@@ -58,12 +58,13 @@ pub struct z_put_options_t {
     pub reliability: z_reliability_t,
     /// Allowed destination of this message.
     pub allowed_destination: zc_locality_t,
-    /// Source info. Present only under `Z_FEATURE_UNSTABLE_API`. UNREAD: wz's
-    /// `SourceInfo` is a (zid, eid, sn) triple and `z_source_info_t` is not
-    /// declared by this crate, so honouring it would need the source-info
-    /// family first.
+    /// Source info. Present only under `Z_FEATURE_UNSTABLE_API`.
+    ///
+    /// R311y563 — READ and CONSUMED. The prior note said honouring it "would
+    /// need the source-info family first"; that family is
+    /// [`crate::source_info`] now.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-    pub source_info: *mut c_void,
+    pub source_info: *mut crate::source_info::z_moved_source_info_t,
     /// Attachment to carry alongside the payload.
     pub attachment: *mut z_moved_bytes_t,
 }
@@ -173,11 +174,31 @@ unsafe fn resolve_put_options(options: *mut z_put_options_t) -> PublishOptions {
         Some(hint) => with_encoding.with_timestamp(hint),
         None => with_encoding,
     };
+    // R311y563 — the SOURCE INFO. Taken, not read: upstream types this field
+    // `z_moved_source_info_t*`, so the call transfers ownership and the take
+    // must happen on every path (it is unconditional here, before the
+    // attachment's own take, so neither can be skipped).
+    // SAFETY: the caller's contract for the pointer.
+    // R311y563 — the two arms exist because upstream gates the FIELD, not just
+    // the functions: `source_info` sits behind `#if defined(Z_FEATURE_UNSTABLE_API)`
+    // in every option struct, so on the no-unstable arm there is nothing to read
+    // and `crate::source_info` is not compiled at all. Binding the value once and
+    // branching HERE keeps the rest of the fold arm-independent, which is what a
+    // `#[cfg]` in the middle of an expression cannot do.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    // SAFETY: the caller's contract for the pointer.
+    let taken_source_info = unsafe { crate::source_info::take_moved_source_info(opts.source_info) };
+    #[cfg(feature = "zenoh-c-no-unstable-api")]
+    let taken_source_info: Option<wz_runtime_tokio::sample::SourceInfo> = None;
+    let with_source_info = match taken_source_info {
+        Some(info) => with_timestamp.with_source_info(info),
+        None => with_timestamp,
+    };
     // SAFETY: as above. TAKEN — upstream documents every owned options field as
     // consumed on return.
     match unsafe { take_payload(opts.attachment) } {
-        Some(blob) => with_timestamp.with_attachment(blob),
-        None => with_timestamp,
+        Some(blob) => with_source_info.with_attachment(blob),
+        None => with_source_info,
     }
 }
 

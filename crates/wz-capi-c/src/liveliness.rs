@@ -116,6 +116,9 @@ pub(crate) fn make_liveliness_callback(
             // A liveliness sample is a token transition, not a timestamped
             // value; upstream's carries none either.
             None,
+            // R311y563 — nor a source identity: a liveliness token transition
+            // is not a published sample and carries no (zid, eid, sn).
+            None,
         );
         // Bind AFTER the move out of `new` — see `SampleMarshal::bind`.
         marshal.bind();

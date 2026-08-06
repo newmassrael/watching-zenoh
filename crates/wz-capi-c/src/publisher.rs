@@ -172,8 +172,11 @@ pub struct z_publisher_put_options_t {
     /// inferred from the pointer's type.
     pub timestamp: *const c_void,
     /// Source info. Present only under `Z_FEATURE_UNSTABLE_API`.
+    ///
+    /// R311y563 — READ and CONSUMED (a `z_moved_*` field transfers ownership on
+    /// every path, including the error ones).
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-    pub source_info: *mut c_void,
+    pub source_info: *mut crate::source_info::z_moved_source_info_t,
     /// Attachment to carry alongside the payload.
     pub attachment: *mut z_moved_bytes_t,
 }
@@ -296,6 +299,9 @@ pub(crate) unsafe fn resolve_publisher_options(
 struct PutOverrides {
     encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
     attachment: Option<Vec<u8>>,
+    /// R311y563 — the per-put source identity. Owned like the attachment, and
+    /// for the same reason: upstream types it `z_moved_source_info_t*`.
+    source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
 }
 
 impl PutOverrides {
@@ -310,6 +316,17 @@ impl PutOverrides {
         }
         // SAFETY: the caller's contract.
         let opts = unsafe { &mut *options };
+        // Bound before the literal so the field init stays arm-independent —
+        // upstream gates the FIELD, so on the no-unstable arm there is nothing
+        // to take and `crate::source_info` is not compiled.
+        #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+        // SAFETY: as above. TAKEN, for the same reason the attachment is: a
+        // `z_moved_*` field transfers ownership on return, so a second put
+        // through the same options struct must not see it again.
+        let taken_source_info =
+            unsafe { crate::source_info::take_moved_source_info(opts.source_info) };
+        #[cfg(feature = "zenoh-c-no-unstable-api")]
+        let taken_source_info: Option<wz_runtime_tokio::sample::SourceInfo> = None;
         Self {
             // SAFETY: as above. Read rather than taken: every encoding this
             // crate hands out is `'static`, which is the same fact that makes
@@ -319,6 +336,7 @@ impl PutOverrides {
             // gravestones the caller's slot, so a program that puts twice with
             // one options struct does not double-free.
             attachment: unsafe { take_payload(opts.attachment) },
+            source_info: taken_source_info,
         }
     }
 
@@ -333,9 +351,13 @@ impl PutOverrides {
             Some(hint) => base.with_encoding(hint),
             None => base,
         };
-        match self.attachment {
+        let with_attachment = match self.attachment {
             Some(blob) => with_encoding.with_attachment(blob),
             None => with_encoding,
+        };
+        match self.source_info {
+            Some(info) => with_attachment.with_source_info(info),
+            None => with_attachment,
         }
     }
 }

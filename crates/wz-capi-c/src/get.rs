@@ -110,9 +110,10 @@ pub struct z_get_options_t {
     pub accept_replies: c_int,
     /// Priority. R311y551 — HONOURED (bits 0-2 of the Request QoS byte).
     pub priority: c_int,
-    /// Querier source info — unstable-only.
+    /// Querier source info — unstable-only. R311y563: READ and CONSUMED,
+    /// stamped onto the outbound Query body's source_info ext.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-    pub source_info: *mut c_void,
+    pub source_info: *mut crate::source_info::z_moved_source_info_t,
     /// Query attachment. CARRIED — consumed by [`z_get`].
     pub attachment: *mut z_moved_bytes_t,
     /// Timeout in milliseconds. CARRIED.
@@ -217,6 +218,10 @@ impl ReplyMarshal {
                 // through the same `z_sample_timestamp` accessor.
                 view.timestamp()
                     .map(crate::timestamp::z_timestamp_t::from_hint),
+                // R311y563 — a REPLY carries a source identity too
+                // (`has_source_info` precedes the `_is_put` split), so the
+                // sample built from one must surface it.
+                view.source_info().cloned(),
             ),
             err_payload: BytesState::whole(err_payload),
             loaned_err_payload: z_loaned_bytes_t::null_value(),
@@ -633,6 +638,25 @@ unsafe fn get_options(options: *mut z_get_options_t) -> QueryOptions {
     }
     if let Some(attachment) = unsafe { crate::bytes::take_payload(o.attachment) } {
         opts = opts.with_attachment(attachment);
+    }
+    // R311y563 — the query's SOURCE INFO (the Query body's ext 0x01). TAKEN,
+    // not read: upstream types it `z_moved_source_info_t*`, so ownership
+    // transfers on return. Until the `z_owned_source_info_t` family existed
+    // there was no type to point the field at, which is why it was `c_void`.
+    // SAFETY: the caller's contract.
+    // R311y563 — the two arms exist because upstream gates the FIELD, not just
+    // the functions: `source_info` sits behind `#if defined(Z_FEATURE_UNSTABLE_API)`
+    // in every option struct, so on the no-unstable arm there is nothing to read
+    // and `crate::source_info` is not compiled at all. Binding the value once and
+    // branching HERE keeps the rest of the fold arm-independent, which is what a
+    // `#[cfg]` in the middle of an expression cannot do.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    // SAFETY: the caller's contract.
+    let taken_source_info = unsafe { crate::source_info::take_moved_source_info(o.source_info) };
+    #[cfg(feature = "zenoh-c-no-unstable-api")]
+    let taken_source_info: Option<wz_runtime_tokio::sample::SourceInfo> = None;
+    if let Some(info) = taken_source_info {
+        opts = opts.with_source_info(info);
     }
     // R311y551 — the request-side QoS trio. Until this round all three were
     // "accepted and ignored": `QueryOptions` had no slot to put them in, so a

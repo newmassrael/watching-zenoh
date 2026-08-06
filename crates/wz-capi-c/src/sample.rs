@@ -62,6 +62,18 @@ pub(crate) struct SampleMarshal {
     /// and that pointer's lifetime is the marshal's — the same contract
     /// `z_sample_attachment` has, reached the same way.
     timestamp: Option<crate::timestamp::z_timestamp_t>,
+    /// R311y563 — the sample's `(zid, eid, sn)`, or `None` when it carries
+    /// none. Stored as the wz type and VIEWED through `loaned_source_info`
+    /// rather than boxed: `z_sample_source_info` hands out a borrowed pointer
+    /// whose lifetime is the marshal's, the same contract
+    /// `z_sample_timestamp` has.
+    source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+    /// The loaned view `z_sample_source_info` returns. Its handle points at
+    /// THIS marshal's `source_info`, so there is nothing to free — a C program
+    /// can only ever obtain the loaned form, and `z_source_info_drop` takes an
+    /// owned one.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    loaned_source_info: crate::source_info::z_loaned_source_info_t,
     loaned_keyexpr: z_loaned_keyexpr_t,
     loaned_payload: z_loaned_bytes_t,
     loaned_attachment: z_loaned_bytes_t,
@@ -76,6 +88,7 @@ impl SampleMarshal {
         attachment: Option<Vec<u8>>,
         kind: z_sample_kind_t,
         timestamp: Option<crate::timestamp::z_timestamp_t>,
+        source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
     ) -> Self {
         Self {
             keyexpr: KeyexprState { keyexpr },
@@ -83,6 +96,9 @@ impl SampleMarshal {
             attachment: attachment.map(BytesState::whole),
             kind,
             timestamp,
+            source_info,
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            loaned_source_info: crate::source_info::z_loaned_source_info_t::null_value(),
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             loaned_payload: z_loaned_bytes_t::null_value(),
             loaned_attachment: z_loaned_bytes_t::null_value(),
@@ -100,6 +116,13 @@ impl SampleMarshal {
             Some(state) => z_loaned_bytes_t::from_handle(state as *const BytesState as *mut c_void),
             None => z_loaned_bytes_t::null_value(),
         };
+        #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+        {
+            self.loaned_source_info = match self.source_info.as_ref() {
+                Some(info) => crate::source_info::z_loaned_source_info_t::from_borrowed(info),
+                None => crate::source_info::z_loaned_source_info_t::null_value(),
+            };
+        }
     }
 
     /// This marshal viewed as the borrowed `z_loaned_sample_t` the C side gets.
@@ -251,6 +274,37 @@ pub unsafe extern "C" fn z_sample_timestamp(
     })
 }
 
+/// Borrow a delivered sample's source info, or NULL when it carries none
+/// (zenoh-c `z_sample_source_info`, `zenoh_commons.h:4657`).
+///
+/// R311y563 — the READ half of the source-info family, and it is separately
+/// omittable from the SEND half: without it a C program has no way to observe
+/// what arrived, so the option folds this round wired would be unfalsifiable.
+/// The pointer borrows the marshal, exactly as [`z_sample_timestamp`] does.
+///
+/// # Safety
+/// `this_` must be null or a live loaned sample.
+/// UNSTABLE-gated, as upstream declares it: the prototype sits behind
+/// `#if defined(Z_FEATURE_UNSTABLE_API)` (`zenoh_commons.h:4410`), so a
+/// no-unstable build must not export it either — a symbol wz defines and the
+/// reference does not is the mirror image of the census gap, and the drop-in
+/// claim is about matching the reference, not exceeding it here.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_source_info(
+    this_: *const z_loaned_sample_t,
+) -> *const crate::source_info::z_loaned_source_info_t {
+    guard_val(std::ptr::null(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { marshal(this_) } {
+            Some(m) if m.source_info.is_some() => {
+                &m.loaned_source_info as *const crate::source_info::z_loaned_source_info_t
+            }
+            _ => std::ptr::null(),
+        }
+    })
+}
+
 /// Construct a non-owned string over a keyexpr (zenoh-c
 /// `z_keyexpr_as_view_string`).
 ///
@@ -299,6 +353,9 @@ pub(crate) fn with_marshalled<R>(
         // what the publisher stamped rather than always NULL.
         view.timestamp()
             .map(crate::timestamp::z_timestamp_t::from_hint),
+        // R311y563 — the delivered source identity, so `z_sample_source_info`
+        // answers with what arrived rather than always NULL.
+        view.source_info().cloned(),
     );
     // Bind AFTER the move out of `new` — the marshal is at its final address
     // only here. See `SampleMarshal::bind`.
@@ -474,6 +531,11 @@ impl SampleMarshal {
             // 24 bytes rather than a pointer into the source marshal, so a
             // sample that outlives its callback keeps its own timestamp.
             timestamp: self.timestamp,
+            // CLONED for the same reason the timestamp is copied: the deep copy
+            // must own its identity, not borrow the source marshal's.
+            source_info: self.source_info.clone(),
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            loaned_source_info: crate::source_info::z_loaned_source_info_t::null_value(),
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             loaned_payload: z_loaned_bytes_t::null_value(),
             loaned_attachment: z_loaned_bytes_t::null_value(),

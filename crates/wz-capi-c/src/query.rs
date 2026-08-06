@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use wz_runtime_tokio::keyexpr_match;
 use wz_runtime_tokio::query::{QueryReply, QueryResponder};
-use wz_runtime_tokio::query_sink::{QueryView, ReplyOut};
+use wz_runtime_tokio::query_sink::{QueryView, ReplyMeta, ReplyOut};
 use wz_runtime_tokio::session::TokioSession;
 
 use crate::abi::{
@@ -87,6 +87,12 @@ enum PendingReply {
         /// an encoding was answering with `zenoh/bytes` on the wire.
         encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
         attachment: Option<Vec<u8>>,
+        /// R311y563 — the reply's timestamp (the inner body T-flag).
+        timestamp: Option<wz_runtime_tokio::sample::TimestampHint>,
+        /// R311y563 — the reply's `(zid, eid, sn)` (the body ext 0x01). Owned,
+        /// because a reply is flushed after the callback returns and the
+        /// caller's `z_moved_source_info_t` is consumed at CALL time.
+        source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
     },
 }
 
@@ -127,26 +133,58 @@ impl Drop for DeferredResponder {
     }
 }
 
+/// R311y563 — TAKE `z_query_reply_options_t::source_info`, on the arm that has
+/// one. A helper for the same reason the querier's is: the call sits inside a
+/// TUPLE expression, where an attribute cannot go.
+///
+/// # Safety
+/// `options` must be null or a valid reply-options struct.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+unsafe fn reply_source_info(
+    options: *mut z_query_reply_options_t,
+) -> Option<wz_runtime_tokio::sample::SourceInfo> {
+    // SAFETY: the caller's contract.
+    unsafe { crate::source_info::take_moved_source_info((*options).source_info) }
+}
+
+/// The no-unstable arm: upstream does not declare the field there.
+///
+/// # Safety
+/// `options` is unused; the signature matches the sibling above.
+#[cfg(feature = "zenoh-c-no-unstable-api")]
+unsafe fn reply_source_info(
+    _options: *mut z_query_reply_options_t,
+) -> Option<wz_runtime_tokio::sample::SourceInfo> {
+    None
+}
+
 /// Route ONE accumulated reply into a [`ReplyOut`]. Shared by the in-dispatch
 /// flush and the deferred emit so the two cannot answer differently.
 fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
     match reply {
+        // R311y563 — ONE seam carries all four arms now
+        // ([`wz_runtime_tokio::query_sink::ReplyMeta`], added the same round for
+        // the pico ABI's identical problem). The previous shape had to CHOOSE
+        // between `reply_keyed_attached` (attachment, no timestamp) and
+        // `reply_keyed_encoded` (neither), because no arm carried an attachment
+        // alongside a timestamp and source_info — which is exactly the
+        // combination `z_query_reply_options_t` lets a caller set.
         PendingReply::Put {
             keyexpr,
             payload,
             encoding,
             attachment,
-        } => match attachment {
-            Some(att) => out.reply_keyed_attached(&keyexpr, &payload, encoding.as_ref(), &att),
-            // R311y547 — `reply_keyed_encoded` rather than `reply_keyed` when
-            // an encoding is set. The two differ only in the inner `MsgPut`
-            // E-flag, and the no-encoding case still takes the narrower seam so
-            // a default reply's bytes are unchanged.
-            None => match encoding {
-                Some(enc) => out.reply_keyed_encoded(&keyexpr, &payload, Some(&enc)),
-                None => out.reply_keyed(&keyexpr, &payload),
-            },
-        },
+            timestamp,
+            source_info,
+        } => out.reply_keyed_meta(
+            &keyexpr,
+            &payload,
+            ReplyMeta::new()
+                .with_encoding(encoding.as_ref())
+                .with_timestamp(timestamp.as_ref())
+                .with_source_info(source_info.as_ref())
+                .with_attachment(attachment.as_deref()),
+        ),
     }
 }
 
@@ -769,11 +807,16 @@ pub struct z_query_reply_options_t {
     pub priority: c_int,
     /// Express flag. Accepted and ignored.
     pub is_express: bool,
-    /// Explicit timestamp. Accepted and ignored.
-    pub timestamp: *mut c_void,
-    /// Source info — present only under `Z_FEATURE_UNSTABLE_API`.
+    /// Explicit timestamp. R311y563 — READ. It was "accepted and ignored" on
+    /// the reasoning that the type did not exist here; `z_timestamp_t` landed
+    /// at R311y557 and the reason expired with it. BORROWED, not moved:
+    /// upstream declares `struct z_timestamp_t *timestamp`, a concrete struct
+    /// the caller keeps.
+    pub timestamp: *mut crate::timestamp::z_timestamp_t,
+    /// Source info — present only under `Z_FEATURE_UNSTABLE_API`. R311y563:
+    /// READ and CONSUMED, stamped onto the reply body's source_info ext.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-    pub source_info: *mut c_void,
+    pub source_info: *mut crate::source_info::z_moved_source_info_t,
     /// Reply attachment. CARRIED, unlike the fields above: it rides the reply's
     /// own body and a queryable that attaches metadata is answering a different
     /// question than one that does not.
@@ -829,8 +872,8 @@ pub unsafe extern "C" fn z_query_reply(
         // leak the caller's payload.
         // SAFETY: the caller's contract.
         let taken = unsafe { crate::bytes::take_payload(payload) };
-        let (encoding, attachment) = if options.is_null() {
-            (None, None)
+        let (encoding, attachment, timestamp, source_info) = if options.is_null() {
+            (None, None, None, None)
         } else {
             // SAFETY: the caller's contract. The encoding is READ rather than
             // taken (every label this crate hands out is `'static`, the same
@@ -842,6 +885,12 @@ pub unsafe extern "C" fn z_query_reply(
                 (
                     crate::encoding::moved_encoding_hint((*options).encoding),
                     crate::bytes::take_payload((*options).attachment),
+                    // BORROWED — a concrete struct the caller keeps.
+                    crate::timestamp::timestamp_hint(
+                        (*options).timestamp as *const std::ffi::c_void,
+                    ),
+                    // TAKEN — a `z_moved_*` field, consumed on every path.
+                    reply_source_info(options),
                 )
             }
         };
@@ -865,6 +914,8 @@ pub unsafe extern "C" fn z_query_reply(
             payload,
             encoding,
             attachment,
+            timestamp,
+            source_info,
         });
         Z_OK
     })
