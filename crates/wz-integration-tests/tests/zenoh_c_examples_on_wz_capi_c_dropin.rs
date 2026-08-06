@@ -388,6 +388,19 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
             "z_query_reply_del_options_t",
             "sizeof(z_query_reply_del_options_t)",
         ),
+        // R311y565 — the other three channel handlers.
+        (
+            "z_owned_fifo_handler_sample_t",
+            "sizeof(z_owned_fifo_handler_sample_t)",
+        ),
+        (
+            "z_owned_ring_handler_query_t",
+            "sizeof(z_owned_ring_handler_query_t)",
+        ),
+        (
+            "z_owned_ring_handler_reply_t",
+            "sizeof(z_owned_ring_handler_reply_t)",
+        ),
     ];
     // R311y543 — the `ze_advanced_*` plane, measured ONLY where upstream
     // declares it. The order must match `abi.rs`'s

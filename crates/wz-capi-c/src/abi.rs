@@ -387,6 +387,28 @@ define_opaque!(
     z_moved_ring_handler_sample_t,
     8
 );
+// R311y565 — the other THREE of the six. Upstream ships fifo AND ring for each
+// of sample / query / reply; this crate had one of each shape and the remaining
+// three were symbols a C program could name and not link. All 8 bytes, measured
+// by a C probe against the installed header like their siblings.
+define_opaque!(
+    z_owned_fifo_handler_sample_t,
+    z_loaned_fifo_handler_sample_t,
+    z_moved_fifo_handler_sample_t,
+    8
+);
+define_opaque!(
+    z_owned_ring_handler_query_t,
+    z_loaned_ring_handler_query_t,
+    z_moved_ring_handler_query_t,
+    8
+);
+define_opaque!(
+    z_owned_ring_handler_reply_t,
+    z_loaned_ring_handler_reply_t,
+    z_moved_ring_handler_reply_t,
+    8
+);
 // The MUTEX family — 24 bytes at align 8; `z_ping.c` / `z_storage.c`
 // stack-allocate the owned one.
 define_opaque!(z_owned_mutex_t, z_loaned_mutex_t, z_moved_mutex_t, 24);
@@ -526,6 +548,20 @@ pub struct z_moved_closure_query_t {
 }
 
 impl z_owned_closure_query_t {
+    /// Build one from its parts, with the channel drop already wired.
+    ///
+    /// The channel constructors need this: a macro that named the fields
+    /// directly would have to know each family's callback type, which is the one
+    /// thing that differs between them.
+    #[inline]
+    pub(crate) fn from_parts(context: *mut c_void, call: z_closure_query_callback_t) -> Self {
+        Self {
+            context,
+            call,
+            drop: Some(crate::handlers::channel_drop),
+        }
+    }
+
     /// The gravestone: no context, no callbacks.
     #[inline]
     pub(crate) fn null_value() -> Self {
@@ -556,6 +592,20 @@ pub struct z_moved_closure_reply_t {
 }
 
 impl z_owned_closure_reply_t {
+    /// Build one from its parts, with the channel drop already wired.
+    ///
+    /// The channel constructors need this: a macro that named the fields
+    /// directly would have to know each family's callback type, which is the one
+    /// thing that differs between them.
+    #[inline]
+    pub(crate) fn from_parts(context: *mut c_void, call: z_closure_reply_callback_t) -> Self {
+        Self {
+            context,
+            call,
+            drop: Some(crate::handlers::channel_drop),
+        }
+    }
+
     /// The gravestone: no context, no callbacks.
     #[inline]
     pub(crate) fn null_value() -> Self {
@@ -716,6 +766,17 @@ pub struct z_moved_closure_sample_t {
 }
 
 impl z_owned_closure_sample_t {
+    /// Build one from its parts, with the channel drop already wired. See the
+    /// query family's twin for why the channel macros need this.
+    #[inline]
+    pub(crate) fn from_parts(context: *mut c_void, call: z_closure_sample_callback_t) -> Self {
+        Self {
+            context,
+            call,
+            drop: Some(crate::handlers::channel_drop),
+        }
+    }
+
     /// The gravestone: no context, no callbacks.
     #[inline]
     pub(crate) fn null_value() -> Self {
@@ -726,6 +787,50 @@ impl z_owned_closure_sample_t {
         }
     }
 }
+
+// R311y565 — the LOANED closure views. zenoh-c's closures are transparent and
+// its `loan` is a pointer cast, so each loaned type is its owned sibling's
+// footprint under a different name. Declared rather than aliased because
+// upstream's header declares them as distinct types and a C program stores the
+// pointer in a variable of that exact type.
+/// Loaned query closure — the same footprint as the owned one.
+#[repr(C)]
+pub struct z_loaned_closure_query_t {
+    pub(crate) context: *mut c_void,
+    pub(crate) call: z_closure_query_callback_t,
+    pub(crate) drop: z_closure_drop_callback_t,
+}
+
+/// Loaned reply closure.
+#[repr(C)]
+pub struct z_loaned_closure_reply_t {
+    pub(crate) context: *mut c_void,
+    pub(crate) call: z_closure_reply_callback_t,
+    pub(crate) drop: z_closure_drop_callback_t,
+}
+
+/// Loaned hello closure.
+#[repr(C)]
+pub struct z_loaned_closure_hello_t {
+    pub(crate) context: *mut c_void,
+    pub(crate) call: z_closure_hello_callback_t,
+    pub(crate) drop: z_closure_drop_callback_t,
+}
+
+/// Loaned sample closure.
+#[repr(C)]
+pub struct z_loaned_closure_sample_t {
+    pub(crate) context: *mut c_void,
+    pub(crate) call: z_closure_sample_callback_t,
+    pub(crate) drop: z_closure_drop_callback_t,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<z_loaned_closure_query_t>() == 24);
+    assert!(std::mem::size_of::<z_loaned_closure_reply_t>() == 24);
+    assert!(std::mem::size_of::<z_loaned_closure_hello_t>() == 24);
+    assert!(std::mem::size_of::<z_loaned_closure_sample_t>() == 24);
+};
 
 const _: () = {
     assert!(std::mem::size_of::<z_owned_closure_sample_t>() == 24);
@@ -947,6 +1052,11 @@ pub const WZ_CAPI_C_LAYOUT_NAMES_BASE: &[&str] = &[
     // stack-allocated by the C side like its Put sibling, so it belongs here for
     // the same reason `z_query_reply_options_t` does.
     "z_query_reply_del_options_t",
+    // R311y565 — the other three of upstream's six channel handlers. Stack-
+    // allocated by every program that uses a channel, so their size is ABI.
+    "z_owned_fifo_handler_sample_t",
+    "z_owned_ring_handler_query_t",
+    "z_owned_ring_handler_reply_t",
 ];
 
 /// The `Z_FEATURE_UNSTABLE_API`-only half of the table — the `ze_advanced_*`
@@ -1075,6 +1185,9 @@ fn layout_values() -> Vec<usize> {
         align_of::<crate::timestamp::z_timestamp_t>(),
         size_of::<z_owned_keyexpr_t>(),
         size_of::<crate::query::z_query_reply_del_options_t>(),
+        size_of::<z_owned_fifo_handler_sample_t>(),
+        size_of::<z_owned_ring_handler_query_t>(),
+        size_of::<z_owned_ring_handler_reply_t>(),
     ];
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     values.extend_from_slice(&[

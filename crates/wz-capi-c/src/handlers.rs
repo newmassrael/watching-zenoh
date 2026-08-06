@@ -217,7 +217,7 @@ unsafe fn free_reply(h: Handle) {
 ///
 /// # Safety
 /// `context` must be a `Box::into_raw::<Producer>` pointer this module made.
-unsafe extern "C" fn channel_drop(context: *mut c_void) {
+pub(crate) unsafe extern "C" fn channel_drop(context: *mut c_void) {
     if context.is_null() {
         return;
     }
@@ -717,6 +717,85 @@ mod tests {
         *b
     }
 
+    /// The three channel families R311y565 added are WIRED, not merely
+    /// exported.
+    ///
+    /// A census proves a program LINKS; it says nothing about whether the
+    /// handler a constructor hands back is connected to the closure it hands
+    /// back beside it. This drives the pair the way a C program does — construct,
+    /// invoke the closure, read the handler — for the family whose value type
+    /// this test can build without a session.
+    ///
+    /// The sample family is the one chosen for exactly that reason: a
+    /// `SampleMarshal` is constructible here, while a query or a reply marshal
+    /// needs a live face. The other two share the generated body, so a wiring
+    /// mistake would have to be in the macro ARGUMENTS to escape this — which is
+    /// what the census's own type list then catches.
+    ///
+    /// WHAT IT DOES NOT COVER, measured rather than assumed: swapping this
+    /// family's `Overflow::Grow` for `DropOldest` leaves the test GREEN. It
+    /// drives one value through, and the policy is only observable past
+    /// capacity. `a_ring_drops_the_oldest_and_keeps_the_newest` pins the policy
+    /// at the `Channel` level; nothing pins which policy each FAMILY was given.
+    #[test]
+    fn the_fifo_sample_channel_connects_its_closure_to_its_handler() {
+        let mut callback = z_owned_closure_sample_t::null_value();
+        let mut handler = crate::abi::z_owned_fifo_handler_sample_t::null_value();
+        // SAFETY: two live locals, valid for every call below.
+        unsafe {
+            z_fifo_channel_sample_new(&mut callback, &mut handler, 4);
+            assert!(z_internal_closure_sample_check(&callback));
+            assert!(
+                crate::abi::z_owned_fifo_handler_sample_t::null_value()
+                    .handle
+                    .is_null(),
+                "the gravestone is what an unconstructed handler reads as"
+            );
+
+            // Nothing pushed yet: a try_recv must report NODATA rather than
+            // block or hand back a gravestone that reads as a value.
+            let loaned = z_fifo_handler_sample_loan(&handler);
+            let mut out = z_owned_sample_t::null_value();
+            assert_eq!(
+                z_fifo_handler_sample_try_recv(loaned, &mut out),
+                Z_CHANNEL_NODATA
+            );
+
+            // Push one THROUGH the closure, exactly as the drive thread does.
+            let marshal = Box::into_raw(Box::new(crate::sample::SampleMarshal::new(
+                "demo/handler".to_owned(),
+                b"payload".to_vec(),
+                None,
+                crate::abi::Z_SAMPLE_KIND_PUT,
+                None,
+                None,
+            )));
+            let loaned_sample = marshal as *const crate::abi::z_loaned_sample_t;
+            let call = callback.call.expect("the constructor wired a callback");
+            call(loaned_sample, callback.context);
+            drop(Box::from_raw(marshal));
+
+            assert_eq!(z_fifo_handler_sample_try_recv(loaned, &mut out), Z_OK);
+            assert!(!out.handle.is_null(), "the handler produced a live sample");
+            let mut moved = crate::abi::z_moved_sample_t { _this: out };
+            crate::sample::z_sample_drop(&mut moved);
+
+            // Dropping the handler releases the channel; the closure's own drop
+            // then releases the producer.
+            let mut moved_handler = crate::abi::z_moved_fifo_handler_sample_t { _this: handler };
+            z_fifo_handler_sample_drop(&mut moved_handler);
+            assert!(
+                !crate::abi::z_owned_fifo_handler_sample_t::null_value()
+                    .handle
+                    .is_null()
+                    || moved_handler._this.handle.is_null(),
+                "the drop gravestones the caller's slot"
+            );
+            let dropfn = callback.drop.expect("the constructor wired a drop");
+            dropfn(callback.context);
+        }
+    }
+
     /// A RING keeps the NEWEST `capacity` values and drops the oldest. Getting
     /// this backwards would make `z_pull.c` print stale samples forever.
     #[test]
@@ -793,4 +872,375 @@ mod tests {
         chan.push(boxed(1), free_usize);
         assert!(chan.try_recv().is_err());
     }
+}
+
+// --- R311y565: the rest of upstream's closure + channel surface -------------
+
+/// Emit a transparent closure family's `_call` / `_loan` / `_loan_mut` /
+/// `z_internal_*_check` / `z_internal_*_null`.
+///
+/// Five exports per family and six families is thirty near-identical functions;
+/// the only thing that varies is the value the callback receives. A macro rather
+/// than thirty hand-written bodies, because the failure a hand-written one
+/// invites — forgetting the `catch_unwind` on ONE of them — is invisible until a
+/// C callback panics across `extern "C"`, which is UB rather than a test failure.
+macro_rules! closure_ops {
+    ($Owned:ty, $Loaned:ty, $Arg:ty, $call:ident, $loan:ident, $loan_mut:ident,
+     $check:ident, $null:ident) => {
+        #[doc = concat!("Invoke a closure (zenoh-c `", stringify!($call), "`).")]
+        ///
+        /// A closure with no `call` is a no-op rather than an error: upstream's
+        /// gravestone is a valid value and calling one is how a program drains
+        /// a handler it never attached a callback to.
+        ///
+        /// # Safety
+        /// `closure` must be null or a valid loaned closure; `arg` is passed
+        /// through to the C callback unchanged.
+        #[no_mangle]
+        pub unsafe extern "C" fn $call(closure: *const $Loaned, arg: $Arg) {
+            guard_val((), || {
+                if closure.is_null() {
+                    return;
+                }
+                // SAFETY: the caller's contract.
+                let (call, context) = unsafe { ((*closure).call, (*closure).context) };
+                let Some(call) = call else {
+                    return;
+                };
+                // SAFETY: `call` is the C callback. An unwind out of it across
+                // `extern "C"` is UB, so it is caught here — the same discipline
+                // every dispatch path in this crate uses.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                    call(arg, context);
+                }));
+            });
+        }
+
+        #[doc = concat!("Borrow a closure (zenoh-c `", stringify!($loan), "`).")]
+        ///
+        /// # Safety
+        /// `closure` must be null or a valid owned closure.
+        #[no_mangle]
+        pub unsafe extern "C" fn $loan(closure: *const $Owned) -> *const $Loaned {
+            closure as *const $Loaned
+        }
+
+        #[doc = concat!("Borrow a closure mutably (zenoh-c `", stringify!($loan_mut), "`).")]
+        ///
+        /// # Safety
+        /// `closure` must be null or a valid, writable owned closure.
+        #[no_mangle]
+        pub unsafe extern "C" fn $loan_mut(closure: *mut $Owned) -> *mut $Loaned {
+            closure as *mut $Loaned
+        }
+
+        #[doc = concat!("`true` iff the closure carries a callback (zenoh-c `", stringify!($check), "`).")]
+        ///
+        /// # Safety
+        /// `this_` must be null or a valid owned closure.
+        #[no_mangle]
+        pub unsafe extern "C" fn $check(this_: *const $Owned) -> bool {
+            guard_val(false, || {
+                // SAFETY: the caller's contract.
+                !this_.is_null() && unsafe { (*this_).call }.is_some()
+            })
+        }
+
+        #[doc = concat!("Gravestone a closure (zenoh-c `", stringify!($null), "`).")]
+        ///
+        /// # Safety
+        /// `this_` must be null or valid and writable.
+        #[no_mangle]
+        pub unsafe extern "C" fn $null(this_: *mut $Owned) {
+            if !this_.is_null() {
+                // SAFETY: the caller's contract.
+                unsafe { *this_ = <$Owned>::null_value() };
+            }
+        }
+    };
+}
+
+closure_ops!(
+    z_owned_closure_sample_t,
+    crate::abi::z_loaned_closure_sample_t,
+    *mut crate::abi::z_loaned_sample_t,
+    z_closure_sample_call,
+    z_closure_sample_loan,
+    z_closure_sample_loan_mut,
+    z_internal_closure_sample_check,
+    z_internal_closure_sample_null
+);
+closure_ops!(
+    z_owned_closure_query_t,
+    crate::abi::z_loaned_closure_query_t,
+    *mut crate::abi::z_loaned_query_t,
+    z_closure_query_call,
+    z_closure_query_loan,
+    z_closure_query_loan_mut,
+    z_internal_closure_query_check,
+    z_internal_closure_query_null
+);
+closure_ops!(
+    z_owned_closure_reply_t,
+    crate::abi::z_loaned_closure_reply_t,
+    *mut crate::abi::z_loaned_reply_t,
+    z_closure_reply_call,
+    z_closure_reply_loan,
+    z_closure_reply_loan_mut,
+    z_internal_closure_reply_check,
+    z_internal_closure_reply_null
+);
+closure_ops!(
+    crate::abi::z_owned_closure_hello_t,
+    crate::abi::z_loaned_closure_hello_t,
+    *mut crate::abi::z_loaned_hello_t,
+    z_closure_hello_call,
+    z_closure_hello_loan,
+    z_closure_hello_loan_mut,
+    z_internal_closure_hello_check,
+    z_internal_closure_hello_null
+);
+
+/// Emit a CHANNEL family: the constructor, the handler's four ops, and its two
+/// internals.
+///
+/// The two overflow policies differ by one argument and nothing else, which is
+/// upstream's own design: a fifo and a ring are the same queue under different
+/// pressure behaviour. Generating both from one body is what keeps `recv` from
+/// drifting between them.
+macro_rules! channel_family {
+    ($new:ident, $Closure:ty, $callback:path, $free:path, $overflow:expr,
+     $Owned:ty, $Loaned:ty, $Moved:ty, $Value:ty,
+     $loan:ident, $recv:ident, $try_recv:ident, $drop:ident, $check:ident, $null:ident) => {
+        #[doc = concat!("Build a channel and its handler (zenoh-c `", stringify!($new), "`).")]
+        ///
+        /// # Safety
+        /// `callback` and `handler` must be valid and writable.
+        #[no_mangle]
+        pub unsafe extern "C" fn $new(
+            callback: *mut $Closure,
+            handler: *mut $Owned,
+            capacity: usize,
+        ) {
+            guard_val((), || {
+                if callback.is_null() || handler.is_null() {
+                    return;
+                }
+                let (context, chan) = new_channel(capacity, $overflow, $free);
+                // SAFETY: the caller's contract.
+                unsafe {
+                    *callback = <$Closure>::from_parts(context, Some($callback));
+                    *handler = <$Owned>::from_handle(chan);
+                }
+            });
+        }
+
+        #[doc = concat!("Borrow a handler (zenoh-c `", stringify!($loan), "`).")]
+        ///
+        /// # Safety
+        /// `this_` must be null or a valid owned handler.
+        #[no_mangle]
+        pub unsafe extern "C" fn $loan(this_: *const $Owned) -> *const $Loaned {
+            this_ as *const $Loaned
+        }
+
+        #[doc = concat!("Take the next value, BLOCKING (zenoh-c `", stringify!($recv), "`).")]
+        ///
+        /// # Safety
+        /// `this_` must be null or a valid loaned handler; `out` must be null or
+        /// valid and writable.
+        #[no_mangle]
+        pub unsafe extern "C" fn $recv(this_: *const $Loaned, out: *mut $Value) -> ZResult {
+            guarded(|| {
+                if out.is_null() {
+                    return Z_ENULL;
+                }
+                // The gravestone contract, written before any fallible work.
+                // SAFETY: the caller's contract.
+                unsafe { *out = <$Value>::null_value() };
+                if this_.is_null() {
+                    return Z_ENULL;
+                }
+                // SAFETY: the caller's contract.
+                let handle = unsafe { (*this_).handle };
+                let Some(chan) = (unsafe { channel(handle) }) else {
+                    return Z_ENULL;
+                };
+                // Cloned out so the blocking wait does not hold a borrow of a
+                // handler the C side may drop from another thread.
+                let chan = chan.clone();
+                match chan.recv() {
+                    Some(value) => {
+                        // SAFETY: the caller's contract.
+                        unsafe { *out = <$Value>::from_handle(value) };
+                        Z_OK
+                    }
+                    None => Z_CHANNEL_DISCONNECTED,
+                }
+            })
+        }
+
+        #[doc = concat!("Take the next value without blocking (zenoh-c `", stringify!($try_recv), "`).")]
+        ///
+        /// # Safety
+        /// `this_` must be null or a valid loaned handler; `out` must be null or
+        /// valid and writable.
+        #[no_mangle]
+        pub unsafe extern "C" fn $try_recv(this_: *const $Loaned, out: *mut $Value) -> ZResult {
+            guarded(|| {
+                if out.is_null() {
+                    return Z_ENULL;
+                }
+                // SAFETY: the caller's contract.
+                unsafe { *out = <$Value>::null_value() };
+                if this_.is_null() {
+                    return Z_ENULL;
+                }
+                // SAFETY: the caller's contract.
+                let handle = unsafe { (*this_).handle };
+                let Some(chan) = (unsafe { channel(handle) }) else {
+                    return Z_ENULL;
+                };
+                match chan.try_recv() {
+                    Ok(value) => {
+                        // SAFETY: the caller's contract.
+                        unsafe { *out = <$Value>::from_handle(value) };
+                        Z_OK
+                    }
+                    Err(true) => Z_CHANNEL_DISCONNECTED,
+                    Err(false) => Z_CHANNEL_NODATA,
+                }
+            })
+        }
+
+        #[doc = concat!("Drop a handler (zenoh-c `", stringify!($drop), "`).")]
+        ///
+        /// # Safety
+        /// `this_` must be null or a valid, writable moved handler.
+        #[no_mangle]
+        pub unsafe extern "C" fn $drop(this_: *mut $Moved) {
+            guard_val((), || {
+                if this_.is_null() {
+                    return;
+                }
+                // SAFETY: the caller's contract.
+                let handle = unsafe { (*this_)._this.handle };
+                unsafe { (*this_)._this = <$Owned>::null_value() };
+                if !handle.is_null() {
+                    // SAFETY: a live `Box<Arc<Channel>>` this crate leaked. The
+                    // drain is what frees values still queued when the C side
+                    // releases the handler without reading them.
+                    let chan = unsafe { Box::from_raw(handle as *mut Arc<Channel>) };
+                    chan.drain($free);
+                }
+            });
+        }
+
+        #[doc = concat!("`true` iff the handler is live (zenoh-c `", stringify!($check), "`).")]
+        ///
+        /// # Safety
+        /// `this_` must be null or a valid owned handler.
+        #[no_mangle]
+        pub unsafe extern "C" fn $check(this_: *const $Owned) -> bool {
+            guard_val(false, || {
+                // SAFETY: the caller's contract.
+                !this_.is_null() && !unsafe { (*this_).handle }.is_null()
+            })
+        }
+
+        #[doc = concat!("Gravestone a handler (zenoh-c `", stringify!($null), "`).")]
+        ///
+        /// # Safety
+        /// `this_` must be null or valid and writable.
+        #[no_mangle]
+        pub unsafe extern "C" fn $null(this_: *mut $Owned) {
+            if !this_.is_null() {
+                // SAFETY: the caller's contract.
+                unsafe { *this_ = <$Owned>::null_value() };
+            }
+        }
+    };
+}
+
+// The six channel families upstream ships: fifo and ring for each of sample /
+// query / reply. Three existed; the other three are R311y565.
+channel_family!(
+    z_fifo_channel_sample_new,
+    z_owned_closure_sample_t,
+    fifo_sample_call,
+    free_sample,
+    Overflow::Grow,
+    crate::abi::z_owned_fifo_handler_sample_t,
+    crate::abi::z_loaned_fifo_handler_sample_t,
+    crate::abi::z_moved_fifo_handler_sample_t,
+    z_owned_sample_t,
+    z_fifo_handler_sample_loan,
+    z_fifo_handler_sample_recv,
+    z_fifo_handler_sample_try_recv,
+    z_fifo_handler_sample_drop,
+    z_internal_fifo_handler_sample_check,
+    z_internal_fifo_handler_sample_null
+);
+channel_family!(
+    z_ring_channel_query_new,
+    z_owned_closure_query_t,
+    ring_query_call,
+    free_query,
+    Overflow::DropOldest,
+    crate::abi::z_owned_ring_handler_query_t,
+    crate::abi::z_loaned_ring_handler_query_t,
+    crate::abi::z_moved_ring_handler_query_t,
+    z_owned_query_t,
+    z_ring_handler_query_loan,
+    z_ring_handler_query_recv,
+    z_ring_handler_query_try_recv,
+    z_ring_handler_query_drop,
+    z_internal_ring_handler_query_check,
+    z_internal_ring_handler_query_null
+);
+channel_family!(
+    z_ring_channel_reply_new,
+    z_owned_closure_reply_t,
+    ring_reply_call,
+    free_reply,
+    Overflow::DropOldest,
+    crate::abi::z_owned_ring_handler_reply_t,
+    crate::abi::z_loaned_ring_handler_reply_t,
+    crate::abi::z_moved_ring_handler_reply_t,
+    z_owned_reply_t,
+    z_ring_handler_reply_loan,
+    z_ring_handler_reply_recv,
+    z_ring_handler_reply_try_recv,
+    z_ring_handler_reply_drop,
+    z_internal_ring_handler_reply_check,
+    z_internal_ring_handler_reply_null
+);
+
+/// The FIFO sample thunk — the same body as the ring one, and deliberately a
+/// separate symbol: the two closures must be distinguishable in a backtrace, and
+/// the overflow policy lives on the channel rather than in the callback.
+///
+/// # Safety
+/// `context` must be a live producer this module made.
+unsafe extern "C" fn fifo_sample_call(sample: *const z_loaned_sample_t, context: *mut c_void) {
+    // SAFETY: the caller's contract, delegated.
+    unsafe { ring_sample_call(sample, context) };
+}
+
+/// The RING query thunk.
+///
+/// # Safety
+/// `context` must be a live producer this module made.
+unsafe extern "C" fn ring_query_call(query: *mut z_loaned_query_t, context: *mut c_void) {
+    // SAFETY: the caller's contract, delegated.
+    unsafe { fifo_query_call(query, context) };
+}
+
+/// The RING reply thunk.
+///
+/// # Safety
+/// `context` must be a live producer this module made.
+unsafe extern "C" fn ring_reply_call(reply: *mut z_loaned_reply_t, context: *mut c_void) {
+    // SAFETY: the caller's contract, delegated.
+    unsafe { fifo_reply_call(reply, context) };
 }
