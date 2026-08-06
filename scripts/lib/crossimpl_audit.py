@@ -176,6 +176,29 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
     # be named by a hosted lane, and the leg running it must still be REQUIRE-exempt.
 }
 
+# ── A4-9: the foreign-adjudicator ratchet ──────────────────────────────────────
+#
+# The sum, over atoms, of DISTINCT corpus tests that foreign-adjudicate them. It is
+# an EXACT match rather than a floor, and both directions of failure are the point:
+#
+#   * Below it, a foreign witness was DELETED or silently stopped being accepted --
+#     the regression `proven`/`partial` cannot see, because dropping one of an atom's
+#     three witnesses leaves that bit untouched.
+#   * Above it, a round ADDED foreign adjudication and did not say so. That is the
+#     failure R311y569 and R311y571 both named: work that closes a plane and moves
+#     no number reads, to the next session, as a round that changed nothing.
+#
+# So a round that adds a witness bumps this line, in the same commit, and the diff
+# carries the claim. Derived wholly from the source tree (the corpus scan), so unlike
+# the census baselines of R311y567 it is NOT machine-dependent -- there is no arm to
+# get wrong and no oracle to pair with.
+#
+# MEASURED at R311y572, three times, and the sequence is the justification for
+# this constant existing at all: 785 before the round, 786 after the pico
+# `source_info` adjudicator for the seven remaining option structs, 787 after the
+# `accept_replies` adjudicator. `proven=128 partial=39` did not move once.
+FOREIGN_ADJUDICATOR_LINKS = 787
+
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
 # A proof that never runs is not a proof. The interop tests are #[ignore]d and their
@@ -425,6 +448,12 @@ def main() -> int:
     proven_partial: dict[str, set[str]] = {}
     ci_full: set[str] = set()
     ci_partial: set[str] = set()
+    # A4-9 (R311y572) — the FOREIGN ADJUDICATOR CENSUS. See its report block for
+    # what this is for; in short, `proven`/`partial` is one bit per atom, so the
+    # first foreign witness for a NEW plane of an already-`partial` atom moves no
+    # number at all and the work is invisible to this axis.
+    adjudicators: dict[str, set[tuple[str, str]]] = {}   # atom -> {(file, test)}
+    adjudicator_impls: dict[str, set[str]] = {}          # atom -> {foreign class}
     none_tests: list[tuple[str, str, str]] = []
     closures: dict[str, frozenset[str]] = {}
     n_ignored = 0
@@ -522,6 +551,13 @@ def main() -> int:
                 bucket.setdefault(atom, set()).add(kind)
                 if runs_in_ci:
                     (ci_partial if partial else ci_full).add(atom)
+                # A4-9 — every claim that survives the checks above IS a foreign
+                # adjudication: every KIND is a cross-impl kind, and A4-8 has just
+                # established that THIS TEST's own call graph reaches the foreign
+                # class the kind requires. So the census is exactly the accepted
+                # claims, counted per atom rather than collapsed to a bit.
+                adjudicators.setdefault(atom, set()).add((rel, t.name))
+                adjudicator_impls.setdefault(atom, set()).update(KIND_CLASS[kind] & t.classes)
 
     # An atom proven fully by ANY test outranks a partial claim elsewhere.
     full = set(proven_full)
@@ -540,6 +576,25 @@ def main() -> int:
     # even the pre-push full run. A headline number resting on those is the exact false
     # authority this axis exists to end, so it gets named.
     proven_without_ci_witness = sorted(full - ci_full_only - ci_partial_only)
+
+    # ── A4-9 — the foreign-adjudicator census ────────────────────────────────
+    #
+    # `proven` / `partial` / `unproven` is ONE BIT per atom, and R311y569 and
+    # R311y571 both recorded the consequence: giving an already-`partial` atom
+    # its first foreign witness for a NEW plane moves no counter, so the axis
+    # reports the work as having changed nothing. R311y571 closed the half that
+    # can REFUSE a bad claim (A4-8); this is the half that can COUNT a good one.
+    #
+    # Two numbers, because they answer different questions:
+    #   * tests  — how many distinct corpus tests foreign-adjudicate this atom.
+    #              A new plane's first witness moves this one.
+    #   * impls  — how many distinct foreign IMPLEMENTATIONS answered. Five tests
+    #              all driving the same spawned pico CLI are five opinions from
+    #              ONE implementation, and that distinction is what stops the
+    #              first number from being gamed by splitting a test in two.
+    witness_links = sum(len(v) for v in adjudicators.values())
+    single_witness = sorted(a for a, v in adjudicators.items() if len(v) == 1)
+    single_impl = sorted(a for a, v in adjudicator_impls.items() if len(v) == 1)
 
     fail_host_gated = assert_host_gated_ci_targets()
 
@@ -583,6 +638,19 @@ def main() -> int:
         print("      claim comes from a lane it does not run.)")
     print("  UNPROVEN (%d, actionable): %s" % (len(unproven), ", ".join(unproven) if unproven else "(none)"))
     print("  witnesses-no-atom (declared `none`): %d" % len(none_tests))
+    print("  FOREIGN ADJUDICATORS [A4-9]: links=%d over %d atom(s); "
+          "1-test-only=%d  1-impl-only=%d"
+          % (witness_links, len(adjudicators), len(single_witness), len(single_impl)))
+    print("     (`links` is the sum over atoms of DISTINCT foreign-adjudicating tests.")
+    print("      proven/partial is one bit per atom, so a first foreign witness for a new")
+    print("      plane of an already-`partial` atom moves nothing there; it moves this.")
+    print("      `1-impl-only` is the sharper list: those atoms have several opinions but")
+    print("      all from ONE foreign implementation.)")
+    if single_witness:
+        print("  SINGLE-ADJUDICATOR atoms (%d): %s"
+              % (len(single_witness), ", ".join(single_witness)))
+        print("     (exactly one test speaks for each. Not a failure -- an inventory of")
+        print("      where a second, differently-shaped witness would buy the most.)")
     if HOST_GATED_CI_TARGETS:
         print("  HOST-GATED hosted-CI targets (named by a lane but echo-skip on the "
               "runner, so NOT counted as hosted-executed): %s"
@@ -614,6 +682,23 @@ def main() -> int:
         print("    (grammar: `// wz-proves: <atom> <kind> [partial]` or `// wz-proves: none -- <reason>`,")
         print("     immediately above the #[test] / #[tokio::test] attribute; kind in %s)"
               % "/".join(sorted(corpus.KINDS)))
+
+    if witness_links != FOREIGN_ADJUDICATOR_LINKS:
+        ok = False
+        direction = "ROSE" if witness_links > FOREIGN_ADJUDICATOR_LINKS else "FELL"
+        print("FAIL [A4-9] the foreign-adjudicator link count %s: measured %d, "
+              "declared %d" % (direction, witness_links, FOREIGN_ADJUDICATOR_LINKS))
+        if witness_links > FOREIGN_ADJUDICATOR_LINKS:
+            print("    A round added foreign adjudication. Say so: set")
+            print("    FOREIGN_ADJUDICATOR_LINKS = %d in scripts/lib/crossimpl_audit.py"
+                  % witness_links)
+            print("    in the SAME commit, so the diff carries the claim. This is the")
+            print("    counter R311y569 asked for -- closing a plane is supposed to move it.")
+        else:
+            print("    A foreign witness was DELETED, or stopped being accepted by an")
+            print("    invariant above. proven/partial cannot see this: an atom keeps its")
+            print("    bit when one of its several witnesses goes away. Find which atom")
+            print("    lost a test before touching the constant.")
 
     if fail_name:
         ok = False

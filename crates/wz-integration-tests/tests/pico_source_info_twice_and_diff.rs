@@ -92,7 +92,12 @@ const PROBE: &str = r#"#include <stdio.h>
    direction this tree's topology note prescribes — a declared publisher that
    dials out never arms its write filter, so the reverse arrangement delivers
    nothing between two real picos either. */
-static int open_session(z_owned_session_t *out, const char *key, const char *endpoint) {
+/* R311y572 — `key` is `uint8_t`, not `const char *`. pico's config keys are
+   small integer constants (`Z_CONFIG_LISTEN_KEY` is `0x42`) and
+   `zp_config_insert` takes a `uint8_t`; the pointer-typed parameter this had
+   round-tripped only because a SysV-x86-64 truncation is lossless for values
+   that small, and gcc warned about it on every build of this probe. */
+static int open_session(z_owned_session_t *out, uint8_t key, const char *endpoint) {
     z_owned_config_t config;
     z_config_default(&config);
     if (zp_config_insert(z_loan_mut(config), Z_CONFIG_MODE_KEY, "peer") < 0) return -1;

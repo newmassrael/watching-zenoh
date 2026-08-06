@@ -116,6 +116,35 @@ EXCLUSIONS = {
 }
 
 
+# ── The INERT-MEMBER declaration (R311y572) ───────────────────────────────────
+#
+# A member of `preset-ap-full` whose inventory reason is tagged UNBUILT. The flag
+# is ON and toggles nothing that exists, so the headline "201 of 213 atoms" counts
+# it as covered on the strength of a Cargo.toml line.
+#
+# This is the OPPOSITE failure to the exclusion table above. That table catches an
+# atom the preset LEAVES OUT without saying why; this catches one the preset TAKES
+# IN without the capability existing. Both make the same headline wrong, and until
+# now only the first had a gate — the debt ledger's §8 carried it as "not a rule
+# violation, but `preset-ap-full = everything on` is two flags wrong and no gate
+# says so".
+#
+# EXACT match, both directions:
+#   * A THIRD inert member means the preset grew a flag for something unbuilt and
+#     the headline silently absorbed it.
+#   * FEWER means one was BUILT, and the entry must go — the same expiry rule the
+#     `unbuilt` exclusion category has always had. The buffer-pool FSM track
+#     (`runtime-zero-copy` first, then `runtime-tokio-uring`) is settled direction
+#     and deferred behind zenoh/pico parity, so this is where that deferral is
+#     recorded as a measured fact rather than a note.
+INERT_MEMBERS = {
+    "runtime-zero-copy": "the buffer-pool lifecycle FSM's first consumer; SCE emits "
+                         "6 pools with a real typestate lifecycle and they have 0 callers",
+    "runtime-tokio-uring": "the io_uring reactor behind it; needs an ARMING FLAG with a "
+                           "hosted hard-fail before it can be a lane",
+}
+
+
 def _predicate_alt_platform(atom, entry):
     return atom.startswith("platform-") and atom != "platform-linux"
 
@@ -273,10 +302,42 @@ def main():
             f"say so — the demo manifest's own held-back rule is what this checks."
         )
 
+    # (4) INERT MEMBERS — a member the preset counts as covered while the
+    # inventory calls it UNBUILT. See the INERT_MEMBERS comment for why this is
+    # the mirror image of the exclusion table rather than more of it.
+    inert = sorted(a for a in atom_members if _predicate_unbuilt(a, atoms[a]))
+    for a in inert:
+        if a not in INERT_MEMBERS:
+            failures.append(
+                f"member `{a}` is UNBUILT per the inventory but is counted as covered by "
+                f"{PRESET}. The headline '{len(atom_members)} of {len(atoms)} atoms' now "
+                f"rests on a Cargo.toml line with nothing behind it. Build it, or declare "
+                f"it in INERT_MEMBERS with the reason it is deferred."
+            )
+    for a in sorted(INERT_MEMBERS):
+        if a not in atoms:
+            failures.append(f"INERT_MEMBERS names `{a}`, which is no inventory atom")
+        elif a not in atom_members:
+            failures.append(
+                f"INERT_MEMBERS names `{a}`, which is NOT a member of {PRESET}. An inert "
+                f"member that is not a member describes nothing — remove the entry."
+            )
+        elif not _predicate_unbuilt(a, atoms[a]):
+            failures.append(
+                f"INERT_MEMBERS names `{a}`, but the inventory no longer tags it UNBUILT "
+                f"(reason={atoms[a]['reason'][:60]!r}). It was BUILT — remove the entry, "
+                f"which is the only way an inert declaration is allowed to expire."
+            )
+
     print(f"exclusions: {len(EXCLUSIONS)} atom(s) deliberately out")
     for a, (category, why) in sorted(EXCLUSIONS.items()):
         marker = "  OPEN " if category == "unbuilt" else "       "
         print(f"{marker}- {a}  [{category}] {why}")
+    print(f"INERT members: {len(inert)} member(s) counted as covered but UNBUILT")
+    for a in inert:
+        print(f"  INERT - {a}  {INERT_MEMBERS.get(a, '(UNDECLARED)')}")
+    print(f"  (so the {len(atom_members)}-of-{len(atoms)} headline above is "
+          f"{len(atom_members) - len(inert)} BUILT + {len(inert)} inert)")
     print(f"wz-ap-demo held-back keys: {len(held_back)}")
 
     if failures and not report_only:
