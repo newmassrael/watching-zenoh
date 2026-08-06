@@ -383,6 +383,11 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
         // `z_keyexpr_from_str` / `z_declare_keyexpr` family has a result type.
         // `z_get.c` and `z_pub.c` both stack-allocate one.
         ("z_owned_keyexpr_t", "sizeof(z_owned_keyexpr_t)"),
+        // R311y565 — the DEL reply options, newly declared this round.
+        (
+            "z_query_reply_del_options_t",
+            "sizeof(z_query_reply_del_options_t)",
+        ),
     ];
     // R311y543 — the `ze_advanced_*` plane, measured ONLY where upstream
     // declares it. The order must match `abi.rs`'s

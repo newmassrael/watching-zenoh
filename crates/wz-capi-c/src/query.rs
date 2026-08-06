@@ -94,6 +94,19 @@ enum PendingReply {
         /// caller's `z_moved_source_info_t` is consumed at CALL time.
         source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
     },
+    /// `z_query_reply_del` — a Del-form reply, R311y565.
+    ///
+    /// No `encoding` field, and that is WIRE-FAITHFUL rather than an omission:
+    /// the codec reads an encoding only in the Put branch
+    /// (`vendor/zenoh-pico/src/protocol/codec/message.c:269-276`), so a Del that
+    /// carried one would put a field no decoder reads on the wire. Upstream's
+    /// `z_query_reply_del_options_t` agrees — it declares no encoding either.
+    Del {
+        keyexpr: String,
+        attachment: Option<Vec<u8>>,
+        timestamp: Option<wz_runtime_tokio::sample::TimestampHint>,
+        source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+    },
 }
 
 /// The wire seam an ESCAPED query replies through.
@@ -181,6 +194,21 @@ fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
             &payload,
             ReplyMeta::new()
                 .with_encoding(encoding.as_ref())
+                .with_timestamp(timestamp.as_ref())
+                .with_source_info(source_info.as_ref())
+                .with_attachment(attachment.as_deref()),
+        ),
+        // The SAME `ReplyMeta` seam, minus the payload and the encoding — so a
+        // Del reply and a Put reply cannot drift on how a timestamp or a
+        // source_info reaches the wire.
+        PendingReply::Del {
+            keyexpr,
+            attachment,
+            timestamp,
+            source_info,
+        } => out.reply_keyed_del_meta(
+            &keyexpr,
+            ReplyMeta::new()
                 .with_timestamp(timestamp.as_ref())
                 .with_source_info(source_info.as_ref())
                 .with_attachment(attachment.as_deref()),
@@ -908,6 +936,136 @@ pub unsafe extern "C" fn z_query_reply(
             keyexpr: ke.to_owned(),
             payload,
             encoding,
+            attachment,
+            timestamp,
+            source_info,
+        });
+        Z_OK
+    })
+}
+
+/// Options for `z_query_reply_del` (`zenoh_commons.h:1052-1081`).
+///
+/// R311y565 — the struct was NOT DECLARED AT ALL until this round, which is a
+/// bigger gap than an unread field: `z_query_reply_del` had no signature to take
+/// and a C program that wanted to answer a query with a DELETE could not be
+/// written against this ABI. Carried as named debt since R311y563.
+///
+/// Upstream's fields in upstream's order, minus the encoding its Put sibling
+/// has — see [`PendingReply::Del`] for why a Del carries none.
+#[repr(C)]
+pub struct z_query_reply_del_options_t {
+    /// Congestion control. Accepted and ignored, as on the Put reply.
+    pub congestion_control: c_int,
+    /// Priority. Accepted and ignored.
+    pub priority: c_int,
+    /// Express flag. Accepted and ignored.
+    pub is_express: bool,
+    /// Explicit timestamp. BORROWED — a concrete struct the caller keeps.
+    pub timestamp: *mut crate::timestamp::z_timestamp_t,
+    /// Source info — present only under `Z_FEATURE_UNSTABLE_API`. TAKEN.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    pub source_info: *mut crate::source_info::z_moved_source_info_t,
+    /// Reply attachment. TAKEN and carried.
+    pub attachment: *mut z_moved_bytes_t,
+}
+
+/// Fill default del-reply options (zenoh-c `z_query_reply_del_options_default`).
+///
+/// # Safety
+/// `this_` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_query_reply_del_options_default(
+    this_: *mut z_query_reply_del_options_t,
+) {
+    if this_.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract. The scalar defaults are the Put reply's,
+    // read from the same place: `z_query_reply_options_default` above.
+    unsafe {
+        *this_ = z_query_reply_del_options_t {
+            congestion_control: 0,
+            priority: 5,
+            is_express: false,
+            timestamp: std::ptr::null_mut(),
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            source_info: std::ptr::null_mut(),
+            attachment: std::ptr::null_mut(),
+        }
+    };
+}
+
+/// The del-reply options' source info, on the arm that declares one.
+///
+/// # Safety
+/// `options` must be a valid del-reply options struct.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+unsafe fn reply_del_source_info(
+    options: *mut z_query_reply_del_options_t,
+) -> Option<wz_runtime_tokio::sample::SourceInfo> {
+    // SAFETY: the caller's contract.
+    unsafe { crate::source_info::take_moved_source_info((*options).source_info) }
+}
+
+/// The no-unstable arm: upstream does not declare the field there.
+///
+/// # Safety
+/// `options` is unused; the signature matches the sibling above.
+#[cfg(feature = "zenoh-c-no-unstable-api")]
+unsafe fn reply_del_source_info(
+    _options: *mut z_query_reply_del_options_t,
+) -> Option<wz_runtime_tokio::sample::SourceInfo> {
+    None
+}
+
+/// Answer a query with a DELETE (zenoh-c `z_query_reply_del`).
+///
+/// The Del half of [`z_query_reply`], sharing its keyexpr-coverage gate and its
+/// `ReplyMeta` flush so the two forms cannot answer differently about anything
+/// but the kind. The owned options fields are consumed on every path, including
+/// the error ones, exactly as on the Put side.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned query; `key_expr` must be null or a
+/// valid loaned keyexpr; `options` must be null or a valid del-reply options
+/// struct.
+#[no_mangle]
+pub unsafe extern "C" fn z_query_reply_del(
+    this_: *const z_loaned_query_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    options: *mut z_query_reply_del_options_t,
+) -> ZResult {
+    guarded(|| {
+        let (attachment, timestamp, source_info) = if options.is_null() {
+            (None, None, None)
+        } else {
+            // SAFETY: the caller's contract. Taken BEFORE any early return, so a
+            // refused reply still consumes what upstream would have consumed.
+            unsafe {
+                (
+                    crate::bytes::take_payload((*options).attachment),
+                    crate::timestamp::timestamp_hint(
+                        (*options).timestamp as *const std::ffi::c_void,
+                    ),
+                    reply_del_source_info(options),
+                )
+            }
+        };
+
+        // SAFETY: the caller's contract, delegated.
+        let Some(marshal) = (unsafe { query_marshal(this_) }) else {
+            return Z_ENULL;
+        };
+        // SAFETY: the caller's contract.
+        let Some(ke) = (unsafe { keyexpr_str(key_expr) }) else {
+            return Z_ENULL;
+        };
+        if !reply_keyexpr_is_covered(&marshal.keyexpr, ke, marshal.anyke) {
+            return Z_EINVAL;
+        }
+        marshal.push_reply(PendingReply::Del {
+            keyexpr: ke.to_owned(),
             attachment,
             timestamp,
             source_info,

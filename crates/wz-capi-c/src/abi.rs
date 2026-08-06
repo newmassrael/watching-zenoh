@@ -943,6 +943,10 @@ pub const WZ_CAPI_C_LAYOUT_NAMES_BASE: &[&str] = &[
     // `z_declare_keyexpr` have a result type. Same footprint as the view, and
     // the gate measures it rather than inheriting that claim.
     "z_owned_keyexpr_t",
+    // R311y565 — the DEL reply options, newly declared. Transparent and
+    // stack-allocated by the C side like its Put sibling, so it belongs here for
+    // the same reason `z_query_reply_options_t` does.
+    "z_query_reply_del_options_t",
 ];
 
 /// The `Z_FEATURE_UNSTABLE_API`-only half of the table — the `ze_advanced_*`
@@ -1070,6 +1074,7 @@ fn layout_values() -> Vec<usize> {
         size_of::<crate::timestamp::z_timestamp_t>(),
         align_of::<crate::timestamp::z_timestamp_t>(),
         size_of::<z_owned_keyexpr_t>(),
+        size_of::<crate::query::z_query_reply_del_options_t>(),
     ];
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     values.extend_from_slice(&[

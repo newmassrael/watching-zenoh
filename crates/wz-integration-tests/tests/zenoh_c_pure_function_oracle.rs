@@ -34,7 +34,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use wz_integration_tests::common::{compile_zenoh_c_example, wz_capi_c_cdylib, zenoh_c_oracle};
+use wz_integration_tests::common::{
+    compile_zenoh_c_example, wz_capi_c_cdylib, zenoh_c_oracle, zenoh_c_shared_library,
+};
 
 /// The oracle, or `None` with a LOUD note naming what to do about it.
 fn oracle_or_note() -> Option<(PathBuf, PathBuf)> {
@@ -58,6 +60,8 @@ fn oracle_or_note() -> Option<(PathBuf, PathBuf)> {
 /// comparison to mean what it claims. A Rust declaration would restate the
 /// signature and could restate it wrong on both arms at once.
 const PROBE: &str = r#"#include <stdio.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 #include "zenoh.h"
 
@@ -277,6 +281,135 @@ int main(void) {
         printf("view.is_empty_after_from_str=%d\n", (int)z_view_keyexpr_is_empty(&left));
     }
 
+    /* --- the serialization plane ----------------------------------------- */
+    {
+        /* Every fixed-width value: serialize, then read the BYTES back, so the
+           comparison is over the wire form rather than over a round trip that
+           would agree with itself on either library. */
+#define SHOW_SER(label, call)                                                  \
+    do {                                                                       \
+        z_owned_bytes_t b;                                                     \
+        z_result_t rc = call;                                                  \
+        printf("ser." label ".rc=%d", (int)rc);                                \
+        if (rc == 0) {                                                         \
+            z_bytes_reader_t r = z_bytes_get_reader(z_bytes_loan(&b));         \
+            uint8_t raw[64];                                                   \
+            size_t n = z_bytes_reader_read(&r, raw, sizeof raw);               \
+            printf(" len=%zu bytes=", n);                                      \
+            for (size_t i = 0; i < n; i++) printf("%02x", raw[i]);             \
+            z_bytes_drop(z_bytes_move(&b));                                    \
+        }                                                                      \
+        printf("\n");                                                          \
+    } while (0)
+
+        SHOW_SER("uint8", ze_serialize_uint8(&b, 0xAB));
+        SHOW_SER("int8", ze_serialize_int8(&b, -3));
+        SHOW_SER("uint16", ze_serialize_uint16(&b, 0x1234));
+        SHOW_SER("int16", ze_serialize_int16(&b, -300));
+        SHOW_SER("uint32", ze_serialize_uint32(&b, 0xDEADBEEFu));
+        SHOW_SER("int32", ze_serialize_int32(&b, -70000));
+        SHOW_SER("uint64", ze_serialize_uint64(&b, 0x0102030405060708ull));
+        SHOW_SER("int64", ze_serialize_int64(&b, -5000000000ll));
+        SHOW_SER("float", ze_serialize_float(&b, 1.5f));
+        SHOW_SER("double", ze_serialize_double(&b, -2.25));
+        SHOW_SER("bool_true", ze_serialize_bool(&b, true));
+        SHOW_SER("bool_false", ze_serialize_bool(&b, false));
+        SHOW_SER("str", ze_serialize_str(&b, "hello"));
+        SHOW_SER("substr", ze_serialize_substr(&b, "hello world", 5));
+        SHOW_SER("buf", ze_serialize_buf(&b, (const uint8_t *)"\x01\x02\x03", 3));
+#undef SHOW_SER
+
+        /* And the READ side, driven off each library's OWN serialization: a
+           value that round-trips on both is still a divergence if the two put
+           different bytes on the wire, which the block above catches. */
+        z_owned_bytes_t b;
+        uint32_t u32v = 0;
+        ze_serialize_uint32(&b, 0xCAFEBABEu);
+        printf("de.uint32.rc=%d val=%u\n",
+               (int)ze_deserialize_uint32(z_bytes_loan(&b), &u32v), (unsigned)u32v);
+        z_bytes_drop(z_bytes_move(&b));
+
+        int16_t i16v = 0;
+        ze_serialize_int16(&b, -1234);
+        printf("de.int16.rc=%d val=%d\n",
+               (int)ze_deserialize_int16(z_bytes_loan(&b), &i16v), (int)i16v);
+        z_bytes_drop(z_bytes_move(&b));
+
+        bool bv = false;
+        ze_serialize_bool(&b, true);
+        printf("de.bool.rc=%d val=%d\n",
+               (int)ze_deserialize_bool(z_bytes_loan(&b), &bv), (int)bv);
+        z_bytes_drop(z_bytes_move(&b));
+
+        /* A payload of the WRONG width must be refused, not truncated. */
+        uint16_t u16v = 0;
+        ze_serialize_uint32(&b, 7);
+        printf("de.uint16_from_uint32.rc=%d\n",
+               (int)ze_deserialize_uint16(z_bytes_loan(&b), &u16v));
+        z_bytes_drop(z_bytes_move(&b));
+
+        /* SEQUENCED, not folded into one printf: C leaves argument evaluation
+           order unspecified, and gcc evaluates right to left — so a single call
+           would read the out-param BEFORE the deserializer filled it. The first
+           cut of this probe did exactly that and reported a two-line divergence
+           that was the harness reading uninitialised stack, not wz. */
+        z_owned_string_t s;
+        ze_serialize_str(&b, "round trip");
+        z_result_t src = ze_deserialize_string(z_bytes_loan(&b), &s);
+        printf("de.string.rc=%d val=%.*s\n", (int)src,
+               (int)z_string_len(z_string_loan(&s)), z_string_data(z_string_loan(&s)));
+        z_string_drop(z_string_move(&s));
+        z_bytes_drop(z_bytes_move(&b));
+
+        z_owned_slice_t sl;
+        ze_serialize_buf(&b, (const uint8_t *)"\xAA\xBB", 2);
+        z_result_t slrc = ze_deserialize_slice(z_bytes_loan(&b), &sl);
+        printf("de.slice.rc=%d len=%zu\n", (int)slrc, z_slice_len(z_slice_loan(&sl)));
+        z_slice_drop(z_slice_move(&sl));
+        z_bytes_drop(z_bytes_move(&b));
+
+        /* The SERIALIZER form, which must agree byte for byte with the
+           value-level one for the same sequence. */
+        ze_owned_serializer_t ser;
+        ze_serializer_empty(&ser);
+        ze_serializer_serialize_uint16(ze_serializer_loan_mut(&ser), 0x0102);
+        ze_serializer_serialize_int8(ze_serializer_loan_mut(&ser), -1);
+        ze_serializer_serialize_bool(ze_serializer_loan_mut(&ser), true);
+        ze_serializer_serialize_substr(ze_serializer_loan_mut(&ser), "abc", 3);
+        ze_serializer_finish(ze_serializer_move(&ser), &b);
+        {
+            z_bytes_reader_t r = z_bytes_get_reader(z_bytes_loan(&b));
+            uint8_t raw[64];
+            size_t n = z_bytes_reader_read(&r, raw, sizeof raw);
+            printf("serializer.len=%zu bytes=", n);
+            for (size_t i = 0; i < n; i++) printf("%02x", raw[i]);
+            printf("\n");
+        }
+        /* …and the deserializer walks it back, reporting `is_done` at each
+           step, which is the loop shape a consumer actually writes. */
+        {
+            ze_deserializer_t de = ze_deserializer_from_bytes(z_bytes_loan(&b));
+            uint16_t a = 0;
+            int8_t c = 0;
+            bool d = false;
+            z_owned_string_t e;
+            /* Sequenced for the same reason as above: `is_done` must be read
+               AFTER the step it reports on. */
+            z_result_t r1 = ze_deserializer_deserialize_uint16(&de, &a);
+            printf("de2.uint16.rc=%d done=%d\n", (int)r1, (int)ze_deserializer_is_done(&de));
+            z_result_t r2 = ze_deserializer_deserialize_int8(&de, &c);
+            printf("de2.int8.rc=%d done=%d\n", (int)r2, (int)ze_deserializer_is_done(&de));
+            z_result_t r3 = ze_deserializer_deserialize_bool(&de, &d);
+            printf("de2.bool.rc=%d done=%d\n", (int)r3, (int)ze_deserializer_is_done(&de));
+            z_result_t r4 = ze_deserializer_deserialize_string(&de, &e);
+            printf("de2.string.rc=%d done=%d\n", (int)r4, (int)ze_deserializer_is_done(&de));
+            printf("de2.values=%u/%d/%d/%.*s\n", (unsigned)a, (int)c, (int)d,
+                   (int)z_string_len(z_string_loan(&e)), z_string_data(z_string_loan(&e)));
+            z_string_drop(z_string_move(&e));
+        }
+        z_bytes_drop(z_bytes_move(&b));
+    }
+
     return 0;
 }
 "#;
@@ -349,22 +482,32 @@ fn run_both_arms(include: &Path, libdir_ref: &Path) -> (String, String) {
 /// It covers the encoding table and the keyexpr plane, which is what R311y564
 /// built, and says nothing about the session planes the interop legs cover.
 ///
-/// NO cross-impl proof annotation, and Layer A4 requires its absence rather than merely
-/// permitting it: a file whose foreign artifacts the corpus classifier cannot
-/// see may not carry a claim at all, not even `none`. The reference arm here IS
-/// a foreign implementation — the real `libzenohc.so`, linked and run — but the
-/// classifier registers `zenoh_pico_shared_library` and has no zenoh-c
-/// equivalent, and the kind vocabulary has no `wz->zenoh-c`. This file's
-/// siblings (`upstream_option_defaults_on_wz_capi_c_match_real_libzenohc`, the
-/// footprint gate) are unannotated for the same reason. Registering the root and
-/// the kind would let `api-compat-c` claim its first REFERENCE-implementation
-/// proof; it is a change to A4's taxonomy and belongs in its own round.
+/// R311y565 — `api-compat-c`'s FIRST reference-implementation proof. Every
+/// earlier cross-impl claim on this atom is pico-mediated (a real zenoh-pico CLI
+/// opposite a wz-hosted upstream program); this one links zenoh's OWN library
+/// as the second arm, which is the counterparty the drop-in claim is actually
+/// about. It became recordable when `zenoh_c_shared_library` was registered as a
+/// foreign root and `wz->zenoh-c` added to the kind vocabulary — before that A4
+/// could not see the file links anything foreign and forbade it a claim.
+///
+/// `partial`: the encoding table and the keyexpr plane, not the session planes.
+// wz-proves: api-compat-c wz->zenoh-c partial
 #[test]
 #[ignore = "reads the installed zenoh-c oracle; run by run-ci Layer C1cc"]
 fn upstream_pure_functions_on_wz_capi_c_match_real_libzenohc() {
-    let Some((include, libdir_ref)) = oracle_or_note() else {
+    let Some((include, _libdir)) = oracle_or_note() else {
         return;
     };
+    // The reference arm is reached through the REGISTERED resolver, not through a
+    // path join. That is what lets Layer A4's classifier see this file links a
+    // foreign implementation — see `zenoh_c_shared_library`'s own docs for the
+    // round where the inlined form cost the sibling ABI five true claims.
+    let reference = zenoh_c_shared_library()
+        .expect("the oracle resolved above, so its libzenohc.so is present");
+    let libdir_ref = reference
+        .parent()
+        .expect("libzenohc.so has a parent")
+        .to_path_buf();
     let (wz_stdout, ref_stdout) = run_both_arms(&include, &libdir_ref);
 
     // Asserted BEFORE the diff: two empty captures are equal, and an equality

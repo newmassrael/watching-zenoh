@@ -505,6 +505,26 @@ pub mod common {
         Some((include, libdir, examples))
     }
 
+    /// The REAL `libzenohc.so` — the zenoh-c ORACLE, as an artifact.
+    ///
+    /// R311y565 — a NAMED, REGISTERED resolver, and the naming is the whole
+    /// point. Layer A4's corpus classifier derives a file's foreign class from
+    /// the resolver FUNCTIONS it names, so a library reached through a local
+    /// `libdir.join("libzenohc.so")` is one the audit cannot see is foreign. The
+    /// sibling `zenoh_pico_shared_library` was inlined the same way until
+    /// R311y536 and every claim in the strongest pico differential in the tree
+    /// read as a wz-vs-wz test.
+    ///
+    /// It is exactly what made `api-compat-c` carry no reference-implementation
+    /// proof while a twice-and-diff against that very library ran on every C1cc
+    /// pass. Returns `None` rather than panicking, because the oracle is
+    /// machine-local and each caller decides whether absence is a skip.
+    pub fn zenoh_c_shared_library() -> Option<PathBuf> {
+        let (_include, libdir, _examples) = zenoh_c_oracle()?;
+        let path = libdir.join("libzenohc.so");
+        path.is_file().then_some(path)
+    }
+
     /// Compile ONE upstream zenoh-c example against a chosen library.
     ///
     /// `link` is the library NAME (`wz_capi_c` for the drop-in arm, `zenohc` for

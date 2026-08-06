@@ -110,6 +110,16 @@ FOREIGN_ROOTS = {
     # so the resolver is the thing that must be shared, not the path.
     "zenoh_pico_shared_library": "pico-lib",
     "zenoh_pico_library_dir": "pico-lib",
+    # R311y565 — the real `libzenohc.so`, zenoh's REFERENCE implementation, as a
+    # library. Registered for the reason the pico entries above were registered
+    # at R311y536, and it had the identical consequence: the `api-compat-c`
+    # twice-and-diff legs LINK and RUN that library on every Layer C1cc pass, and
+    # with no root here the classifier saw no foreign artifact, so A4 forbade
+    # them a claim and the atom's strongest witness went uncounted. A class of
+    # its own rather than more `zenohd` roots: zenoh-c is the cbindgen wrapper
+    # over zenoh Rust, not the router, and folding it in would make every claim
+    # read `wz->zenohd` against a counterparty that is not zenohd.
+    "zenoh_c_shared_library": "zenoh-c-lib",
 }
 # A wz binary is EXTERNAL (needs #[ignore]) but not FOREIGN (cannot witness parity).
 # The package each root resolves to is what Layer A4's containment arm needs: the
@@ -151,7 +161,8 @@ PICO_FFI_CRATE = "zenoh_pico_sys"
 
 CLAIM_RE = re.compile(
     r"^\s*//[/!]?\s*wz-proves:\s*(?P<atom>[A-Za-z0-9_-]+)\s+"
-    r"(?P<kind>wz->pico|pico->wz|wz->zenoh-ext|zenoh-ext->wz|wz->zenohd|zenohd->wz|codec-parity)"
+    r"(?P<kind>wz->pico|pico->wz|wz->zenoh-ext|zenoh-ext->wz|wz->zenoh-c|zenoh-c->wz"
+    r"|wz->zenohd|zenohd->wz|codec-parity)"
     r"\s*(?P<partial>partial)?\s*$"
 )
 # A corpus test that witnesses NO atom must say so, with a reason, rather than be
@@ -166,6 +177,12 @@ KINDS = {
     "zenohd->wz",
     "wz->zenoh-ext",
     "zenoh-ext->wz",
+    # R311y565 — the reference implementation, linked rather than spawned. There
+    # is no zenoh-c BINARY to spawn: zenoh-c is a library, so the only witness
+    # shape available is the compile-once-link-twice differential, which is also
+    # the strongest one.
+    "wz->zenoh-c",
+    "zenoh-c->wz",
     "codec-parity",
 }
 # Which foreign classes can legitimately produce each proof kind.
@@ -198,6 +215,11 @@ KIND_CLASS = {
     # kind would have encoded the retired assumption a second time.
     "wz->zenoh-ext": {"zenoh-ext"},
     "zenoh-ext->wz": {"zenoh-ext"},
+    # Only the library can witness a zenoh-c kind, for the same reason only
+    # zenohd can witness a zenohd one — and unlike pico there is no spawned-CLI
+    # alternative to also accept.
+    "wz->zenoh-c": {"zenoh-c-lib"},
+    "zenoh-c->wz": {"zenoh-c-lib"},
     "codec-parity": {"codec"},
 }
 

@@ -1357,6 +1357,14 @@ PY
         echo "  inert families already stay covered." >&2
         return 1
     fi
+    # R311y565 — the EXPIRED-BLOCKER lint. Eight times across y561-y563 a field
+    # or a family sat unimplemented behind a comment naming its own reason, and
+    # the reason had already dissolved -- twice in the round that wrote it. Each
+    # named its own blocker in prose and each blocker was one grep from being
+    # falsified, which is what makes the class mechanical rather than editorial.
+    # Enforcement MEASURED by re-introducing one of the eight verbatim, not by
+    # observing that the script runs.
+    python3 scripts/lib/expired_blocker_lint.py || return 1
     return 0
 }
 

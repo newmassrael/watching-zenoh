@@ -241,87 +241,6 @@ pub unsafe extern "C" fn ze_serializer_serialize_sequence_length(
     unsafe { with_serializer(this_, |state| push_zint(state, len as u64)) }
 }
 
-/// Serialize an `int32` (zenoh-c `ze_serializer_serialize_int32`) — FIXED-WIDTH
-/// little-endian, not VLE.
-///
-/// # Safety
-/// `this_` must be null or a valid loaned serializer.
-#[no_mangle]
-pub unsafe extern "C" fn ze_serializer_serialize_int32(
-    this_: *mut ze_loaned_serializer_t,
-    val: i32,
-) -> ZResult {
-    // SAFETY: the caller's contract, delegated.
-    unsafe {
-        with_serializer(this_, |state| {
-            state.buf.extend_from_slice(&val.to_le_bytes())
-        })
-    }
-}
-
-/// Serialize a `uint32` into a fresh payload (zenoh-c `ze_serialize_uint32`).
-///
-/// # Safety
-/// `this_` must be null or valid and writable.
-#[no_mangle]
-pub unsafe extern "C" fn ze_serialize_uint32(this_: *mut z_owned_bytes_t, val: u32) -> ZResult {
-    // SAFETY: the caller's contract — a four-byte little-endian payload, the
-    // same bytes `ze_serializer_serialize_uint32` would write.
-    unsafe { crate::bytes::z_bytes_copy_from_buf(this_, val.to_le_bytes().as_ptr(), 4) }
-}
-
-/// Serialize a `uint32` (zenoh-c `ze_serializer_serialize_uint32`).
-///
-/// # Safety
-/// `this_` must be null or a valid loaned serializer.
-#[no_mangle]
-pub unsafe extern "C" fn ze_serializer_serialize_uint32(
-    this_: *mut ze_loaned_serializer_t,
-    val: u32,
-) -> ZResult {
-    // SAFETY: the caller's contract, delegated.
-    unsafe {
-        with_serializer(this_, |state| {
-            state.buf.extend_from_slice(&val.to_le_bytes())
-        })
-    }
-}
-
-/// Serialize a `uint64` (zenoh-c `ze_serializer_serialize_uint64`).
-///
-/// # Safety
-/// `this_` must be null or a valid loaned serializer.
-#[no_mangle]
-pub unsafe extern "C" fn ze_serializer_serialize_uint64(
-    this_: *mut ze_loaned_serializer_t,
-    val: u64,
-) -> ZResult {
-    // SAFETY: the caller's contract, delegated.
-    unsafe {
-        with_serializer(this_, |state| {
-            state.buf.extend_from_slice(&val.to_le_bytes())
-        })
-    }
-}
-
-/// Serialize a `float` (zenoh-c `ze_serializer_serialize_float`) — its IEEE-754
-/// bit pattern, little-endian.
-///
-/// # Safety
-/// `this_` must be null or a valid loaned serializer.
-#[no_mangle]
-pub unsafe extern "C" fn ze_serializer_serialize_float(
-    this_: *mut ze_loaned_serializer_t,
-    val: f32,
-) -> ZResult {
-    // SAFETY: the caller's contract, delegated.
-    unsafe {
-        with_serializer(this_, |state| {
-            state.buf.extend_from_slice(&val.to_le_bytes())
-        })
-    }
-}
-
 /// Serialize a byte run with its VLE length — the shared body of the two string
 /// exports.
 ///
@@ -455,58 +374,6 @@ pub unsafe extern "C" fn ze_deserializer_deserialize_sequence_length(
     })
 }
 
-/// Deserialize an `int32` (zenoh-c `ze_deserializer_deserialize_int32`).
-///
-/// # Safety
-/// `this_` must be null or a valid deserializer; `dst` must be null or writable.
-#[no_mangle]
-pub unsafe extern "C" fn ze_deserializer_deserialize_int32(
-    this_: *mut ze_deserializer_t,
-    dst: *mut i32,
-) -> ZResult {
-    // SAFETY: delegated.
-    unsafe { deserialize_le::<4, i32>(this_, dst, i32::from_le_bytes) }
-}
-
-/// Deserialize a `uint32` (zenoh-c `ze_deserializer_deserialize_uint32`).
-///
-/// # Safety
-/// `this_` must be null or a valid deserializer; `dst` must be null or writable.
-#[no_mangle]
-pub unsafe extern "C" fn ze_deserializer_deserialize_uint32(
-    this_: *mut ze_deserializer_t,
-    dst: *mut u32,
-) -> ZResult {
-    // SAFETY: delegated.
-    unsafe { deserialize_le::<4, u32>(this_, dst, u32::from_le_bytes) }
-}
-
-/// Deserialize a `uint64` (zenoh-c `ze_deserializer_deserialize_uint64`).
-///
-/// # Safety
-/// `this_` must be null or a valid deserializer; `dst` must be null or writable.
-#[no_mangle]
-pub unsafe extern "C" fn ze_deserializer_deserialize_uint64(
-    this_: *mut ze_deserializer_t,
-    dst: *mut u64,
-) -> ZResult {
-    // SAFETY: delegated.
-    unsafe { deserialize_le::<8, u64>(this_, dst, u64::from_le_bytes) }
-}
-
-/// Deserialize a `float` (zenoh-c `ze_deserializer_deserialize_float`).
-///
-/// # Safety
-/// `this_` must be null or a valid deserializer; `dst` must be null or writable.
-#[no_mangle]
-pub unsafe extern "C" fn ze_deserializer_deserialize_float(
-    this_: *mut ze_deserializer_t,
-    dst: *mut f32,
-) -> ZResult {
-    // SAFETY: delegated.
-    unsafe { deserialize_le::<4, f32>(this_, dst, f32::from_le_bytes) }
-}
-
 /// Deserialize a string into an owned one (zenoh-c
 /// `ze_deserializer_deserialize_string`).
 ///
@@ -551,15 +418,159 @@ pub unsafe extern "C" fn ze_deserializer_deserialize_string(
     })
 }
 
-/// Deserialize a `uint32` straight out of a payload (zenoh-c
-/// `ze_deserialize_uint32`).
+// --- R311y565: the rest of upstream's serialization surface -----------------
+//
+// Everything here is one of four shapes over a fixed-width little-endian value,
+// and all four already existed for `int32` / `uint32` / `uint64` / `float`. The
+// widths are the only thing that varies, so they are generated: writing them out
+// forty-six times is forty-six chances to transpose a width, and the wire format
+// is what a transposition would corrupt.
+
+/// Emit the four entry points a fixed-width value needs.
+///
+/// `$ty` is the Rust type, `$n` its byte width. The value-level and
+/// serializer-level halves must produce the SAME bytes — that is the property a
+/// caller relies on when it serializes with one and deserializes with the other
+/// — so both are generated from one width rather than written twice.
+macro_rules! fixed_width_codec {
+    ($( $ty:ty, $n:expr, $ser:ident, $ser_into:ident, $de:ident, $de_from:ident );+ $(;)?) => {
+        $(
+            #[doc = concat!("Serialize a `", stringify!($ty), "` into a fresh payload (zenoh-c `", stringify!($ser), "`).")]
+            ///
+            /// # Safety
+            /// `this_` must be null or valid and writable.
+            #[no_mangle]
+            pub unsafe extern "C" fn $ser(this_: *mut z_owned_bytes_t, val: $ty) -> ZResult {
+                // SAFETY: the caller's contract — the same little-endian bytes
+                // the serializer-level sibling writes.
+                unsafe {
+                    crate::bytes::z_bytes_copy_from_buf(this_, val.to_le_bytes().as_ptr(), $n)
+                }
+            }
+
+            #[doc = concat!("Serialize a `", stringify!($ty), "` (zenoh-c `", stringify!($ser_into), "`).")]
+            ///
+            /// # Safety
+            /// `this_` must be null or a valid loaned serializer.
+            #[no_mangle]
+            pub unsafe extern "C" fn $ser_into(
+                this_: *mut ze_loaned_serializer_t,
+                val: $ty,
+            ) -> ZResult {
+                // SAFETY: the caller's contract, delegated.
+                unsafe {
+                    with_serializer(this_, |state| {
+                        state.buf.extend_from_slice(&val.to_le_bytes())
+                    })
+                }
+            }
+
+            #[doc = concat!("Deserialize a whole payload as a `", stringify!($ty), "` (zenoh-c `", stringify!($de), "`).")]
+            ///
+            /// # Safety
+            /// `this_` must be null or a valid loaned payload; `dst` must be
+            /// null or writable.
+            #[no_mangle]
+            pub unsafe extern "C" fn $de(this_: *const z_loaned_bytes_t, dst: *mut $ty) -> ZResult {
+                guarded(|| {
+                    if dst.is_null() {
+                        return Z_ENULL;
+                    }
+                    // SAFETY: the caller's contract.
+                    let Some(bytes) = (unsafe { bytes_slice(this_) }) else {
+                        return Z_ENULL;
+                    };
+                    // Upstream rejects a payload that is not EXACTLY the value:
+                    // a longer one is a different type, not a value with a tail.
+                    if bytes.len() != $n {
+                        return Z_EPARSE;
+                    }
+                    let mut raw = [0u8; $n];
+                    raw.copy_from_slice(bytes);
+                    // SAFETY: the caller's contract.
+                    unsafe { *dst = <$ty>::from_le_bytes(raw) };
+                    Z_OK
+                })
+            }
+
+            #[doc = concat!("Deserialize a `", stringify!($ty), "` (zenoh-c `", stringify!($de_from), "`).")]
+            ///
+            /// # Safety
+            /// `this_` must be null or a valid deserializer; `dst` must be null
+            /// or writable.
+            #[no_mangle]
+            pub unsafe extern "C" fn $de_from(
+                this_: *mut ze_deserializer_t,
+                dst: *mut $ty,
+            ) -> ZResult {
+                // SAFETY: delegated.
+                unsafe { deserialize_le::<$n, $ty>(this_, dst, <$ty>::from_le_bytes) }
+            }
+        )+
+    };
+}
+
+fixed_width_codec! {
+    u8, 1, ze_serialize_uint8, ze_serializer_serialize_uint8,
+        ze_deserialize_uint8, ze_deserializer_deserialize_uint8;
+    i8, 1, ze_serialize_int8, ze_serializer_serialize_int8,
+        ze_deserialize_int8, ze_deserializer_deserialize_int8;
+    u16, 2, ze_serialize_uint16, ze_serializer_serialize_uint16,
+        ze_deserialize_uint16, ze_deserializer_deserialize_uint16;
+    i16, 2, ze_serialize_int16, ze_serializer_serialize_int16,
+        ze_deserialize_int16, ze_deserializer_deserialize_int16;
+    i32, 4, ze_serialize_int32, ze_serializer_serialize_int32,
+        ze_deserialize_int32, ze_deserializer_deserialize_int32;
+    u32, 4, ze_serialize_uint32, ze_serializer_serialize_uint32,
+        ze_deserialize_uint32, ze_deserializer_deserialize_uint32;
+    i64, 8, ze_serialize_int64, ze_serializer_serialize_int64,
+        ze_deserialize_int64, ze_deserializer_deserialize_int64;
+    u64, 8, ze_serialize_uint64, ze_serializer_serialize_uint64,
+        ze_deserialize_uint64, ze_deserializer_deserialize_uint64;
+    f64, 8, ze_serialize_double, ze_serializer_serialize_double,
+        ze_deserialize_double, ze_deserializer_deserialize_double;
+    f32, 4, ze_serialize_float, ze_serializer_serialize_float,
+        ze_deserialize_float, ze_deserializer_deserialize_float;
+}
+
+/// Serialize a `bool` into a fresh payload (zenoh-c `ze_serialize_bool`).
+///
+/// One byte, 0 or 1 — NOT a `u8` alias in the macro above, because a bool's
+/// wire form is a two-valued byte and a `u8` round trip would happily carry 2.
 ///
 /// # Safety
-/// `this_` must be null or a valid loaned bytes; `dst` must be null or writable.
+/// `this_` must be null or valid and writable.
 #[no_mangle]
-pub unsafe extern "C" fn ze_deserialize_uint32(
+pub unsafe extern "C" fn ze_serialize_bool(this_: *mut z_owned_bytes_t, val: bool) -> ZResult {
+    // SAFETY: the caller's contract.
+    unsafe { crate::bytes::z_bytes_copy_from_buf(this_, [u8::from(val)].as_ptr(), 1) }
+}
+
+/// Serialize a `bool` (zenoh-c `ze_serializer_serialize_bool`).
+///
+/// # Safety
+/// `this_` must be null or a valid loaned serializer.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serializer_serialize_bool(
+    this_: *mut ze_loaned_serializer_t,
+    val: bool,
+) -> ZResult {
+    // SAFETY: the caller's contract, delegated.
+    unsafe { with_serializer(this_, |state| state.buf.push(u8::from(val))) }
+}
+
+/// Deserialize a whole payload as a `bool` (zenoh-c `ze_deserialize_bool`).
+///
+/// A byte outside `{0, 1}` is `Z_EPARSE`, not a truthy read: upstream's writer
+/// only ever emits those two, so anything else came from a different type.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned payload; `dst` must be null or
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn ze_deserialize_bool(
     this_: *const z_loaned_bytes_t,
-    dst: *mut u32,
+    dst: *mut bool,
 ) -> ZResult {
     guarded(|| {
         if dst.is_null() {
@@ -569,15 +580,390 @@ pub unsafe extern "C" fn ze_deserialize_uint32(
         let Some(bytes) = (unsafe { bytes_slice(this_) }) else {
             return Z_ENULL;
         };
-        // Upstream rejects a payload that is not EXACTLY the value: a longer one
-        // is a different type, not a value with a tail to ignore.
-        if bytes.len() != 4 {
-            return Z_EPARSE;
-        };
-        let mut raw = [0u8; 4];
-        raw.copy_from_slice(bytes);
+        match bytes {
+            [0] | [1] => {
+                // SAFETY: the caller's contract.
+                unsafe { *dst = bytes[0] == 1 };
+                Z_OK
+            }
+            _ => Z_EPARSE,
+        }
+    })
+}
+
+/// Deserialize a `bool` (zenoh-c `ze_deserializer_deserialize_bool`).
+///
+/// # Safety
+/// `this_` must be null or a valid deserializer; `dst` must be null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn ze_deserializer_deserialize_bool(
+    this_: *mut ze_deserializer_t,
+    dst: *mut bool,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() || dst.is_null() {
+            return Z_ENULL;
+        }
         // SAFETY: the caller's contract.
-        unsafe { *dst = u32::from_le_bytes(raw) };
+        let de = unsafe { &mut *this_ };
+        // Probed before committing, so a non-boolean byte leaves the cursor
+        // where it was and a caller may try a different type.
+        let Some(bytes) = de.rest().first().copied() else {
+            return Z_EDESERIALIZE;
+        };
+        if bytes > 1 {
+            return Z_EDESERIALIZE;
+        }
+        de.pos += 1;
+        // SAFETY: the caller's contract.
+        unsafe { *dst = bytes == 1 };
+        Z_OK
+    })
+}
+
+/// `true` once the deserializer has consumed its whole payload (zenoh-c
+/// `ze_deserializer_is_done`).
+///
+/// A null deserializer reads as DONE: there is nothing left in it to read, which
+/// is the answer that stops a caller's loop rather than spinning it.
+///
+/// # Safety
+/// `this_` must be null or a valid deserializer.
+#[no_mangle]
+pub unsafe extern "C" fn ze_deserializer_is_done(this_: *const ze_deserializer_t) -> bool {
+    guard_val(true, || {
+        if this_.is_null() {
+            return true;
+        }
+        // SAFETY: the caller's contract.
+        let de = unsafe { &*this_ };
+        de.pos >= de.len
+    })
+}
+
+/// Serialize a raw buffer into a fresh payload (zenoh-c `ze_serialize_buf`).
+///
+/// LENGTH-PREFIXED, unlike `z_bytes_copy_from_buf`: this is the serialization
+/// format, so the reader has to know where the value ends even when it is not
+/// the whole payload.
+///
+/// # Safety
+/// `this_` must be valid and writable; `data` must be null or point at `len`
+/// readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serialize_buf(
+    this_: *mut z_owned_bytes_t,
+    data: *const u8,
+    len: usize,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_bytes_t::null_value() };
+        if data.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: as above — `len` readable bytes.
+        let body = unsafe { std::slice::from_raw_parts(data, len) };
+        let mut framed = Vec::with_capacity(len + VLE_LEN);
+        let mut header = [0u8; VLE_LEN];
+        let n = encode_zint(&mut header, len as u64);
+        framed.extend_from_slice(&header[..n]);
+        framed.extend_from_slice(body);
+        // SAFETY: `framed` is a live local for the duration of the call.
+        unsafe { crate::bytes::z_bytes_copy_from_buf(this_, framed.as_ptr(), framed.len()) }
+    })
+}
+
+/// Serialize a counted string into a fresh payload (zenoh-c
+/// `ze_serialize_substr`).
+///
+/// # Safety
+/// `this_` must be valid and writable; `start` must be null or point at `len`
+/// readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serialize_substr(
+    this_: *mut z_owned_bytes_t,
+    start: *const c_char,
+    len: usize,
+) -> ZResult {
+    // SAFETY: the caller's contract, delegated — a string serializes exactly as
+    // a buffer does, which is why upstream's reader can take either.
+    unsafe { ze_serialize_buf(this_, start.cast::<u8>(), len) }
+}
+
+/// Serialize a NUL-terminated string into a fresh payload (zenoh-c
+/// `ze_serialize_str`).
+///
+/// # Safety
+/// `this_` must be valid and writable; `str_` must be null or NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serialize_str(
+    this_: *mut z_owned_bytes_t,
+    str_: *const c_char,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_bytes_t::null_value() };
+        if str_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: as above.
+        let bytes = unsafe { CStr::from_ptr(str_) }.to_bytes();
+        // SAFETY: `bytes` borrows the caller's live string.
+        unsafe { ze_serialize_buf(this_, bytes.as_ptr(), bytes.len()) }
+    })
+}
+
+/// Serialize a loaned string into a fresh payload (zenoh-c
+/// `ze_serialize_string`).
+///
+/// # Safety
+/// `this_` must be valid and writable; `str_` must be null or a valid loaned
+/// string.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serialize_string(
+    this_: *mut z_owned_bytes_t,
+    str_: *const z_loaned_string_t,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_bytes_t::null_value() };
+        if str_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: as above.
+        let (ptr, len) = unsafe {
+            (
+                crate::string::z_string_data(str_),
+                crate::string::z_string_len(str_),
+            )
+        };
+        // SAFETY: the loaned string's buffer is live for the call.
+        unsafe { ze_serialize_buf(this_, ptr.cast::<u8>(), len) }
+    })
+}
+
+/// Serialize a loaned slice into a fresh payload (zenoh-c `ze_serialize_slice`).
+///
+/// # Safety
+/// `this_` must be valid and writable; `slice` must be null or a valid loaned
+/// slice.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serialize_slice(
+    this_: *mut z_owned_bytes_t,
+    slice: *const crate::abi::z_loaned_slice_t,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_bytes_t::null_value() };
+        if slice.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: as above.
+        let (ptr, len) = unsafe {
+            (
+                crate::slice::z_slice_data(slice),
+                crate::slice::z_slice_len(slice),
+            )
+        };
+        // SAFETY: the loaned slice's buffer is live for the call.
+        unsafe { ze_serialize_buf(this_, ptr, len) }
+    })
+}
+
+/// Serialize a raw buffer (zenoh-c `ze_serializer_serialize_buf`).
+///
+/// # Safety
+/// `this_` must be null or a valid loaned serializer; `data` must be null or
+/// point at `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serializer_serialize_buf(
+    this_: *mut ze_loaned_serializer_t,
+    data: *const u8,
+    len: usize,
+) -> ZResult {
+    if data.is_null() {
+        return Z_ENULL;
+    }
+    // SAFETY: the caller's contract.
+    let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+    // SAFETY: delegated — the same length-prefixed shape `serialize_str` uses.
+    unsafe { serialize_bytes(this_, bytes) }
+}
+
+/// Serialize a counted string (zenoh-c `ze_serializer_serialize_substr`).
+///
+/// # Safety
+/// `this_` must be null or a valid loaned serializer; `start` must be null or
+/// point at `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serializer_serialize_substr(
+    this_: *mut ze_loaned_serializer_t,
+    start: *const c_char,
+    len: usize,
+) -> ZResult {
+    // SAFETY: the caller's contract, delegated.
+    unsafe { ze_serializer_serialize_buf(this_, start.cast::<u8>(), len) }
+}
+
+/// Serialize a loaned slice (zenoh-c `ze_serializer_serialize_slice`).
+///
+/// # Safety
+/// `this_` must be null or a valid loaned serializer; `slice` must be null or a
+/// valid loaned slice.
+#[no_mangle]
+pub unsafe extern "C" fn ze_serializer_serialize_slice(
+    this_: *mut ze_loaned_serializer_t,
+    slice: *const crate::abi::z_loaned_slice_t,
+) -> ZResult {
+    if slice.is_null() {
+        return Z_ENULL;
+    }
+    // SAFETY: the caller's contract.
+    let (ptr, len) = unsafe {
+        (
+            crate::slice::z_slice_data(slice),
+            crate::slice::z_slice_len(slice),
+        )
+    };
+    // SAFETY: delegated.
+    unsafe { ze_serializer_serialize_buf(this_, ptr, len) }
+}
+
+/// Deserialize a length-prefixed slice (zenoh-c
+/// `ze_deserializer_deserialize_slice`).
+///
+/// # Safety
+/// `this_` must be null or a valid deserializer; `slice` must be valid and
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn ze_deserializer_deserialize_slice(
+    this_: *mut ze_deserializer_t,
+    slice: *mut crate::abi::z_owned_slice_t,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() || slice.is_null() {
+            return Z_ENULL;
+        }
+        // Written before any fallible work, so a caller that ignores the code
+        // sees a gravestone rather than a stale stack value.
+        // SAFETY: the caller's contract.
+        unsafe { *slice = crate::slice::null_slice() };
+        // SAFETY: as above.
+        let de = unsafe { &mut *this_ };
+        // The same probe-then-commit discipline `deserialize_string` uses: a
+        // failed BODY read must not have consumed the length.
+        let mut probe = ze_deserializer_t {
+            ptr: de.ptr,
+            len: de.len,
+            pos: de.pos,
+        };
+        let Some(n) = probe.take_zint() else {
+            return Z_EDESERIALIZE;
+        };
+        let Ok(n) = usize::try_from(n) else {
+            return Z_EDESERIALIZE;
+        };
+        let Some(body) = probe.take(n) else {
+            return Z_EDESERIALIZE;
+        };
+        // SAFETY: the caller's contract.
+        unsafe { *slice = crate::slice::owned_slice_from(body) };
+        de.pos = probe.pos;
+        Z_OK
+    })
+}
+
+/// Deserialize a whole payload as a length-prefixed slice (zenoh-c
+/// `ze_deserialize_slice`).
+///
+/// # Safety
+/// `this_` must be null or a valid loaned payload; `slice` must be valid and
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn ze_deserialize_slice(
+    this_: *const z_loaned_bytes_t,
+    slice: *mut crate::abi::z_owned_slice_t,
+) -> ZResult {
+    guarded(|| {
+        if slice.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *slice = crate::slice::null_slice() };
+        // SAFETY: as above.
+        let Some(bytes) = (unsafe { bytes_slice(this_) }) else {
+            return Z_ENULL;
+        };
+        let mut de = ze_deserializer_t {
+            ptr: bytes.as_ptr(),
+            len: bytes.len(),
+            pos: 0,
+        };
+        // SAFETY: `de` is a live local over a live payload.
+        let rc = unsafe { ze_deserializer_deserialize_slice(&mut de, slice) };
+        if rc != Z_OK {
+            return rc;
+        }
+        // Upstream rejects a payload with a TAIL: the value is the payload, not
+        // a prefix of it.
+        if de.pos != de.len {
+            // SAFETY: the caller's contract.
+            unsafe { *slice = crate::slice::null_slice() };
+            return Z_EPARSE;
+        }
+        Z_OK
+    })
+}
+
+/// Deserialize a whole payload as a length-prefixed string (zenoh-c
+/// `ze_deserialize_string`).
+///
+/// # Safety
+/// `this_` must be null or a valid loaned payload; `str_` must be valid and
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn ze_deserialize_string(
+    this_: *const z_loaned_bytes_t,
+    str_: *mut z_owned_string_t,
+) -> ZResult {
+    guarded(|| {
+        if str_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *str_ = crate::string::null_string() };
+        // SAFETY: as above.
+        let Some(bytes) = (unsafe { bytes_slice(this_) }) else {
+            return Z_ENULL;
+        };
+        let mut de = ze_deserializer_t {
+            ptr: bytes.as_ptr(),
+            len: bytes.len(),
+            pos: 0,
+        };
+        // SAFETY: `de` is a live local over a live payload.
+        let rc = unsafe { ze_deserializer_deserialize_string(&mut de, str_) };
+        if rc != Z_OK {
+            return rc;
+        }
+        if de.pos != de.len {
+            // SAFETY: the caller's contract.
+            unsafe { *str_ = crate::string::null_string() };
+            return Z_EPARSE;
+        }
         Z_OK
     })
 }
