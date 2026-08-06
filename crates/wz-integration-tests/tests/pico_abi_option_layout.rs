@@ -86,6 +86,27 @@ const PINNED: &[(&str, &[&str])] = &[
         &["timestamp", "attachment", "source_info"],
     ),
     ("z_publisher_put_options_t", &["timestamp", "source_info"]),
+    // R311y565 — the SIZE-ONLY half. Everything above is field-mirrored, so its
+    // offsets are the interesting part; the families below are opaque blobs the
+    // C side stack-allocates and never reads inside, where the SIZE is the whole
+    // contract. They were pinned in `wz-capi-pico/src/lib.rs` as wz constants
+    // checked against wz constants — self-consistent by construction and unable
+    // to notice the reference header moving, which is the exact gap that let
+    // `z_get_options_t` sit at the wrong layout for rounds.
+    ("z_owned_session_t", &[]),
+    ("z_loaned_session_t", &[]),
+    ("z_owned_config_t", &[]),
+    ("z_owned_bytes_t", &[]),
+    ("z_owned_slice_t", &[]),
+    ("z_owned_string_t", &[]),
+    ("z_view_keyexpr_t", &[]),
+    ("z_view_string_t", &[]),
+    ("z_owned_closure_sample_t", &[]),
+    ("z_owned_closure_query_t", &[]),
+    ("z_owned_closure_reply_t", &[]),
+    ("z_queryable_options_t", &[]),
+    ("z_query_reply_err_options_t", &[]),
+    ("z_query_consolidation_t", &[]),
 ];
 
 /// The reference build's generated config directory — the one whose `config.h`
@@ -289,7 +310,42 @@ fn wz_layout(ty: &str) -> Layout {
                 ),
             ],
         },
-        other => panic!("no wz layout wired for {other}"),
+        // The size-only half. A macro rather than fourteen hand-written
+        // `Layout { size: size_of::<..>(), offsets: vec![] }` literals, so a new
+        // entry is one line and cannot get its own `offsets` wrong.
+        _ => {
+            macro_rules! size_only {
+                ($t:ty) => {
+                    Layout {
+                        size: size_of::<$t>(),
+                        offsets: Vec::new(),
+                    }
+                };
+            }
+            match ty {
+                "z_owned_session_t" => size_only!(wz_capi_pico::session::z_owned_session_t),
+                "z_loaned_session_t" => size_only!(wz_capi_pico::session::z_loaned_session_t),
+                "z_owned_config_t" => size_only!(wz_capi_pico::abi::z_owned_config_t),
+                "z_owned_bytes_t" => size_only!(wz_capi_pico::abi::z_owned_bytes_t),
+                "z_owned_slice_t" => size_only!(wz_capi_pico::abi::z_owned_slice_t),
+                "z_owned_string_t" => size_only!(wz_capi_pico::abi::z_owned_string_t),
+                "z_view_keyexpr_t" => size_only!(wz_capi_pico::abi::z_view_keyexpr_t),
+                "z_view_string_t" => size_only!(wz_capi_pico::abi::z_view_string_t),
+                "z_owned_closure_sample_t" => {
+                    size_only!(wz_capi_pico::pubsub::z_owned_closure_sample_t)
+                }
+                "z_owned_closure_query_t" => {
+                    size_only!(wz_capi_pico::query::z_owned_closure_query_t)
+                }
+                "z_owned_closure_reply_t" => size_only!(wz_capi_pico::get::z_owned_closure_reply_t),
+                "z_queryable_options_t" => size_only!(wz_capi_pico::query::z_queryable_options_t),
+                "z_query_reply_err_options_t" => {
+                    size_only!(wz_capi_pico::query::z_query_reply_err_options_t)
+                }
+                "z_query_consolidation_t" => size_only!(wz_capi_pico::get::z_query_consolidation_t),
+                other => panic!("no wz layout wired for {other}"),
+            }
+        }
     }
 }
 
