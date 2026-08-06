@@ -166,6 +166,11 @@ use crate::network_message::NetworkMessage;
 use crate::query_sink::BorrowedQuery;
 #[cfg(feature = "alloc")]
 use crate::query_sink::BoxedQuerySink;
+// `ReplyMeta` carries `alloc`-gated hint types and its only sites here are
+// `QueryResponder`'s staging methods, so it follows `BorrowedQuery`'s gate —
+// the one that block itself carries — rather than the unconditional trio's.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+use crate::query_sink::ReplyMeta;
 use crate::query_sink::{QuerySink, QueryView, ReplyOut};
 #[cfg(all(feature = "codec-response", feature = "alloc"))]
 // R311y315 — `ResponseErrBuilder` is deliberately NOT imported here.
@@ -913,6 +918,56 @@ impl<'a> QueryResponder<'a> {
         });
     }
 
+    /// R311y562 — stage a Put-form reply under an explicit `keyexpr` carrying
+    /// every metadata arm [`ReplyMeta`] holds, in one call. The staging type
+    /// [`QueryReply::Reply`] has always had all four slots; what was missing
+    /// was a way to FILL them together, so a caller holding an options struct
+    /// (the pico ABI's `z_query_reply`) or a whole cached sample (the advanced
+    /// cache's recovery replay) had to pick the nearest per-combination arm and
+    /// lose the rest.
+    ///
+    /// Every field routes to the same [`crate::response_build::ResponseReplyBuilder`]
+    /// setter its per-combination arm used, so each stays behind its own policy
+    /// gate (`pubsub-encoding` / `pubsub-timestamp` / `pubsub-attachment` /
+    /// `reply-source-info`) — this seam adds no wire arm, it only stops
+    /// dropping the ones already built.
+    pub fn send_reply_keyed_meta(&mut self, keyexpr: &str, payload: &[u8], meta: ReplyMeta<'_>) {
+        self.replies.push(QueryReply::Reply {
+            rid: self.rid,
+            keyexpr_literal: keyexpr.to_string(),
+            body: ReplyBody::Put(payload.to_vec()),
+            encoding: meta.encoding.cloned(),
+            timestamp: meta.timestamp.cloned(),
+            responder: self.responder.clone(),
+            attachment: meta.attachment.map(<[u8]>::to_vec),
+            source_info: meta.source_info.cloned(),
+        });
+    }
+
+    /// R311y562 — the Del-arm mirror of [`Self::send_reply_keyed_meta`].
+    ///
+    /// `meta.encoding` / `meta.attachment` are dropped rather than staged, and
+    /// that is the WIRE's rule, not a shortcut: `_z_push_body_encode` gates
+    /// `has_attachment` on `_is_put` and reads the encoding only in the
+    /// `_is_put` branch (`vendor/zenoh-pico/src/protocol/codec/message.c:263,
+    /// 269-276`), so staging either onto a Del body would put a field into the
+    /// reply record that the codec then silently discards — a staged value that
+    /// cannot reach the wire is worse than an honest drop, because the next
+    /// reader of the record believes it was sent. See
+    /// [`ReplyOut::reply_keyed_del_meta`].
+    pub fn send_reply_keyed_del_meta(&mut self, keyexpr: &str, meta: ReplyMeta<'_>) {
+        self.replies.push(QueryReply::Reply {
+            rid: self.rid,
+            keyexpr_literal: keyexpr.to_string(),
+            body: ReplyBody::Del,
+            encoding: None,
+            timestamp: meta.timestamp.cloned(),
+            responder: self.responder.clone(),
+            attachment: None,
+            source_info: meta.source_info.cloned(),
+        });
+    }
+
     /// Emit an Err reply. `encoding_id` (with optional `schema`)
     /// maps onto [`crate::response_build::ResponseErrBuilder::encoding`]
     /// at frame-emit
@@ -1105,6 +1160,12 @@ impl ReplyOut for QueryResponder<'_> {
         source_info: Option<&SourceInfo>,
     ) {
         self.send_reply_keyed_del_sourced(keyexpr, timestamp, source_info);
+    }
+    fn reply_keyed_meta(&mut self, keyexpr: &str, payload: &[u8], meta: ReplyMeta<'_>) {
+        self.send_reply_keyed_meta(keyexpr, payload, meta);
+    }
+    fn reply_keyed_del_meta(&mut self, keyexpr: &str, meta: ReplyMeta<'_>) {
+        self.send_reply_keyed_del_meta(keyexpr, meta);
     }
     fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]) {
         #[cfg(feature = "query-reply-err")]

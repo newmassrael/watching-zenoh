@@ -125,6 +125,78 @@ pub trait QueryView {
     }
 }
 
+/// R311y562 — every optional piece of per-reply metadata, in ONE value.
+///
+/// The reply arms below grew one method per metadata COMBINATION
+/// (`_stamped` = encoding+timestamp, `_encoded` = encoding, `_attached` =
+/// encoding+attachment, `_sourced` = encoding+timestamp+source_info,
+/// `_del_sourced` = timestamp+source_info). That surface is combinatorial, and
+/// it had already run out: the two callers that need ALL of it at once — the
+/// pico ABI's `z_query_reply`, whose options struct carries `encoding`,
+/// `timestamp`, `attachment` AND `source_info` together
+/// (`vendor/zenoh-pico/include/zenoh-pico/api/types.h:327-337`), and the
+/// advanced cache's recovery reply, which must replay the whole cached sample —
+/// had no arm to call and silently dropped whatever the nearest arm lacked.
+///
+/// Carrying the metadata as a value rather than as a parameter list makes the
+/// next field a STRUCT field instead of a 2^n-th trait method, which is the
+/// whole point: `#[non_exhaustive]` so adding one is not a breaking change, and
+/// [`Default`] so a caller names only what it has.
+///
+/// `None` on a field means "omit that wire arm", exactly as the per-combination
+/// arms' `None` arguments did.
+#[cfg(feature = "alloc")]
+#[derive(Default, Clone, Copy)]
+#[non_exhaustive]
+pub struct ReplyMeta<'a> {
+    /// The value encoding — the inner `MsgPut` E-flag. Put-only on the wire
+    /// (zenoh-pico `_z_push_body_encode` reads `_encoding` only under
+    /// `_is_put`, `vendor/zenoh-pico/src/protocol/codec/message.c:269-276`).
+    pub encoding: Option<&'a crate::sample::EncodingHint>,
+    /// The value timestamp — the inner T-flag. Carried on BOTH arms: the Put
+    /// body sets `_Z_FLAG_Z_P_T` and the Del body `_Z_FLAG_Z_D_T`
+    /// (`message.c:269-281`).
+    pub timestamp: Option<&'a crate::sample::TimestampHint>,
+    /// The sample's `(zid, eid, sn)` — the inner-body source_info ext id 0x01.
+    /// Carried on BOTH arms: `has_source_info` is computed off the shared
+    /// push-body `_commons`, before the `_is_put` split (`message.c:259-261`).
+    pub source_info: Option<&'a crate::sample::SourceInfo>,
+    /// An opaque side-band — the inner body attachment ext id 0x03.
+    /// **Put-only on the wire**: `has_attachment` is gated on `_is_put`
+    /// (`message.c:263`), so a Del reply never emits one even though
+    /// `z_query_reply_del_options_t` accepts the field. The Del arm below
+    /// therefore ignores it rather than pretending to carry it.
+    pub attachment: Option<&'a [u8]>,
+}
+
+#[cfg(feature = "alloc")]
+impl<'a> ReplyMeta<'a> {
+    /// The all-absent metadata — a reply that carries none of the four arms.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Set the value encoding (the `MsgPut` E-flag).
+    pub fn with_encoding(mut self, encoding: Option<&'a crate::sample::EncodingHint>) -> Self {
+        self.encoding = encoding;
+        self
+    }
+    /// Set the value timestamp (the inner T-flag, both arms).
+    pub fn with_timestamp(mut self, timestamp: Option<&'a crate::sample::TimestampHint>) -> Self {
+        self.timestamp = timestamp;
+        self
+    }
+    /// Set the sample's source identity (the body ext id 0x01, both arms).
+    pub fn with_source_info(mut self, source_info: Option<&'a crate::sample::SourceInfo>) -> Self {
+        self.source_info = source_info;
+        self
+    }
+    /// Set the opaque attachment side-band (the body ext id 0x03, Put-only).
+    pub fn with_attachment(mut self, attachment: Option<&'a [u8]>) -> Self {
+        self.attachment = attachment;
+        self
+    }
+}
+
 /// Outbound emit contract a [`QuerySink`] writes replies through. The
 /// output half of the §3-a queryable seam, injected as `&mut dyn
 /// ReplyOut` so the no-`alloc` MCU handler stays decoupled from the
@@ -319,6 +391,58 @@ pub trait ReplyOut {
     ) {
         let _ = (timestamp, source_info);
         self.reply_keyed_del(keyexpr);
+    }
+    /// R311y562 — emit a Put-form reply under an explicit concrete `keyexpr`
+    /// carrying WHATEVER metadata [`ReplyMeta`] holds: encoding, timestamp,
+    /// source_info and attachment, in any combination. The arm the
+    /// per-combination family above could not express, and the one a caller
+    /// that receives its metadata as an options STRUCT needs — the pico ABI's
+    /// `z_query_reply` and the advanced cache's recovery replay both hold all
+    /// four at once.
+    ///
+    /// The default impl chains to the richest per-combination arm that can
+    /// carry what `meta` actually holds, so impls predating this seam stay
+    /// valid. Each fallback drops only what the older arm has no slot for:
+    /// with a timestamp present the chain routes through
+    /// [`Self::reply_keyed_sourced`] (dropping the attachment, which no arm
+    /// below carries alongside a timestamp), without one through
+    /// [`Self::reply_keyed_attached`] / [`Self::reply_keyed_encoded`] (dropping
+    /// the source_info, which no timestamp-less arm carries). An impl that
+    /// wants all four — [`crate::query::QueryResponder`] does — overrides this.
+    #[cfg(feature = "alloc")]
+    fn reply_keyed_meta(&mut self, keyexpr: &str, payload: &[u8], meta: ReplyMeta<'_>) {
+        match (meta.timestamp, meta.attachment) {
+            (Some(ts), _) => {
+                self.reply_keyed_sourced(keyexpr, payload, meta.encoding, ts, meta.source_info)
+            }
+            (None, Some(att)) => self.reply_keyed_attached(keyexpr, payload, meta.encoding, att),
+            (None, None) => self.reply_keyed_encoded(keyexpr, payload, meta.encoding),
+        }
+    }
+    /// R311y562 — the Del-arm mirror of [`Self::reply_keyed_meta`]: emit a
+    /// Del-form reply under an explicit concrete `keyexpr` carrying the
+    /// metadata a DEL body can actually hold.
+    ///
+    /// [`ReplyMeta::encoding`] and [`ReplyMeta::attachment`] are ignored here,
+    /// and that is wire-faithful rather than a gap: `_z_push_body_encode`
+    /// computes `has_attachment` as `_is_put && ...` and reads the encoding
+    /// only inside the `_is_put` branch
+    /// (`vendor/zenoh-pico/src/protocol/codec/message.c:263,269-276`), so a Del
+    /// body emits neither ext even when the caller's
+    /// `z_query_reply_del_options_t` supplied one. Upstream pico accepts the
+    /// attachment on that struct and drops it the same way
+    /// (`src/api/api.c:2208-2212` hands it to `_z_send_reply`, which encodes a
+    /// Del body). The timestamp and source_info DO ride a Del
+    /// (`_Z_FLAG_Z_D_T`; `has_source_info` precedes the `_is_put` split).
+    ///
+    /// Default impl chains to [`Self::reply_keyed_del_sourced`] when a
+    /// timestamp is present and to [`Self::reply_keyed_del`] otherwise.
+    #[cfg(feature = "alloc")]
+    fn reply_keyed_del_meta(&mut self, keyexpr: &str, meta: ReplyMeta<'_>) {
+        match meta.timestamp {
+            Some(ts) => self.reply_keyed_del_sourced(keyexpr, ts, meta.source_info),
+            None => self.reply_keyed_del(keyexpr),
+        }
     }
     /// Emit a Del-form reply (the queryable signals deletion at the
     /// keyexpr).
