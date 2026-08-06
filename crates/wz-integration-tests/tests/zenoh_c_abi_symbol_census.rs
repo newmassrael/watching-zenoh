@@ -114,20 +114,25 @@ use wz_integration_tests::common::{wz_capi_c_cdylib, zenoh_c_oracle};
 ///   `z_ptr_in_segment_*`, `z_chunk_alloc_result_*`, `zc_shm_client_list_*`.
 ///   wz exports the SHM BUFFER half already (`z_shm_*` / `z_shm_mut_*`); this is
 ///   the ALLOCATOR half, which needs a segment provider wz does not have.
-/// - **18** — the zenoh-ext `ze_publication_cache` and `ze_querying_subscriber`
-///   planes. Distinct from `ze_advanced_*`, which wz does implement: these are
-///   upstream's older standalone spellings of the same two ideas.
+/// - **18 — CLOSED at R311y573.** The zenoh-ext `ze_publication_cache` and
+///   `ze_querying_subscriber` planes, upstream's older standalone spellings of
+///   the two ideas `ze_advanced_*` already carried. Built in
+///   `wz-capi-c/src/zenoh_ext.rs` on this crate's own C entry points, which is
+///   how upstream builds them too. `deprecated` was never a reason to omit
+///   them: a symbol wz does not define is a program upstream can write and wz
+///   cannot link.
 ///
-/// Both are FEATURES rather than accessors, which is why they are a recorded
-/// number here instead of work this round absorbed. That the remainder is
-/// exactly two planes — with no scattered leftovers — is what makes this row a
-/// scoped debt rather than a tally.
+/// The SHM-allocator plane is a FEATURE rather than a set of accessors, which is
+/// why it is a recorded number here instead of work a round absorbs. That the
+/// remainder is now exactly ONE plane — with no scattered leftovers — is what
+/// makes this row a scoped debt rather than a tally.
 const BASELINES: &[(&str, usize)] = &[
     // `~/.local`, upstream's published standalone archive. CLOSED at R311y568.
     ("nounstable", 0),
     // `target/zenoh-c-shm`, built by `scripts/install-zenoh-c-shm.sh`; the arm
-    // hosted CI provisions. 65 SHM-allocator + 18 zenoh-ext, and nothing else.
-    ("unstable-shm", 83),
+    // hosted CI provisions. 83 -> 65 at R311y573 (the zenoh-ext plane closed);
+    // what remains is the SHM ALLOCATOR half and nothing else.
+    ("unstable-shm", 65),
 ];
 
 /// The committed ceiling for `arm`, or a FAILURE naming what to measure.

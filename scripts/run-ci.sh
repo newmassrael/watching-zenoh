@@ -9386,6 +9386,16 @@ layer_c1ce_api_compat_c_shm_oracle() {
             --test zenoh_c_shm_and_advanced_on_wz_capi_c -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || rc=1
     done
+    # R311y573 — the zenoh-ext families (`ze_publication_cache` /
+    # `ze_querying_subscriber`), the 18 symbols that were the smaller of the two
+    # planes the census had left on this arm. They sit behind
+    # `Z_FEATURE_UNSTABLE_API`, so THIS oracle is the only one that can declare
+    # them and this lane is the only place the leg can run. A link census says
+    # the symbols exist; this says they behave as upstream's do.
+    WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce zenoh-ext families" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        --exact the_zenoh_ext_families_behave_identically_on_wz_and_libzenohc || rc=1
     # REPORTED, never enforced, exactly as C1cc's is.
     WZ_ZENOH_C_PREFIX="$shm" python3 scripts/lib/capi_c_coverage.py || rc=1
 

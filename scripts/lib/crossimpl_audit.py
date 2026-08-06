@@ -197,7 +197,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # this constant existing at all: 785 before the round, 786 after the pico
 # `source_info` adjudicator for the seven remaining option structs, 787 after the
 # `accept_replies` adjudicator. `proven=128 partial=39` did not move once.
-FOREIGN_ADJUDICATOR_LINKS = 787
+# R311y573 took it to 788 with the zenoh-ext families' adjudicator — and that
+# one first landed at 787 because the file resolved the oracle by joining a
+# path, so A4-3 read its `wz->zenoh-c` claim as a wz-vs-wz test. The counter did
+# not move until the claim was real.
+FOREIGN_ADJUDICATOR_LINKS = 788
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

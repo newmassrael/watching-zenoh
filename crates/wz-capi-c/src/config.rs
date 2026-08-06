@@ -133,6 +133,27 @@ fn parse_json5_value(raw: &str) -> Option<Vec<String>> {
     if text.is_empty() {
         return None;
     }
+    // An OBJECT value, stored VERBATIM. R311y573 — found by running an upstream
+    // program rather than by reading: `zc_config_insert_json5(cfg,
+    // "timestamping", "{\"enabled\":{...}}")` is what `ze_publication_cache`
+    // requires of its session, upstream accepts it, and this parser returned
+    // `None` for it, i.e. `Z_EPARSE`. Upstream's config takes ANY JSON5 value at
+    // ANY path; this parser exists to give wz's own open path a list of strings
+    // for the handful of keys it reads, and it must not become a whitelist of
+    // the SHAPES a caller may store. The bare-literal branch below already
+    // stores verbatim on exactly that reasoning; an object is the same case with
+    // a delimiter.
+    //
+    // The brace scan is QUOTE-AWARE, so a `}` inside a string does not close the
+    // object early. A value whose braces do not balance is still rejected —
+    // accepting it would turn a malformed insert into a silent success.
+    if text.starts_with('{') {
+        return if braces_balance(text) {
+            Some(vec![text.to_owned()])
+        } else {
+            None
+        };
+    }
     // A bare literal: `false` / `true` / a number. Stored verbatim; the open path
     // reads only the keys it knows.
     if !text.starts_with('[') && !text.starts_with('"') && !text.starts_with('\'') {
@@ -159,6 +180,41 @@ fn parse_json5_value(raw: &str) -> Option<Vec<String>> {
         out.push(unquote(item.trim())?);
     }
     Some(out)
+}
+
+/// Whether `text` is a brace-balanced object, ignoring braces inside strings.
+///
+/// Deliberately NOT a JSON5 parser: wz's open path reads a handful of known
+/// keys and stores everything else verbatim, so the only question this has to
+/// answer is whether the caller handed over a complete value or a truncated one.
+fn braces_balance(text: &str) -> bool {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in text.chars() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    quote.is_none() && depth == 0
 }
 
 /// Strip one matching pair of `"` or `'`, or `None` if `text` is not quoted.
@@ -734,16 +790,47 @@ mod tests {
     /// The REFUSAL is the load-bearing half: a shape this slice cannot honour
     /// must not be stored, or a program believes it configured something wz never
     /// reads.
+    ///
+    /// R311y573 MOVED `{nested: 1}` OUT of this list, and the move is a
+    /// correction rather than a relaxation. The list encoded "an object is a
+    /// shape this slice cannot honour"; upstream accepts an object at any config
+    /// path, `ze_publication_cache` REQUIRES one (`timestamping`), and refusing
+    /// it made a whole upstream family unusable on wz — measured by running the
+    /// probe, not argued. A balanced object now stores VERBATIM, which is what
+    /// the bare-literal branch beside it has always done; an UNBALANCED one is
+    /// still refused, and that case is what keeps this test discriminating.
     #[test]
     fn an_unimplemented_shape_is_refused_rather_than_stored() {
         for raw in [
-            "{nested: 1}",
+            "{unbalanced: 1",
+            "nested: 1}",
+            "{\"quote: \"still open\"",
             "[\"unterminated",
             "[\"a\", bare]",
             "\"unbalanced'",
             "",
         ] {
             assert_eq!(parse_json5_value(raw), None, "must refuse {raw:?}");
+        }
+    }
+
+    /// R311y573 — a BALANCED object is stored verbatim, braces and all. wz's
+    /// open path reads the handful of keys it knows and ignores the rest, so the
+    /// parser's job is to tell a complete value from a truncated one, never to
+    /// whitelist the shapes a caller may store.
+    #[test]
+    fn a_balanced_object_is_stored_verbatim() {
+        for raw in [
+            "{nested: 1}",
+            "{\"enabled\":{\"router\":true,\"peer\":true,\"client\":true}}",
+            // A brace INSIDE a string must not close the object early.
+            "{\"body\":\"}\"}",
+        ] {
+            assert_eq!(
+                parse_json5_value(raw),
+                Some(vec![raw.to_owned()]),
+                "must store {raw:?} verbatim"
+            );
         }
     }
 }
