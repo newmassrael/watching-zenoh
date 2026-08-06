@@ -417,39 +417,34 @@ fn canon_rejects_invalid_grammar_single_violation() {
     assert_agree("home/foo$*$"); // DollarAfterDollarOrStar
 }
 
-// ── Known wz/pico canon divergences (pinned for visibility) ────
+// ── The star-after-double-star run: a CLOSED divergence ────────
 
-// wz-proves: none -- pins a wz/pico DIVERGENCE; a locked disagreement is not an interop proof
+/// R311y564 — these five inputs were pinned here as "Pico bug #1", a
+/// deliberate divergence in which wz DROPPED a `*` that followed a `**` and
+/// pico re-ordered it. The pin recorded pico's answers correctly. What it got
+/// wrong was which side was right: the same probe run against the real
+/// `libzenohc.so` — a third implementation, and zenoh's reference one — gives
+/// pico's answer, not wz's, on every case.
+///
+/// The two forms are not two spellings of one keyexpr. `a/**/b` matches `a/b`;
+/// `a/**/*/b` requires at least one chunk between them. So wz was WIDENING
+/// every keyexpr of this shape — on the wire and in both C ABIs — and a pinned
+/// divergence is exactly what kept it invisible: the assertion passed every run
+/// while asserting the defect.
+///
+/// The cases now assert AGREEMENT, which is why they moved out of the
+/// divergence section. `**/$*`-shaped inputs are included deliberately: that is
+/// the one sub-case where zenoh-c and pico themselves disagree, and wz's
+/// default dialect is pico's, so agreement here is the stronger claim.
+// wz-proves: keyexpr-canon codec-parity partial
 #[test]
-fn canon_known_pico_anomaly_star_after_double_star() {
-    // Pico bug #1: `**` followed by any `*`-shape chunk. Wz drops
-    // the post-`**` chunk per spec; pico writes it then re-emits
-    // `**` before the next non-`*` chunk. Pinning these specific
-    // outputs locks the divergence — a future pico fix flips the
-    // assertion and triggers a revisit of the wire-interop strategy.
-    let cases: &[(&str, &str, &str)] = &[
-        ("**/*", "**", "*/**"),
-        ("home/**/*/temp", "home/**/temp", "home/*/**/temp"),
-        ("**/$*/temp", "**/temp", "**/*/temp"),
-        ("**/$*", "**", "**/*"),
-        ("**/$*$*/temp", "**/temp", "**/*/temp"),
-    ];
-    for (input, wz_expected, pico_expected) in cases {
-        let (wz, pico) = capture_both(input);
-        assert_eq!(
-            wz.as_deref(),
-            Ok(*wz_expected),
-            "wz canon shape changed for `{}`",
-            input,
-        );
-        assert_eq!(
-            pico.as_deref(),
-            Ok(*pico_expected),
-            "pico canon shape changed for `{}` (upstream may have fixed bug #1 — \
-             revisit the R299 divergence carry)",
-            input,
-        );
-    }
+fn canon_agrees_with_pico_on_a_star_after_a_double_star() {
+    assert_agree("**/*");
+    assert_agree("home/**/*/temp");
+    assert_agree("**/$*/temp");
+    assert_agree("**/$*");
+    assert_agree("**/$*$*/temp");
+    assert_agree("a/**/*/*/b");
 }
 
 // wz-proves: none -- pico SIGABRTs on these inputs; no foreign call, wz-side only

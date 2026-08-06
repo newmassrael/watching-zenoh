@@ -379,6 +379,10 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
         // 24-byte array, and 24 bytes at align 4 would compare equal on size.
         ("z_timestamp_t", "sizeof(z_timestamp_t)"),
         ("z_timestamp_t/align", "_Alignof(z_timestamp_t)"),
+        // R311y564 — the OWNED keyexpr, newly declared so the
+        // `z_keyexpr_from_str` / `z_declare_keyexpr` family has a result type.
+        // `z_get.c` and `z_pub.c` both stack-allocate one.
+        ("z_owned_keyexpr_t", "sizeof(z_owned_keyexpr_t)"),
     ];
     // R311y543 — the `ze_advanced_*` plane, measured ONLY where upstream
     // declares it. The order must match `abi.rs`'s

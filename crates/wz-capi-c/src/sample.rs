@@ -91,7 +91,7 @@ impl SampleMarshal {
         source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
     ) -> Self {
         Self {
-            keyexpr: KeyexprState { keyexpr },
+            keyexpr: KeyexprState::new(keyexpr),
             payload: BytesState::whole(payload),
             attachment: attachment.map(BytesState::whole),
             kind,
@@ -518,9 +518,7 @@ impl SampleMarshal {
     /// own fields once it is at its final address.
     pub(crate) fn deep_copy(&self) -> Self {
         Self {
-            keyexpr: KeyexprState {
-                keyexpr: self.keyexpr.keyexpr.clone(),
-            },
+            keyexpr: KeyexprState::new(self.keyexpr.keyexpr.clone()),
             payload: BytesState::whole(self.payload.payload.clone()),
             attachment: self
                 .attachment

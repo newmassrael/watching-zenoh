@@ -797,6 +797,52 @@ const _: () = {
     assert!(std::mem::align_of::<z_loaned_keyexpr_t>() == 8);
 };
 
+/// The OWNED keyexpr — 32 bytes at align 8 (`zenoh_opaque.h:220-222`).
+///
+/// R311y564. The view family above shipped first because `z_put.c` uses only
+/// that shape; the owned one is what `z_keyexpr_from_str` / `z_keyexpr_clone` /
+/// `z_declare_keyexpr` produce and what `z_keyexpr_drop` reclaims. Same
+/// footprint as the view and same `KeyexprState` behind the handle, so
+/// [`crate::keyexpr::keyexpr_str`] serves all three without a second path — the
+/// distinction is OWNERSHIP, which lives in whether a drop frees.
+#[repr(C)]
+pub struct z_owned_keyexpr_t {
+    pub(crate) handle: Handle,
+    pub(crate) _pad: [u8; 32 - std::mem::size_of::<Handle>()],
+}
+
+/// Moved wrapper — zenoh-c's `z_moved_keyexpr_t` is `struct { z_owned_keyexpr_t _this; }`.
+#[repr(C)]
+pub struct z_moved_keyexpr_t {
+    pub(crate) _this: z_owned_keyexpr_t,
+}
+
+impl z_owned_keyexpr_t {
+    /// The gravestone value: a null handle and zeroed padding.
+    #[inline]
+    pub(crate) fn null_value() -> Self {
+        Self {
+            handle: std::ptr::null_mut(),
+            _pad: [0u8; 32 - std::mem::size_of::<Handle>()],
+        }
+    }
+
+    /// Wrap a `Box::into_raw` pointer.
+    #[inline]
+    pub(crate) fn from_handle(handle: Handle) -> Self {
+        Self {
+            handle,
+            _pad: [0u8; 32 - std::mem::size_of::<Handle>()],
+        }
+    }
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<z_owned_keyexpr_t>() == 32);
+    assert!(std::mem::align_of::<z_owned_keyexpr_t>() == 8);
+    assert!(std::mem::size_of::<z_moved_keyexpr_t>() == 32);
+};
+
 /// The layout numbers this build asserts, in a form a gate can READ back out of
 /// the compiled cdylib rather than re-transcribing.
 ///
@@ -893,6 +939,10 @@ pub const WZ_CAPI_C_LAYOUT_NAMES_BASE: &[&str] = &[
     // bytes — the size alone cannot tell the two apart.
     "z_timestamp_t",
     "z_timestamp_t/align",
+    // R311y564 — the OWNED keyexpr, newly declared so `z_keyexpr_from_str` /
+    // `z_declare_keyexpr` have a result type. Same footprint as the view, and
+    // the gate measures it rather than inheriting that claim.
+    "z_owned_keyexpr_t",
 ];
 
 /// The `Z_FEATURE_UNSTABLE_API`-only half of the table — the `ze_advanced_*`
@@ -1019,6 +1069,7 @@ fn layout_values() -> Vec<usize> {
         size_of::<crate::put::z_delete_options_t>(),
         size_of::<crate::timestamp::z_timestamp_t>(),
         align_of::<crate::timestamp::z_timestamp_t>(),
+        size_of::<z_owned_keyexpr_t>(),
     ];
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     values.extend_from_slice(&[

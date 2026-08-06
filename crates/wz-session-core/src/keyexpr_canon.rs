@@ -22,8 +22,13 @@
 //!    ([`collapse_dsl_runs`]).
 //! 2. **Chunk-level canon**: per-chunk validation + rewriting:
 //!    - lone `$*` chunk → `*` chunk
-//!    - `*` after `**` → drop the `*` (the `**` already covers it)
-//!    - `**` after `**` → drop the duplicate
+//!    - a wild RUN is reordered: every `*` first, then at most one
+//!      `**`. R311y564 replaced "`*` after `**` → drop the `*`"
+//!      here, which was a different LANGUAGE rather than a different
+//!      spelling — `a/**/b` matches `a/b` and `a/**/*/b` does not, so
+//!      absorbing widened the keyexpr. Both references disagree with
+//!      the old rule and agree with this one; measured, not read.
+//!    - `**` after `**` → collapse into the run's single `**`
 //!    - `**$*` and similar mixed shapes are rejected by the per-
 //!      char state machine ([`analyze_chunk`])
 //! 3. **Per-char validation** rejects `#`, `?`, unbound `$`, bare
@@ -173,8 +178,9 @@ enum ChunkShape {
 /// // `$*$*$*` runs collapse to single `$*`.
 /// assert_eq!(canonize_keyexpr("home/$*$*$*foo").unwrap(), "home/$*foo");
 ///
-/// // `*` after `**` is absorbed.
-/// assert_eq!(canonize_keyexpr("home/**/*/temp").unwrap(), "home/**/temp");
+/// // A `*` after `**` is REORDERED, not absorbed — the two say
+/// // different things (`a/**/b` matches `a/b`; `a/**/*/b` does not).
+/// assert_eq!(canonize_keyexpr("home/**/*/temp").unwrap(), "home/*/**/temp");
 ///
 /// // Invalid grammar returns a typed error.
 /// assert!(canonize_keyexpr("home/foo?bar").is_err());
@@ -182,8 +188,49 @@ enum ChunkShape {
 pub fn canonize_keyexpr(
     input: &str,
 ) -> Result<BoundedString<MAX_KEYEXPR_BYTES>, KeyexprCanonError> {
+    canonize_keyexpr_in(input, KeyexprDialect::Pico)
+}
+
+/// Which upstream's canonical form to produce.
+///
+/// # R311y564 — the two references genuinely DISAGREE, on one case
+///
+/// This enum exists because a measurement said so, not because a
+/// design wanted a knob. The real `libzenohc.so` and the real
+/// `libzenohpico.so` were handed the same thirteen inputs; they
+/// agreed on eleven, and split on what a `$*`-spelled single wild
+/// does INSIDE a wild run:
+///
+/// | input | zenoh-c | zenoh-pico |
+/// |---|---|---|
+/// | `**/$*/temp` | `*/**/temp` | `**/*/temp` |
+/// | `**/*` | `*/**` | `*/**` |
+///
+/// So pico's reorder pass treats a `$*` chunk as an ordinary chunk
+/// that ENDS the wild run and only later rewrites it to `*`, while
+/// zenoh-c folds it into the run first. Neither is a wz choice to
+/// make: a drop-in has to answer whatever the ABI it is standing in
+/// for answers, and picking one would make the other ABI's
+/// pure-function oracle red.
+///
+/// Everything else — including the reorder itself — is shared, which
+/// is why this is a two-variant flag rather than two canonizers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyexprDialect {
+    /// zenoh-pico's form. wz's own wire path uses it, because wz is
+    /// pico-faithful everywhere else too.
+    Pico,
+    /// zenoh-c's form, for the `wz-capi-c` drop-in.
+    ZenohC,
+}
+
+/// [`canonize_keyexpr`] in an explicit dialect.
+pub fn canonize_keyexpr_in(
+    input: &str,
+    dialect: KeyexprDialect,
+) -> Result<BoundedString<MAX_KEYEXPR_BYTES>, KeyexprCanonError> {
     let collapsed = collapse_dsl_runs(input)?;
-    canonize_chunks(&collapsed)
+    canonize_chunks(&collapsed, dialect)
 }
 
 /// Collapse runs of consecutive `$*` tokens into a single `$*`.
@@ -220,40 +267,93 @@ fn collapse_dsl_runs(input: &str) -> Result<BoundedString<MAX_KEYEXPR_BYTES>, Ke
 
 /// Walk `/`-separated chunks, validating each via
 /// [`analyze_chunk`] and applying the chunk-level canon rules
-/// (`$*` → `*`, drop `*` / `**` after `**`).
-fn canonize_chunks(input: &str) -> Result<BoundedString<MAX_KEYEXPR_BYTES>, KeyexprCanonError> {
+/// (`$*` → `*`; a wild RUN is reordered to all its `*` first, then
+/// at most one `**`).
+///
+/// # R311y564 — the run rule REPLACES an absorb rule that was wrong
+///
+/// This function used to drop any `*` that followed a `**`, and
+/// said so: "`*` after `**` is absorbed". That is a different
+/// LANGUAGE, not a different spelling. `a/**/b` matches `a/b`,
+/// while `a/**/*/b` requires at least one chunk between them — so
+/// absorbing the `*` widened every such keyexpr, silently, in both
+/// C ABIs and on the wire.
+///
+/// The rule upstream actually applies is a REORDER: within a
+/// maximal run of `*` / `**` chunks, every `*` is emitted first and
+/// the `**`s collapse into one. The arity is preserved (`n` single
+/// wilds stay `n`) and the super-wild ends up last, which is the
+/// canonical form both references produce.
+///
+/// MEASURED on both, not read off either implementation: the real
+/// `libzenohc.so` and the real `libzenohpico.so` were each handed
+/// `home/**/*/temp` and each answered `home/*/**/temp`, where wz
+/// answered `home/**/temp`. The two ABIs' pure-function oracles
+/// now drive that comparison on every run.
+fn canonize_chunks(
+    input: &str,
+    dialect: KeyexprDialect,
+) -> Result<BoundedString<MAX_KEYEXPR_BYTES>, KeyexprCanonError> {
     let mut out_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-    let mut prev_was_double_star = false;
+    // The wild run being accumulated: how many `*` chunks it has
+    // contained so far, and whether any of them was a `**`.
+    let mut run_single_stars: usize = 0;
+    let mut run_has_double_star = false;
+
+    // Emit the pending wild run in canonical order: every `*`, then
+    // at most one `**`.
+    fn flush_run(
+        out: &mut BoundedVec<&str, MAX_KEYEXPR_CHUNKS>,
+        singles: usize,
+        has_double: bool,
+    ) -> Result<(), KeyexprCanonError> {
+        for _ in 0..singles {
+            out.push("*")
+                .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
+        }
+        if has_double {
+            out.push("**")
+                .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
+        }
+        Ok(())
+    }
 
     for chunk in input.split('/') {
         let shape = analyze_chunk(chunk)?;
-        let keep: Option<&str> = match shape {
-            ChunkShape::SingleStar => {
-                let k = (!prev_was_double_star).then_some("*");
-                prev_was_double_star = false;
-                k
-            }
-            ChunkShape::DoubleStar => {
-                let k = (!prev_was_double_star).then_some("**");
-                prev_was_double_star = true;
-                k
-            }
-            ChunkShape::LoneDollarStar => {
-                let k = (!prev_was_double_star).then_some("*");
-                prev_was_double_star = false;
-                k
-            }
-            ChunkShape::Mixed => {
-                prev_was_double_star = false;
-                Some(chunk)
-            }
+        // The ONE case the two dialects split on — see [`KeyexprDialect`].
+        // pico ends the wild run at a `$*` chunk and emits `*` after
+        // whatever the run held; zenoh-c folds it into the run.
+        let folds_into_run = match shape {
+            ChunkShape::SingleStar => true,
+            ChunkShape::LoneDollarStar => dialect == KeyexprDialect::ZenohC,
+            _ => false,
         };
-        if let Some(c) = keep {
-            out_chunks
-                .push(c)
-                .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
+        if folds_into_run {
+            run_single_stars += 1;
+            continue;
+        }
+        match shape {
+            ChunkShape::DoubleStar => run_has_double_star = true,
+            // A pico-dialect `$*`, or an ordinary literal chunk: flush
+            // the pending run, then emit this chunk's canonical form.
+            _ => {
+                flush_run(&mut out_chunks, run_single_stars, run_has_double_star)?;
+                run_single_stars = 0;
+                run_has_double_star = false;
+                let literal = if shape == ChunkShape::LoneDollarStar {
+                    "*"
+                } else {
+                    chunk
+                };
+                out_chunks
+                    .push(literal)
+                    .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
+            }
         }
     }
+    // A keyexpr may END in a wild run, so the flush cannot live only
+    // at the literal-chunk boundary.
+    flush_run(&mut out_chunks, run_single_stars, run_has_double_star)?;
 
     // Join by '/' into a fresh bounded buffer (replaces `Vec::join`).
     let mut out = BoundedString::new();
@@ -629,17 +729,47 @@ mod tests {
         assert_eq!(canonize_keyexpr("$*/temp").unwrap(), "*/temp");
     }
 
-    // ── Star-after-double-star drop ──
+    // ── Wild-run reorder (R311y564) ──
 
+    /// A `*` inside a wild run is REORDERED before the `**`, never
+    /// dropped. Every expectation here was read off the real
+    /// `libzenohpico.so` by a C probe, not derived from this
+    /// implementation — the rule this replaced was self-consistent
+    /// and wrong, so a hand-written expectation is what let it live.
     #[test]
-    fn canon_drops_single_star_after_double_star() {
-        assert_eq!(canonize_keyexpr("home/**/*/temp").unwrap(), "home/**/temp");
-        assert_eq!(canonize_keyexpr("**/*").unwrap(), "**");
-        assert_eq!(canonize_keyexpr("**/$*/temp").unwrap(), "**/temp");
+    fn canon_reorders_a_single_star_ahead_of_a_double_star() {
+        assert_eq!(
+            canonize_keyexpr("home/**/*/temp").unwrap(),
+            "home/*/**/temp"
+        );
+        assert_eq!(canonize_keyexpr("**/*").unwrap(), "*/**");
+        assert_eq!(canonize_keyexpr("a/**/*/*/b").unwrap(), "a/*/*/**/b");
+    }
+
+    /// The ONE case the two references split on: pico ENDS the wild
+    /// run at a `$*` chunk, so the `**` stays in front.
+    #[test]
+    fn the_pico_dialect_does_not_fold_a_dollar_star_into_the_run() {
+        assert_eq!(canonize_keyexpr("**/$*/temp").unwrap(), "**/*/temp");
+        assert_eq!(canonize_keyexpr("**/$*$*/temp").unwrap(), "**/*/temp");
+    }
+
+    /// …and zenoh-c folds it, so the `*` comes out in front.
+    #[test]
+    fn the_zenoh_c_dialect_folds_a_dollar_star_into_the_run() {
+        assert_eq!(
+            canonize_keyexpr_in("**/$*/temp", KeyexprDialect::ZenohC).unwrap(),
+            "*/**/temp"
+        );
+        // Everything the two agree on stays agreed.
+        assert_eq!(
+            canonize_keyexpr_in("home/**/*/temp", KeyexprDialect::ZenohC).unwrap(),
+            "home/*/**/temp"
+        );
     }
 
     #[test]
-    fn canon_drops_double_star_after_double_star() {
+    fn canon_collapses_a_double_star_run_into_one() {
         assert_eq!(canonize_keyexpr("home/**/**/temp").unwrap(), "home/**/temp");
         assert_eq!(canonize_keyexpr("**/**").unwrap(), "**");
         assert_eq!(canonize_keyexpr("**/**/**").unwrap(), "**");
@@ -649,7 +779,6 @@ mod tests {
 
     #[test]
     fn canon_combines_singleify_and_chunk_rules() {
-        assert_eq!(canonize_keyexpr("**/$*$*/temp").unwrap(), "**/temp");
         assert_eq!(
             canonize_keyexpr("home/$*$*/$*/temp").unwrap(),
             "home/*/*/temp"

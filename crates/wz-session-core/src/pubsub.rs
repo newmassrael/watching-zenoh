@@ -2343,12 +2343,21 @@ mod tests {
         );
     }
 
+    /// R311y564 — this test used to assert the OPPOSITE, and asserting it is
+    /// what kept the defect alive for the whole life of the canonizer.
+    ///
+    /// `home/**/*/temp` canonicalizes to `home/*/**/temp`: the `*` is
+    /// REORDERED ahead of the `**`, not absorbed by it. The two say different
+    /// things and this registry is where the difference is observable —
+    /// `home/**/temp` matches `home/temp`, while `home/**/*/temp` requires at
+    /// least one chunk in between. wz was absorbing, so every subscriber of
+    /// this shape was silently WIDENED and received samples upstream would not
+    /// have delivered.
+    ///
+    /// Both real references were probed and both reorder; see
+    /// [`keyexpr_canon`](crate::keyexpr_canon::KeyexprDialect).
     #[test]
     fn register_canonicalizes_single_star_after_double_star() {
-        // `home/**/*/temp` canonicalizes to `home/**/temp` (the `*`
-        // after `**` is absorbed). After canon the stored chunks
-        // match the zero-extra-chunk case `home/temp` because `**`
-        // already covers zero or more.
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
@@ -2356,12 +2365,25 @@ mod tests {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         });
 
+        // The zero-extra-chunk case must NOT match: one wild chunk is required.
         let push = push_with_keyexpr("home/temp");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
         assert_eq!(
             counter.load(Ordering::SeqCst),
-            1,
-            "canonicalized `**/*` → `**` matches the zero-extra-chunk case"
+            0,
+            "`home/**/*/temp` requires at least one chunk between `home` and \
+             `temp`; matching `home/temp` is the widening this canon rule fixed"
+        );
+
+        // One chunk, and more than one, both match.
+        for target in ["home/a/temp", "home/a/b/temp"] {
+            let push = push_with_keyexpr(target);
+            registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
+        }
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "`home/*/**/temp` matches one or more intervening chunks"
         );
     }
 

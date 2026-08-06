@@ -100,6 +100,40 @@ pub const SCHEMA_SEPARATOR: char = ';';
 /// zenoh-pico's `_Z_ENCODING_ID_DEFAULT` — `zenoh/bytes`, id 0.
 pub const ENCODING_ID_DEFAULT: u16 = 0;
 
+/// zenoh-c's sentinel for a label that names no table entry.
+///
+/// MEASURED, not assumed: `zc_internal_encoding_get_data` on the real
+/// `libzenohc.so` reports `id=65535` for `wz/unknown` and for `text/pla`,
+/// against `id=4` for `text/plain`.
+pub const ENCODING_ID_UNKNOWN: u16 = 65535;
+
+/// Which upstream's encoding string rules to apply.
+///
+/// # R311y564 — the two references disagree about BOTH halves
+///
+/// A C probe was compiled once and linked against the real `libzenohc.so`
+/// and the real `libzenohpico.so`, and handed eleven labels. They split on
+/// two independent rules:
+///
+/// | label | zenoh-c renders | zenoh-pico renders |
+/// |---|---|---|
+/// | `text/pla` | `text/pla` (id 65535) | `text/plain` (id 4) |
+/// | `wz/unknown` | `wz/unknown` (id 65535) | `zenoh/bytes;wz/unknown` (id 0) |
+///
+/// So zenoh-c matches the prefix EXACTLY and files an unrecognised label
+/// under a sentinel id carrying the whole string, while zenoh-pico matches
+/// by `strncmp` PREFIX and files the leftover under the default id. Neither
+/// is a wz choice: each ABI has to answer what the library it stands in for
+/// answers, and the id is what goes on the WIRE, so this is not a rendering
+/// preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodingDialect {
+    /// zenoh-pico's rules. wz's own wire path uses them.
+    Pico,
+    /// zenoh-c's rules, for the `wz-capi-c` drop-in.
+    ZenohC,
+}
+
 /// The table index for `prefix`, or `None`.
 ///
 /// zenoh-pico compares with `strncmp(schema, TABLE[i], len)` — a PREFIX compare
@@ -134,6 +168,32 @@ pub fn hint_from_parts(id: u16, schema: &str) -> EncodingHint {
 /// error: the whole string becomes the schema under the default id. That
 /// fallback is why `z_encoding_from_str` has no invalid input.
 pub fn hint_from_str(s: &str) -> EncodingHint {
+    hint_from_str_in(s, EncodingDialect::Pico)
+}
+
+/// [`hint_from_str`] in an explicit dialect.
+///
+/// The zenoh-c arm is not a variation on the pico one: an unrecognised prefix
+/// takes [`ENCODING_ID_UNKNOWN`] with the WHOLE input as its schema, so the
+/// label survives a round trip verbatim rather than acquiring a
+/// `zenoh/bytes;` head. The empty input is the one shared special case — both
+/// references report the default id for it.
+pub fn hint_from_str_in(s: &str, dialect: EncodingDialect) -> EncodingHint {
+    if dialect == EncodingDialect::ZenohC {
+        if s.is_empty() {
+            return hint_from_parts(ENCODING_ID_DEFAULT, "");
+        }
+        let (prefix, schema) = match s.split_once(SCHEMA_SEPARATOR) {
+            Some((prefix, schema)) => (prefix, schema),
+            None => (s, ""),
+        };
+        return match ENCODING_ID_TO_STR.iter().position(|e| *e == prefix) {
+            Some(id) => hint_from_parts(id as u16, schema),
+            // The whole input, separator and all — that is what makes
+            // `wz/unknown;x` render back as `wz/unknown;x`.
+            None => hint_from_parts(ENCODING_ID_UNKNOWN, s),
+        };
+    }
     if let Some(pos) = s.find(SCHEMA_SEPARATOR) {
         let (prefix, rest) = s.split_at(pos);
         // Skip the separator itself.
@@ -152,14 +212,28 @@ pub fn hint_from_str(s: &str) -> EncodingHint {
 /// as the empty prefix, which is pico's behaviour too (its bounds check leaves
 /// `prefix` NULL and `prefix_len` 0).
 pub fn hint_to_string(hint: &EncodingHint) -> String {
+    hint_to_string_in(hint, EncodingDialect::Pico)
+}
+
+/// [`hint_to_string`] in an explicit dialect.
+///
+/// Under [`EncodingDialect::ZenohC`] the sentinel id renders its schema ALONE
+/// — no table name and no separator — which is the half that makes the round
+/// trip verbatim. Every recognised id renders identically in both dialects.
+pub fn hint_to_string_in(hint: &EncodingHint, dialect: EncodingDialect) -> String {
     let id = (hint.packed_id >> 1) as usize;
     let mut out = String::new();
-    if let Some(prefix) = ENCODING_ID_TO_STR.get(id) {
-        out.push_str(prefix);
+    let unknown = dialect == EncodingDialect::ZenohC && id == usize::from(ENCODING_ID_UNKNOWN);
+    if !unknown {
+        if let Some(prefix) = ENCODING_ID_TO_STR.get(id) {
+            out.push_str(prefix);
+        }
     }
     if let Some(schema) = hint.schema.as_deref() {
         if !schema.is_empty() {
-            out.push(SCHEMA_SEPARATOR);
+            if !unknown {
+                out.push(SCHEMA_SEPARATOR);
+            }
             out.push_str(schema);
         }
     }

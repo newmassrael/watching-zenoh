@@ -157,10 +157,10 @@ unsafe fn resolve_put_options(options: *mut z_put_options_t) -> PublishOptions {
         .with_express(opts.is_express)
         // R311y554 — HONOURED, no longer read for layout.
         .with_locality(locality_from_c(opts.allowed_destination));
-    // SAFETY: as above. Read rather than taken — every encoding this crate
-    // hands out is `'static`, the same fact that makes `z_encoding_drop` free
-    // nothing.
-    let with_encoding = match unsafe { crate::encoding::moved_encoding_hint(opts.encoding) } {
+    // SAFETY: as above. TAKEN — an encoding may be heap-owned since R311y564
+    // (`z_encoding_from_str`), so a read would leak the caller's label and leave
+    // their owned value non-null.
+    let with_encoding = match unsafe { crate::encoding::take_moved_encoding(opts.encoding) } {
         Some(hint) => qos.with_encoding(hint),
         None => qos,
     };
@@ -314,7 +314,18 @@ pub unsafe extern "C" fn z_put(
         ) else {
             return Z_ENULL;
         };
-        match state.shared.publish_all(keyexpr, &payload, &publish) {
+        // R311y564 — a keyexpr that carries a DECLARATION publishes aliased, the
+        // bandwidth saving `z_declare_keyexpr` exists to enable. Undeclared
+        // views take the literal path, which is every keyexpr this crate could
+        // build before the owned family shipped.
+        // SAFETY: the caller's contract for the handle.
+        let sent = match unsafe { crate::keyexpr::keyexpr_mapping(key_expr) } {
+            Some(mapping) => state
+                .shared
+                .publish_aliased_all(mapping, &payload, &publish),
+            None => state.shared.publish_all(keyexpr, &payload, &publish),
+        };
+        match sent {
             Ok(_) => Z_OK,
             // The only fan-out failure is a payload/keyexpr the bounded codec
             // cannot carry, which is an invalid argument rather than a network
@@ -355,7 +366,13 @@ pub unsafe extern "C" fn z_delete(
         };
         // SAFETY: the caller's contract for the options struct.
         let publish = unsafe { resolve_delete_options(options) };
-        match state.shared.publish_all(keyexpr, &[], &publish) {
+        // The DEL half of the same aliasing choice — see `z_put`.
+        // SAFETY: the caller's contract for the handle.
+        let sent = match unsafe { crate::keyexpr::keyexpr_mapping(key_expr) } {
+            Some(mapping) => state.shared.publish_aliased_all(mapping, &[], &publish),
+            None => state.shared.publish_all(keyexpr, &[], &publish),
+        };
+        match sent {
             Ok(_) => Z_OK,
             Err(_) => Z_EINVAL,
         }

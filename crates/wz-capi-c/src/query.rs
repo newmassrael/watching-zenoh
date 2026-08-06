@@ -267,9 +267,7 @@ impl QueryMarshal {
             parameters,
             payload: view.payload().map(|p| BytesState::whole(p.to_vec())),
             attachment: view.attachment().map(|a| BytesState::whole(a.to_vec())),
-            keyexpr_state: KeyexprState {
-                keyexpr: keyexpr.clone(),
-            },
+            keyexpr_state: KeyexprState::new(keyexpr.clone()),
             keyexpr,
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             loaned_payload: z_loaned_bytes_t::null_value(),
@@ -321,9 +319,7 @@ impl QueryMarshal {
                 .attachment
                 .as_ref()
                 .map(|s| BytesState::whole(s.payload.clone())),
-            keyexpr_state: KeyexprState {
-                keyexpr: self.keyexpr.clone(),
-            },
+            keyexpr_state: KeyexprState::new(self.keyexpr.clone()),
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             loaned_payload: z_loaned_bytes_t::null_value(),
             loaned_attachment: z_loaned_bytes_t::null_value(),
@@ -875,15 +871,14 @@ pub unsafe extern "C" fn z_query_reply(
         let (encoding, attachment, timestamp, source_info) = if options.is_null() {
             (None, None, None, None)
         } else {
-            // SAFETY: the caller's contract. The encoding is READ rather than
-            // taken (every label this crate hands out is `'static`, the same
-            // fact that makes `z_encoding_drop` free nothing); the attachment
-            // is TAKEN, as upstream specifies for owned options fields. Both
-            // happen before any early return, so a failed reply still consumes
-            // what upstream would have consumed.
+            // SAFETY: the caller's contract. The encoding and the attachment
+            // are both TAKEN, as upstream specifies for owned options fields —
+            // an encoding may be heap-owned since R311y564. Both happen before
+            // any early return, so a failed reply still consumes what upstream
+            // would have consumed.
             unsafe {
                 (
-                    crate::encoding::moved_encoding_hint((*options).encoding),
+                    crate::encoding::take_moved_encoding((*options).encoding),
                     crate::bytes::take_payload((*options).attachment),
                     // BORROWED — a concrete struct the caller keeps.
                     crate::timestamp::timestamp_hint(

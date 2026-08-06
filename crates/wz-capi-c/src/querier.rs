@@ -268,7 +268,7 @@ pub unsafe extern "C" fn z_declare_querier(
 
         let handle = Box::into_raw(Box::new(QuerierState {
             shared: state.shared.clone(),
-            keyexpr: KeyexprState { keyexpr: ke },
+            keyexpr: KeyexprState::new(ke),
             base,
             matching: Mutex::new(None),
         })) as Handle;
@@ -323,7 +323,7 @@ pub unsafe extern "C" fn z_querier_get(
                 (
                     crate::bytes::take_payload((*options).payload),
                     crate::bytes::take_payload((*options).attachment),
-                    crate::encoding::moved_encoding_hint((*options).encoding),
+                    crate::encoding::take_moved_encoding((*options).encoding),
                     querier_get_source_info(options),
                 )
             }

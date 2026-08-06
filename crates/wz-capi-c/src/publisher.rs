@@ -137,7 +137,7 @@ pub(crate) fn priority_from_c(p: z_priority_t) -> Priority {
 ///
 /// `encoding` is a `z_moved_encoding_t*`, and R311y545 made it a TYPED pointer
 /// because the field is now READ: the declare path resolves the label through
-/// [`moved_encoding_hint`](crate::encoding::moved_encoding_hint) and every put
+/// [`take_moved_encoding`](crate::encoding::take_moved_encoding) and every put
 /// on this publisher carries it. The layout is unchanged — a pointer is a
 /// pointer — but the type now says what the code does.
 #[repr(C)]
@@ -265,14 +265,14 @@ pub(crate) fn publisher_put_options() -> PublishOptions {
 /// `options` must be null or a valid publisher-options struct whose `encoding`
 /// field is null or a valid moved encoding.
 pub(crate) unsafe fn resolve_publisher_options(
-    options: *const z_publisher_options_t,
+    options: *mut z_publisher_options_t,
 ) -> PublishOptions {
     let base = publisher_put_options();
     if options.is_null() {
         return base;
     }
     // SAFETY: the caller's contract.
-    let opts = unsafe { &*options };
+    let opts = unsafe { &mut *options };
     let resolved = base
         .with_priority(priority_from_c(opts.priority))
         .with_congestion_control(congestion_from_c(opts.congestion_control))
@@ -282,7 +282,7 @@ pub(crate) unsafe fn resolve_publisher_options(
         // `z_publisher_put_options_t` carries no locality field of its own.
         .with_locality(crate::put::locality_from_c(opts.allowed_destination));
     // SAFETY: the caller's contract for the pointee.
-    match unsafe { crate::encoding::moved_encoding_hint(opts.encoding) } {
+    match unsafe { crate::encoding::take_moved_encoding(opts.encoding) } {
         Some(hint) => resolved.with_encoding(hint),
         None => resolved,
     }
@@ -328,10 +328,10 @@ impl PutOverrides {
         #[cfg(feature = "zenoh-c-no-unstable-api")]
         let taken_source_info: Option<wz_runtime_tokio::sample::SourceInfo> = None;
         Self {
-            // SAFETY: as above. Read rather than taken: every encoding this
-            // crate hands out is `'static`, which is the same fact that makes
-            // `z_encoding_drop` free nothing.
-            encoding: unsafe { crate::encoding::moved_encoding_hint(opts.encoding) },
+            // SAFETY: as above. TAKEN — an encoding may be heap-owned since
+            // R311y564 (`z_encoding_from_str`), so a read would leak the
+            // caller's label and leave their owned value non-null.
+            encoding: unsafe { crate::encoding::take_moved_encoding(opts.encoding) },
             // SAFETY: as above. TAKEN — `take_payload` reclaims the box and
             // gravestones the caller's slot, so a program that puts twice with
             // one options struct does not double-free.
@@ -473,7 +473,16 @@ pub unsafe extern "C" fn z_declare_publisher(
         }
         let mut boxed = Box::new(PublisherState {
             shared: state.shared.clone(),
-            keyexpr: KeyexprState { keyexpr },
+            // A publisher declared over a DECLARED keyexpr inherits its alias,
+            // so every put on the handle rides it — upstream's shape, and the
+            // reason the mapping travels with the keyexpr rather than with the
+            // session.
+            keyexpr: crate::keyexpr::KeyexprState {
+                keyexpr,
+                // SAFETY: the caller's contract for `key_expr`, already read
+                // above by `keyexpr_str`.
+                mapping: unsafe { crate::keyexpr::keyexpr_mapping(key_expr) },
+            },
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             matching: std::sync::Mutex::new(None),
             // SAFETY: the caller's contract for `options`.
@@ -518,10 +527,15 @@ pub unsafe extern "C" fn z_publisher_put(
         // The publisher's declare-time bundle is the base; the per-put options
         // taken above override it field by field.
         let publish = overrides.apply(state.base.clone());
-        match state
-            .shared
-            .publish_all(&state.keyexpr.keyexpr, &payload, &publish)
-        {
+        let sent = match state.keyexpr.mapping {
+            Some(mapping) => state
+                .shared
+                .publish_aliased_all(mapping, &payload, &publish),
+            None => state
+                .shared
+                .publish_all(&state.keyexpr.keyexpr, &payload, &publish),
+        };
+        match sent {
             Ok(_) => Z_OK,
             Err(_) => Z_EINVAL,
         }
@@ -553,10 +567,13 @@ pub unsafe extern "C" fn z_publisher_delete(
             .base
             .clone()
             .with_kind(wz_runtime_tokio::sample::SampleKind::Del);
-        match state
-            .shared
-            .publish_all(&state.keyexpr.keyexpr, &[], &options)
-        {
+        let sent = match state.keyexpr.mapping {
+            Some(mapping) => state.shared.publish_aliased_all(mapping, &[], &options),
+            None => state
+                .shared
+                .publish_all(&state.keyexpr.keyexpr, &[], &options),
+        };
+        match sent {
             Ok(_) => Z_OK,
             Err(_) => Z_EINVAL,
         }
@@ -680,7 +697,7 @@ mod locality_tests {
             (ZC_LOCALITY_SESSION_LOCAL, Locality::SessionLocal),
             (ZC_LOCALITY_REMOTE, Locality::Remote),
         ] {
-            let o = z_publisher_options_t {
+            let mut o = z_publisher_options_t {
                 encoding: std::ptr::null_mut(),
                 congestion_control: Z_CONGESTION_CONTROL_DROP,
                 priority: Z_PRIORITY_DATA,
@@ -690,7 +707,7 @@ mod locality_tests {
                 allowed_destination: c_value,
             };
             // SAFETY: a live local whose owned field is null.
-            let resolved = unsafe { resolve_publisher_options(&o) };
+            let resolved = unsafe { resolve_publisher_options(&mut o) };
             assert_eq!(
                 resolved.allowed_destination, expected,
                 "z_publisher_options_t.allowed_destination = {c_value} -> {expected:?}",

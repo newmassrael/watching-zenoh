@@ -9121,6 +9121,15 @@ layer_c1cc_api_compat_c() {
             --test zenoh_c_examples_on_wz_capi_c_dropin -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || return 1
     done
+    # R311y564 — the PURE-FUNCTION twice-and-diff, a separate binary. It reaches
+    # the part of the ABI no session ever touches (the encoding constant table,
+    # keyexpr canonization and the set relations), which is where a wrong answer
+    # is invisible to every interop leg: `z_keyexpr_canonize` runs before a
+    # session exists. It found two wire-affecting defects on its first run.
+    _runci_guarded_test "C1cc upstream_pure_functions_on_wz_capi_c_match_real_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_pure_function_oracle -- --ignored --quiet --test-threads=1 \
+        --exact upstream_pure_functions_on_wz_capi_c_match_real_libzenohc || return 1
     # R311y500 — the CROSS-IMPL half, and it is a different question from the
     # three legs above. Those establish that upstream's program LINKS wz and that
     # wz's answers match the real `libzenohc.so`; every byte on their wire was

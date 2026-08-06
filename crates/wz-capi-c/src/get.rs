@@ -630,10 +630,10 @@ unsafe fn get_options(options: *mut z_get_options_t) -> QueryOptions {
     // into the wire `_z_value_t` pair that `QueryMetadata::value` threads onto
     // `RequestQueryBuilder::query_value` (the Q_B / Q_E value ext 0x03), so a
     // querier that set one was previously sending its payload with the default
-    // label. READ rather than taken, for the reason
-    // `crate::encoding::moved_encoding_hint` documents.
+    // label. TAKEN, for the reason `crate::encoding::take_moved_encoding`
+    // documents.
     // SAFETY: the caller's contract.
-    if let Some(hint) = unsafe { crate::encoding::moved_encoding_hint(o.encoding) } {
+    if let Some(hint) = unsafe { crate::encoding::take_moved_encoding(o.encoding) } {
         opts = opts.with_encoding(hint);
     }
     if let Some(attachment) = unsafe { crate::bytes::take_payload(o.attachment) } {
