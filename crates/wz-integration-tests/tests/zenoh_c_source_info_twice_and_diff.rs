@@ -314,7 +314,9 @@ fn run_both_arms(include: &Path) -> (String, String) {
 /// not driven here.
 // wz-proves: api-compat-c wz->zenoh-c partial
 #[test]
-#[ignore = "opens a session and reads the installed zenoh-c oracle; run by run-ci Layer C1cc"]
+#[ignore = "opens a session and reads a zenoh-c oracle; run by run-ci Layer C1ce \
+            (which has the UNSTABLE oracle this needs to measure source_info at \
+            all) and by Layer C1cc (delivery half + the arm-pairing refusal)"]
 fn a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc() {
     let Some(include) = oracle_or_note() else {
         return;
