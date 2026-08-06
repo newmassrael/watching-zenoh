@@ -4686,7 +4686,14 @@ layer_c1s_runtime_tokio_multicast_tests() {
 # explicit max-compatible feature set — do not drop it from COVERED, which would
 # restore the blind spot this lane exists to cover.
 layer_c1bf_cargo_clippy_all_features() {
-    local covered=(wz-runtime-tokio wz-session-core wz-ap-demo)
+    # R311y566 — `wz-capi-c` JOINED the hazard class and the audit caught it on
+    # HOSTED, where this lane runs and the local sweep does not. The trigger was
+    # y565's `z_close_options_t` / `z_query_reply_del_options_t`, whose fields are
+    # `#[cfg(feature = "zenoh-c-no-unstable-api")]`-gated — exactly the shape an
+    # exhaustive struct literal cannot survive. Its two features are INDEPENDENT
+    # axes rather than an exclusive pair, so `--all-features` is a real arm (the
+    # no-unstable + shared-memory one) and no narrowing is needed.
+    local covered=(wz-runtime-tokio wz-session-core wz-ap-demo wz-capi-c)
 
     # Drift audit: re-derive the hazard class from source. A crate qualifies when
     # a `#[cfg(feature ...)]` attribute is immediately followed by a `pub <field>:`
