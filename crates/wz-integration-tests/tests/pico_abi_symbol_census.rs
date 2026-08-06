@@ -192,6 +192,221 @@ fn wz_defines_every_public_symbol_the_real_pico_defines() {
     );
 }
 
+/// Every `z_*` / `zp_* `/ `ze_*` name the PINNED upstream headers use as a
+/// FUNCTION, whether they declare it or call it from a `static inline` body.
+///
+/// The vendored header tree is in-repo, so this side of the comparison is the
+/// same fact on every machine — which is the whole reason the adjudication
+/// below hangs on it rather than on the oracle's build configuration.
+fn upstream_declared_functions() -> BTreeSet<String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/")
+        .parent()
+        .expect("repo root")
+        .join("vendor/zenoh-pico/include");
+    assert!(
+        root.is_dir(),
+        "vendored zenoh-pico headers missing at {}; run \
+         `git submodule update --init vendor/zenoh-pico`",
+        root.display()
+    );
+    let mut names = BTreeSet::new();
+    let mut headers = 0usize;
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("h") {
+                continue;
+            }
+            headers += 1;
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let bytes = text.as_bytes();
+            // `<name>` immediately followed by `(`, modulo whitespace. Scanned by
+            // hand rather than with a regex dependency this crate does not carry.
+            let mut i = 0usize;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if !(c.is_ascii_alphanumeric() || c == b'_') {
+                    i += 1;
+                    continue;
+                }
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let word = &text[start..i];
+                if !(word.starts_with("z_") || word.starts_with("zp_") || word.starts_with("ze_")) {
+                    continue;
+                }
+                let mut j = i;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if bytes.get(j) == Some(&b'(') {
+                    names.insert(word.to_owned());
+                }
+            }
+        }
+    }
+    assert!(
+        headers > 20 && names.len() > 300,
+        "the header scan read {headers} header(s) and found {} function name(s) — \
+         too few to be the real zenoh-pico API, and a scan that found nothing would \
+         call every wz export an invention",
+        names.len()
+    );
+    names
+}
+
+/// Public API symbols wz's cdylib defines and the REAL library does not.
+fn extra_public_symbols() -> BTreeSet<String> {
+    let wz: BTreeSet<String> = defined_dynamic_symbols(&wz_capi_pico_cdylib())
+        .into_iter()
+        .filter(|n| is_public_api(n))
+        .collect();
+    let reference: BTreeSet<String> = defined_dynamic_symbols(&zenoh_pico_shared_library())
+        .into_iter()
+        .filter(|n| is_public_api(n))
+        .collect();
+    assert!(
+        reference.len() > 500,
+        "the reference exported only {} public symbols — the oracle is not the \
+         real zenoh-pico library, and a census against a stub reports green",
+        reference.len()
+    );
+    wz.difference(&reference).cloned().collect()
+}
+
+/// Symbols wz exports that the ORACLE BUILD does not define, each ADJUDICATED.
+///
+/// Membership here is a claim that upstream owns the name and this particular
+/// CMake configuration simply omits the body — never that wz may invent names.
+/// That half is checked mechanically against the vendored headers below; this
+/// list exists so a NEW one has to be looked at by a person rather than joining
+/// a growing number.
+const BUILD_GATED_EXTRAS: &[(&str, &str)] = &[
+    (
+        "zp_spin_once",
+        "upstream declares it under `#if Z_FEATURE_MULTI_THREAD == 0`; the CMake \
+         oracle build has threads ON, so the artifact omits the body. wz's \
+         single-threaded drop-in defines it unconditionally.",
+    ),
+    (
+        "z_scout_options_default",
+        "declared in upstream's `primitives.h`; the oracle build omits the body \
+         with its scouting configuration. wz defines it on every arm.",
+    ),
+];
+
+/// THE OTHER DIRECTION: wz exports nothing upstream does not itself own.
+///
+/// # R311y570 — the pico census measured ONE direction for its whole life
+///
+/// `wz_defines_every_public_symbol_the_real_pico_defines` is `reference - wz`,
+/// which answers "can every upstream program be attempted". It says nothing
+/// about `wz - reference`, and R311y568 established on the SIBLING ABI that the
+/// unmeasured direction is not empty and not harmless: it found four
+/// over-exports there, one of them a zenoh-pico symbol transcribed into the
+/// zenoh-c ABI where upstream declares no such function. Nothing was looking.
+///
+/// The two directions ask different questions and neither implies the other,
+/// so the pico census carried the identical blind spot until this test.
+///
+/// # Why this one is not a plain ZERO like its zenoh-c sibling
+///
+/// The zenoh-c reverse leg asserts an exact zero because every entry there is a
+/// mistake by construction. Here the set is legitimately non-empty: upstream's
+/// headers declare symbols whose bodies a given `Z_FEATURE_*` configuration
+/// omits, and wz's drop-in defines them on every arm. `zp_spin_once` is the
+/// clean case — upstream declares it only when `Z_FEATURE_MULTI_THREAD == 0`,
+/// and the oracle is built with threads on.
+///
+/// So the gate splits the set by a MACHINE-INDEPENDENT question: does the
+/// pinned, in-repo header tree use this name as a function? If not, wz invented
+/// a `z_`-prefixed name and that is a hard failure. If so, it is a build-arm
+/// difference, and it must be one of the ADJUDICATED entries above — a new one
+/// fails, so the set cannot grow silently. A recorded entry that stops
+/// appearing does NOT fail, because whether the oracle defines it is exactly
+/// the machine-dependent half.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "reads the CMake-built libzenohpico.so oracle; run by run-ci Layer E"]
+fn wz_exports_nothing_upstream_does_not_declare() {
+    let extra = extra_public_symbols();
+    let declared = upstream_declared_functions();
+
+    let invented: Vec<&str> = extra
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !declared.contains(*name))
+        .collect();
+    assert!(
+        invented.is_empty(),
+        "wz's zenoh-pico drop-in exports {} public symbol(s) that the PINNED \
+         upstream headers do not use as a function anywhere. Each is a name wz \
+         invented wearing an upstream prefix, which makes wz's surface differ \
+         from the ABI it claims to be:\n{}",
+        invented.len(),
+        invented.join("\n")
+    );
+
+    let adjudicated: BTreeSet<&str> = BUILD_GATED_EXTRAS.iter().map(|(n, _)| *n).collect();
+    let unadjudicated: Vec<&str> = extra
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !adjudicated.contains(*name))
+        .collect();
+    assert!(
+        unadjudicated.is_empty(),
+        "wz exports {} symbol(s) the oracle build does not define, and they are \
+         NOT in BUILD_GATED_EXTRAS. Upstream declares each, so none is an \
+         invention — but which `Z_FEATURE_*` omits the body is a fact someone has \
+         to establish, and an unexamined entry joining a count is how the sibling \
+         census went four rounds blind:\n{}",
+        unadjudicated.len(),
+        unadjudicated.join("\n")
+    );
+}
+
+/// The reverse census's own positive control.
+///
+/// Both halves of the gate above are "a set is empty", and both are satisfied
+/// by a header scan that matched everything. This pins the scan's discrimination
+/// directly: a name upstream really uses is found, and a name in the same
+/// namespace that upstream never wrote is NOT.
+///
+/// It witnesses no atom of its own.
+// wz-proves: none -- positive control for the reverse census gate
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored"]
+fn the_header_scan_discriminates_a_real_name_from_an_invented_one() {
+    let declared = upstream_declared_functions();
+    for real in ["z_open", "z_put", "zp_spin_once", "z_scout_options_default"] {
+        assert!(
+            declared.contains(real),
+            "the header scan missed `{real}`, which upstream really declares — so \
+             the gate would call a legitimate export an invention"
+        );
+    }
+    for invented in [
+        "z_wz_invented_name",
+        "ze_not_a_real_upstream_function",
+        "zp_definitely_not_upstream",
+    ] {
+        assert!(
+            !declared.contains(invented),
+            "the header scan claims upstream declares `{invented}` — it matches too \
+             broadly, so the gate above can never fire"
+        );
+    }
+}
+
 /// The census's own positive control.
 ///
 /// A parser that silently returned an empty set — a wrong section type, an

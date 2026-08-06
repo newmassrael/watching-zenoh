@@ -144,36 +144,88 @@ pub unsafe extern "C" fn z_whatami_to_view_string(
 // z_owned_string_array_t
 // ---------------------------------------------------------------------------
 
-/// The boxed payload behind a `z_owned_string_array_t` / the array a
-/// `z_loaned_hello_t` lends out.
+/// One string-array entry, BOXED so the address of its cached view survives a
+/// push that reallocates the vector.
 ///
-/// `views` is built ONCE, after `items` is final, and each entry borrows that
-/// `String`'s heap buffer. That is sound and the reason for the ordering: a
-/// `String`'s buffer address is stable across `Vec<String>` reallocation
-/// (reallocating the vec moves the `String` headers, not the bytes they own),
-/// but a `push` after the views exist could still leave a view pointing at a
-/// buffer a later `String` mutation freed. Nothing here mutates after build.
+/// R311y570 — the previous shape kept `items: Vec<String>` beside a parallel
+/// `views: Vec<z_loaned_string_t>`, and a push rebuilt BOTH into a fresh state
+/// and freed the old one, so every pointer `z_string_array_get` had handed out
+/// dangled from the next push onward. One indirection per entry replaces that:
+/// a push moves the BOXES and never the bytes they describe.
+///
+/// # Every entry OWNS its bytes, in BOTH push spellings
+///
+/// That is not a shortcut — it is what the real library does, MEASURED at
+/// R311y570 by `pico_string_array_alias_twice_and_diff`. Upstream's
+/// `z_string_array_push_by_alias` builds an alias `_z_string_t` and then hands
+/// it to `_z_string_svec_append(a, &str, true)`, which deep-copies; the probe
+/// sees the array's entry pointing at storage that is NOT the caller's buffer,
+/// on the real `libzenohpico.so`. So a wz that aliased here would be the one
+/// diverging, and it would diverge in the dangerous direction — holding a
+/// pointer into caller memory where upstream holds its own copy.
+///
+/// The SIBLING ABI genuinely differs: real `libzenohc.so` aliases in
+/// `_by_alias` and copies in `_by_copy`, also measured, which is why
+/// `wz-capi-c` implements the two spellings differently. A third dialect
+/// split, alongside the keyexpr and encoding ones.
+struct StringArrayEntry {
+    value: String,
+    view: z_loaned_string_t,
+}
+
+impl StringArrayEntry {
+    /// An entry over a copy of `value`.
+    ///
+    /// The view is derived BEFORE the move, which is sound because moving a
+    /// `String` moves the three-word header and never the heap buffer the view
+    /// points at.
+    fn new(value: String) -> Box<Self> {
+        let view = z_loaned_string_t {
+            _start: value.as_ptr(),
+            _len: value.len(),
+        };
+        Box::new(Self { value, view })
+    }
+}
+
 pub(crate) struct StringArrayState {
-    items: Vec<String>,
-    views: Vec<z_loaned_string_t>,
+    // `clippy::vec_box` fires here and is WRONG for this type, exactly as it is
+    // for the sibling zenoh-c state: the lint's premise is that the `Vec`
+    // already heap-allocates, so the `Box` buys nothing. What it buys is the
+    // whole point — an element address that survives a reallocation. Without
+    // it, one `push` past capacity invalidates every pointer
+    // `z_string_array_get` has handed out, which is the use-after-free
+    // `an_element_pointer_survives_a_reallocating_push` pins.
+    #[allow(clippy::vec_box)]
+    entries: Vec<Box<StringArrayEntry>>,
 }
 
 impl StringArrayState {
     fn new(items: Vec<String>) -> Box<Self> {
-        let mut state = Box::new(Self {
-            items,
-            views: Vec::new(),
-        });
-        let views: Vec<z_loaned_string_t> = state
-            .items
+        Box::new(Self {
+            entries: items.into_iter().map(StringArrayEntry::new).collect(),
+        })
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn view(&self, k: usize) -> Option<&z_loaned_string_t> {
+        self.entries.get(k).map(|entry| &entry.view)
+    }
+
+    /// Every entry as an OWNED string.
+    ///
+    /// An alias is COPIED here on purpose: the callers are the deep-copy paths
+    /// (`z_string_array_clone`, the hello clone), and a copy that kept
+    /// borrowing would silently extend the caller's lifetime obligation to an
+    /// array it never pushed to.
+    fn to_strings(&self) -> Vec<String> {
+        self.entries
             .iter()
-            .map(|s| z_loaned_string_t {
-                _start: s.as_ptr(),
-                _len: s.len(),
-            })
-            .collect();
-        state.views = views;
-        state
+            .map(|entry| entry.value.clone())
+            .collect()
     }
 }
 
@@ -214,13 +266,25 @@ unsafe fn string_array_state<'a>(
     (array.handle as *const StringArrayState).as_ref()
 }
 
+/// The MUTABLE half, for the two push exports.
+///
+/// Sound for the same reason every other handle deref in this crate is: the C
+/// side owns the array and pico's contract makes it single-threaded for the
+/// duration of a call.
+unsafe fn string_array_state_mut<'a>(
+    array: *mut z_loaned_string_array_t,
+) -> Option<&'a mut StringArrayState> {
+    let array = array.as_mut()?;
+    (array.handle as *mut StringArrayState).as_mut()
+}
+
 /// Number of strings in the array (pico `z_string_array_len`).
 ///
 /// # Safety
 /// `array` must be a live loaned string array (or null, which reads 0).
 #[no_mangle]
 pub unsafe extern "C" fn z_string_array_len(array: *const z_loaned_string_array_t) -> usize {
-    string_array_state(array).map_or(0, |s| s.items.len())
+    string_array_state(array).map_or(0, |s| s.len())
 }
 
 /// Whether the array is empty (pico `z_string_array_is_empty`).
@@ -246,7 +310,7 @@ pub unsafe extern "C" fn z_string_array_get(
     array: *const z_loaned_string_array_t,
     k: usize,
 ) -> *const z_loaned_string_t {
-    match string_array_state(array).and_then(|s| s.views.get(k)) {
+    match string_array_state(array).and_then(|s| s.view(k)) {
         Some(view) => view as *const z_loaned_string_t,
         None => std::ptr::null(),
     }
@@ -380,17 +444,23 @@ pub unsafe extern "C" fn z_string_array_push_by_copy(
 /// Append `value` (pico `z_string_array_push_by_alias`), returning the array's
 /// new length.
 ///
-/// A NAMED DIVERGENCE, stated rather than left to be inferred from the name:
-/// upstream ALIASES the caller's storage here and copies in the `_by_copy`
-/// sibling, so a program that mutates the source string afterwards sees the
-/// change through the array. wz copies in both.
+/// COPIES, and so does the real library — which is the opposite of what this
+/// tree believed until R311y570. The doc here used to record a NAMED DIVERGENCE
+/// ("upstream ALIASES the caller's storage here and wz copies in both"), and
+/// the debt ledger carried it for rounds as a gap to close. It was read off the
+/// function's NAME and never measured.
 ///
-/// The reason is structural, not convenience. `StringArrayState` owns its
-/// `items` and hands out `views` pointing INTO them, so an aliased entry would
-/// be a borrow of caller storage with no lifetime wz can enforce — and the
-/// array outlives the call. The observable consequence is confined to
-/// mutate-after-push, which upstream itself documents as the caller's
-/// responsibility; every read path (`len`, `get`, `is_empty`) is identical.
+/// `pico_string_array_alias_twice_and_diff` measures it: on the real
+/// `libzenohpico.so`, a view that provably aliases the caller's buffer
+/// (`view.is_caller_buffer=1`) becomes an array entry that provably does not
+/// (`alias.is_caller_buffer=0`). Upstream builds the alias and then hands it to
+/// `_z_string_svec_append(a, &str, true)`, whose last argument deep-copies. So
+/// the two spellings are the same operation on this ABI, and wz aliasing here
+/// would be the divergence — in the dangerous direction.
+///
+/// The sibling zenoh-c ABI is genuinely different (its `_by_alias` really does
+/// alias, also measured), which is why `wz-capi-c` implements the pair with two
+/// bodies and this crate with one.
 ///
 /// # Safety
 /// As [`z_string_array_push_by_copy`].
@@ -403,40 +473,29 @@ pub unsafe extern "C" fn z_string_array_push_by_alias(
 }
 
 /// The shared body of the two push exports — see
-/// [`z_string_array_push_by_alias`] for why they share one.
+/// [`z_string_array_push_by_alias`] for why one body serves both.
 ///
-/// Rebuilding the state rather than pushing in place is what keeps the cached
-/// `views` valid: `items` is a `Vec<String>`, so a push can REALLOCATE it and
-/// every previously handed-out `z_loaned_string_t` would then point into freed
-/// storage. `StringArrayState::new` re-derives all views from the final
-/// addresses, which is the same discipline `bind`-after-boxing enforces
-/// elsewhere in this crate.
+/// Pushes IN PLACE. The earlier version rebuilt the whole state into a fresh
+/// box and freed the old one, which invalidated every pointer
+/// `z_string_array_get` had handed out; boxed entries make an in-place push the
+/// safe operation instead of the dangerous one.
 unsafe fn string_array_push(
     array: *mut z_loaned_string_array_t,
     value: *const z_loaned_string_t,
 ) -> usize {
-    let Some(state) = string_array_state(array as *const z_loaned_string_array_t) else {
+    let Some(state) = string_array_state_mut(array) else {
         return 0;
     };
     let Some(view) = value.as_ref() else {
-        return state.items.len();
+        return state.len();
     };
     let Some(bytes) = crate::abi::view_bytes(view._start, view._len) else {
-        return state.items.len();
+        return state.len();
     };
-    let mut items = state.items.clone();
-    items.push(String::from_utf8_lossy(bytes).into_owned());
-    let len = items.len();
-    let fresh = StringArrayState::new(items);
-    // Replace the box behind the handle, releasing the old state only after the
-    // new one is in place.
-    let slot = array as *mut z_owned_string_array_t;
-    let old = (*slot).handle;
-    (*slot).handle = Box::into_raw(fresh) as *mut c_void;
-    if !old.is_null() {
-        drop(Box::from_raw(old as *mut StringArrayState));
-    }
-    len
+    state.entries.push(StringArrayEntry::new(
+        String::from_utf8_lossy(bytes).into_owned(),
+    ));
+    state.len()
 }
 
 /// Deep-copy a string array (pico `z_string_array_clone`).
@@ -456,7 +515,7 @@ pub unsafe extern "C" fn z_string_array_clone(
         return crate::result::Z_ERR_NULL;
     };
     *dst = z_owned_string_array_t {
-        handle: Box::into_raw(StringArrayState::new(state.items.clone())) as *mut c_void,
+        handle: Box::into_raw(StringArrayState::new(state.to_strings())) as *mut c_void,
         _pad: [std::ptr::null_mut(); 3],
     };
     crate::result::Z_OK
@@ -609,7 +668,7 @@ pub unsafe extern "C" fn z_hello_locators(
     if out.is_null() {
         return;
     }
-    let items = hello_state(hello).map_or_else(Vec::new, |s| s.locators.items.clone());
+    let items = hello_state(hello).map_or_else(Vec::new, |s| s.locators.to_strings());
     *out = z_owned_string_array_t {
         handle: Box::into_raw(StringArrayState::new(items)) as *mut c_void,
         _pad: [std::ptr::null_mut(); 3],
@@ -708,7 +767,7 @@ pub unsafe extern "C" fn z_hello_clone(
         *dst = z_owned_hello_t::null_value();
         return crate::result::Z_ERR_INVALID;
     };
-    let cloned = HelloState::new(state.zid, state.whatami, state.locators.items.clone());
+    let cloned = HelloState::new(state.zid, state.whatami, state.locators.to_strings());
     *dst = z_owned_hello_t {
         handle: Box::into_raw(cloned) as *mut c_void,
         _pad: [std::ptr::null_mut(); 6],
@@ -1273,6 +1332,73 @@ mod tests {
             assert_eq!(z_hello_whatami(&loaned), 2);
             assert_eq!(z_hello_zid(&loaned).id[0], 0xAB);
             assert_eq!(z_string_array_len(locs), 1);
+        }
+    }
+
+    /// R311y570 — an element pointer SURVIVES a reallocating push, on this ABI
+    /// too.
+    ///
+    /// ## What this fixed, and why it is a wz-side test
+    ///
+    /// Until this round a push REPLACED the whole `StringArrayState` with a
+    /// freshly built one and freed the old box, so every pointer
+    /// `z_string_array_get` had handed out was dangling from the next push
+    /// onward — a use-after-free reachable from ordinary C. Boxed entries make
+    /// the push in-place and the pointers stable.
+    ///
+    /// It is asserted HERE rather than in a twice-and-diff leg because it is a
+    /// wz SUPERSET: upstream's `_z_string_svec_t` stores entries inline, so the
+    /// same program reads freed memory against the real library. A claim one
+    /// side cannot make has no reference answer to agree with — the sibling
+    /// zenoh-c ABI keeps its copy of this same claim in the same place, for the
+    /// same reason.
+    ///
+    /// Meaningful only if the push actually REALLOCATES, which is why it grows
+    /// well past any plausible initial capacity rather than pushing once.
+    #[test]
+    fn an_element_pointer_survives_a_reallocating_push() {
+        // SAFETY: every pointer below is a live stack slot this test owns, and
+        // the array is dropped exactly once at the end.
+        unsafe {
+            let mut arr = z_owned_string_array_t::null_value();
+            z_string_array_new(&mut arr);
+            let first = z_loaned_string_t {
+                _start: b"first".as_ptr(),
+                _len: 5,
+            };
+            let loaned = &mut arr as *mut z_owned_string_array_t as *mut z_loaned_string_array_t;
+            assert_eq!(z_string_array_push_by_copy(loaned, &first), 1);
+
+            // The pointer taken BEFORE the growth — the one the pre-y570 shape
+            // freed out from under the caller.
+            let e0 = z_string_array_get(loaned as *const z_loaned_string_array_t, 0);
+            assert!(!e0.is_null());
+            let before = std::slice::from_raw_parts((*e0)._start, (*e0)._len).to_vec();
+            assert_eq!(before, b"first");
+
+            let filler = z_loaned_string_t {
+                _start: b"filler".as_ptr(),
+                _len: 6,
+            };
+            for _ in 0..64 {
+                z_string_array_push_by_copy(loaned, &filler);
+            }
+            assert_eq!(
+                z_string_array_len(loaned as *const z_loaned_string_array_t),
+                65
+            );
+
+            // Read through the PRE-GROWTH pointer, not a fresh `get`. A fresh
+            // one would pass on either layout and would be testing nothing.
+            let after = std::slice::from_raw_parts((*e0)._start, (*e0)._len).to_vec();
+            assert_eq!(
+                after, before,
+                "the pointer handed out before the growth no longer reads its own \
+                 string, so a reallocating push moved or freed the entry"
+            );
+
+            let mut moved = z_moved_string_array_t { _this: arr };
+            z_string_array_drop(&mut moved);
         }
     }
 }

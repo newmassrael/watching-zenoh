@@ -517,15 +517,22 @@ int main(void) {
         z_bytes_from_string(&b4, z_string_move(&st));
         printf("bytes.from_string.len=%zu\n", z_bytes_len(z_bytes_loan(&b4)));
 
+        /* The constructor is SEQUENCED BEFORE the accessor, on its own
+           statement. Folding both into one `printf` leaves them unsequenced:
+           the compiler is free to evaluate `z_bytes_len` first, and gcc does,
+           so the length is read out of an UNINITIALISED `z_owned_bytes_t`.
+           That is what R311y568 shipped, and it measured stack junk on both
+           arms — locally the junk happened to agree and the leg was green;
+           hosted it did not and the reference printed a stack address. */
         static uint8_t STATIC_BUF[4] = {1, 2, 3, 4};
-        printf("bytes.from_static_buf.rc=%d len=%zu\n",
-               (int)z_bytes_from_static_buf(&b5, STATIC_BUF, sizeof STATIC_BUF),
+        z_result_t rc5 = z_bytes_from_static_buf(&b5, STATIC_BUF, sizeof STATIC_BUF);
+        printf("bytes.from_static_buf.rc=%d len=%zu\n", (int)rc5,
                z_bytes_len(z_bytes_loan(&b5)));
 
         char *owned_str = (char *)malloc(6);
         memcpy(owned_str, "OWNED", 6);
-        printf("bytes.from_str.rc=%d len=%zu\n",
-               (int)z_bytes_from_str(&b6, owned_str, free_str, NULL),
+        z_result_t rc6 = z_bytes_from_str(&b6, owned_str, free_str, NULL);
+        printf("bytes.from_str.rc=%d len=%zu\n", (int)rc6,
                z_bytes_len(z_bytes_loan(&b6)));
 
         z_bytes_empty(&empty);
@@ -592,6 +599,22 @@ int main(void) {
         for (size_t i = 0; i < z_string_array_len(z_string_array_loan(&arr)); i++) {
             const z_loaned_string_t *e = z_string_array_get(z_string_array_loan(&arr), i);
             printf("array.get[%zu]=%.*s\n", i, (int)z_string_len(e), z_string_data(e));
+        }
+        /* R311y570 — does `_by_alias` actually ALIAS? Every read path answers
+           identically for an alias and a copy, so the only C-visible difference
+           is whether the entry DESCRIBES the source buffer. A pointer value
+           cannot be diffed across arms; its IDENTITY with a pointer this
+           program also holds can, and that is exactly the claim the two
+           spellings make. Asked here because the sibling pico probe measured
+           this and found upstream's `_by_alias` copying despite its name — a
+           thing this tree had believed from the function's spelling. */
+        {
+            const z_loaned_string_t *e0 = z_string_array_get(z_string_array_loan(&arr), 0);
+            const z_loaned_string_t *e1 = z_string_array_get(z_string_array_loan(&arr), 1);
+            printf("array.alias_is_source_buffer=%d\n",
+                   (int)(z_string_data(e0) == z_string_data(z_string_loan(&a))));
+            printf("array.copy_is_source_buffer=%d\n",
+                   (int)(z_string_data(e1) == z_string_data(z_string_loan(&b))));
         }
         for (int i = 0; i < 8; i++) {
             z_string_array_push_by_copy(z_string_array_loan_mut(&arr), z_string_loan(&b));
@@ -836,6 +859,45 @@ fn upstream_pure_functions_on_wz_capi_c_match_real_libzenohc() {
          equality below would be an equality between two failures.\n{ref_stdout}",
         ref_stdout.lines().count()
     );
+
+    // ANCHORS: lines whose value is known from OUTSIDE the two programs.
+    //
+    // The diff below is an equality between two stdouts, and an equality is
+    // silent when both sides are wrong the same way. R311y570 is the proof:
+    // the two `z_bytes_*` constructor lines read an UNINITIALISED
+    // `z_owned_bytes_t`, so both arms printed stack junk — and locally the junk
+    // agreed, so the leg stayed green while measuring nothing. Hosted disagreed
+    // and that is the only reason it was found.
+    //
+    // Each anchor states a length this file can derive without running anything
+    // (`STATIC_BUF` is 4 bytes; `"OWNED"` is 5 characters), and it is asserted
+    // against BOTH arms, so neither a wz defect nor a probe defect can hide.
+    const ANCHORS: &[&str] = &[
+        "bytes.from_static_buf.rc=0 len=4",
+        "bytes.from_str.rc=0 len=5",
+        "bytes.copy_from_slice.len=5 empty=0",
+        "bytes.copy_from_string.len=6",
+        "bytes.empty.is_empty=1",
+        // R311y570 — the two push spellings, stated as the FACT upstream's API
+        // contract asserts rather than left to an arm-vs-arm agreement. The
+        // sibling pico ABI is the reason this is anchored: there the same
+        // measurement found upstream's `_by_alias` COPYING despite its name, so
+        // "the two arms agree" is demonstrably not the same claim as "the
+        // function does what it is called".
+        "array.alias_is_source_buffer=1",
+        "array.copy_is_source_buffer=0",
+    ];
+    for (arm, stdout) in [("wz", &wz_stdout), ("reference", &ref_stdout)] {
+        for anchor in ANCHORS {
+            assert!(
+                stdout.lines().any(|l| l == *anchor),
+                "the {arm} arm never printed the anchor line `{anchor}`. An anchor \
+                 is a value derived OUTSIDE both programs, so its absence means the \
+                 probe measured something other than what it names — which is what \
+                 an arm-vs-arm diff cannot see.\n--- {arm} stdout ---\n{stdout}"
+            );
+        }
+    }
 
     let wz: Vec<&str> = wz_stdout.lines().collect();
     let reference: Vec<&str> = ref_stdout.lines().collect();

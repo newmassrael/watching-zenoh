@@ -1400,6 +1400,17 @@ PY
     # empty — a version that quietly analysed nothing would exit 0 forever and
     # read as coverage. Enforcement MEASURED by renaming a guarded test fn.
     python3 scripts/lib/count_guard_lint.py || return 1
+    # R311y570 — the UNSEQUENCED-PROBE lint. A C probe that passes `&x` to a
+    # constructor and reads `x` through a loan accessor in the SAME full
+    # expression is reading an uninitialised object: C does not order call
+    # arguments and gcc evaluates them right to left. R311y568 shipped two such
+    # lines and the twice-and-diff gate could not see them, because both arms
+    # printed stack junk and an equality between two wrong answers is GREEN.
+    # Only the hosted runner's different junk exposed it, a round later.
+    #
+    # Static for the same reason the count-guard gate is: both halves are in the
+    # source. Enforcement MEASURED by re-introducing the y568 line verbatim.
+    python3 scripts/lib/unsequenced_probe_lint.py || return 1
     return 0
 }
 
