@@ -2874,7 +2874,7 @@ layer_c1ap_cargo_test_ext_pubsub_serde() {
 # wz-runtime-tokio). query-get supplies the loopback get; pubsub-allow-loop the
 # loopback dispatch.
 layer_c1aq_cargo_test_ext_pubsub_advanced() {
-    _runci_guarded_test "C1aq advanced_" 13 \
+    _runci_guarded_test "C1aq advanced_" 16 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
         --lib advanced_ --quiet || return 1
     (cd crates \
@@ -3018,7 +3018,7 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
 # faithfulness test (the emitted payload decodes to last_sn on the @adv KE). Then
 # clippy-gates the producer surface + validates the facade forward target.
 layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
-    _runci_guarded_test "C1au advanced_publisher" 8 \
+    _runci_guarded_test "C1au advanced_publisher" 10 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-sample-miss-detection,ext-pubsub-advanced-recovery,pubsub-allow-loop \
         --lib advanced_publisher --quiet || return 1
     (cd crates \
