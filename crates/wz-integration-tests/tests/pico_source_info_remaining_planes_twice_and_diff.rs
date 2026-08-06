@@ -590,7 +590,7 @@ fn assert_anchored(arm: &str, stdout: &str) {
     let lines: Vec<&str> = stdout.lines().collect();
     let missing: Vec<String> = anchors()
         .into_iter()
-        .filter(|want| !lines.iter().any(|line| *line == want.as_str()))
+        .filter(|want| !lines.contains(&want.as_str()))
         .collect();
     assert!(
         missing.is_empty(),
