@@ -267,7 +267,12 @@ impl ReplyMarshal {
             // inner body, and dropping them here made a foreign queryable's
             // attachment invisible to upstream's own `z_get_attachment.c`.
             sample: SampleMarshal::new(view.keyexpr().to_owned(), sample_payload, sample_kind)
-                .with_reply_metadata(view.attachment(), view.put_encoding(), view.timestamp()),
+                .with_reply_metadata(
+                    view.attachment(),
+                    view.put_encoding(),
+                    view.timestamp(),
+                    view.source_info(),
+                ),
             err_payload,
             loaned_err_payload: z_loaned_bytes_t {
                 handle: std::ptr::null_mut(),
@@ -624,21 +629,39 @@ pub unsafe extern "C" fn z_closure_reply_drop(closure: *mut z_moved_closure_repl
 
 /// Get options (pico `z_get_options_t`, `api/types.h:479-497`).
 ///
-/// This is the DEFAULT-build layout. Two of pico's fields are compiled out and
-/// so are absent here: `allowed_destination` exists only under
-/// `Z_FEATURE_LOCAL_QUERYABLE` (default **0**, `~/zenoh-pico/CMakeLists.txt:353`)
-/// and `source_info` / `cancellation_token` only under `Z_FEATURE_UNSTABLE_API`
-/// (default **0**, `CMakeLists.txt:316`). Mirroring api.c's feature gates rather
-/// than the header is the rule this crate follows: the header declares fields
-/// unconditionally, the gates decide what a default build actually has.
+/// `allowed_destination` is absent because `Z_FEATURE_LOCAL_QUERYABLE` is 0 in
+/// the generated config; the `source_info` / `cancellation_token` pair is
+/// PRESENT because `Z_FEATURE_UNSTABLE_API` is defined there. Same rule and same
+/// build as [`crate::pubsub::z_put_options_t`]: read the arms off the GENERATED
+/// `config.h` the drop-in's programs compile against, not off the cmake default.
+///
+/// R311y562 FIXED A LIVE ABI DEFECT HERE, and it was not a missing feature —
+/// it was a WRONG OFFSET. The struct previously omitted the unstable pair on the
+/// reasoning that the flag "defaults **0**, `CMakeLists.txt:316`", which is the
+/// R311y466 trap this crate's own put-options doc warns about:
+/// `scripts/build-zenoh-pico-cli.sh:454,512` configures the reference pico with
+/// `-DZ_FEATURE_UNSTABLE_API=ON`, and
+/// `target/zenoh-pico-build/zenohpico/include/zenoh-pico/config.h` carries a
+/// bare `#define Z_FEATURE_UNSTABLE_API`.
+///
+/// The pair sits BEFORE `accept_replies` in upstream's declaration, so omitting
+/// it did not merely hide two fields — it MOVED the field after them. Measured
+/// on the reference header, `accept_replies` is at offset **72**; this struct
+/// placed it at **56**, which in the caller's memory is the `source_info`
+/// POINTER. Every drop-in program that called `z_get_options_default` and passed
+/// the result read its reply-keyexpr policy out of the low half of a null
+/// pointer — i.e. `0`, which is not the `Z_REPLY_KEYEXPR_MATCHING_QUERY` the
+/// default sets. No test in the tree could see it: the corpus witnesses
+/// BEHAVIOUR, and no upstream example varies `accept_replies`.
 #[repr(C)]
 pub struct z_get_options_t {
     /// `z_moved_bytes_t*` — the query's value payload. Honoured.
     pub payload: *mut z_moved_bytes_t,
-    /// `z_moved_encoding_t*`. Opaque: the encoding family is a follow-up round,
-    /// so a C program linking this library has no exported `z_encoding_*` to
-    /// build one with and this is always null in practice.
-    pub encoding: *mut c_void,
+    /// `z_moved_encoding_t*` — the query's value encoding. Honoured (R311y562);
+    /// it was carried opaque with the stated reason "no exported `z_encoding_*`
+    /// to build one with", which stopped being true when the encoding family
+    /// shipped.
+    pub encoding: *mut crate::encoding::z_moved_encoding_t,
     pub consolidation: z_query_consolidation_t,
     pub congestion_control: c_int,
     pub priority: c_int,
@@ -647,8 +670,64 @@ pub struct z_get_options_t {
     pub timeout_ms: u64,
     /// `z_moved_bytes_t*` — an optional attachment on the query. Honoured.
     pub attachment: *mut z_moved_bytes_t,
+    /// `z_source_info_t*` — the `(zid, eid, sn)` stamped on the outbound Query
+    /// body (ext 0x01). Honoured (R311y562).
+    pub source_info: *mut crate::pubsub::z_source_info_t,
+    /// `z_moved_cancellation_token_t*` — accepted for layout and IGNORED, named
+    /// rather than implied: wz has no cancellation-token plane, so a get issued
+    /// through this path cannot be cancelled by one. The same explicit
+    /// non-support the sibling `z_querier_get_options_t` records.
+    pub cancellation_token: *mut c_void,
     pub accept_replies: z_reply_keyexpr_t,
 }
+
+/// The upstream layout this struct must match, measured against the reference
+/// build's header (`-DZENOH_LINUX -DZ_FEATURE_UNSTABLE_API`): 80 B with
+/// `accept_replies` at 72.
+///
+/// R311y562 — the SIZE alone would not have caught the defect this replaces.
+/// A struct can be the wrong size for a harmless reason (a missing tail field
+/// nobody reads) or a harmful one (a field displaced under a caller's writes),
+/// and only an OFFSET assertion tells those apart. So the field that moved is
+/// pinned by offset, not merely counted.
+const _: () = {
+    assert!(std::mem::size_of::<z_get_options_t>() == 80);
+    assert!(std::mem::align_of::<z_get_options_t>() == 8);
+    // Every field AFTER the feature-conditional region, by offset. These are
+    // the assertions that would have caught the defect: the struct was 64 B
+    // instead of 80 B, which reads as "two tail fields missing" — harmless —
+    // when in fact the missing pair sits BEFORE `accept_replies` and displaced
+    // it by 16 B. A size check cannot tell those two stories apart.
+    assert!(std::mem::offset_of!(z_get_options_t, attachment) == 48);
+    assert!(std::mem::offset_of!(z_get_options_t, source_info) == 56);
+    assert!(std::mem::offset_of!(z_get_options_t, cancellation_token) == 64);
+    assert!(std::mem::offset_of!(z_get_options_t, accept_replies) == 72);
+};
+
+/// How to re-measure the numbers above, so the next round checks rather than
+/// inherits them (this file has now been wrong once by inheriting):
+///
+/// ```text
+/// $ cat > /tmp/off.c <<'EOF'
+/// #include <stdio.h>
+/// #include <stddef.h>
+/// #include "zenoh-pico.h"
+/// int main(void){ printf("%zu %zu\n", sizeof(z_get_options_t),
+///                        offsetof(z_get_options_t, accept_replies)); }
+/// EOF
+/// $ gcc -DZENOH_LINUX -DZ_FEATURE_UNSTABLE_API \
+///       -Icrates/target/debug/build/zenoh-pico-sys-*/out/include /tmp/off.c -o /tmp/off && /tmp/off
+/// 80 72
+/// ```
+///
+/// `-DZ_FEATURE_UNSTABLE_API` reproduces the REFERENCE build's config: that flag
+/// is the only one on which
+/// `target/zenoh-pico-build/zenohpico/include/zenoh-pico/config.h` (built by
+/// `scripts/build-zenoh-pico-cli.sh` with `-DZ_FEATURE_UNSTABLE_API=ON`) and the
+/// `zenoh-pico-sys` crate's generated config differ — both carry
+/// `Z_FEATURE_LOCAL_SUBSCRIBER 0` and `Z_FEATURE_LOCAL_QUERYABLE 0`.
+#[cfg(doc)]
+pub struct GetOptionsLayoutProvenance;
 
 /// Fill default get options (pico `z_get_options_default`,
 /// `src/api/api.c:1723-1741`).
@@ -676,6 +755,8 @@ pub unsafe extern "C" fn z_get_options_default(options: *mut z_get_options_t) {
     (*options).target = Z_QUERY_TARGET_BEST_MATCHING;
     (*options).timeout_ms = 0;
     (*options).attachment = std::ptr::null_mut();
+    (*options).source_info = std::ptr::null_mut();
+    (*options).cancellation_token = std::ptr::null_mut();
     (*options).accept_replies = crate::query::Z_REPLY_KEYEXPR_MATCHING_QUERY;
 }
 
@@ -795,6 +876,7 @@ fn get_options(
     payload: Option<crate::bytes::ByteBuf>,
     attachment: Option<crate::bytes::ByteBuf>,
     qos: PicoQueryQos,
+    value_meta: PicoQueryValueMeta,
 ) -> QueryOptions {
     let mut opts = QueryOptions::get()
         .with_allowed_destination(Locality::Remote)
@@ -809,6 +891,23 @@ fn get_options(
         .with_priority(crate::query::priority_from_pico(qos.priority))
         .with_congestion_control(crate::query::congestion_from_pico(qos.congestion_control))
         .with_express(qos.is_express);
+
+    // R311y562 — the query's own VALUE metadata. Both fields were carried and
+    // dropped: the encoding because "no exported `z_encoding_*`" (untrue since
+    // the encoding family shipped) and the source_info because the struct did
+    // not model it at all (the unstable tail this round restored).
+    //
+    // Unconditional, like the put plane's `with_source_info` call: the setters
+    // are gated on `wz-runtime-tokio`'s `pubsub-encoding` / `query-source-info`,
+    // and this crate's dependency takes that crate's DEFAULT features, which
+    // carry both. A `#[cfg]` here would name a feature `wz-capi-pico` does not
+    // declare, which the unexpected-cfg lint rejects outright.
+    if let Some(enc) = value_meta.encoding {
+        opts = opts.with_encoding(enc);
+    }
+    if let Some(si) = value_meta.source_info {
+        opts = opts.with_source_info(si);
+    }
 
     // `Z_QUERY_TARGET_BEST_MATCHING` is deliberately NOT representable in wz's
     // `QueryTarget`: pico's encoder clears the target ext when the value is
@@ -947,12 +1046,18 @@ unsafe fn get_inner(
     // first for the same reason. There is no pico behaviour to mirror here
     // (pico derefs the null callback and crashes); the standard is this
     // function's own consume-on-EVERY-path contract.
-    let (payload, attachment) = if options.is_null() {
-        (None, None)
+    let (payload, attachment, value_meta) = if options.is_null() {
+        (None, None, PicoQueryValueMeta::default())
     } else {
         (
             crate::pubsub::take_moved_bytes((*options).payload),
             crate::pubsub::take_moved_bytes((*options).attachment),
+            // R311y562 — the moved encoding is consumed on this same
+            // every-path line, for the same reason the two byte buffers are.
+            PicoQueryValueMeta {
+                encoding: crate::encoding::take_moved_encoding((*options).encoding as *mut c_void),
+                source_info: crate::pubsub::source_info_hint_of((*options).source_info),
+            },
         )
     };
 
@@ -1023,6 +1128,7 @@ unsafe fn get_inner(
         payload,
         attachment,
         qos,
+        value_meta,
         cclosure,
     )
 }
@@ -1045,6 +1151,25 @@ pub(crate) unsafe fn adopt_reply_closure(
     let adopted = Arc::new(CReplyClosure::new(owned.context, owned.call, owned.drop));
     *owned = z_owned_closure_reply_t::null_value();
     adopted
+}
+
+/// R311y562 — the per-query VALUE metadata, bundled for the same reason
+/// [`PicoQueryQos`] is: [`issue_get`] is already an eleven-argument seam, and
+/// two more `Option`s of different types next to each other is a transposition
+/// waiting to happen.
+///
+/// Both fields are shared by `z_get_options_t` and `z_querier_get_options_t` —
+/// the two entry points describe the same query, so a divergence between them
+/// would make `z_get` and `z_querier_get` put different bytes on the wire for
+/// the same program.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PicoQueryValueMeta {
+    /// The query's value encoding — the Query body's encoding field. Consumed
+    /// from the caller's moved `z_moved_encoding_t*`.
+    pub(crate) encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
+    /// The query's `(zid, eid, sn)` — the Query body's source_info ext 0x01.
+    /// Borrowed from the caller's `z_source_info_t*`, projected to an owned hint.
+    pub(crate) source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
 }
 
 /// R311y551 — the three request-QoS option fields, bundled so the shared
@@ -1103,6 +1228,7 @@ pub(crate) fn issue_get(
     payload: Option<crate::bytes::ByteBuf>,
     attachment: Option<crate::bytes::ByteBuf>,
     qos: PicoQueryQos,
+    value_meta: PicoQueryValueMeta,
     closure: Arc<CReplyClosure>,
 ) -> ZResult {
     let params = transmit_parameters(params_in, accept_replies);
@@ -1125,6 +1251,7 @@ pub(crate) fn issue_get(
         payload,
         attachment,
         qos,
+        value_meta,
     );
 
     fan_get(shared, &keyexpr, &opts, closure, gate)
@@ -1649,6 +1776,7 @@ mod tests {
             None,
             None,
             qos,
+            PicoQueryValueMeta::default(),
         );
         let packed = opts.qos.expect("the QoS trio reaches QueryOptions");
         assert_eq!(packed.priority(), Priority::RealTime, "priority");
@@ -1667,6 +1795,7 @@ mod tests {
             None,
             None,
             PicoQueryQos::defaults(),
+            PicoQueryValueMeta::default(),
         );
         let packed = defaulted
             .qos

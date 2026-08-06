@@ -99,8 +99,28 @@ pub struct z_querier_get_options_t {
     pub encoding: *mut c_void,
     pub attachment: *mut z_moved_bytes_t,
     pub cancellation_token: *mut c_void,
-    pub source_info: *mut c_void,
+    /// `z_source_info_t*` — the `(zid, eid, sn)` stamped on the outbound Query
+    /// body (ext 0x01). READ as of R311y562; it was carried opaque alongside
+    /// `cancellation_token` and the two were named ignored TOGETHER, which
+    /// bundled a field wz has no plane for with one it does.
+    pub source_info: *mut crate::pubsub::z_source_info_t,
 }
+
+/// The reference build declares this at 40 B
+/// (`-DZENOH_LINUX -DZ_FEATURE_UNSTABLE_API`); pinned so the unstable tail
+/// cannot silently fall off, as it had on `z_get_options_t`.
+const _: () = {
+    assert!(std::mem::size_of::<z_querier_get_options_t>() == 40);
+    // By OFFSET too: this struct's unstable tail is a PAIR, and a pair is where
+    // an order mistake hides — `cancellation_token` before `source_info` here,
+    // the other way round in `z_get_options_t`. Upstream really does declare
+    // them in opposite orders in the two structs
+    // (`api/types.h:290-297` vs `:479-497`), so "same two fields" is not the
+    // same layout and only a measured offset says which.
+    assert!(std::mem::offset_of!(z_querier_get_options_t, attachment) == 16);
+    assert!(std::mem::offset_of!(z_querier_get_options_t, cancellation_token) == 24);
+    assert!(std::mem::offset_of!(z_querier_get_options_t, source_info) == 32);
+};
 
 /// Default querier options (pico `z_querier_options_default`,
 /// `src/api/api.c`). Mirrors `z_get_options_default` field for field — the two
@@ -408,12 +428,16 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         // Consume the moved payload / attachment FIRST — before the
         // null-callback return, which is a path they must also be freed on. The
         // sibling `z_get` takes its bytes first for the same reason.
-        let (payload, attachment) = if options.is_null() {
-            (None, None)
+        let (payload, attachment, value_meta) = if options.is_null() {
+            (None, None, crate::get::PicoQueryValueMeta::default())
         } else {
             (
                 crate::pubsub::take_moved_bytes((*options).payload),
                 crate::pubsub::take_moved_bytes((*options).attachment),
+                crate::get::PicoQueryValueMeta {
+                    encoding: crate::encoding::take_moved_encoding((*options).encoding),
+                    source_info: crate::pubsub::source_info_hint_of((*options).source_info),
+                },
             )
         };
         if callback.is_null() {
@@ -442,6 +466,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             payload,
             attachment,
             state.qos,
+            value_meta,
             closure,
         )
     })
