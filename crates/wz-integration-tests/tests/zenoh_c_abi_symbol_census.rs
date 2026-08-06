@@ -26,9 +26,10 @@
 //!
 //! ## A RATCHET, not a zero-assertion — and that is a deliberate weaker claim
 //!
-//! 180 symbols remain at R311y564. Asserting emptiness would red the lane every
-//! run and be turned off; asserting nothing would let the number climb back.
-//! So the gate holds a committed [`BASELINE`] and fails when the set GROWS —
+//! Symbols remain. Asserting emptiness would red the lane every run and be
+//! turned off; asserting nothing would let the number climb back.
+//! So the gate holds a committed [`BASELINES`] row PER ABI ARM and fails when
+//! the set GROWS —
 //! and equally when it SHRINKS without the constant moving, because a stale
 //! ceiling is a gate measuring nothing. Both directions have to be a deliberate
 //! edit, which is the whole content of a ratchet.
@@ -55,13 +56,49 @@ use std::path::{Path, PathBuf};
 
 use wz_integration_tests::common::{wz_capi_c_cdylib, zenoh_c_oracle};
 
-/// Public symbols the real `libzenohc.so` defines and wz's cdylib does not, as
-/// measured at R311y564 on the no-unstable arm.
+/// Public symbols the real `libzenohc.so` defines and wz's cdylib does not,
+/// PER ABI ARM.
 ///
-/// Lower it in the same commit as the work that closes symbols. It is a
-/// CEILING, and the test fails if the real number drops below it without this
-/// constant moving — see the module docs.
-const BASELINE: usize = 90;
+/// # R311y566 — one number was blind on its own machine
+///
+/// This was a single `const BASELINE = 90`, measured against the author's
+/// `~/.local` (a plain no-unstable archive). Hosted CI provisions an
+/// unstable+SHM oracle, which DEFINES 758 public symbols to that one's 568 — so
+/// the same wz cdylib is missing 197 there and 90 here, and the gate redded on
+/// hosted for a difference that is not a regression. Exactly the class this
+/// tree already files under "a diff gate is blind on the machine that produced
+/// the commit", walked into while writing a gate to close another one.
+///
+/// Both recorded rows are MEASURED, and the hosted number was reproduced
+/// locally against `target/zenoh-c-shm` before being written here — 197 on both,
+/// so the row is a measurement rather than a transcription of a log line.
+///
+/// An arm with no row is a hard FAIL, not a default: the two unmeasured arms
+/// have no oracle on this machine, and a guessed ceiling is a gate that
+/// measures nothing. Add the row when the oracle exists.
+const BASELINES: &[(&str, usize)] = &[
+    // `~/.local`, upstream's published standalone archive.
+    ("nounstable", 90),
+    // `target/zenoh-c-shm`, built by `scripts/install-zenoh-c-shm.sh`; the arm
+    // hosted CI provisions.
+    ("unstable-shm", 197),
+];
+
+/// The committed ceiling for `arm`, or a FAILURE naming what to measure.
+fn baseline_for(arm: &str) -> usize {
+    BASELINES
+        .iter()
+        .find(|(name, _)| *name == arm)
+        .map(|(_, n)| *n)
+        .unwrap_or_else(|| {
+            panic!(
+                "no census baseline recorded for the '{arm}' ABI arm. The gap is \
+                 arm-dependent (each zenoh-c build DEFINES a different symbol \
+                 set), so a ceiling from another arm would measure nothing. \
+                 Measure this arm and add its row to BASELINES."
+            )
+        })
+}
 
 /// `SHT_DYNSYM`.
 const SHT_DYNSYM: u32 = 11;
@@ -164,6 +201,25 @@ fn is_public_api(name: &str) -> bool {
             || name.starts_with("zp_"))
 }
 
+/// Which of the four ABI arms this oracle is, named as
+/// `scripts/lib/zenoh-c-oracle-arm.sh` names them.
+///
+/// Read from the oracle's own `zenoh_configure.h`, which is the same fact the
+/// shell resolver reads — one rule, two consumers, and neither guesses.
+fn oracle_arm(include: &Path) -> String {
+    let configure = std::fs::read_to_string(include.join("zenoh_configure.h"))
+        .expect("the oracle ships zenoh_configure.h");
+    let unstable = configure.contains("#define Z_FEATURE_UNSTABLE_API");
+    let shm = configure.contains("#define Z_FEATURE_SHARED_MEMORY");
+    match (unstable, shm) {
+        (true, true) => "unstable-shm",
+        (true, false) => "unstable",
+        (false, true) => "nounstable-shm",
+        (false, false) => "nounstable",
+    }
+    .to_owned()
+}
+
 /// The oracle's library dir, or `None` with a LOUD note naming what to do.
 fn oracle_or_note() -> Option<(PathBuf, PathBuf)> {
     match zenoh_c_oracle() {
@@ -262,6 +318,8 @@ fn the_wz_capi_c_drop_in_surface_gap_does_not_grow() {
     let Some((include, libdir)) = oracle_or_note() else {
         return;
     };
+    let arm = oracle_arm(&include);
+    let baseline = baseline_for(&arm);
     let (wz, reference) = both_surfaces(&include, &libdir);
     let missing: Vec<&str> = reference
         .difference(&wz)
@@ -269,24 +327,25 @@ fn the_wz_capi_c_drop_in_surface_gap_does_not_grow() {
         .collect::<Vec<_>>();
 
     assert!(
-        missing.len() <= BASELINE,
-        "wz's zenoh-c drop-in is missing {} public symbol(s), up from the committed \
-         baseline of {BASELINE}. A C program naming any of them fails to LINK, so no \
-         behavioural leg can reach it:\n{}",
+        missing.len() <= baseline,
+        "wz's zenoh-c drop-in is missing {} public symbol(s) on the '{arm}' arm, up \
+         from the committed baseline of {baseline}. A C program naming any of them \
+         fails to LINK, so no behavioural leg can reach it:\n{}",
         missing.len(),
         missing.join("\n")
     );
     assert_eq!(
         missing.len(),
-        BASELINE,
-        "the gap is now {} and the committed baseline is still {BASELINE}. Lower \
-         BASELINE in the same commit as the work that closed the symbols — a ceiling \
-         left above the real number is a gate that measures nothing.",
+        baseline,
+        "the gap on the '{arm}' arm is now {} and its committed baseline is still \
+         {baseline}. Lower that row in BASELINES in the same commit as the work that \
+         closed the symbols — a ceiling left above the real number is a gate that \
+         measures nothing.",
         missing.len()
     );
     eprintln!(
-        "api-compat-c census: wz defines {} of the reference's {} public symbols; \
-         {} remain (baseline {BASELINE})",
+        "api-compat-c census [{arm}]: wz defines {} of the reference's {} public \
+         symbols; {} remain (baseline {baseline})",
         reference.len() - missing.len(),
         reference.len(),
         missing.len()
