@@ -145,13 +145,41 @@ generate nounstable-shm "${ARCHIVE_FEATURES[@]}" -F shared-memory || rc=1
 generate unstable-shm "${ARCHIVE_FEATURES[@]}" -F unstable -F shared-memory || rc=1
 [[ $rc -eq 0 ]] || exit 1
 
-# CALIBRATION FIRST. The no-unstable arm must reproduce the INSTALLED header
+# CALIBRATION FIRST. ONE generator arm must reproduce the INSTALLED header
 # exactly; if it does not, the generator is not describing the same build the
-# rest of the lane measures against and its UNSTABLE table cannot be trusted
-# either. Checking the arm we can verify is what licenses the arm we cannot.
-INCLUDE="${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include"
-if [[ -f "$INCLUDE/zenoh_opaque.h" ]]; then
-    if ! python3 - "$INCLUDE/zenoh_opaque.h" "$OUT/nounstable.stderr" <<'PY'
+# rest of the lane measures against and its OTHER tables cannot be trusted
+# either. Checking the arm we can verify is what licenses the arms we cannot.
+#
+# R311y566 — WHICH arm is READ OFF THE ORACLE, not assumed. This calibrated the
+# `nounstable` table unconditionally, which is blind on any machine whose
+# installed zenoh-c is a different build: the author's `~/.local` is a plain
+# archive (no unstable, no shared-memory) and the arm matched, while hosted CI
+# provisions an unstable+SHM oracle where that arm CANNOT match and never could.
+# So the job redded on a calibration structurally unable to pass, and the
+# four-arm comparison below it -- the whole point of the script -- has not run on
+# hosted since R311y542.
+#
+# The fix is the technique the census gate already uses: the oracle ships its own
+# `zenoh_configure.h`, so the arm is a fact to read rather than a default to
+# guess.
+PREFIX="${WZ_ZENOH_C_PREFIX:-$HOME/.local}"
+INCLUDE="$PREFIX/include"
+CALIBRATION_ARM=""
+if [[ -f "$INCLUDE/zenoh_configure.h" ]]; then
+    # The SHARED resolver, not an inlined copy — `test-zenoh-c-oracle-arm.sh`
+    # drives this exact file on all four combinations plus the refusal case, and
+    # a probe against a copy would prove nothing about what ships.
+    CALIBRATION_ARM="$(bash "$ROOT/scripts/lib/zenoh-c-oracle-arm.sh" "$PREFIX")"
+    say "installed oracle is the '$CALIBRATION_ARM' build"
+elif [[ -f "$INCLUDE/zenoh_opaque.h" ]]; then
+    say "FAIL — the installed oracle has zenoh_opaque.h but no zenoh_configure.h,"
+    say "       so which build it is cannot be established. Calibrating against a"
+    say "       guessed arm is what made this gate structurally unpassable on"
+    say "       hosted CI; it is not repeated."
+    exit 1
+fi
+if [[ -n "$CALIBRATION_ARM" && -f "$INCLUDE/zenoh_opaque.h" ]]; then
+    if ! python3 - "$INCLUDE/zenoh_opaque.h" "$OUT/$CALIBRATION_ARM.stderr" <<'PY'
 import re, sys
 hdr, gen = sys.argv[1], sys.argv[2]
 installed = {m.group(2): int(m.group(3)) for m in re.finditer(
@@ -168,9 +196,10 @@ for t, i, g in bad:
 sys.exit(1 if bad or not common else 0)
 PY
     then
-        say "FAIL — the no-unstable generator arm does NOT reproduce the installed"
-        say "       header. Until it does, the unstable arm's table describes some"
-        say "       other build and comparing wz against it would be theatre."
+        say "FAIL — the '$CALIBRATION_ARM' generator arm does NOT reproduce the"
+        say "       installed header, and that IS the arm this oracle claims to be."
+        say "       Until it does, every other arm's table describes some other"
+        say "       build and comparing wz against them would be theatre."
         exit 1
     fi
 else

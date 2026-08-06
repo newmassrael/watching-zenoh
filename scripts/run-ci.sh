@@ -878,6 +878,28 @@ layer_0_preflight_lints() {
     # whatever shellcheck the developer has, and this line is what makes a
     # local green comparable to a hosted one.
     echo "  actionlint OK (${al_version}; $(shellcheck --version 2>/dev/null | awk '/^version:/{print "shellcheck " $2}' || true))"
+
+    # 0.4 — the zenoh-c ORACLE-ARM resolver, driven on all four feature
+    # combinations plus the refusal case.
+    #
+    # R311y566. `check-capi-c-opaque-arms.sh` calibrated its generator against
+    # the `nounstable` table unconditionally. That matched the author's
+    # `~/.local` (a plain archive) and could never match hosted CI's
+    # unstable+SHM oracle, so the `capi-c-arms` job redded on a check
+    # structurally unable to pass and the four-arm comparison behind it went
+    # unrun from R311y542. The arm is now READ from the oracle's own
+    # `zenoh_configure.h`, and this drives that resolver rather than a copy of
+    # its logic — the shape of check a count guard nothing ties to its binary
+    # already taught this tree to distrust.
+    #
+    # In Layer 0 because it needs no oracle, no toolchain and no network: it
+    # synthesises its prefixes. The lane it PROTECTS (`capi-c-arms`) is
+    # hosted-only and opt-in, which is precisely why its resolver has to be
+    # checkable here.
+    if ! bash scripts/lib/test-zenoh-c-oracle-arm.sh; then
+        echo "  Layer0 FAIL: the zenoh-c oracle-arm resolver is wrong (see above)" >&2
+        return 1
+    fi
 }
 
 # ─── Layer A — mnemosyne validate-workspace ─────────────────────────
