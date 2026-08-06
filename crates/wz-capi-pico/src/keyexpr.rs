@@ -854,6 +854,36 @@ pub unsafe extern "C" fn z_keyexpr_is_canon(start: *const c_char, len: usize) ->
 /// # Safety
 /// `start` must be null or point at `*len` readable AND writable bytes; `len`
 /// must be null or valid and writable.
+/// wz's typed canon error as pico's `zp_keyexpr_canon_status_t`
+/// (`api/constants.h:90-100`).
+///
+/// R311y564 — this export used to flatten every failure onto `Z_ERR_INVALID`
+/// (-1), which is not a member of that enum at all: -1 is
+/// `Z_KEYEXPR_CANON_LONE_DOLLAR_STAR`, a SUCCESS-shaped status describing a
+/// keyexpr that merely needs rewriting. So a C program checking why its keyexpr
+/// was refused was told "it contains a `$*` chunk" for an empty chunk, a stray
+/// `?`, or an unbound `$`.
+///
+/// The mapping already existed — `layer3_keyexpr_canon.rs` has carried it since
+/// R221 to compare wz's Rust canonizer against pico's status codes — so this is
+/// the same table finally reaching the C ABI. Found by the dlopen differential
+/// in `pico_pure_function_oracle.rs`, which compares the two libraries' EXPORTS
+/// rather than wz's Rust function.
+fn pico_canon_status(err: &wz_runtime_tokio::keyexpr_canon::KeyexprCanonError) -> ZResult {
+    use wz_runtime_tokio::keyexpr_canon::KeyexprCanonError as E;
+    match err {
+        E::EmptyChunk => -4,
+        E::StarsInChunk => -5,
+        E::DollarAfterDollarOrStar => -6,
+        E::ContainsSharpOrQmark => -7,
+        E::ContainsUnboundDollar => -8,
+        // A wz-side no-alloc-only variant with no pico mirror; on the AP
+        // backing this crate runs on it is never produced, and a generic
+        // failure is the honest answer rather than a status pico defines.
+        E::ExceedsCapacity => Z_ERR_GENERIC,
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn z_keyexpr_canonize(start: *mut c_char, len: *mut usize) -> ZResult {
     guarded(|| {
@@ -866,7 +896,7 @@ pub unsafe extern "C" fn z_keyexpr_canonize(start: *mut c_char, len: *mut usize)
         };
         let canon = match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(text) {
             Ok(c) => c,
-            Err(_) => return Z_ERR_INVALID,
+            Err(err) => return pico_canon_status(&err),
         };
         let bytes = canon.as_str().as_bytes();
         debug_assert!(

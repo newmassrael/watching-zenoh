@@ -53,6 +53,7 @@
 //! handles at the same library makes the mismatch assertions unreachable, which
 //! is the shape this arrangement exists to avoid.
 
+use std::ffi::c_char;
 use std::path::PathBuf;
 
 use libloading::{Library, Symbol};
@@ -404,6 +405,89 @@ fn encoding_strings_agree_with_the_real_pico_library() {
             );
         }
     }
+}
+
+/// The keyexpr CANONIZER, compared library against library.
+///
+/// R311y564 — this leg exists because the workspace had already MEASURED pico's
+/// answers for these inputs and recorded them as "Pico bug #1", a pinned
+/// divergence in which wz dropped a `*` that followed a `**` and pico reordered
+/// it. Running the same probe against the real `libzenohc.so` — a third
+/// implementation, and zenoh's reference one — gave pico's answer on every case,
+/// so the pin was wrong about which side was right, and wz had been WIDENING
+/// every keyexpr of that shape (`a/**/b` matches `a/b`; `a/**/*/b` does not).
+///
+/// `layer3_keyexpr_canon.rs` compares wz's RUST canonizer against pico through a
+/// subprocess. This leg compares the two C ABIs' EXPORTS, which is the surface a
+/// drop-in consumer actually calls, and it is where the pico DIALECT lives — the
+/// one sub-case (`$*` inside a wild run) where the two upstreams themselves
+/// disagree and wz must follow pico here and zenoh-c there.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "dlopens the CMake-built libzenohpico.so oracle; run by run-ci \
+            Layer E"]
+fn keyexpr_canonization_agrees_with_the_real_pico_library() {
+    // SAFETY: both libraries export pico's keyexpr ABI; each is opened in its
+    // own namespace so the two `z_*` sets cannot alias.
+    unsafe {
+        let wz = open(wz_cdylib());
+        let pico = open(pico_library());
+        for probe in [
+            "home/temp",
+            "home/$*/temp",
+            // The reorder cases — the defect this leg was written for.
+            "home/**/*/temp",
+            "**/*",
+            "a/**/*/*/b",
+            "home/**/**/temp",
+            "**/**",
+            "**/**/**",
+            // The DIALECT cases: pico keeps the `**` in front of a `$*`, and
+            // zenoh-c does not. wz must answer pico's way HERE.
+            "**/$*/temp",
+            "**/$*",
+            "**/$*$*/temp",
+            "home/$*$*$*foo",
+            // Grammar rejections, whose STATUS CODE is part of the contract.
+            "home//temp",
+            "home/foo?bar",
+            "home/fo*o",
+        ] {
+            let from_wz = canonize_through(&wz, probe);
+            let from_pico = canonize_through(&pico, probe);
+            assert_eq!(
+                from_wz, from_pico,
+                "z_keyexpr_canonize_null_terminated disagrees with upstream for \
+                 {probe:?}"
+            );
+        }
+    }
+}
+
+/// Canonize `probe` through `lib`, returning `"<status>:<result>"`.
+///
+/// The status is folded into the compared string on purpose: a canonizer that
+/// produced the right text under the wrong code, or refused what upstream
+/// accepts, would otherwise compare equal on the half that was measured.
+///
+/// # Safety
+/// `lib` must export pico's `z_keyexpr_canonize_null_terminated`.
+unsafe fn canonize_through(lib: &Library, probe: &str) -> String {
+    // A generous buffer: canonization never grows its input, so the only
+    // requirement is room for the original plus its terminator.
+    let mut buf = vec![0u8; probe.len() + 64];
+    buf[..probe.len()].copy_from_slice(probe.as_bytes());
+    // SAFETY: the caller's contract for the export's shape.
+    let canonize: libloading::Symbol<unsafe extern "C" fn(*mut c_char) -> i8> =
+        unsafe { lib.get(b"z_keyexpr_canonize_null_terminated\0") }
+            .expect("z_keyexpr_canonize_null_terminated is exported by both libraries");
+    // SAFETY: `buf` is NUL-terminated and writable for its whole length.
+    let status = unsafe { canonize(buf.as_mut_ptr().cast::<c_char>()) };
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    format!(
+        "{status}:{}",
+        String::from_utf8_lossy(&buf[..end]).into_owned()
+    )
 }
 
 /// Build an encoding whose id is `id` with no schema, and render it.
