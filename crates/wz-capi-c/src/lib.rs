@@ -113,5 +113,9 @@ pub mod source_info;
 pub mod string;
 pub mod sub;
 pub mod sync;
+/// R311y568 — the THREAD family (`z_owned_task_t` and its four operations), the
+/// last of upstream's C-shaped concurrency helpers this crate did not export.
+/// Its mutex and condvar siblings are [`crate::sync`].
+pub mod task;
 pub mod timestamp;
 pub mod zid;

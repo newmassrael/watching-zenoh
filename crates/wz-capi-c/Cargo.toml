@@ -79,7 +79,17 @@ zenoh-c-shared-memory = []
 [dependencies]
 # The ABI-neutral session model, shared with wz-capi-pico.
 wz-capi-core = { path = "../wz-capi-core" }
-wz-runtime-tokio = { path = "../wz-runtime-tokio", features = ["routing-accept"] }
+# `query-reply-err` is DECLARED rather than inherited from the default set, and
+# R311y568 is why: `z_query_reply_err` routes through
+# `ReplyOut::reply_err`, whose body is `#[cfg(feature = "query-reply-err")]` and
+# whose OFF arm discards its arguments SILENTLY. A build that turned the default
+# set off would link the symbol and answer nothing — the vacuous-proof shape this
+# tree names. Naming the gate here makes the dependency explicit at the one place
+# that could otherwise drop it.
+wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
+    "routing-accept",
+    "query-reply-err",
+] }
 
 [lints]
 workspace = true

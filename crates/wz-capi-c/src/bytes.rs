@@ -10,11 +10,11 @@
 //! can verify. Copying is the safe direction — a caller who honours the static
 //! contract loses only an allocation.
 
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{c_char, c_int, c_void, CStr};
 
 use crate::abi::{z_loaned_bytes_t, z_moved_bytes_t, z_owned_bytes_t, z_owned_string_t, Handle};
 use crate::ffi::guarded;
-use crate::result::{ZResult, Z_ENULL, Z_EPARSE, Z_OK};
+use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_EPARSE, Z_OK};
 use crate::string::owned_string_from;
 
 /// The owned payload behind a bytes handle.
@@ -373,6 +373,271 @@ pub unsafe extern "C" fn z_bytes_copy_from_buf(
     })
 }
 
+// --- R311y568: the six remaining constructors + the emptiness predicate ------
+//
+// Every one is a symbol the real `libzenohc.so` defines and this cdylib did not,
+// so a C program naming any of them failed at LINK time. They fall into three
+// shapes and the file already has one of each: a COPY from a borrowed thing, a
+// TAKE of a moved owned thing, and the static-buffer variant whose contract wz
+// cannot honour and therefore copies (see the module note).
+
+/// Install `payload` into `this_`, gravestoning it first.
+///
+/// The tail every constructor in this section shares. It exists because the
+/// three-line `Box::into_raw` / `from_handle` sequence was already written out
+/// five times in this file, and six more copies is where one of them ends up
+/// missing the gravestone — which a caller who ignores the return code reads as
+/// a live payload sitting on a stale stack value.
+///
+/// # Safety
+/// `this_` must be non-null, valid and writable.
+unsafe fn install_payload(this_: *mut z_owned_bytes_t, payload: Vec<u8>) {
+    let handle = Box::into_raw(Box::new(BytesState::whole(payload))) as Handle;
+    // SAFETY: the caller's contract.
+    unsafe { *this_ = z_owned_bytes_t::from_handle(handle) };
+}
+
+/// Build a payload by COPYING a loaned SLICE (zenoh-c
+/// `z_bytes_copy_from_slice`).
+///
+/// # Safety
+/// `this_` must be valid and writable; `slice` must be null or a valid loaned
+/// slice.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_copy_from_slice(
+    this_: *mut z_owned_bytes_t,
+    slice: *const crate::abi::z_loaned_slice_t,
+) {
+    let _ = guarded(|| {
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_bytes_t::null_value() };
+        // A null slice yields the EMPTY payload rather than a gravestone:
+        // upstream's signature returns `void`, so a caller has no way to learn
+        // that construction failed and would go on to loan a dead value.
+        // SAFETY: the caller's contract.
+        let bytes = unsafe { crate::slice::loaned_slice_bytes(slice) }.unwrap_or(&[]);
+        // SAFETY: `this_` is non-null and writable.
+        unsafe { install_payload(this_, bytes.to_vec()) };
+        Z_OK
+    });
+}
+
+/// Build a payload by COPYING a loaned STRING (zenoh-c
+/// `z_bytes_copy_from_string`).
+///
+/// # Safety
+/// `this_` must be valid and writable; `str_` must be null or a valid loaned
+/// string.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_copy_from_string(
+    this_: *mut z_owned_bytes_t,
+    str_: *const crate::abi::z_loaned_string_t,
+) {
+    let _ = guarded(|| {
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_bytes_t::null_value() };
+        // The string's own `len` EXCLUDES wz's trailing NUL (see
+        // `crate::string`), so the payload is the text and not the terminator —
+        // which is what upstream's `z_bytes_copy_from_string` puts on the wire.
+        // SAFETY: the caller's contract.
+        let bytes = unsafe { crate::string::loaned_string_bytes(str_) }.unwrap_or(&[]);
+        // SAFETY: `this_` is non-null and writable.
+        unsafe { install_payload(this_, bytes.to_vec()) };
+        Z_OK
+    });
+}
+
+/// Build a payload by CONSUMING an owned slice (zenoh-c `z_bytes_from_slice`).
+///
+/// # Safety
+/// `this_` must be valid and writable; `slice` must be null or a valid moved
+/// slice, which is consumed.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_from_slice(
+    this_: *mut z_owned_bytes_t,
+    slice: *mut crate::abi::z_moved_slice_t,
+) {
+    let _ = guarded(|| {
+        // The move is UNCONDITIONAL and happens first, so an early return still
+        // consumes what upstream would have consumed — the same discipline
+        // `z_bytes_from_buf` states for its deleter.
+        // SAFETY: the caller's contract.
+        let taken = unsafe { crate::slice::take_moved_slice(slice) };
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_bytes_t::null_value() };
+        // SAFETY: `this_` is non-null and writable.
+        unsafe { install_payload(this_, taken.unwrap_or_default()) };
+        Z_OK
+    });
+}
+
+/// Build a payload by CONSUMING an owned string (zenoh-c
+/// `z_bytes_from_string`).
+///
+/// # Safety
+/// `this_` must be valid and writable; `s` must be null or a valid moved string,
+/// which is consumed.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_from_string(
+    this_: *mut z_owned_bytes_t,
+    s: *mut crate::abi::z_moved_string_t,
+) {
+    let _ = guarded(|| {
+        // Unconditional, for the reason given in `z_bytes_from_slice`.
+        // SAFETY: the caller's contract.
+        let taken = unsafe { crate::string::take_moved_string(s) };
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_bytes_t::null_value() };
+        // SAFETY: `this_` is non-null and writable.
+        unsafe { install_payload(this_, taken.unwrap_or_default()) };
+        Z_OK
+    });
+}
+
+/// Build a payload over a caller buffer with STATIC lifetime (zenoh-c
+/// `z_bytes_from_static_buf`).
+///
+/// wz COPIES, exactly as [`z_bytes_from_static_str`] does and for the same
+/// reason the module note gives: the wz payload path owns its bytes, so a
+/// zero-copy borrow of the caller's buffer is not representable. The divergence
+/// is a copy the caller does not pay for upstream and is unobservable through the
+/// ABI — upstream's contract only PERMITS the borrow, it does not let the caller
+/// detect one.
+///
+/// # Safety
+/// `this_` must be valid and writable; `data` must be null or point at `len`
+/// readable bytes that live for the program's duration.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_from_static_buf(
+    this_: *mut z_owned_bytes_t,
+    data: *mut u8,
+    len: usize,
+) -> ZResult {
+    // SAFETY: the caller's contract, delegated — a `'static` buffer is a valid
+    // readable one, and the copying twin makes no further demand of it.
+    unsafe { z_bytes_copy_from_buf(this_, data as *const u8, len) }
+}
+
+/// Build a payload by TAKING OWNERSHIP of a caller STRING (zenoh-c
+/// `z_bytes_from_str`).
+///
+/// The string sibling of [`z_bytes_from_buf`], with the same unconditional
+/// deleter discipline: wz copies the text and runs the caller's `deleter` on
+/// every path, because upstream's ownership transfer is unconditional and a
+/// skipped deleter would leak the caller's buffer.
+///
+/// # Safety
+/// `this_` must be valid and writable; `str_` must be null or NUL-terminated;
+/// `deleter` must be null or a valid C function pointer, and owns `str_` after
+/// this call.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_from_str(
+    this_: *mut z_owned_bytes_t,
+    str_: *mut c_char,
+    deleter: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+    context: *mut c_void,
+) -> ZResult {
+    let rc = guarded(|| {
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_bytes_t::null_value() };
+        if str_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract — NUL-terminated.
+        let bytes = unsafe { CStr::from_ptr(str_) }.to_bytes().to_vec();
+        // SAFETY: `this_` is non-null and writable.
+        unsafe { install_payload(this_, bytes) };
+        Z_OK
+    });
+    // UNCONDITIONAL, outside the `guarded` body so it runs on the error returns
+    // above too.
+    if let Some(free) = deleter {
+        // SAFETY: upstream's contract — the deleter owns `str_` from here, and
+        // an unwind across the C boundary is UB, so it is caught.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            free(str_ as *mut c_void, context);
+        }));
+    }
+    rc
+}
+
+/// `true` iff the payload carries no bytes (zenoh-c `z_bytes_is_empty`).
+///
+/// A gravestone reads as EMPTY, which is upstream's answer for a null loan and
+/// the same convention [`crate::slice::z_slice_is_empty`] follows.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned bytes.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_is_empty(this_: *const z_loaned_bytes_t) -> bool {
+    crate::ffi::guard_val(true, || {
+        // SAFETY: the caller's contract, delegated.
+        unsafe { bytes_slice(this_) }.map_or(true, <[u8]>::is_empty)
+    })
+}
+
+/// Borrow the payload as a contiguous VIEW slice, without copying (zenoh-c
+/// `z_bytes_get_contiguous_view`).
+///
+/// ## wz always succeeds here, and that is a superset rather than a shortcut
+///
+/// Upstream fails when the `ZBytes` is a sequence of several buffers, because
+/// there is no single run to point at. wz's payload IS contiguous by
+/// construction — see [`BytesState`], which keeps one `Vec<u8>` and records the
+/// slice boundaries alongside it — so the case upstream refuses cannot arise.
+///
+/// A caller that checks the return code is served correctly either way; one that
+/// relies on the FAILURE (to detect a multi-slice payload) should be asking
+/// [`z_bytes_get_slice_iterator`] instead, which reports the boundaries wz does
+/// keep.
+///
+/// UNSTABLE-gated, as upstream gates it.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned bytes that outlives every use of the
+/// view; `view` must be null or valid and writable.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_get_contiguous_view(
+    this_: *const z_loaned_bytes_t,
+    view: *mut crate::abi::z_view_slice_t,
+) -> ZResult {
+    guarded(|| {
+        if view.is_null() {
+            return Z_ENULL;
+        }
+        // Gravestoned before any fallible work, so a caller that ignores the
+        // code loans an empty view rather than a stale stack value.
+        // SAFETY: the caller's contract.
+        unsafe { *view = crate::abi::z_view_slice_t::null_value() };
+        // SAFETY: the caller's contract, delegated.
+        let Some(bytes) = (unsafe { bytes_slice(this_) }) else {
+            return Z_ENULL;
+        };
+        // A BORROW of the payload this crate owns — the caller's own
+        // `z_owned_bytes_t` is what keeps it alive, which is upstream's contract
+        // for this view too.
+        // SAFETY: as above.
+        unsafe { *view = crate::slice::view_slice_over(bytes) };
+        Z_OK
+    })
+}
+
 /// Copy the payload into an owned SLICE (zenoh-c `z_bytes_to_slice`) — the
 /// bytes-shaped twin of [`z_bytes_to_string`].
 ///
@@ -462,6 +727,93 @@ pub unsafe extern "C" fn z_bytes_reader_read(
         unsafe { std::ptr::copy_nonoverlapping(reader.ptr.add(reader.pos), dst, n) };
         reader.pos += n;
         n
+    })
+}
+
+/// How many bytes the reader has NOT yet handed out (zenoh-c
+/// `z_bytes_reader_remaining`).
+///
+/// # Safety
+/// `this_` must be null or a valid reader whose payload is still alive.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_reader_remaining(this_: *const z_bytes_reader_t) -> usize {
+    crate::ffi::guard_val(0, || {
+        if this_.is_null() {
+            return 0;
+        }
+        // SAFETY: the caller's contract.
+        let reader = unsafe { &*this_ };
+        reader.len.saturating_sub(reader.pos)
+    })
+}
+
+/// The reader's current offset (zenoh-c `z_bytes_reader_tell`).
+///
+/// `int64_t` upstream, and a payload past `i64::MAX` cannot exist in an address
+/// space, so the conversion is total in practice; it saturates rather than
+/// wrapping so the failure would be a stuck cursor rather than a negative one.
+///
+/// # Safety
+/// `this_` must be null or a valid reader.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_reader_tell(this_: *const z_bytes_reader_t) -> i64 {
+    crate::ffi::guard_val(0, || {
+        if this_.is_null() {
+            return 0;
+        }
+        // SAFETY: the caller's contract.
+        i64::try_from(unsafe { &*this_ }.pos).unwrap_or(i64::MAX)
+    })
+}
+
+/// Move the reader's cursor (zenoh-c `z_bytes_reader_seek`).
+///
+/// `origin` follows C's `fseek`: `SEEK_SET` (0) from the start, `SEEK_CUR` (1)
+/// from the current position, `SEEK_END` (2) from the end. Seeking OUT of the
+/// payload is refused with `Z_EINVAL` and leaves the cursor untouched, which is
+/// upstream's behaviour — a reader left past its end would make
+/// [`z_bytes_reader_remaining`] and [`z_bytes_reader_read`] disagree about
+/// whether anything is left.
+///
+/// # Safety
+/// `this_` must be null or a valid reader.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_reader_seek(
+    this_: *mut z_bytes_reader_t,
+    offset: i64,
+    origin: c_int,
+) -> ZResult {
+    /// C `SEEK_SET`.
+    const SEEK_SET: c_int = 0;
+    /// C `SEEK_CUR`.
+    const SEEK_CUR: c_int = 1;
+    /// C `SEEK_END`.
+    const SEEK_END: c_int = 2;
+    guarded(|| {
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        let reader = unsafe { &mut *this_ };
+        // The arithmetic runs in `i64` precisely so an out-of-range seek is
+        // DETECTED rather than wrapping into a plausible `usize`.
+        let base = match origin {
+            SEEK_SET => 0i64,
+            SEEK_CUR => i64::try_from(reader.pos).unwrap_or(i64::MAX),
+            SEEK_END => i64::try_from(reader.len).unwrap_or(i64::MAX),
+            _ => return Z_EINVAL,
+        };
+        let Some(target) = base.checked_add(offset) else {
+            return Z_EINVAL;
+        };
+        let Ok(target) = usize::try_from(target) else {
+            return Z_EINVAL;
+        };
+        if target > reader.len {
+            return Z_EINVAL;
+        }
+        reader.pos = target;
+        Z_OK
     })
 }
 

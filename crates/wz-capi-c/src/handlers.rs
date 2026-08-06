@@ -809,10 +809,8 @@ mod tests {
             let marshal = Box::into_raw(Box::new(crate::sample::SampleMarshal::new(
                 "demo/handler".to_owned(),
                 b"payload".to_vec(),
-                None,
                 crate::abi::Z_SAMPLE_KIND_PUT,
-                None,
-                None,
+                crate::sample::SampleMeta::default(),
             )));
             let loaned_sample = marshal as *const crate::abi::z_loaned_sample_t;
             let call = callback.call.expect("the constructor wired a callback");
@@ -1180,6 +1178,23 @@ macro_rules! channel_family {
             });
         }
 
+        handler_internals!($Owned, $check, $null);
+    };
+}
+
+/// Emit the `z_internal_<family>_check` / `_null` pair for ONE handler family.
+///
+/// R311y568 — split out of [`channel_family`], which used to inline it. The
+/// split is what the census forced: three of upstream's six handler families are
+/// hand-written here rather than macro-generated (the two fifos and the sample
+/// ring, which predate the macro), so those three had a `drop` and a `loan` and
+/// no `check` / `null` — six symbols a C program could name and not link, while
+/// their three macro-generated siblings resolved fine.
+///
+/// Naming it separately means the pair is one definition serving all six, rather
+/// than a fourth hand-written copy that can drift from the macro's.
+macro_rules! handler_internals {
+    ($Owned:ty, $check:ident, $null:ident) => {
         #[doc = concat!("`true` iff the handler is live (zenoh-c `", stringify!($check), "`).")]
         ///
         /// # Safety
@@ -1205,6 +1220,26 @@ macro_rules! channel_family {
         }
     };
 }
+
+// The three HAND-WRITTEN families' internals. Their `new` / `loan` / `recv` /
+// `drop` are spelled out above (they predate `channel_family!`); only this pair
+// was missing, and it is emitted from the same macro their macro-generated
+// siblings use so the two cannot drift.
+handler_internals!(
+    crate::abi::z_owned_ring_handler_sample_t,
+    z_internal_ring_handler_sample_check,
+    z_internal_ring_handler_sample_null
+);
+handler_internals!(
+    crate::abi::z_owned_fifo_handler_reply_t,
+    z_internal_fifo_handler_reply_check,
+    z_internal_fifo_handler_reply_null
+);
+handler_internals!(
+    crate::abi::z_owned_fifo_handler_query_t,
+    z_internal_fifo_handler_query_check,
+    z_internal_fifo_handler_query_null
+);
 
 // The six channel families upstream ships: fifo and ring for each of sample /
 // query / reply. Three existed; the other three are R311y565.

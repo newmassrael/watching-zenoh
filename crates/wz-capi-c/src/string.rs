@@ -203,6 +203,52 @@ pub unsafe extern "C" fn z_string_from_str(
     rc
 }
 
+// --- R311y568: the two cross-module readers `crate::bytes` needs -------------
+
+/// The bytes behind a loaned string, for a consumer outside this module.
+///
+/// EXCLUDES wz's trailing NUL (it is not in `len`), so a payload built from one
+/// carries the text and not the terminator.
+///
+/// # Safety
+/// As [`string_bytes`].
+pub(crate) unsafe fn loaned_string_bytes<'a>(this_: *const z_loaned_string_t) -> Option<&'a [u8]> {
+    // SAFETY: the caller's contract, delegated.
+    unsafe { string_bytes(this_) }
+}
+
+/// CONSUME a moved string: take its bytes, gravestone the caller's slot, and
+/// free the buffer when it was owned.
+///
+/// The string twin of [`crate::slice::take_moved_slice`]; see there for why a
+/// `z_moved_*` parameter must be taken rather than read.
+///
+/// # Safety
+/// `moved` must be null, or a valid, writable moved string.
+pub(crate) unsafe fn take_moved_string(moved: *mut z_moved_string_t) -> Option<Vec<u8>> {
+    if moved.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    let (ptr, len, owned) = unsafe {
+        let s = &(*moved)._this;
+        (s.ptr, s.len, s.owned)
+    };
+    // SAFETY: gravestoned before any free, so a second drop is a no-op.
+    unsafe { (*moved)._this = z_owned_string_t::null_value() };
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: `ptr`/`len` describe a live buffer per the caller's contract.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+    if !owned.is_null() {
+        // SAFETY: a live `Box<Vec<u8>>` this crate leaked in
+        // `owned_string_from`.
+        drop(unsafe { Box::from_raw(owned as *mut Vec<u8>) });
+    }
+    Some(bytes)
+}
+
 // --- R311y564: the rest of upstream's string surface ------------------------
 
 /// The GRAVESTONE owned string — a null buffer, which is what

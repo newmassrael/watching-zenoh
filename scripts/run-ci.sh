@@ -9174,8 +9174,14 @@ layer_c1cc_api_compat_c() {
     # example calls is invisible to the corpus and is still a program that cannot
     # be written. A RATCHET, not a zero: it fails when the gap grows, and equally
     # when it shrinks without its committed baseline moving.
+    # R311y568 — `wz_exports_nothing_the_reference_does_not` is the OTHER
+    # direction, and it is a separate leg rather than a widening of the first:
+    # the ratchet above measures reference-minus-wz and is blind by construction
+    # to wz-minus-reference, which is where an ungated unstable export or an
+    # invented `z_`-named symbol lives. Both were present when it was written.
     for leg in \
         the_wz_capi_c_drop_in_surface_gap_does_not_grow \
+        wz_exports_nothing_the_reference_does_not \
         the_census_reads_both_libraries_rather_than_nothing; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \

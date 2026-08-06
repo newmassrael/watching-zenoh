@@ -271,6 +271,154 @@ pub unsafe extern "C" fn z_close_options_default(this_: *mut z_close_options_t) 
     };
 }
 
+// --- R311y568: the CONCURRENT-CLOSE handle family ---------------------------
+
+/// zenoh-c `zc_owned_concurrent_close_handle_t` — 16 bytes at align 8, MEASURED
+/// against the unstable oracle's header (it is declared on that arm only, which
+/// is why the whole family is unstable-gated here as upstream gates it).
+///
+/// ## wz closes SYNCHRONOUSLY, so this handle is always a gravestone
+///
+/// [`z_close_options_t::internal_out_concurrent`] already records the divergence:
+/// wz's close runs to completion inside `z_close`, so there is no separate task
+/// to control and the out-param is left untouched. The four functions below are
+/// therefore the operations on a handle that is never non-null.
+///
+/// That is not a stub. Upstream's contract for an uninitialised handle is that
+/// `zc_internal_concurrent_close_handle_check` reads `false`, `_wait` has nothing
+/// to wait for, and `_drop` is a no-op — which is exactly what a C program that
+/// never set the option gets from upstream too, and exactly what it gets here
+/// whether or not it set it. Their absence, by contrast, was a LINK error for any
+/// program that named them.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[repr(C)]
+pub struct zc_owned_concurrent_close_handle_t {
+    pub(crate) handle: *mut c_void,
+    pub(crate) _pad: [u8; 8],
+}
+
+/// Moved concurrent-close handle (zenoh-c `zc_moved_concurrent_close_handle_t`).
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[repr(C)]
+pub struct zc_moved_concurrent_close_handle_t {
+    pub(crate) _this: zc_owned_concurrent_close_handle_t,
+}
+
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+const _: () = {
+    assert!(std::mem::size_of::<zc_owned_concurrent_close_handle_t>() == 16);
+    assert!(std::mem::align_of::<zc_owned_concurrent_close_handle_t>() == 8);
+    assert!(std::mem::size_of::<zc_moved_concurrent_close_handle_t>() == 16);
+};
+
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+impl zc_owned_concurrent_close_handle_t {
+    /// The gravestone value — the only value wz ever produces.
+    pub(crate) fn null_value() -> Self {
+        Self {
+            handle: std::ptr::null_mut(),
+            _pad: [0u8; 8],
+        }
+    }
+}
+
+/// Wait for a concurrent close to finish (zenoh-c
+/// `zc_concurrent_close_handle_wait`).
+///
+/// `Z_OK` on a gravestone, which is the honest answer rather than a convenient
+/// one: wz's `z_close` has ALREADY completed by the time it returns, so "the
+/// close this handle refers to has finished" is true. Reporting an error would
+/// tell a C program its session failed to close when it did.
+///
+/// # Safety
+/// `handle` must be null or a valid moved concurrent-close handle.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn zc_concurrent_close_handle_wait(
+    handle: *mut zc_moved_concurrent_close_handle_t,
+) -> crate::result::ZResult {
+    // SAFETY: the caller's contract, delegated — the handle is consumed either
+    // way, as a `zc_moved_*` parameter must be.
+    unsafe { zc_concurrent_close_handle_drop(handle) };
+    crate::result::Z_OK
+}
+
+/// Free a concurrent-close handle (zenoh-c `zc_concurrent_close_handle_drop`).
+///
+/// # Safety
+/// `this_` must be null or a valid moved concurrent-close handle.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn zc_concurrent_close_handle_drop(
+    this_: *mut zc_moved_concurrent_close_handle_t,
+) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract. Gravestoned on every path, so a
+        // defensive second drop is a no-op.
+        unsafe { (*this_)._this = zc_owned_concurrent_close_handle_t::null_value() };
+    }
+}
+
+/// `true` iff the handle refers to a live concurrent close (zenoh-c
+/// `zc_internal_concurrent_close_handle_check`).
+///
+/// Always `false` here — see the type's docs.
+///
+/// # Safety
+/// `this_` must be null or a valid owned concurrent-close handle.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn zc_internal_concurrent_close_handle_check(
+    this_: *const zc_owned_concurrent_close_handle_t,
+) -> bool {
+    guard_val(false, || {
+        // SAFETY: the caller's contract.
+        !this_.is_null() && !unsafe { (*this_).handle }.is_null()
+    })
+}
+
+/// Zero a concurrent-close handle (zenoh-c
+/// `zc_internal_concurrent_close_handle_null`).
+///
+/// # Safety
+/// `this_` must be null or a valid, writable owned concurrent-close handle.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn zc_internal_concurrent_close_handle_null(
+    this_: *mut zc_owned_concurrent_close_handle_t,
+) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = zc_owned_concurrent_close_handle_t::null_value() };
+    }
+}
+
+/// The last error this thread recorded, as a view string (zenoh-c
+/// `zc_get_last_error`).
+///
+/// wz records none: every entry point in this crate reports its verdict through
+/// its `z_result_t` return, and [`crate::ffi`] maps even a panic onto
+/// `Z_EINVAL` rather than stashing a message. So this writes the EMPTY view,
+/// which is upstream's own answer when nothing has failed.
+///
+/// The divergence is that a wz caller learns nothing MORE from this than the
+/// return code already told them — never something different, and never a stale
+/// message from an unrelated call, which is the failure mode a thread-local
+/// error string has.
+///
+/// UNSTABLE-gated, because upstream gates it (`zenoh_commons.h:5774`).
+///
+/// # Safety
+/// `out` must be null or valid and writable.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn zc_get_last_error(out: *mut crate::abi::z_view_string_t) {
+    if !out.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *out = crate::abi::z_view_string_t::null_value() };
+    }
+}
+
 /// `true` iff the session has been closed (zenoh-c `z_session_is_closed`).
 ///
 /// R311y564 — the accessor existed on `SessionState` from the day the drive

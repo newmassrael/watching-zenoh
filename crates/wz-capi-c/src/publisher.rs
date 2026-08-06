@@ -103,6 +103,102 @@ pub const ZC_LOCALITY_SESSION_LOCAL: zc_locality_t = 1;
 /// `ZC_LOCALITY_REMOTE` = 2.
 pub const ZC_LOCALITY_REMOTE: zc_locality_t = 2;
 
+// --- R311y568: the option struct + four constant getters --------------------
+
+/// Options for `z_publisher_delete` (`zenoh_commons.h:890-895`) — 8 bytes, one
+/// field.
+///
+/// R311y568 — NOT DECLARED until this round; [`z_publisher_delete`] took
+/// `*mut c_void`, which is the same "no signature to write against" gap y565
+/// closed for `z_query_reply_del_options_t` and y545 for `z_put_options_t`.
+#[repr(C)]
+pub struct z_publisher_delete_options_t {
+    /// The timestamp of this message. BORROWED — a concrete struct the caller
+    /// keeps, as on every other option struct that carries one.
+    pub timestamp: *const crate::timestamp::z_timestamp_t,
+}
+
+/// Fill default publisher-delete options (zenoh-c
+/// `z_publisher_delete_options_default`).
+///
+/// # Safety
+/// `this_` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_publisher_delete_options_default(
+    this_: *mut z_publisher_delete_options_t,
+) {
+    if this_.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    unsafe {
+        *this_ = z_publisher_delete_options_t {
+            timestamp: std::ptr::null(),
+        }
+    };
+}
+
+// The four constant getters. Each returns a value this file already names as a
+// constant, so the getter is a one-line read rather than a second transcription
+// — and each value was MEASURED against the real `libzenohc.so` by a C probe
+// before being written here, because this file has been wrong about exactly
+// this kind of number before (see the R311y545 note above).
+
+/// zenoh's default congestion control for PUSH messages — a put (zenoh-c
+/// `z_internal_congestion_control_default_push`).
+///
+/// `Z_CONGESTION_CONTROL_DROP` (1), measured. Note that this is the OPPOSITE of
+/// the request / response default below: a data push may be dropped under
+/// congestion, while a query must not be.
+#[no_mangle]
+pub extern "C" fn z_internal_congestion_control_default_push() -> z_congestion_control_t {
+    Z_CONGESTION_CONTROL_DROP
+}
+
+/// zenoh's default congestion control for REQUEST messages — a get (zenoh-c
+/// `z_internal_congestion_control_default_request`).
+///
+/// `Z_CONGESTION_CONTROL_BLOCK` (0), measured.
+#[no_mangle]
+pub extern "C" fn z_internal_congestion_control_default_request() -> z_congestion_control_t {
+    Z_CONGESTION_CONTROL_BLOCK
+}
+
+/// zenoh's default congestion control for RESPONSE messages — a reply (zenoh-c
+/// `z_internal_congestion_control_default_response`).
+///
+/// `Z_CONGESTION_CONTROL_BLOCK` (0), measured.
+#[no_mangle]
+pub extern "C" fn z_internal_congestion_control_default_response() -> z_congestion_control_t {
+    Z_CONGESTION_CONTROL_BLOCK
+}
+
+/// zenoh's default priority (zenoh-c `z_priority_default`).
+///
+/// `Z_PRIORITY_DATA` (5), measured.
+#[no_mangle]
+pub extern "C" fn z_priority_default() -> z_priority_t {
+    Z_PRIORITY_DATA
+}
+
+/// zenoh's default RELIABILITY (zenoh-c `z_reliability_default`).
+///
+/// `Z_RELIABILITY_RELIABLE` (1). UNSTABLE-gated, as upstream gates both this and
+/// the `reliability` option fields it supplies a default for.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub extern "C" fn z_reliability_default() -> z_reliability_t {
+    Z_RELIABILITY_RELIABLE
+}
+
+/// zenoh's default destination locality (zenoh-c `zc_locality_default`).
+///
+/// `ZC_LOCALITY_ANY` (0), measured — both local and remote.
+#[no_mangle]
+pub extern "C" fn zc_locality_default() -> zc_locality_t {
+    ZC_LOCALITY_ANY
+}
+
 /// zenoh-c's `z_congestion_control_t` as wz's typed [`CongestionControl`].
 ///
 /// `BLOCK_FIRST` maps to `Block`: the packed QoS byte carries a single `nodrop`
@@ -546,12 +642,12 @@ pub unsafe extern "C" fn z_publisher_put(
 /// `z_publisher_delete`).
 ///
 /// # Safety
-/// `this_` must be null or a valid loaned publisher. `_options` is accepted for
-/// ABI compatibility and ignored.
+/// `this_` must be null or a valid loaned publisher; `options` must be null or a
+/// valid publisher-delete options struct.
 #[no_mangle]
 pub unsafe extern "C" fn z_publisher_delete(
     this_: *const z_loaned_publisher_t,
-    _options: *mut c_void,
+    options: *mut z_publisher_delete_options_t,
 ) -> ZResult {
     guarded(|| {
         // SAFETY: the caller's contract.
@@ -563,10 +659,29 @@ pub unsafe extern "C" fn z_publisher_delete(
         // resolves off the same `Publisher`). Only the kind differs; the
         // encoding is dropped because a Del body has no encoding slot
         // (`_z_msg_del_t`).
-        let options = state
-            .base
-            .clone()
-            .with_kind(wz_runtime_tokio::sample::SampleKind::Del);
+        let options = {
+            let base = state
+                .base
+                .clone()
+                .with_kind(wz_runtime_tokio::sample::SampleKind::Del);
+            // R311y568 — the per-call TIMESTAMP, which is the struct's only
+            // field and is now HONOURED rather than accepted-and-ignored. It
+            // reaches the same `with_timestamp` seam the session-level
+            // `z_delete_options_t` uses, so a publisher Del and a session Del
+            // stamp the wire identically.
+            if options.is_null() {
+                base
+            } else {
+                // SAFETY: the caller's contract — BORROWED, a concrete struct
+                // the caller keeps, exactly as on the put side.
+                match unsafe {
+                    crate::timestamp::timestamp_hint((*options).timestamp as *const c_void)
+                } {
+                    Some(hint) => base.with_timestamp(hint),
+                    None => base,
+                }
+            }
+        };
         let sent = match state.keyexpr.mapping {
             Some(mapping) => state.shared.publish_aliased_all(mapping, &[], &options),
             None => state
@@ -604,26 +719,16 @@ pub unsafe extern "C" fn z_publisher_delete(
 pub unsafe extern "C" fn z_publisher_id(
     publisher: *const z_loaned_publisher_t,
 ) -> crate::advanced::z_entity_global_id_t {
-    let empty = crate::advanced::z_entity_global_id_t {
-        zid: crate::zid::z_id_t::empty(),
-        eid: 0,
-    };
-    guard_val(empty, || {
+    // R311y568 — through the shared constructor, which is where the zid/eid
+    // convention is now stated once for all five entity-id accessors.
+    guard_val(crate::advanced::z_entity_global_id_t::empty(), || {
         // SAFETY: the caller's contract.
-        let Some(state) = (unsafe { publisher_state(publisher) }) else {
-            return crate::advanced::z_entity_global_id_t {
-                zid: crate::zid::z_id_t::empty(),
-                eid: 0,
-            };
-        };
-        crate::advanced::z_entity_global_id_t {
-            zid: crate::zid::z_id_t {
-                id: state.shared.zid(),
-            },
-            // The handle's own address, narrowed — a per-publisher value that is
-            // stable for the publisher's life and distinct between live
-            // publishers, which is the whole contract an entity id carries here.
-            eid: (publisher as usize as u64 & u64::from(u32::MAX)) as u32,
+        match unsafe { publisher_state(publisher) } {
+            Some(state) => crate::advanced::z_entity_global_id_t::for_entity(
+                &state.shared,
+                publisher as *const c_void,
+            ),
+            None => crate::advanced::z_entity_global_id_t::empty(),
         }
     })
 }

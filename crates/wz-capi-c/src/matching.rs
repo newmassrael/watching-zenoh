@@ -66,6 +66,24 @@ pub struct z_owned_closure_matching_status_t {
     pub(crate) drop: z_closure_drop_callback_t,
 }
 
+/// Loaned matching-status closure (zenoh-c
+/// `z_loaned_closure_matching_status_t`, `zenoh_commons.h:532-536`).
+///
+/// Upstream declares it as three bare `size_t`s, which is the same 24-byte
+/// footprint as the owned form — so [`z_closure_matching_status_loan`] is a
+/// pointer cast and the fields are written out here rather than as a blob, for
+/// the same reason the owned one is.
+///
+/// R311y568 — the type and its four functions were missing entirely, so a C
+/// program that CALLED a matching-status closure (rather than only handing one
+/// to `z_publisher_declare_matching_listener`) failed to link.
+#[repr(C)]
+pub struct z_loaned_closure_matching_status_t {
+    pub(crate) context: *mut c_void,
+    pub(crate) call: z_closure_matching_status_callback_t,
+    pub(crate) drop: z_closure_drop_callback_t,
+}
+
 /// Moved matching-status closure.
 #[repr(C)]
 pub struct z_moved_closure_matching_status_t {
@@ -88,7 +106,87 @@ const _: () = {
     assert!(std::mem::size_of::<z_owned_closure_matching_status_t>() == 24);
     assert!(std::mem::align_of::<z_owned_closure_matching_status_t>() == 8);
     assert!(std::mem::size_of::<z_moved_closure_matching_status_t>() == 24);
+    // The loan is a CAST, so the two footprints must agree exactly — asserted
+    // rather than assumed, because the owned form's fields are typed while
+    // upstream's loaned one is three bare words.
+    assert!(std::mem::size_of::<z_loaned_closure_matching_status_t>() == 24);
+    assert!(std::mem::align_of::<z_loaned_closure_matching_status_t>() == 8);
 };
+
+// --- R311y568: the closure's own four entry points --------------------------
+
+/// Borrow a matching-status closure (zenoh-c `z_closure_matching_status_loan`).
+///
+/// A pointer CAST — see [`z_loaned_closure_matching_status_t`].
+///
+/// # Safety
+/// `closure` must be null or a valid owned matching-status closure.
+#[no_mangle]
+pub unsafe extern "C" fn z_closure_matching_status_loan(
+    closure: *const z_owned_closure_matching_status_t,
+) -> *const z_loaned_closure_matching_status_t {
+    closure as *const z_loaned_closure_matching_status_t
+}
+
+/// Invoke a matching-status closure (zenoh-c `z_closure_matching_status_call`).
+///
+/// Calling an uninitialised closure is a NO-OP, which is upstream's documented
+/// behaviour for every closure family.
+///
+/// # Safety
+/// `closure` must be null or a valid loaned closure; `matching_status` must be
+/// null or a valid status struct.
+#[no_mangle]
+pub unsafe extern "C" fn z_closure_matching_status_call(
+    closure: *const z_loaned_closure_matching_status_t,
+    matching_status: *const z_matching_status_t,
+) {
+    guard_val((), || {
+        if closure.is_null() {
+            return;
+        }
+        // SAFETY: the caller's contract.
+        let (call, context) = unsafe { ((*closure).call, (*closure).context) };
+        let Some(call) = call else {
+            return;
+        };
+        // SAFETY: the caller's function pointer; an unwind back across
+        // `extern "C"` is UB, so it is caught.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            call(matching_status, context);
+        }));
+    });
+}
+
+/// `true` iff the owned closure holds a callback (zenoh-c
+/// `z_internal_closure_matching_status_check`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned matching-status closure.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_closure_matching_status_check(
+    this_: *const z_owned_closure_matching_status_t,
+) -> bool {
+    guard_val(false, || {
+        // SAFETY: the caller's contract.
+        !this_.is_null() && unsafe { (*this_).call }.is_some()
+    })
+}
+
+/// Zero an owned matching-status closure (zenoh-c
+/// `z_internal_closure_matching_status_null`).
+///
+/// # Safety
+/// `this_` must be null or a valid, writable owned closure.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_closure_matching_status_null(
+    this_: *mut z_owned_closure_matching_status_t,
+) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_closure_matching_status_t::null_value() };
+    }
+}
 
 /// The Rust-side wrapper a matching listener's callback holds.
 pub(crate) type CMatchClosure = FfiClosure<z_closure_matching_status_callback_t>;
@@ -367,6 +465,111 @@ pub unsafe extern "C" fn z_publisher_declare_matching_listener(
     })
 }
 
+// --- R311y568: the ADVANCED publisher's matching trio ------------------------
+//
+// The same three entry points the base publisher has, on a handle whose state is
+// `crate::advanced`'s. They route through the SAME
+// `SharedSession::declare_matching_listener` / `has_matching` the base plane
+// uses, keyed by the advanced publisher's own declared keyexpr — so the two
+// planes cannot report different verdicts for the same keyexpr.
+//
+// UNSTABLE-gated, and the gate is FORCED rather than chosen: upstream declares
+// the whole `ze_advanced_*` plane under `#if defined(Z_FEATURE_UNSTABLE_API)`,
+// so `crate::advanced` is not compiled on the other arm and these three name a
+// type that does not exist there. That is the y536 rule read forwards — a
+// helper's cfg is the OR of every arm that calls it — and Layer C1cc caught this
+// one on its first run, because it clippies the arm the local build was not.
+
+/// Declare an OWNED matching listener on an ADVANCED publisher (zenoh-c
+/// `ze_advanced_publisher_declare_matching_listener`).
+///
+/// # Safety
+/// `publisher` must be null or a valid loaned advanced publisher;
+/// `matching_listener` must be valid and writable; `callback` must be a valid
+/// moved closure, which is consumed on every path.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_publisher_declare_matching_listener(
+    publisher: *const crate::advanced::ze_loaned_advanced_publisher_t,
+    matching_listener: *mut z_owned_matching_listener_t,
+    callback: *mut z_moved_closure_matching_status_t,
+) -> ZResult {
+    guarded(|| {
+        if callback.is_null() || matching_listener.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *matching_listener = z_owned_matching_listener_t::null_value() };
+        // Consume the moved closure FIRST (consume-on-all-paths).
+        // SAFETY: as above.
+        let closure = unsafe { adopt_matching_closure(callback) };
+        // SAFETY: as above.
+        let Some((shared, keyexpr)) =
+            (unsafe { crate::advanced::adv_pub_shared_and_keyexpr(publisher) })
+        else {
+            return Z_ENULL;
+        };
+        let id = shared.declare_matching_listener(keyexpr, matching_sink(closure));
+        // SAFETY: the slot was gravestoned above.
+        unsafe { install_listener(matching_listener, shared, id) };
+        Z_OK
+    })
+}
+
+/// Declare a BACKGROUND matching listener on an ADVANCED publisher (zenoh-c
+/// `ze_advanced_publisher_declare_background_matching_listener`).
+///
+/// Declares into a LOCAL owned handle and discards it, the same construction the
+/// background declares elsewhere use — so the listener is retired when the
+/// publisher is, through [`MatchingHold`]'s `Drop`, and nothing can undeclare it
+/// sooner.
+///
+/// # Safety
+/// `publisher` must be null or a valid loaned advanced publisher; `callback` must
+/// be a valid moved closure, which is consumed on every path.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_publisher_declare_background_matching_listener(
+    publisher: *const crate::advanced::ze_loaned_advanced_publisher_t,
+    callback: *mut z_moved_closure_matching_status_t,
+) -> ZResult {
+    let mut sink = z_owned_matching_listener_t::null_value();
+    // SAFETY: the caller's contract, delegated.
+    unsafe { ze_advanced_publisher_declare_matching_listener(publisher, &mut sink, callback) }
+}
+
+/// Poll an ADVANCED publisher's matching status (zenoh-c
+/// `ze_advanced_publisher_get_matching_status`).
+///
+/// # Safety
+/// `this_` must be null or a valid loaned advanced publisher; `matching_status`
+/// must be valid and writable.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_publisher_get_matching_status(
+    this_: *const crate::advanced::ze_loaned_advanced_publisher_t,
+    matching_status: *mut z_matching_status_t,
+) -> ZResult {
+    guarded(|| {
+        if matching_status.is_null() {
+            return Z_ENULL;
+        }
+        // Written before any fallible work, so a caller that ignores the code
+        // reads `false` rather than a stale value.
+        // SAFETY: the caller's contract.
+        unsafe { (*matching_status).matching = false };
+        // SAFETY: as above.
+        let Some((shared, keyexpr)) =
+            (unsafe { crate::advanced::adv_pub_shared_and_keyexpr(this_) })
+        else {
+            return Z_ENULL;
+        };
+        // SAFETY: as above.
+        unsafe { (*matching_status).matching = shared.has_matching(&keyexpr) };
+        Z_OK
+    })
+}
+
 /// Declare an OWNED matching listener on a querier (zenoh-c
 /// `z_querier_declare_matching_listener`).
 ///
@@ -396,7 +599,7 @@ pub unsafe extern "C" fn z_querier_declare_matching_listener(
             return Z_ENULL;
         };
         let id = state.shared.declare_querier_matching_listener(
-            state.keyexpr.keyexpr.clone(),
+            state.keyexpr.literal().to_owned(),
             matching_sink(closure),
         );
         // SAFETY: the slot was gravestoned above.
@@ -459,7 +662,7 @@ pub unsafe extern "C" fn z_querier_get_matching_status(
         // SAFETY: as above.
         unsafe {
             (*matching_status).matching =
-                state.shared.has_matching_queryable(&state.keyexpr.keyexpr)
+                state.shared.has_matching_queryable(state.keyexpr.literal())
         };
         Z_OK
     })

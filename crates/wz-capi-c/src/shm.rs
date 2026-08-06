@@ -759,16 +759,15 @@ pub unsafe extern "C" fn z_shm_provider_loan(
     this_ as *const z_loaned_shm_provider_t
 }
 
-/// Mutably borrow a provider (zenoh-c `z_shm_provider_loan_mut`).
-///
-/// # Safety
-/// `this_` must be null or a valid owned provider.
-#[no_mangle]
-pub unsafe extern "C" fn z_shm_provider_loan_mut(
-    this_: *mut z_owned_shm_provider_t,
-) -> *mut z_loaned_shm_provider_t {
-    this_ as *mut z_loaned_shm_provider_t
-}
+// R311y568 — REMOVED: z_shm_provider_loan_mut.
+//
+// Upstream declares no such function on EITHER arm (0 hits across every header
+// in both oracles), so wz was exporting a `z_`-prefixed symbol that is not part
+// of the zenoh-c ABI. Nothing in the tree called it and no C program compiled
+// against upstream's header could name it; what it did was make wz's exported
+// surface a superset of the reference's, which is a different library wearing
+// the same names. Found by the census's REVERSE direction, added the same round
+// — the forward ratchet had been green over it since the plane landed.
 
 /// Drop a provider (zenoh-c `z_shm_provider_drop`).
 ///

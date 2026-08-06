@@ -35,9 +35,10 @@ use wz_runtime_tokio::sample::SampleKind;
 use wz_runtime_tokio::session::QueryOptions;
 
 use crate::abi::{
-    z_closure_drop_callback_t, z_closure_reply_callback_t, z_loaned_bytes_t, z_loaned_keyexpr_t,
-    z_loaned_reply_err_t, z_loaned_reply_t, z_loaned_sample_t, z_loaned_session_t, z_moved_bytes_t,
-    z_moved_closure_reply_t, z_moved_reply_t, z_owned_closure_reply_t, z_owned_reply_t, Handle,
+    z_closure_drop_callback_t, z_closure_reply_callback_t, z_loaned_bytes_t, z_loaned_encoding_t,
+    z_loaned_keyexpr_t, z_loaned_reply_err_t, z_loaned_reply_t, z_loaned_sample_t,
+    z_loaned_session_t, z_moved_bytes_t, z_moved_closure_reply_t, z_moved_reply_err_t,
+    z_moved_reply_t, z_owned_closure_reply_t, z_owned_reply_err_t, z_owned_reply_t, Handle,
     Z_SAMPLE_KIND_PUT,
 };
 use crate::bytes::BytesState;
@@ -71,11 +72,83 @@ pub const ZC_REPLY_KEYEXPR_ANY: c_int = 0;
 #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
 pub const ZC_REPLY_KEYEXPR_MATCHING_QUERY: c_int = 1;
 
+/// `Z_CONSOLIDATION_MODE_NONE` = 0 — every reply is delivered.
+pub const Z_CONSOLIDATION_MODE_NONE: c_int = 0;
+/// `Z_CONSOLIDATION_MODE_MONOTONIC` = 1 — replies are filtered so a key never
+/// goes backwards, without waiting for the query to complete.
+pub const Z_CONSOLIDATION_MODE_MONOTONIC: c_int = 1;
+/// `Z_CONSOLIDATION_MODE_LATEST` = 2 — only the newest reply per key.
+pub const Z_CONSOLIDATION_MODE_LATEST: c_int = 2;
+
+/// zenoh's default accepted reply-keyexpr policy (zenoh-c
+/// `zc_reply_keyexpr_default`).
+///
+/// `ZC_REPLY_KEYEXPR_MATCHING_QUERY` (1) — upstream's
+/// `ReplyKeyExpr::default()`, and the value R311y545 MEASURED against the real
+/// `libzenohc.so` after this crate had it as 0. Read from the constant rather
+/// than restated, so the two cannot drift.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub extern "C" fn zc_reply_keyexpr_default() -> c_int {
+    ZC_REPLY_KEYEXPR_MATCHING_QUERY
+}
+
 /// zenoh-c `z_query_consolidation_t` — a one-field wrapper around the mode.
 #[repr(C)]
 pub struct z_query_consolidation_t {
     /// The consolidation mode.
     pub mode: c_int,
+}
+
+// --- R311y568: the five consolidation constructors --------------------------
+//
+// Returned BY VALUE, which is the whole reason they exist as functions rather
+// than as C macros: `z_get_options_t.consolidation` is a struct field and
+// upstream's header offers no aggregate initialiser for it. Five symbols a C
+// program could name and not link.
+
+/// AUTO consolidation (zenoh-c `z_query_consolidation_auto`), mode `-1`.
+#[no_mangle]
+pub extern "C" fn z_query_consolidation_auto() -> z_query_consolidation_t {
+    z_query_consolidation_t {
+        mode: Z_CONSOLIDATION_MODE_AUTO,
+    }
+}
+
+/// The DEFAULT consolidation (zenoh-c `z_query_consolidation_default`).
+///
+/// AUTO, and read from [`z_query_consolidation_auto`] rather than restated:
+/// upstream's `zenoh_constants.h:16` defines `Z_CONSOLIDATION_MODE_DEFAULT` as
+/// `Z_CONSOLIDATION_MODE_AUTO`, so one is the other by upstream's own
+/// definition and writing `-1` twice would let them drift.
+#[no_mangle]
+pub extern "C" fn z_query_consolidation_default() -> z_query_consolidation_t {
+    z_query_consolidation_auto()
+}
+
+/// NONE consolidation (zenoh-c `z_query_consolidation_none`), mode `0`.
+#[no_mangle]
+pub extern "C" fn z_query_consolidation_none() -> z_query_consolidation_t {
+    z_query_consolidation_t {
+        mode: Z_CONSOLIDATION_MODE_NONE,
+    }
+}
+
+/// MONOTONIC consolidation (zenoh-c `z_query_consolidation_monotonic`), mode
+/// `1`.
+#[no_mangle]
+pub extern "C" fn z_query_consolidation_monotonic() -> z_query_consolidation_t {
+    z_query_consolidation_t {
+        mode: Z_CONSOLIDATION_MODE_MONOTONIC,
+    }
+}
+
+/// LATEST consolidation (zenoh-c `z_query_consolidation_latest`), mode `2`.
+#[no_mangle]
+pub extern "C" fn z_query_consolidation_latest() -> z_query_consolidation_t {
+    z_query_consolidation_t {
+        mode: Z_CONSOLIDATION_MODE_LATEST,
+    }
 }
 
 /// zenoh-c `z_get_options_t` (`zenoh_commons.h:801-831`).
@@ -183,7 +256,17 @@ pub(crate) struct ReplyMarshal {
     sample: SampleMarshal,
     /// The Err blob, meaningful iff `!is_ok`.
     err_payload: BytesState,
+    /// R311y568 — the Err VALUE's own encoding, meaningful iff `!is_ok`.
+    ///
+    /// A separate field from the sample's, and that is a fidelity point rather
+    /// than bookkeeping: [`ReplyView`] exposes `err_encoding()` and
+    /// `put_encoding()` as two accessors because a reply carries at most one of
+    /// them, and `z_reply_err_encoding` must report the ERROR's. Reading it off
+    /// the sample half — which the sibling pico ABI does — would report the Put
+    /// encoding of a reply that has no Put arm, i.e. always the default.
+    err_encoding: crate::encoding::EncodingState,
     loaned_err_payload: z_loaned_bytes_t,
+    loaned_err_encoding: crate::abi::z_loaned_encoding_t,
 }
 
 impl ReplyMarshal {
@@ -209,22 +292,41 @@ impl ReplyMarshal {
             sample: SampleMarshal::new(
                 view.keyexpr().to_owned(),
                 sample_payload,
-                // The reply's attachment rides its sample: it is carried on the
-                // Put reply's inner body, and dropping it here would make a
-                // foreign queryable's metadata invisible.
-                view.attachment().map(<[u8]>::to_vec),
                 sample_kind,
-                // R311y557 — a reply's sample carries its timestamp too, read
-                // through the same `z_sample_timestamp` accessor.
-                view.timestamp()
-                    .map(crate::timestamp::z_timestamp_t::from_hint),
-                // R311y563 — a REPLY carries a source identity too
-                // (`has_source_info` precedes the `_is_put` split), so the
-                // sample built from one must surface it.
-                view.source_info().cloned(),
+                // R311y568 — [`SampleMeta`] rather than eight positional
+                // arguments. `ReplyView` is NOT `SampleView`, so `from_view` is
+                // unavailable here and each field is still named — but there is
+                // now one place per field rather than one place per plane, and
+                // the encoding this round adds joins the same list.
+                crate::sample::SampleMeta::default()
+                    // The reply's attachment rides its sample: it is carried on
+                    // the Put reply's inner body, and dropping it here would
+                    // make a foreign queryable's metadata invisible.
+                    .with_attachment(view.attachment().map(<[u8]>::to_vec))
+                    // R311y557 — a reply's sample carries its timestamp too,
+                    // read through the same `z_sample_timestamp` accessor.
+                    .with_timestamp(
+                        view.timestamp()
+                            .map(crate::timestamp::z_timestamp_t::from_hint),
+                    )
+                    // R311y563 — a REPLY carries a source identity too
+                    // (`has_source_info` precedes the `_is_put` split), so the
+                    // sample built from one must surface it.
+                    .with_source_info(view.source_info().cloned())
+                    // R311y568 — the Put arm's E-flag, so `z_sample_encoding` on
+                    // `z_reply_ok(reply)` reports what the queryable stamped.
+                    // `put_encoding` and not `err_encoding`: this is the sample
+                    // half, and the error's own encoding lives on the err arm
+                    // below.
+                    .with_encoding(encoding_hint_from_wire(view.put_encoding())),
             ),
             err_payload: BytesState::whole(err_payload),
+            err_encoding: match encoding_hint_from_wire(view.err_encoding()) {
+                Some(hint) => crate::encoding::EncodingState::from_hint(&hint),
+                None => crate::encoding::EncodingState::default_encoding(),
+            },
             loaned_err_payload: z_loaned_bytes_t::null_value(),
+            loaned_err_encoding: crate::abi::z_loaned_encoding_t::null_value(),
         }
     }
 
@@ -233,6 +335,9 @@ impl ReplyMarshal {
         self.sample.bind();
         self.loaned_err_payload =
             z_loaned_bytes_t::from_handle(&self.err_payload as *const BytesState as *mut c_void);
+        self.loaned_err_encoding = crate::abi::z_loaned_encoding_t::from_handle(
+            &self.err_encoding as *const crate::encoding::EncodingState as *mut c_void,
+        );
     }
 
     /// An INDEPENDENT copy, for a reply CHANNEL to escape the callback with.
@@ -241,9 +346,30 @@ impl ReplyMarshal {
             is_ok: self.is_ok,
             sample: self.sample.deep_copy(),
             err_payload: BytesState::whole(self.err_payload.payload.clone()),
+            err_encoding: self.err_encoding.deep_copy(),
             loaned_err_payload: z_loaned_bytes_t::null_value(),
+            loaned_err_encoding: crate::abi::z_loaned_encoding_t::null_value(),
         }
     }
+}
+
+/// R311y568 — a [`ReplyView`]'s wire encoding pair as an [`EncodingHint`].
+///
+/// `ReplyView` reports `(id, schema)` because that is what the codec read;
+/// [`SampleMeta`](crate::sample::SampleMeta) and [`crate::encoding`] both speak
+/// [`EncodingHint`]. One conversion, used by both the Put and the Err arm, so the
+/// two cannot decode the same wire pair differently.
+fn encoding_hint_from_wire(
+    wire: Option<(u32, Option<&str>)>,
+) -> Option<wz_runtime_tokio::sample::EncodingHint> {
+    let (id, schema) = wire?;
+    Some(wz_capi_core::encoding_ids::hint_from_parts(
+        // The wire id is a `u16` field the codec widened; a value past `u16`
+        // cannot have come off the wire, and saturating keeps this total rather
+        // than adding a panic path inside a dispatch.
+        u16::try_from(id).unwrap_or(wz_capi_core::encoding_ids::ENCODING_ID_UNKNOWN),
+        schema.unwrap_or(""),
+    ))
 }
 
 /// Read the marshal behind a loaned reply.
@@ -446,6 +572,330 @@ pub unsafe extern "C" fn z_reply_err_payload(
         // SAFETY: `z_reply_err` mints this pointer from a `ReplyMarshal`.
         let m = unsafe { &*(this_ as *const ReplyMarshal) };
         &m.loaned_err_payload as *const z_loaned_bytes_t
+    })
+}
+
+// --- R311y568: the OWNED reply-error family + the four mutable accessors -----
+//
+// Eleven symbols the real `libzenohc.so` defines and this cdylib did not. The
+// crate's previous position was that a borrow-only error arm was enough because
+// no corpus example constructs an owned one; the census asks whether a C program
+// CAN name them, and eleven of these were link errors.
+//
+// The loan model is the same one the pico ABI argued for at y559 and it is
+// load-bearing rather than stylistic: `z_reply_err_loan` hands back the boxed
+// [`ReplyMarshal`], NOT the owned struct's own address, because the OTHER
+// producer of a `z_loaned_reply_err_t*` is `z_reply_err(reply)` — which hands
+// back the dispatcher's marshal. An accessor cannot tell two pointee types apart
+// behind one C pointer type, so both producers must yield a `ReplyMarshal` or
+// `z_reply_err_payload` would read a `bool` field as a pointer on one of the two
+// paths.
+
+/// Read the marshal behind a loaned reply ERROR.
+///
+/// # Safety
+/// `this_` must be null or a pointer minted by [`z_reply_err`] /
+/// [`z_reply_err_loan`] whose marshal is still alive.
+unsafe fn reply_err_marshal<'a>(this_: *const z_loaned_reply_err_t) -> Option<&'a ReplyMarshal> {
+    if this_.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract — both producers aim this at a
+    // `ReplyMarshal`; see the section note.
+    Some(unsafe { &*(this_ as *const ReplyMarshal) })
+}
+
+/// The error VALUE's encoding (zenoh-c `z_reply_err_encoding`).
+///
+/// Reads [`ReplyMarshal::err_encoding`], which is the `ReplyView::err_encoding`
+/// pair — not the sample half's Put encoding. See that field for why the two are
+/// separate.
+///
+/// # Safety
+/// `this_` must be null or a live loaned reply error.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_err_encoding(
+    this_: *const z_loaned_reply_err_t,
+) -> *const z_loaned_encoding_t {
+    guard_val(std::ptr::null(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { reply_err_marshal(this_) } {
+            Some(m) => &m.loaned_err_encoding as *const z_loaned_encoding_t,
+            None => std::ptr::null(),
+        }
+    })
+}
+
+/// Mutably borrow the error's payload (zenoh-c `z_reply_err_payload_mut`).
+///
+/// # Safety
+/// `this_` must be null or a live loaned reply error.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_err_payload_mut(
+    this_: *mut z_loaned_reply_err_t,
+) -> *mut z_loaned_bytes_t {
+    guard_val(std::ptr::null_mut(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { reply_err_marshal(this_) } {
+            Some(m) => &m.loaned_err_payload as *const z_loaned_bytes_t as *mut z_loaned_bytes_t,
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Deep-copy a borrowed reply error into an owned one (zenoh-c
+/// `z_reply_err_clone`).
+///
+/// Copies the WHOLE marshal rather than just the error blob: the owned value has
+/// to answer `z_reply_err_payload` AND `z_reply_err_encoding` after the callback
+/// frame is gone, and both read the marshal.
+///
+/// # Safety
+/// `dst` must be null or valid and writable; `this_` must be null or a live
+/// loaned reply error.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_err_clone(
+    dst: *mut z_owned_reply_err_t,
+    this_: *const z_loaned_reply_err_t,
+) {
+    guard_val((), || {
+        if dst.is_null() {
+            return;
+        }
+        // The gravestone first, so cloning a null error yields an empty owned
+        // value rather than leaving a stale stack one.
+        // SAFETY: the caller's contract.
+        unsafe { *dst = z_owned_reply_err_t::null_value() };
+        // SAFETY: the caller's contract, delegated.
+        let Some(m) = (unsafe { reply_err_marshal(this_) }) else {
+            return;
+        };
+        let mut boxed = Box::new(m.deep_copy());
+        boxed.bind();
+        // SAFETY: `dst` is writable per the caller's contract.
+        unsafe {
+            *dst = z_owned_reply_err_t::from_handle(Box::into_raw(boxed) as Handle);
+        }
+    });
+}
+
+/// Borrow an owned reply error (zenoh-c `z_reply_err_loan`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned reply error.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_err_loan(
+    this_: *const z_owned_reply_err_t,
+) -> *const z_loaned_reply_err_t {
+    guard_val(std::ptr::null(), || {
+        if this_.is_null() {
+            return std::ptr::null();
+        }
+        // The handle IS the marshal pointer — see the section note.
+        // SAFETY: the caller's contract.
+        unsafe { (*this_).handle as *const z_loaned_reply_err_t }
+    })
+}
+
+/// Mutably borrow an owned reply error (zenoh-c `z_reply_err_loan_mut`).
+///
+/// # Safety
+/// As [`z_reply_err_loan`].
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_err_loan_mut(
+    this_: *mut z_owned_reply_err_t,
+) -> *mut z_loaned_reply_err_t {
+    guard_val(std::ptr::null_mut(), || {
+        if this_.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: the caller's contract.
+        unsafe { (*this_).handle as *mut z_loaned_reply_err_t }
+    })
+}
+
+/// `true` iff the owned reply error holds a live marshal (zenoh-c
+/// `z_internal_reply_err_check`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned reply error.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_reply_err_check(this_: *const z_owned_reply_err_t) -> bool {
+    guard_val(false, || {
+        // SAFETY: the caller's contract.
+        !this_.is_null() && !unsafe { (*this_).handle }.is_null()
+    })
+}
+
+/// Zero an owned reply error (zenoh-c `z_internal_reply_err_null`).
+///
+/// # Safety
+/// `this_` must be null or a valid, writable owned reply error.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_reply_err_null(this_: *mut z_owned_reply_err_t) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_reply_err_t::null_value() };
+    }
+}
+
+/// Free an owned reply error (zenoh-c `z_reply_err_drop`).
+///
+/// # Safety
+/// `this_` must be null or a valid moved reply error.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_err_drop(this_: *mut z_moved_reply_err_t) {
+    let _ = guarded(|| {
+        if this_.is_null() {
+            return Z_OK;
+        }
+        // SAFETY: the caller's contract.
+        let handle = unsafe { (*this_)._this.handle };
+        if !handle.is_null() {
+            // SAFETY: a live `Box<ReplyMarshal>` this crate leaked in
+            // `z_reply_err_clone`.
+            drop(unsafe { Box::from_raw(handle as *mut ReplyMarshal) });
+            // SAFETY: the caller's contract.
+            unsafe { (*this_)._this = z_owned_reply_err_t::null_value() };
+        }
+        Z_OK
+    });
+}
+
+/// Mutably borrow the reply's ERROR (zenoh-c `z_reply_err_mut`).
+///
+/// The mutable mirror of [`z_reply_err`], with the same Ok/Err gate: a reply that
+/// carries data yields null, so a C program that reaches for the error arm
+/// without checking gets a null rather than a sample reinterpreted as an error.
+///
+/// # Safety
+/// `this_` must be null or a live loaned reply.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_err_mut(
+    this_: *mut z_loaned_reply_t,
+) -> *mut z_loaned_reply_err_t {
+    guard_val(std::ptr::null_mut(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { reply_marshal(this_) } {
+            Some(m) if !m.is_ok => m as *const ReplyMarshal as *mut z_loaned_reply_err_t,
+            _ => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Mutably borrow the reply's SAMPLE (zenoh-c `z_reply_ok_mut`).
+///
+/// # Safety
+/// `this_` must be null or a live loaned reply.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_ok_mut(this_: *mut z_loaned_reply_t) -> *mut z_loaned_sample_t {
+    guard_val(std::ptr::null_mut(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { reply_marshal(this_) } {
+            Some(m) if m.is_ok => m.sample.as_loaned() as *mut z_loaned_sample_t,
+            _ => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Mutably borrow an owned reply (zenoh-c `z_reply_loan_mut`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned reply.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_loan_mut(this_: *mut z_owned_reply_t) -> *mut z_loaned_reply_t {
+    guard_val(std::ptr::null_mut(), || {
+        if this_.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: the caller's contract.
+        unsafe { (*this_).handle as *mut z_loaned_reply_t }
+    })
+}
+
+/// Deep-copy a borrowed reply into an owned one (zenoh-c `z_reply_clone`).
+///
+/// # Safety
+/// `dst` must be null or valid and writable; `this_` must be null or a live
+/// loaned reply.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_clone(dst: *mut z_owned_reply_t, this_: *const z_loaned_reply_t) {
+    guard_val((), || {
+        if dst.is_null() {
+            return;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *dst = z_owned_reply_t::null_value() };
+        // SAFETY: the caller's contract, delegated — the same escape a reply
+        // CHANNEL performs, so a clone and a channel hand back the same thing.
+        let handle = unsafe { escape_reply(this_) };
+        if !handle.is_null() {
+            // SAFETY: as above.
+            unsafe { *dst = z_owned_reply_t::from_handle(handle) };
+        }
+    });
+}
+
+/// Take ownership of a mutably borrowed reply (zenoh-c
+/// `z_reply_take_from_loaned`).
+///
+/// A COPY rather than a move, for the reason spelled out at
+/// [`crate::sample::z_sample_take_from_loaned`]: the loaned pointer's storage
+/// belongs to a stack frame or to a live owned value, and nothing in the pointer
+/// says which.
+///
+/// # Safety
+/// `dst` must be null or valid and writable; `src` must be null or a live loaned
+/// reply.
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_take_from_loaned(
+    dst: *mut z_owned_reply_t,
+    src: *mut z_loaned_reply_t,
+) {
+    // SAFETY: the caller's contract, delegated.
+    unsafe { z_reply_clone(dst, src as *const z_loaned_reply_t) };
+}
+
+/// The REPLIER's global entity id, if the reply carried one (zenoh-c
+/// `z_reply_replier_id`).
+///
+/// R311y568. Returns `false` and leaves `out_id` untouched when the reply has no
+/// source identity — which is upstream's contract, and is why the id is an
+/// out-param rather than a return value: a zero id and an absent id are
+/// different facts and a by-value return could not distinguish them.
+///
+/// Read from the reply's `source_info` (the body ext 0x01), which is where the
+/// responder's `(zid, eid)` actually arrives; the `sn` half is a per-source
+/// sequence number and has no place in an entity id.
+///
+/// UNSTABLE-gated, as upstream gates it and as `z_entity_global_id_t` requires.
+///
+/// # Safety
+/// `this_` must be null or a live loaned reply; `out_id` must be null or valid
+/// and writable.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn z_reply_replier_id(
+    this_: *const z_loaned_reply_t,
+    out_id: *mut crate::advanced::z_entity_global_id_t,
+) -> bool {
+    guard_val(false, || {
+        if out_id.is_null() {
+            return false;
+        }
+        // SAFETY: the caller's contract, delegated.
+        let Some(info) = unsafe { reply_marshal(this_) }.and_then(|m| m.sample.source_info())
+        else {
+            return false;
+        };
+        // SAFETY: `out_id` is writable per the caller's contract.
+        unsafe {
+            *out_id = crate::advanced::z_entity_global_id_t {
+                zid: crate::zid::z_id_t { id: info.zid },
+                eid: info.eid,
+            };
+        }
+        true
     })
 }
 
@@ -724,6 +1174,99 @@ pub unsafe extern "C" fn z_get(
     callback: *mut z_moved_closure_reply_t,
     options: *mut z_get_options_t,
 ) -> ZResult {
+    // SAFETY: the caller's contract, delegated. The selector is read as a
+    // NUL-terminated string here and handed to the shared core as bytes.
+    unsafe {
+        get_with_selector(
+            session,
+            key_expr,
+            nul_terminated(parameters),
+            callback,
+            options,
+        )
+    }
+}
+
+/// R311y568 — `z_get` with an explicit selector LENGTH (zenoh-c
+/// `z_get_with_parameters_substr`).
+///
+/// The general form: upstream's NUL-terminated `z_get` is the special case where
+/// the length is measured for you, which is why both route through one core
+/// rather than one calling the other. A selector that is a SLICE of a larger
+/// buffer — the shape a C program parsing a URL ends up with — cannot be passed
+/// through the NUL-terminated entry point without copying it first.
+///
+/// # Safety
+/// As [`z_get`], except that `parameters` must be null or point at
+/// `parameters_len` readable bytes rather than being NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn z_get_with_parameters_substr(
+    session: *const z_loaned_session_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    parameters: *const c_char,
+    parameters_len: usize,
+    callback: *mut z_moved_closure_reply_t,
+    options: *mut z_get_options_t,
+) -> ZResult {
+    // SAFETY: the caller's contract, delegated.
+    unsafe {
+        get_with_selector(
+            session,
+            key_expr,
+            counted_bytes(parameters, parameters_len),
+            callback,
+            options,
+        )
+    }
+}
+
+/// A NUL-terminated selector as owned bytes, or `None` for a null pointer.
+///
+/// # Safety
+/// `parameters` must be null or NUL-terminated.
+pub(crate) unsafe fn nul_terminated(parameters: *const c_char) -> Option<Vec<u8>> {
+    if parameters.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    Some(unsafe { CStr::from_ptr(parameters) }.to_bytes().to_vec())
+}
+
+/// A counted selector as owned bytes, or `None` for a null pointer.
+///
+/// A null pointer with a NON-ZERO length is also `None` rather than a read: the
+/// caller's arguments contradict each other, and upstream's own guard is the
+/// same shape ([`crate::bytes::z_bytes_copy_from_buf`] states it explicitly).
+///
+/// # Safety
+/// `parameters` must be null or point at `parameters_len` readable bytes.
+pub(crate) unsafe fn counted_bytes(
+    parameters: *const c_char,
+    parameters_len: usize,
+) -> Option<Vec<u8>> {
+    if parameters.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    Some(unsafe { std::slice::from_raw_parts(parameters as *const u8, parameters_len) }.to_vec())
+}
+
+/// The body BOTH `z_get` spellings share.
+///
+/// One core rather than two, because the closure and the moved options fields
+/// must be consumed on every path in both — and "consumed on every path" is
+/// exactly the property a second copy loses first.
+///
+/// # Safety
+/// As [`z_get`], with `params` already read out of whichever selector form the
+/// caller used.
+unsafe fn get_with_selector(
+    session: *const z_loaned_session_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    params: Option<Vec<u8>>,
+    callback: *mut z_moved_closure_reply_t,
+    options: *mut z_get_options_t,
+) -> ZResult {
     guarded(|| {
         if callback.is_null() {
             return Z_ENULL;
@@ -747,12 +1290,6 @@ pub unsafe extern "C" fn z_get(
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_EINVAL;
         }
-        let params = if parameters.is_null() {
-            None
-        } else {
-            // SAFETY: the caller's contract — NUL-terminated.
-            Some(unsafe { CStr::from_ptr(parameters) }.to_bytes().to_vec())
-        };
         issue_get(&state.shared, ke, params, opts, closure)
     })
 }

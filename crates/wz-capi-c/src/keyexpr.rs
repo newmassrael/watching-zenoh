@@ -49,6 +49,63 @@ impl KeyexprState {
     }
 }
 
+/// R311y568 — the keyexpr a DECLARATION was made under, plus the loaned view its
+/// accessor hands back.
+///
+/// `z_subscriber_keyexpr` / `z_queryable_keyexpr` / `z_querier_keyexpr` all
+/// answer the same question — "what did I declare?" — and all three need the
+/// same two things: the state, and a `z_loaned_keyexpr_t` VALUE whose address
+/// they can return. Writing that pair into three declaration-state structs
+/// would be three copies of the bind discipline
+/// ([`crate::sample::SampleMarshal::bind`]'s: never bind before the final
+/// address), which is the shape that gets one of them wrong.
+///
+/// Held by value inside a BOXED declaration state, so the address it hands out
+/// lives exactly as long as the declaration — which is upstream's contract for
+/// these accessors (the borrow is valid while the subscriber / queryable /
+/// querier is).
+pub(crate) struct DeclaredKeyexpr {
+    state: KeyexprState,
+    loaned: z_loaned_keyexpr_t,
+}
+
+impl DeclaredKeyexpr {
+    /// Build it UNBOUND. [`Self::bind`] must run once the owner is boxed.
+    pub(crate) fn new(keyexpr: String) -> Self {
+        Self {
+            state: KeyexprState::new(keyexpr),
+            loaned: z_loaned_keyexpr_t::null_value(),
+        }
+    }
+
+    /// Aim the cached view at this value's own state. MUST run only once the
+    /// owner sits at its FINAL address.
+    pub(crate) fn bind(&mut self) {
+        self.loaned = z_loaned_keyexpr_t::from_handle(
+            &self.state as *const KeyexprState as *mut std::ffi::c_void,
+        );
+    }
+
+    /// The keyexpr LITERAL, for the wire paths that publish against it.
+    ///
+    /// One holder rather than two: a declaration that kept its own `String`
+    /// beside this value could answer the accessor with a keyexpr it does not
+    /// actually use.
+    pub(crate) fn literal(&self) -> &str {
+        &self.state.keyexpr
+    }
+
+    /// The borrowed keyexpr an accessor returns, or NULL if [`Self::bind`] has
+    /// not run — a null rather than a dangling pointer, so a missed bind is a
+    /// visible NULL instead of a use-after-free.
+    pub(crate) fn as_loaned(&self) -> *const z_loaned_keyexpr_t {
+        if self.loaned.handle.is_null() {
+            return std::ptr::null();
+        }
+        &self.loaned as *const z_loaned_keyexpr_t
+    }
+}
+
 /// Read the keyexpr behind a loaned handle.
 ///
 /// # Safety
@@ -150,17 +207,6 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str_unchecked(
     let handle = Box::into_raw(Box::new(KeyexprState::new(text.to_owned()))) as Handle;
     // SAFETY: the slot was gravestoned above.
     unsafe { *this_ = z_view_keyexpr_t::from_handle(handle) };
-}
-
-/// Borrow a view keyexpr mutably (zenoh-c `z_view_keyexpr_loan_mut`).
-///
-/// # Safety
-/// `this_` must be null or a valid view keyexpr.
-#[no_mangle]
-pub unsafe extern "C" fn z_view_keyexpr_loan_mut(
-    this_: *mut z_view_keyexpr_t,
-) -> *mut z_loaned_keyexpr_t {
-    this_ as *mut z_loaned_keyexpr_t
 }
 
 /// Construct a view keyexpr from a pointer plus LENGTH (zenoh-c
@@ -568,6 +614,68 @@ pub unsafe extern "C" fn z_keyexpr_includes(
         let a_chunks: Vec<&str> = a.split('/').collect();
         let b_chunks: Vec<&str> = b.split('/').collect();
         wz_runtime_tokio::keyexpr_match::keyexpr_includes_patterns(&a_chunks, &b_chunks)
+    })
+}
+
+/// `Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT` = 0 — no key matches both.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub const Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT: std::ffi::c_int = 0;
+/// `Z_KEYEXPR_INTERSECTION_LEVEL_INTERSECTS` = 1 — some key matches both.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub const Z_KEYEXPR_INTERSECTION_LEVEL_INTERSECTS: std::ffi::c_int = 1;
+/// `Z_KEYEXPR_INTERSECTION_LEVEL_INCLUDES` = 2 — every key matching the right
+/// also matches the left.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub const Z_KEYEXPR_INTERSECTION_LEVEL_INCLUDES: std::ffi::c_int = 2;
+/// `Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS` = 3 — the two accept the same keys.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub const Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS: std::ffi::c_int = 3;
+
+/// The strongest set relation that holds between two keyexprs (zenoh-c
+/// `z_keyexpr_relation_to`).
+///
+/// R311y568. The three predicates this crate already exports —
+/// [`z_keyexpr_intersects`], [`z_keyexpr_includes`], [`z_keyexpr_equals`] —
+/// answer the same question one bit at a time; this collapses them into
+/// upstream's four-level ladder, which is what a router-shaped C program
+/// switches on.
+///
+/// Routed through those SAME three rather than re-deriving the relation, so the
+/// ladder and the predicates cannot disagree: a pair this reports as `EQUALS`
+/// is exactly a pair `z_keyexpr_equals` accepts. The ladder is checked from the
+/// STRONGEST end down, because the levels nest — equal implies includes implies
+/// intersects — and reporting the first level that holds from the weak end would
+/// answer `INTERSECTS` for an equal pair.
+///
+/// UNSTABLE-gated, because upstream gates it: `zenoh_commons.h:3697` wraps the
+/// declaration in `#if defined(Z_FEATURE_UNSTABLE_API)`, so the published
+/// archive neither declares nor defines it. Exporting it unconditionally — which
+/// this did for the length of one damage probe — makes wz's surface a SUPERSET
+/// of the reference's on that arm, and the drop-in census cannot see that: it
+/// measures reference-minus-wz and is blind by construction to the other
+/// direction. R311y568 added the reverse assertion for exactly this.
+///
+/// # Safety
+/// `left` and `right` must be null or valid loaned keyexprs.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn z_keyexpr_relation_to(
+    left: *const z_loaned_keyexpr_t,
+    right: *const z_loaned_keyexpr_t,
+) -> std::ffi::c_int {
+    crate::ffi::guard_val(Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT, || {
+        // SAFETY: the caller's contract, delegated to the three predicates.
+        unsafe {
+            if z_keyexpr_equals(left, right) {
+                Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS
+            } else if z_keyexpr_includes(left, right) {
+                Z_KEYEXPR_INTERSECTION_LEVEL_INCLUDES
+            } else if z_keyexpr_intersects(left, right) {
+                Z_KEYEXPR_INTERSECTION_LEVEL_INTERSECTS
+            } else {
+                Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT
+            }
+        }
     })
 }
 

@@ -73,6 +73,43 @@ impl EncodingState {
             heap: true,
         }
     }
+
+    /// R311y568 — the state for a delivered [`EncodingHint`], for a marshal that
+    /// must answer `z_sample_encoding` / `z_reply_err_encoding`.
+    ///
+    /// `heap: false` even though the label may be `Owned`, and that is not a
+    /// contradiction: `heap` means "the STATE is a `Box::into_raw` the free path
+    /// must reclaim", and this one is a marshal FIELD whose storage the marshal
+    /// owns. Freeing it would be a double free — which is exactly why the flag
+    /// is a separate discriminant from the `Cow` variant, as this type's own doc
+    /// comment says.
+    pub(crate) fn from_hint(hint: &EncodingHint) -> Self {
+        Self {
+            label: Cow::Owned(wz_capi_core::encoding_ids::hint_to_string_in(
+                hint,
+                wz_capi_core::encoding_ids::EncodingDialect::ZenohC,
+            )),
+            heap: false,
+        }
+    }
+
+    /// R311y568 — the DEFAULT encoding, which is what an absent wire E-flag
+    /// means. `zenoh/bytes`, table index
+    /// [`ENCODING_ID_DEFAULT`](wz_capi_core::encoding_ids::ENCODING_ID_DEFAULT).
+    pub(crate) fn default_encoding() -> Self {
+        Self::constant(wz_capi_core::encoding_ids::ENCODING_ID_DEFAULT as usize)
+    }
+
+    /// R311y568 — an INDEPENDENT copy for a marshal that outlives its callback.
+    ///
+    /// Never `heap`, for the same reason [`Self::from_hint`] is not: the copy is
+    /// a field of the cloned marshal, not a leaked box.
+    pub(crate) fn deep_copy(&self) -> Self {
+        Self {
+            label: Cow::Owned(self.label.to_string()),
+            heap: false,
+        }
+    }
 }
 
 /// A loaned encoding view that lives for the whole program.

@@ -113,6 +113,9 @@ pub(crate) fn make_subscriber_callback(
 struct SubscriberState {
     shared: Arc<SharedSession>,
     id: SubId,
+    /// R311y568 — the keyexpr this subscription was declared under, so
+    /// [`z_subscriber_keyexpr`] can answer.
+    keyexpr: crate::keyexpr::DeclaredKeyexpr,
 }
 
 /// Leak a [`SubscriberState`] and hand back the handle a `z_owned_subscriber_t`
@@ -124,11 +127,20 @@ struct SubscriberState {
 /// `z_undeclare_subscriber` below. One state type is what makes that true by
 /// construction — the registry already shares [`SubId`] space between the two for
 /// the same reason.
-pub(crate) fn subscriber_state_handle(shared: &Arc<SharedSession>, id: SubId) -> Handle {
-    Box::into_raw(Box::new(SubscriberState {
+pub(crate) fn subscriber_state_handle(
+    shared: &Arc<SharedSession>,
+    id: SubId,
+    keyexpr: String,
+) -> Handle {
+    let mut boxed = Box::new(SubscriberState {
         shared: shared.clone(),
         id,
-    })) as Handle
+        keyexpr: crate::keyexpr::DeclaredKeyexpr::new(keyexpr),
+    });
+    // Bind AFTER boxing — the state is at its final address only here. See
+    // `DeclaredKeyexpr::bind`.
+    boxed.keyexpr.bind();
+    Box::into_raw(boxed) as Handle
 }
 
 impl Drop for SubscriberState {
@@ -299,13 +311,17 @@ pub unsafe extern "C" fn z_declare_subscriber(
 
         // SAFETY: the caller's contract for the options struct.
         let allowed_origin = unsafe { subscriber_allowed_origin(options) };
+        let declared = ke.clone();
         let id = state.shared.declare_subscriber(ke, allowed_origin, {
             let closure = Arc::new(cclosure);
             Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
         });
         unsafe {
-            *subscriber =
-                z_owned_subscriber_t::from_handle(subscriber_state_handle(&state.shared, id))
+            *subscriber = z_owned_subscriber_t::from_handle(subscriber_state_handle(
+                &state.shared,
+                id,
+                declared,
+            ))
         };
         Z_OK
     })
@@ -348,6 +364,72 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
     // handle the owned form would have written out, and then goes out of scope
     // without reclaiming it. See the doc note.
     unsafe { z_declare_subscriber(session, &mut sink, key_expr, callback, options) }
+}
+
+/// This subscriber's GLOBAL ENTITY ID (zenoh-c `z_subscriber_id`).
+///
+/// R311y568. UNSTABLE-gated as upstream gates it, and it has to be:
+/// `z_entity_global_id_t` lives in [`crate::advanced`], which is not compiled on
+/// the other arm. Built through the shared
+/// [`for_entity`](crate::advanced::z_entity_global_id_t::for_entity)
+/// constructor, so the zid / eid convention is stated once for all five
+/// entity-id accessors.
+///
+/// # Safety
+/// `subscriber` must be null or a valid loaned subscriber.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn z_subscriber_id(
+    subscriber: *const crate::abi::z_loaned_subscriber_t,
+) -> crate::advanced::z_entity_global_id_t {
+    crate::ffi::guard_val(crate::advanced::z_entity_global_id_t::empty(), || {
+        if subscriber.is_null() {
+            return crate::advanced::z_entity_global_id_t::empty();
+        }
+        // SAFETY: the caller's contract — a live `Box<SubscriberState>`.
+        let handle = unsafe { (*subscriber).handle };
+        if handle.is_null() {
+            return crate::advanced::z_entity_global_id_t::empty();
+        }
+        // SAFETY: as above.
+        let state = unsafe { &*(handle as *const SubscriberState) };
+        crate::advanced::z_entity_global_id_t::for_entity(
+            &state.shared,
+            subscriber as *const std::ffi::c_void,
+        )
+    })
+}
+
+/// The keyexpr a subscriber was declared under (zenoh-c `z_subscriber_keyexpr`).
+///
+/// R311y568. The borrow is valid for as long as the subscriber is — the state is
+/// boxed and the view is aimed at its own field.
+///
+/// Serves the LIVELINESS subscriber too, because both kinds share one
+/// [`SubscriberState`] (see [`subscriber_state_handle`] for why), so
+/// `z_liveliness_declare_subscriber`'s handle answers here as well.
+///
+/// # Safety
+/// `subscriber` must be null or a valid loaned subscriber.
+#[no_mangle]
+pub unsafe extern "C" fn z_subscriber_keyexpr(
+    subscriber: *const crate::abi::z_loaned_subscriber_t,
+) -> *const z_loaned_keyexpr_t {
+    crate::ffi::guard_val(std::ptr::null(), || {
+        if subscriber.is_null() {
+            return std::ptr::null();
+        }
+        // SAFETY: the caller's contract — the handle is a live
+        // `Box<SubscriberState>` this crate leaked.
+        let handle = unsafe { (*subscriber).handle };
+        if handle.is_null() {
+            return std::ptr::null();
+        }
+        // SAFETY: as above.
+        unsafe { &*(handle as *const SubscriberState) }
+            .keyexpr
+            .as_loaned()
+    })
 }
 
 /// Undeclare a subscriber (zenoh-c `z_undeclare_subscriber`): drops the wz

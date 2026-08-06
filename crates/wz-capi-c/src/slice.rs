@@ -42,6 +42,9 @@ pub(crate) fn view_slice_over(bytes: &[u8]) -> z_view_slice_t {
 
 /// The bytes behind a loaned slice, or `None` for a gravestone.
 ///
+/// R311y568 — re-exported as [`loaned_slice_bytes`] for `z_bytes_copy_from_slice`
+/// next door.
+///
 /// # Safety
 /// `this_` must be null or a valid loaned slice.
 unsafe fn slice_bytes<'a>(this_: *const z_loaned_slice_t) -> Option<&'a [u8]> {
@@ -194,6 +197,52 @@ pub unsafe extern "C" fn z_slice_is_empty(this_: *const z_loaned_slice_t) -> boo
         // SAFETY: the caller's contract.
         unsafe { slice_bytes(this_) }.map_or(true, <[u8]>::is_empty)
     })
+}
+
+// --- R311y568: the two cross-module readers `crate::bytes` needs -------------
+
+/// The bytes behind a loaned slice, for a consumer outside this module.
+///
+/// # Safety
+/// As [`slice_bytes`].
+pub(crate) unsafe fn loaned_slice_bytes<'a>(this_: *const z_loaned_slice_t) -> Option<&'a [u8]> {
+    // SAFETY: the caller's contract, delegated.
+    unsafe { slice_bytes(this_) }
+}
+
+/// CONSUME a moved slice: take its bytes, gravestone the caller's slot, and free
+/// the buffer when it was owned.
+///
+/// The slice-side twin of [`crate::encoding::take_moved_encoding`], and the same
+/// argument applies: a `z_moved_*` parameter is consumed on every path, so a READ
+/// would leave the caller's owned value non-null and leak its buffer.
+///
+/// A VIEW slice reaching here has a null `owned` slot, so its bytes are copied
+/// and nothing is freed — the borrow was never this crate's to release.
+///
+/// # Safety
+/// `moved` must be null, or a valid, writable moved slice.
+pub(crate) unsafe fn take_moved_slice(moved: *mut z_moved_slice_t) -> Option<Vec<u8>> {
+    if moved.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    let (ptr, len, owned) = unsafe {
+        let s = &(*moved)._this;
+        (s.ptr, s.len, s.owned)
+    };
+    // SAFETY: gravestoned before any free, so a second drop is a no-op.
+    unsafe { (*moved)._this = z_owned_slice_t::null_value() };
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: `ptr`/`len` describe a live buffer per the caller's contract.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+    if !owned.is_null() {
+        // SAFETY: a live `Box<Vec<u8>>` this crate leaked in `owned_slice_from`.
+        drop(unsafe { Box::from_raw(owned as *mut Vec<u8>) });
+    }
+    Some(bytes)
 }
 
 /// Deep-copy a slice (zenoh-c `z_slice_clone`).

@@ -108,17 +108,17 @@ pub(crate) fn make_liveliness_callback(
         let Some(call) = closure.call else {
             return;
         };
+        // A liveliness sample is a token TRANSITION rather than a published
+        // value: no attachment, no timestamp, no `(zid, eid, sn)`, no encoding
+        // and no QoS ext — upstream's carries none of them either. The default
+        // meta says exactly that, and says it once, so a field added to
+        // [`SampleMeta`](crate::sample::SampleMeta) does not need a decision
+        // here to keep compiling.
         let mut marshal = SampleMarshal::new(
             sample.keyexpr.to_owned(),
             Vec::new(),
-            None,
             liveliness_kind_of(sample.kind),
-            // A liveliness sample is a token transition, not a timestamped
-            // value; upstream's carries none either.
-            None,
-            // R311y563 — nor a source identity: a liveliness token transition
-            // is not a published sample and carries no (zid, eid, sn).
-            None,
+            crate::sample::SampleMeta::default(),
         );
         // Bind AFTER the move out of `new` — see `SampleMarshal::bind`.
         marshal.bind();
@@ -282,6 +282,31 @@ pub unsafe extern "C" fn z_internal_liveliness_token_null(this_: *mut z_owned_li
     }
 }
 
+/// Declare a liveliness subscriber the C side never holds (zenoh-c
+/// `z_liveliness_declare_background_subscriber`): it lives until the session is
+/// closed.
+///
+/// R311y568. The same construction the data-plane
+/// [`crate::sub::z_declare_background_subscriber`] uses — declare into a LOCAL
+/// owned handle and discard it — for the same reason; see that function for the
+/// full argument about why the discard is deliberate.
+///
+/// # Safety
+/// `session` must be a valid loaned session; `key_expr` must be a valid loaned
+/// keyexpr; `callback` must be a valid moved closure; `options` must be null or a
+/// valid options struct.
+#[no_mangle]
+pub unsafe extern "C" fn z_liveliness_declare_background_subscriber(
+    session: *const z_loaned_session_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_sample_t,
+    options: *mut z_liveliness_subscriber_options_t,
+) -> ZResult {
+    let mut sink = z_owned_subscriber_t::null_value();
+    // SAFETY: the caller's contract, delegated.
+    unsafe { z_liveliness_declare_subscriber(session, &mut sink, key_expr, callback, options) }
+}
+
 /// Declare a subscriber on liveliness tokens (zenoh-c
 /// `z_liveliness_declare_subscriber`). Consumes the moved closure on every path.
 ///
@@ -332,13 +357,17 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         let mut opts = LivelinessSubscriberOptions::default();
         opts.history = history;
 
+        let declared = ke.clone();
         let id: SubId = state.shared.declare_liveliness_subscriber(ke, opts, {
             let closure = Arc::new(cclosure);
             Arc::new(move || Box::new(make_liveliness_callback(closure.clone())) as Box<_>)
         });
         unsafe {
-            *subscriber =
-                z_owned_subscriber_t::from_handle(subscriber_state_handle(&state.shared, id))
+            *subscriber = z_owned_subscriber_t::from_handle(subscriber_state_handle(
+                &state.shared,
+                id,
+                declared,
+            ))
         };
         Z_OK
     })

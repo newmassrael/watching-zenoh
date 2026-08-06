@@ -13,7 +13,7 @@
 //! QUERYABLES rather than subscribers, which is the one thing that differs from
 //! the publisher's ([`crate::matching`]).
 
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::{c_char, c_int};
 // R311y563 — the cfg'd `c_void` import that used to live here is GONE, and the
 // reason is worth one line: its only user was
 // `z_querier_get_options_t::source_info`, which is typed
@@ -30,7 +30,7 @@ use crate::abi::{
 };
 use crate::ffi::{guard_val, guarded};
 use crate::get::{adopt_reply_closure, issue_get, z_query_consolidation_t};
-use crate::keyexpr::{keyexpr_str, KeyexprState};
+use crate::keyexpr::keyexpr_str;
 use crate::matching::{
     z_matching_status_t, z_moved_closure_matching_status_t, z_owned_closure_matching_status_t,
     CMatchClosure, MatchingHold,
@@ -176,7 +176,9 @@ unsafe fn querier_get_source_info(
 
 pub(crate) struct QuerierState {
     pub(crate) shared: Arc<SharedSession>,
-    pub(crate) keyexpr: KeyexprState,
+    /// R311y568 — the declared keyexpr AND the loaned view `z_querier_keyexpr`
+    /// hands back, in one holder so the accessor and the wire cannot disagree.
+    pub(crate) keyexpr: crate::keyexpr::DeclaredKeyexpr,
     /// The per-declaration options every `z_querier_get` starts from.
     base: QueryOptions,
     /// A background matching listener, held so it is undeclared when the
@@ -268,12 +270,15 @@ pub unsafe extern "C" fn z_declare_querier(
                 .with_express(o.is_express);
         }
 
-        let handle = Box::into_raw(Box::new(QuerierState {
+        let mut boxed = Box::new(QuerierState {
             shared: state.shared.clone(),
-            keyexpr: KeyexprState::new(ke),
+            keyexpr: crate::keyexpr::DeclaredKeyexpr::new(ke),
             base,
             matching: Mutex::new(None),
-        })) as Handle;
+        });
+        // Bind AFTER boxing — the state is at its final address only here.
+        boxed.keyexpr.bind();
+        let handle = Box::into_raw(boxed) as Handle;
         // SAFETY: the caller's contract.
         unsafe { *querier = z_owned_querier_t::from_handle(handle) };
         Z_OK
@@ -291,6 +296,63 @@ pub unsafe extern "C" fn z_querier_loan(
     this_ as *const z_loaned_querier_t
 }
 
+/// Mutably borrow a querier (zenoh-c `z_querier_loan_mut`).
+///
+/// A CAST, like its immutable twin.
+///
+/// # Safety
+/// `this_` must be null or a valid owned querier.
+#[no_mangle]
+pub unsafe extern "C" fn z_querier_loan_mut(
+    this_: *mut z_owned_querier_t,
+) -> *mut z_loaned_querier_t {
+    this_ as *mut z_loaned_querier_t
+}
+
+/// This querier's GLOBAL ENTITY ID (zenoh-c `z_querier_id`).
+///
+/// R311y568. UNSTABLE-gated — see [`crate::sub::z_subscriber_id`].
+///
+/// # Safety
+/// `querier` must be null or a valid loaned querier.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn z_querier_id(
+    querier: *const z_loaned_querier_t,
+) -> crate::advanced::z_entity_global_id_t {
+    guard_val(crate::advanced::z_entity_global_id_t::empty(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { querier_state(querier) } {
+            Some(state) => crate::advanced::z_entity_global_id_t::for_entity(
+                &state.shared,
+                querier as *const std::ffi::c_void,
+            ),
+            None => crate::advanced::z_entity_global_id_t::empty(),
+        }
+    })
+}
+
+/// The keyexpr a querier was declared under (zenoh-c `z_querier_keyexpr`).
+///
+/// R311y568. Reads the querier's OWN [`KeyexprState`] — the same one
+/// `z_querier_get` publishes against — rather than a second copy, so the
+/// accessor and the wire cannot disagree about what was declared.
+///
+/// # Safety
+/// `querier` must be null or a valid loaned querier.
+#[no_mangle]
+pub unsafe extern "C" fn z_querier_keyexpr(
+    querier: *const z_loaned_querier_t,
+) -> *const crate::abi::z_loaned_keyexpr_t {
+    guard_val(std::ptr::null(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { querier_state(querier) } {
+            Some(state) => state.keyexpr.as_loaned(),
+            None => std::ptr::null(),
+        }
+    })
+}
+
 /// Issue one get through a querier (zenoh-c `z_querier_get`). Consumes the moved
 /// closure on every path.
 ///
@@ -302,6 +364,57 @@ pub unsafe extern "C" fn z_querier_loan(
 pub unsafe extern "C" fn z_querier_get(
     querier: *const z_loaned_querier_t,
     parameters: *const c_char,
+    callback: *mut z_moved_closure_reply_t,
+    options: *mut z_querier_get_options_t,
+) -> ZResult {
+    // SAFETY: the caller's contract, delegated.
+    unsafe {
+        querier_get_with_selector(
+            querier,
+            crate::get::nul_terminated(parameters),
+            callback,
+            options,
+        )
+    }
+}
+
+/// R311y568 — [`z_querier_get`] with an explicit selector LENGTH (zenoh-c
+/// `z_querier_get_with_parameters_substr`).
+///
+/// The querier twin of [`crate::get::z_get_with_parameters_substr`]; see there
+/// for why the counted form is the general one.
+///
+/// # Safety
+/// As [`z_querier_get`], except that `parameters` must be null or point at
+/// `parameters_len` readable bytes rather than being NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
+    querier: *const z_loaned_querier_t,
+    parameters: *const c_char,
+    parameters_len: usize,
+    callback: *mut z_moved_closure_reply_t,
+    options: *mut z_querier_get_options_t,
+) -> ZResult {
+    // SAFETY: the caller's contract, delegated.
+    unsafe {
+        querier_get_with_selector(
+            querier,
+            crate::get::counted_bytes(parameters, parameters_len),
+            callback,
+            options,
+        )
+    }
+}
+
+/// The body BOTH `z_querier_get` spellings share — one core, for the
+/// consume-on-every-path reason [`crate::get`]'s records.
+///
+/// # Safety
+/// As [`z_querier_get`], with `params` already read out of whichever selector
+/// form the caller used.
+unsafe fn querier_get_with_selector(
+    querier: *const z_loaned_querier_t,
+    params: Option<Vec<u8>>,
     callback: *mut z_moved_closure_reply_t,
     options: *mut z_querier_get_options_t,
 ) -> ZResult {
@@ -348,15 +461,9 @@ pub unsafe extern "C" fn z_querier_get(
         if let Some(info) = source_info {
             opts = opts.with_source_info(info);
         }
-        let params = if parameters.is_null() {
-            None
-        } else {
-            // SAFETY: the caller's contract — NUL-terminated.
-            Some(unsafe { CStr::from_ptr(parameters) }.to_bytes().to_vec())
-        };
         issue_get(
             &state.shared,
-            state.keyexpr.keyexpr.clone(),
+            state.keyexpr.literal().to_owned(),
             params,
             opts,
             closure,
@@ -396,7 +503,7 @@ pub unsafe extern "C" fn z_querier_declare_background_matching_listener(
         };
         let closure = Arc::new(cclosure);
         let id = state.shared.declare_querier_matching_listener(
-            state.keyexpr.keyexpr.clone(),
+            state.keyexpr.literal().to_owned(),
             Arc::new(move |matching: bool| {
                 let Some(call) = closure.call else {
                     return;

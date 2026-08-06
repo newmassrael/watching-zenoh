@@ -76,12 +76,58 @@ use wz_integration_tests::common::{wz_capi_c_cdylib, zenoh_c_oracle};
 /// An arm with no row is a hard FAIL, not a default: the two unmeasured arms
 /// have no oracle on this machine, and a guessed ceiling is a gate that
 /// measures nothing. Add the row when the oracle exists.
+/// # R311y568 — the `nounstable` arm reached ZERO
+///
+/// 90 -> 0 and 197 -> 107, in one round. What closed on the published-archive
+/// arm: the owned `reply_err` family (11), the `z_owned_task_t` thread plane
+/// (6), the `zc_owned_closure_log_t` family (7), six `z_bytes_*` constructors
+/// plus the reader's three cursor calls, the string array's mutable half (5),
+/// the matching-status closure's own four entry points, the six
+/// `z_internal_*_handler_*` pairs the three HAND-WRITTEN channel families never
+/// got, the five `z_query_consolidation_*` constructors, five constant getters,
+/// the `*_loan_mut` / `*_take_from_loaned` / `*_clone` accessors across sample /
+/// reply / query / hello / querier, three `*_keyexpr` declaration getters, two
+/// background declares, and the two counted-selector `_with_parameters_substr`
+/// gets.
+///
+/// A zero here is a STRONGER claim than the ratchet was making, and the gate
+/// shape does not change to accommodate it: the `assert_eq!` below still fails
+/// if the number moves in EITHER direction, so a regression reds the lane and a
+/// future improvement on another arm still has to move its row deliberately.
+///
+/// ## The `unstable-shm` arm: 197 -> 83, and the remainder is TWO PLANES
+///
+/// The same round also closed the unstable-only half of that arm — the entity-id
+/// accessors (`z_subscriber_id` / `z_queryable_id` / `z_querier_id` /
+/// `ze_advanced_publisher_id` / `ze_advanced_subscriber_id`),
+/// `z_reply_replier_id`, `z_sample_reliability`, `z_keyexpr_relation_to`, the
+/// `zc_owned_concurrent_close_handle_t` family, `zc_get_last_error`,
+/// `z_bytes_get_contiguous_view`, the two remaining defaults, the advanced
+/// publisher's matching trio and delete, and the advanced subscriber's two
+/// background declares.
+///
+/// What is left is 83 symbols in exactly TWO coherent planes, and NOTHING
+/// outside them — the classification is a measurement, re-run with the census:
+///
+/// - **65** — the SHM provider / allocator surface: `z_alloc_layout_*`,
+///   `z_shm_provider_*`, `z_shm_client*`, `z_memory_layout_*`,
+///   `z_ptr_in_segment_*`, `z_chunk_alloc_result_*`, `zc_shm_client_list_*`.
+///   wz exports the SHM BUFFER half already (`z_shm_*` / `z_shm_mut_*`); this is
+///   the ALLOCATOR half, which needs a segment provider wz does not have.
+/// - **18** — the zenoh-ext `ze_publication_cache` and `ze_querying_subscriber`
+///   planes. Distinct from `ze_advanced_*`, which wz does implement: these are
+///   upstream's older standalone spellings of the same two ideas.
+///
+/// Both are FEATURES rather than accessors, which is why they are a recorded
+/// number here instead of work this round absorbed. That the remainder is
+/// exactly two planes — with no scattered leftovers — is what makes this row a
+/// scoped debt rather than a tally.
 const BASELINES: &[(&str, usize)] = &[
-    // `~/.local`, upstream's published standalone archive.
-    ("nounstable", 90),
+    // `~/.local`, upstream's published standalone archive. CLOSED at R311y568.
+    ("nounstable", 0),
     // `target/zenoh-c-shm`, built by `scripts/install-zenoh-c-shm.sh`; the arm
-    // hosted CI provisions.
-    ("unstable-shm", 197),
+    // hosted CI provisions. 65 SHM-allocator + 18 zenoh-ext, and nothing else.
+    ("unstable-shm", 83),
 ];
 
 /// The committed ceiling for `arm`, or a FAILURE naming what to measure.
@@ -349,6 +395,53 @@ fn the_wz_capi_c_drop_in_surface_gap_does_not_grow() {
         reference.len() - missing.len(),
         reference.len(),
         missing.len()
+    );
+}
+
+/// THE OTHER DIRECTION: wz exports NOTHING the reference does not.
+///
+/// # R311y568 — the census was blind by construction, and it cost a real defect
+///
+/// The gate above is `reference - wz`, which answers "can every upstream program
+/// be attempted". It is silent about `wz - reference`, and that set is not
+/// harmless: a symbol wz exports and upstream does not is one of
+///
+/// - a symbol upstream gates behind `Z_FEATURE_UNSTABLE_API` that wz exports
+///   unconditionally, so wz's surface is arm-dependent in a way the header is
+///   not; or
+/// - a symbol upstream does not declare AT ALL, i.e. a wz invention wearing a
+///   `z_`-prefixed name.
+///
+/// Both were live when this test was written, and neither could be reached from
+/// the other direction. `z_keyexpr_relation_to` and `zc_get_last_error` had just
+/// been added ungated (upstream gates both), and `z_view_keyexpr_loan_mut` had
+/// been sitting in the tree since the keyexpr plane landed — a symbol that
+/// exists in ZENOH-PICO and was transcribed into the zenoh-c ABI, where upstream
+/// declares no such function on either arm. The first two were caught only
+/// because the pure-function probe failed to LINK against the reference; the
+/// third nothing was looking for.
+///
+/// A ZERO rather than a ratchet, and deliberately so: the missing direction has
+/// a legitimate non-zero remainder (features wz has not built), while this one
+/// does not — every entry is a mistake by construction, so there is nothing to
+/// carry.
+#[test]
+#[ignore = "reads the installed zenoh-c oracle; run by run-ci Layer C1cc"]
+fn wz_exports_nothing_the_reference_does_not() {
+    let Some((include, libdir)) = oracle_or_note() else {
+        return;
+    };
+    let arm = oracle_arm(&include);
+    let (wz, reference) = both_surfaces(&include, &libdir);
+    let extra: Vec<&str> = wz
+        .difference(&reference)
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        extra.is_empty(),
+        "wz's zenoh-c drop-in exports {} public symbol(s) the real libzenohc.so does          NOT define on the '{arm}' arm. Each is either a symbol upstream gates behind          a `Z_FEATURE_*` that wz exports unconditionally, or a name wz invented —          both make wz's surface differ from the ABI it claims to be:\n{}",
+        extra.len(),
+        extra.join("\n")
     );
 }
 

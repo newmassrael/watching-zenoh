@@ -63,7 +63,28 @@ const PROBE: &str = r#"#include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 #include "zenoh.h"
+
+/* R311y568 — the state the new blocks at the end of `main` observe. Globals
+   rather than a context pointer because the probe is single-threaded apart from
+   the one task it joins, and a printed COUNT is what distinguishes a callback
+   that RAN from one that merely linked. */
+static int task_ran = 0;
+static int log_calls = 0;
+static int log_drops = 0;
+static int match_calls = 0;
+static int match_last = -1;
+
+static void *task_body(void *arg) { (void)arg; task_ran = 1; return NULL; }
+static void free_str(void *data, void *context) { (void)context; free(data); }
+static void on_log(zc_log_severity_t sev, const z_loaned_string_t *msg, void *ctx) {
+    (void)sev; (void)msg; (void)ctx; log_calls++;
+}
+static void on_log_drop(void *ctx) { (void)ctx; log_drops++; }
+static void on_match(const z_matching_status_t *st, void *ctx) {
+    (void)ctx; match_calls++; match_last = st ? (int)st->matching : -1;
+}
 
 /* Render a loaned encoding through `z_encoding_to_string`. */
 static void show_encoding(const char *label, const z_loaned_encoding_t *e) {
@@ -408,6 +429,302 @@ int main(void) {
             z_string_drop(z_string_move(&e));
         }
         z_bytes_drop(z_bytes_move(&b));
+    }
+
+    /* --- R311y568: the families the DROP-IN CENSUS forced into existence ---
+       Every block below drives symbols that did not exist in wz's cdylib
+       before this round, so none had ever been compared against the reference.
+       They are pure or session-free, which is why they belong in THIS file
+       rather than in an interop leg: a wrong answer here is invisible on the
+       wire because it never reaches one. */
+
+    /* The five consolidation constructors + the five constant getters. */
+    printf("consolidation.auto=%d\n", (int)z_query_consolidation_auto().mode);
+    printf("consolidation.default=%d\n", (int)z_query_consolidation_default().mode);
+    printf("consolidation.none=%d\n", (int)z_query_consolidation_none().mode);
+    printf("consolidation.monotonic=%d\n", (int)z_query_consolidation_monotonic().mode);
+    printf("consolidation.latest=%d\n", (int)z_query_consolidation_latest().mode);
+    printf("default.cc.push=%d\n", (int)z_internal_congestion_control_default_push());
+    printf("default.cc.request=%d\n", (int)z_internal_congestion_control_default_request());
+    printf("default.cc.response=%d\n", (int)z_internal_congestion_control_default_response());
+    printf("default.priority=%d\n", (int)z_priority_default());
+    printf("default.locality=%d\n", (int)zc_locality_default());
+
+    /* The two option structs that were NOT DECLARED before this round. Their
+       defaults are the whole observable content of an 8-byte struct. */
+    {
+        z_publisher_delete_options_t pdo;
+        z_publisher_delete_options_default(&pdo);
+        printf("pub_delete_opts.timestamp_null=%d size=%zu\n",
+               (int)(pdo.timestamp == NULL), sizeof pdo);
+        z_query_reply_err_options_t qreo;
+        z_query_reply_err_options_default(&qreo);
+        printf("reply_err_opts.encoding_null=%d size=%zu\n",
+               (int)(qreo.encoding == NULL), sizeof qreo);
+    }
+
+    /* The four keyexpr RELATION levels, over pairs chosen to hit each one.
+       `z_keyexpr_relation_to` collapses three predicates into a ladder, and
+       the ladder's ORDER is what a hand-written version gets wrong — an equal
+       pair answered as INTERSECTS is a plausible bug no single pair exposes.
+
+       Behind upstream's OWN `#if`, not a wz-authored one: the probe is compiled
+       against upstream's header, so the header's gate is the definition of
+       which arm has this symbol. Copying the condition rather than inventing a
+       flag is what keeps the two arms comparable — and it is how this block
+       first proved wz was over-exporting, by failing to link against the
+       reference. */
+#if defined(Z_FEATURE_UNSTABLE_API)
+    {
+        const char *pairs[][2] = {
+            {"a/b", "a/b"},
+            {"a/**", "a/b/c"},
+            {"a/*/c", "a/b/*"},
+            {"a/b", "x/y"},
+            {"**", "a/b/c"},
+            {"a/*", "a/*"},
+        };
+        for (size_t i = 0; i < sizeof pairs / sizeof pairs[0]; i++) {
+            z_view_keyexpr_t l, r;
+            z_view_keyexpr_from_str(&l, pairs[i][0]);
+            z_view_keyexpr_from_str(&r, pairs[i][1]);
+            printf("relation[%s|%s]=%d\n", pairs[i][0], pairs[i][1],
+                   (int)z_keyexpr_relation_to(z_view_keyexpr_loan(&l),
+                                              z_view_keyexpr_loan(&r)));
+        }
+    }
+#endif
+
+    /* The six `z_bytes_*` constructors and the reader's three cursor calls.
+       The reader block is SEQUENCED deliberately: `tell` and `remaining` are
+       read after each step, so a cursor that moves by the wrong amount shows
+       up on the step that moved it rather than only at the end. */
+    {
+        z_owned_bytes_t b1, b2, b3, b4, b5, b6, empty;
+        z_owned_slice_t sl;
+        z_owned_string_t st;
+        z_slice_copy_from_buf(&sl, (const uint8_t *)"SLICE", 5);
+        z_string_copy_from_str(&st, "STRING");
+
+        z_bytes_copy_from_slice(&b1, z_slice_loan(&sl));
+        printf("bytes.copy_from_slice.len=%zu empty=%d\n",
+               z_bytes_len(z_bytes_loan(&b1)), (int)z_bytes_is_empty(z_bytes_loan(&b1)));
+        z_bytes_copy_from_string(&b2, z_string_loan(&st));
+        printf("bytes.copy_from_string.len=%zu\n", z_bytes_len(z_bytes_loan(&b2)));
+        /* MOVING constructors: the sources are consumed by the callee. */
+        z_bytes_from_slice(&b3, z_slice_move(&sl));
+        printf("bytes.from_slice.len=%zu\n", z_bytes_len(z_bytes_loan(&b3)));
+        z_bytes_from_string(&b4, z_string_move(&st));
+        printf("bytes.from_string.len=%zu\n", z_bytes_len(z_bytes_loan(&b4)));
+
+        static uint8_t STATIC_BUF[4] = {1, 2, 3, 4};
+        printf("bytes.from_static_buf.rc=%d len=%zu\n",
+               (int)z_bytes_from_static_buf(&b5, STATIC_BUF, sizeof STATIC_BUF),
+               z_bytes_len(z_bytes_loan(&b5)));
+
+        char *owned_str = (char *)malloc(6);
+        memcpy(owned_str, "OWNED", 6);
+        printf("bytes.from_str.rc=%d len=%zu\n",
+               (int)z_bytes_from_str(&b6, owned_str, free_str, NULL),
+               z_bytes_len(z_bytes_loan(&b6)));
+
+        z_bytes_empty(&empty);
+        printf("bytes.empty.is_empty=%d\n", (int)z_bytes_is_empty(z_bytes_loan(&empty)));
+
+        z_bytes_reader_t rd = z_bytes_get_reader(z_bytes_loan(&b1));
+        uint8_t buf[8];
+        printf("reader.start tell=%lld remaining=%zu\n",
+               (long long)z_bytes_reader_tell(&rd), z_bytes_reader_remaining(&rd));
+        z_bytes_reader_read(&rd, buf, 2);
+        printf("reader.after_read2 tell=%lld remaining=%zu\n",
+               (long long)z_bytes_reader_tell(&rd), z_bytes_reader_remaining(&rd));
+        printf("reader.seek_set0.rc=%d tell=%lld\n",
+               (int)z_bytes_reader_seek(&rd, 0, SEEK_SET), (long long)z_bytes_reader_tell(&rd));
+        printf("reader.seek_cur3.rc=%d tell=%lld\n",
+               (int)z_bytes_reader_seek(&rd, 3, SEEK_CUR), (long long)z_bytes_reader_tell(&rd));
+        printf("reader.seek_end0.rc=%d tell=%lld remaining=%zu\n",
+               (int)z_bytes_reader_seek(&rd, 0, SEEK_END), (long long)z_bytes_reader_tell(&rd),
+               z_bytes_reader_remaining(&rd));
+        /* PAST the end and BEFORE the start: a version that CLAMPED instead of
+           refusing would pass an rc-only check and differ on `tell` here. */
+        printf("reader.seek_past.rc=%d tell=%lld\n",
+               (int)z_bytes_reader_seek(&rd, 99, SEEK_SET), (long long)z_bytes_reader_tell(&rd));
+        printf("reader.seek_neg.rc=%d tell=%lld\n",
+               (int)z_bytes_reader_seek(&rd, -99, SEEK_SET), (long long)z_bytes_reader_tell(&rd));
+
+        z_bytes_drop(z_bytes_move(&b1));
+        z_bytes_drop(z_bytes_move(&b2));
+        z_bytes_drop(z_bytes_move(&b3));
+        z_bytes_drop(z_bytes_move(&b4));
+        z_bytes_drop(z_bytes_move(&b5));
+        z_bytes_drop(z_bytes_move(&b6));
+        z_bytes_drop(z_bytes_move(&empty));
+    }
+
+    /* The string array's MUTABLE half.
+
+       NOTE what is deliberately NOT compared here. wz boxes each entry so a
+       pointer from `z_string_array_get` survives a later reallocating push;
+       upstream does not, and a probe that read a pre-growth pointer back
+       SEGFAULTED the reference arm on its first run. That is a wz SUPERSET, so
+       it cannot be a twice-and-diff claim — a property the reference does not
+       have has no reference answer to agree with. It is asserted where it
+       belongs instead, as a wz-side unit test in `crate::scout`.
+
+       What IS compared is every answer both libraries can give: the push return
+       values, the length after growth, the element read back at each index
+       BEFORE any further push, and the clone's length. */
+    {
+        z_owned_string_array_t arr, copy;
+        z_string_array_new(&arr);
+        printf("array.new.len=%zu empty=%d\n",
+               z_string_array_len(z_string_array_loan(&arr)),
+               (int)z_string_array_is_empty(z_string_array_loan(&arr)));
+        z_owned_string_t a, b;
+        z_string_copy_from_str(&a, "alpha");
+        z_string_copy_from_str(&b, "beta");
+        printf("array.push_alias=%zu\n",
+               z_string_array_push_by_alias(z_string_array_loan_mut(&arr), z_string_loan(&a)));
+        printf("array.push_copy=%zu\n",
+               z_string_array_push_by_copy(z_string_array_loan_mut(&arr), z_string_loan(&b)));
+        /* Read back through a FRESH `get` each time — the only form both
+           libraries support. */
+        for (size_t i = 0; i < z_string_array_len(z_string_array_loan(&arr)); i++) {
+            const z_loaned_string_t *e = z_string_array_get(z_string_array_loan(&arr), i);
+            printf("array.get[%zu]=%.*s\n", i, (int)z_string_len(e), z_string_data(e));
+        }
+        for (int i = 0; i < 8; i++) {
+            z_string_array_push_by_copy(z_string_array_loan_mut(&arr), z_string_loan(&b));
+        }
+        printf("array.len_after_growth=%zu\n", z_string_array_len(z_string_array_loan(&arr)));
+        {
+            const z_loaned_string_t *e0 = z_string_array_get(z_string_array_loan(&arr), 0);
+            printf("array.get0_after_growth=%.*s\n",
+                   (int)z_string_len(e0), z_string_data(e0));
+        }
+        printf("array.get_past_end_null=%d\n",
+               (int)(z_string_array_get(z_string_array_loan(&arr), 999) == NULL));
+        z_string_array_clone(&copy, z_string_array_loan(&arr));
+        printf("array.clone.len=%zu\n", z_string_array_len(z_string_array_loan(&copy)));
+        z_string_array_drop(z_string_array_move(&copy));
+        z_string_array_drop(z_string_array_move(&arr));
+        z_string_drop(z_string_move(&a));
+        z_string_drop(z_string_move(&b));
+    }
+
+    /* The TASK plane. The counter is bumped by the spawned function and read
+       AFTER the join, so the claim is that the task RAN — a `z_task_join` that
+       did not wait would print 0 on one arm and 1 on the other. */
+    {
+        z_owned_task_t t, t2, t3;
+        task_ran = 0;
+        /* SEQUENCED, not folded into one `printf`. C leaves the evaluation
+           order of argument expressions unspecified, so `check(&t)` beside
+           `init(&t)` is read before the init on one arm and after it on the
+           other — which this probe reported as an ABI difference on its first
+           run and was not one. The existing deserializer block above carries
+           the same note for the same reason. */
+        z_result_t task_rc = z_task_init(&t, NULL, task_body, NULL);
+        int task_check = (int)z_internal_task_check(&t);
+        printf("task.init.rc=%d check=%d\n", (int)task_rc, task_check);
+        z_result_t join_rc = z_task_join(z_task_move(&t));
+        printf("task.join.rc=%d ran=%d\n", (int)join_rc, task_ran);
+        z_task_init(&t2, NULL, task_body, NULL);
+        z_task_detach(z_task_move(&t2));
+        printf("task.detached.check=%d\n", (int)z_internal_task_check(&t2));
+        z_internal_task_null(&t3);
+        printf("task.null.check=%d\n", (int)z_internal_task_check(&t3));
+    }
+
+    /* The LOG closure family. The CALL is what distinguishes a working closure
+       from a gravestone, so it is driven rather than only checked. */
+    {
+        zc_owned_closure_log_t lc;
+        zc_internal_closure_log_null(&lc);
+        printf("log.null.check=%d\n", (int)zc_internal_closure_log_check(&lc));
+        log_calls = 0;
+        log_drops = 0;
+        zc_closure_log(&lc, on_log, on_log_drop, NULL);
+        printf("log.built.check=%d\n", (int)zc_internal_closure_log_check(&lc));
+        z_view_string_t msg;
+        z_view_string_from_str(&msg, "hello");
+        zc_closure_log_call(zc_closure_log_loan(&lc), ZC_LOG_SEVERITY_WARN,
+                            z_view_string_loan(&msg));
+        printf("log.calls=%d\n", log_calls);
+        zc_closure_log_drop(zc_closure_log_move(&lc));
+        printf("log.drops=%d check=%d\n", log_drops, (int)zc_internal_closure_log_check(&lc));
+    }
+
+    /* The MATCHING-STATUS closure's own four entry points. */
+    {
+        z_owned_closure_matching_status_t mc;
+        z_internal_closure_matching_status_null(&mc);
+        printf("match.null.check=%d\n", (int)z_internal_closure_matching_status_check(&mc));
+        match_calls = 0;
+        match_last = -1;
+        z_closure_matching_status(&mc, on_match, NULL, NULL);
+        printf("match.built.check=%d\n", (int)z_internal_closure_matching_status_check(&mc));
+        z_matching_status_t st;
+        st.matching = true;
+        z_closure_matching_status_call(z_closure_matching_status_loan(&mc), &st);
+        printf("match.calls=%d last=%d\n", match_calls, match_last);
+        z_closure_matching_status_drop(z_closure_matching_status_move(&mc));
+    }
+
+    /* The three `z_internal_*_handler_*` pairs whose families are HAND-WRITTEN
+       in wz rather than macro-generated. The gravestone / live distinction is
+       the whole observable content of the pair. */
+    {
+        z_owned_fifo_handler_query_t fq;
+        z_owned_fifo_handler_reply_t fr;
+        z_owned_ring_handler_sample_t rs;
+        z_internal_fifo_handler_query_null(&fq);
+        z_internal_fifo_handler_reply_null(&fr);
+        z_internal_ring_handler_sample_null(&rs);
+        printf("handler.null.checks=%d/%d/%d\n",
+               (int)z_internal_fifo_handler_query_check(&fq),
+               (int)z_internal_fifo_handler_reply_check(&fr),
+               (int)z_internal_ring_handler_sample_check(&rs));
+        z_owned_closure_query_t cq;
+        z_owned_closure_reply_t cr;
+        z_owned_closure_sample_t cs;
+        z_fifo_channel_query_new(&cq, &fq, 4);
+        z_fifo_channel_reply_new(&cr, &fr, 4);
+        z_ring_channel_sample_new(&cs, &rs, 4);
+        printf("handler.live.checks=%d/%d/%d\n",
+               (int)z_internal_fifo_handler_query_check(&fq),
+               (int)z_internal_fifo_handler_reply_check(&fr),
+               (int)z_internal_ring_handler_sample_check(&rs));
+        z_fifo_handler_query_drop(z_fifo_handler_query_move(&fq));
+        z_fifo_handler_reply_drop(z_fifo_handler_reply_move(&fr));
+        z_ring_handler_sample_drop(z_ring_handler_sample_move(&rs));
+        z_closure_query_drop(z_closure_query_move(&cq));
+        z_closure_reply_drop(z_closure_reply_move(&cr));
+        z_closure_sample_drop(z_closure_sample_move(&cs));
+    }
+
+    /* The owned REPLY-ERROR family's gravestone half. A LIVE reply error needs
+       a queryable that answers with one, which is an interop question rather
+       than a pure-function one; what is pure here is the null / check / drop
+       cycle.
+
+       `z_reply_err_loan` on a gravestone is deliberately NOT compared, and the
+       reason is a MEASURED divergence rather than an omission: upstream's loan
+       is a cast of the owned struct's own address and is therefore never NULL,
+       while wz's hands back the boxed `ReplyMarshal` the accessors read — which
+       is null for a gravestone. wz cannot match without giving up that model,
+       and the model is load-bearing: `z_reply_err(reply)` is the OTHER producer
+       of a `z_loaned_reply_err_t*`, and one C pointer type cannot carry two
+       pointee types. The divergence runs in the safe direction — a caller that
+       loans a gravestone gets NULL here and a pointer into a dead value
+       upstream — and it is unreachable for a caller who checks first, which is
+       what `z_internal_reply_err_check` is for. */
+    {
+        z_owned_reply_err_t re;
+        z_internal_reply_err_null(&re);
+        printf("reply_err.null.check=%d\n", (int)z_internal_reply_err_check(&re));
+        z_reply_err_drop(z_reply_err_move(&re));
+        printf("reply_err.after_drop.check=%d\n", (int)z_internal_reply_err_check(&re));
     }
 
     return 0;

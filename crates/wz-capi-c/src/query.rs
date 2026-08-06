@@ -107,6 +107,21 @@ enum PendingReply {
         timestamp: Option<wz_runtime_tokio::sample::TimestampHint>,
         source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
     },
+    /// `z_query_reply_err` — an ERROR-form reply, R311y568.
+    ///
+    /// No keyexpr, and that is upstream's own signature rather than an omission:
+    /// `z_query_reply_err` takes no `key_expr` argument, because a zenoh reply
+    /// ERROR is a property of the QUERY (`ResponseBody::Err`) and not of a key.
+    /// The keyexpr-coverage gate the Put and Del arms run therefore has nothing
+    /// to check here.
+    ///
+    /// The encoding IS carried, unlike on the Del arm: the Err body is a
+    /// `zenoh_protocol::zenoh::Err` whose value has its own encoding field, and
+    /// `z_query_reply_err_options_t` declares exactly that one field.
+    Err {
+        payload: Vec<u8>,
+        encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
+    },
 }
 
 /// The wire seam an ESCAPED query replies through.
@@ -213,6 +228,25 @@ fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
                 .with_source_info(source_info.as_ref())
                 .with_attachment(attachment.as_deref()),
         ),
+        // R311y568 — the ERROR arm. A separate seam method rather than a
+        // `ReplyMeta` variant because the wire body differs in KIND, not in
+        // metadata: `reply_err` emits `ResponseBody::Err`, which carries neither
+        // a keyexpr nor a timestamp nor an attachment. The `(id, schema)` split
+        // is what [`ReplyOut::reply_err`] takes, so the hint is projected here
+        // rather than at the call site.
+        PendingReply::Err { payload, encoding } => {
+            let (id, schema) = match encoding.as_ref() {
+                // UNPACKED. `EncodingHint::packed_id` is the wire word
+                // `(id << 1) | has_schema` (`hint_from_parts`), while
+                // `ReplyOut::reply_err` documents its `encoding_id` as the
+                // content-type PREFIX and re-packs it itself
+                // (`response_build.rs::encoding`). Passing the packed word would
+                // double-shift and put a different content type on the wire.
+                Some(hint) => (Some(hint.packed_id >> 1), hint.schema.as_deref()),
+                None => (None, None),
+            };
+            out.reply_err(id, schema, &payload);
+        }
     }
 }
 
@@ -257,10 +291,24 @@ pub(crate) struct QueryMarshal {
     /// would take the wrong branch.
     payload: Option<BytesState>,
     attachment: Option<BytesState>,
+    /// R311y568 — the query VALUE's encoding, ALWAYS present.
+    ///
+    /// Not an `Option`, for the reason [`crate::sample::SampleMarshal::encoding`]
+    /// gives: upstream's `z_query_encoding` returns a non-optional
+    /// `const z_loaned_encoding_t *` off a Rust `Encoding` value, so a query
+    /// that carried no encoding ext reports the DEFAULT rather than NULL.
+    ///
+    /// Note the contrast with [`Self::payload`] one field up, which IS an
+    /// `Option` because `z_queryable.c` branches on its NULL. The two shapes
+    /// differ because upstream's two signatures do.
+    encoding: crate::encoding::EncodingState,
     keyexpr_state: KeyexprState,
     loaned_keyexpr: z_loaned_keyexpr_t,
     loaned_payload: z_loaned_bytes_t,
     loaned_attachment: z_loaned_bytes_t,
+    /// The loaned view `z_query_encoding` returns, aimed at this marshal's own
+    /// [`Self::encoding`].
+    loaned_encoding: crate::abi::z_loaned_encoding_t,
     /// The request id this query answers — the correlator a deferred reply and
     /// the terminator both need.
     rid: u64,
@@ -295,11 +343,16 @@ impl QueryMarshal {
             parameters,
             payload: view.payload().map(|p| BytesState::whole(p.to_vec())),
             attachment: view.attachment().map(|a| BytesState::whole(a.to_vec())),
+            encoding: match view.encoding() {
+                Some(hint) => crate::encoding::EncodingState::from_hint(hint),
+                None => crate::encoding::EncodingState::default_encoding(),
+            },
             keyexpr_state: KeyexprState::new(keyexpr.clone()),
             keyexpr,
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             loaned_payload: z_loaned_bytes_t::null_value(),
             loaned_attachment: z_loaned_bytes_t::null_value(),
+            loaned_encoding: crate::abi::z_loaned_encoding_t::null_value(),
             rid: view.rid(),
             session: None,
             escapes: Cell::new(0),
@@ -321,6 +374,9 @@ impl QueryMarshal {
             Some(state) => z_loaned_bytes_t::from_handle(state as *const BytesState as *mut c_void),
             None => z_loaned_bytes_t::null_value(),
         };
+        self.loaned_encoding = crate::abi::z_loaned_encoding_t::from_handle(
+            &self.encoding as *const crate::encoding::EncodingState as *mut c_void,
+        );
     }
 
     /// Bind the FACE's session, so this marshal can be escaped. Called only by
@@ -347,10 +403,12 @@ impl QueryMarshal {
                 .attachment
                 .as_ref()
                 .map(|s| BytesState::whole(s.payload.clone())),
+            encoding: self.encoding.deep_copy(),
             keyexpr_state: KeyexprState::new(self.keyexpr.clone()),
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             loaned_payload: z_loaned_bytes_t::null_value(),
             loaned_attachment: z_loaned_bytes_t::null_value(),
+            loaned_encoding: crate::abi::z_loaned_encoding_t::null_value(),
             rid: self.rid,
             // The COPY is the escaped end of the chain: it carries the responder
             // rather than the raw session, so it can never be escaped again.
@@ -584,6 +642,9 @@ pub(crate) unsafe fn queryable_declare_params(
 struct QueryableState {
     shared: Arc<SharedSession>,
     id: QblId,
+    /// R311y568 — the keyexpr this queryable was declared under, so
+    /// [`z_queryable_keyexpr`] can answer.
+    keyexpr: crate::keyexpr::DeclaredKeyexpr,
 }
 
 impl Drop for QueryableState {
@@ -636,6 +697,7 @@ pub unsafe extern "C" fn z_declare_queryable(
         // SAFETY: the caller's contract for the options struct.
         let (complete, allowed_origin) = unsafe { queryable_declare_params(options) };
 
+        let declared = ke.clone();
         let id = state
             .shared
             .declare_queryable(ke, complete, allowed_origin, {
@@ -644,13 +706,104 @@ pub unsafe extern "C" fn z_declare_queryable(
                     Box::new(make_queryable_callback(closure.clone(), face.clone())) as Box<_>
                 })
             });
-        let handle = Box::into_raw(Box::new(QueryableState {
+        let mut boxed = Box::new(QueryableState {
             shared: state.shared.clone(),
             id,
-        })) as Handle;
+            keyexpr: crate::keyexpr::DeclaredKeyexpr::new(declared),
+        });
+        // Bind AFTER boxing — the state is at its final address only here.
+        boxed.keyexpr.bind();
+        let handle = Box::into_raw(boxed) as Handle;
         // SAFETY: the caller's contract.
         unsafe { *queryable = z_owned_queryable_t::from_handle(handle) };
         Z_OK
+    })
+}
+
+/// Declare a queryable the C side never holds (zenoh-c
+/// `z_declare_background_queryable`): it lives until the session is closed.
+///
+/// R311y568. The subscriber twin has existed since the declare plane landed;
+/// this one is the same construction for the same reason, and its absence was a
+/// link error for any program using upstream's background form on the query
+/// side.
+///
+/// Implemented by declaring into a LOCAL owned handle and DISCARDING it, exactly
+/// as [`crate::sub::z_declare_background_subscriber`] does — see that function
+/// for the full argument, including why the discard is a deliberate leak and why
+/// `mem::forget` here would be a no-op that merely looked load-bearing.
+///
+/// # Safety
+/// `session` must be a valid loaned session; `key_expr` must be a valid loaned
+/// keyexpr; `callback` must be a valid moved closure; `options` must be null or
+/// valid.
+#[no_mangle]
+pub unsafe extern "C" fn z_declare_background_queryable(
+    session: *const z_loaned_session_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_query_t,
+    options: *mut z_queryable_options_t,
+) -> ZResult {
+    let mut sink = z_owned_queryable_t::null_value();
+    // SAFETY: the caller's contract, delegated — the local sink absorbs the
+    // handle the owned form would have written out, and then goes out of scope
+    // without reclaiming it.
+    unsafe { z_declare_queryable(session, &mut sink, key_expr, callback, options) }
+}
+
+/// This queryable's GLOBAL ENTITY ID (zenoh-c `z_queryable_id`).
+///
+/// R311y568. UNSTABLE-gated, as upstream gates it and as its return type
+/// requires — see [`crate::sub::z_subscriber_id`] for the full argument.
+///
+/// # Safety
+/// `queryable` must be null or a valid loaned queryable.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn z_queryable_id(
+    queryable: *const z_loaned_queryable_t,
+) -> crate::advanced::z_entity_global_id_t {
+    guard_val(crate::advanced::z_entity_global_id_t::empty(), || {
+        if queryable.is_null() {
+            return crate::advanced::z_entity_global_id_t::empty();
+        }
+        // SAFETY: the caller's contract — a live `Box<QueryableState>`.
+        let handle = unsafe { (*queryable).handle };
+        if handle.is_null() {
+            return crate::advanced::z_entity_global_id_t::empty();
+        }
+        // SAFETY: as above.
+        let state = unsafe { &*(handle as *const QueryableState) };
+        crate::advanced::z_entity_global_id_t::for_entity(&state.shared, queryable as *const c_void)
+    })
+}
+
+/// The keyexpr a queryable was declared under (zenoh-c `z_queryable_keyexpr`).
+///
+/// R311y568. The borrow is valid for as long as the queryable is, which is
+/// upstream's contract: the state is boxed and the view is aimed at its own
+/// field, so the pointer outlives every call but not the declaration.
+///
+/// # Safety
+/// `queryable` must be null or a valid loaned queryable.
+#[no_mangle]
+pub unsafe extern "C" fn z_queryable_keyexpr(
+    queryable: *const z_loaned_queryable_t,
+) -> *const z_loaned_keyexpr_t {
+    guard_val(std::ptr::null(), || {
+        if queryable.is_null() {
+            return std::ptr::null();
+        }
+        // SAFETY: the caller's contract — the handle is a live
+        // `Box<QueryableState>` this crate leaked.
+        let handle = unsafe { (*queryable).handle };
+        if handle.is_null() {
+            return std::ptr::null();
+        }
+        // SAFETY: as above.
+        unsafe { &*(handle as *const QueryableState) }
+            .keyexpr
+            .as_loaned()
     })
 }
 
@@ -789,6 +942,75 @@ pub unsafe extern "C" fn z_query_payload(
         match unsafe { query_marshal(this_) } {
             Some(m) if m.payload.is_some() => &m.loaned_payload as *const z_loaned_bytes_t,
             _ => std::ptr::null(),
+        }
+    })
+}
+
+// --- R311y568: the query's mutable accessors + its encoding + the owned pair -
+//
+// Six symbols upstream defines and this cdylib did not. The three `_mut`
+// spellings are what a C program calling `z_bytes_writer_*` on a query's payload
+// needs, and `z_query_encoding` is the read that was blocked until the marshal
+// carried one.
+
+/// The query VALUE's encoding (zenoh-c `z_query_encoding`).
+///
+/// NEVER null for a live query — see [`QueryMarshal::encoding`] for why an absent
+/// ext reports the default rather than NULL.
+///
+/// # Safety
+/// `this_` must be null or a live loaned query.
+#[no_mangle]
+pub unsafe extern "C" fn z_query_encoding(
+    this_: *const z_loaned_query_t,
+) -> *const crate::abi::z_loaned_encoding_t {
+    guard_val(std::ptr::null(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { query_marshal(this_) } {
+            Some(m) => &m.loaned_encoding as *const crate::abi::z_loaned_encoding_t,
+            None => std::ptr::null(),
+        }
+    })
+}
+
+/// Mutably borrow a query's VALUE payload (zenoh-c `z_query_payload_mut`).
+///
+/// Keeps [`z_query_payload`]'s NULL-on-absent gate: upstream's own
+/// `z_queryable.c` branches on the null, and the mutable spelling reaching for a
+/// present-but-empty blob instead would take the other branch.
+///
+/// # Safety
+/// `this_` must be null or a live loaned query.
+#[no_mangle]
+pub unsafe extern "C" fn z_query_payload_mut(
+    this_: *mut z_loaned_query_t,
+) -> *mut z_loaned_bytes_t {
+    guard_val(std::ptr::null_mut(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { query_marshal(this_) } {
+            Some(m) if m.payload.is_some() => {
+                &m.loaned_payload as *const z_loaned_bytes_t as *mut z_loaned_bytes_t
+            }
+            _ => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Mutably borrow a query's ATTACHMENT (zenoh-c `z_query_attachment_mut`).
+///
+/// # Safety
+/// `this_` must be null or a live loaned query.
+#[no_mangle]
+pub unsafe extern "C" fn z_query_attachment_mut(
+    this_: *mut z_loaned_query_t,
+) -> *mut z_loaned_bytes_t {
+    guard_val(std::ptr::null_mut(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { query_marshal(this_) } {
+            Some(m) if m.attachment.is_some() => {
+                &m.loaned_attachment as *const z_loaned_bytes_t as *mut z_loaned_bytes_t
+            }
+            _ => std::ptr::null_mut(),
         }
     })
 }
@@ -996,6 +1218,85 @@ pub unsafe extern "C" fn z_query_reply_del_options_default(
     };
 }
 
+/// zenoh-c `z_query_reply_err_options_t` (`zenoh_commons.h:1086-1091`) — 8
+/// bytes, one field.
+///
+/// R311y568 — NOT DECLARED AT ALL until this round, the same gap
+/// [`z_query_reply_del_options_t`] had at y565: `z_query_reply_err` had no
+/// signature to take, so a C program that wanted to answer a query with an
+/// application-level ERROR could not be written against this ABI.
+#[repr(C)]
+pub struct z_query_reply_err_options_t {
+    /// The encoding of the ERROR payload. TAKEN — a `z_moved_*` field, consumed
+    /// on every path including the error ones.
+    pub encoding: *mut crate::abi::z_moved_encoding_t,
+}
+
+/// Fill default err-reply options (zenoh-c `z_query_reply_err_options_default`).
+///
+/// # Safety
+/// `this_` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_query_reply_err_options_default(
+    this_: *mut z_query_reply_err_options_t,
+) {
+    if this_.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    unsafe {
+        *this_ = z_query_reply_err_options_t {
+            encoding: std::ptr::null_mut(),
+        }
+    };
+}
+
+/// Answer a query with an application-level ERROR (zenoh-c
+/// `z_query_reply_err`).
+///
+/// The third reply form, alongside [`z_query_reply`] and [`z_query_reply_del`],
+/// and the only one that takes NO keyexpr — see [`PendingReply::Err`] for why
+/// that is upstream's signature rather than an omission here, and why the
+/// coverage gate the other two run has nothing to check.
+///
+/// Accumulated into the query marshal like its siblings, so an error reply
+/// emitted from an ESCAPED query reaches the wire through the same
+/// [`DeferredResponder`] path.
+///
+/// # Safety
+/// `this_` must be null or a live loaned query; `payload` must be null or a valid
+/// moved bytes, which is consumed; `options` must be null or valid.
+#[no_mangle]
+pub unsafe extern "C" fn z_query_reply_err(
+    this_: *const z_loaned_query_t,
+    payload: *mut z_moved_bytes_t,
+    options: *mut z_query_reply_err_options_t,
+) -> ZResult {
+    guarded(|| {
+        // Consumed FIRST and on every path, as on the Put arm: upstream's
+        // ownership transfer is unconditional.
+        // SAFETY: the caller's contract.
+        let taken = unsafe { crate::bytes::take_payload(payload) };
+        let encoding = if options.is_null() {
+            None
+        } else {
+            // SAFETY: the caller's contract — a `z_moved_*` field, taken before
+            // any early return.
+            unsafe { crate::encoding::take_moved_encoding((*options).encoding) }
+        };
+
+        // SAFETY: the caller's contract, delegated.
+        let Some(marshal) = (unsafe { query_marshal(this_) }) else {
+            return Z_ENULL;
+        };
+        let Some(payload) = taken else {
+            return Z_ENULL;
+        };
+        marshal.push_reply(PendingReply::Err { payload, encoding });
+        Z_OK
+    })
+}
+
 /// The del-reply options' source info, on the arm that declares one.
 ///
 /// # Safety
@@ -1075,6 +1376,77 @@ pub unsafe extern "C" fn z_query_reply_del(
 }
 
 // --- the OWNED query --------------------------------------------------------
+
+/// Mutably borrow an owned query (zenoh-c `z_query_loan_mut`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned query.
+#[no_mangle]
+pub unsafe extern "C" fn z_query_loan_mut(this_: *mut z_owned_query_t) -> *mut z_loaned_query_t {
+    guard_val(std::ptr::null_mut(), || {
+        if this_.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: the caller's contract.
+        unsafe { (*this_).handle as *mut z_loaned_query_t }
+    })
+}
+
+/// Deep-copy a borrowed query into an owned one (zenoh-c `z_query_clone`).
+///
+/// ## An ESCAPE, not merely a copy — and that is what makes it correct
+///
+/// Routed through [`escape_query`], the same path `z_fifo_channel_query_new`
+/// takes, rather than through a plain field copy. The reason is the
+/// `ResponseFinal`: a cloned query can be REPLIED to, so it must carry a
+/// [`DeferredResponder`] and must count as an escape, or the terminator would go
+/// out while the clone still holds an unanswered query and the querier would see
+/// the replies truncated.
+///
+/// A query built OUTSIDE a dispatch has no face session and therefore cannot be
+/// escaped; cloning one yields a gravestone rather than a value that would
+/// silently fail to answer.
+///
+/// # Safety
+/// `dst` must be null or valid and writable; `this_` must be null or a live
+/// loaned query.
+#[no_mangle]
+pub unsafe extern "C" fn z_query_clone(dst: *mut z_owned_query_t, this_: *const z_loaned_query_t) {
+    guard_val((), || {
+        if dst.is_null() {
+            return;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *dst = z_owned_query_t::null_value() };
+        // SAFETY: the caller's contract, delegated.
+        let handle = unsafe { escape_query(this_) };
+        if !handle.is_null() {
+            // SAFETY: as above.
+            unsafe { *dst = z_owned_query_t::from_handle(handle) };
+        }
+    });
+}
+
+/// Take ownership of a mutably borrowed query (zenoh-c
+/// `z_query_take_from_loaned`).
+///
+/// A COPY rather than a move, for the reason spelled out at
+/// [`crate::sample::z_sample_take_from_loaned`] — and here the copy is
+/// additionally the RIGHT shape, because it is an escape that takes its own
+/// `ResponseFinal` hold. Stealing the borrowed marshal would leave the dispatch
+/// with a marshal it still flushes replies from.
+///
+/// # Safety
+/// `dst` must be null or valid and writable; `src` must be null or a live loaned
+/// query.
+#[no_mangle]
+pub unsafe extern "C" fn z_query_take_from_loaned(
+    dst: *mut z_owned_query_t,
+    src: *mut z_loaned_query_t,
+) {
+    // SAFETY: the caller's contract, delegated.
+    unsafe { z_query_clone(dst, src as *const z_loaned_query_t) };
+}
 
 /// Borrow an owned query (zenoh-c `z_query_loan`).
 ///

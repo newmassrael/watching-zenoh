@@ -100,6 +100,21 @@ const BYTES_WRITER_SIZE: usize = if SHM { 64 } else { 56 };
 const SERIALIZER_SIZE: usize = BYTES_WRITER_SIZE;
 const SAMPLE_SIZE: usize = 184 + if SHM { 16 } else { 0 } + if UNSTABLE { 32 } else { 0 };
 const REPLY_SIZE: usize = 184 + if SHM { 16 } else { 0 } + if UNSTABLE { 56 } else { 0 };
+// R311y568 — the reply ERROR, and the ONE of this round's seven new opaque types
+// that moves at all: 72 on the published archive, 88 against the SHM oracle.
+// (`z_owned_task_t` 32, `z_task_attr_t` 8, `zc_owned_closure_log_t` 24,
+// `z_loaned_closure_matching_status_t` 24, and the three option structs are
+// identical on both — measured, not assumed.)
+//
+// DERIVED rather than a ninth measured literal, and the derivation is upstream's
+// own struct rather than a fitted delta: `z_owned_reply_err_t` is
+// `{ ZBytes payload, Encoding encoding }`, so its footprint IS the two
+// footprints this file already carries. Both arms confirm it — 32+40=72 and
+// 40+48=88 — which is what makes this a composition rather than the "coincidence
+// waiting to break" the note above warns about for a shared DELTA. It also means
+// the two unmeasured arms are already right: whatever moves `z_owned_bytes_t`
+// moves this by the same amount, because it is that field.
+const REPLY_ERR_SIZE: usize = BYTES_SIZE + ENCODING_SIZE;
 
 /// A raw pointer used as an FFI handle slot. Null = "gravestone / not present",
 /// which is zenoh-c's own word for a moved-from or failed-to-construct value.
@@ -334,11 +349,27 @@ define_opaque_owned!(z_owned_query_t, z_moved_query_t, QUERY_SIZE);
 // The owned reply — the other moving pair (184 without `Z_FEATURE_UNSTABLE_API`,
 // 240 with). Every channel-based get stack-allocates it.
 define_opaque_owned!(z_owned_reply_t, z_moved_reply_t, REPLY_SIZE);
-// The reply ERROR is BORROW-ONLY here: `z_reply_err` hands back a pointer into
-// the reply's own marshal, so there is no owned form to construct and none is
-// declared. Upstream's `z_owned_reply_err_t` (72 bytes) arrives with the family
-// that produces one — a reply-error channel, which no example in the corpus
-// uses.
+// The reply ERROR — 72 bytes on the published archive and 88 against the SHM
+// oracle (`zenoh_opaque.h:357-359`); see `REPLY_ERR_SIZE` for why that is a
+// derivation rather than a second literal.
+//
+// R311y568 — until this round the family was BORROW-ONLY, justified by
+// `z_reply_err` handing back a pointer into the reply's own marshal so that
+// "there is no owned form to construct". The justification was about what the
+// corpus EXERCISES, and the census asks the other question: `z_owned_reply_err_t`
+// is a type a C program can declare, and its eleven functions were eleven link
+// errors. It was the single largest blocker on the zenoh-c arm.
+//
+// OWNED-only, like `z_owned_reply_t` next door: upstream declares a 72-byte
+// `z_loaned_reply_err_t` too, but every producer of one in this crate aims it at
+// a `ReplyMarshal`, so the loaned form stays the zero-sized TAG defined below.
+define_opaque_owned!(z_owned_reply_err_t, z_moved_reply_err_t, REPLY_ERR_SIZE);
+// The TASK — 32 bytes (`zenoh_opaque.h:387-389`), and the one type whose size
+// the TOOLCHAIN moves rather than a feature: 32 under zenoh-c's pinned 1.85.0
+// and 24 under 1.97.0 (R311y540 measured it, and that single disagreement was
+// the whole gap between upstream's generator and the installed header).
+// OWNED-only: upstream declares no loaned form for a task.
+define_opaque_owned!(z_owned_task_t, z_moved_task_t, 32);
 // The hello family — 48 bytes; `z_scout.c` never stack-allocates one (the
 // callback receives a pointer), but the owned form is what a hello channel
 // would hand back and the size is measured either way.
@@ -1057,6 +1088,25 @@ pub const WZ_CAPI_C_LAYOUT_NAMES_BASE: &[&str] = &[
     "z_owned_fifo_handler_sample_t",
     "z_owned_ring_handler_query_t",
     "z_owned_ring_handler_reply_t",
+    // R311y568 — the seven types the DROP-IN CENSUS forced into existence. Each
+    // is stack-allocated by a C program (or, for the two option structs and the
+    // consolidation, written through by an `_options_default` / returned BY
+    // VALUE), so every one of these sizes is ABI the C side depends on.
+    "z_owned_reply_err_t",
+    "z_owned_task_t",
+    "z_task_attr_t",
+    "z_query_reply_err_options_t",
+    "z_publisher_delete_options_t",
+    // Returned by value into a C stack slot by the five `z_query_consolidation_*`
+    // constructors, so its size is what the caller's frame reserves.
+    "z_query_consolidation_t",
+    // The log closure family — TRANSPARENT upstream, so the gate measures the
+    // footprint the `zc_closure` macro writes through.
+    "zc_owned_closure_log_t",
+    // The matching-status closure's LOANED half. Its owned sibling is already
+    // in this table; the loaned one is what `z_closure_matching_status_loan`
+    // casts to, and the cast is only sound if the two footprints agree.
+    "z_loaned_closure_matching_status_t",
 ];
 
 /// The `Z_FEATURE_UNSTABLE_API`-only half of the table — the `ze_advanced_*`
@@ -1188,6 +1238,14 @@ fn layout_values() -> Vec<usize> {
         size_of::<z_owned_fifo_handler_sample_t>(),
         size_of::<z_owned_ring_handler_query_t>(),
         size_of::<z_owned_ring_handler_reply_t>(),
+        size_of::<z_owned_reply_err_t>(),
+        size_of::<z_owned_task_t>(),
+        size_of::<crate::task::z_task_attr_t>(),
+        size_of::<crate::query::z_query_reply_err_options_t>(),
+        size_of::<crate::publisher::z_publisher_delete_options_t>(),
+        size_of::<crate::get::z_query_consolidation_t>(),
+        size_of::<crate::log::zc_owned_closure_log_t>(),
+        size_of::<crate::matching::z_loaned_closure_matching_status_t>(),
     ];
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     values.extend_from_slice(&[

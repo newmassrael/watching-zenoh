@@ -116,6 +116,40 @@ pub struct z_entity_global_id_t {
     pub eid: u32,
 }
 
+impl z_entity_global_id_t {
+    /// The EMPTY id a gravestoned entity reports.
+    ///
+    /// R311y568 — named once. Five accessors now answer this question
+    /// (`z_publisher_id` / `z_subscriber_id` / `z_queryable_id` /
+    /// `z_querier_id` / the `ze_advanced_*` pair), and each of them needs the
+    /// empty value on TWO paths — the panic fallback and the null-handle arm —
+    /// so open-coding it would be ten copies of one literal.
+    pub(crate) fn empty() -> Self {
+        Self {
+            zid: z_id_t::empty(),
+            eid: 0,
+        }
+    }
+
+    /// The id for an entity of `shared` whose per-entity identity is the
+    /// address `handle`.
+    ///
+    /// The zid half is the SESSION's, which is what upstream reports too — a
+    /// publisher or subscriber is not a separate node. The eid half is the
+    /// handle's own address, narrowed: a per-entity value that is stable for the
+    /// entity's life and distinct between live entities, which is the whole
+    /// contract an entity id carries here.
+    pub(crate) fn for_entity(
+        shared: &wz_capi_core::faces::SharedSession,
+        handle: *const std::ffi::c_void,
+    ) -> Self {
+        Self {
+            zid: z_id_t { id: shared.zid() },
+            eid: (handle as usize as u64 & u64::from(u32::MAX)) as u32,
+        }
+    }
+}
+
 /// The zid half of a global entity id (zenoh-c `z_entity_global_id_zid`,
 /// `zenoh_commons.h:2643`).
 ///
@@ -567,6 +601,9 @@ impl ze_owned_advanced_publisher_t {
 struct AdvPubState {
     shared: Arc<SharedSession>,
     id: AdvPubId,
+    /// R311y568 — the keyexpr this publisher was declared under, so
+    /// [`ze_advanced_publisher_keyexpr`] can answer.
+    keyexpr: crate::keyexpr::DeclaredKeyexpr,
 }
 
 impl Drop for AdvPubState {
@@ -593,6 +630,23 @@ unsafe fn adv_pub_state<'a>(
     }
     // SAFETY: as above — a live `Box<AdvPubState>` this crate leaked.
     Some(unsafe { &*(handle as *const AdvPubState) })
+}
+
+/// R311y568 — an advanced publisher's session and declared keyexpr, for
+/// [`crate::matching`]'s three advanced entry points.
+///
+/// A getter rather than making [`AdvPubState`] visible: the matching plane needs
+/// exactly these two facts, and exposing the state would let it reach the
+/// registry id, which is the field whose misuse would double-undeclare.
+///
+/// # Safety
+/// As [`adv_pub_state`].
+pub(crate) unsafe fn adv_pub_shared_and_keyexpr(
+    this_: *const ze_loaned_advanced_publisher_t,
+) -> Option<(Arc<SharedSession>, String)> {
+    // SAFETY: the caller's contract, delegated.
+    let state = unsafe { adv_pub_state(this_) }?;
+    Some((state.shared.clone(), state.keyexpr.literal().to_owned()))
 }
 
 /// The wz options one C `ze_advanced_publisher_options_t` maps to.
@@ -696,11 +750,15 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         }
         // SAFETY: the caller's contract.
         let opts = unsafe { advanced_publisher_options(options) };
+        let declared = ke.clone();
         let id = state.shared.declare_advanced_publisher(ke, opts);
-        let boxed = Box::new(AdvPubState {
+        let mut boxed = Box::new(AdvPubState {
             shared: state.shared.clone(),
             id,
+            keyexpr: crate::keyexpr::DeclaredKeyexpr::new(declared),
         });
+        // Bind AFTER boxing — the state is at its final address only here.
+        boxed.keyexpr.bind();
         // SAFETY: `publisher` was checked non-null above.
         unsafe { (*publisher).handle = Box::into_raw(boxed) as Handle };
         Z_OK
@@ -753,6 +811,92 @@ pub unsafe extern "C" fn ze_internal_advanced_publisher_null(
         // SAFETY: the caller's contract.
         unsafe { *this_ = ze_owned_advanced_publisher_t::null_value() };
     }
+}
+
+// --- R311y568: the advanced planes' identity + matching accessors -----------
+
+/// This advanced publisher's GLOBAL ENTITY ID (zenoh-c
+/// `ze_advanced_publisher_id`).
+///
+/// Through the shared [`z_entity_global_id_t::for_entity`] constructor, like the
+/// four base-plane accessors.
+///
+/// # Safety
+/// `publisher` must be null or a valid loaned advanced publisher.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_publisher_id(
+    publisher: *const ze_loaned_advanced_publisher_t,
+) -> z_entity_global_id_t {
+    guard_val(z_entity_global_id_t::empty(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { adv_pub_state(publisher) } {
+            Some(state) => {
+                z_entity_global_id_t::for_entity(&state.shared, publisher as *const c_void)
+            }
+            None => z_entity_global_id_t::empty(),
+        }
+    })
+}
+
+/// The keyexpr this advanced publisher was declared under (zenoh-c
+/// `ze_advanced_publisher_keyexpr`).
+///
+/// # Safety
+/// `publisher` must be null or a valid loaned advanced publisher.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_publisher_keyexpr(
+    publisher: *const ze_loaned_advanced_publisher_t,
+) -> *const crate::abi::z_loaned_keyexpr_t {
+    guard_val(std::ptr::null(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { adv_pub_state(publisher) } {
+            Some(state) => state.keyexpr.as_loaned(),
+            None => std::ptr::null(),
+        }
+    })
+}
+
+/// Publish a DELETE through an advanced publisher (zenoh-c
+/// `ze_advanced_publisher_delete`).
+///
+/// The Del twin of [`ze_advanced_publisher_put`], routed through the SAME
+/// registry entry so a Del and a Put from one advanced publisher carry the same
+/// declared QoS and the same sequencing — the sample-miss detection a subscriber
+/// runs counts both, which is why a Del must not bypass the counter.
+///
+/// ## The options' `timestamp` is ACCEPTED and NOT USED, and that is FAITHFUL
+///
+/// `ze_advanced_publisher_delete_options_t` embeds a
+/// `z_publisher_delete_options_t`, whose only field is a timestamp — and the
+/// base-plane [`crate::publisher::z_publisher_delete`] honours it. Here it is
+/// deliberately ignored, because upstream ignores it too: an advanced publisher
+/// OVERWRITES `put_options.timestamp` and `put_options.source_info` with its own
+/// sequencing values (`vendor/zenoh-pico/src/api/advanced_publisher.c:402-407`),
+/// which is the same reason
+/// [`AdvancedPublisher::delete`](wz_runtime_tokio::advanced_publisher::AdvancedPublisher::delete)
+/// takes no timestamp parameter. Honouring the caller's value here would let a C
+/// program stamp a Del out of order with the Puts its own subscribers use to
+/// detect misses.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned advanced publisher; `_options` must be
+/// null or a valid delete-options struct.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_publisher_delete(
+    this_: *const ze_loaned_advanced_publisher_t,
+    _options: *mut ze_advanced_publisher_delete_options_t,
+) -> ZResult {
+    guarded(|| {
+        // SAFETY: the caller's contract, delegated.
+        let Some(state) = (unsafe { adv_pub_state(this_) }) else {
+            return Z_ENULL;
+        };
+        if state.shared.advanced_publisher_delete(state.id) {
+            Z_OK
+        } else {
+            Z_EINVAL
+        }
+    })
 }
 
 /// `true` iff the owned advanced publisher holds a live handle.
@@ -1029,6 +1173,9 @@ struct AdvSubState {
     /// The miss closure the C side may install AFTER declaring — see the module
     /// note on ordering.
     miss: MissSlot,
+    /// R311y568 — the keyexpr this subscriber was declared under, so
+    /// [`ze_advanced_subscriber_keyexpr`] can answer.
+    keyexpr: crate::keyexpr::DeclaredKeyexpr,
 }
 
 impl Drop for AdvSubState {
@@ -1140,6 +1287,32 @@ fn fire_miss(slot: &MissSlot, miss: &Miss) {
     }));
 }
 
+/// Declare an advanced subscriber the C side never holds (zenoh-c
+/// `ze_declare_background_advanced_subscriber`): it lives until the session is
+/// closed. Consumes the moved sample closure on every path.
+///
+/// R311y568.
+///
+/// # Safety
+/// `session` must be a valid loaned session; `key_expr` must be a valid loaned
+/// keyexpr; `callback` must be a valid moved closure; `options` must be null or a
+/// valid options struct.
+#[no_mangle]
+pub unsafe extern "C" fn ze_declare_background_advanced_subscriber(
+    session: *const z_loaned_session_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_sample_t,
+    options: *mut ze_advanced_subscriber_options_t,
+) -> ZResult {
+    let mut sink = ze_owned_advanced_subscriber_t::null_value();
+    // SAFETY: the caller's contract, delegated — the local sink absorbs the
+    // handle the owned form would have written out and then goes out of scope
+    // without reclaiming it, so the subscription lives until the session is
+    // closed. See `crate::sub::z_declare_background_subscriber` for the full
+    // argument, including why the discard is deliberate.
+    unsafe { ze_declare_advanced_subscriber(session, &mut sink, key_expr, callback, options) }
+}
+
 /// Declare an advanced subscriber (zenoh-c `ze_declare_advanced_subscriber`,
 /// `zenoh_commons.h:6029-6033`). Consumes the moved sample closure on every
 /// path.
@@ -1186,6 +1359,7 @@ pub unsafe extern "C" fn ze_declare_advanced_subscriber(
         let miss: MissSlot = Arc::new(Mutex::new(None));
         // SAFETY: the caller's contract.
         let opts = unsafe { advanced_subscriber_options(options) };
+        let declared = ke.clone();
         let id = state.shared.declare_advanced_subscriber(ke, opts, {
             let closure = cclosure.clone();
             let miss = miss.clone();
@@ -1207,11 +1381,14 @@ pub unsafe extern "C" fn ze_declare_advanced_subscriber(
                 (sample_cb, miss_cb)
             })
         });
-        let boxed = Box::new(AdvSubState {
+        let mut boxed = Box::new(AdvSubState {
             shared: state.shared.clone(),
             id,
             miss,
+            keyexpr: crate::keyexpr::DeclaredKeyexpr::new(declared),
         });
+        // Bind AFTER boxing — the state is at its final address only here.
+        boxed.keyexpr.bind();
         // SAFETY: `subscriber` was checked non-null above.
         unsafe { (*subscriber).handle = Box::into_raw(boxed) as Handle };
         Z_OK
@@ -1247,6 +1424,74 @@ pub unsafe extern "C" fn ze_internal_advanced_subscriber_check(
     })
 }
 
+/// This advanced subscriber's GLOBAL ENTITY ID (zenoh-c
+/// `ze_advanced_subscriber_id`).
+///
+/// # Safety
+/// `subscriber` must be null or a valid loaned advanced subscriber.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_subscriber_id(
+    subscriber: *const ze_loaned_advanced_subscriber_t,
+) -> z_entity_global_id_t {
+    guard_val(z_entity_global_id_t::empty(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { adv_sub_state(subscriber) } {
+            Some(state) => {
+                z_entity_global_id_t::for_entity(&state.shared, subscriber as *const c_void)
+            }
+            None => z_entity_global_id_t::empty(),
+        }
+    })
+}
+
+/// The keyexpr this advanced subscriber was declared under (zenoh-c
+/// `ze_advanced_subscriber_keyexpr`).
+///
+/// # Safety
+/// `subscriber` must be null or a valid loaned advanced subscriber.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_subscriber_keyexpr(
+    subscriber: *const ze_loaned_advanced_subscriber_t,
+) -> *const crate::abi::z_loaned_keyexpr_t {
+    guard_val(std::ptr::null(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { adv_sub_state(subscriber) } {
+            Some(state) => state.keyexpr.as_loaned(),
+            None => std::ptr::null(),
+        }
+    })
+}
+
+/// Subscribe to the PUBLISHER-DETECTION liveliness plane in the background
+/// (zenoh-c `ze_advanced_subscriber_detect_publishers_background`).
+///
+/// An advanced publisher declared with `publisher_detection` announces itself
+/// with a liveliness token under `<keyexpr>/@adv/pub/**`; this is the
+/// subscription that observes those tokens coming and going, so a C program can
+/// learn WHICH publishers it is tracking rather than only that a sample was
+/// missed.
+///
+/// Routed through [`ze_advanced_subscriber_detect_publishers`] — the OWNED form
+/// this crate already exports — into a LOCAL handle that is then discarded, the
+/// same background construction the rest of the crate uses. The subscription
+/// therefore lives until the session is closed, which is upstream's contract for
+/// a background declare.
+///
+/// # Safety
+/// `subscriber` must be null or a valid loaned advanced subscriber; `callback`
+/// must be a valid moved closure, consumed on every path; `options` must be null
+/// or valid.
+#[no_mangle]
+pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
+    subscriber: *const ze_loaned_advanced_subscriber_t,
+    callback: *mut z_moved_closure_sample_t,
+    options: *mut crate::liveliness::z_liveliness_subscriber_options_t,
+) -> ZResult {
+    let mut sink = z_owned_subscriber_t::null_value();
+    // SAFETY: the caller's contract, delegated.
+    unsafe { ze_advanced_subscriber_detect_publishers(subscriber, &mut sink, callback, options) }
+}
+
 /// Borrow an advanced subscriber (zenoh-c `ze_advanced_subscriber_loan`).
 ///
 /// # Safety
@@ -1258,16 +1503,15 @@ pub unsafe extern "C" fn ze_advanced_subscriber_loan(
     this_ as *const ze_loaned_advanced_subscriber_t
 }
 
-/// Mutably borrow an advanced subscriber.
-///
-/// # Safety
-/// `this_` must be null or a valid owned advanced subscriber.
-#[no_mangle]
-pub unsafe extern "C" fn ze_advanced_subscriber_loan_mut(
-    this_: *mut ze_owned_advanced_subscriber_t,
-) -> *mut ze_loaned_advanced_subscriber_t {
-    this_ as *mut ze_loaned_advanced_subscriber_t
-}
+// R311y568 — REMOVED: ze_advanced_subscriber_loan_mut.
+//
+// Upstream declares no such function on EITHER arm (0 hits across every header
+// in both oracles), so wz was exporting a `ze_`-prefixed symbol that is not part
+// of the zenoh-c ABI. Nothing in the tree called it and no C program compiled
+// against upstream's header could name it; what it did was make wz's exported
+// surface a superset of the reference's, which is a different library wearing
+// the same names. Found by the census's REVERSE direction, added the same round
+// — the forward ratchet had been green over it since the plane landed.
 
 /// Retract an advanced subscriber (zenoh-c
 /// `ze_undeclare_advanced_subscriber`).
@@ -1482,16 +1726,15 @@ pub unsafe extern "C" fn ze_internal_sample_miss_listener_check(
     })
 }
 
-/// Borrow a sample-miss listener.
-///
-/// # Safety
-/// `this_` must be null or a valid owned listener.
-#[no_mangle]
-pub unsafe extern "C" fn ze_sample_miss_listener_loan(
-    this_: *const ze_owned_sample_miss_listener_t,
-) -> *const ze_loaned_sample_miss_listener_t {
-    this_ as *const ze_loaned_sample_miss_listener_t
-}
+// R311y568 — REMOVED: ze_sample_miss_listener_loan.
+//
+// Upstream declares no such function on EITHER arm (0 hits across every header
+// in both oracles), so wz was exporting a `ze_`-prefixed symbol that is not part
+// of the zenoh-c ABI. Nothing in the tree called it and no C program compiled
+// against upstream's header could name it; what it did was make wz's exported
+// surface a superset of the reference's, which is a different library wearing
+// the same names. Found by the census's REVERSE direction, added the same round
+// — the forward ratchet had been green over it since the plane landed.
 
 /// Retract a sample-miss listener (zenoh-c
 /// `ze_undeclare_sample_miss_listener`).
@@ -1589,6 +1832,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         // from its default and narrowed.
         let mut opts = wz_runtime_tokio::session::LivelinessSubscriberOptions::default();
         opts.history = history;
+        let declared = ke.clone();
         let id = state.shared.declare_liveliness_subscriber(ke, opts, {
             let closure = Arc::new(cclosure);
             Arc::new(move || {
@@ -1597,8 +1841,11 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         });
         // SAFETY: `liveliness_subscriber` was checked non-null above.
         unsafe {
-            *liveliness_subscriber =
-                z_owned_subscriber_t::from_handle(subscriber_state_handle(&state.shared, id))
+            *liveliness_subscriber = z_owned_subscriber_t::from_handle(subscriber_state_handle(
+                &state.shared,
+                id,
+                declared,
+            ))
         };
         Z_OK
     })

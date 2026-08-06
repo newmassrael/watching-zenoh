@@ -401,6 +401,26 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
             "z_owned_ring_handler_reply_t",
             "sizeof(z_owned_ring_handler_reply_t)",
         ),
+        // R311y568 — the seven types the DROP-IN CENSUS forced into existence.
+        // Order matches `WZ_CAPI_C_LAYOUT_NAMES`'s tail exactly; the two tables
+        // are compared index for index.
+        ("z_owned_reply_err_t", "sizeof(z_owned_reply_err_t)"),
+        ("z_owned_task_t", "sizeof(z_owned_task_t)"),
+        ("z_task_attr_t", "sizeof(z_task_attr_t)"),
+        (
+            "z_query_reply_err_options_t",
+            "sizeof(z_query_reply_err_options_t)",
+        ),
+        (
+            "z_publisher_delete_options_t",
+            "sizeof(z_publisher_delete_options_t)",
+        ),
+        ("z_query_consolidation_t", "sizeof(z_query_consolidation_t)"),
+        ("zc_owned_closure_log_t", "sizeof(zc_owned_closure_log_t)"),
+        (
+            "z_loaned_closure_matching_status_t",
+            "sizeof(z_loaned_closure_matching_status_t)",
+        ),
     ];
     // R311y543 — the `ze_advanced_*` plane, measured ONLY where upstream
     // declares it. The order must match `abi.rs`'s

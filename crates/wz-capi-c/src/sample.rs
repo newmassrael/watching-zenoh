@@ -24,16 +24,21 @@
 
 use std::ffi::c_void;
 
-use wz_runtime_tokio::sample::SampleKind;
+use wz_runtime_tokio::sample::{EncodingHint, QosLevel, SampleKind};
 use wz_runtime_tokio::sink::SampleView;
 
 use crate::abi::{
-    z_loaned_bytes_t, z_loaned_keyexpr_t, z_loaned_sample_t, z_sample_kind_t, z_view_string_t,
-    Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
+    z_loaned_bytes_t, z_loaned_encoding_t, z_loaned_keyexpr_t, z_loaned_sample_t, z_sample_kind_t,
+    z_view_string_t, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
 use crate::bytes::BytesState;
+use crate::encoding::EncodingState;
 use crate::ffi::guard_val;
 use crate::keyexpr::KeyexprState;
+use crate::publisher::{
+    z_congestion_control_t, z_priority_t, Z_CONGESTION_CONTROL_BLOCK, Z_CONGESTION_CONTROL_DROP,
+    Z_PRIORITY_DATA,
+};
 use crate::string::view_string_over;
 
 /// The zenoh-c kind constant for a wz [`SampleKind`].
@@ -41,6 +46,96 @@ pub(crate) fn sample_kind_of(kind: SampleKind) -> z_sample_kind_t {
     match kind {
         SampleKind::Put => Z_SAMPLE_KIND_PUT,
         SampleKind::Del => Z_SAMPLE_KIND_DELETE,
+    }
+}
+
+/// The OPTIONAL half of a sample's metadata, passed by NAME rather than by
+/// position.
+///
+/// R311y568. [`SampleMarshal::new`] had grown to six positional arguments, four
+/// of them `Option<_>`, and the two this round adds would have made eight — a
+/// shape where transposing two `None`s compiles and silently drops a field. The
+/// tree already reached for this remedy once, on the reply side: y563's
+/// [`ReplyMeta`](wz_runtime_tokio::query_sink::ReplyMeta) exists because the
+/// alternative was one flush arm per field COMBINATION.
+///
+/// [`Self::from_view`] is the other half of the argument, and the more important
+/// one. Three of this crate's four marshal sites copy their fields out of a
+/// [`SampleView`], and before this round each named the accessors itself — so a
+/// field added to the view was carried at whichever sites its author edited.
+/// That is the y563 "one witness, two folds" shape; reading the view in ONE
+/// place makes the next field's fan-out a single edit.
+#[derive(Default)]
+pub(crate) struct SampleMeta {
+    attachment: Option<Vec<u8>>,
+    timestamp: Option<crate::timestamp::z_timestamp_t>,
+    source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+    /// R311y568 — the value encoding (the inner `MsgPut` E-flag), what
+    /// `z_sample_encoding` reports.
+    encoding: Option<EncodingHint>,
+    /// R311y568 — the outer QoS ext, which `z_sample_priority` /
+    /// `z_sample_congestion_control` / `z_sample_express` decode three different
+    /// sub-fields of. Held RAW rather than split into three, because the wire
+    /// carries one byte and splitting it here would let the three accessors
+    /// disagree about an absent ext.
+    qos: Option<QosLevel>,
+    /// R311y568 — the LINK-layer reliability of the frame that carried this
+    /// sample, what `z_sample_reliability` reports.
+    ///
+    /// Not part of the QoS ext: `SampleView::reliability()` is an unconditional
+    /// accessor because it is a property of the carrying frame rather than of
+    /// the body, which is why it is a separate field here.
+    reliability: Option<wz_runtime_tokio::Reliability>,
+}
+
+impl SampleMeta {
+    /// Every optional field a [`SampleView`] carries, read in one place.
+    pub(crate) fn from_view(view: &dyn SampleView) -> Self {
+        Self {
+            attachment: view.attachment().map(<[u8]>::to_vec),
+            timestamp: view
+                .timestamp()
+                .map(crate::timestamp::z_timestamp_t::from_hint),
+            source_info: view.source_info().cloned(),
+            encoding: view.encoding().cloned(),
+            qos: view.qos(),
+            reliability: Some(view.reliability()),
+        }
+    }
+
+    /// Override the attachment — for a marshal built from a view whose payload
+    /// split differs (a reply's Err arm).
+    #[must_use]
+    pub(crate) fn with_attachment(mut self, attachment: Option<Vec<u8>>) -> Self {
+        self.attachment = attachment;
+        self
+    }
+
+    /// Set the timestamp.
+    #[must_use]
+    pub(crate) fn with_timestamp(
+        mut self,
+        timestamp: Option<crate::timestamp::z_timestamp_t>,
+    ) -> Self {
+        self.timestamp = timestamp;
+        self
+    }
+
+    /// Set the source identity.
+    #[must_use]
+    pub(crate) fn with_source_info(
+        mut self,
+        source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+    ) -> Self {
+        self.source_info = source_info;
+        self
+    }
+
+    /// Set the value encoding.
+    #[must_use]
+    pub(crate) fn with_encoding(mut self, encoding: Option<EncodingHint>) -> Self {
+        self.encoding = encoding;
+        self
     }
 }
 
@@ -74,9 +169,26 @@ pub(crate) struct SampleMarshal {
     /// owned one.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     loaned_source_info: crate::source_info::z_loaned_source_info_t,
+    /// R311y568 — the sample's value encoding, ALWAYS present.
+    ///
+    /// `Option` would be the obvious shape and it is the wrong one: upstream's
+    /// `z_sample_encoding` returns `const z_loaned_encoding_t*` off a Rust
+    /// `Encoding` VALUE, so it can never be NULL and no C program checks it.
+    /// A sample that carried no E-flag therefore reports the DEFAULT encoding,
+    /// which is what the absent flag means on the wire.
+    encoding: EncodingState,
+    /// R311y568 — the outer QoS ext byte, or `None` when the sample carried no
+    /// ext at all. The three accessors each report the wire's meaning for an
+    /// absent ext, which is not the same value for all three.
+    qos: Option<QosLevel>,
+    /// R311y568 — the carrying frame's link-layer reliability.
+    reliability: Option<wz_runtime_tokio::Reliability>,
     loaned_keyexpr: z_loaned_keyexpr_t,
     loaned_payload: z_loaned_bytes_t,
     loaned_attachment: z_loaned_bytes_t,
+    /// The loaned view `z_sample_encoding` returns, aimed at this marshal's own
+    /// [`Self::encoding`] — the same borrow contract `loaned_payload` has.
+    loaned_encoding: z_loaned_encoding_t,
 }
 
 impl SampleMarshal {
@@ -85,23 +197,28 @@ impl SampleMarshal {
     pub(crate) fn new(
         keyexpr: String,
         payload: Vec<u8>,
-        attachment: Option<Vec<u8>>,
         kind: z_sample_kind_t,
-        timestamp: Option<crate::timestamp::z_timestamp_t>,
-        source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+        meta: SampleMeta,
     ) -> Self {
         Self {
             keyexpr: KeyexprState::new(keyexpr),
             payload: BytesState::whole(payload),
-            attachment: attachment.map(BytesState::whole),
+            attachment: meta.attachment.map(BytesState::whole),
             kind,
-            timestamp,
-            source_info,
+            timestamp: meta.timestamp,
+            source_info: meta.source_info,
             #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
             loaned_source_info: crate::source_info::z_loaned_source_info_t::null_value(),
+            encoding: match meta.encoding.as_ref() {
+                Some(hint) => EncodingState::from_hint(hint),
+                None => EncodingState::default_encoding(),
+            },
+            qos: meta.qos,
+            reliability: meta.reliability,
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             loaned_payload: z_loaned_bytes_t::null_value(),
             loaned_attachment: z_loaned_bytes_t::null_value(),
+            loaned_encoding: z_loaned_encoding_t::null_value(),
         }
     }
 
@@ -116,6 +233,8 @@ impl SampleMarshal {
             Some(state) => z_loaned_bytes_t::from_handle(state as *const BytesState as *mut c_void),
             None => z_loaned_bytes_t::null_value(),
         };
+        self.loaned_encoding =
+            z_loaned_encoding_t::from_handle(&self.encoding as *const EncodingState as *mut c_void);
         #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
         {
             self.loaned_source_info = match self.source_info.as_ref() {
@@ -123,6 +242,14 @@ impl SampleMarshal {
                 None => crate::source_info::z_loaned_source_info_t::null_value(),
             };
         }
+    }
+
+    /// R311y568 — the sample's source identity, for the REPLY plane's
+    /// `z_reply_replier_id`, which reads the responder's `(zid, eid)` out of the
+    /// same field `z_sample_source_info` exposes.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    pub(crate) fn source_info(&self) -> Option<&wz_runtime_tokio::sample::SourceInfo> {
+        self.source_info.as_ref()
     }
 
     /// This marshal viewed as the borrowed `z_loaned_sample_t` the C side gets.
@@ -305,6 +432,121 @@ pub unsafe extern "C" fn z_sample_source_info(
     })
 }
 
+// --- R311y568: the four metadata accessors the census found missing ---------
+//
+// Every one of them is a symbol the real `libzenohc.so` defines and this cdylib
+// did not, so a C program naming any of them failed at LINK time. None was
+// reachable by a behavioural leg for exactly that reason.
+
+/// The sample's value ENCODING (zenoh-c `z_sample_encoding`).
+///
+/// NEVER null for a live sample — see [`SampleMarshal::encoding`] for why the
+/// absent-E-flag case reports the default rather than NULL. Upstream's return
+/// type is non-optional in Rust, so a C program does not check.
+///
+/// # Safety
+/// `this_` must be null or a live loaned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_encoding(
+    this_: *const z_loaned_sample_t,
+) -> *const z_loaned_encoding_t {
+    guard_val(std::ptr::null(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { marshal(this_) } {
+            Some(m) => &m.loaned_encoding as *const z_loaned_encoding_t,
+            None => std::ptr::null(),
+        }
+    })
+}
+
+/// The sample's congestion-control setting (zenoh-c
+/// `z_sample_congestion_control`).
+///
+/// zenoh-c's constants are the REVERSE of zenoh-pico's — `BLOCK = 0` here and
+/// `DROP = 0` there ([`crate::publisher`]) — so this maps through the named
+/// constants rather than casting the wz enum's discriminant. The sibling pico
+/// ABI records the same trap from the other side.
+///
+/// An absent QoS ext reports BLOCK, which is what the wire means by eliding it:
+/// zenoh's default is `CongestionControl::Block` for a Put, and the ext is
+/// omitted precisely when every field sits at its default.
+///
+/// # Safety
+/// `this_` must be null or a live loaned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_congestion_control(
+    this_: *const z_loaned_sample_t,
+) -> z_congestion_control_t {
+    guard_val(Z_CONGESTION_CONTROL_BLOCK, || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { marshal(this_) }
+            .and_then(|m| m.qos)
+            .map(|qos| qos.congestion())
+        {
+            Some(wz_runtime_tokio::qos::CongestionControl::Drop) => Z_CONGESTION_CONTROL_DROP,
+            _ => Z_CONGESTION_CONTROL_BLOCK,
+        }
+    })
+}
+
+/// Whether the sample bypassed batching (zenoh-c `z_sample_express`).
+///
+/// # Safety
+/// `this_` must be null or a live loaned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_express(this_: *const z_loaned_sample_t) -> bool {
+    guard_val(false, || {
+        // SAFETY: the caller's contract, delegated.
+        unsafe { marshal(this_) }
+            .and_then(|m| m.qos)
+            .is_some_and(|qos| qos.is_express())
+    })
+}
+
+/// The sample's PRIORITY (zenoh-c `z_sample_priority`).
+///
+/// An absent QoS ext reports `Z_PRIORITY_DATA` (5) — the wire's meaning for the
+/// elided ext, and the same answer the pico ABI gives for the same reason.
+///
+/// # Safety
+/// `this_` must be null or a live loaned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_priority(this_: *const z_loaned_sample_t) -> z_priority_t {
+    guard_val(Z_PRIORITY_DATA, || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { marshal(this_) }.and_then(|m| m.qos) {
+            Some(qos) => z_priority_t::from(qos.priority().wire_byte()),
+            None => Z_PRIORITY_DATA,
+        }
+    })
+}
+
+/// The link-layer RELIABILITY of the frame that carried this sample (zenoh-c
+/// `z_sample_reliability`).
+///
+/// UNSTABLE-gated, as upstream gates it. A sample with no recorded reliability —
+/// a synthetic marshal, or a liveliness transition — reports the DEFAULT, which
+/// is what [`z_reliability_default`](crate::publisher::z_reliability_default)
+/// answers.
+///
+/// # Safety
+/// `this_` must be null or a live loaned sample.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_reliability(
+    this_: *const z_loaned_sample_t,
+) -> crate::publisher::z_reliability_t {
+    guard_val(crate::publisher::Z_RELIABILITY_RELIABLE, || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { marshal(this_) }.and_then(|m| m.reliability) {
+            Some(wz_runtime_tokio::Reliability::BestEffort) => {
+                crate::publisher::Z_RELIABILITY_BEST_EFFORT
+            }
+            _ => crate::publisher::Z_RELIABILITY_RELIABLE,
+        }
+    })
+}
+
 /// Construct a non-owned string over a keyexpr (zenoh-c
 /// `z_keyexpr_as_view_string`).
 ///
@@ -344,18 +586,15 @@ pub(crate) fn with_marshalled<R>(
     view: &dyn SampleView,
     body: impl FnOnce(*const z_loaned_sample_t) -> R,
 ) -> R {
+    // R311y568 — every optional field the view carries, read through the ONE
+    // place that names its accessors ([`SampleMeta::from_view`]). Before this
+    // round the three metadata fields were named here, and the encoding + QoS
+    // this round adds would have been a fourth and fifth transcription.
     let mut marshal = SampleMarshal::new(
         view.keyexpr().to_owned(),
         view.payload().to_vec(),
-        view.attachment().map(<[u8]>::to_vec),
         sample_kind_of(view.kind()),
-        // R311y557 — the delivered timestamp, so `z_sample_timestamp` answers
-        // what the publisher stamped rather than always NULL.
-        view.timestamp()
-            .map(crate::timestamp::z_timestamp_t::from_hint),
-        // R311y563 — the delivered source identity, so `z_sample_source_info`
-        // answers with what arrived rather than always NULL.
-        view.source_info().cloned(),
+        SampleMeta::from_view(view),
     );
     // Bind AFTER the move out of `new` — the marshal is at its final address
     // only here. See `SampleMarshal::bind`.
@@ -534,9 +773,18 @@ impl SampleMarshal {
             source_info: self.source_info.clone(),
             #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
             loaned_source_info: crate::source_info::z_loaned_source_info_t::null_value(),
+            // A copy that OWNS its label. Cloning the `Cow` would share a
+            // `Borrowed` static (fine) or duplicate an `Owned` (also fine) —
+            // what must not happen is the copy pointing into the source
+            // marshal's allocation, which is why this goes through the state's
+            // own clone rather than the loaned view.
+            encoding: self.encoding.deep_copy(),
+            qos: self.qos,
+            reliability: self.reliability,
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             loaned_payload: z_loaned_bytes_t::null_value(),
             loaned_attachment: z_loaned_bytes_t::null_value(),
+            loaned_encoding: z_loaned_encoding_t::null_value(),
         }
     }
 }
@@ -574,6 +822,56 @@ pub unsafe extern "C" fn z_sample_loan(
         // SAFETY: the caller's contract.
         unsafe { (*this_).handle as *const z_loaned_sample_t }
     })
+}
+
+/// Mutably borrow an owned sample (zenoh-c `z_sample_loan_mut`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_loan_mut(
+    this_: *mut crate::abi::z_owned_sample_t,
+) -> *mut z_loaned_sample_t {
+    guard_val(std::ptr::null_mut(), || {
+        if this_.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: the caller's contract.
+        unsafe { (*this_).handle as *mut z_loaned_sample_t }
+    })
+}
+
+/// Take ownership of a mutably borrowed sample (zenoh-c
+/// `z_sample_take_from_loaned`).
+///
+/// ## A COPY, and the divergence is deliberate
+///
+/// Upstream MOVES the Rust `Sample` out of the loaned slot, leaving it
+/// moved-from. wz cannot: a `z_loaned_sample_t*` in this crate is a pointer at a
+/// [`SampleMarshal`] whose STORAGE belongs to someone else — the dispatcher's
+/// stack frame inside [`with_marshalled`], or a `Box` behind a live
+/// `z_owned_sample_t` — and nothing in the pointer says which. Stealing the
+/// marshal would leave either a dangling owned value or a freed stack slot.
+///
+/// So this deep-copies, through the same [`escape_sample`] every channel handler
+/// uses. The C contract is unaffected: `dst` is a valid owned sample and `src`
+/// must not be used again, which is exactly what upstream promises. The one
+/// thing a caller could observe is `src` still reading as live afterwards — and
+/// there is no `z_internal_loaned_sample_check` for a caller to ask with, so the
+/// difference is unobservable through the ABI rather than merely unlikely to be
+/// noticed.
+///
+/// # Safety
+/// `dst` must be null or valid and writable; `src` must be null or a live loaned
+/// sample.
+#[no_mangle]
+pub unsafe extern "C" fn z_sample_take_from_loaned(
+    dst: *mut crate::abi::z_owned_sample_t,
+    src: *mut z_loaned_sample_t,
+) {
+    // SAFETY: the caller's contract, delegated — a mutable loan is a valid
+    // immutable one, and the copy reads only.
+    unsafe { z_sample_clone(dst, src as *const z_loaned_sample_t) };
 }
 
 /// Deep-copy a borrowed sample into an owned one (zenoh-c `z_sample_clone`).

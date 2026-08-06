@@ -176,6 +176,24 @@ pub unsafe extern "C" fn z_closure_zid_loan(
     closure as *const z_loaned_closure_zid_t
 }
 
+/// The `_mut` spelling of the loan (zenoh-c `z_closure_zid_loan_mut`).
+///
+/// R311y568. Note the SIGNATURE: upstream's takes a `const z_owned_closure_zid_t
+/// *` and returns a `const z_loaned_closure_zid_t *` — both const, despite the
+/// name. That is upstream's declaration and not a transcription slip here, so
+/// the mirror keeps it; a C program's call site would not compile against the
+/// mutable spelling.
+///
+/// # Safety
+/// As [`z_closure_zid_loan`].
+#[no_mangle]
+pub unsafe extern "C" fn z_closure_zid_loan_mut(
+    closure: *const z_owned_closure_zid_t,
+) -> *const z_loaned_closure_zid_t {
+    // SAFETY: the caller's contract, delegated.
+    unsafe { z_closure_zid_loan(closure) }
+}
+
 /// Invoke a zid closure (zenoh-c `z_closure_zid_call`). Calling an uninitialized
 /// closure is a no-op, which is upstream's stated contract.
 ///
