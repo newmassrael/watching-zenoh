@@ -157,6 +157,202 @@ pub unsafe extern "C" fn z_slice_drop(this_: *mut z_moved_slice_t) {
     });
 }
 
+// --- R311y564: the rest of upstream's slice surface -------------------------
+
+/// The GRAVESTONE owned slice — a null buffer.
+///
+/// Distinct from an EMPTY slice: the empty one CHECKS as present. See the
+/// string family's note; the same two-state distinction applies.
+pub(crate) fn null_slice() -> z_owned_slice_t {
+    z_owned_slice_t {
+        ptr: std::ptr::null(),
+        len: 0,
+        owned: std::ptr::null_mut(),
+        _pad: 0,
+    }
+}
+
+/// Construct an EMPTY owned slice (zenoh-c `z_slice_empty`).
+///
+/// # Safety
+/// `this_` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_slice_empty(this_: *mut z_owned_slice_t) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = owned_slice_from(&[]) };
+    }
+}
+
+/// `true` iff the loaned slice has zero length (zenoh-c `z_slice_is_empty`).
+///
+/// # Safety
+/// `this_` must be null or a valid loaned slice.
+#[no_mangle]
+pub unsafe extern "C" fn z_slice_is_empty(this_: *const z_loaned_slice_t) -> bool {
+    guard_val(true, || {
+        // SAFETY: the caller's contract.
+        unsafe { slice_bytes(this_) }.map_or(true, <[u8]>::is_empty)
+    })
+}
+
+/// Deep-copy a slice (zenoh-c `z_slice_clone`).
+///
+/// # Safety
+/// `dst` must be valid and writable; `this_` must be null or a valid loaned
+/// slice.
+#[no_mangle]
+pub unsafe extern "C" fn z_slice_clone(dst: *mut z_owned_slice_t, this_: *const z_loaned_slice_t) {
+    guard_val((), || {
+        if dst.is_null() {
+            return;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *dst = null_slice() };
+        // SAFETY: as above.
+        let Some(bytes) = (unsafe { slice_bytes(this_) }) else {
+            return;
+        };
+        unsafe { *dst = owned_slice_from(bytes) };
+    });
+}
+
+/// Copy `len` bytes into an owned slice (zenoh-c `z_slice_copy_from_buf`).
+///
+/// # Safety
+/// `this_` must be valid and writable; `start` must be null or point at `len`
+/// readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn z_slice_copy_from_buf(
+    this_: *mut z_owned_slice_t,
+    start: *const u8,
+    len: usize,
+) -> crate::result::ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = null_slice() };
+        if start.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // SAFETY: as above — `len` readable bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(start, len) };
+        unsafe { *this_ = owned_slice_from(bytes) };
+        Z_OK
+    })
+}
+
+/// ADOPT a caller-allocated buffer into an owned slice (zenoh-c
+/// `z_slice_from_buf`).
+///
+/// Upstream transfers ownership: the slice takes the buffer and calls `drop`
+/// when it is done. wz COPIES and invokes the deleter immediately, which is the
+/// same divergence `wz-capi-pico`'s `z_bytes_from_buf` records and for the same
+/// reason — this crate's owned slice frees through `Box<Vec<u8>>`, and a
+/// foreign allocation cannot be handed to that.
+///
+/// The deleter runs on EVERY path including the failure ones. Upstream's
+/// ownership transfer is unconditional, so skipping it would leak the caller's
+/// buffer rather than merely diverging.
+///
+/// # Safety
+/// `this_` must be valid and writable; `data` must be null or point at `len`
+/// readable bytes owned by the caller; `drop` must be null or callable with
+/// `(data, context)`.
+#[no_mangle]
+pub unsafe extern "C" fn z_slice_from_buf(
+    this_: *mut z_owned_slice_t,
+    data: *mut u8,
+    len: usize,
+    drop: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void)>,
+    context: *mut std::ffi::c_void,
+) -> crate::result::ZResult {
+    let copied = if data.is_null() {
+        None
+    } else {
+        // SAFETY: the caller's contract — `len` readable bytes at `data`.
+        Some(unsafe { std::slice::from_raw_parts(data, len) }.to_vec())
+    };
+    // The transfer is unconditional upstream, so the deleter runs before any
+    // early return below.
+    if let Some(deleter) = drop {
+        // SAFETY: the caller's contract for the function pointer.
+        unsafe { deleter(data.cast(), context) };
+    }
+    guarded(|| {
+        if this_.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = null_slice() };
+        let Some(copied) = copied else {
+            return crate::result::Z_ENULL;
+        };
+        unsafe { *this_ = owned_slice_from(&copied) };
+        Z_OK
+    })
+}
+
+/// Gravestone a view slice (zenoh-c `z_view_slice_empty`).
+///
+/// # Safety
+/// `this_` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_slice_empty(this_: *mut z_view_slice_t) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = view_slice_over(&[]) };
+    }
+}
+
+/// `true` iff the view slice is empty (zenoh-c `z_view_slice_is_empty`).
+///
+/// # Safety
+/// `this_` must be null or a valid view slice.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_slice_is_empty(this_: *const z_view_slice_t) -> bool {
+    guard_val(true, || {
+        // SAFETY: the caller's contract — the two types share a footprint.
+        unsafe { z_slice_is_empty(this_ as *const z_loaned_slice_t) }
+    })
+}
+
+/// Build a view slice ALIASING the caller's buffer (zenoh-c
+/// `z_view_slice_from_buf`).
+///
+/// # Safety
+/// `this_` must be valid and writable; `start` must be null or point at `len`
+/// readable bytes that outlive every use of the view.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_slice_from_buf(
+    this_: *mut z_view_slice_t,
+    start: *const u8,
+    len: usize,
+) -> crate::result::ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = view_slice_over(&[]) };
+        if start.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // SAFETY: as above — the view borrows, so no copy is made.
+        unsafe {
+            *this_ = z_view_slice_t {
+                ptr: start,
+                len,
+                owned: std::ptr::null_mut(),
+                _pad: 0,
+            }
+        };
+        Z_OK
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

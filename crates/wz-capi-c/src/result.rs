@@ -58,6 +58,14 @@ pub const Z_CHANNEL_NODATA: ZResult = 2;
 /// `pthread`'s own `errno` values for the mutex family rather than mapping them
 /// onto its `Z_E*` set, which is why this number is -22 and not a small one.
 pub const Z_EINVAL_MUTEX: ZResult = -22;
+/// A `z_mutex_try_lock` found the mutex already HELD (`Z_EBUSY_MUTEX` = -16).
+///
+/// MEASURED against the real `libzenohc.so`, not derived: a probe took the lock
+/// and tried again, and upstream answered `-16` — `pthread_mutex_trylock`'s
+/// `EBUSY`, negated the way zenoh-c negates every forwarded errno. It is a
+/// DIFFERENT verdict from [`Z_EINVAL_MUTEX`], and a caller that could not tell
+/// them apart would spin forever on an unusable handle.
+pub const Z_EBUSY_MUTEX: ZResult = -16;
 /// An unclassified failure (`Z_EGENERIC` = `INT8_MIN`). zenoh-c spells its
 /// catch-all as the type's minimum rather than as another small negative, so the
 /// value is transcribed rather than chosen.
@@ -81,6 +89,7 @@ mod tests {
             Z_EDESERIALIZE,
             Z_ESESSION_CLOSED,
             Z_EINVAL_MUTEX,
+            Z_EBUSY_MUTEX,
             Z_EGENERIC,
         ];
         for (i, a) in errs.iter().enumerate() {

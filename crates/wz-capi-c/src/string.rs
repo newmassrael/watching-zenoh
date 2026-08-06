@@ -202,3 +202,263 @@ pub unsafe extern "C" fn z_string_from_str(
     }
     rc
 }
+
+// --- R311y564: the rest of upstream's string surface ------------------------
+
+/// The GRAVESTONE owned string — a null buffer, which is what
+/// `z_internal_string_check` reads as absent.
+///
+/// Distinct from an EMPTY string, which upstream's `z_string_empty` produces
+/// and which checks as PRESENT. Two different states, and a C program that
+/// tests one for the other gets the wrong answer, so both are constructed
+/// explicitly rather than by zeroing.
+pub(crate) fn null_string() -> z_owned_string_t {
+    z_owned_string_t {
+        ptr: std::ptr::null(),
+        len: 0,
+        owned: std::ptr::null_mut(),
+        _pad: 0,
+    }
+}
+
+/// Construct an EMPTY owned string (zenoh-c `z_string_empty`).
+///
+/// # Safety
+/// `this_` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_empty(this_: *mut z_owned_string_t) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract. Empty rather than gravestoned: an
+        // empty string CHECKS, and `owned_string_from` mints the NUL that makes
+        // `z_string_data` a valid `const char*`.
+        unsafe { *this_ = owned_string_from(b"") };
+    }
+}
+
+/// `true` iff the loaned string has zero length (zenoh-c `z_string_is_empty`).
+///
+/// A gravestone reads as empty, which is upstream's behaviour and the reason
+/// this is not the negation of `z_internal_string_check`.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned string.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_is_empty(this_: *const z_loaned_string_t) -> bool {
+    guard_val(true, || {
+        // SAFETY: the caller's contract.
+        unsafe { string_bytes(this_) }.map_or(true, <[u8]>::is_empty)
+    })
+}
+
+/// Copy a NUL-terminated string into an owned one (zenoh-c
+/// `z_string_copy_from_str`).
+///
+/// # Safety
+/// `this_` must be valid and writable; `str_` must be null or NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_copy_from_str(
+    this_: *mut z_owned_string_t,
+    str_: *const c_char,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = null_string() };
+        if str_.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // SAFETY: as above.
+        let bytes = unsafe { std::ffi::CStr::from_ptr(str_) }.to_bytes();
+        unsafe { *this_ = owned_string_from(bytes) };
+        Z_OK
+    })
+}
+
+/// Copy `len` bytes into an owned string (zenoh-c `z_string_copy_from_substr`).
+///
+/// # Safety
+/// `this_` must be valid and writable; `str_` must be null or point at `len`
+/// readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_copy_from_substr(
+    this_: *mut z_owned_string_t,
+    str_: *const c_char,
+    len: usize,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = null_string() };
+        if str_.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // SAFETY: as above — `len` readable bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(str_.cast::<u8>(), len) };
+        unsafe { *this_ = owned_string_from(bytes) };
+        Z_OK
+    })
+}
+
+/// Deep-copy a string (zenoh-c `z_string_clone`).
+///
+/// # Safety
+/// `dst` must be valid and writable; `this_` must be null or a valid loaned
+/// string.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_clone(
+    dst: *mut z_owned_string_t,
+    this_: *const z_loaned_string_t,
+) {
+    guard_val((), || {
+        if dst.is_null() {
+            return;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *dst = null_string() };
+        // SAFETY: as above.
+        let Some(bytes) = (unsafe { string_bytes(this_) }) else {
+            return;
+        };
+        unsafe { *dst = owned_string_from(bytes) };
+    });
+}
+
+/// View a string's bytes as a slice (zenoh-c `z_string_as_slice`).
+///
+/// A POINTER CAST, not a copy. The two types have the same `(ptr, len, owned)`
+/// prefix here, which is what makes the borrow free — and it is also why the
+/// returned slice must never be dropped: it does not own the buffer, the string
+/// does.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned string.
+#[no_mangle]
+pub unsafe extern "C" fn z_string_as_slice(
+    this_: *const z_loaned_string_t,
+) -> *const crate::abi::z_loaned_slice_t {
+    this_ as *const crate::abi::z_loaned_slice_t
+}
+
+/// `true` iff the owned string holds a buffer (zenoh-c
+/// `z_internal_string_check`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned string.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_string_check(this_: *const z_owned_string_t) -> bool {
+    guard_val(false, || {
+        // SAFETY: the caller's contract.
+        !this_.is_null() && !unsafe { (*this_).ptr }.is_null()
+    })
+}
+
+/// Gravestone an owned string (zenoh-c `z_internal_string_null`).
+///
+/// # Safety
+/// `this_` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_string_null(this_: *mut z_owned_string_t) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = null_string() };
+    }
+}
+
+/// Gravestone a view string (zenoh-c `z_view_string_empty`).
+///
+/// # Safety
+/// `this_` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_string_empty(this_: *mut z_view_string_t) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = view_string_over("") };
+    }
+}
+
+/// `true` iff the view string is empty (zenoh-c `z_view_string_is_empty`).
+///
+/// # Safety
+/// `this_` must be null or a valid view string.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_string_is_empty(this_: *const z_view_string_t) -> bool {
+    guard_val(true, || {
+        // SAFETY: the caller's contract — the two types share a footprint.
+        unsafe { z_string_is_empty(this_ as *const z_loaned_string_t) }
+    })
+}
+
+/// Build a view string ALIASING a NUL-terminated buffer (zenoh-c
+/// `z_view_string_from_str`).
+///
+/// The caller keeps the buffer alive; nothing is copied, which is the whole
+/// point of the view family.
+///
+/// # Safety
+/// `this_` must be valid and writable; `str_` must be null or NUL-terminated
+/// and must outlive every use of the view.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_string_from_str(
+    this_: *mut z_view_string_t,
+    str_: *const c_char,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = view_string_over("") };
+        if str_.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // SAFETY: as above.
+        let bytes = unsafe { std::ffi::CStr::from_ptr(str_) }.to_bytes();
+        unsafe {
+            *this_ = z_view_string_t {
+                ptr: bytes.as_ptr(),
+                len: bytes.len(),
+                owned: std::ptr::null_mut(),
+                _pad: 0,
+            }
+        };
+        Z_OK
+    })
+}
+
+/// The counted form of [`z_view_string_from_str`] (zenoh-c
+/// `z_view_string_from_substr`).
+///
+/// # Safety
+/// `this_` must be valid and writable; `str_` must be null or point at `len`
+/// readable bytes that outlive every use of the view.
+#[no_mangle]
+pub unsafe extern "C" fn z_view_string_from_substr(
+    this_: *mut z_view_string_t,
+    str_: *const c_char,
+    len: usize,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = view_string_over("") };
+        if str_.is_null() {
+            return crate::result::Z_ENULL;
+        }
+        // SAFETY: as above.
+        unsafe {
+            *this_ = z_view_string_t {
+                ptr: str_.cast::<u8>(),
+                len,
+                owned: std::ptr::null_mut(),
+                _pad: 0,
+            }
+        };
+        Z_OK
+    })
+}

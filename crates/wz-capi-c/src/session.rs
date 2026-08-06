@@ -204,3 +204,87 @@ pub unsafe extern "C" fn z_session_drop(this_: *mut z_moved_session_t) {
         Z_OK
     });
 }
+
+/// zenoh-c's `z_open_options_t` (`zenoh_commons.h:883-885`) — a placeholder.
+///
+/// Declared rather than taken as `void*` so a C program using the documented
+/// shape compiles, and so the footprint gate can measure it.
+#[repr(C)]
+pub struct z_open_options_t {
+    /// Upstream's own name for the placeholder byte.
+    pub _dummy: u8,
+}
+
+/// zenoh-c's `z_close_options_t` (`zenoh_commons.h:473-491`).
+///
+/// FEATURE-DEPENDENT, like the publisher options: `Z_FEATURE_UNSTABLE_API`
+/// replaces the placeholder byte with a close timeout and a concurrent-close
+/// handle out-pointer.
+#[repr(C)]
+pub struct z_close_options_t {
+    /// The close timeout in milliseconds; 0 means upstream's default of 10 s.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    pub internal_timeout_ms: u32,
+    /// An optional out-pointer for a concurrent-close handle. wz closes
+    /// synchronously, so a non-null request here is ACCEPTED and the handle is
+    /// left untouched — a named divergence rather than a silent one, and the
+    /// shape a caller who never sets it cannot observe.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    pub internal_out_concurrent: *mut c_void,
+    /// Upstream's placeholder on the no-unstable arm.
+    #[cfg(feature = "zenoh-c-no-unstable-api")]
+    pub _dummy: u8,
+}
+
+/// Upstream's defaults for `z_open_options_t` (zenoh-c `z_open_options_default`).
+///
+/// # Safety
+/// `this_` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_open_options_default(this_: *mut z_open_options_t) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_open_options_t { _dummy: 0 } };
+    }
+}
+
+/// Upstream's defaults for `z_close_options_t` (zenoh-c
+/// `z_close_options_default`).
+///
+/// # Safety
+/// `this_` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_close_options_default(this_: *mut z_close_options_t) {
+    if this_.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    unsafe {
+        *this_ = z_close_options_t {
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            internal_timeout_ms: 0,
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            internal_out_concurrent: std::ptr::null_mut(),
+            #[cfg(feature = "zenoh-c-no-unstable-api")]
+            _dummy: 0,
+        }
+    };
+}
+
+/// `true` iff the session has been closed (zenoh-c `z_session_is_closed`).
+///
+/// R311y564 — the accessor existed on `SessionState` from the day the drive
+/// loop was written, and its doc comment named this very export; only the
+/// `#[no_mangle]` wrapper was missing, so a C program asking the question did
+/// not link. A null or gravestoned handle reads as CLOSED, which is the safe
+/// direction: there is no live session behind it.
+///
+/// # Safety
+/// `session` must be null or a valid loaned session.
+#[no_mangle]
+pub unsafe extern "C" fn z_session_is_closed(session: *const z_loaned_session_t) -> bool {
+    guard_val(true, || {
+        // SAFETY: the caller's contract, delegated.
+        unsafe { session_state(session) }.map_or(true, SessionState::is_closed)
+    })
+}

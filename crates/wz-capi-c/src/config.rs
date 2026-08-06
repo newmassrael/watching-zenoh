@@ -62,6 +62,66 @@ impl ConfigState {
     pub(crate) fn first(&self, key: &str) -> Option<&str> {
         self.entries.get(key).and_then(|v| v.first()).map(|s| &**s)
     }
+
+    /// Store `values` under `key`, replacing whatever was there.
+    fn insert(&mut self, key: String, values: Vec<String>) {
+        self.entries.insert(key, values);
+    }
+
+    /// Render one key's value back in the json5 form the insert path accepts,
+    /// or `None` when the key is absent.
+    ///
+    /// The round trip is the contract: a scalar renders bare and a list renders
+    /// bracketed with quoted elements, so `get` of an inserted value re-inserts
+    /// identically. A renderer that could not be re-parsed would make the pair
+    /// of exports lossy in a way only a caller would notice.
+    fn render(&self, key: &str) -> Option<String> {
+        let values = self.entries.get(key)?;
+        Some(render_values(values))
+    }
+
+    /// Render every entry as a json5 object.
+    fn render_all(&self) -> String {
+        let body: Vec<String> = self
+            .entries
+            .iter()
+            .map(|(key, values)| format!("  \"{key}\": {}", render_values(values)))
+            .collect();
+        format!("{{\n{}\n}}", body.join(",\n"))
+    }
+
+    /// An independent copy — the config is a plain value, so this is a clone.
+    fn deep_copy(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+        }
+    }
+}
+
+/// Render a stored value list in the json5 form [`parse_json5_value`] accepts.
+///
+/// A single entry that parsed from a bare literal renders bare; anything else
+/// renders as a quoted string or a bracketed list. The one-entry case cannot
+/// distinguish "was a bare literal" from "was a quoted scalar" after the fact,
+/// so it renders bare when the text is literal-shaped and quoted otherwise —
+/// which re-parses to the same value either way.
+fn render_values(values: &[String]) -> String {
+    let is_bare = |text: &str| {
+        text == "true"
+            || text == "false"
+            || (!text.is_empty()
+                && text
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
+    };
+    match values {
+        [one] if is_bare(one) => one.clone(),
+        [one] => format!("\"{one}\""),
+        many => {
+            let items: Vec<String> = many.iter().map(|v| format!("\"{v}\"")).collect();
+            format!("[{}]", items.join(", "))
+        }
+    }
 }
 
 /// Parse one json5 VALUE into the strings it denotes.
@@ -275,6 +335,370 @@ pub unsafe extern "C" fn z_config_drop(this_: *mut z_moved_config_t) {
         // SAFETY: a live `Box<ConfigState>` this crate leaked.
         drop(unsafe { Box::from_raw(handle as *mut ConfigState) });
         unsafe { (*this_)._this = z_owned_config_t::null_value() };
+    }
+}
+
+// --- R311y564: the rest of upstream's config surface ------------------------
+
+/// Read a configuration from json5 TEXT (zenoh-c `zc_config_from_str`).
+///
+/// The same line-oriented parser [`zc_config_from_file`] applies, over a string
+/// the caller already has. Sharing the parser is the point: a config that opens
+/// a session when read from a file and refuses when read from a string would be
+/// a difference no caller could predict.
+///
+/// # Safety
+/// `this_` must be valid and writable; `s` must be null or NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn zc_config_from_str(
+    this_: *mut z_owned_config_t,
+    s: *const c_char,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_config_t::null_value() };
+        if s.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: as above.
+        let Ok(text) = (unsafe { CStr::from_ptr(s) }).to_str() else {
+            return Z_EPARSE;
+        };
+        // SAFETY: `this_` is valid and currently a gravestone.
+        unsafe { install_parsed(this_, text) }
+    })
+}
+
+/// The counted form of [`zc_config_from_str`] (zenoh-c `zc_config_from_substr`).
+///
+/// # Safety
+/// `this_` must be valid and writable; `s` must be null or point at `len`
+/// readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn zc_config_from_substr(
+    this_: *mut z_owned_config_t,
+    s: *const c_char,
+    len: usize,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_config_t::null_value() };
+        if s.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: as above — `len` readable bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), len) };
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return Z_EPARSE;
+        };
+        // SAFETY: `this_` is valid and currently a gravestone.
+        unsafe { install_parsed(this_, text) }
+    })
+}
+
+/// The counted form of [`zc_config_from_file`] (zenoh-c
+/// `zc_config_from_file_substr`).
+///
+/// # Safety
+/// `this_` must be valid and writable; `path` must be null or point at `len`
+/// readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn zc_config_from_file_substr(
+    this_: *mut z_owned_config_t,
+    path: *const c_char,
+    len: usize,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_config_t::null_value() };
+        if path.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: as above — `len` readable bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(path.cast::<u8>(), len) };
+        let Ok(path) = std::str::from_utf8(bytes) else {
+            return Z_EPARSE;
+        };
+        let Ok(owned) = std::ffi::CString::new(path) else {
+            return Z_EPARSE;
+        };
+        // SAFETY: `owned` is a live NUL-terminated string.
+        unsafe { zc_config_from_file(this_, owned.as_ptr()) }
+    })
+}
+
+/// The DEFAULT configuration read from the environment (zenoh-c
+/// `zc_config_from_env`).
+///
+/// Upstream reads `ZENOH_CONFIG`, and falls back to the default configuration
+/// when it is unset. Both halves are reproduced: an unset variable is not an
+/// error, and a path that does not read IS.
+///
+/// # Safety
+/// `this_` must be valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn zc_config_from_env(this_: *mut z_owned_config_t) -> ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        match std::env::var("ZENOH_CONFIG") {
+            Ok(path) if !path.is_empty() => {
+                let Ok(owned) = std::ffi::CString::new(path) else {
+                    // SAFETY: the caller's contract.
+                    unsafe { *this_ = z_owned_config_t::null_value() };
+                    return Z_EPARSE;
+                };
+                // SAFETY: `owned` is a live NUL-terminated string.
+                unsafe { zc_config_from_file(this_, owned.as_ptr()) }
+            }
+            // SAFETY: the caller's contract.
+            _ => unsafe { z_config_default(this_) },
+        }
+    })
+}
+
+/// Parse `text` into a fresh state and install it, or leave the gravestone.
+///
+/// # Safety
+/// `this_` must be valid, writable, and currently a gravestone.
+unsafe fn install_parsed(this_: *mut z_owned_config_t, text: &str) -> ZResult {
+    let mut state = ConfigState::default();
+    for line in text.lines() {
+        let line = line.trim().trim_end_matches(',');
+        if line.is_empty() || line.starts_with("//") || line == "{" || line == "}" {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            return Z_EPARSE;
+        };
+        let key = key.trim().trim_matches(['"', '\'']).to_owned();
+        let Some(values) = parse_json5_value(value) else {
+            return Z_EPARSE;
+        };
+        state.insert(key, values);
+    }
+    install(this_, state);
+    Z_OK
+}
+
+/// Read one config value back as a string (zenoh-c `zc_config_get_from_str`).
+///
+/// The rendering is json5-ish and MATCHES what the insert path accepts, so a
+/// `get` of an inserted value round-trips: a scalar renders bare and a list
+/// renders bracketed with quoted elements.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned config; `key` must be null or
+/// NUL-terminated; `out_value_string` must be valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn zc_config_get_from_str(
+    this_: *const z_loaned_config_t,
+    key: *const c_char,
+    out_value_string: *mut crate::abi::z_owned_string_t,
+) -> ZResult {
+    guarded(|| {
+        if out_value_string.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *out_value_string = crate::string::null_string() };
+        if key.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: as above.
+        let Ok(key) = (unsafe { CStr::from_ptr(key) }).to_str() else {
+            return Z_EPARSE;
+        };
+        // SAFETY: as above.
+        unsafe { get_into(this_, key, out_value_string) }
+    })
+}
+
+/// The counted-key form of [`zc_config_get_from_str`] (zenoh-c
+/// `zc_config_get_from_substr`).
+///
+/// # Safety
+/// `this_` must be null or a valid loaned config; `key` must be null or point
+/// at `key_len` readable bytes; `out_value_string` must be valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn zc_config_get_from_substr(
+    this_: *const z_loaned_config_t,
+    key: *const c_char,
+    key_len: usize,
+    out_value_string: *mut crate::abi::z_owned_string_t,
+) -> ZResult {
+    guarded(|| {
+        if out_value_string.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *out_value_string = crate::string::null_string() };
+        if key.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: as above — `key_len` readable bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(key.cast::<u8>(), key_len) };
+        let Ok(key) = std::str::from_utf8(bytes) else {
+            return Z_EPARSE;
+        };
+        // SAFETY: as above.
+        unsafe { get_into(this_, key, out_value_string) }
+    })
+}
+
+/// The shared body of the two `get` entry points.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned config; `out` must be valid, writable
+/// and currently a gravestone.
+unsafe fn get_into(
+    this_: *const z_loaned_config_t,
+    key: &str,
+    out: *mut crate::abi::z_owned_string_t,
+) -> ZResult {
+    // SAFETY: the caller's contract. The cast drops `const`, which is sound
+    // because `config_state` only reads here — upstream types the get path
+    // `const` and the insert path mutable over the same handle.
+    let Some(state) = (unsafe { config_state(this_ as *mut z_loaned_config_t) }) else {
+        return Z_ENULL;
+    };
+    let Some(rendered) = state.render(key) else {
+        // Upstream distinguishes "no such key" from a bad argument; this is the
+        // former, and the out-param stays a gravestone.
+        return Z_EPARSE;
+    };
+    // SAFETY: the caller's contract.
+    unsafe { *out = crate::string::owned_string_from(rendered.as_bytes()) };
+    Z_OK
+}
+
+/// The counted form of [`zc_config_insert_json5`] (zenoh-c
+/// `zc_config_insert_json5_from_substr`).
+///
+/// # Safety
+/// `this_` must be null or a valid loaned config; `key` / `value` must be null
+/// or point at `key_len` / `value_len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn zc_config_insert_json5_from_substr(
+    this_: *mut z_loaned_config_t,
+    key: *const c_char,
+    key_len: usize,
+    value: *const c_char,
+    value_len: usize,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() || key.is_null() || value.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract — the two counted buffers.
+        let (key_bytes, value_bytes) = unsafe {
+            (
+                std::slice::from_raw_parts(key.cast::<u8>(), key_len),
+                std::slice::from_raw_parts(value.cast::<u8>(), value_len),
+            )
+        };
+        let (Ok(key), Ok(value)) = (
+            std::str::from_utf8(key_bytes),
+            std::str::from_utf8(value_bytes),
+        ) else {
+            return Z_EPARSE;
+        };
+        // SAFETY: the caller's contract for the handle.
+        let Some(state) = (unsafe { config_state(this_) }) else {
+            return Z_ENULL;
+        };
+        let Some(values) = parse_json5_value(value) else {
+            return Z_EPARSE;
+        };
+        state.insert(key.to_owned(), values);
+        Z_OK
+    })
+}
+
+/// Render the whole configuration as json5 (zenoh-c `zc_config_to_string`).
+///
+/// # Safety
+/// `config` must be null or a valid loaned config; `out_config_string` must be
+/// valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn zc_config_to_string(
+    config: *const z_loaned_config_t,
+    out_config_string: *mut crate::abi::z_owned_string_t,
+) -> ZResult {
+    guarded(|| {
+        if out_config_string.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *out_config_string = crate::string::null_string() };
+        // SAFETY: as above; see `get_into` for the `const` cast.
+        let Some(state) = (unsafe { config_state(config as *mut z_loaned_config_t) }) else {
+            return Z_ENULL;
+        };
+        // SAFETY: the caller's contract.
+        unsafe {
+            *out_config_string = crate::string::owned_string_from(state.render_all().as_bytes())
+        };
+        Z_OK
+    })
+}
+
+/// Deep-copy a configuration (zenoh-c `z_config_clone`).
+///
+/// # Safety
+/// `dst` must be valid and writable; `this_` must be null or a valid loaned
+/// config.
+#[no_mangle]
+pub unsafe extern "C" fn z_config_clone(
+    dst: *mut z_owned_config_t,
+    this_: *const z_loaned_config_t,
+) {
+    crate::ffi::guard_val((), || {
+        if dst.is_null() {
+            return;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *dst = z_owned_config_t::null_value() };
+        // SAFETY: as above; see `get_into` for the `const` cast.
+        let Some(state) = (unsafe { config_state(this_ as *mut z_loaned_config_t) }) else {
+            return;
+        };
+        install(dst, state.deep_copy());
+    });
+}
+
+/// `true` iff the owned config holds a state (zenoh-c
+/// `z_internal_config_check`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned config.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_config_check(this_: *const z_owned_config_t) -> bool {
+    crate::ffi::guard_val(false, || {
+        // SAFETY: the caller's contract.
+        !this_.is_null() && !unsafe { (*this_).handle }.is_null()
+    })
+}
+
+/// Gravestone an owned config (zenoh-c `z_internal_config_null`).
+///
+/// # Safety
+/// `this_` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_config_null(this_: *mut z_owned_config_t) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_config_t::null_value() };
     }
 }
 

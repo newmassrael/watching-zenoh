@@ -9130,6 +9130,21 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         --test zenoh_c_pure_function_oracle -- --ignored --quiet --test-threads=1 \
         --exact upstream_pure_functions_on_wz_capi_c_match_real_libzenohc || return 1
+    # R311y564 — the DROP-IN CENSUS, the question the corpus report cannot ask.
+    # `capi_c_coverage.py` above counts upstream EXAMPLES that link (29 of 29);
+    # this counts SYMBOLS the real library defines and wz does not (180 of 568 at
+    # this round). Both are true and they measure different things — a symbol no
+    # example calls is invisible to the corpus and is still a program that cannot
+    # be written. A RATCHET, not a zero: it fails when the gap grows, and equally
+    # when it shrinks without its committed baseline moving.
+    for leg in \
+        the_wz_capi_c_drop_in_surface_gap_does_not_grow \
+        the_census_reads_both_libraries_rather_than_nothing; do
+        _runci_guarded_test "C1cc $leg" 1 \
+            cargo test -p wz-integration-tests \
+            --test zenoh_c_abi_symbol_census -- --ignored --quiet --test-threads=1 \
+            --exact "$leg" || return 1
+    done
     # R311y500 — the CROSS-IMPL half, and it is a different question from the
     # three legs above. Those establish that upstream's program LINKS wz and that
     # wz's answers match the real `libzenohc.so`; every byte on their wire was

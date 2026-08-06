@@ -12,15 +12,16 @@
 //! [`declare_matching_listener`](wz_capi_core::faces::SharedSession::declare_matching_listener)
 //! and is shared with the zenoh-pico ABI. This module is the zenoh-c spelling.
 //!
-//! ## Only the BACKGROUND form is exported
+//! ## BOTH forms are exported since R311y564
 //!
 //! `z_pub.c` calls `z_publisher_declare_background_matching_listener`, whose
-//! listener "will be automatically dropped when the publisher is dropped" — there
-//! is no owned handle for the C side to hold. The owned form
-//! (`z_publisher_declare_matching_listener`) needs a
-//! `z_owned_matching_listener_t` and an undeclare, and it arrives with the
-//! program that calls it: the scope rule for this crate is an upstream PROGRAM,
-//! not a symbol list.
+//! listener "will be automatically dropped when the publisher is dropped", and
+//! that was the only form here while the crate's scope rule was an upstream
+//! PROGRAM. The census question is a different one — `libzenohc.so` DEFINES the
+//! owned family, so a C program naming it did not link — so
+//! [`z_publisher_declare_matching_listener`] and the querier twin now ship with
+//! an owned [`z_owned_matching_listener_t`], its undeclare, and the two polls
+//! ([`z_publisher_get_matching_status`] / [`z_querier_get_matching_status`]).
 //!
 //! Retiring the listener when its publisher drops is [`MatchingHold`]'s `Drop`,
 //! which the publisher state owns — so the two cannot drift, the same discipline
@@ -229,4 +230,305 @@ pub unsafe extern "C" fn z_publisher_declare_background_matching_listener(
         state.attach_matching(MatchingHold::new(state.shared.clone(), id));
         Z_OK
     })
+}
+
+// --- R311y564: the OWNED matching-listener family ---------------------------
+
+/// Behind a `z_owned_matching_listener_t` handle: the listener's id and the
+/// session that owns the watch.
+///
+/// The retraction lives in this state's `Drop`, so
+/// [`z_matching_listener_drop`] and [`z_undeclare_matching_listener`] take the
+/// identical path and cannot drift — the same discipline
+/// [`MatchingHold`] uses for the background form.
+struct ListenerState {
+    shared: Arc<SharedSession>,
+    id: MatchId,
+}
+
+impl Drop for ListenerState {
+    fn drop(&mut self) {
+        self.shared.undeclare_matching_listener(self.id);
+    }
+}
+
+/// Owned matching listener (zenoh-c `z_owned_matching_listener_t`) — 24 bytes
+/// at align 8, MEASURED by a C probe against the installed header.
+#[repr(C)]
+pub struct z_owned_matching_listener_t {
+    pub(crate) handle: *mut c_void,
+    pub(crate) _pad: [u8; 16],
+}
+
+/// Moved matching listener.
+#[repr(C)]
+pub struct z_moved_matching_listener_t {
+    pub(crate) _this: z_owned_matching_listener_t,
+}
+
+impl z_owned_matching_listener_t {
+    /// The gravestone value.
+    #[inline]
+    fn null_value() -> Self {
+        Self {
+            handle: std::ptr::null_mut(),
+            _pad: [0u8; 16],
+        }
+    }
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<z_owned_matching_listener_t>() == 24);
+    assert!(std::mem::align_of::<z_owned_matching_listener_t>() == 8);
+    assert!(std::mem::size_of::<z_moved_matching_listener_t>() == 24);
+};
+
+/// Adopt a moved closure into the aggregated sink both declare paths install.
+///
+/// # Safety
+/// `callback` must be a valid, writable moved closure.
+unsafe fn adopt_matching_closure(
+    callback: *mut z_moved_closure_matching_status_t,
+) -> Arc<CMatchClosure> {
+    // SAFETY: the caller's contract.
+    let owned = unsafe { &mut (*callback)._this };
+    let cclosure = CMatchClosure::new(owned.context, owned.call, owned.drop);
+    *owned = z_owned_closure_matching_status_t::null_value();
+    Arc::new(cclosure)
+}
+
+/// The `MatchingSink` that forwards an aggregated verdict to a C closure.
+fn matching_sink(closure: Arc<CMatchClosure>) -> Arc<dyn Fn(bool) + Send + Sync> {
+    Arc::new(move |matching: bool| {
+        let Some(call) = closure.call else {
+            return;
+        };
+        let status = z_matching_status_t { matching };
+        let ctx = closure.context.0;
+        // SAFETY: `call` is the C callback and `status` outlives it. An unwind
+        // out of the callback across `extern "C"` is UB, so it is caught.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            call(&status, ctx);
+        }));
+    })
+}
+
+/// Install a declared listener into the caller's owned slot.
+///
+/// # Safety
+/// `out` must be valid and writable.
+unsafe fn install_listener(
+    out: *mut z_owned_matching_listener_t,
+    shared: Arc<SharedSession>,
+    id: MatchId,
+) {
+    let boxed = Box::into_raw(Box::new(ListenerState { shared, id })) as *mut c_void;
+    // SAFETY: the caller's contract.
+    unsafe {
+        *out = z_owned_matching_listener_t {
+            handle: boxed,
+            _pad: [0u8; 16],
+        }
+    };
+}
+
+/// Declare an OWNED matching listener on a publisher (zenoh-c
+/// `z_publisher_declare_matching_listener`). Consumes the moved closure on
+/// every path.
+///
+/// # Safety
+/// `publisher` must be null or a valid loaned publisher; `matching_listener`
+/// must be valid and writable; `callback` must be a valid moved closure.
+#[no_mangle]
+pub unsafe extern "C" fn z_publisher_declare_matching_listener(
+    publisher: *const z_loaned_publisher_t,
+    matching_listener: *mut z_owned_matching_listener_t,
+    callback: *mut z_moved_closure_matching_status_t,
+) -> ZResult {
+    guarded(|| {
+        if callback.is_null() || matching_listener.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *matching_listener = z_owned_matching_listener_t::null_value() };
+        // Consume the moved closure FIRST (consume-on-all-paths).
+        // SAFETY: as above.
+        let closure = unsafe { adopt_matching_closure(callback) };
+        // SAFETY: as above.
+        let Some(state) = (unsafe { crate::publisher::publisher_state(publisher) }) else {
+            return Z_ENULL;
+        };
+        let id = state
+            .shared
+            .declare_matching_listener(state.keyexpr.keyexpr.clone(), matching_sink(closure));
+        // SAFETY: the slot was gravestoned above.
+        unsafe { install_listener(matching_listener, state.shared.clone(), id) };
+        Z_OK
+    })
+}
+
+/// Declare an OWNED matching listener on a querier (zenoh-c
+/// `z_querier_declare_matching_listener`).
+///
+/// The querier's verdict is about QUERYABLES, not subscribers — a different
+/// scope over the same aggregation, which is why it routes through
+/// `declare_matching_listener_queryable` rather than the publisher's path.
+///
+/// # Safety
+/// `querier` must be null or a valid loaned querier; `matching_listener` must
+/// be valid and writable; `callback` must be a valid moved closure.
+#[no_mangle]
+pub unsafe extern "C" fn z_querier_declare_matching_listener(
+    querier: *const crate::abi::z_loaned_querier_t,
+    matching_listener: *mut z_owned_matching_listener_t,
+    callback: *mut z_moved_closure_matching_status_t,
+) -> ZResult {
+    guarded(|| {
+        if callback.is_null() || matching_listener.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *matching_listener = z_owned_matching_listener_t::null_value() };
+        // SAFETY: as above.
+        let closure = unsafe { adopt_matching_closure(callback) };
+        // SAFETY: as above.
+        let Some(state) = (unsafe { crate::querier::querier_state(querier) }) else {
+            return Z_ENULL;
+        };
+        let id = state.shared.declare_querier_matching_listener(
+            state.keyexpr.keyexpr.clone(),
+            matching_sink(closure),
+        );
+        // SAFETY: the slot was gravestoned above.
+        unsafe { install_listener(matching_listener, state.shared.clone(), id) };
+        Z_OK
+    })
+}
+
+/// Poll a publisher's matching verdict (zenoh-c
+/// `z_publisher_get_matching_status`).
+///
+/// Computed FRESH across faces rather than read off a listener's cached state,
+/// so it answers correctly for a publisher that never declared one.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned publisher; `matching_status` must be
+/// valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_publisher_get_matching_status(
+    this_: *const z_loaned_publisher_t,
+    matching_status: *mut z_matching_status_t,
+) -> ZResult {
+    guarded(|| {
+        if matching_status.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract — written before any fallible work so a
+        // caller that ignores the code reads `false` rather than a stale value.
+        unsafe { (*matching_status).matching = false };
+        // SAFETY: as above.
+        let Some(state) = (unsafe { crate::publisher::publisher_state(this_) }) else {
+            return Z_ENULL;
+        };
+        // SAFETY: as above.
+        unsafe { (*matching_status).matching = state.shared.has_matching(&state.keyexpr.keyexpr) };
+        Z_OK
+    })
+}
+
+/// Poll a querier's matching verdict (zenoh-c `z_querier_get_matching_status`).
+///
+/// # Safety
+/// `this_` must be null or a valid loaned querier; `matching_status` must be
+/// valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_querier_get_matching_status(
+    this_: *const crate::abi::z_loaned_querier_t,
+    matching_status: *mut z_matching_status_t,
+) -> ZResult {
+    guarded(|| {
+        if matching_status.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { (*matching_status).matching = false };
+        // SAFETY: as above.
+        let Some(state) = (unsafe { crate::querier::querier_state(this_) }) else {
+            return Z_ENULL;
+        };
+        // SAFETY: as above.
+        unsafe {
+            (*matching_status).matching =
+                state.shared.has_matching_queryable(&state.keyexpr.keyexpr)
+        };
+        Z_OK
+    })
+}
+
+/// Retract a matching listener (zenoh-c `z_undeclare_matching_listener`).
+///
+/// # Safety
+/// `this_` must be null or a valid, writable moved matching listener.
+#[no_mangle]
+pub unsafe extern "C" fn z_undeclare_matching_listener(
+    this_: *mut z_moved_matching_listener_t,
+) -> ZResult {
+    guarded(|| {
+        // SAFETY: the caller's contract, delegated — the drop path IS the
+        // retraction, so the explicit and implicit forms cannot drift.
+        unsafe { z_matching_listener_drop(this_) };
+        Z_OK
+    })
+}
+
+/// Drop a matching listener (zenoh-c `z_matching_listener_drop`), retracting
+/// its watch.
+///
+/// # Safety
+/// `this_` must be null or a valid, writable moved matching listener.
+#[no_mangle]
+pub unsafe extern "C" fn z_matching_listener_drop(this_: *mut z_moved_matching_listener_t) {
+    guard_val((), || {
+        if this_.is_null() {
+            return;
+        }
+        // SAFETY: the caller's contract.
+        let handle = unsafe { (*this_)._this.handle };
+        unsafe { (*this_)._this = z_owned_matching_listener_t::null_value() };
+        if !handle.is_null() {
+            // SAFETY: every listener handle is a `Box::into_raw`; the `Drop`
+            // impl retracts the watch.
+            drop(unsafe { Box::from_raw(handle as *mut ListenerState) });
+        }
+    });
+}
+
+/// `true` iff the owned listener is live (zenoh-c
+/// `z_internal_matching_listener_check`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned matching listener.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_matching_listener_check(
+    this_: *const z_owned_matching_listener_t,
+) -> bool {
+    guard_val(false, || {
+        // SAFETY: the caller's contract.
+        !this_.is_null() && !unsafe { (*this_).handle }.is_null()
+    })
+}
+
+/// Gravestone an owned matching listener (zenoh-c
+/// `z_internal_matching_listener_null`).
+///
+/// # Safety
+/// `this_` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_matching_listener_null(
+    this_: *mut z_owned_matching_listener_t,
+) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_matching_listener_t::null_value() };
+    }
 }

@@ -346,10 +346,19 @@ fn run_both_arms(include: &Path, libdir_ref: &Path) -> (String, String) {
 
 /// THE GATE: every pure function answers what the real library answers.
 ///
-/// The claim is `partial`: it covers the encoding table and the keyexpr plane,
-/// which is what R311y564 built, and says nothing about the session planes the
-/// interop legs cover.
-// wz-proves: api-compat-c wz->zenoh-c partial
+/// It covers the encoding table and the keyexpr plane, which is what R311y564
+/// built, and says nothing about the session planes the interop legs cover.
+///
+/// NO cross-impl proof annotation, and Layer A4 requires its absence rather than merely
+/// permitting it: a file whose foreign artifacts the corpus classifier cannot
+/// see may not carry a claim at all, not even `none`. The reference arm here IS
+/// a foreign implementation — the real `libzenohc.so`, linked and run — but the
+/// classifier registers `zenoh_pico_shared_library` and has no zenoh-c
+/// equivalent, and the kind vocabulary has no `wz->zenoh-c`. This file's
+/// siblings (`upstream_option_defaults_on_wz_capi_c_match_real_libzenohc`, the
+/// footprint gate) are unannotated for the same reason. Registering the root and
+/// the kind would let `api-compat-c` claim its first REFERENCE-implementation
+/// proof; it is a change to A4's taxonomy and belongs in its own round.
 #[test]
 #[ignore = "reads the installed zenoh-c oracle; run by run-ci Layer C1cc"]
 fn upstream_pure_functions_on_wz_capi_c_match_real_libzenohc() {

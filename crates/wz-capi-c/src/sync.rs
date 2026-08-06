@@ -94,6 +94,19 @@ impl MutexState {
         *held = true;
     }
 
+    /// Set the flag if it is clear, reporting whether it did.
+    ///
+    /// Never blocks — that is the whole distinction from [`Self::lock`], and it
+    /// is what `z_mutex_try_lock` needs.
+    fn try_lock(&self) -> bool {
+        let mut held = self.locked.lock().unwrap_or_else(|e| e.into_inner());
+        if *held {
+            return false;
+        }
+        *held = true;
+        true
+    }
+
     /// Clear the flag and wake one waiter.
     fn unlock(&self) {
         let mut held = self.locked.lock().unwrap_or_else(|e| e.into_inner());
@@ -337,6 +350,44 @@ pub unsafe extern "C" fn z_condvar_loan(
     // A plain cast: the key is at offset 0 of both forms, which is what makes
     // the four-byte loaned type expressible at all.
     this_ as *const z_loaned_condvar_t
+}
+
+/// Try to take the lock without blocking (zenoh-c `z_mutex_try_lock`).
+///
+/// `Z_OK` on success. A CONTENDED mutex answers `Z_EBUSY` (upstream forwards
+/// `pthread_mutex_trylock`'s `EBUSY`, 16), which is a different verdict from
+/// `Z_EINVAL_MUTEX` — the latter means the handle itself is unusable. A caller
+/// that could not tell the two apart would retry a dead mutex forever.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned mutex.
+#[no_mangle]
+pub unsafe extern "C" fn z_mutex_try_lock(this_: *mut z_loaned_mutex_t) -> ZResult {
+    guarded(|| {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { mutex_state(this_) } {
+            Some(state) => {
+                if state.try_lock() {
+                    Z_OK
+                } else {
+                    crate::result::Z_EBUSY_MUTEX
+                }
+            }
+            None => Z_EINVAL_MUTEX,
+        }
+    })
+}
+
+/// Borrow a condvar mutably (zenoh-c `z_condvar_loan_mut`).
+///
+/// # Safety
+/// `this_` must be null or a valid, writable owned condvar.
+#[no_mangle]
+pub unsafe extern "C" fn z_condvar_loan_mut(
+    this_: *mut z_owned_condvar_t,
+) -> *mut z_loaned_condvar_t {
+    // A plain cast, as in `z_condvar_loan` — the key is at offset 0 of both.
+    this_ as *mut z_loaned_condvar_t
 }
 
 /// Wake one waiter (zenoh-c `z_condvar_signal`).

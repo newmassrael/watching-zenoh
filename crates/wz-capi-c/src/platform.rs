@@ -23,6 +23,7 @@
 //! this the "monotonic clock", and a wall clock stepping backwards would make a
 //! throughput benchmark print a negative interval as a huge unsigned one.
 
+use std::ffi::c_char;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -134,6 +135,207 @@ pub extern "C" fn z_sleep_s(time: usize) -> ZResult {
         std::thread::sleep(std::time::Duration::from_secs(time as u64));
         Z_OK
     })
+}
+
+// --- R311y564: the WALL-CLOCK, RANDOM and TASK surfaces ---------------------
+//
+// `z_clock_t` above is the MONOTONIC clock (`CLOCK_MONOTONIC`, for measuring
+// intervals). `z_time_t` below is the WALL clock, and upstream keeps them
+// separate because they answer different questions — a wall clock can jump
+// backwards, a monotonic one cannot. Both are exported and they are not
+// interchangeable.
+
+/// zenoh-c's `z_time_t` (`zenoh_commons.h:1245-1247`) — a wall-clock instant as
+/// one `uint64_t`.
+///
+/// The field is opaque to a C caller (upstream never documents its unit), so
+/// this build stores MICROSECONDS since the Unix epoch: it is the finest unit
+/// any `z_time_elapsed_*` reader needs, so every reader divides rather than
+/// losing precision.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct z_time_t {
+    /// Microseconds since the Unix epoch.
+    pub t: u64,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<z_time_t>() == 8);
+    assert!(std::mem::align_of::<z_time_t>() == 8);
+};
+
+/// Microseconds since the Unix epoch, or 0 if the clock is before it.
+fn epoch_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+/// The current wall-clock instant (zenoh-c `z_time_now`).
+#[no_mangle]
+pub extern "C" fn z_time_now() -> z_time_t {
+    z_time_t { t: epoch_micros() }
+}
+
+/// The elapsed microseconds since `time` (zenoh-c `z_time_elapsed_us`).
+///
+/// SATURATES at 0 rather than wrapping, for the same reason
+/// [`z_clock_elapsed_us`] does: a wall clock can legitimately move backwards
+/// (NTP), and a wrapped `u64` would read as ~584 000 years of uptime.
+///
+/// # Safety
+/// `time` must be null or a valid `z_time_t`.
+#[no_mangle]
+pub unsafe extern "C" fn z_time_elapsed_us(time: *const z_time_t) -> u64 {
+    guard_val(0, || {
+        if time.is_null() {
+            return 0;
+        }
+        // SAFETY: the caller's contract.
+        epoch_micros().saturating_sub(unsafe { (*time).t })
+    })
+}
+
+/// The elapsed milliseconds since `time` (zenoh-c `z_time_elapsed_ms`).
+///
+/// # Safety
+/// `time` must be null or a valid `z_time_t`.
+#[no_mangle]
+pub unsafe extern "C" fn z_time_elapsed_ms(time: *const z_time_t) -> u64 {
+    // SAFETY: the caller's contract, delegated — one clock read, so the three
+    // readings cannot disagree about which instant "now" was.
+    (unsafe { z_time_elapsed_us(time) }) / 1_000
+}
+
+/// The elapsed seconds since `time` (zenoh-c `z_time_elapsed_s`).
+///
+/// # Safety
+/// `time` must be null or a valid `z_time_t`.
+#[no_mangle]
+pub unsafe extern "C" fn z_time_elapsed_s(time: *const z_time_t) -> u64 {
+    // SAFETY: the caller's contract, delegated.
+    (unsafe { z_time_elapsed_us(time) }) / 1_000_000
+}
+
+/// Render the current time into the caller's buffer (zenoh-c
+/// `z_time_now_as_str`).
+///
+/// Returns `buf`, which is what upstream's signature promises and what a caller
+/// passes straight to `printf`. The buffer is always NUL-terminated, including
+/// when it is too short for the rendering — a truncated timestamp is a bad log
+/// line, an unterminated one is a read past the end.
+///
+/// # Safety
+/// `buf` must be null or point at `len` WRITABLE bytes.
+#[no_mangle]
+pub unsafe extern "C" fn z_time_now_as_str(buf: *const c_char, len: usize) -> *const c_char {
+    guard_val(buf, || {
+        if buf.is_null() || len == 0 {
+            return buf;
+        }
+        let micros = epoch_micros();
+        let rendered = format!("{}.{:06}", micros / 1_000_000, micros % 1_000_000);
+        let bytes = rendered.as_bytes();
+        // One byte of the caller's buffer is reserved for the terminator.
+        let n = bytes.len().min(len - 1);
+        // SAFETY: the caller's contract — `len` writable bytes, and `n < len`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, n);
+            *(buf as *mut u8).add(n) = 0;
+        }
+        buf
+    })
+}
+
+/// Sleep for `time` microseconds (zenoh-c `z_sleep_us`).
+#[no_mangle]
+pub extern "C" fn z_sleep_us(time: usize) -> ZResult {
+    guarded(|| {
+        std::thread::sleep(std::time::Duration::from_micros(time as u64));
+        Z_OK
+    })
+}
+
+/// Fill `buf` with `len` random bytes (zenoh-c `z_random_fill`).
+///
+/// # Safety
+/// `buf` must be null or point at `len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn z_random_fill(buf: *mut std::ffi::c_void, len: usize) {
+    guard_val((), || {
+        if buf.is_null() || len == 0 {
+            return;
+        }
+        // SAFETY: the caller's contract.
+        let out = unsafe { std::slice::from_raw_parts_mut(buf.cast::<u8>(), len) };
+        fill_random(out);
+    });
+}
+
+/// The random source behind the whole family.
+///
+/// `getrandom(2)` through `/dev/urandom`, with a per-thread counter-based
+/// fallback if that is unavailable. The fallback is NOT cryptographic and does
+/// not claim to be: upstream's own `z_random_*` is documented as a convenience
+/// for example programs (nonces, jittered sleeps), and this crate's security
+/// surface (`extauth`, TLS) does not route through it.
+fn fill_random(out: &mut [u8]) {
+    use std::io::Read;
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if f.read_exact(out).is_ok() {
+            return;
+        }
+    }
+    // Fallback: splitmix64 seeded from the wall clock and this thread's id.
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    epoch_micros().hash(&mut hasher);
+    std::thread::current().id().hash(&mut hasher);
+    let mut state = hasher.finish();
+    for chunk in out.chunks_mut(8) {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        for (byte, source) in chunk.iter_mut().zip(z.to_le_bytes()) {
+            *byte = source;
+        }
+    }
+}
+
+/// One random byte (zenoh-c `z_random_u8`).
+#[no_mangle]
+pub extern "C" fn z_random_u8() -> u8 {
+    let mut buf = [0u8; 1];
+    fill_random(&mut buf);
+    buf[0]
+}
+
+/// A random `u16` (zenoh-c `z_random_u16`).
+#[no_mangle]
+pub extern "C" fn z_random_u16() -> u16 {
+    let mut buf = [0u8; 2];
+    fill_random(&mut buf);
+    u16::from_le_bytes(buf)
+}
+
+/// A random `u32` (zenoh-c `z_random_u32`).
+#[no_mangle]
+pub extern "C" fn z_random_u32() -> u32 {
+    let mut buf = [0u8; 4];
+    fill_random(&mut buf);
+    u32::from_le_bytes(buf)
+}
+
+/// A random `u64` (zenoh-c `z_random_u64`).
+#[no_mangle]
+pub extern "C" fn z_random_u64() -> u64 {
+    let mut buf = [0u8; 8];
+    fill_random(&mut buf);
+    u64::from_le_bytes(buf)
 }
 
 #[cfg(test)]

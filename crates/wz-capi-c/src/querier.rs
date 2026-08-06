@@ -197,7 +197,9 @@ impl QuerierState {
 ///
 /// # Safety
 /// `this_` must be null or a valid loaned querier whose handle is live.
-unsafe fn querier_state<'a>(this_: *const z_loaned_querier_t) -> Option<&'a QuerierState> {
+pub(crate) unsafe fn querier_state<'a>(
+    this_: *const z_loaned_querier_t,
+) -> Option<&'a QuerierState> {
     if this_.is_null() {
         return None;
     }
