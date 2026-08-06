@@ -85,6 +85,44 @@ impl MissDetectionConfig {
     }
 }
 
+/// R311y562 — per-put value metadata for [`AdvancedPublisher::put_with`].
+///
+/// Deliberately just the two fields upstream lets a caller set on an advanced
+/// put. `ze_advanced_publisher_put` takes the caller's whole
+/// `ze_advanced_publisher_put_options_t` and then overwrites
+/// `put_options.timestamp` and `put_options.source_info` with the publisher's
+/// own sequencing values before publishing
+/// (`vendor/zenoh-pico/src/api/advanced_publisher.c:396-407`) — so on this
+/// publisher those two are not caller-settable anywhere, and modelling them
+/// here would advertise a knob whose value is discarded one line later.
+///
+/// `#[non_exhaustive]`, matching [`AdvancedPublisherOptions`]: the QoS trio
+/// (priority / congestion control / express) also rides upstream's struct and
+/// is a later round's wiring, which must not break a struct literal here.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct AdvancedPutOptions {
+    /// The value's encoding — the inner `MsgPut` E-flag. Rides both the wire
+    /// publish and the cache entry, so a recovered sample renders identically.
+    pub encoding: Option<wz_session_core::sample::EncodingHint>,
+    /// An opaque attachment side-band — the inner body ext id 0x03. Put-only
+    /// on the wire, so there is no delete-side counterpart.
+    pub attachment: Option<Vec<u8>>,
+}
+
+impl AdvancedPutOptions {
+    /// Set the value encoding.
+    pub fn with_encoding(mut self, encoding: wz_session_core::sample::EncodingHint) -> Self {
+        self.encoding = Some(encoding);
+        self
+    }
+    /// Set the attachment side-band.
+    pub fn with_attachment(mut self, attachment: impl Into<Vec<u8>>) -> Self {
+        self.attachment = Some(attachment.into());
+        self
+    }
+}
+
 /// Construction options for an [`AdvancedPublisher`].
 ///
 /// R311y93 (review S3) — `#[non_exhaustive]` for additive-field stability (the
@@ -316,10 +354,33 @@ where
         })
     }
 
-    /// Publish `payload`, stamping the next `SourceInfo` sequence number
-    /// (in `SequenceNumber` mode) + a timestamp, and retaining the sample in
-    /// the cache. Returns the [`Session::publish`] byte count.
+    /// Publish `payload` with no value metadata — [`Self::put_with`] under
+    /// [`AdvancedPutOptions::default`]. Returns the [`Session::publish`] byte
+    /// count.
     pub fn put(&self, payload: &[u8]) -> Result<usize, PublishError> {
+        self.put_with(payload, AdvancedPutOptions::default())
+    }
+
+    /// R311y562 — publish `payload` carrying a value `encoding` and/or an
+    /// opaque `attachment`, stamping the next `SourceInfo` sequence number
+    /// (in `SequenceNumber` mode) + a timestamp, and retaining the sample —
+    /// metadata included — in the cache.
+    ///
+    /// These are exactly the two fields upstream's advanced put lets a caller
+    /// set. `ze_advanced_publisher_put` copies the caller's options and then
+    /// OVERWRITES `put_options.timestamp` and `put_options.source_info` with
+    /// the publisher's own sequencing values
+    /// (`vendor/zenoh-pico/src/api/advanced_publisher.c:402-407`), so those two
+    /// are the publisher's to own and are deliberately NOT parameters here —
+    /// letting a caller supply an `sn` would break the miss-detection contract
+    /// the shared counter exists to hold. Encoding and attachment pass straight
+    /// through to `_z_publisher_put_impl`, which is handed `pub->_cache`, so
+    /// upstream's cache retains them with the sample.
+    pub fn put_with(
+        &self,
+        payload: &[u8],
+        options: AdvancedPutOptions,
+    ) -> Result<usize, PublishError> {
         // fetch_add returns the pre-increment value, so the first sample
         // carries sn=0 (zenoh advanced_publisher.rs:490-501).
         let sn = self
@@ -340,16 +401,44 @@ where
         if let Some(si) = &source_info {
             opts = opts.with_source_info(si.clone());
         }
+        // The SSOT discipline the source_info already followed, extended to the
+        // value metadata: the SAME encoding / attachment ride the wire publish
+        // AND the cache entry, so a recovered sample cannot render differently
+        // from the live one it replaces.
+        //
+        // Each fold sits behind the gate of the SETTER it calls —
+        // `PublishOptions::with_encoding` is `pubsub-encoding` and
+        // `with_attachment` is `pubsub-attachment`, and
+        // `ext-pubsub-advanced-publisher` composes NEITHER (it pulls
+        // `pubsub-put` / `-source-info` / `-timestamp` only). An ungated call
+        // therefore compiled under this crate's default features and broke the
+        // `wz` facade's `--features ext-pubsub-advanced-publisher` build, which
+        // is the narrow set Layer C1aq builds. The ring below stays ungated on
+        // purpose: it retains what it was given regardless, and the wire
+        // emission is the codec's decision — the same split
+        // `advanced_cache`'s source_info already follows.
+        #[cfg(feature = "pubsub-encoding")]
+        if let Some(enc) = &options.encoding {
+            opts = opts.with_encoding(enc.clone());
+        }
+        #[cfg(feature = "pubsub-attachment")]
+        if let Some(att) = &options.attachment {
+            opts = opts.with_attachment(att.clone());
+        }
         let written = self.session.publish(&self.keyexpr, payload, opts)?;
 
         if let Some(cache) = &self.cache {
-            cache.cache_sample(CachedSample {
-                keyexpr: self.keyexpr.clone(),
-                payload: payload.to_vec(),
-                source_info,
-                timestamp,
-                kind: crate::sample::SampleKind::Put,
-            });
+            cache.cache_sample(
+                CachedSample::new(
+                    self.keyexpr.clone(),
+                    payload.to_vec(),
+                    source_info,
+                    timestamp,
+                    crate::sample::SampleKind::Put,
+                )
+                .with_encoding(options.encoding)
+                .with_attachment(options.attachment),
+            );
         }
         Ok(written)
     }
@@ -386,13 +475,19 @@ where
         let written = self.session.publish(&self.keyexpr, &[], opts)?;
 
         if let Some(cache) = &self.cache {
-            cache.cache_sample(CachedSample {
-                keyexpr: self.keyexpr.clone(),
-                payload: Vec::new(),
+            // No `with_encoding` / `with_attachment` chain: a Del body carries
+            // neither ext on the wire (`has_attachment` is `_is_put && ..`, and
+            // the encoding is read only in the `_is_put` branch —
+            // `message.c:263,269-276`), and upstream's
+            // `ze_advanced_publisher_delete_options_t` has no slot for either.
+            // The absence is structural, not an omission.
+            cache.cache_sample(CachedSample::new(
+                self.keyexpr.clone(),
+                Vec::new(),
                 source_info,
                 timestamp,
-                kind: crate::sample::SampleKind::Del,
-            });
+                crate::sample::SampleKind::Del,
+            ));
         }
         Ok(written)
     }
@@ -706,6 +801,177 @@ mod tests {
                  draws from the same counter as put"
             );
         }
+    }
+
+    /// R311y562 — a sample published with an ENCODING and an ATTACHMENT comes
+    /// back through the recovery path carrying both.
+    ///
+    /// This is the end-to-end arm of the y561 residual, and it is deliberately
+    /// driven through the whole chain — `put_with` -> `PublishOptions` ->
+    /// `CachedSample` -> `answer_from_ring` -> the reply -> `ReplyView` — rather
+    /// than asserted on the ring, because the ring was never the only place the
+    /// two fields could be lost: before this round `answer_from_ring` had no
+    /// attachment slot to pass them through even if the ring had held them.
+    /// A unit test on `CachedSample` would have been green with the wire half
+    /// still broken.
+    ///
+    /// The negative arm (sn 1, published by plain `put`) is what makes the
+    /// positive one a claim: it pins that the accessors report absence as
+    /// `None` rather than defaulting, so `Some(..)` on sn 0 cannot be an
+    /// artifact of the reader.
+    #[cfg(all(feature = "query-get", feature = "pubsub-encoding"))]
+    #[test]
+    fn published_encoding_and_attachment_survive_recovery() {
+        use std::sync::Mutex;
+
+        use crate::observer::ApplicationLayerObserver;
+        use crate::reply_sink::ReplyView;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::{QueryOptions, TokioSession};
+        use wz_session_core::locality::Locality;
+        use wz_session_core::sample::EncodingHint;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let options = AdvancedPublisherOptions {
+            sequencing: Sequencing::SequenceNumber,
+            cache: Some(CacheConfig { max_samples: 8 }),
+            publisher_detection: true,
+            sample_miss_detection: MissDetectionConfig::default(),
+        };
+        let publisher = AdvancedPublisher::declare(&session, "demo/data", options, vec![0x01])
+            .expect("advanced publisher declares against the test link");
+
+        // sn 0 carries both metadata fields; sn 1 carries neither.
+        publisher
+            .put_with(
+                &[0xAA],
+                AdvancedPutOptions::default()
+                    .with_encoding(EncodingHint {
+                        packed_id: 0x0B,
+                        schema: None,
+                    })
+                    .with_attachment(b"side-band".to_vec()),
+            )
+            .expect("advanced put with metadata");
+        publisher.put(&[0xBB]).expect("advanced put");
+
+        /// One recorded reply: `(payload, encoding packed_id, attachment)`.
+        type RecordedMeta = (Vec<u8>, Option<u32>, Option<Vec<u8>>);
+
+        let replies: Arc<Mutex<Vec<RecordedMeta>>> = Arc::new(Mutex::new(Vec::new()));
+        let rec = Arc::clone(&replies);
+        session
+            .query(
+                "demo/data/@adv/**",
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                move |reply: &dyn ReplyView| {
+                    rec.lock().expect("reply recorder poisoned").push((
+                        reply.payload().to_vec(),
+                        reply.put_encoding().map(|(id, _schema)| id),
+                        reply.attachment().map(<[u8]>::to_vec),
+                    ));
+                },
+                |_rid| {},
+            )
+            .expect("loopback query fires the cache queryable inline");
+
+        let got = replies.lock().expect("reply recorder poisoned").clone();
+        assert_eq!(
+            got[0],
+            (vec![0xAA], Some(0x0B), Some(b"side-band".to_vec())),
+            "the recovered sample carries the encoding and the attachment it \
+             was published with",
+        );
+        assert_eq!(
+            got[1],
+            (vec![0xBB], None, None),
+            "a sample published without either reports both absent — the \
+             accessors do not manufacture a default",
+        );
+    }
+
+    /// R311y562 — the LIVE half of [`AdvancedPublisher::put_with`]: the
+    /// encoding and attachment reach a subscriber on the ordinary publish path,
+    /// not only the recovery one.
+    ///
+    /// This test exists because a damage probe said it had to. Deleting the
+    /// wire-side fold in `put_with` — the two `opts.with_encoding` /
+    /// `with_attachment` lines — left
+    /// `published_encoding_and_attachment_survive_recovery` GREEN, because that
+    /// test reads the reply the CACHE answers and the cache is populated from
+    /// the options directly. Two folds, one witness: the live half was
+    /// unpinned, and a future edit could have deleted it silently. Now each
+    /// fold has a test that reds when it goes.
+    #[cfg(all(feature = "declare-subscriber", feature = "pubsub-allow-loop"))]
+    #[test]
+    fn put_with_metadata_reaches_a_live_subscriber() {
+        use std::sync::Mutex;
+
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::{SubscribeOptions, TokioSession};
+        use wz_session_core::sample::EncodingHint;
+        use wz_session_core::sink::SampleView;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        /// One live sample: `(payload, encoding packed_id, attachment)`.
+        type LiveSample = (Vec<u8>, Option<u32>, Option<Vec<u8>>);
+
+        let seen: Arc<Mutex<Vec<LiveSample>>> = Arc::new(Mutex::new(Vec::new()));
+        let s = Arc::clone(&seen);
+        let _rec = session
+            .declare_subscriber(
+                "demo/data",
+                SubscribeOptions::default(),
+                move |v: &dyn SampleView| {
+                    s.lock().expect("live recorder poisoned").push((
+                        v.payload().to_vec(),
+                        v.encoding().map(|e| e.packed_id),
+                        v.attachment().map(<[u8]>::to_vec),
+                    ));
+                },
+            )
+            .expect("live recorder subscribes");
+
+        let publisher = AdvancedPublisher::declare(
+            &session,
+            "demo/data",
+            AdvancedPublisherOptions::default(),
+            vec![0x09],
+        )
+        .expect("advanced publisher declares");
+
+        publisher
+            .put_with(
+                &[0xAA],
+                AdvancedPutOptions::default()
+                    .with_encoding(EncodingHint {
+                        packed_id: 0x0B,
+                        schema: None,
+                    })
+                    .with_attachment(b"side-band".to_vec()),
+            )
+            .expect("advanced put with metadata");
+        publisher.put(&[0xBB]).expect("advanced put");
+
+        let got = seen.lock().expect("live recorder poisoned").clone();
+        assert_eq!(
+            got,
+            vec![
+                (vec![0xAA], Some(0x0B), Some(b"side-band".to_vec())),
+                (vec![0xBB], None, None),
+            ],
+            "the live sample carries the metadata put_with was given, and a \
+             plain put carries neither",
+        );
     }
 
     /// R311y85 — the heartbeat beacon emits the publisher's last published sn on

@@ -997,15 +997,21 @@ fn issue_recovery_query<R, T>(
 /// sample "arrives timestamp-less" because "the `ReplyView` exposes no
 /// reply-timestamp accessor" — that ceased to be true at R311y321, which added
 /// [`ReplyView::timestamp`], and the prose outlived the fact by rounds. The
-/// cached timestamp is re-applied here, so what a recovered sample still loses
-/// vs the live one is exactly `encoding` + `attachment`, and only because the
-/// cache does not retain those two.
+/// cached timestamp is re-applied here.
 ///
-/// R311y95 (review L4) — documented fidelity gap of a RECOVERED sample vs the
-/// original live one. The encoding + attachment ARE re-applied from the reply
-/// when present, but the `@adv` cache stores only `(keyexpr, payload,
-/// source_info, timestamp, kind)`, so it never carries the original encoding /
-/// attachment back — those are lost on recovery.
+/// R311y562 CLOSES the last of it, and the fix was never on this side.
+/// [`crate::advanced_cache::CachedSample`] now retains the `encoding` and the
+/// `attachment` too, and the recovery reply carries both
+/// ([`wz_session_core::query_sink::ReplyMeta`]), so the two re-applications
+/// below finally receive something. They were written at R311y95 and had been
+/// dead code ever since — the reply could not carry what the ring never kept,
+/// which is why the gap survived a reader who checked only this function. A
+/// recovered sample is now field-for-field the live one, minus nothing.
+///
+/// The Del arm carries neither, and that is the WIRE's rule rather than a
+/// residual: `_z_push_body_encode` gates `has_attachment` on `_is_put` and
+/// reads the encoding only inside the `_is_put` branch
+/// (`vendor/zenoh-pico/src/protocol/codec/message.c:263,269-276`).
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<((Vec<u8>, u32), u32, Sample)> {
     let kind = reply.kind();
@@ -2093,16 +2099,16 @@ mod tests {
         let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
             .expect("advanced cache declares");
         for sn in 0u8..5 {
-            cache.cache_sample(CachedSample {
-                keyexpr: "demo/data".to_string(),
-                payload: vec![sn],
-                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                timestamp: TimestampHint {
+            cache.cache_sample(CachedSample::new(
+                "demo/data",
+                vec![sn],
+                Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                TimestampHint {
                     time: 100 + sn as u64,
                     zid: pub_zid.clone(),
                 },
-                kind: crate::sample::SampleKind::Put,
-            });
+                crate::sample::SampleKind::Put,
+            ));
         }
 
         // The recovering subscriber; recovery GET pinned to SessionLocal (the
@@ -2205,20 +2211,20 @@ mod tests {
             } else {
                 SampleKind::Put
             };
-            cache.cache_sample(CachedSample {
-                keyexpr: "demo/data".to_string(),
-                payload: if kind == SampleKind::Del {
+            cache.cache_sample(CachedSample::new(
+                "demo/data",
+                if kind == SampleKind::Del {
                     Vec::new()
                 } else {
                     vec![sn]
                 },
-                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                timestamp: TimestampHint {
+                Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                TimestampHint {
                     time: 100 + sn as u64,
                     zid: pub_zid.clone(),
                 },
                 kind,
-            });
+            ));
         }
 
         // Record (kind, payload) — a Del rebuilt as an empty Put would be
@@ -2389,16 +2395,16 @@ mod tests {
         let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
             .expect("advanced cache declares");
         for sn in 0u8..3 {
-            cache.cache_sample(CachedSample {
-                keyexpr: "demo/data".to_string(),
-                payload: vec![sn],
-                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                timestamp: TimestampHint {
+            cache.cache_sample(CachedSample::new(
+                "demo/data",
+                vec![sn],
+                Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                TimestampHint {
                     time: 100 + sn as u64,
                     zid: pub_zid.clone(),
                 },
-                kind: crate::sample::SampleKind::Put,
-            });
+                crate::sample::SampleKind::Put,
+            ));
         }
 
         let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -2579,16 +2585,16 @@ mod tests {
             AdvancedCache::declare(&session, adv_ke.clone(), CacheConfig { max_samples: 8 })
                 .expect("advanced cache declares");
         for sn in 0u8..3 {
-            cache.cache_sample(CachedSample {
-                keyexpr: "demo/data".to_string(),
-                payload: vec![sn],
-                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                timestamp: TimestampHint {
+            cache.cache_sample(CachedSample::new(
+                "demo/data",
+                vec![sn],
+                Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                TimestampHint {
                     time: 100 + sn as u64,
                     zid: pub_zid.clone(),
                 },
-                kind: crate::sample::SampleKind::Put,
-            });
+                crate::sample::SampleKind::Put,
+            ));
         }
 
         let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -2708,16 +2714,16 @@ mod tests {
         let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
             .expect("advanced cache declares");
         for sn in 0u8..3 {
-            cache.cache_sample(CachedSample {
-                keyexpr: "demo/data".to_string(),
-                payload: vec![sn],
-                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                timestamp: TimestampHint {
+            cache.cache_sample(CachedSample::new(
+                "demo/data",
+                vec![sn],
+                Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                TimestampHint {
                     time: 100 + sn as u64,
                     zid: pub_zid.clone(),
                 },
-                kind: crate::sample::SampleKind::Put,
-            });
+                crate::sample::SampleKind::Put,
+            ));
         }
 
         let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -2943,16 +2949,16 @@ mod tests {
         let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
             .expect("advanced cache declares");
         for sn in 0u8..3 {
-            cache.cache_sample(CachedSample {
-                keyexpr: "demo/data".to_string(),
-                payload: vec![sn],
-                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                timestamp: TimestampHint {
+            cache.cache_sample(CachedSample::new(
+                "demo/data",
+                vec![sn],
+                Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                TimestampHint {
                     time: 100 + sn as u64,
                     zid: pub_zid.clone(),
                 },
-                kind: crate::sample::SampleKind::Put,
-            });
+                crate::sample::SampleKind::Put,
+            ));
         }
 
         let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -3003,16 +3009,16 @@ mod tests {
         let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
             .expect("advanced cache declares");
         for sn in 0u8..5 {
-            cache.cache_sample(CachedSample {
-                keyexpr: "demo/data".to_string(),
-                payload: vec![sn],
-                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                timestamp: TimestampHint {
+            cache.cache_sample(CachedSample::new(
+                "demo/data",
+                vec![sn],
+                Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                TimestampHint {
                     time: 100 + sn as u64,
                     zid: pub_zid.clone(),
                 },
-                kind: crate::sample::SampleKind::Put,
-            });
+                crate::sample::SampleKind::Put,
+            ));
         }
 
         let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -3097,16 +3103,16 @@ mod tests {
         // sn 0 is 2h old (outside a 1h window); sn 1,2 are ~now (inside).
         let times = [now.saturating_sub(two_hours), now, now];
         for (sn, &t) in times.iter().enumerate() {
-            cache.cache_sample(CachedSample {
-                keyexpr: "demo/data".to_string(),
-                payload: vec![sn as u8],
-                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                timestamp: TimestampHint {
+            cache.cache_sample(CachedSample::new(
+                "demo/data",
+                vec![sn as u8],
+                Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                TimestampHint {
                     time: t,
                     zid: pub_zid.clone(),
                 },
-                kind: crate::sample::SampleKind::Put,
-            });
+                crate::sample::SampleKind::Put,
+            ));
         }
 
         let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -3246,16 +3252,16 @@ mod tests {
         // The LATE publisher caches samples (cache_sample, not publish -> the
         // subscriber's live subscription never sees them).
         for sn in 0u8..3 {
-            cache.cache_sample(CachedSample {
-                keyexpr: "demo/data".to_string(),
-                payload: vec![sn],
-                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                timestamp: TimestampHint {
+            cache.cache_sample(CachedSample::new(
+                "demo/data",
+                vec![sn],
+                Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                TimestampHint {
                     time: 100 + sn as u64,
                     zid: pub_zid.clone(),
                 },
-                kind: crate::sample::SampleKind::Put,
-            });
+                crate::sample::SampleKind::Put,
+            ));
         }
 
         // Inject the publisher's `@adv` liveliness token (a Put) -> the REAL

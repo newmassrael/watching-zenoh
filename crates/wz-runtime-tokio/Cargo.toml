@@ -346,8 +346,22 @@ ext-pubsub-advanced-recovery = [
     # not never-expire); the explicit timeout still pins the recovery GET's own
     # bound. `with_timeout_ms` no-ops without this feature.
     "query-timeout",
-    "wz-session-core/reply-source-info",
+    "reply-source-info",
 ]
+# R311y562 — a NAMED passthrough for the reply-side source-info emit gate, so a
+# consumer that needs it for a reason other than advanced-recovery can say so.
+#
+# It exists because there now IS such a consumer. `wz-capi-pico`'s
+# `z_query_reply` / `z_query_reply_del` expose `options->source_info` (the
+# unstable-API field the reference pico build declares), and pico's own
+# implementation hands it to `_z_send_reply`, which encodes the ext. So the
+# session-core gate's "OFF (default) = pico-faithful no-emit" reasoning — true
+# while no production queryable could set the field — inverts for that ABI: with
+# the gate off, a drop-in program sets `source_info` on its reply and wz puts
+# nothing on the wire where real pico puts an ext. Reaching through as
+# `wz-session-core/reply-source-info` from each consumer would have worked and
+# said nothing about why; this names the dependency.
+reply-source-info = ["wz-session-core/reply-source-info"]
 # R311y86 — ext-pubsub-advanced-history (§5.25): the startup history query. A
 # history-enabled AdvancedSubscriber issues a GET over `<ke>/@adv/**` (with a
 # `_max=N` cap) on declare, recovering the publishers' cached samples so a LATE

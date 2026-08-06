@@ -56,8 +56,8 @@ use std::sync::{Arc, Mutex};
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
 use wz_session_core::ntp64::Ntp64;
-use wz_session_core::query_sink::{QueryView, ReplyOut};
-use wz_session_core::sample::{SampleKind, SourceInfo, TimestampHint};
+use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
+use wz_session_core::sample::{EncodingHint, SampleKind, SourceInfo, TimestampHint};
 
 use crate::session::{Queryable, QueryableError, QueryableOptions, Session, Unicast};
 use crate::session_glue::SessionLinkActions;
@@ -98,6 +98,69 @@ pub struct CachedSample {
     /// [`ReplyOut::reply_keyed_del_sourced`]) and deletes are retained like any
     /// other sample.
     pub kind: SampleKind,
+    /// R311y562 — the sample's value ENCODING, replayed on recovery.
+    ///
+    /// zenoh caches the whole `Sample`, and a `Sample` carries its encoding, so
+    /// a recovered sample renders exactly as the live one did. Before this
+    /// field the ring retained no encoding and `answer_from_ring` passed a
+    /// hard-coded `None`, so every recovered sample arrived with the peer's
+    /// DEFAULT encoding regardless of what was published — a silent content-type
+    /// corruption on exactly the samples a subscriber could not compare against
+    /// the original, because it never received the original.
+    ///
+    /// `None` is the honest absence (a publish that set no encoding), which is
+    /// distinct from "we forgot to keep it" only because this field exists.
+    pub encoding: Option<EncodingHint>,
+    /// R311y562 — the sample's ATTACHMENT side-band, replayed on recovery.
+    ///
+    /// Put-only, like the wire (`_z_push_body_encode` gates `has_attachment` on
+    /// `_is_put`, `vendor/zenoh-pico/src/protocol/codec/message.c:263`), so a
+    /// cached Del carries `None` by construction rather than by accident. The
+    /// same reasoning as [`Self::encoding`]: an application that puts its
+    /// routing metadata in the attachment lost all of it on every recovered
+    /// sample.
+    pub attachment: Option<Vec<u8>>,
+}
+
+impl CachedSample {
+    /// R311y562 — a cached sample carrying no value metadata.
+    ///
+    /// Exists so that adding a retained field is a change to THIS function
+    /// rather than to every construction site. The two fields this round added
+    /// (`encoding`, `attachment`) broke ten struct literals, all of them test
+    /// fixtures that never cared about the new fields — which is the signal
+    /// that spelling every field at every site was the wrong shape. Callers
+    /// that DO care chain [`Self::with_encoding`] / [`Self::with_attachment`].
+    pub fn new(
+        keyexpr: impl Into<String>,
+        payload: Vec<u8>,
+        source_info: Option<SourceInfo>,
+        timestamp: TimestampHint,
+        kind: SampleKind,
+    ) -> Self {
+        Self {
+            keyexpr: keyexpr.into(),
+            payload,
+            source_info,
+            timestamp,
+            kind,
+            encoding: None,
+            attachment: None,
+        }
+    }
+
+    /// Retain the sample's value encoding, replayed on recovery.
+    pub fn with_encoding(mut self, encoding: Option<EncodingHint>) -> Self {
+        self.encoding = encoding;
+        self
+    }
+
+    /// Retain the sample's attachment side-band, replayed on recovery.
+    /// Put-only on the wire; a Del keeps `None`.
+    pub fn with_attachment(mut self, attachment: Option<Vec<u8>>) -> Self {
+        self.attachment = attachment;
+        self
+    }
 }
 
 /// How many samples the cache retains. Mirror of zenoh-ext `CacheConfig`
@@ -251,17 +314,25 @@ fn answer_from_ring(
         // kind-agnostic on purpose: a Del occupies its sequence number exactly
         // like a Put, so excluding it from a range would re-introduce the
         // apparent gap the shared counter exists to avoid.
+        //
+        // R311y562 — the reply now carries the sample's ENCODING and
+        // ATTACHMENT too, through the one [`ReplyMeta`] seam. Both were
+        // previously dropped: the Put arm passed a literal `None` encoding and
+        // no arm had an attachment slot alongside a timestamp, so a recovered
+        // sample arrived stripped of both. The Del arm carries neither, and
+        // that is the wire's rule rather than a leftover — see
+        // [`ReplyOut::reply_keyed_del_meta`].
+        let meta = ReplyMeta::new()
+            .with_timestamp(Some(&s.timestamp))
+            .with_source_info(s.source_info.as_ref());
         match s.kind {
-            SampleKind::Put => out.reply_keyed_sourced(
+            SampleKind::Put => out.reply_keyed_meta(
                 &s.keyexpr,
                 &s.payload,
-                None,
-                &s.timestamp,
-                s.source_info.as_ref(),
+                meta.with_encoding(s.encoding.as_ref())
+                    .with_attachment(s.attachment.as_deref()),
             ),
-            SampleKind::Del => {
-                out.reply_keyed_del_sourced(&s.keyexpr, &s.timestamp, s.source_info.as_ref())
-            }
+            SampleKind::Del => out.reply_keyed_del_meta(&s.keyexpr, meta),
         }
     }
 }
@@ -448,8 +519,6 @@ fn parse_duration_secs(s: &str) -> Option<f64> {
 mod tests {
     use super::*;
 
-    use wz_session_core::sample::EncodingHint;
-
     /// Shared `ReplyOut` recorder for the `answer_from_ring` integration
     /// tests: captures each reply's `(keyexpr, payload)` and its source
     /// identity `(zid_prefix, eid, sn)` (or `None`).
@@ -467,12 +536,23 @@ mod tests {
     /// One Del-arm emission: `(keyexpr, timestamp, source_info)`.
     type RecDel = (String, u64, RecSource);
 
+    /// R311y562 — one recorded emission's value metadata:
+    /// `(encoding packed_id + schema, attachment)`.
+    type RecMeta = (Option<(u32, Option<String>)>, Option<Vec<u8>>);
+
     #[derive(Default)]
     struct Rec {
         keyed: Vec<(String, Vec<u8>)>,
         sourced: Vec<RecSource>,
         arms: Vec<&'static str>,
         dels: Vec<RecDel>,
+        /// R311y562 — the encoding + attachment each emission carried, in emit
+        /// order. Recorded on the META arms specifically: routing the recorder
+        /// through the DEFAULT `reply_keyed_meta` chain would drop the
+        /// attachment before it ever reached a recorder method, so a test built
+        /// on the old arms alone cannot tell "the cache dropped it" from "the
+        /// recorder dropped it".
+        metas: Vec<RecMeta>,
     }
     impl ReplyOut for Rec {
         fn reply(&mut self, payload: &[u8]) {
@@ -504,6 +584,33 @@ mod tests {
                 source_info.map(|si| (si.zid_prefix().to_vec(), si.eid, si.sn)),
             ));
             self.arms.push("del");
+        }
+        fn reply_keyed_meta(&mut self, keyexpr: &str, payload: &[u8], meta: ReplyMeta<'_>) {
+            self.metas.push((
+                meta.encoding.map(|e| (e.packed_id, e.schema.clone())),
+                meta.attachment.map(<[u8]>::to_vec),
+            ));
+            // Delegate the identity bookkeeping to the arm the pre-y562 tests
+            // already assert on, so `arms` / `keyed` / `sourced` keep their
+            // meaning and those tests keep measuring what they measured.
+            self.reply_keyed_sourced(
+                keyexpr,
+                payload,
+                meta.encoding,
+                meta.timestamp.expect("the cache always stamps a timestamp"),
+                meta.source_info,
+            );
+        }
+        fn reply_keyed_del_meta(&mut self, keyexpr: &str, meta: ReplyMeta<'_>) {
+            self.metas.push((
+                meta.encoding.map(|e| (e.packed_id, e.schema.clone())),
+                meta.attachment.map(<[u8]>::to_vec),
+            ));
+            self.reply_keyed_del_sourced(
+                keyexpr,
+                meta.timestamp.expect("the cache always stamps a timestamp"),
+                meta.source_info,
+            );
         }
         fn reply_del(&mut self) {
             self.arms.push("bare-del");
@@ -549,16 +656,16 @@ mod tests {
 
         let mut ring = VecDeque::new();
         for sn in 0..3u32 {
-            ring.push_back(CachedSample {
-                keyexpr: "demo/k".to_string(),
-                payload: vec![sn as u8],
-                source_info: Some(SourceInfo::new(&[0x07], 9, sn)),
-                timestamp: TimestampHint {
+            ring.push_back(CachedSample::new(
+                "demo/k",
+                vec![sn as u8],
+                Some(SourceInfo::new(&[0x07], 9, sn)),
+                TimestampHint {
                     time: 100 + sn as u64,
                     zid: vec![1],
                 },
-                kind: SampleKind::Put,
-            });
+                SampleKind::Put,
+            ));
         }
         let q = |params: Option<&'static [u8]>| BorrowedQuery {
             keyexpr: "demo/k",
@@ -631,20 +738,20 @@ mod tests {
             } else {
                 SampleKind::Put
             };
-            ring.push_back(CachedSample {
-                keyexpr: "demo/k".to_string(),
-                payload: if kind == SampleKind::Del {
+            ring.push_back(CachedSample::new(
+                "demo/k",
+                if kind == SampleKind::Del {
                     Vec::new()
                 } else {
                     vec![sn as u8]
                 },
-                source_info: Some(SourceInfo::new(&[0x07], 9, sn)),
-                timestamp: TimestampHint {
+                Some(SourceInfo::new(&[0x07], 9, sn)),
+                TimestampHint {
                     time: 100 + sn as u64,
                     zid: vec![1],
                 },
                 kind,
-            });
+            ));
         }
         let q = |params: Option<&'static [u8]>| BorrowedQuery {
             keyexpr: "demo/k",
@@ -694,6 +801,104 @@ mod tests {
         let mut out = Rec::default();
         answer_from_ring(&ring, &q(Some(b"_max=2")), &mut out, 0);
         assert_eq!(out.arms, vec!["del", "put"], "_max counts the Del");
+    }
+
+    /// R311y562 — a recovery reply carries the cached sample's ENCODING and
+    /// ATTACHMENT, and a cached DELETE carries neither.
+    ///
+    /// The Put half is the closing of the y561 residual: before this the ring
+    /// retained neither field and `answer_from_ring` passed a hard-coded `None`
+    /// encoding with no attachment slot at all, so every recovered sample
+    /// arrived rendered as the peer's DEFAULT content type with its side-band
+    /// silently gone. Revert either `with_encoding` / `with_attachment` in
+    /// `answer_from_ring`'s `meta` chain and the corresponding `metas` entry
+    /// goes `None` while every other assertion in this file still passes —
+    /// which is why the fields are asserted by VALUE and not merely for
+    /// presence.
+    ///
+    /// The Del half is a claim about the WIRE, not about the cache: a Del body
+    /// emits no attachment ext (`has_attachment = _is_put && ..`) and no
+    /// encoding (read only inside the `_is_put` branch),
+    /// `vendor/zenoh-pico/src/protocol/codec/message.c:263,269-276`. So the
+    /// `(None, None)` asserted for the Del is upstream parity, and a future
+    /// round that "fixes" it by threading either field would be building
+    /// something the codec discards.
+    #[test]
+    fn recovery_reply_carries_encoding_and_attachment() {
+        use wz_session_core::query_sink::BorrowedQuery;
+
+        let enc = EncodingHint {
+            packed_id: 0x0B,
+            schema: Some("utf8".to_string()),
+        };
+        let mut ring = VecDeque::new();
+        // sn 0: a Put carrying BOTH metadata fields.
+        ring.push_back(
+            CachedSample::new(
+                "demo/k",
+                vec![0xAA],
+                Some(SourceInfo::new(&[0x07], 9, 0)),
+                TimestampHint {
+                    time: 100,
+                    zid: vec![1],
+                },
+                SampleKind::Put,
+            )
+            .with_encoding(Some(enc.clone()))
+            .with_attachment(Some(b"side-band".to_vec())),
+        );
+        // sn 1: a Put carrying NEITHER — the honest-absence arm, so a green
+        // result cannot come from the recorder inventing a default.
+        ring.push_back(CachedSample::new(
+            "demo/k",
+            vec![0xBB],
+            Some(SourceInfo::new(&[0x07], 9, 1)),
+            TimestampHint {
+                time: 101,
+                zid: vec![1],
+            },
+            SampleKind::Put,
+        ));
+        // sn 2: a DELETE. Carries neither by construction (the wire's rule).
+        ring.push_back(CachedSample::new(
+            "demo/k",
+            Vec::new(),
+            Some(SourceInfo::new(&[0x07], 9, 2)),
+            TimestampHint {
+                time: 102,
+                zid: vec![1],
+            },
+            SampleKind::Del,
+        ));
+
+        let q = BorrowedQuery {
+            keyexpr: "demo/k",
+            parameters: None,
+            attachment: None,
+            source_info: None,
+            payload: None,
+            encoding: None,
+            rid: 0,
+            is_local: true,
+        };
+        let mut out = Rec::default();
+        answer_from_ring(&ring, &q, &mut out, 0);
+
+        assert_eq!(out.arms, vec!["put", "put", "del"], "ring order preserved");
+        assert_eq!(
+            out.metas,
+            vec![
+                (
+                    Some((0x0B, Some("utf8".to_string()))),
+                    Some(b"side-band".to_vec())
+                ),
+                (None, None),
+                (None, None),
+            ],
+            "the recovery reply replays the cached encoding + attachment by \
+             value; a sample that carried neither replays neither; and a Del \
+             carries neither because a Del body encodes neither",
+        );
     }
 
     #[test]
@@ -807,16 +1012,16 @@ mod tests {
         let now = 100u64 << 32;
         let mut ring = VecDeque::new();
         for (i, secs) in [60u64, 80, 100].into_iter().enumerate() {
-            ring.push_back(CachedSample {
-                keyexpr: "demo/k".to_string(),
-                payload: vec![i as u8],
-                source_info: Some(SourceInfo::new(&[0x07], 9, i as u32)),
-                timestamp: TimestampHint {
+            ring.push_back(CachedSample::new(
+                "demo/k",
+                vec![i as u8],
+                Some(SourceInfo::new(&[0x07], 9, i as u32)),
+                TimestampHint {
                     time: secs << 32,
                     zid: vec![1],
                 },
-                kind: SampleKind::Put,
-            });
+                SampleKind::Put,
+            ));
         }
         let q = BorrowedQuery {
             keyexpr: "demo/k",
