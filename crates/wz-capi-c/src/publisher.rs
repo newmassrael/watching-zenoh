@@ -580,6 +580,54 @@ pub unsafe extern "C" fn z_publisher_delete(
     })
 }
 
+/// This publisher's GLOBAL ENTITY ID (zenoh-c `z_publisher_id`).
+///
+/// R311y566 — added because the `source_info` foreign adjudicator needs it:
+/// `z_entity_global_id_t` is OPAQUE upstream with accessors and NO constructor,
+/// so a C program cannot mint one. The only way to obtain one is to ask an
+/// entity for its own, and `z_publisher_id` is the entry point a publisher-side
+/// `z_source_info_new` is written against.
+///
+/// The zid half is the SESSION's, which is what upstream reports too — a
+/// publisher is not a separate node. The eid half is wz's per-publisher id; a
+/// gravestoned publisher answers the empty id rather than a stale one.
+///
+/// UNSTABLE-gated as upstream gates it (`#if defined(Z_FEATURE_UNSTABLE_API)`),
+/// and it has to be: `z_entity_global_id_t` lives in [`crate::advanced`], which
+/// is not compiled on the other arm. A helper's cfg must be the OR of every arm
+/// that calls it, and this one's return TYPE fixes the arm for it.
+///
+/// # Safety
+/// `publisher` must be null or a valid loaned publisher.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn z_publisher_id(
+    publisher: *const z_loaned_publisher_t,
+) -> crate::advanced::z_entity_global_id_t {
+    let empty = crate::advanced::z_entity_global_id_t {
+        zid: crate::zid::z_id_t::empty(),
+        eid: 0,
+    };
+    guard_val(empty, || {
+        // SAFETY: the caller's contract.
+        let Some(state) = (unsafe { publisher_state(publisher) }) else {
+            return crate::advanced::z_entity_global_id_t {
+                zid: crate::zid::z_id_t::empty(),
+                eid: 0,
+            };
+        };
+        crate::advanced::z_entity_global_id_t {
+            zid: crate::zid::z_id_t {
+                id: state.shared.zid(),
+            },
+            // The handle's own address, narrowed — a per-publisher value that is
+            // stable for the publisher's life and distinct between live
+            // publishers, which is the whole contract an entity id carries here.
+            eid: (publisher as usize as u64 & u64::from(u32::MAX)) as u32,
+        }
+    })
+}
+
 /// This publisher's keyexpr (zenoh-c `z_publisher_keyexpr`).
 ///
 /// # Safety

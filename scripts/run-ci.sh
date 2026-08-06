@@ -9175,6 +9175,17 @@ layer_c1cc_api_compat_c() {
             --test zenoh_c_abi_symbol_census -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || return 1
     done
+    # R311y566 — the `source_info` FOREIGN ADJUDICATOR, the gap the debt ledger
+    # named as the largest on this axis. Everything y561-y563 built on this plane
+    # was wz-driven with damage probes, because no stock example on either side
+    # sets the field. This is the y548 remedy applied: an upstream program
+    # PATCHED to set it, compiled once and linked twice.
+    _runci_guarded_test \
+        "C1cc a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_source_info_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        --exact a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc \
+        || return 1
     # R311y500 — the CROSS-IMPL half, and it is a different question from the
     # three legs above. Those establish that upstream's program LINKS wz and that
     # wz's answers match the real `libzenohc.so`; every byte on their wire was
@@ -9300,6 +9311,23 @@ layer_c1ce_api_compat_c_shm_oracle() {
         cargo test -p wz-integration-tests \
         --test zenoh_c_examples_on_wz_capi_c_dropin -- --ignored --quiet --test-threads=1 \
         --exact upstream_option_defaults_on_wz_capi_c_match_real_libzenohc || rc=1
+    # R311y566 — the `source_info` FOREIGN ADJUDICATOR, and THIS is the lane
+    # where it means something. The whole source-info half of that probe sits
+    # behind the header's own `#if defined(Z_FEATURE_UNSTABLE_API)`, so on the
+    # installed no-unstable oracle Layer C1cc runs it and measures only the
+    # delivery half. Here it measures the field: that a publisher's
+    # `z_entity_global_id_t` round-trips through `z_source_info_new`, reaches the
+    # wire, and comes back off `z_sample_source_info` with the same eid and sn.
+    #
+    # It is the gap the debt ledger named as the largest on this axis: every
+    # witness R311y561-y563 produced for this plane was wz driving wz, because no
+    # stock example sets the field. Damage-probed by dropping the put-side fold,
+    # which prints five differing lines.
+    WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce source_info adjudicator" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_source_info_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        --exact a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc \
+        || rc=1
     # R311y543 — the RUN legs for the two planes this oracle is what makes
     # reachable. Layer C1cc cannot host them: against the INSTALLED header
     # (neither Z_FEATURE_SHARED_MEMORY nor Z_FEATURE_UNSTABLE_API) these six

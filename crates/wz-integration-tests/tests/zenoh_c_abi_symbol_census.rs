@@ -61,7 +61,7 @@ use wz_integration_tests::common::{wz_capi_c_cdylib, zenoh_c_oracle};
 /// Lower it in the same commit as the work that closes symbols. It is a
 /// CEILING, and the test fails if the real number drops below it without this
 /// constant moving — see the module docs.
-const BASELINE: usize = 91;
+const BASELINE: usize = 90;
 
 /// `SHT_DYNSYM`.
 const SHT_DYNSYM: u32 = 11;

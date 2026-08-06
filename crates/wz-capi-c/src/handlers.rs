@@ -322,6 +322,50 @@ pub unsafe extern "C" fn z_ring_handler_sample_loan(
     this_ as *const z_loaned_ring_handler_sample_t
 }
 
+/// Take the next sample, BLOCKING (zenoh-c `z_ring_handler_sample_recv`).
+///
+/// R311y566 — the ring-sample family predates the `channel_family!` macro, so it
+/// was written by hand and this one member was simply missed. It is what makes a
+/// twice-and-diff over a session DETERMINISTIC: a callback probe has to sleep
+/// and hope, while a blocking recv either returns the sample or reports the
+/// channel closed.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned ring handler; `sample` must be null or
+/// valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_ring_handler_sample_recv(
+    this_: *const z_loaned_ring_handler_sample_t,
+    sample: *mut z_owned_sample_t,
+) -> ZResult {
+    guarded(|| {
+        if sample.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *sample = z_owned_sample_t::null_value() };
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        let handle = unsafe { (*this_).handle };
+        let Some(chan) = (unsafe { channel(handle) }) else {
+            return Z_ENULL;
+        };
+        // Cloned out so the blocking wait does not hold a borrow of a handler
+        // the C side may drop from another thread.
+        let chan = chan.clone();
+        match chan.recv() {
+            Some(value) => {
+                // SAFETY: the caller's contract.
+                unsafe { *sample = z_owned_sample_t::from_handle(value) };
+                Z_OK
+            }
+            None => Z_CHANNEL_DISCONNECTED,
+        }
+    })
+}
+
 /// Take the next sample without blocking (zenoh-c
 /// `z_ring_handler_sample_try_recv`).
 ///
