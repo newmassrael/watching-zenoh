@@ -219,6 +219,7 @@ impl SampleMarshal {
         attachment: Option<&[u8]>,
         encoding: Option<(u32, Option<&str>)>,
         timestamp: Option<&wz_runtime_tokio::sample::TimestampHint>,
+        source_info: Option<&wz_runtime_tokio::sample::SourceInfo>,
     ) -> Self {
         self.attachment = attachment.map(ByteBuf::from);
         self.timestamp = timestamp.map(timestamp_of);
@@ -228,6 +229,19 @@ impl SampleMarshal {
                 schema: schema.map(str::to_owned),
             })
         });
+        // R311y562 — the FOURTH field, and it went missing for the same reason
+        // the other three once did: this function is the reply plane's separate
+        // copy of `with_metadata`, so a field added to the sample side does not
+        // arrive here. A reply DOES carry a source identity — `has_source_info`
+        // is computed off the shared push-body `_commons` before the `_is_put`
+        // split (`vendor/zenoh-pico/src/protocol/codec/message.c:259-261`) — and
+        // without this a C program that read `z_sample_source_info` off a reply
+        // got NULL no matter what the answerer stamped.
+        //
+        // Projected through the same `source_info_of` the sample plane uses, so
+        // a `(zid, eid, sn)` read off a reply and one read off a live sample
+        // cannot render differently.
+        self.source_info = source_info.map(source_info_of);
         self
     }
 
@@ -1169,7 +1183,7 @@ fn reliability_from_pico(r: c_int) -> Reliability {
 ///
 /// # Safety
 /// `ptr` must be null or point at a valid `z_timestamp_t`.
-unsafe fn timestamp_hint_of(
+pub(crate) unsafe fn timestamp_hint_of(
     ptr: *const z_timestamp_t,
 ) -> Option<wz_runtime_tokio::sample::TimestampHint> {
     if ptr.is_null() {
@@ -1205,7 +1219,7 @@ unsafe fn timestamp_hint_of(
 ///
 /// # Safety
 /// `ptr` must be null or point at a valid `z_source_info_t`.
-unsafe fn source_info_hint_of(
+pub(crate) unsafe fn source_info_hint_of(
     ptr: *const z_source_info_t,
 ) -> Option<wz_runtime_tokio::sample::SourceInfo> {
     if ptr.is_null() {

@@ -69,7 +69,7 @@ use std::sync::Arc;
 
 use wz_runtime_tokio::keyexpr_match;
 use wz_runtime_tokio::query::{QueryReply, QueryResponder};
-use wz_runtime_tokio::query_sink::{QueryView, ReplyOut};
+use wz_runtime_tokio::query_sink::{QueryView, ReplyMeta, ReplyOut};
 use wz_runtime_tokio::session::TokioSession;
 
 use crate::abi::{
@@ -216,6 +216,33 @@ pub(crate) fn reply_keyexpr_is_covered(query_keyexpr: &str, reply: &str, anyke: 
     keyexpr_match::keyexpr_intersect_patterns(&query_chunks, &reply_chunks)
 }
 
+/// R311y562 — the value metadata a staged reply carries, in the wz hint types
+/// the [`ReplyOut`] seam takes.
+///
+/// Read off the caller's options struct at `z_query_reply` / `z_query_reply_del`
+/// time rather than at flush time, because the options are BORROWED for the
+/// duration of that call only: the `z_timestamp_t*` and `z_source_info_t*` a C
+/// program passes routinely point at its own stack, and a reply is flushed
+/// after the callback returns (or, for an escaped query, arbitrarily later).
+/// Projecting to owned hints at read time is what makes the deferral sound.
+#[derive(Default)]
+struct ReplyMetaOwned {
+    encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
+    timestamp: Option<wz_runtime_tokio::sample::TimestampHint>,
+    source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+}
+
+impl ReplyMetaOwned {
+    /// Borrow the owned hints back into the seam's borrowed view.
+    fn view<'a>(&'a self, attachment: Option<&'a [u8]>) -> ReplyMeta<'a> {
+        ReplyMeta::new()
+            .with_encoding(self.encoding.as_ref())
+            .with_timestamp(self.timestamp.as_ref())
+            .with_source_info(self.source_info.as_ref())
+            .with_attachment(attachment)
+    }
+}
+
 /// One reply the C callback asked for, held until the callback returns and the
 /// batch is flushed into the wz [`ReplyOut`].
 enum PendingReply {
@@ -224,9 +251,13 @@ enum PendingReply {
         keyexpr: String,
         payload: crate::bytes::ByteBuf,
         attachment: Option<crate::bytes::ByteBuf>,
+        meta: ReplyMetaOwned,
     },
     /// `z_query_reply_del` — a Del-form reply under an explicit keyexpr.
-    Del { keyexpr: String },
+    Del {
+        keyexpr: String,
+        meta: ReplyMetaOwned,
+    },
     /// `z_query_reply_err` — an Err-form reply.
     Err { payload: crate::bytes::ByteBuf },
 }
@@ -289,17 +320,26 @@ impl Drop for DeferredResponder {
 /// flush and the deferred emit so the two cannot answer differently.
 fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
     match reply {
+        // R311y562 — ONE seam carries all four metadata arms now
+        // ([`ReplyMeta`]). The previous shape had to pick between
+        // `reply_keyed_attached` (attachment, no timestamp) and `reply_keyed`
+        // (neither), because no arm carried an attachment ALONGSIDE a timestamp
+        // and source_info — so a `z_query_reply` whose options set both lost
+        // one of them no matter which branch it took.
         PendingReply::Put {
             keyexpr,
             payload,
             attachment,
-        } => match attachment {
-            // The attachment rides the reply only through the keyed ATTACHED
-            // seam; `reply_keyed` has no slot for it.
-            Some(att) => out.reply_keyed_attached(&keyexpr, &payload, None, &att),
-            None => out.reply_keyed(&keyexpr, &payload),
-        },
-        PendingReply::Del { keyexpr } => out.reply_keyed_del(&keyexpr),
+            meta,
+        } => out.reply_keyed_meta(
+            &keyexpr,
+            &payload,
+            meta.view(attachment.as_ref().map(|a| a.as_slice())),
+        ),
+        // The Del arm passes no attachment: a Del body encodes none
+        // (`has_attachment = _is_put && ..`, `message.c:263`), which is why
+        // `z_query_reply_del` takes-and-drops the caller's — as pico does.
+        PendingReply::Del { keyexpr, meta } => out.reply_keyed_del_meta(&keyexpr, meta.view(None)),
         PendingReply::Err { payload } => out.reply_err(None, None, &payload),
     }
 }
@@ -865,22 +905,63 @@ pub unsafe extern "C" fn z_queryable_options_default(options: *mut z_queryable_o
     }
 }
 
-/// Reply options (pico `z_query_reply_options_t`). `congestion_control` /
-/// `priority` are carried for layout only — pico documents both "Deprecated:
-/// ignored, taken from query" (`api/types.h:318-321`).
+/// Reply options (pico `z_query_reply_options_t`, `api/types.h:327-337`).
+/// `congestion_control` / `priority` are carried for layout only — pico
+/// documents both "Deprecated: ignored, taken from query" (`api/types.h:318-321`).
+///
+/// R311y562 — `encoding` and `timestamp` are TYPED and READ now, and
+/// `source_info` exists at all. All three were carried as opaque `*mut c_void`
+/// (source_info was simply absent) with two stated reasons, and BOTH had
+/// expired: the encoding said "no exported `z_encoding_*` to build one with"
+/// while [`crate::encoding::z_encoding_from_str`] and its family have been
+/// exported since R311y529, and the timestamp said "the timestamp family is a
+/// follow-up round" while `z_timestamp_t` / `z_timestamp_new` landed at
+/// R311y557. This is the same class R311y561 named — a residual is a claim with
+/// a date on it — recurring in the file next door.
 #[repr(C)]
 pub struct z_query_reply_options_t {
-    /// `z_moved_encoding_t*`. Opaque here: the encoding type family is a
-    /// follow-up round, so a C program linking this library has no exported
-    /// `z_encoding_*` to build one with and this is always null in practice.
-    pub encoding: *mut c_void,
+    /// `z_moved_encoding_t*` — the value encoding, CONSUMED (pico
+    /// `z_encoding_drop(opts.encoding)`, `src/api/api.c:2152`).
+    pub encoding: *mut crate::encoding::z_moved_encoding_t,
     pub congestion_control: z_congestion_control_t,
     pub priority: z_priority_t,
-    /// `z_timestamp_t*` — opaque (the timestamp family is a follow-up round).
-    pub timestamp: *mut c_void,
+    /// `z_timestamp_t*` — borrowed, not moved: pico reads through it into
+    /// `_z_send_reply` and never drops it.
+    pub timestamp: *mut crate::pubsub::z_timestamp_t,
     pub is_express: bool,
     pub attachment: *mut z_moved_bytes_t,
+    /// `z_source_info_t*` — the `(zid, eid, sn)` the reply is stamped with.
+    /// Unstable-gated upstream (`#ifdef Z_FEATURE_UNSTABLE_API`), and this ABI
+    /// mirrors the unstable layout throughout (so does `z_put_options_t`).
+    pub source_info: *mut crate::pubsub::z_source_info_t,
 }
+
+/// The upstream layout this struct must match, measured against the vendored
+/// header with `Z_FEATURE_UNSTABLE_API` on: 48 B, `source_info` last at
+/// offset 40.
+///
+/// R311y562 — the FIRST ABI layout guard on this crate's reply options. Adding
+/// `source_info` moves this struct from 40 B to 48 B, and nothing else in the
+/// tree would have caught getting that wrong: a C caller passing the upstream
+/// struct into a wz build with a short one writes past the end of wz's view and
+/// reads garbage for every field after the mismatch, silently.
+const _: () = {
+    assert!(std::mem::size_of::<z_query_reply_options_t>() == 48);
+    assert!(std::mem::size_of::<z_query_reply_del_options_t>() == 40);
+    assert!(std::mem::size_of::<z_query_reply_err_options_t>() == 8);
+    // By OFFSET, not only by size — see `crate::get::z_get_options_t`, where the
+    // same feature-conditional tail displaced a field and a size check would
+    // have read that as a harmless omission. Here the unstable field IS last,
+    // so nothing moves; pinning it anyway is what keeps that a measured fact
+    // rather than an assumption about upstream's field order, which is exactly
+    // what was wrong next door.
+    assert!(std::mem::offset_of!(z_query_reply_options_t, timestamp) == 16);
+    assert!(std::mem::offset_of!(z_query_reply_options_t, attachment) == 32);
+    assert!(std::mem::offset_of!(z_query_reply_options_t, source_info) == 40);
+    assert!(std::mem::offset_of!(z_query_reply_del_options_t, timestamp) == 8);
+    assert!(std::mem::offset_of!(z_query_reply_del_options_t, attachment) == 24);
+    assert!(std::mem::offset_of!(z_query_reply_del_options_t, source_info) == 32);
+};
 
 /// Fill default reply options (pico `z_query_reply_options_default`).
 #[no_mangle]
@@ -894,17 +975,34 @@ pub unsafe extern "C" fn z_query_reply_options_default(options: *mut z_query_rep
     (*options).timestamp = std::ptr::null_mut();
     (*options).is_express = false;
     (*options).attachment = std::ptr::null_mut();
+    (*options).source_info = std::ptr::null_mut();
 }
 
-/// Del-reply options (pico `z_query_reply_del_options_t`) — the reply options
-/// without the encoding (a Del carries no payload to encode).
+/// Del-reply options (pico `z_query_reply_del_options_t`,
+/// `api/types.h:352-361`) — the reply options without the encoding (a Del
+/// carries no payload to encode).
+///
+/// The `attachment` is accepted and dropped, and that is UPSTREAM PARITY rather
+/// than a wz gap: `_z_push_body_encode` computes `has_attachment` as
+/// `pshb->_is_put && _z_bytes_check(..)` (`src/protocol/codec/message.c:263`),
+/// so pico's own `z_query_reply_del` — which passes `opts.attachment` into
+/// `_z_send_reply` with `Z_SAMPLE_KIND_DELETE` (`src/api/api.c:2208-2212`) —
+/// encodes a Del body that carries no attachment ext either. Both libraries
+/// take the value, free it, and put nothing on the wire.
 #[repr(C)]
 pub struct z_query_reply_del_options_t {
     pub congestion_control: z_congestion_control_t,
     pub priority: z_priority_t,
-    pub timestamp: *mut c_void,
+    /// `z_timestamp_t*` — READ (R311y562). A Del body DOES carry a timestamp:
+    /// `_z_push_body_encode` sets `_Z_FLAG_Z_D_T` on the Del arm exactly as it
+    /// sets `_Z_FLAG_Z_P_T` on the Put arm (`message.c:269-281`).
+    pub timestamp: *mut crate::pubsub::z_timestamp_t,
     pub is_express: bool,
     pub attachment: *mut z_moved_bytes_t,
+    /// `z_source_info_t*` — READ (R311y562). `has_source_info` is computed off
+    /// the shared push-body `_commons`, BEFORE the `_is_put` split
+    /// (`message.c:259-261`), so a Del reply carries its source identity.
+    pub source_info: *mut crate::pubsub::z_source_info_t,
 }
 
 /// Fill default del-reply options (pico `z_query_reply_del_options_default`).
@@ -920,6 +1018,7 @@ pub unsafe extern "C" fn z_query_reply_del_options_default(
     (*options).timestamp = std::ptr::null_mut();
     (*options).is_express = false;
     (*options).attachment = std::ptr::null_mut();
+    (*options).source_info = std::ptr::null_mut();
 }
 
 /// Err-reply options (pico `z_query_reply_err_options_t`) — `{ encoding }`.
@@ -1288,12 +1387,12 @@ pub unsafe extern "C" fn z_query_attachment(
 /// callback returns; see the module doc for why that is observably identical to
 /// emitting inline.
 ///
-/// Of `options`, `attachment` is honoured; `encoding` and `timestamp` are
-/// unreachable (opaque, with no exported constructor — see
-/// [`z_query_reply_options_t`]); `congestion_control` / `priority` are documented
-/// ignored by pico itself. `is_express` is a NAMED DIVERGENCE: wz's [`ReplyOut`]
-/// has no express arm on any reply form, so the flag cannot be honoured and is
-/// dropped. It is a batching hint with no effect on delivery or content.
+/// R311y562 — of `options`, `attachment`, `encoding`, `timestamp` AND
+/// `source_info` are all honoured now. `congestion_control` / `priority` are
+/// documented ignored by pico itself. `is_express` remains a NAMED DIVERGENCE:
+/// wz's [`ReplyOut`] has no express arm on any reply form, so the flag cannot be
+/// honoured and is dropped. It is a batching hint with no effect on delivery or
+/// content.
 #[no_mangle]
 pub unsafe extern "C" fn z_query_reply(
     query: *const z_loaned_query_t,
@@ -1310,10 +1409,20 @@ pub unsafe extern "C" fn z_query_reply(
             Some(b) => b,
             None => return Z_ERR_NULL,
         };
-        let attachment = if options.is_null() {
-            None
+        // The moved `encoding` is consumed on every path alongside the
+        // attachment, matching pico's unconditional `z_encoding_drop(opts.encoding)`
+        // (`src/api/api.c:2152`) — an early return that skipped it would leak the
+        // caller's owned encoding.
+        let (attachment, meta) = if options.is_null() {
+            (None, ReplyMetaOwned::default())
         } else {
-            crate::pubsub::take_moved_bytes((*options).attachment)
+            let attachment = crate::pubsub::take_moved_bytes((*options).attachment);
+            let meta = ReplyMetaOwned {
+                encoding: crate::encoding::take_moved_encoding((*options).encoding as *mut c_void),
+                timestamp: crate::pubsub::timestamp_hint_of((*options).timestamp),
+                source_info: crate::pubsub::source_info_hint_of((*options).source_info),
+            };
+            (attachment, meta)
         };
         let marshal = match query_marshal(query) {
             Some(m) => m,
@@ -1335,6 +1444,7 @@ pub unsafe extern "C" fn z_query_reply(
             keyexpr: ke,
             payload: buf,
             attachment,
+            meta,
         });
         Z_OK
     })
@@ -1360,14 +1470,31 @@ pub unsafe extern "C" fn z_query_reply_del(
 ) -> ZResult {
     guarded(|| {
         // Consume the moved attachment on every path (see `z_query_reply`).
-        // A Del reply carries no attachment through the wz seam, so this is a
+        // A Del reply carries no attachment ON THE WIRE, so this is a
         // take-and-drop: the C side's contract is still honoured (its `z_bytes`
-        // is freed and its source nulled) and nothing leaks. The dropped
-        // attachment is the same named gap as the Put arm's `is_express`.
-        let attachment = if options.is_null() {
-            None
+        // is freed and its source nulled) and nothing leaks.
+        //
+        // R311y562 — this is UPSTREAM PARITY, not a wz gap, and the earlier note
+        // calling it "the same named gap as the Put arm's `is_express`" was
+        // wrong about what it was looking at. `_z_push_body_encode` computes
+        // `has_attachment` as `pshb->_is_put && _z_bytes_check(..)`
+        // (`vendor/zenoh-pico/src/protocol/codec/message.c:263`), so pico's own
+        // `z_query_reply_del` — which does pass `opts.attachment` down into
+        // `_z_send_reply` (`src/api/api.c:2208-2212`) — emits a Del body with no
+        // attachment ext either. Carrying it further would build a field the
+        // codec discards.
+        //
+        // The `timestamp` and `source_info` DO ride a Del and are read.
+        let (attachment, meta) = if options.is_null() {
+            (None, ReplyMetaOwned::default())
         } else {
-            crate::pubsub::take_moved_bytes((*options).attachment)
+            let attachment = crate::pubsub::take_moved_bytes((*options).attachment);
+            let meta = ReplyMetaOwned {
+                encoding: None,
+                timestamp: crate::pubsub::timestamp_hint_of((*options).timestamp),
+                source_info: crate::pubsub::source_info_hint_of((*options).source_info),
+            };
+            (attachment, meta)
         };
         drop(attachment);
         let marshal = match query_marshal(query) {
@@ -1383,7 +1510,7 @@ pub unsafe extern "C" fn z_query_reply_del(
         if !reply_keyexpr_is_covered(&marshal.keyexpr, &ke, marshal.anyke) {
             return Z_ERR_KEYEXPR_NOT_MATCH;
         }
-        marshal.push_reply(PendingReply::Del { keyexpr: ke });
+        marshal.push_reply(PendingReply::Del { keyexpr: ke, meta });
         Z_OK
     })
 }

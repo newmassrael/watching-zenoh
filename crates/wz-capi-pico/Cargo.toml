@@ -178,6 +178,16 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "ext-pubsub-advanced-publisher",
     "ext-pubsub-advanced-history",
     "ext-pubsub-sample-miss-detection",
+    # R311y562 — the reply-side source-info EMIT gate, needed because this ABI
+    # exposes the field. `z_query_reply_options_t` / `z_query_reply_del_options_t`
+    # each declare `z_source_info_t *source_info` in the reference build
+    # (`Z_FEATURE_UNSTABLE_API` is defined there), and pico's own
+    # `z_query_reply` hands it to `_z_send_reply`, which encodes the body ext.
+    # Without this the field is read, staged, and then silently dropped at the
+    # codec — measured exactly that way by
+    # `tests/reply_options_roundtrip.rs`, which saw the timestamp and the
+    # attachment arrive while the source_info did not.
+    "reply-source-info",
 ] }
 
 # Per-session zid entropy. zenoh identifies a PEER by its zid, so two sessions
