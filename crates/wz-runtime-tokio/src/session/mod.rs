@@ -1125,6 +1125,73 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         !self.fires.is_empty()
     }
 
+    /// Drop a pending get's reply registration before its Final arrives,
+    /// answering whether one was there to drop.
+    ///
+    /// R311y575 — the CANCELLATION seam. pico's cancellation token runs
+    /// `_z_cancel_pending_query`, which is exactly
+    /// `_z_unregister_pending_query(zn, qid)`
+    /// (`vendor/zenoh-pico/src/session/query.c:290-298`), so a cancelled get is
+    /// not a special delivery state: the pending entry simply stops existing.
+    /// Dropping it drops the sink, and dropping the sink is already this tree's
+    /// completion signal on every other path (a real Final, a timeout sweep, a
+    /// face death), so cancellation reuses the mechanism rather than adding a
+    /// fourth one.
+    ///
+    /// Idempotent, and truthful about it: `false` means the rid was never
+    /// registered or has already completed, which is a cancel that arrived after
+    /// the get finished — a race the caller cannot prevent and must not treat as
+    /// an error. Upstream answers the same way (its `_z_unregister_pending_query`
+    /// on an absent qid is a no-op).
+    ///
+    /// The C `drop(context)` of a cancelled get therefore runs on the CANCELLING
+    /// thread and inside the observer lock, which is the same shape the
+    /// register→emit rollback in [`Self::query`] already has. Named because it is
+    /// a real constraint on what a drop handler may do, not because it is new
+    /// here.
+    ///
+    /// Ungated: `observer.replies` is an unconditional field
+    /// (`wz-session-core/src/observer.rs:306`) and this method names nothing
+    /// else, so gating it on `query-get` would only make the C ABI's own
+    /// cancellation plane vanish on a feature subset that still compiles the
+    /// token type.
+    pub fn cancel_pending_query(&self, rid: u64) -> bool {
+        R::with_mutex_mut(&self.observer, |observer| observer.replies.unregister(rid))
+    }
+
+    /// The liveliness twin of [`Self::cancel_pending_query`] — drop a pending
+    /// liveliness snapshot get by the interest id [`Self::liveliness_get`]
+    /// returned.
+    ///
+    /// A separate method rather than one that takes "an id" because the two ids
+    /// come from DIFFERENT allocators (`alloc_next_request_id` vs
+    /// `alloc_next_interest_id`) and land in different registries; a single
+    /// entry point would silently accept a request id and unregister nothing.
+    /// Upstream keeps them apart for the same reason — liveliness has its own
+    /// `_z_liveliness_pending_query_register_cancellation`
+    /// (`vendor/zenoh-pico/src/net/liveliness.c:284-310`).
+    /// Type-ungated and `false` on a `liveliness-get`-off build, matching the
+    /// Result-form discipline [`Self::liveliness_get`] itself uses: the registry
+    /// field is `liveliness-get`-gated
+    /// (`wz-session-core/src/observer.rs:288`), but the C ABI that calls this
+    /// compiles on every feature subset, so gating the method would make the
+    /// caller carry a `cfg` for a plane whose own entry point does not.
+    /// `false` is the honest answer there — nothing was registered, so nothing
+    /// was cancelled.
+    pub fn cancel_pending_liveliness_get(&self, interest_id: u64) -> bool {
+        #[cfg(feature = "liveliness-get")]
+        {
+            R::with_mutex_mut(&self.observer, |observer| {
+                observer.liveliness_gets.unregister(interest_id)
+            })
+        }
+        #[cfg(not(feature = "liveliness-get"))]
+        {
+            let _ = interest_id;
+            false
+        }
+    }
+
     /// Run the caller-thread half of the deferred drain, subject to this
     /// session's [`LocalDeliveryDrain`] policy.
     ///
@@ -4380,7 +4447,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         options: LivelinessGetOptions,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
-    ) -> Result<(), LivelinessGetError> {
+    ) -> Result<u64, LivelinessGetError> {
         #[cfg(feature = "liveliness-get")]
         {
             // R311nf — `liveliness_get` lives on `impl Session<R, T, Unicast>`,
@@ -4479,7 +4546,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 /*keyexpr_mapping_id=*/ 0,
                 Some(&keyexpr_string),
             );
-            Ok(())
+            // R311y575 — the interest id is RETURNED rather than kept internal,
+            // so a caller can later [`Self::cancel_pending_liveliness_get`] it.
+            // The sibling [`Self::query`] already returns its `ReplyHandle` for
+            // exactly this purpose, and this plane's own `on_final` already
+            // hands the interest id to the caller as a bare `u64`, so no new
+            // currency is introduced. Without it the C ABI's cancellation token
+            // could stop a `z_get` and not a `z_liveliness_get`, which would be a
+            // divergence invented by an accessor rather than by a decision.
+            Ok(interest_id)
         }
         #[cfg(not(feature = "liveliness-get"))]
         {

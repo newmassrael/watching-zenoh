@@ -454,7 +454,14 @@ where
         },
     );
     match result {
-        Ok(()) => log::info!("wz-ap-demo: LIVELINESS GET EMITTED keyexpr='{keyexpr}'"),
+        // R311y575 — `liveliness_get` now answers with the interest id it
+        // registered under (the id `cancel_pending_liveliness_get` takes), so the
+        // emit log names it: the FINAL log above already prints the same id, and
+        // a pair that does not match is a correlation bug this line makes
+        // visible.
+        Ok(interest_id) => log::info!(
+            "wz-ap-demo: LIVELINESS GET EMITTED keyexpr='{keyexpr}' interest_id={interest_id}"
+        ),
         Err(e) => log::warn!("wz-ap-demo: liveliness_get failed: {e}"),
     }
 }

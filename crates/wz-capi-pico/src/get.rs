@@ -673,11 +673,19 @@ pub struct z_get_options_t {
     /// `z_source_info_t*` — the `(zid, eid, sn)` stamped on the outbound Query
     /// body (ext 0x01). Honoured (R311y562).
     pub source_info: *mut crate::pubsub::z_source_info_t,
-    /// `z_moved_cancellation_token_t*` — accepted for layout and IGNORED, named
-    /// rather than implied: wz has no cancellation-token plane, so a get issued
-    /// through this path cannot be cancelled by one. The same explicit
-    /// non-support the sibling `z_querier_get_options_t` records.
-    pub cancellation_token: *mut c_void,
+    /// `z_moved_cancellation_token_t*` — HONOURED as of R311y575, and typed
+    /// rather than `c_void` because the type is the contract: this is a MOVED
+    /// handle upstream consumes unconditionally
+    /// (`z_cancellation_token_drop(opt.cancellation_token)`,
+    /// `vendor/zenoh-pico/src/api/api.c:1783`), so reading it as an opaque
+    /// pointer leaked one token per get and left the caller's owned struct
+    /// non-null, making ownership ambiguous rather than merely leaked.
+    ///
+    /// Cancelling the token unregisters this get's pending replies on every
+    /// face; an ALREADY-cancelled token fails the call with `Z_ERR_CANCELLED`
+    /// and sends no Query, both mirroring upstream (see
+    /// [`crate::get::fan_get`]).
+    pub cancellation_token: *mut crate::sync::z_moved_cancellation_token_t,
     pub accept_replies: z_reply_keyexpr_t,
 }
 
@@ -1046,8 +1054,8 @@ unsafe fn get_inner(
     // first for the same reason. There is no pico behaviour to mirror here
     // (pico derefs the null callback and crashes); the standard is this
     // function's own consume-on-EVERY-path contract.
-    let (payload, attachment, value_meta) = if options.is_null() {
-        (None, None, PicoQueryValueMeta::default())
+    let (payload, attachment, value_meta, token) = if options.is_null() {
+        (None, None, PicoQueryValueMeta::default(), None)
     } else {
         (
             crate::pubsub::take_moved_bytes((*options).payload),
@@ -1058,6 +1066,11 @@ unsafe fn get_inner(
                 encoding: crate::encoding::take_moved_encoding((*options).encoding as *mut c_void),
                 source_info: crate::pubsub::source_info_hint_of((*options).source_info),
             },
+            // R311y575 — the cancellation token joins the same consume-first
+            // line. It is a MOVED handle upstream drops unconditionally
+            // (`api.c:1783`), so taking it anywhere later would leak it on the
+            // null-callback return below, exactly as the two byte buffers would.
+            crate::sync::take_moved_cancellation_token((*options).cancellation_token),
         )
     };
 
@@ -1130,6 +1143,7 @@ unsafe fn get_inner(
         qos,
         value_meta,
         cclosure,
+        token,
     )
 }
 
@@ -1230,6 +1244,7 @@ pub(crate) fn issue_get(
     qos: PicoQueryQos,
     value_meta: PicoQueryValueMeta,
     closure: Arc<CReplyClosure>,
+    token: Option<Arc<crate::sync::CancellationToken>>,
 ) -> ZResult {
     let params = transmit_parameters(params_in, accept_replies);
 
@@ -1254,7 +1269,82 @@ pub(crate) fn issue_get(
         value_meta,
     );
 
-    fan_get(shared, &keyexpr, &opts, closure, gate)
+    fan_get(shared, &keyexpr, &opts, closure, gate, token)
+}
+
+/// The pending registrations one C get made, and the seam a cancelled token
+/// unregisters them through.
+///
+/// R311y575. Two things make this a shared cell rather than a list the fan
+/// builds and then hands over:
+///
+/// * The fan issues ONE query per face, each with its own rid, so cancellation
+///   is a set operation and not a single id.
+/// * Upstream registers the cancellation BEFORE the Query goes out
+///   (`vendor/zenoh-pico/src/net/primitives.c:606-609`), so there is no window
+///   in which a cancelled token leaves a live pending query behind. Mirroring
+///   that ordering across a FAN means the handler must exist before the first
+///   face is issued and be able to stop the loop mid-way — which is what the
+///   `None` state below does.
+pub(crate) struct CancellableFan {
+    /// The UNDO for each registration issued so far, or `None` once the token has
+    /// cancelled. `None` is BOTH "everything issued has been undone" and "issue
+    /// nothing further", which is why one field carries both: a separate
+    /// `cancelled` flag could disagree with the vector under a concurrent
+    /// cancel.
+    ///
+    /// A per-registration CLOSURE rather than a `(session, id)` pair plus a
+    /// discriminator, because the two planes that cancel through this type
+    /// unregister from different registries (`cancel_pending_query` vs
+    /// `cancel_pending_liveliness_get`) and a third would need a third. Each
+    /// caller supplies its own undo, so this type never learns their names.
+    undo: crate::sync::OnCancelSlot,
+}
+
+impl CancellableFan {
+    pub(crate) fn new() -> Self {
+        Self {
+            undo: std::sync::Mutex::new(Some(Vec::new())),
+        }
+    }
+
+    /// Record one face's registration, or report that the token cancelled while
+    /// the fan was running — in which case `undo` is run HERE, since the handler
+    /// that already ran could not have seen this registration.
+    pub(crate) fn record(&self, undo: impl FnOnce() + Send + 'static) -> bool {
+        let mut slot = match self.undo.lock() {
+            Ok(slot) => slot,
+            // A poisoned lock means a handler panicked mid-cancel. Treat the fan
+            // as cancelled: continuing would issue gets nothing can stop.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match slot.as_mut() {
+            Some(pending) => {
+                pending.push(Box::new(undo));
+                true
+            }
+            None => {
+                drop(slot);
+                undo();
+                false
+            }
+        }
+    }
+
+    /// Cancel: take the set and run every undo in it.
+    ///
+    /// Called from `z_cancellation_token_cancel`'s handler run, which is outside
+    /// the token's own lock — so the C `drop(context)` a sink drop fires is not
+    /// under it.
+    pub(crate) fn cancel(&self) {
+        let taken = match self.undo.lock() {
+            Ok(mut slot) => slot.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        for undo in taken.into_iter().flatten() {
+            undo();
+        }
+    }
 }
 
 /// Fan one C get across every connected face, returning `Z_OK`.
@@ -1282,8 +1372,36 @@ fn fan_get(
     opts: &QueryOptions,
     closure: Arc<CReplyClosure>,
     gate: Arc<ReplyGate>,
+    token: Option<Arc<crate::sync::CancellationToken>>,
 ) -> ZResult {
     let guard = closure.clone();
+    // R311y575 — the cancellation is registered BEFORE the first face is
+    // issued, which is upstream's ordering
+    // (`vendor/zenoh-pico/src/net/primitives.c:606-609`: register the
+    // cancellation under the session mutex, THEN `_z_send_n_msg`). Registering
+    // afterwards would leave a window in which a token cancelled mid-fan left
+    // live pending queries behind.
+    let fan = match &token {
+        None => None,
+        Some(token) => {
+            let fan = Arc::new(CancellableFan::new());
+            let on_cancel = Arc::clone(&fan);
+            if !crate::sync::register_on_cancel(token, move || on_cancel.cancel()) {
+                // ALREADY CANCELLED. Upstream's
+                // `_z_cancellation_token_add_on_cancel_handler` answers
+                // `Z_ERR_CANCELLED` here, `_z_query` unregisters the pending
+                // query it had just created and returns that error, and NO
+                // Query reaches the wire
+                // (`src/session/cancellation.c:171-181`,
+                // `src/net/primitives.c:606-629`). `closure` and `guard` drop on
+                // this return, so the C `drop(context)` still runs — the get is
+                // correctly reported over, exactly as upstream's
+                // `_z_unregister_pending_query` rollback reports it.
+                return crate::result::Z_ERR_CANCELLED;
+            }
+            Some(fan)
+        }
+    };
     for (session, revised) in shared.face_sessions_with_wake() {
         let per_face = closure.clone();
         let per_face_gate = gate.clone();
@@ -1299,11 +1417,29 @@ fn fan_get(
             move |view: &dyn ReplyView| fire_reply(&per_face, &per_face_gate, view),
             |_rid| {},
         );
+        // R311y575 — record this face's rid against the cancellation set before
+        // moving on. `record` answers `false` when the token cancelled while the
+        // fan was running; it has already unregistered THIS rid (the handler
+        // that ran could not have seen it), so the only thing left is to stop
+        // issuing on further faces.
+        let cancelled_mid_fan = match (&fan, &issued) {
+            (Some(fan), Ok(handle)) => {
+                let undo_session = session.clone();
+                let rid = handle.rid();
+                !fan.record(move || {
+                    undo_session.cancel_pending_query(rid);
+                })
+            }
+            _ => false,
+        };
         // A per-face issue error (a face mid-teardown) is swallowed, matching
         // the fan-out publish's best-effort discipline. Its `Arc` clone was
         // already dropped with the rolled-back sink, so it cannot hold the get
         // open — and if EVERY face errors, `guard` below completes it.
         drop(issued);
+        if cancelled_mid_fan {
+            break;
+        }
         // Wake this face's drive loop so it re-arms on the deadline just
         // registered. Without this the loop stays parked on whatever it armed
         // BEFORE the get existed — in a silent session that is the keepalive

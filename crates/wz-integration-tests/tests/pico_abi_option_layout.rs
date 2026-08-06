@@ -73,6 +73,15 @@ const PINNED: &[(&str, &[&str])] = &[
         "z_querier_get_options_t",
         &["attachment", "cancellation_token", "source_info"],
     ),
+    // R311y575 — added because its ABSENCE from this table is what let the
+    // defect through. wz declared this struct at 8 B (`timeout_ms` alone) on the
+    // reasoning that `Z_FEATURE_UNSTABLE_API` "defaults OFF", the same R311y466
+    // trap `z_get_options_t` above was fixed for at y562. Measured against the
+    // reference build's headers it is 16 B with `cancellation_token` at 8, so
+    // `z_liveliness_get_options_default` wrote 8 of the 16 bytes a drop-in
+    // program allocates. A mechanical gate that only covers the structs already
+    // known to be wrong is a regression test, not a gate.
+    ("z_liveliness_get_options_t", &["cancellation_token"]),
     (
         "z_query_reply_options_t",
         &["timestamp", "attachment", "source_info"],
@@ -212,6 +221,7 @@ fn measure_reference(work: &Path) -> Vec<(String, Layout)> {
 fn wz_layout(ty: &str) -> Layout {
     use std::mem::{offset_of, size_of};
     use wz_capi_pico::get::z_get_options_t;
+    use wz_capi_pico::liveliness::z_liveliness_get_options_t;
     use wz_capi_pico::pubsub::{z_publisher_put_options_t, z_put_options_t};
     use wz_capi_pico::querier::z_querier_get_options_t;
     use wz_capi_pico::query::{z_query_reply_del_options_t, z_query_reply_options_t};
@@ -251,6 +261,13 @@ fn wz_layout(ty: &str) -> Layout {
                     offset_of!(z_querier_get_options_t, source_info),
                 ),
             ],
+        },
+        "z_liveliness_get_options_t" => Layout {
+            size: size_of::<z_liveliness_get_options_t>(),
+            offsets: vec![(
+                "cancellation_token".into(),
+                offset_of!(z_liveliness_get_options_t, cancellation_token),
+            )],
         },
         "z_query_reply_options_t" => Layout {
             size: size_of::<z_query_reply_options_t>(),

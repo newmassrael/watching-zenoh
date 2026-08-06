@@ -520,8 +520,127 @@ pub unsafe extern "C" fn z_internal_condvar_null(cv: *mut z_owned_condvar_t) {
 /// clone and its original name the SAME cancellation state and cancelling
 /// either cancels both. A plain copy of a bool would give each holder its own
 /// flag and `z_cancellation_token_clone` would silently stop working.
-struct CancellationToken {
+///
+/// R311y575 — the token also carries the ON-CANCEL HANDLER storage, which is
+/// what makes it a cancellation plane rather than a flag two API calls agree
+/// about. Upstream's token is exactly this pair: a sync group plus an intmap of
+/// `_z_cancellation_token_on_cancel_handler_t`
+/// (`vendor/zenoh-pico/src/session/cancellation.c:49-66`), and a get registers
+/// one so that cancelling the token unregisters the get's pending query
+/// (`src/session/query.c:306-334`).
+pub(crate) struct CancellationToken {
     cancelled: std::sync::atomic::AtomicBool,
+    /// The handlers to run when this token cancels.
+    ///
+    /// `None` once cancel has STARTED, which is load-bearing rather than an
+    /// optimisation: upstream refuses a registration made after that point
+    /// (`_z_unsafe_cancellation_token_has_started_cancel` ->
+    /// `Z_ERR_CANCELLED`, `src/session/cancellation.c:171-181`), and that
+    /// refusal is what makes a get issued with an already-cancelled token fail
+    /// instead of running uncancellably. Taking the storage under the same lock
+    /// that would accept a push is what makes the two race-free against each
+    /// other.
+    handlers: OnCancelSlot,
+}
+
+/// A take-once list of one-shot callbacks: `Some` while it can still accept a
+/// registration, `None` once it has been taken.
+///
+/// Named because BOTH cancellation participants need exactly this shape — the
+/// token's handler storage here and [`crate::get::CancellableFan`]'s undo set —
+/// and because `Mutex<Option<Vec<Box<dyn FnOnce() + Send>>>>` spelled twice is
+/// the kind of type where one of the two copies loses a layer. The `Option` is
+/// the load-bearing part: it is what makes "cancel has started" and "the
+/// callbacks are gone" one fact rather than two that can disagree.
+pub(crate) type OnCancelSlot = std::sync::Mutex<Option<Vec<Box<dyn FnOnce() + Send>>>>;
+
+impl CancellationToken {
+    fn fresh() -> Self {
+        Self {
+            cancelled: std::sync::atomic::AtomicBool::new(false),
+            handlers: std::sync::Mutex::new(Some(Vec::new())),
+        }
+    }
+
+    /// Begin cancelling: latch the flag and TAKE the handler storage.
+    ///
+    /// The flag is set inside the same critical section that empties the
+    /// storage, so no observer can see "not cancelled" while the handlers are
+    /// already gone, and no registration can land in a vector nobody will run.
+    /// A poisoned lock is treated as cancelled-with-no-handlers: a token whose
+    /// handler list panicked mid-run must not resurrect as registrable.
+    fn begin_cancel(&self) -> Vec<Box<dyn FnOnce() + Send>> {
+        let taken = match self.handlers.lock() {
+            Ok(mut slot) => {
+                self.cancelled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                slot.take()
+            }
+            Err(poisoned) => {
+                self.cancelled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                poisoned.into_inner().take()
+            }
+        };
+        taken.unwrap_or_default()
+    }
+
+    /// Register an on-cancel handler, or report that cancel has already
+    /// started — upstream's `Z_ERR_CANCELLED` from
+    /// `_z_cancellation_token_add_on_cancel_handler`.
+    fn register_on_cancel(&self, handler: Box<dyn FnOnce() + Send>) -> bool {
+        match self.handlers.lock() {
+            Ok(mut slot) => match slot.as_mut() {
+                Some(handlers) => {
+                    handlers.push(handler);
+                    true
+                }
+                None => false,
+            },
+            Err(_) => false,
+        }
+    }
+}
+
+/// Register `on_cancel` against a token, or answer `false` because the token has
+/// already cancelled.
+///
+/// The seam the get paths use, so `CancellationToken`'s internals stay private
+/// to this module. `false` is the caller's cue to fail the get with
+/// `Z_ERR_CANCELLED`, which is what upstream's `_z_query` does with the same
+/// answer (`vendor/zenoh-pico/src/net/primitives.c:606-629`).
+pub(crate) fn register_on_cancel(
+    token: &Arc<CancellationToken>,
+    on_cancel: impl FnOnce() + Send + 'static,
+) -> bool {
+    token.register_on_cancel(Box::new(on_cancel))
+}
+
+/// Consume a MOVED cancellation token, yielding the state it named.
+///
+/// Upstream's option structs declare this field as `z_moved_cancellation_token_t
+/// *`, and both `z_get` and `z_liveliness_get` drop it unconditionally once the
+/// call is made (`src/api/api.c:1783`, `src/api/liveliness.c:146`). So the field
+/// is an ownership transfer, not a borrow: a caller that hands over a token must
+/// not be left holding a live handle, and a callee that merely READ the pointer
+/// would leak one per get. This takes the handle and nulls the caller's owned
+/// struct, exactly as [`z_cancellation_token_drop`] does, and returns the `Arc`
+/// so the caller keeps the state alive for as long as the get needs it.
+///
+/// # Safety
+/// `moved` must be null or a valid moved token this crate produced.
+pub(crate) unsafe fn take_moved_cancellation_token(
+    moved: *mut z_moved_cancellation_token_t,
+) -> Option<Arc<CancellationToken>> {
+    if moved.is_null() {
+        return None;
+    }
+    let handle = (*moved)._this.handle;
+    (*moved)._this = z_owned_cancellation_token_t::null_value();
+    if handle.is_null() {
+        return None;
+    }
+    Some(*Box::from_raw(handle as *mut Arc<CancellationToken>))
 }
 
 /// pico `z_owned_cancellation_token_t` — `{ _z_cancellation_token_rc_t _rc }`,
@@ -584,9 +703,7 @@ pub unsafe extern "C" fn z_cancellation_token_new(
         if token.is_null() {
             return Z_ERR_NULL;
         }
-        let arc = Arc::new(CancellationToken {
-            cancelled: std::sync::atomic::AtomicBool::new(false),
-        });
+        let arc = Arc::new(CancellationToken::fresh());
         *token = z_owned_cancellation_token_t {
             handle: Box::into_raw(Box::new(arc)) as *mut c_void,
             _cnt: std::ptr::null_mut(),
@@ -600,6 +717,14 @@ pub unsafe extern "C" fn z_cancellation_token_new(
 /// Visible through every CLONE, which is the whole point of the type — see
 /// [`CancellationToken`].
 ///
+/// R311y575 — this also RUNS the registered on-cancel handlers, which is what
+/// makes a cancelled token stop the gets it was handed to. The handlers are run
+/// AFTER the lock is released (upstream does the same: `_z_cancellation_token_
+/// call_handlers` swaps the storage out under the mutex and only then calls
+/// them, `src/session/cancellation.c:128-144`) because a handler unregisters a
+/// pending query, whose sink drop runs the C `drop(context)`, and a C callback
+/// is explicitly allowed to re-enter the session.
+///
 /// # Safety
 /// `token` must be null or a live loaned token.
 #[no_mangle]
@@ -608,8 +733,9 @@ pub unsafe extern "C" fn z_cancellation_token_cancel(
 ) -> ZResult {
     crate::ffi::guarded(|| match token_ref(token as *const _) {
         Some(arc) => {
-            arc.cancelled
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            for handler in arc.begin_cancel() {
+                handler();
+            }
             Z_OK
         }
         None => Z_ERR_NULL,

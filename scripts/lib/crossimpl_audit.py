@@ -201,7 +201,15 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # one first landed at 787 because the file resolved the oracle by joining a
 # path, so A4-3 read its `wz->zenoh-c` claim as a wz-vs-wz test. The counter did
 # not move until the claim was real.
-FOREIGN_ADJUDICATOR_LINKS = 788
+# R311y575 took it to 790, in two measured steps from one new file: 789 for the
+# `api-compat-pico` claim on the cancellation-token adjudicator, then 790 for its
+# `liveliness-get` claim, whose legE drives that atom's own option struct and its
+# own cancellation registration. The second step is the one worth naming — it took
+# `1-test-only` from 61 to 60 and `1-impl-only` from 113 to 112, which is the first
+# time either of the two populations R311y572 NAMED has moved. `proven=128
+# partial=39` did not move for either step, which is exactly the blindness this
+# counter exists to cover.
+FOREIGN_ADJUDICATOR_LINKS = 790
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

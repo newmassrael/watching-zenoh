@@ -51,3 +51,13 @@ pub const Z_ERR_INVALID: ZResult = -1;
 /// expected to branch on (`z_query_reply` is the only place pico raises it,
 /// `src/net/primitives.c:439`), so a C program that checks for it must see it.
 pub const Z_ERR_KEYEXPR_NOT_MATCH: ZResult = -108;
+
+/// A get was issued with a cancellation token that had ALREADY cancelled.
+/// Matches pico `Z_ERR_CANCELLED` (`utils/result.h:98`) EXACTLY, for the reason
+/// [`Z_ERR_KEYEXPR_NOT_MATCH`] is not collapsed either: it is a code the caller
+/// is expected to branch on. Upstream raises it from
+/// `_z_cancellation_token_add_on_cancel_handler`
+/// (`src/session/cancellation.c:171-181`) and returns it out of `_z_query`
+/// without sending a Query, so a C program that hands over a spent token must
+/// see this rather than a generic failure or a success.
+pub const Z_ERR_CANCELLED: ZResult = -69;

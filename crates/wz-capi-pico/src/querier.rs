@@ -89,16 +89,18 @@ pub struct z_querier_options_t {
 /// pico `z_querier_get_options_t` (`api/types.h:290-297`), 40 B measured.
 ///
 /// The `cancellation_token` / `source_info` tail exists because
-/// `Z_FEATURE_UNSTABLE_API` is defined in the generated config. Both are read as
-/// opaque pointers and IGNORED — named rather than implied: wz has no
-/// cancellation-token plane, and a get issued through this path cannot be
-/// cancelled by one.
+/// `Z_FEATURE_UNSTABLE_API` is defined in the generated config. Both are
+/// HONOURED — `source_info` since R311y562, `cancellation_token` since
+/// R311y575, which is also when it stopped being a `c_void` that leaked one
+/// token per get. The two entry points describe the same query and share
+/// [`crate::get::issue_get`], so the cancellation semantics here are the same
+/// ones `z_get` has by construction rather than by a second implementation.
 #[repr(C)]
 pub struct z_querier_get_options_t {
     pub payload: *mut z_moved_bytes_t,
     pub encoding: *mut c_void,
     pub attachment: *mut z_moved_bytes_t,
-    pub cancellation_token: *mut c_void,
+    pub cancellation_token: *mut crate::sync::z_moved_cancellation_token_t,
     /// `z_source_info_t*` — the `(zid, eid, sn)` stamped on the outbound Query
     /// body (ext 0x01). READ as of R311y562; it was carried opaque alongside
     /// `cancellation_token` and the two were named ignored TOGETHER, which
@@ -428,8 +430,8 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         // Consume the moved payload / attachment FIRST — before the
         // null-callback return, which is a path they must also be freed on. The
         // sibling `z_get` takes its bytes first for the same reason.
-        let (payload, attachment, value_meta) = if options.is_null() {
-            (None, None, crate::get::PicoQueryValueMeta::default())
+        let (payload, attachment, value_meta, token) = if options.is_null() {
+            (None, None, crate::get::PicoQueryValueMeta::default(), None)
         } else {
             (
                 crate::pubsub::take_moved_bytes((*options).payload),
@@ -438,6 +440,10 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
                     encoding: crate::encoding::take_moved_encoding((*options).encoding),
                     source_info: crate::pubsub::source_info_hint_of((*options).source_info),
                 },
+                // R311y575 — consumed on the same every-path line as the byte
+                // buffers, for the same reason: upstream's `z_querier_get` drops
+                // it unconditionally once the call is made.
+                crate::sync::take_moved_cancellation_token((*options).cancellation_token),
             )
         };
         if callback.is_null() {
@@ -468,6 +474,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             state.qos,
             value_meta,
             closure,
+            token,
         )
     })
 }

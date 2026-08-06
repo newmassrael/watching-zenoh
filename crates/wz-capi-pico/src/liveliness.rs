@@ -344,17 +344,50 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
 
 // --- liveliness GET ---------------------------------------------------------
 
-/// pico `z_liveliness_get_options_t` — `{ uint64_t timeout_ms; }`
-/// (`api/liveliness.h:142-147`), 8 B measured. The `cancellation_token` field
-/// the header declares exists only under `Z_FEATURE_UNSTABLE_API`, which
-/// defaults OFF, so a default build has just the timeout.
+/// pico `z_liveliness_get_options_t` (`api/liveliness.h:142-147`), **16 B
+/// measured** against the reference build's own headers.
+///
+/// R311y575 — this struct was 8 B, on the reasoning that the
+/// `cancellation_token` field "exists only under `Z_FEATURE_UNSTABLE_API`,
+/// which defaults OFF". That is the R311y466 trap the sibling
+/// `z_get_options_t` doc names, and R311y562 had already paid for it once on
+/// that struct: `scripts/build-zenoh-pico-cli.sh` configures the reference pico
+/// with `-DZ_FEATURE_UNSTABLE_API=ON`, and
+/// `target/zenoh-pico-build/zenohpico/include/zenoh-pico/config.h:35` carries a
+/// bare `#define Z_FEATURE_UNSTABLE_API`. MEASURED against those headers the
+/// struct is 16 B with `cancellation_token` at offset 8, so
+/// `z_liveliness_get_options_default` was writing 8 of the 16 bytes a drop-in
+/// program allocates and leaving the tail as whatever was on the caller's stack
+/// — where upstream writes NULL (`src/api/liveliness.c:111-115`).
+///
+/// The defect survived R311y565's mechanical layout gate because that gate pins
+/// the structs its `PINNED` table names and this type was not in it. Adding it
+/// there is the half of this fix that keeps the next one from happening.
 #[repr(C)]
 pub struct z_liveliness_get_options_t {
     /// Snapshot timeout in milliseconds. `0` means "use the default", NOT
     /// "never expire" — pico rewrites it before issuing
     /// (`src/api/liveliness.c:132-133`), and so does this crate.
     pub timeout_ms: u64,
+    /// `z_moved_cancellation_token_t*` — HONOURED as of R311y575. Cancelling the
+    /// token drops this snapshot get's pending registration; an ALREADY-cancelled
+    /// token fails the call with `Z_ERR_CANCELLED` and sends no Interest, which
+    /// is upstream's own ordering (`src/net/liveliness.c:284-310, 341`).
+    pub cancellation_token: *mut crate::sync::z_moved_cancellation_token_t,
 }
+
+/// The upstream layout this struct must match, measured against the reference
+/// build's header. Pinned by OFFSET as well as size for the R311y562 reason: a
+/// wrong size can mean a harmless missing tail or a displaced field, and only an
+/// offset tells those apart. The mechanical gate
+/// (`crates/wz-integration-tests/tests/pico_abi_option_layout.rs`) is what
+/// notices upstream MOVING the field; this const is the compile-time floor under
+/// it.
+const _: () = {
+    assert!(std::mem::size_of::<z_liveliness_get_options_t>() == 16);
+    assert!(std::mem::align_of::<z_liveliness_get_options_t>() == 8);
+    assert!(std::mem::offset_of!(z_liveliness_get_options_t, cancellation_token) == 8);
+};
 
 /// Fill default liveliness-get options (pico `z_liveliness_get_options_default`,
 /// `src/api/liveliness.c:111`).
@@ -367,6 +400,12 @@ pub unsafe extern "C" fn z_liveliness_get_options_default(
             return Z_ERR_NULL;
         }
         (*options).timeout_ms = 0;
+        // R311y575 — upstream writes this too (`src/api/liveliness.c:114`), and
+        // not writing it was the OBSERVABLE half of the 8-vs-16 byte defect: a
+        // caller's 16-byte struct kept whatever its stack held in the tail, so
+        // the very next thing a drop-in program does with these options differs
+        // from upstream on uninitialised memory.
+        (*options).cancellation_token = std::ptr::null_mut();
         Z_OK
     })
 }
@@ -400,6 +439,16 @@ pub unsafe extern "C" fn z_liveliness_get(
     options: *mut z_liveliness_get_options_t,
 ) -> ZResult {
     guarded(|| {
+        // R311y575 — the moved cancellation token is consumed BEFORE the
+        // null-callback return, which is a path it must also be freed on:
+        // upstream drops it unconditionally once the call is made
+        // (`src/api/liveliness.c:146`), so taking it later would leak one token
+        // per `z_liveliness_get(zs, ke, NULL, &opts)`.
+        let token = if options.is_null() {
+            None
+        } else {
+            crate::sync::take_moved_cancellation_token((*options).cancellation_token)
+        };
         if callback.is_null() {
             return Z_ERR_NULL;
         }
@@ -439,6 +488,24 @@ pub unsafe extern "C" fn z_liveliness_get(
         });
 
         let guard = closure.clone();
+        // R311y575 — registered BEFORE the first face is issued, the ordering
+        // upstream uses (`src/net/liveliness.c:341` registers the cancellation
+        // before `_z_send_n_msg`). The `Z_ERR_CANCELLED` arm is reached when the
+        // token was ALREADY cancelled: no Interest goes out and `closure` /
+        // `guard` drop on the return, so the C `drop(context)` still reports the
+        // get over. Shared with `z_get` through [`crate::get::CancellableFan`],
+        // so the two planes cannot drift in their cancellation semantics.
+        let fan = match &token {
+            None => None,
+            Some(token) => {
+                let fan = Arc::new(crate::get::CancellableFan::new());
+                let on_cancel = Arc::clone(&fan);
+                if !crate::sync::register_on_cancel(token, move || on_cancel.cancel()) {
+                    return crate::result::Z_ERR_CANCELLED;
+                }
+                Some(fan)
+            }
+        };
         for (session, revised) in state.shared.face_sessions_with_wake() {
             let per_face = closure.clone();
             let per_face_gate = gate.clone();
@@ -454,7 +521,24 @@ pub unsafe extern "C" fn z_liveliness_get(
                 // empty.
                 |_id| {},
             );
+            // R311y575 — the interest id this face registered under, recorded so
+            // a later cancel can unregister it. `record` answers `false` when the
+            // token cancelled while the fan was running; it has already undone
+            // THIS registration, so the only thing left is to stop issuing.
+            let cancelled_mid_fan = match (&fan, &issued) {
+                (Some(fan), Ok(interest_id)) => {
+                    let undo_session = session.clone();
+                    let interest_id = *interest_id;
+                    !fan.record(move || {
+                        undo_session.cancel_pending_liveliness_get(interest_id);
+                    })
+                }
+                _ => false,
+            };
             drop(issued);
+            if cancelled_mid_fan {
+                break;
+            }
             // Wake this face's drive loop so it re-arms on the deadline just
             // registered; without it a silent session sweeps the snapshot only
             // at the next keepalive wake.
