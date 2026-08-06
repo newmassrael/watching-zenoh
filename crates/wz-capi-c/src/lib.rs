@@ -97,6 +97,19 @@ pub mod session;
 ))]
 pub mod shm;
 pub mod slice;
+/// R311y563 — the zenoh-c `source_info` owned family (§5.27): the
+/// `z_owned_source_info_t` / loaned / moved trio plus its seven functions, and
+/// what the six option structs' `source_info` fields were waiting on.
+///
+/// UNSTABLE-gated, because upstream gates every one of them: the option fields
+/// sit behind `#if defined(Z_FEATURE_UNSTABLE_API)` and so do
+/// `z_source_info_new` / `_id` / `_sn` / `_loan` / `_drop` /
+/// `z_internal_source_info_*` / `z_sample_source_info`
+/// (`zenoh_commons.h:4410, 5189-5223`). The y536 rule — a symbol's cfg is the
+/// OR of every arm that uses it — read forwards: every user here is gated, so
+/// the module is.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub mod source_info;
 pub mod string;
 pub mod sub;
 pub mod sync;
