@@ -145,30 +145,30 @@ pub unsafe extern "C" fn z_timestamp_new(
         let Some(state) = (unsafe { session_state(session) }) else {
             return Z_ENULL;
         };
-        let now = state.shared.now_monotonic_ms();
         let mut stamped = z_timestamp_t::empty();
-        stamped._time = ntp64_from_millis(now);
+        // R311y569 — the WALL CLOCK, through wz's own NTP64 SSOT.
+        //
+        // This was `ntp64_from_millis(shared.now_monotonic_ms())`, and the debt
+        // ledger carried it from y557 as "the only shipped thing whose VALUE
+        // could be wrong on the wire". It was: `now_monotonic_ms` is
+        // `Instant::elapsed()` from the moment the session was CONSTRUCTED
+        // (`runtime_impl.rs:357`), so the seconds half of the word counted
+        // session uptime rather than time. MEASURED against the real
+        // `libzenohc.so` with one C probe before this line changed — upstream
+        // printed `ntp_secs == time(NULL)` exactly, wz printed `ntp_secs=0`,
+        // a value 56 years adrift on any peer that reads it.
+        //
+        // Routed through [`wall_clock_ntp64`] rather than re-derived: it is the
+        // NTP64 recipe the storage stack, the digest publisher and the aligner
+        // already share, so a timestamp a C program mints and a timestamp wz
+        // stamps itself are now the same units by construction rather than by
+        // coincidence.
+        stamped._time = wz_runtime_tokio::timestamp_source::wall_clock_ntp64();
         stamped._id = state.zid();
         // SAFETY: checked non-null above.
         unsafe { *this_ = stamped };
         Z_OK
     })
-}
-
-/// The NTP64 encoding of a millisecond count: seconds in the high 32 bits,
-/// binary fraction of a second in the low 32.
-///
-/// This is the shape `uhlc` puts on the wire and the one wz's own codec reads
-/// back, so a timestamp minted here and a timestamp decoded from a peer are
-/// comparable numbers rather than two different units that happen to share a
-/// field.
-fn ntp64_from_millis(millis: u64) -> u64 {
-    let secs = millis / 1_000;
-    let rem = millis % 1_000;
-    // (rem / 1000) * 2^32, computed without a float so the value is exact and
-    // reproducible on every target.
-    let frac = (rem << 32) / 1_000;
-    (secs << 32) | frac
 }
 
 /// The NTP64 time word (zenoh-c `z_timestamp_ntp64_time`).
@@ -239,19 +239,33 @@ mod tests {
         assert!(back.zid.is_empty());
     }
 
-    /// The NTP64 packing is the seconds/fraction split, not a millisecond count
-    /// stored raw — the difference a peer would decode as a timestamp ~1000x
-    /// off.
+    /// R311y569 — the minted NTP64's SECONDS half is the UNIX EPOCH, not an
+    /// uptime.
+    ///
+    /// The test the packing helper used to carry checked that milliseconds
+    /// split correctly into the two halves, and it PASSED throughout the whole
+    /// life of the defect: the arithmetic was right and its INPUT was wrong.
+    /// That is why this asserts the magnitude against the process's own clock
+    /// instead — the one property a unit-conversion test cannot express.
+    ///
+    /// The bound is loose on purpose (a decade either side): the claim is "this
+    /// is wall-clock time", not "this is the same instant", and a tight window
+    /// would make the test a rate measurement of the machine it runs on.
     #[test]
-    fn millis_pack_into_the_ntp64_seconds_and_fraction_halves() {
-        assert_eq!(ntp64_from_millis(0), 0);
-        assert_eq!(ntp64_from_millis(1_000), 1u64 << 32);
-        // 500 ms is exactly half a second: the fraction half is 2^31.
-        assert_eq!(ntp64_from_millis(1_500), (1u64 << 32) | (1u64 << 31));
-        // And it is monotonic across the second boundary, which a naive
-        // `millis << 32` would also satisfy but a swapped-halves packing
-        // would not.
-        assert!(ntp64_from_millis(1_999) < ntp64_from_millis(2_000));
+    fn the_minted_ntp64_seconds_half_is_the_unix_epoch_not_an_uptime() {
+        let word = wz_runtime_tokio::timestamp_source::wall_clock_ntp64();
+        let secs = word >> 32;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the system clock is after 1970")
+            .as_secs();
+        let decade = 10 * 365 * 24 * 60 * 60;
+        assert!(
+            secs.abs_diff(now) < decade,
+            "the NTP64 seconds half is {secs}, which is not within a decade of \
+             the UNIX time {now}. A session-uptime word reads as 1970 on every \
+             peer that decodes it — the defect this replaced."
+        );
     }
 
     /// NULL is answered, not dereferenced — the accessors are the surface a C

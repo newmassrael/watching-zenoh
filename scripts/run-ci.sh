@@ -1387,6 +1387,19 @@ PY
     # Enforcement MEASURED by re-introducing one of the eight verbatim, not by
     # observing that the script runs.
     python3 scripts/lib/expired_blocker_lint.py || return 1
+    # R311y569 — the COUNT-GUARD-to-binary gate. `run-ci.sh` carries 53 bare
+    # `| grep -qE '^test result: ok\. N passed'` guards, and NOTHING tied N to
+    # the binary it guards: rename a test, delete one, or add one, and the guard
+    # is simply wrong until some lane happens to run. The debt ledger ranked it
+    # #5 on the frontier and noted the check is DERIVABLE, which is the whole
+    # reason it belongs in a static lane — both sides are readable without
+    # building anything, so this costs milliseconds rather than a test run.
+    #
+    # It reports what it CANNOT analyse (a substring filter, a feature-dependent
+    # test set) rather than passing over it, and FAILS when its in-scope set is
+    # empty — a version that quietly analysed nothing would exit 0 forever and
+    # read as coverage. Enforcement MEASURED by renaming a guarded test fn.
+    python3 scripts/lib/count_guard_lint.py || return 1
     return 0
 }
 

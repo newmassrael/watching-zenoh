@@ -109,6 +109,7 @@ fn oracle_or_note() -> Option<PathBuf> {
 const PROBE: &str = r#"#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "zenoh.h"
 
 int main(int argc, char **argv) {
@@ -141,6 +142,40 @@ int main(int argc, char **argv) {
     if (z_declare_subscriber(z_session_loan(&session), &sub, z_view_keyexpr_loan(&ke),
                              z_closure_sample_move(&callback), NULL) != 0) {
         printf("declare_subscriber=FAILED\n"); return 1;
+    }
+
+    /* R311y569 — the SESSION-MINTED TIMESTAMP, adjudicated here because this is
+       the file that already has a session on both arms.
+
+       What is compared is NOT the instant — the two arms run seconds apart, so
+       the words differ by construction. It is whether the seconds half of the
+       NTP64 word is the UNIX EPOCH, which each arm answers about ITSELF by
+       comparing against its own `time(NULL)`. Both must print 1.
+
+       The debt ledger carried this from y557 as "the only shipped thing whose
+       VALUE could be wrong on the wire", and it was: wz stamped
+       `Instant::elapsed()` since session construction, so `ntp_secs` was 0
+       against a real epoch of 1786010513 — 56 years adrift on any peer that
+       decoded it. A unit test on the packing arithmetic passed throughout,
+       because the arithmetic was right and its INPUT was wrong. */
+    {
+        z_timestamp_t ts;
+        z_result_t ts_rc = z_timestamp_new(&ts, z_session_loan(&session));
+        unsigned long long ntp_secs =
+            (unsigned long long)(z_timestamp_ntp64_time(&ts) >> 32);
+        unsigned long long unix_secs = (unsigned long long)time(NULL);
+        printf("timestamp.new.rc=%d\n", (int)ts_rc);
+        /* A decade of slack: the claim is "this is wall-clock time", not "this
+           is the same instant". A tight window would make the leg a rate
+           measurement of the machine it runs on. */
+        printf("timestamp.seconds_are_unix_epoch=%d\n",
+               ntp_secs > unix_secs - 315360000ULL && ntp_secs < unix_secs + 315360000ULL);
+        /* The zid half is the SESSION's, which is per-arm, so only the
+           agreement with `z_info_zid` is printed. */
+        z_id_t ts_id = z_timestamp_id(&ts);
+        z_id_t self_id = z_info_zid(z_session_loan(&session));
+        printf("timestamp.zid_is_this_session=%d\n",
+               memcmp(&ts_id, &self_id, sizeof self_id) == 0);
     }
 
     z_owned_bytes_t payload;

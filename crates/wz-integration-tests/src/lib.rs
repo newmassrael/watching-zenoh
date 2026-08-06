@@ -873,6 +873,61 @@ pub mod common {
         path
     }
 
+    /// Compile ONE C source against a chosen pico implementation — the generic
+    /// form both `_on_wz` and `_oracle` builds reduce to.
+    ///
+    /// R311y569. Its two predecessors take an upstream example NAME and dig it
+    /// out of the vendored tree, which is right for the corpus and wrong for a
+    /// PATCHED program: the y548 remedy for "no upstream example sets this
+    /// field" is to take upstream's source, add the calls, and compile the
+    /// RESULT twice. That has no name in `vendor/`, so it needs an entry point
+    /// that takes a path.
+    ///
+    /// `link` is the library stem — `wz_capi_pico` or `zenohpico` — and it is
+    /// also what the output binary is named after, so the two arms cannot
+    /// overwrite each other in one directory. Everything else is identical
+    /// between the arms by construction, which is what makes a diff of their
+    /// stdout a statement about the two libraries and nothing else.
+    ///
+    /// The zenoh-c side has had [`compile_zenoh_c_example`] in this shape since
+    /// y500; this is the pico twin.
+    pub fn compile_pico_source(
+        src: &Path,
+        out_dir: &Path,
+        includes: &[PathBuf],
+        libdir: &Path,
+        link: &str,
+    ) -> Result<PathBuf, String> {
+        let stem = src
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("pico_probe");
+        let exe = out_dir.join(format!("{stem}_on_{link}"));
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        let mut cmd = Command::new(&cc);
+        cmd.arg(src).arg("-DZENOH_LINUX");
+        for inc in includes {
+            cmd.arg(format!("-I{}", inc.display()));
+        }
+        cmd.arg("-o")
+            .arg(&exe)
+            .arg(format!("-L{}", libdir.display()))
+            .arg(format!("-l{link}"))
+            .arg(format!("-Wl,-rpath,{}", libdir.display()));
+        let out = cmd
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn C compiler {cc:?}: {e}"));
+        if !out.status.success() {
+            return Err(format!(
+                "{cc} failed for {} against -l{link} (status {:?})\n--- stderr ---\n{}",
+                src.display(),
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr),
+            ));
+        }
+        Ok(exe)
+    }
+
     /// The directory [`zenoh_pico_shared_library`] lives in — what a `cc -L`
     /// needs when an upstream example is linked against REAL pico as the
     /// reference arm of a compile-twice differential.

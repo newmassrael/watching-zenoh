@@ -653,20 +653,25 @@ pub unsafe extern "C" fn z_timestamp_new(
         *ts = z_timestamp_t {
             valid: true,
             id: crate::zid::z_id_t { id: state.zid() },
-            // NTP64: seconds in the high 32 bits, fraction in the low 32.
-            time: ntp64_from_millis(state.shared.now_monotonic_ms()),
+            // R311y569 — the WALL CLOCK, through wz's own NTP64 SSOT.
+            //
+            // This was `ntp64_from_millis(shared.now_monotonic_ms())`, the same
+            // defect the debt ledger had carried on the zenoh-c ABI since y557
+            // and the same fix. `now_monotonic_ms` is `Instant::elapsed()` from
+            // the moment the session was CONSTRUCTED, so the seconds half of the
+            // word counted session uptime rather than time — measured on the
+            // sibling ABI as `ntp_secs=0` where the real library printed
+            // `time(NULL)`.
+            //
+            // Found by looking: the zenoh-c fix names its own mechanism, and the
+            // mechanism is shared, so the question "does the other ABI do this
+            // too" answers itself. Both now read the same
+            // [`wall_clock_ntp64`](wz_runtime_tokio::timestamp_source::wall_clock_ntp64)
+            // the storage stack stamps with.
+            time: wz_runtime_tokio::timestamp_source::wall_clock_ntp64(),
         };
         Z_OK
     })
-}
-
-/// Project milliseconds into the NTP64 word shape pico's timestamps carry:
-/// whole seconds in the high 32 bits, the sub-second remainder scaled to
-/// 2^32 in the low 32.
-fn ntp64_from_millis(ms: u64) -> u64 {
-    let secs = ms / 1000;
-    let frac = ((ms % 1000) << 32) / 1000;
-    (secs << 32) | (frac & 0xFFFF_FFFF)
 }
 
 /// Default publisher-put options (pico `z_publisher_put_options_default`).
