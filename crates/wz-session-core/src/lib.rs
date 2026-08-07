@@ -837,6 +837,16 @@ pub mod passive;
 #[cfg(feature = "dissect")]
 pub mod dissect;
 
+/// R311y585 (A4) — the OBSERVER's per-direction key-expression tables.
+///
+/// A participant keeps one table per link (the peer's ids) because the other
+/// number space is its own. An observer has neither and must rebuild both,
+/// then pick between them with the wire expression's `M` bit. Gated with the
+/// dissect surface, whose consumers are the ones that need a path rather than
+/// a number.
+#[cfg(all(feature = "dissect", feature = "codec-declare"))]
+pub mod passive_keyexpr;
+
 /// R311y578 — SSOT for the `0x7` PATCH establishment ext: the protocol patch
 /// LEVEL wz announces (R121f1) and, newly, the peer's half plus the `min()`
 /// negotiation over it. The negotiated level is the sole gate on the

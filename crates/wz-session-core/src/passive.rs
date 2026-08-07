@@ -416,6 +416,16 @@ pub struct PassiveSession {
     /// constrained observer can still bound it.
     #[cfg(feature = "reassembly")]
     reasm: [ReassemblyDispatcher<PASSIVE_CHAIN_SLOTS, PASSIVE_CHAIN_CAP>; 2],
+    /// R311y585 (A4) — the per-direction `id -> keyexpr` bindings, folded
+    /// from every `Declare` this observer decodes.
+    ///
+    /// Kept HERE rather than left to the consumer for the reason A2 was
+    /// written for: a context that is inferred and then unused by its own
+    /// crate makes every consumer redo the same work. The Declares arrive
+    /// inside the batches `carried` already decodes, so folding them is one
+    /// pass over data that has been walked anyway.
+    #[cfg(all(feature = "dissect", feature = "codec-declare"))]
+    keyexprs: crate::passive_keyexpr::KeyexprTables,
     /// Which directions have contributed an Init. A retransmission (a capture
     /// with duplicates, a TCP retransmit the reassembler let through) must not
     /// fold twice: `&=` is idempotent but `min` on the patch level is only
@@ -454,6 +464,8 @@ impl Default for PassiveSession {
             a: DirectionStream::default(),
             b: DirectionStream::default(),
             init_seen: [false; 2],
+            #[cfg(all(feature = "dissect", feature = "codec-declare"))]
+            keyexprs: crate::passive_keyexpr::KeyexprTables::new(),
             #[cfg(feature = "reassembly")]
             reasm: core::array::from_fn(|_| {
                 // An observer cannot enforce a deadline it has no clock for
@@ -559,6 +571,27 @@ impl PassiveSession {
         })
     }
 
+    /// R311y585 (A4) — the key-expression bindings observed so far.
+    ///
+    /// Read it to turn a decoded message's numeric `WireExpr` into a path:
+    /// `tables.resolve(frame.direction, &push.keyexpr)`. The direction must
+    /// be the one the MESSAGE travelled, because the wire expression's `M`
+    /// bit is read relative to its sender.
+    #[cfg(all(feature = "dissect", feature = "codec-declare"))]
+    pub fn keyexprs(&self) -> &crate::passive_keyexpr::KeyexprTables {
+        &self.keyexprs
+    }
+
+    /// Fold every `Declare` in a freshly-walked batch into the tables.
+    #[cfg(all(feature = "dissect", feature = "codec-declare"))]
+    fn fold_keyexprs(&mut self, direction: Direction, batch: &BatchParse) {
+        for m in &batch.messages {
+            if let crate::network_message::NetworkMessage::Declare(d) = m {
+                self.keyexprs.observe_declare(direction, d);
+            }
+        }
+    }
+
     /// R311y584 (A3) — decode ONE datagram, which is one whole wire message.
     ///
     /// The datagram sibling of [`Self::next_frame`], and a separate entry
@@ -625,7 +658,11 @@ impl PassiveSession {
         };
         match f {
             InboundFrame::Frame { payload, .. } => match self.batch_of(payload) {
-                Some(b) => Carried::Batch(b),
+                Some(b) => {
+                    #[cfg(all(feature = "dissect", feature = "codec-declare"))]
+                    self.fold_keyexprs(direction, &b);
+                    Carried::Batch(b)
+                }
                 None => Carried::Undecompressible,
             },
             #[cfg(feature = "reassembly")]
@@ -671,7 +708,11 @@ impl PassiveSession {
                 );
                 match joined {
                     Some(bytes) => match self.batch_of(&bytes) {
-                        Some(b) => Carried::Reassembled(b),
+                        Some(b) => {
+                            #[cfg(all(feature = "dissect", feature = "codec-declare"))]
+                            self.fold_keyexprs(direction, &b);
+                            Carried::Reassembled(b)
+                        }
                         None => Carried::Undecompressible,
                     },
                     None => Carried::Fragment(outcome),
@@ -1211,5 +1252,89 @@ mod tests {
         assert_eq!(caps.seq_num_res, 2);
         assert_eq!(caps.batch_size, 65535);
         assert_eq!(s.context().sn_mask(), Some(crate::sn::mask_from_res(2)));
+    }
+
+    /// R311y585 (A4) — the tables are FOLDED by the observer, not merely
+    /// available to it. Without this leg `KeyexprTables` would be a library
+    /// with no caller, which is the exact criticism A2 was written for.
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn a_declare_inside_a_frame_populates_the_keyexpr_tables() {
+        use crate::passive_keyexpr::Resolved;
+        use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
+        use wz_codecs::wireexpr_local::WireexprLocalOwned;
+
+        let path = "demo/robots/";
+        let keyexpr = WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                id: 0,
+                suffix_len: Some(path.len() as u64),
+                suffix: Some(sce_forge_runtime::codec::SceString::from_view(path).expect("fits")),
+            }),
+        };
+        // The headers carry the wire MIDs, and `Default` is what bakes them
+        // (`out/wz-codecs/declare.rs` variant-default-uniformity). Writing 0
+        // here is what the first version of this fixture did: the batch still
+        // decoded, as an `Unknown` record, and the table stayed empty — which
+        // is why the batch assertion below counts the messages instead of
+        // merely matching the arm.
+        let declare: wz_codecs::declare::DeclareOwned = wz_codecs::declare::DeclareOwned {
+            // The MID ALONE: `Default`'s header also carries flags (I / Z),
+            // and announcing an ext chain that `extensions: None` then does
+            // not write leaves the decoder reading the next record's bytes as
+            // a chain. Masking to the MID is what makes this one record.
+            header: wz_codecs::declare::Declare::default().header & 0x1F,
+            interest_id: None,
+            extensions: None,
+            body: wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclKexpr(
+                wz_codecs::decl_kexpr::DeclKexprOwned {
+                    // N (`0x20`) announces the wireexpr's SUFFIX. The parent header
+                    // carries it, not the wireexpr, so leaving it clear makes
+                    // the encoder write the id and DROP the suffix — which the
+                    // first version of this fixture did, and the trailing
+                    // "demo/robots/" bytes then decoded as a second, Unknown
+                    // record.
+                    header: wz_codecs::decl_kexpr::DeclKexpr::default().header | 0x20,
+                    id: 42,
+                    keyexpr,
+                },
+            ),
+        };
+        // Through the real encoder, so the fixture is a batch wz could have
+        // emitted rather than a byte string that happens to parse.
+        let record = declare
+            .try_as_borrowed()
+            .expect("owned -> borrowed")
+            .encode_to_vec();
+
+        let mut s = established(vec![]);
+        assert!(s.keyexprs().is_empty(Direction::A));
+        s.push(Direction::A, &framed(&frame_wire(0, &record), 2));
+        let f = s.next_frame(Direction::A).expect("frame");
+        match &f.carried {
+            Carried::Batch(b) => assert_eq!(
+                b.messages.len(),
+                1,
+                "the Declare must decode as exactly one record: {:?}",
+                b.halt
+            ),
+            other => panic!("expected a batch, got {other:?}"),
+        }
+
+        assert_eq!(s.keyexprs().len(Direction::A), 1);
+        // A later Push from the SAME direction, local-rooted on that id.
+        let later = WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                id: 42,
+                suffix_len: Some(6),
+                suffix: Some(
+                    sce_forge_runtime::codec::SceString::from_view("1/pose").expect("fits"),
+                ),
+            }),
+        };
+        assert_eq!(
+            s.keyexprs().resolve(Direction::A, &later),
+            Resolved::Literal(alloc::string::String::from("demo/robots/1/pose"))
+        );
     }
 }
