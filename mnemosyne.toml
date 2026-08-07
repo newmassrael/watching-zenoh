@@ -338,6 +338,22 @@ to = "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-fe
 reason = "R311y504 scope correction — Round 311y503 impact_refs typo. Intended atomic section: feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend (the `storage-mgr-*` atoms live there; there is no `-storage-manager` section). Round 311y504 re-cites the intended section."
 since = "Round 311y504"
 
+# R311y579 impact_refs typo — the same class a FIFTH time (Round 193,
+# y327, y503, y526, y579). Every instance has the identical shape: an id
+# composed from the ATOM'S SUBJECT rather than copied out of
+# `list_sections`, which yields a plausible name for the right topic and
+# no existing section. Four prior corrections each wrote the lesson down
+# and it recurred, so R311y579a carries a MECHANICAL gate as the open
+# item instead of restating it a fifth time — nothing checks an
+# impact_ref against the section space at append time.
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 311y579"
+to = "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-config"
+reason = "R311y579a scope correction — Round 311y579 impact_refs typo. Intended atomic section: feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace (the §5.23 config-introspection atom is named for the adminspace family; there is no `-config` section). Round 311y579a re-cites the intended section."
+since = "Round 311y579a"
+
 # ── R408 markdown-doc model retirement (2026-06-04) ──
 # R400 retired the ParsedDoc validator; store-prose §N citations that
 # previously resolved against parsed markdown headings now surface as
