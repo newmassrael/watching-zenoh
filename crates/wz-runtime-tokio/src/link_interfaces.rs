@@ -439,6 +439,34 @@ pub fn multicast_iface_selector_v4(iface: &str) -> std::io::Result<Option<std::n
 
 #[cfg(test)]
 mod tests {
+    /// The loopback interface's NAME, discovered rather than assumed.
+    ///
+    /// R311y581 — three tests below hardcoded `"lo"`, and all three FAILED the
+    /// first time any CI lane actually RAN this crate on macOS, where the
+    /// loopback interface is `lo0`. They had compiled cleanly on that host since
+    /// R311y13; a name that only exists on Linux is invisible to `clippy`.
+    ///
+    /// The defect was in the FIXTURES, not the resolver: every function here
+    /// takes the name as an argument and asks the kernel, so none of them
+    /// assumes a platform. What the tests assert is the loopback ADDRESS
+    /// contract, and the name is an INPUT to that — so it belongs here, once,
+    /// instead of at three call sites.
+    ///
+    /// Deliberately a candidate list rather than a lookup through
+    /// `interface_names_for(127.0.0.1)`: that would make
+    /// `the_two_resolution_directions_agree_on_loopback` circular, since
+    /// witnessing exactly that pair is the test's whole purpose.
+    #[cfg(unix)]
+    fn loopback_iface_name() -> &'static str {
+        // `lo` on Linux, `lo0` on macOS and the BSDs.
+        for candidate in ["lo", "lo0"] {
+            if super::unicast_addresses_of_interface(candidate).is_ok() {
+                return candidate;
+            }
+        }
+        panic!("no loopback interface resolved as `lo` or `lo0` on this host");
+    }
+
     use super::*;
 
     /// The loopback address must resolve to at least one interface on any host
@@ -477,10 +505,12 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn the_loopback_interface_resolves_to_its_loopback_address() {
-        let addrs = unicast_addresses_of_interface("lo").expect("lo is present, up and running");
+        let lo = loopback_iface_name();
+        let addrs =
+            unicast_addresses_of_interface(lo).expect("the loopback is present, up and running");
         assert!(
             addrs.contains(&IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
-            "lo must carry 127.0.0.1; got {addrs:?}"
+            "{lo} must carry 127.0.0.1; got {addrs:?}"
         );
         assert!(
             addrs.iter().all(|ip| !ip.is_multicast()),
@@ -528,11 +558,13 @@ mod tests {
     #[test]
     #[cfg(all(unix, feature = "locator-iface"))]
     fn a_multicast_iface_given_as_a_name_resolves_to_its_v4_address() {
-        let selector = multicast_iface_selector_v4("lo").expect("lo is present, up and running");
+        let lo = loopback_iface_name();
+        let selector =
+            multicast_iface_selector_v4(lo).expect("the loopback is present, up and running");
         assert_eq!(
             selector,
             Some(std::net::Ipv4Addr::LOCALHOST),
-            "lo's v4 address is the selector a v4 group pins to"
+            "{lo}'s v4 address is the selector a v4 group pins to"
         );
     }
 
@@ -616,13 +648,14 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn the_two_resolution_directions_agree_on_loopback() {
-        let addrs = unicast_addresses_of_interface("lo").expect("lo resolves");
-        assert!(!addrs.is_empty(), "lo carries at least one address");
+        let lo = loopback_iface_name();
+        let addrs = unicast_addresses_of_interface(lo).expect("the loopback resolves");
+        assert!(!addrs.is_empty(), "{lo} carries at least one address");
         for addr in addrs {
             let names = interface_names_for(addr).expect("the reverse lookup runs");
             assert!(
-                names.iter().any(|n| n == "lo"),
-                "{addr} came from lo, so its name set {names:?} must contain lo"
+                names.iter().any(|n| n == lo),
+                "{addr} came from {lo}, so its name set {names:?} must contain {lo}"
             );
         }
     }
