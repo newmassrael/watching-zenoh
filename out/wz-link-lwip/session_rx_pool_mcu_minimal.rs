@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: e812b8b9426089658c190b079d72f4505398532fde65fe2c41c3ec6148939d1b
-// template-hash: 566d82cde8067d5a043ddb08a09857bfebb8c9df80a7d6c2995a193c1455a335
+// template-hash: 7d180dffdd955c10062343fb76305c7a80a95112d21da2591e0f0959805b08ad
 // generated-at: 0
 // SCE-MAP: session_rx_pool_mcu_minimal.scxml:67
 

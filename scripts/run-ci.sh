@@ -1111,6 +1111,17 @@ layer_b_verify_codegen() {
     #             `on-overflow="reject"` on the entry-flag path at all
     #             (claudedocs/sce-report-tlv-chain-entry-flag-overflow.md
     #             — until then the depth is a cliff moved, not removed).
+    #
+    #             R311y589 — the SECOND condition is now MET and the first
+    #             is not, which is exactly why they were written as two.
+    #             SCE landed the guard (ec3b032984) and wz's compensating
+    #             seam is deleted; the cliff is REMOVED, not merely moved.
+    #             The upstream fixtures still declare max-depth="4"
+    #             (vendor/sce/tests/forge/resources/codec_zenoh_msg_put
+    #             .scxml:82), so the body diff survives on its own and
+    #             this entry stays. MEASURED, not assumed: Layer B was
+    #             re-run against pin fbc29c4d14 and both stems still
+    #             report L2 MISMATCH.
     #             Layer 3 (crates/wz-integration-tests/tests/
     #             layer3_msg_{put,del}.rs, byte-compared against
     #             zenoh-pico's own encoder) is the real wire check and is

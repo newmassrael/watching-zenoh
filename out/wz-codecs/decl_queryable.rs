@@ -93,13 +93,23 @@ impl<'a> DeclQueryable<'a> {
         let keyexpr = Wireexpr::decode(cursor, (header >> 5) & 0x1, (header >> 6) & 0x1)?;
         let extensions = if (header & 0x80u8) != 0 {
             let mut _vec: HeaplessVec<ExtEntry<'a>, 8> = HeaplessVec::new();
+            let mut _more = false;
             for _ in 0..8u32 {
-                    if cursor.remaining() == 0 { break; }
-                    let _entry = ExtEntry::decode(cursor)?;
-                    let _continue = _entry.z();
-                    _vec.push(_entry).map_err(|_| CodecError::TooManyElements)?;
-                    if !_continue { break; }
-                }
+                if cursor.remaining() == 0 { break; }
+                let _entry = ExtEntry::decode(cursor)?;
+                _more = _entry.z();
+                // Bounded by max-depth on both sides — loop count and `_vec`
+                // capacity are the same literal — so this push cannot fail. An
+                // over-long chain is refused by the guard after the loop.
+                _vec.push(_entry).map_err(|_| CodecError::TooManyElements)?;
+                if !_more { break; }
+            }
+            if _more && cursor.remaining() == 0 {
+                return Err(CodecError::NeedMoreBytes);
+            }
+            if _more {
+                return Err(CodecError::TlvChainOverflow);
+            }
             Some(_vec)
         } else {
             None

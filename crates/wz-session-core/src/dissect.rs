@@ -461,36 +461,53 @@ pub fn walk_ext_entry(c: &mut SpanCursor<'_>) -> Result<(bool, Field), CodecErro
 /// The Z-terminated ext chain: entries until one clears the Z bit, the cursor
 /// empties, or `max` entries have been read.
 ///
-/// R311y582 (A1) — this is the ONE place the walker deliberately does NOT
-/// mirror the generated codec, and the divergence is the point rather than an
-/// oversight. The codec leaves this loop on the `max` bound with the last
-/// entry still saying "continue" and then reads the NEXT FIELD out of chain
-/// bytes, silently ([`crate::ext_chain::chain_saturated`] carries the
-/// measurement and why the generator does it). A dissector that reproduced
-/// that would draw a confident wrong tree, which is the single thing a
-/// dissector must never do — so the walker refuses instead.
+/// R311y589 — this walker is now an EXACT mirror of the generated decode
+/// again, and the two-branch tail below is the whole reason it had to be
+/// rewritten rather than merely un-patched.
 ///
-/// The divergence is bounded to inputs no faithful fixture contains: for any
-/// chain that terminates within `max`, walker and codec still agree byte for
-/// byte, which is what every `agree`-driven test exercises. The saturating
-/// input is pinned separately by
-/// `a_chain_past_the_cap_is_refused_rather_than_misread`, so the difference is
-/// a MEASURED claim and not something a later reader has to rediscover.
+/// R311y582 (A1) recorded a divergence here: the generator dropped the
+/// post-loop overflow check on the `entry-flag` path even though the SCXML
+/// declared `on-overflow="reject"`, so the codec left the loop on the `max`
+/// bound with the last entry still saying "continue" and read the NEXT FIELD
+/// out of chain bytes. wz refused instead, and carried compensating checks at
+/// its own participant seams. SCE landed the fix (`ec3b032984`), so both are
+/// gone — but the fix also DISTINGUISHES two reasons the loop can stop with
+/// the flag still set, and a walker that collapsed them would now disagree
+/// with the codec on the second:
+///
+/// | loop stopped with the flag set | cursor    | reported as        |
+/// |--------------------------------|-----------|--------------------|
+/// | the depth cap refused an entry | non-empty | `TlvChainOverflow` |
+/// | the peer's frame ended mid-chain | empty   | `NeedMoreBytes`    |
+///
+/// The second row is a failure R311y582's report did not name and SCE found
+/// while measuring: for `MsgPut` it is masked (`payload_len` then hits EOF),
+/// but a codec whose chain is its LAST field — `Interest` is exactly that
+/// shape — reported a truncated chain as a finished one. It is signalled
+/// independently of `on-overflow`, because the cap was never reached and no
+/// overflow policy is in play; the frame is simply short.
+///
+/// Both rows are pinned by `a_chain_past_the_cap_is_refused_rather_than_misread`
+/// against the codec and the walker together, so the mirror claim is a
+/// MEASURED one rather than an inspection of two loops that look alike.
 fn walk_ext_chain_z(c: &mut SpanCursor<'_>, max: usize) -> Result<Vec<Field>, CodecError> {
     let mut out = Vec::new();
-    let mut last_says_continue = false;
+    let mut more = false;
     for _ in 0..max {
         if c.remaining() == 0 {
             break;
         }
         let (z, f) = walk_ext_entry(c)?;
         out.push(f);
-        last_says_continue = z;
+        more = z;
         if !z {
             break;
         }
     }
-    if crate::ext_chain::chain_saturated(out.len(), max, last_says_continue) {
+    if more && c.remaining() == 0 {
+        return Err(CodecError::NeedMoreBytes);
+    }
+    if more {
         return Err(CodecError::TlvChainOverflow);
     }
     Ok(out)
@@ -2029,54 +2046,115 @@ mod tests {
         );
     }
 
-    /// Two claims, and both halves matter:
+    /// R311y589 — the three rows the entry-flag chain can end on, asserted
+    /// against the CODEC and the WALKER together so "the walker mirrors the
+    /// codec" is a measurement rather than an inspection of two loops that
+    /// look alike.
     ///
-    /// 1. the WALKER refuses — the observer never draws a wrong tree;
-    /// 2. the CODEC still misreads — pinned here so the defect is a measured
-    ///    fact with a witness rather than a note. When SCE honours
-    ///    `on-overflow="reject"` on the entry-flag path, THIS half flips, and
-    ///    that is the signal to delete wz's compensating check rather than
-    ///    carry it forever.
+    /// R311y582 (A1) wrote this test with two halves: the walker refused and
+    /// the codec MISREAD, and the second half was pinned precisely so it would
+    /// flip when SCE honoured `on-overflow="reject"`. It flipped (`ec3b032984`),
+    /// and this is the post-flip statement.
+    ///
+    /// | row | chain ends because | cursor | both must answer |
+    /// |-----|--------------------|--------|------------------|
+    /// | 1 | the cap refused an entry the peer sent | non-empty | `TlvChainOverflow` |
+    /// | 2 | the peer's frame ended mid-chain | empty | `NeedMoreBytes` |
+    /// | 3 | the wire's own terminator, AT the cap | empty | `Ok`, real payload |
+    ///
+    /// Row 3 is the CONTROL and it is not decoration: a guard that refused
+    /// every chain would satisfy rows 1 and 2 and prove nothing. Row 2 is the
+    /// DISCRIMINATOR — a second failure on this path that R311y582's report to
+    /// SCE never named, and the one the pre-fix codec answered `Ok` on.
     #[test]
     fn a_chain_past_the_cap_is_refused_rather_than_misread() {
         let cap = crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH;
         let payload = [0xAAu8, 0xBB, 0xCC];
-        // ONE more extension than the cap, derived rather than written out:
-        // the first version of this test hardcoded five, and raising the cap
-        // in the same round turned it green while proving nothing. The
-        // terminating entry's id is 3 so its header byte (0x03) is exactly the
-        // VLE the codec mistakes for `payload_len` — that choice is what makes
-        // the misread SUCCEED instead of running off the end, and it holds at
-        // any cap.
+
+        // ── Row 1: ONE more extension than the cap, derived rather than
+        //    written out (the first version hardcoded five and raising the cap
+        //    in the same round turned it green while proving nothing). The
+        //    terminating entry's id is 3 so its header byte (0x03) is exactly
+        //    the VLE the OLD codec mistook for `payload_len` — that choice is
+        //    what made the misread SUCCEED with `[0x03, 0xAA, 0xBB]` instead of
+        //    running off the end, and it holds at any cap. The bytes after the
+        //    chain are the reason this row is `TlvChainOverflow` and not row 2's
+        //    `NeedMoreBytes`: the cursor is NOT empty, so the cap is what
+        //    refused, not the frame length.
         let mut exts: Vec<Vec<u8>> = (1..=cap).map(|i| ext_unit(i as u8, true)).collect();
         exts.push(ext_unit(0x3, false));
-        let bytes = msg_put(None, None, &exts, &payload);
+        let over = msg_put(None, None, &exts, &payload);
 
-        // (1) The observer refuses rather than reporting a wrong payload.
-        let mut w = SpanCursor::new(&bytes);
+        let mut w = SpanCursor::new(&over);
         assert_eq!(
             walk_msg_put(&mut w).err(),
             Some(CodecError::TlvChainOverflow),
             "the walker accepted a chain that never terminated inside the bound"
         );
-
-        // (2) The generated codec, for now, does NOT — and this is what that
-        //     costs. `payload_len` is read from the overflowing extension's
-        //     header byte, so the payload is three bytes that were never the
-        //     payload and one wire byte is left behind to desynchronise
-        //     whatever follows in the batch.
         {
-            let mut c = SceCursor::new(&bytes);
-            let m = wz_codecs::msg_put::MsgPut::decode(&mut c)
-                .expect("the codec is expected to accept this today, silently");
-            assert_eq!(m.extensions.as_ref().map_or(0, |e| e.len()), cap);
+            let mut c = SceCursor::new(&over);
             assert_eq!(
-                m.payload,
-                &[0x03u8, 0xAA, 0xBB],
-                "if this changed, SCE now honours on-overflow on the entry-flag \
-                 path and wz's compensating check in walk_ext_chain_z can go"
+                wz_codecs::msg_put::MsgPut::decode(&mut c).err(),
+                Some(CodecError::TlvChainOverflow),
+                "the codec misread a saturated chain instead of refusing it"
             );
-            assert_eq!(c.remaining(), 1, "one byte of the message left unread");
+        }
+
+        // ── Row 2: the chain is the LAST field and its final entry still says
+        //    "continue". `Interest` is exactly that shape, which is why it is
+        //    the fixture and `MsgPut` is not: on `MsgPut` a short chain is
+        //    masked, because reading `payload_len` hits EOF and fails anyway.
+        //    Here nothing follows, so before `ec3b032984` the decode reported a
+        //    truncated chain as a FINISHED one — `Ok` with three extensions and
+        //    an empty cursor. The cap is never reached, so no overflow policy
+        //    is in play and the refusal is `NeedMoreBytes`, independently of
+        //    `on-overflow`.
+        let short = concat(&[
+            alloc::vec![0x19u8 | 0x80], // Interest, Z set, no C/F body
+            vle(5),
+            ext_unit(1, true),
+            ext_unit(2, true),
+            ext_unit(3, true), // says "continue" — and then the frame ends
+        ]);
+        assert!(
+            short.len() < cap + 5,
+            "row 2 must stop BELOW the cap, or it is row 1 in disguise"
+        );
+
+        let mut w = SpanCursor::new(&short);
+        assert_eq!(
+            walk_interest(&mut w).err(),
+            Some(CodecError::NeedMoreBytes),
+            "the walker reported a truncated chain as a finished one"
+        );
+        {
+            let mut c = SceCursor::new(&short);
+            assert_eq!(
+                wz_codecs::interest::Interest::decode(&mut c).err(),
+                Some(CodecError::NeedMoreBytes),
+                "the codec reported a truncated chain as a finished one"
+            );
+        }
+
+        // ── Row 3, THE CONTROL: the chain fills the cap EXACTLY and the last
+        //    entry clears Z, so the wire itself terminated it. The field after
+        //    the chain must still read its own bytes. A guard that refused
+        //    everything would pass rows 1 and 2 and fail here.
+        let exact: Vec<Vec<u8>> = (1..=cap).map(|i| ext_unit(i as u8, i != cap)).collect();
+        let ok = msg_put(None, None, &exact, &payload);
+
+        let mut w = SpanCursor::new(&ok);
+        let fields = walk_msg_put(&mut w).expect("a chain terminated at the cap must walk");
+        let root = group("MsgPut", 0, ok.len(), fields);
+        assert_eq!(raw(&root, "payload"), payload.to_vec());
+        assert_eq!(w.remaining(), 0, "the walker left bytes unread");
+        {
+            let mut c = SceCursor::new(&ok);
+            let m = wz_codecs::msg_put::MsgPut::decode(&mut c)
+                .expect("a chain terminated at the cap must decode");
+            assert_eq!(m.extensions.as_ref().map_or(0, |e| e.len()), cap);
+            assert_eq!(m.payload, &payload);
+            assert_eq!(c.remaining(), 0, "the codec left bytes unread");
         }
     }
 

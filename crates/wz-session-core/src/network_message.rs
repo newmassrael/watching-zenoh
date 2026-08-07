@@ -361,41 +361,34 @@ fn decode_one_record(
         #[cfg(feature = "codec-request")]
         wire_const::N_MID_REQUEST => {
             let req = wz_codecs::request::Request::decode(cursor)?;
-            crate::ext_chain::check_request(&req)?;
             out.push(NetworkMessage::Request(Box::new(req.try_into_owned()?)));
         }
         #[cfg(feature = "codec-push")]
         wire_const::N_MID_PUSH => {
             let push = wz_codecs::push::Push::decode(cursor)?;
-            crate::ext_chain::check_push(&push)?;
             out.push(NetworkMessage::Push(Box::new(push.try_into_owned()?)));
         }
         #[cfg(feature = "codec-response-final")]
         wire_const::N_MID_RESPONSE_FINAL => {
             let rf = wz_codecs::response_final::ResponseFinal::decode(cursor)?;
-            crate::ext_chain::check_chain(rf.extensions.as_ref())?;
             out.push(NetworkMessage::ResponseFinal(rf.try_into_owned()?));
         }
         wire_const::N_MID_OAM => {
             let oam = wz_codecs::oam::Oam::decode(cursor)?;
-            crate::ext_chain::check_chain(oam.extensions.as_ref())?;
             out.push(NetworkMessage::Oam(oam.try_into_owned()?));
         }
         wire_const::N_MID_INTEREST => {
             let interest = wz_codecs::interest::Interest::decode(cursor)?;
-            crate::ext_chain::check_chain(interest.extensions.as_ref())?;
             out.push(NetworkMessage::Interest(interest.try_into_owned()?));
         }
         #[cfg(feature = "codec-response")]
         wire_const::N_MID_RESPONSE => {
             let resp = wz_codecs::response::Response::decode(cursor)?;
-            crate::ext_chain::check_response(&resp)?;
             out.push(NetworkMessage::Response(Box::new(resp.try_into_owned()?)));
         }
         #[cfg(feature = "codec-declare")]
         wire_const::N_MID_DECLARE => {
             let decl = wz_codecs::declare::Declare::decode(cursor)?;
-            crate::ext_chain::check_declare(&decl)?;
             out.push(NetworkMessage::Declare(Box::new(decl.try_into_owned()?)));
         }
         _ => return Ok(false),
@@ -404,9 +397,17 @@ fn decode_one_record(
 }
 
 // ── R311y582 — A1: a chain that never terminated must not reach a consumer.
-//    The check lives in `crate::ext_chain`; these are its firing legs. A rule
-//    that is merely PRESENT proves nothing, so each leg damages one thing and
-//    is paired with the control that leaves it green. ──
+//    A rule that is merely PRESENT proves nothing, so each leg damages one
+//    thing and is paired with the control that leaves it green.
+//
+//    R311y589 — the check no longer lives in `crate::ext_chain`: SCE landed
+//    `on-overflow="reject"` on the entry-flag path (`ec3b032984`) and the
+//    GENERATED decode refuses now, so wz's compensating seam was deleted. These
+//    tests were deliberately NOT deleted with it. They assert the CONTRACT —
+//    what a wz participant must never act on — and the contract outlives
+//    whichever layer enforces it; that they still pass with the seam gone is
+//    the measurement that the codec took the work over, rather than an
+//    inspection of the emit. ──
 #[cfg(all(test, feature = "codec-frame", feature = "codec-push"))]
 mod chain_saturation_tests {
     use super::*;

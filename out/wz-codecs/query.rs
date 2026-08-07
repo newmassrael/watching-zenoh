@@ -116,13 +116,16 @@ impl<'a> Query<'a> {
         let extensions = if (header & 0x80u8) != 0 {
             let mut _vec: HeaplessVec<ExtEntry<'a>, 8> = HeaplessVec::new();
             for _ in 0..8u32 {
-                    if cursor.remaining() == 0 { break; }
-                    _vec.push(ExtEntry::decode(cursor)?)
-                        .map_err(|_| CodecError::TooManyElements)?;
-                }
-                if cursor.remaining() > 0 {
-                    return Err(CodecError::TlvChainOverflow);
-                }
+                if cursor.remaining() == 0 { break; }
+                // Bounded by max-depth on both sides — loop count and `_vec`
+                // capacity are the same literal — so this push cannot fail. An
+                // over-long chain is refused by the guard after the loop.
+                _vec.push(ExtEntry::decode(cursor)?)
+                    .map_err(|_| CodecError::TooManyElements)?;
+            }
+            if cursor.remaining() > 0 {
+                return Err(CodecError::TlvChainOverflow);
+            }
             Some(_vec)
         } else {
             None
