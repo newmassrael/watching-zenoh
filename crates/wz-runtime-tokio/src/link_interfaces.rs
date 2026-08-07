@@ -437,7 +437,15 @@ pub fn multicast_iface_selector_v4(iface: &str) -> std::io::Result<Option<std::n
     Ok(None)
 }
 
-#[cfg(test)]
+// R311y581 — gated on `unix`, not just `test`. EVERY test below is
+// `#[cfg(unix)]` (they all need a POSIX interface table), so on Windows this
+// module compiled to a `use super::*` with no consumer and the whole lib-test
+// build failed `-D warnings` with `unused import`. Nothing had ever compiled it
+// there: the portability lane ran `clippy` on the LIB, which does not build the
+// test target, and the first `cargo test --lib` on Windows is what surfaced it.
+// Gating the module is exactly equivalent to the ten per-test gates it replaces
+// and leaves no dead import to allow away.
+#[cfg(all(test, unix))]
 mod tests {
     /// The loopback interface's NAME, discovered rather than assumed.
     ///
@@ -456,7 +464,6 @@ mod tests {
     /// `interface_names_for(127.0.0.1)`: that would make
     /// `the_two_resolution_directions_agree_on_loopback` circular, since
     /// witnessing exactly that pair is the test's whole purpose.
-    #[cfg(unix)]
     fn loopback_iface_name() -> &'static str {
         // `lo` on Linux, `lo0` on macOS and the BSDs.
         for candidate in ["lo", "lo0"] {
@@ -472,7 +479,6 @@ mod tests {
     /// The loopback address must resolve to at least one interface on any host
     /// this test can run on, and the resolution must be a definite `Some`.
     #[test]
-    #[cfg(unix)]
     fn loopback_resolves_to_a_named_interface() {
         let names = interface_names_for(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
             .expect("getifaddrs resolves on a unix host");
@@ -486,7 +492,6 @@ mod tests {
     /// definite negative, NOT an error. This is the distinction zenoh collapses:
     /// upstream returns `vec![]` for this case AND for a failed lookup.
     #[test]
-    #[cfg(unix)]
     fn a_foreign_address_resolves_to_a_definite_empty_set() {
         // TEST-NET-1 (RFC5737) — reserved for documentation, never assigned to a
         // host interface.
@@ -503,7 +508,6 @@ mod tests {
     /// own syscall: the expected address is a constant of the loopback contract,
     /// not something the function under test chose.
     #[test]
-    #[cfg(unix)]
     fn the_loopback_interface_resolves_to_its_loopback_address() {
         let lo = loopback_iface_name();
         let addrs =
@@ -522,7 +526,6 @@ mod tests {
     /// `Undetermined`. This is the boundary the honor policy turns on: `NotFound`
     /// is upstream's hard error, `Undetermined` is the platform warn.
     #[test]
-    #[cfg(unix)]
     fn an_absent_interface_name_is_not_found_rather_than_undetermined() {
         // IFNAMSIZ caps a real device name at 15 bytes, and `/` is not legal in
         // one, so this name cannot collide with a host interface.
@@ -541,7 +544,7 @@ mod tests {
     /// :228-230). Checked with an address NO interface carries, so it can only pass
     /// if the literal short-circuits the table walk.
     #[test]
-    #[cfg(all(unix, feature = "locator-iface"))]
+    #[cfg(feature = "locator-iface")]
     fn a_multicast_iface_given_as_an_address_literal_skips_the_interface_lookup() {
         // TEST-NET-1 (RFC5737): reserved for documentation, never on a host NIC. A
         // name-based resolution of it would be NotFound.
@@ -556,7 +559,7 @@ mod tests {
 
     /// A NAME resolves through the interface table to that interface's v4 address.
     #[test]
-    #[cfg(all(unix, feature = "locator-iface"))]
+    #[cfg(feature = "locator-iface")]
     fn a_multicast_iface_given_as_a_name_resolves_to_its_v4_address() {
         let lo = loopback_iface_name();
         let selector =
@@ -573,7 +576,7 @@ mod tests {
     /// the boundary the policy turns on: silently falling back would pin the group to
     /// an interface the config never named.
     #[test]
-    #[cfg(all(unix, feature = "locator-iface"))]
+    #[cfg(feature = "locator-iface")]
     fn an_absent_multicast_iface_refuses_the_bind_rather_than_warning() {
         let err = multicast_iface_selector_v4("wz/no/such/dev")
             .expect_err("an unnameable device must not yield a selector");
@@ -600,7 +603,6 @@ mod tests {
     /// checks nothing — but the `carrier == 1` direction still asserts on every one
     /// of them, so the test is never vacuous.
     #[test]
-    #[cfg(unix)]
     fn the_carrier_verdict_agrees_with_sysfs_for_every_interface() {
         let entries = match std::fs::read_dir("/sys/class/net") {
             Ok(e) => e,
@@ -646,7 +648,6 @@ mod tests {
     /// BACK to a name set containing `lo`. Neither function can satisfy this
     /// alone, so it witnesses the pair rather than either one's own output.
     #[test]
-    #[cfg(unix)]
     fn the_two_resolution_directions_agree_on_loopback() {
         let lo = loopback_iface_name();
         let addrs = unicast_addresses_of_interface(lo).expect("the loopback resolves");
@@ -663,7 +664,6 @@ mod tests {
     /// The wildcard address is on EVERY interface (zenoh's same arm), so it must
     /// be a strict superset of what a specific local address resolves to.
     #[test]
-    #[cfg(unix)]
     fn the_unspecified_address_covers_every_interface() {
         let all = interface_names_for(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
             .expect("getifaddrs resolves");
