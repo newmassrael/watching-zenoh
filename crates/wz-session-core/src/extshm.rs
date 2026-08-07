@@ -112,7 +112,7 @@ pub fn body_has_shm_marker(extensions: &[ExtEntryOwned]) -> bool {
 /// same-host trusted peers the capability AND-merge correctly gates the data
 /// path. No M bit (a non-SHM peer drops the offer silently).
 #[cfg(feature = "session-extshm")]
-pub const SHM_ESTABLISHMENT_EXT_ID: u8 = 0x02;
+pub const SHM_ESTABLISHMENT_EXT_ID: u8 = crate::ext_header::establishment_ext_id::SHM;
 
 /// Build the establishment SHM capability offer (the UNIT ext on Init / Open,
 /// the [`crate::unit_ext`] mechanism at the SHM establishment id).

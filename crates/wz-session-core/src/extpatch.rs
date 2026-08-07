@@ -59,7 +59,7 @@ use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 /// establishment (Init / Open) ext space (`0x1` QoS, `0x2` Shm, `0x3`
 /// Auth, `0x4` MultiLink, `0x5` LowLatency, `0x6` Compression, `0x7`
 /// Patch).
-pub const PATCH_EXT_ID: u8 = 0x07;
+pub const PATCH_EXT_ID: u8 = crate::ext_header::establishment_ext_id::PATCH;
 
 /// zenoh `PatchType::NONE` — a peer that announced no patch extension.
 /// Fragment chain-boundary markers are OFF against such a peer.

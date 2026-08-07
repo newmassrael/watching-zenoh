@@ -58,3 +58,46 @@ pub fn ext_id(header: u8) -> u8 {
 pub fn ext_eid(header: u8) -> u8 {
     header & !EXT_FLAG_Z
 }
+
+/// R311y578 — the ESTABLISHMENT (Init / Open) extension id space, as one
+/// table.
+///
+/// The seven ids below were already written down verbatim, as PROSE, in the
+/// module docs of `extqos` / `extshm` / `extauth` / `extmultilink` /
+/// `extlowlatency` / `extcompression` / `extpatch` ("0x1 QoS, 0x2 Shm, 0x3
+/// Auth, 0x4 MultiLink, 0x5 LowLatency, 0x6 Compression, 0x7 Patch"). Each of
+/// those modules keeps its OWN named constant + its zenoh citation — the
+/// discoverable per-capability SSOT — and now derives its value from here, so
+/// the id space is a machine-checkable table rather than seven copies of a
+/// sentence.
+///
+/// The table lives in this UNCONDITIONAL module for a reason a per-capability
+/// constant cannot serve: each of those modules is gated on the feature that
+/// IMPLEMENTS its capability, and an OBSERVER must read ids whose capability
+/// its own build does not implement. A dissector reading a foreign session
+/// still has to recognise the `0x5` on the wire to know the flow reframes to a
+/// 4-byte prefix, whether or not this build could ever negotiate lowlatency.
+///
+/// Ids are the 4-bit id FIELD. Match with [`ext_eid`], not with these values
+/// alone: the encoding bits are part of an extension's identity (R311y505).
+pub mod establishment_ext_id {
+    /// `init::ext::QoS` — `zextunit!(0x1, false)`; also the id of the z64
+    /// `QoSLink`, which is a DIFFERENT extension sharing the id field.
+    pub const QOS: u8 = 0x01;
+    /// `init::ext::Shm` — `zextzbuf!(0x2, false)`; wz additionally offers a
+    /// UNIT form on the same id.
+    pub const SHM: u8 = 0x02;
+    /// `init::ext::Auth` — the Z_EXT_AUTH carrier.
+    pub const AUTH: u8 = 0x03;
+    /// `init::ext::MultiLink`.
+    pub const MULTILINK: u8 = 0x04;
+    /// `init::ext::LowLatency` / `open::ext::LowLatency` —
+    /// `zextunit!(0x5, false)`. Presence on BOTH sides reframes the stream to
+    /// a 4-byte LE length prefix once established.
+    pub const LOWLATENCY: u8 = 0x05;
+    /// `init::ext::Compression` — `zextunit!(0x6, false)`. Presence on both
+    /// sides wraps every post-establishment batch body.
+    pub const COMPRESSION: u8 = 0x06;
+    /// `_Z_MSG_EXT_ID_INIT_PATCH` — the z64 protocol patch LEVEL.
+    pub const PATCH: u8 = 0x07;
+}

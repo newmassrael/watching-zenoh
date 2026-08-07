@@ -56,7 +56,7 @@ use crate::auth_dispatch::{AuthError, AuthMethod, AuthSubExt};
 /// from the `0x3` auth ext ([`AUTH_EXT_ID`](crate::extauth::AUTH_EXT_ID)):
 /// establishment messages have their own ext id space (0x1 QoS, 0x2 Shm, 0x3
 /// Auth, 0x4 MultiLink, 0x5 LowLatency, 0x6 Compression, 0x7 Patch).
-pub const MULTILINK_EXT_ID: u8 = 0x04;
+pub const MULTILINK_EXT_ID: u8 = crate::ext_header::establishment_ext_id::MULTILINK;
 
 /// zenoh's `close::reason::INVALID` (0x02) — the wire close-reason code for a
 /// link rejected because its captured ephemeral multilink pubkey did NOT match

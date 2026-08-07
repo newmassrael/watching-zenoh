@@ -35,7 +35,7 @@ use wz_codecs::ext_zbuf::ExtZbufOwned;
 /// data-plane attachment ext (also `0x03` but on the Push / Query carrier);
 /// establishment messages have their own ext id space (0x1 QoS, 0x2 Shm,
 /// 0x3 Auth, 0x4 MultiLink, 0x5 LowLatency, 0x6 Compression, 0x7 Patch).
-pub const AUTH_EXT_ID: u8 = 0x03;
+pub const AUTH_EXT_ID: u8 = crate::ext_header::establishment_ext_id::AUTH;
 
 /// Build the Z_EXT_AUTH `ExtEntry` carrying `payload` (the negotiated method's
 /// challenge / response bytes). The header is the auth id with the ENC_ZBUF

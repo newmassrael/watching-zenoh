@@ -49,7 +49,7 @@ use crate::unit_ext::{chain_has_ext_eid, encode_unit_ext};
 /// `init.rs:162` / `open.rs:128` `zextunit!(0x5, false)`. The establishment
 /// messages have their own ext id space (0x1 QoS, 0x2 Shm, 0x3 Auth,
 /// 0x4 MultiLink, 0x5 LowLatency, 0x6 Compression, 0x7 Patch).
-pub const LOWLATENCY_EXT_ID: u8 = 0x05;
+pub const LOWLATENCY_EXT_ID: u8 = crate::ext_header::establishment_ext_id::LOWLATENCY;
 
 /// Build the Z_EXT_LOWLATENCY `ExtEntry`: the unit (zero-length) marker that
 /// advertises lowlatency capability (the [`crate::unit_ext`] mechanism at the

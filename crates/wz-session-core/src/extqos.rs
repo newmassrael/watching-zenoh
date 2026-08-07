@@ -52,7 +52,7 @@ use crate::unit_ext::{chain_has_ext_eid, encode_unit_ext};
 /// (link). The establishment messages have their own ext id space (0x1 QoS,
 /// 0x2 Shm, 0x3 Auth, 0x4 MultiLink, 0x5 LowLatency, 0x6 Compression,
 /// 0x7 Patch).
-pub const QOS_EXT_ID: u8 = 0x01;
+pub const QOS_EXT_ID: u8 = crate::ext_header::establishment_ext_id::QOS;
 
 /// Build the Z_EXT_QOS `ExtEntry`: the presence-only UNIT marker wz advertises
 /// (the [`crate::unit_ext`] mechanism at the QoS id). zenoh

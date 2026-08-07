@@ -806,6 +806,21 @@ pub mod unit_ext;
 #[cfg(any(feature = "reassembly", feature = "transport-fragmentation"))]
 pub mod extfragment;
 
+/// R311y578 (G2) — the PASSIVE session-context tracker: the observer-side
+/// counterpart to `session_actions`'s participant state. Folds BOTH sides'
+/// Init offers (a participant computes only its own half), tracks the phase
+/// that decides when the stream reframes to the lowlatency 4-byte prefix, and
+/// de-frames each direction's byte stream into decoded transport messages.
+/// No I/O: capture ingest is a layer above.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-frame"
+))]
+pub mod passive;
+
 /// R311y578 — SSOT for the `0x7` PATCH establishment ext: the protocol patch
 /// LEVEL wz announces (R121f1) and, newly, the peer's half plus the `min()`
 /// negotiation over it. The negotiated level is the sole gate on the
