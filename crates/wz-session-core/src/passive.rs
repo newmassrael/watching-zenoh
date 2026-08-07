@@ -51,7 +51,14 @@ use alloc::vec::Vec;
 
 use crate::ext_header::{establishment_ext_id as est_ext, ext_eid};
 use crate::inbound::{parse_inbound, InboundFrame};
+#[cfg(feature = "codec-frame")]
+use crate::network_message::{parse_frame_payload_best_effort, BatchParse};
 use crate::parse_error::InboundParseError;
+use crate::peer_init_caps::PeerInitCaps;
+#[cfg(feature = "reassembly")]
+use crate::reassembly_dispatch::{
+    Fragment as ReasmFragment, IngestOutcome, ReassemblyConfig, ReassemblyDispatcher,
+};
 use wz_codecs::ext_entry::ExtEntryOwned;
 
 /// The universal stream length-prefix width: 2-byte LE `u16`.
@@ -148,6 +155,24 @@ pub struct FlowContext {
     /// Whether a `MultiLink` (`0x4`) extension rode either Init: this session
     /// may span more flows than the one being read.
     pub multilink_offered: bool,
+    /// R311y583 (A5) — the session's effective size parameters, `None` until
+    /// an InitAck has been observed.
+    ///
+    /// Taken from the ACK and not folded, because the negotiation is not a
+    /// fold: zenoh requires every InitAck size parameter to be less than or
+    /// equal to the InitSyn's and REJECTS a peer that enlarges one
+    /// (`peer_init_caps::init_ack_exceeds_advertisement`, zenoh-pico
+    /// `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION`). So the acceptor's answer IS the
+    /// session value, and an observer can read it directly — it has the
+    /// `is_ack` bit that tells the two Inits apart, which is the one thing
+    /// this needs that a `&=` fold would throw away.
+    ///
+    /// Decoded through [`PeerInitCaps::from_init_body`] rather than by
+    /// re-splitting the packed `sn_res` byte here: that byte is
+    /// `(seq_num_res & 0x03) | ((req_id_res & 0x03) << 2)` and the S-clear
+    /// defaults are non-obvious, so a second decoder would be a second place
+    /// to get it wrong.
+    pub caps: Option<PeerInitCaps>,
 }
 
 impl Default for FlowContext {
@@ -165,6 +190,7 @@ impl Default for FlowContext {
             auth_offered: false,
             shm_offered: false,
             multilink_offered: false,
+            caps: None,
         }
     }
 }
@@ -211,6 +237,18 @@ impl FlowContext {
     /// zenoh `PatchType::has_fragmentation_markers` over the negotiated level
     /// — whether the Fragment `First` / `Drop` markers may be enforced on this
     /// flow ([`crate::extfragment`]). `false` while no Init has been seen.
+    /// R311y583 (A5) — the SN ring mask this session's fragment chains are
+    /// compared at ([`crate::sn::mask_from_res`]).
+    ///
+    /// `None` until an InitAck has been observed, and a caller must NOT
+    /// substitute a default: a mask that is too WIDE reads a legitimate
+    /// wraparound as a gap, and one too NARROW reads a gap as a wraparound.
+    /// Both produce a reassembly verdict that looks decisive and is not, which
+    /// is why this returns an absence rather than a guess.
+    pub fn sn_mask(&self) -> Option<u64> {
+        self.caps.map(|c| crate::sn::mask_from_res(c.seq_num_res))
+    }
+
     pub fn fragmentation_markers(&self) -> bool {
         self.patch
             .is_some_and(crate::extpatch::has_fragmentation_markers)
@@ -274,6 +312,55 @@ pub struct PassiveFrame {
     /// than borrowed so a consumer can keep a decoded frame beside the
     /// contract it was read under.
     pub context: FlowContext,
+    /// R311y583 (A2) — what this frame carried ABOVE the transport layer.
+    ///
+    /// Before A2 the tracker stopped here and every consumer re-did the same
+    /// three connections itself: decompress the body when the session
+    /// negotiated it, walk the batch, and drive a chain over Fragments. All
+    /// three need the negotiated context, which is the thing this type exists
+    /// to hold, so leaving them out made the context inferred and then unused
+    /// by its own crate.
+    pub carried: Carried,
+}
+
+/// R311y583 (A2) — the layer above a transport frame, as far as an observer
+/// can take it.
+///
+/// Every arm that is not [`Carried::Batch`] names a REASON rather than
+/// collapsing to an empty batch. A dissector's whole value is that "nothing
+/// here" and "something here I could not read, and here is why" are different
+/// answers on screen.
+#[derive(Debug)]
+#[cfg(feature = "codec-frame")]
+pub enum Carried {
+    /// The frame carries no network batch: a handshake message, a keepalive,
+    /// or a frame this build's features cannot decode.
+    Nothing,
+    /// The batch this frame carried, walked best-effort — every record that
+    /// decoded, plus where the walk stopped if it did
+    /// ([`crate::network_message::parse_frame_payload_best_effort`]).
+    Batch(BatchParse),
+    /// The session negotiated `Compression` and lz4 refused the body. NOT an
+    /// empty batch: the bytes were there and are unreadable, which is a
+    /// different fact from a frame that carried nothing.
+    Undecompressible,
+    /// A fragment that did not complete a chain, and what the chain router
+    /// made of it — including the refusals and aborts, which are exactly the
+    /// events a loss-tracking view wants.
+    #[cfg(feature = "reassembly")]
+    Fragment(IngestOutcome),
+    /// A fragment that COMPLETED a chain, and the batch reassembled out of it.
+    #[cfg(feature = "reassembly")]
+    Reassembled(BatchParse),
+    /// A fragment arrived before this observer saw an InitAck, so the
+    /// session's SN resolution is unknown and no chain can be tracked.
+    ///
+    /// Not a guess with a default mask: a mask that is too wide reads a
+    /// wraparound as a gap and one too narrow reads a gap as a wraparound, so
+    /// a defaulted verdict would look decisive and be arbitrary. The ordinary
+    /// cause is a capture that started mid-session.
+    #[cfg(feature = "reassembly")]
+    FragmentWithoutResolution,
 }
 
 /// Why the observer cannot produce the next frame yet, or at all.
@@ -308,17 +395,98 @@ struct DirectionStream {
 /// Feed it bytes with [`Self::push`] and pull decoded frames with
 /// [`Self::next_frame`]. It never blocks, never allocates per frame beyond the
 /// decode itself, and holds only the unconsumed tail of each direction.
-#[derive(Debug, Default)]
+// No `Debug`: the chain routers hold a staging buffer per slot and
+// `ReassemblyDispatcher` deliberately does not derive it either — a debug
+// print of an observer mid-reassembly would dump every buffered chain.
 pub struct PassiveSession {
     context: FlowContext,
     a: DirectionStream,
     b: DirectionStream,
+    /// R311y583 (A2) — one chain router PER DIRECTION.
+    ///
+    /// A participant keys chains by peer zid because it faces many peers over
+    /// one router. An observer faces exactly two half-sessions and may never
+    /// learn either zid (a capture that starts mid-session has no Init), so
+    /// the direction IS the peer key here and the split is structural rather
+    /// than a lookup.
+    ///
+    /// `CAP` is advisory on the `alloc` backing this module requires
+    /// ([`crate::bounded::BoundedVec`]), so the 64 KiB default costs nothing
+    /// until fragments actually arrive; it is a const parameter so a
+    /// constrained observer can still bound it.
+    #[cfg(feature = "reassembly")]
+    reasm: [ReassemblyDispatcher<PASSIVE_CHAIN_SLOTS, PASSIVE_CHAIN_CAP>; 2],
     /// Which directions have contributed an Init. A retransmission (a capture
     /// with duplicates, a TCP retransmit the reassembler let through) must not
     /// fold twice: `&=` is idempotent but `min` on the patch level is only
     /// idempotent for the same value, and the phase transition is not.
     init_seen: [bool; 2],
 }
+
+/// Hand-written so a debug print never dumps buffered chain bytes: the chain
+/// routers hold every fragment staged so far, and a consumer that derives
+/// `Debug` over a `PassiveSession` (as `wz_capture::FlowDissection` does)
+/// would otherwise print a capture's payloads into its own logs. The
+/// occupancy gauge is what a reader actually wants there.
+impl core::fmt::Debug for PassiveSession {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut d = f.debug_struct("PassiveSession");
+        d.field("context", &self.context)
+            .field("a", &self.a)
+            .field("b", &self.b)
+            .field("init_seen", &self.init_seen);
+        #[cfg(feature = "reassembly")]
+        d.field(
+            "open_chains",
+            &[self.reasm[0].active_chains(), self.reasm[1].active_chains()],
+        );
+        d.finish()
+    }
+}
+
+// Derivable ONLY in the arm without `reassembly`, where the chain routers
+// are absent; with them it initialises each from an explicit config.
+#[allow(clippy::derivable_impls)]
+impl Default for PassiveSession {
+    fn default() -> Self {
+        Self {
+            context: FlowContext::default(),
+            a: DirectionStream::default(),
+            b: DirectionStream::default(),
+            init_seen: [false; 2],
+            #[cfg(feature = "reassembly")]
+            reasm: core::array::from_fn(|_| {
+                // An observer cannot enforce a deadline it has no clock for
+                // (see `next_frame`), so the timeout is inert here and the
+                // quota is the only live defence. Markers start off and are
+                // pushed in per frame from the negotiated patch level.
+                ReassemblyDispatcher::new(ReassemblyConfig::new(PASSIVE_CHAIN_QUOTA, u64::MAX))
+            }),
+        }
+    }
+}
+
+/// Concurrently-open chains one observed direction may hold. Matches the AP
+/// participant's per-peer quota shape; an observer has no way to punish a
+/// peer that opens chains it never finishes, so the bound is the defence.
+#[cfg(feature = "reassembly")]
+const PASSIVE_CHAIN_QUOTA: u16 = 4;
+
+/// Chain slots per direction.
+///
+/// Not const parameters on [`PassiveSession`]: a struct's const-param DEFAULT
+/// does not participate in inference, so `PassiveSession::new()` would fail to
+/// resolve at every call site and every consumer would have to spell the two
+/// numbers out. The passive path already requires `alloc`, so it is a host
+/// shape and a second, constrained instantiation would have no user.
+#[cfg(feature = "reassembly")]
+pub const PASSIVE_CHAIN_SLOTS: usize = 4;
+
+/// Reassembled-message ceiling per chain. Advisory on the `alloc` backing
+/// ([`crate::bounded::BoundedVec`]), so it costs nothing until fragments
+/// arrive; it still bounds what a corrupt or hostile chain can accumulate.
+#[cfg(feature = "reassembly")]
+pub const PASSIVE_CHAIN_CAP: usize = 65_536;
 
 impl PassiveSession {
     /// A fresh observer with no bytes and no inferred context.
@@ -380,13 +548,118 @@ impl PassiveSession {
         if let Ok(ref f) = frame {
             self.fold(direction, f);
         }
+        let carried = self.decode_carried(direction, &frame);
         Ok(PassiveFrame {
             direction,
             stream_offset,
             prefix_width: width,
             frame,
             context: self.context,
+            carried,
         })
+    }
+
+    /// R311y583 (A2) — take one decoded transport frame the rest of the way.
+    ///
+    /// Runs AFTER [`Self::fold`], so the context this reads is the one in
+    /// force for this frame rather than the one before it. That ordering is
+    /// load-bearing in exactly one place and it is a real capture: the Open
+    /// that establishes a compressed session is itself uncompressed, and the
+    /// first frame after it is not.
+    #[cfg(feature = "codec-frame")]
+    fn decode_carried(
+        &mut self,
+        direction: Direction,
+        frame: &Result<InboundFrame, InboundParseError>,
+    ) -> Carried {
+        // `direction` selects a chain router, and there are none without
+        // `reassembly`.
+        #[cfg(not(feature = "reassembly"))]
+        let _ = direction;
+        let Ok(f) = frame else {
+            return Carried::Nothing;
+        };
+        match f {
+            InboundFrame::Frame { payload, .. } => match self.batch_of(payload) {
+                Some(b) => Carried::Batch(b),
+                None => Carried::Undecompressible,
+            },
+            #[cfg(feature = "reassembly")]
+            InboundFrame::Fragment {
+                reliable,
+                sn,
+                more,
+                payload,
+                priority,
+                markers,
+                ..
+            } => {
+                let Some(sn_mask) = self.context.sn_mask() else {
+                    return Carried::FragmentWithoutResolution;
+                };
+                let markers_on = self.context.fragmentation_markers();
+                let idx = usize::from(direction == Direction::B);
+                let router = &mut self.reasm[idx];
+                router.set_fragmentation_markers(markers_on);
+                let mut joined: Option<Vec<u8>> = None;
+                // The peer key is the DIRECTION, one byte, because an observer
+                // holds one router per half-session (see the field docs).
+                let key = [idx as u8];
+                let outcome = router.ingest(
+                    ReasmFragment {
+                        peer_key: &key,
+                        reliable: *reliable,
+                        sn: *sn,
+                        more: u8::from(*more),
+                        payload,
+                        priority: *priority,
+                        markers: *markers,
+                    },
+                    sn_mask,
+                    // An observer has no monotonic clock — a capture's
+                    // timestamps are the CAPTURE's, not this session's, and a
+                    // replayed file has none at all. The config's window is
+                    // `u64::MAX` for the same reason, so this instant only
+                    // ever arms a deadline nothing sweeps; the per-direction
+                    // quota is what bounds a chain that never completes.
+                    0,
+                    |bytes| joined = Some(bytes.to_vec()),
+                );
+                match joined {
+                    Some(bytes) => match self.batch_of(&bytes) {
+                        Some(b) => Carried::Reassembled(b),
+                        None => Carried::Undecompressible,
+                    },
+                    None => Carried::Fragment(outcome),
+                }
+            }
+            _ => Carried::Nothing,
+        }
+    }
+
+    /// Decompress if the session negotiated it, then walk the batch.
+    ///
+    /// `None` means the body was lz4-wrapped and would not decompress. The
+    /// ceiling passed to [`crate::compression::decompress_batch`] is the same
+    /// [`MAX_FRAME_PAYLOAD`] that bounds an untrusted length prefix, so a
+    /// corrupt block cannot ask this observer for an arbitrary allocation.
+    #[cfg(feature = "codec-frame")]
+    fn batch_of(&self, body: &[u8]) -> Option<BatchParse> {
+        if self.context.compression_active() {
+            // A build WITHOUT `transport-compression` reports the same
+            // absence, and that is the honest answer rather than a bug: the
+            // bytes are lz4 and this observer cannot read them. Saying so
+            // beats handing the caller a batch parsed out of compressed
+            // bytes, which decodes to confident nonsense.
+            #[cfg(not(feature = "transport-compression"))]
+            return None;
+            #[cfg(feature = "transport-compression")]
+            {
+                let plain = crate::compression::decompress_batch(body, MAX_FRAME_PAYLOAD)?;
+                return Some(parse_frame_payload_best_effort(&plain));
+            }
+        }
+        Some(parse_frame_payload_best_effort(body))
     }
 
     /// Advance the observed context by one decoded frame.
@@ -397,13 +670,25 @@ impl PassiveSession {
     /// negotiation it never observed. Close ends the session.
     fn fold(&mut self, direction: Direction, frame: &InboundFrame) {
         match frame {
-            InboundFrame::Init { extensions, .. } => {
+            InboundFrame::Init {
+                is_ack,
+                body,
+                extensions,
+                ..
+            } => {
                 let idx = usize::from(direction == Direction::B);
                 if self.init_seen[idx] {
                     return;
                 }
                 self.init_seen[idx] = true;
                 self.context.fold_init(extensions);
+                // R311y583 (A5) — the ACK's size parameters ARE the session's.
+                // See `FlowContext::caps` for why this is an assignment and
+                // not a fold.
+                if *is_ack {
+                    self.context.caps =
+                        Some(PeerInitCaps::from_init_body(body.sn_res, body.batch_size));
+                }
                 self.context.phase = if self.init_seen[0] && self.init_seen[1] {
                     SessionPhase::InitComplete
                 } else {
@@ -484,6 +769,55 @@ mod tests {
             wire.extend_from_slice(&crate::ext_chain::encode_ext_chain(&exts));
         }
         wire
+    }
+
+    /// R311y583 (A2) — a `T_MID_FRAME` carrying `payload` as its batch.
+    fn frame_wire(sn: u64, payload: &[u8]) -> Vec<u8> {
+        let mut wire =
+            vec![wz_codecs::wire_const::T_MID_FRAME | wz_codecs::wire_const::FLAG_T_FRAME_R];
+        crate::vle::encode_vle_u64_into(&mut wire, sn);
+        wire.extend_from_slice(payload);
+        wire
+    }
+
+    /// One `T_MID_FRAGMENT`. `more` set means the chain continues.
+    #[cfg(feature = "reassembly")]
+    fn fragment_wire(sn: u64, more: bool, payload: &[u8]) -> Vec<u8> {
+        let mut flags = wz_codecs::wire_const::FLAG_T_FRAGMENT_R;
+        if more {
+            flags |= wz_codecs::wire_const::FLAG_T_FRAGMENT_M;
+        }
+        let mut wire = vec![wz_codecs::wire_const::T_MID_FRAGMENT | flags];
+        crate::vle::encode_vle_u64_into(&mut wire, sn);
+        wire.extend_from_slice(payload);
+        wire
+    }
+
+    /// One encoded OAM record — a real network message through the real
+    /// encoder, so the batch fixture cannot drift from what wz emits.
+    fn oam_record(id: u64) -> Vec<u8> {
+        wz_codecs::oam::Oam {
+            id,
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    /// Drive a session to Established so the post-handshake contracts are in
+    /// force, and return it. `exts` rides BOTH Inits, which is what makes a
+    /// capability negotiated rather than merely offered.
+    fn established(exts: Vec<ExtEntryOwned>) -> PassiveSession {
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &framed(&init_wire(false, exts.clone()), 2));
+        s.push(Direction::B, &framed(&init_wire(true, exts), 2));
+        s.next_frame(Direction::A).expect("init syn");
+        s.next_frame(Direction::B).expect("init ack");
+        s.push(Direction::A, &framed(&open_wire(false), 2));
+        s.push(Direction::B, &framed(&open_wire(true), 2));
+        s.next_frame(Direction::A).expect("open syn");
+        s.next_frame(Direction::B).expect("open ack");
+        assert_eq!(s.context().phase, SessionPhase::Established);
+        s
     }
 
     fn open_wire(is_ack: bool) -> Vec<u8> {
@@ -730,5 +1064,108 @@ mod tests {
             first.len(),
             "the second frame's offset is the first frame's total wire length"
         );
+    }
+
+    /// R311y583 (A2) — the layer the tracker used to stop short of. Before
+    /// this, `carried` did not exist and every consumer walked the batch
+    /// itself.
+    #[test]
+    fn a_frame_carries_its_batch_decoded() {
+        let mut s = established(vec![]);
+        let mut batch = oam_record(7);
+        batch.extend_from_slice(&oam_record(8));
+        s.push(Direction::A, &framed(&frame_wire(0, &batch), 2));
+
+        let f = s.next_frame(Direction::A).expect("frame");
+        match f.carried {
+            Carried::Batch(b) => {
+                assert!(b.is_complete(), "clean batch must not halt: {:?}", b.halt);
+                assert_eq!(b.messages.len(), 2);
+            }
+            other => panic!("expected a decoded batch, got {other:?}"),
+        }
+    }
+
+    /// A frame is not the only thing on the wire, and the handshake messages
+    /// must NOT acquire a phantom empty batch — "carried nothing" and
+    /// "carried an empty batch" are different facts.
+    #[test]
+    fn handshake_frames_carry_nothing() {
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &framed(&init_wire(false, vec![]), 2));
+        let f = s.next_frame(Direction::A).expect("init");
+        assert!(matches!(f.carried, Carried::Nothing));
+    }
+
+    /// A chain across two fragments: the first opens it, the second completes
+    /// it and the reassembled bytes are walked as a batch. This is the whole
+    /// of the fragment half of A2 — a consumer previously got two opaque
+    /// Fragment frames and had to run a dispatcher itself.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_fragment_chain_reassembles_into_a_batch() {
+        let mut s = established(vec![]);
+        // Split ONE OAM record down the middle, so the halves are individually
+        // undecodable and only the join can produce a message. A fixture split
+        // on a record boundary would pass even if the join never happened.
+        let record = oam_record(9);
+        let (head, tail) = record.split_at(1);
+
+        s.push(Direction::A, &framed(&fragment_wire(0, true, head), 2));
+        let first = s.next_frame(Direction::A).expect("fragment 1");
+        assert!(
+            matches!(first.carried, Carried::Fragment(IngestOutcome::Begun)),
+            "expected a chain start, got {:?}",
+            first.carried
+        );
+
+        s.push(Direction::A, &framed(&fragment_wire(1, false, tail), 2));
+        let last = s.next_frame(Direction::A).expect("fragment 2");
+        match last.carried {
+            Carried::Reassembled(b) => {
+                assert!(b.is_complete(), "reassembled batch halted: {:?}", b.halt);
+                assert_eq!(b.messages.len(), 1);
+            }
+            other => panic!("expected a reassembled batch, got {other:?}"),
+        }
+    }
+
+    /// A capture that starts mid-session has no InitAck, so the SN resolution
+    /// is unknown and the observer says so instead of picking a mask. A
+    /// defaulted mask reads a wraparound as a gap or the reverse, and either
+    /// verdict would look decisive.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_fragment_without_an_observed_initack_is_named_not_guessed() {
+        let mut s = PassiveSession::new();
+        assert_eq!(s.context().sn_mask(), None);
+        s.push(Direction::A, &framed(&fragment_wire(0, true, b"x"), 2));
+        let f = s.next_frame(Direction::A).expect("fragment");
+        assert!(
+            matches!(f.carried, Carried::FragmentWithoutResolution),
+            "got {:?}",
+            f.carried
+        );
+    }
+
+    /// R311y583 (A5) — the InitAck's size parameters ARE the session's, and
+    /// the observer reads them off the ACK rather than folding both Inits.
+    #[test]
+    fn the_initack_supplies_the_size_parameters() {
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &framed(&init_wire(false, vec![]), 2));
+        s.next_frame(Direction::A).expect("syn");
+        assert!(
+            s.context().caps.is_none(),
+            "a SYN alone must not settle the size parameters"
+        );
+        s.push(Direction::B, &framed(&init_wire(true, vec![]), 2));
+        s.next_frame(Direction::B).expect("ack");
+        let caps = s.context().caps.expect("the ACK settles them");
+        // The fixture sends no S-bit fields, so these are the wire defaults
+        // `decode_wire_caps` applies, not values this test invented.
+        assert_eq!(caps.seq_num_res, 2);
+        assert_eq!(caps.batch_size, 65535);
+        assert_eq!(s.context().sn_mask(), Some(crate::sn::mask_from_res(2)));
     }
 }
