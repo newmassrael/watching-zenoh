@@ -349,6 +349,14 @@ pub mod locator;
 #[cfg(feature = "transport-link-serial")]
 pub mod serial_link;
 
+/// R311y579 (G9) — the raweth (L2) link's FRAMING SSOT: the 16 / 20-byte
+/// Ethernet header zenoh-pico's raweth transport puts a batch inside, its
+/// source-MAC allow-list, and the `reth/` locator. Pure data, `no_std` +
+/// alloc; the AF_PACKET socket that carries it lives in wz-runtime-tokio,
+/// the same split as the serial link's.
+#[cfg(feature = "transport-link-raweth")]
+pub mod raweth_link;
+
 /// R311eg — peer-advertised InitSyn capability snapshot (`PeerInitCaps`,
 /// three integer fields + a `from_init_body` decoder). Pure no_std +
 /// no_alloc; unconditional AND feature-independent (R311kl removed the

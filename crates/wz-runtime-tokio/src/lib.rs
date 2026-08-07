@@ -575,6 +575,13 @@ pub mod config;
 #[cfg(feature = "zenoh-config-emit")]
 pub mod zenoh_config;
 
+/// R311y579 (G9) — the raweth (L2) link's TRANSPORT: an `AF_PACKET` socket and
+/// the [`RawEthIo`](raweth_socket::RawEthIo) seam that lets the framing above
+/// it be driven without `CAP_NET_RAW`. Framing SSOT is
+/// [`wz_session_core::raweth_link`]. Linux-only, like pico's own raweth.
+#[cfg(all(feature = "transport-link-raweth", target_os = "linux"))]
+pub mod raweth_socket;
+
 /// R121k-2 — application-layer remote-declaration registries. Route
 /// decoded `Declare(Decl*|Undecl*)` records to user-registered
 /// callbacks. This round lands `RemoteSubscriberRegistry`

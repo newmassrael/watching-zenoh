@@ -1115,6 +1115,15 @@ config-mutate-runtime = ["routing-peer"]
 # only on a build that HAS them, so this feature does not silently widen the
 # transport surface to obtain a number to emit.
 zenoh-config-emit = []
+# R311y579 (G9) — `transport-link-raweth`: the raweth (L2) link. Forwards to
+# wz-session-core's framing half and pulls `dep:libc` for the AF_PACKET socket
+# (`socket`/`ioctl(SIOCGIFINDEX)`/`bind`/`recvfrom`), the same reason
+# `transport-link-unixpipe` pulls it. The module is ADDITIONALLY gated on
+# `target_os = "linux"` in lib.rs rather than here: pico's own raweth is
+# `#error "Raweth transport only supported on linux systems"`
+# (raweth_unix.c:42), and a feature that refused to compile on macOS would make
+# the FRAMING half unreachable there too, for no reason -- it is pure data.
+transport-link-raweth = ["wz-session-core/transport-link-raweth", "dep:libc"]
 # R311il — FOUNDATIONAL session gate. Forwards to wz-session-core's
 # `session-unicast`, which codegens the engine-free unicast session FSM
 # (sources/session/session_fsm_unicast.scxml, `--no-std`) into the

@@ -76,6 +76,11 @@ wz-capi-pico = { path = "../wz-capi-pico" }
 # SerialFrameReader}` (the wz serial framing logic under test).
 wz-session-core = { path = "../wz-session-core", features = [
     "transport-link-serial",
+    # R311y579 (G9) — tests/raweth_framing_pico_layout.rs compares wz's raweth
+    # header bytes against the bytes zenoh-pico's OWN structs lay out, compiled
+    # from vendor/zenoh-pico. The framing lives behind this opt-in feature, so
+    # the pin is what puts it in reach.
+    "transport-link-raweth",
     # R311y248 — the layer3 query VALUE byte-parity test
     # (layer3_request.rs::layer3_request_query_value_byte_equivalent) builds a
     # wz Query carrying the value ext via the production

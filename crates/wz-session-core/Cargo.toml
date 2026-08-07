@@ -355,6 +355,14 @@ codec-join = ["wz-codecs/codec-join"]
 # transport-agnostic logic only; the host tty backend (tokio-serial) and
 # the `LinkDriver` impl that drives it live in wz-runtime-tokio.
 transport-link-serial = ["wz-codecs/codec-serial", "alloc"]
+# R311y579 (G9) — `transport-link-raweth`: the raweth (L2) link's FRAMING, the
+# `raweth_link` module. Needs only `alloc` and NO codec feature: unlike serial,
+# raweth adds no per-frame codec (no COBS, no CRC) — the Ethernet header is the
+# whole framing and the payload is an ordinary zenoh batch. The AF_PACKET
+# socket that carries it is a wz-runtime-tokio concern (Linux-only), gated on
+# the feature of the same name there; this half stays no_std so an MCU raweth
+# port has the framing without the socket.
+transport-link-raweth = ["alloc"]
 
 # attachment domain primitive: gates the `attachment` SSOT module (the
 # one attachment-ext encode/decode pair). Selected by the
