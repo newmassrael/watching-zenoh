@@ -2020,6 +2020,14 @@ jobs:
       - name: Layer C1bo — dissection C ABI from real C (R311y587)
         run: bash scripts/run-ci.sh --layer C1bo
 
+      # R311y589 — runtime-zero-copy stopped being an empty flag and became the
+      # first consumer of an `sce:kind="buffer-pool"` emit. Both arena arms run
+      # here for the reason the lane's own comment gives: the seam's claim is
+      # that swapping the arena changes only where the bytes land, and one arm
+      # cannot state that.
+      - name: Layer C1bq — runtime-zero-copy arena, both arms (R311y589)
+        run: bash scripts/run-ci.sh --layer C1bq
+
       - name: Layer C1as — reply source-info (R311y581 wiring)
         run: bash scripts/run-ci.sh --layer C1as
 

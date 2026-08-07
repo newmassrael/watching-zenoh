@@ -637,6 +637,14 @@ codec-frame = ["wz-codecs/codec-frame", "wz-session-core/codec-frame"]
 # and the `InboundFrame::Fragment` parse arm only under this feature.
 reassembly = ["wz-session-core/reassembly", "codec-frame"]
 
+# R311y589 — runtime-zero-copy: reassembly stages into the SCE-generated
+# `sce:kind="buffer-pool"` emit (`crate::zero_copy`) instead of growing a heap
+# buffer per chain. Implies `reassembly` because the arena has nothing to serve
+# without the Router that stages into it; the flag was `[]` and toggled nothing
+# for the whole time the pool FSM had zero callers, which is what the
+# `preset-ap-full` INERT-MEMBER gate existed to say out loud.
+runtime-zero-copy = ["reassembly"]
+
 # transport-fragmentation (R311jm) — forwards the session-core TX
 # fragmentation gate + the runtime `reassembly` RX wiring so the AP
 # profile fragments + reassembles full-duplex.

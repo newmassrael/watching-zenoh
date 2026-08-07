@@ -51,7 +51,26 @@ pub(crate) const REASSEMBLY_SLOT_SIZE: usize = crate::reassembly_pool_ap::SLOT_S
 /// is the per-chain cap the dispatcher enforces explicitly (so reassembly
 /// is bounded on the AP profile too). Shared by the unicast drive loop and
 /// the multicast drive loop — both construct a `TokioReassembly::new(...)`.
+#[cfg(not(feature = "runtime-zero-copy"))]
 pub type TokioReassembly = ReassemblyDispatcher<REASSEMBLY_SLOTS, REASSEMBLY_SLOT_SIZE>;
+
+/// R311y589 — the same Router over the RESERVED arena. `runtime-zero-copy`
+/// swaps only the staging: the chain FSM, the SN arithmetic, the per-peer quota
+/// and the deadline clock are the same code on both arms, which is what makes
+/// `the_two_arenas_reassemble_the_same_bytes` a meaningful comparison rather
+/// than two implementations that happen to agree.
+///
+/// The dims are the SAME constants the arena checks itself against
+/// (`crate::reassembly_pool_ap::SLOT_COUNT` / `SLOT_SIZE`), reached through the
+/// Router's aliases above — so a Router and a pool that disagree cannot be
+/// built, and the assertion in `PooledStaging::new` is the backstop for a
+/// deploy that writes its own dims.
+#[cfg(feature = "runtime-zero-copy")]
+pub type TokioReassembly = ReassemblyDispatcher<
+    REASSEMBLY_SLOTS,
+    REASSEMBLY_SLOT_SIZE,
+    crate::zero_copy::PooledStaging<REASSEMBLY_SLOTS, REASSEMBLY_SLOT_SIZE>,
+>;
 
 /// Reassembly config (`per_peer_quota` / `reassembly_timeout_ms`) sourced
 /// from the same SCE-codegen'd AP buffer-pool constants. The emit types

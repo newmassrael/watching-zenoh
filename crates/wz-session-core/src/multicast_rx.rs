@@ -251,15 +251,17 @@ pub fn dispatch_multicast_inbound_reassembling<
     const MAX_PEERS: usize,
     const SLOTS: usize,
     const CAP: usize,
+    S,
 >(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     params: &MulticastParams,
     bytes: &[u8],
     src: SocketAddr,
     now_ms: u64,
     on_event: &mut F,
 ) where
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
     F: FnMut(IterationEvent<'_>),
 {
     match dispatch_multicast_inbound(dispatcher, params, bytes, src, now_ms, on_event) {
@@ -322,12 +324,14 @@ pub fn sweep_multicast_reassembling<
     const MAX_PEERS: usize,
     const SLOTS: usize,
     const CAP: usize,
+    S,
 >(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     now_ms: u64,
     on_event: &mut F,
 ) where
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
     F: FnMut(IterationEvent<'_>),
 {
     crate::reassembly_dispatch::sweep_reporting(reasm, now_ms, on_event);

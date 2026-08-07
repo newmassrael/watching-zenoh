@@ -4840,6 +4840,52 @@ layer_c1bf_cargo_clippy_all_features() {
 # `transport-link-tls`. What no lane did was LINT the keylog feature's own two
 # arms, which is where an un-called `#[cfg]` helper reds -- the exact shape of
 # R311y578's G7 and of the four hosted reds R311y537 catalogued.
+# ─── Layer C1bq — the runtime-zero-copy arena, BOTH arms ─────────────
+#
+# R311y589. `runtime-zero-copy` stopped being an empty Cargo.toml flag and
+# became the first consumer any `sce:kind="buffer-pool"` emit has had, and a
+# feature in no lane rots -- the §7 "gates that do not exist" shape this tree
+# has now paid for three times.
+#
+# BOTH arms, because the seam's whole claim is that swapping the arena changes
+# only WHERE the bytes land. The default arm alone would miss a pooled-only
+# defect; the pooled arm alone would miss the arena default regressing every
+# other Router in the tree, which is the wider blast radius of the two.
+#
+# The dims arm is not decoration either. `PooledStaging::new` asserts the
+# Router's dims against the pool's, and the AP Router's are the pool's own
+# constants -- so a lane that only ran the 4x64 unit dims would never construct
+# the 32 MiB arena, which is exactly the configuration that stack-overflowed
+# before `heap_pool` existed.
+layer_c1bq_zero_copy_arena() {
+    local out
+    (cd crates && cargo clippy -p wz-runtime-tokio \
+        --features runtime-zero-copy --all-targets --quiet -- -D warnings) || return 1
+
+    out="$(cd crates && cargo test -p wz-runtime-tokio --features runtime-zero-copy \
+        --lib zero_copy:: --quiet 2>&1)" || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1bq FAIL: the zero_copy filter matched no test"; echo "$out"; return 1; }
+
+    # The DEFAULT arena, which every other Router in the tree runs. The seam
+    # moved `reassembly_dispatch`'s staging out from under all of them.
+    out="$(cd crates && cargo test -p wz-session-core --features reassembly \
+        --lib reassembly_dispatch:: --quiet 2>&1)" || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1bq FAIL: the reassembly_dispatch filter matched no test"; echo "$out"; return 1; }
+
+    # The feature must compose with the transports that actually drive a Router,
+    # not only standalone: the unicast and multicast loops each thread the
+    # dispatcher through their own generic paths.
+    (cd crates && cargo clippy -p wz-runtime-tokio \
+        --features runtime-zero-copy,transport-unicast,transport-multicast,transport-fragmentation \
+        --all-targets --quiet -- -D warnings) || return 1
+
+    # The facade arm the preset actually ships.
+    (cd crates && cargo build -p wz --features preset-ap-full --quiet) || return 1
+    return 0
+}
+
 layer_c1bo_dissect_c_abi() {
     # R311y587 — the dissection C ABI, driven from a REAL C translation unit.
     #
@@ -9946,6 +9992,7 @@ run_layer C1be layer_c1be_cargo_test_query_value || overall=1
 run_layer C1bf layer_c1bf_cargo_clippy_all_features || overall=1
 run_layer C1bn layer_c1bn_passive_dissection_features || overall=1
 run_layer C1bo layer_c1bo_dissect_c_abi || overall=1
+run_layer C1bq layer_c1bq_zero_copy_arena || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1bl layer_c1bl_cargo_test_router_failfast || overall=1
 run_layer C1bm layer_c1bm_cargo_test_pico_failfast || overall=1

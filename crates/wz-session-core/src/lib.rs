@@ -1222,6 +1222,13 @@ pub mod reassembly_slot {
 /// classification, per-peer quota, staging buffers, and deadline sweep
 /// that the engine-free slot FSM cannot own. See the module docs for the
 /// division of labour with the slot FSM.
+/// R311y589 — the seam between the reassembly Router and the STORAGE its
+/// chains accumulate into ([`chain_staging::ChainStaging`]), plus the default
+/// on-demand-heap arena. Gated with the Router it serves: a build without
+/// `reassembly` has no chains to stage.
+#[cfg(feature = "reassembly")]
+pub mod chain_staging;
+
 #[cfg(feature = "reassembly")]
 pub mod reassembly_dispatch;
 

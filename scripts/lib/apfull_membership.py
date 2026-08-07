@@ -137,9 +137,15 @@ EXCLUSIONS = {
 #     (`runtime-zero-copy` first, then `runtime-tokio-uring`) is settled direction
 #     and deferred behind zenoh/pico parity, so this is where that deferral is
 #     recorded as a measured fact rather than a note.
+#
+# R311y589 REMOVED `runtime-zero-copy`, and the way it left is the point — the
+# same expiry the `unbuilt` exclusion category has always had. The entry named
+# a capability that did not exist ("SCE emits 6 pools with a real typestate
+# lifecycle and they have 0 callers"); `crates/wz-runtime-tokio/src/zero_copy.rs`
+# is now the first of those callers, so the entry would be FALSE rather than
+# stale. It was not re-worded or re-categorised: an inert member expires by
+# being built, and this is what that looks like.
 INERT_MEMBERS = {
-    "runtime-zero-copy": "the buffer-pool lifecycle FSM's first consumer; SCE emits "
-                         "6 pools with a real typestate lifecycle and they have 0 callers",
     "runtime-tokio-uring": "the io_uring reactor behind it; needs an ARMING FLAG with a "
                            "hosted hard-fail before it can be a lane",
 }

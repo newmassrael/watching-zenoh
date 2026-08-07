@@ -63,7 +63,7 @@
 //! one `--no-std` codegen emit drives both the std (AP) and heapless (MCU)
 //! `sce-rust-runtime`.
 
-use crate::bounded::BoundedVec;
+use crate::chain_staging::{ChainStaging, HeapStaging};
 use crate::qos::Priority;
 use crate::reassembly_slot::{
     ReassemblySlotActions, ReassemblySlotEvent, ReassemblySlotFragmentChunkPayload,
@@ -352,7 +352,7 @@ impl ChainKey {
 
 /// One reassembly slot: the engine-free protocol FSM plus the Router-owned
 /// chain state (key / expected next SN / deadline / staging buffer).
-struct Slot<const CAP: usize> {
+struct Slot<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> {
     engine: Engine<ReassemblySlotPolicy<SlotBinding>>,
     /// `Some` while the slot holds an in-progress chain (FSM == Receiving);
     /// `None` when free (FSM == Empty).
@@ -367,12 +367,19 @@ struct Slot<const CAP: usize> {
     /// Absolute monotonic-ms instant this chain times out (valid iff
     /// `key.is_some()`).
     deadline_ms: u64,
-    /// Router-owned staging buffer: the reassembled message accumulates
-    /// here across the chain's fragments.
-    buf: BoundedVec<u8, CAP>,
+    /// R311y589 — this chain's staging handle, vended by the Router's arena
+    /// ([`crate::chain_staging::ChainStaging`]). `Some` exactly while `key` is
+    /// `Some`; the two are armed and cleared together, and
+    /// [`ChainStaging::available`](crate::chain_staging::ChainStaging::available)
+    /// is what catches them drifting apart.
+    ///
+    /// It used to be a `BoundedVec<u8, CAP>` inline. The bytes still land in a
+    /// growable heap buffer under the default arena — what moved is WHO decides
+    /// that, so a deterministic deploy can reserve the arena up front instead.
+    chain: Option<S::Chain>,
 }
 
-impl<const CAP: usize> Slot<CAP> {
+impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLOTS, CAP, S> {
     fn new() -> Self {
         let mut engine = Engine::new(ReassemblySlotPolicy::new(SlotBinding::default()));
         // W3C SCXML 3.3: enter the initial `Empty` leaf.
@@ -382,7 +389,7 @@ impl<const CAP: usize> Slot<CAP> {
             key: None,
             last_sn: 0,
             deadline_ms: 0,
-            buf: BoundedVec::new(),
+            chain: None,
         }
     }
 
@@ -392,32 +399,74 @@ impl<const CAP: usize> Slot<CAP> {
 
     /// Drive the slot's terminal-state `slot.release` transition back to
     /// Empty and clear the Router-side chain state for reuse.
-    fn release(&mut self) {
+    ///
+    /// R311y589 — takes the arena because releasing the staging is now part of
+    /// releasing the slot, and it has to be: on a reserved arena the handle IS
+    /// the reservation, so a slot that went Empty while still holding one would
+    /// shrink the arena permanently. Passing it in rather than reaching for it
+    /// keeps `Slot` ignorant of the Router.
+    fn release(&mut self, staging: &mut S) {
         // Only the terminal states (Complete / Aborted / TimedOut) have a
         // `slot.release` transition; the caller only releases from there.
         self.engine.process_event(ReassemblySlotEvent::SlotRelease);
         self.key = None;
         self.last_sn = 0;
         self.deadline_ms = 0;
-        self.buf.clear();
+        if let Some(chain) = self.chain.take() {
+            staging.release(chain);
+        }
     }
 }
 
 /// The reassembly Router: a fixed pool of `SLOTS` slot FSMs, each able to
 /// reassemble a fragment chain of up to `CAP` bytes. See the module docs
 /// for the division of labour with the engine-free slot FSM.
-pub struct ReassemblyDispatcher<const SLOTS: usize, const CAP: usize> {
-    slots: [Slot<CAP>; SLOTS],
+pub struct ReassemblyDispatcher<const SLOTS: usize, const CAP: usize, S = HeapStaging<SLOTS, CAP>>
+where
+    S: ChainStaging<SLOTS, CAP>,
+{
+    slots: [Slot<SLOTS, CAP, S>; SLOTS],
     config: ReassemblyConfig,
+    /// R311y589 — the arena the chains stage into. Defaulted to
+    /// [`HeapStaging`], which is byte-for-byte the pre-seam behaviour, so every
+    /// `ReassemblyDispatcher<SLOTS, CAP>` in the tree keeps its exact semantics
+    /// without naming it.
+    staging: S,
 }
 
-impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
+impl<const SLOTS: usize, const CAP: usize, S> ReassemblyDispatcher<SLOTS, CAP, S>
+where
+    S: ChainStaging<SLOTS, CAP>,
+{
     /// Build a Router with `SLOTS` empty slots over `config`.
     pub fn new(config: ReassemblyConfig) -> Self {
         Self {
             slots: core::array::from_fn(|_| Slot::new()),
             config,
+            staging: S::new(),
         }
+    }
+
+    /// The staging arena itself, read-only.
+    ///
+    /// Exposed so a test can assert on the ARENA's own state rather than on
+    /// this Router's bookkeeping: an arena that staged into a private buffer
+    /// and decremented a counter would satisfy every assertion phrased in terms
+    /// of [`Self::staging_available`], which is exactly the vacuous proof the
+    /// pooled backing needs to rule out.
+    pub fn staging(&self) -> &S {
+        &self.staging
+    }
+
+    /// How many chains the staging arena can still serve.
+    ///
+    /// Pairs with [`Self::active_chains`]: their sum is `SLOTS` at every
+    /// quiescent point, and a violation means a chain handle was leaked or
+    /// double-released. Exposed rather than kept test-private because the
+    /// reserved-arena backing makes this a DEPLOY number — it is how much
+    /// reassembly the node can still take on.
+    pub fn staging_available(&self) -> usize {
+        self.staging.available()
     }
 
     /// Number of slots currently holding an in-progress chain (test /
@@ -553,13 +602,16 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
     /// `is_free`). Returns the number of chains timed out.
     pub fn sweep(&mut self, now_ms: u64) -> usize {
         let mut timed_out = 0;
-        for slot in self.slots.iter_mut() {
+        // Split the borrow: `release` hands the chain's staging back to the
+        // arena, and both live behind `&mut self`.
+        let Self { slots, staging, .. } = self;
+        for slot in slots.iter_mut() {
             if slot.is_free() || now_ms < slot.deadline_ms {
                 continue;
             }
             slot.engine
                 .process_event(ReassemblySlotEvent::ReassemblyTimeout);
-            slot.release();
+            slot.release(staging);
             timed_out += 1;
         }
         timed_out
@@ -604,10 +656,27 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
         self.slots[idx].key = Some(ChainKey::new(frag.peer_key, frag.reliable, frag.priority));
         self.slots[idx].last_sn = frag.sn;
         self.slots[idx].deadline_ms = now_ms.saturating_add(self.config.reassembly_timeout_ms);
-        self.slots[idx].buf.clear();
+        // Reserve this chain's staging. A well-dimensioned arena cannot refuse
+        // here (the Router just found a free slot of its own), but the arm is
+        // real rather than an `unwrap`: the two dims are an invariant between
+        // two numbers, and reporting exhaustion is the honest answer if they
+        // ever disagree. `PoolExhausted` is already the Router's word for it.
+        let chain = match self.staging.acquire() {
+            Some(c) => c,
+            None => {
+                self.slots[idx].key = None;
+                return IngestOutcome::Refused(RefuseReason::PoolExhausted);
+            }
+        };
+        self.slots[idx].chain = Some(chain);
 
-        if stage(&mut self.slots[idx].buf, frag.payload).is_err() {
-            return self.abort(idx, AbortReason::CapacityOverflow);
+        {
+            let Self { slots, staging, .. } = self;
+            let slot = &mut slots[idx];
+            let chain = slot.chain.as_mut().expect("just armed");
+            if staging.append(chain, frag.payload).is_err() {
+                return self.abort(idx, AbortReason::CapacityOverflow);
+            }
         }
 
         // Empty --fragment.chunk--> { Receiving | Complete }, the slot FSM's
@@ -631,8 +700,15 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
 
         match self.slots[idx].engine.get_current_state() {
             ReassemblySlotState::Complete => {
-                deliver(&self.slots[idx].buf);
-                self.slots[idx].release();
+                {
+                    let chain = self.slots[idx]
+                        .chain
+                        .as_ref()
+                        .expect("a completed chain has staging");
+                    deliver(self.staging.bytes(chain));
+                }
+                let Self { slots, staging, .. } = self;
+                slots[idx].release(staging);
                 IngestOutcome::Reassembled
             }
             _ => IngestOutcome::Begun,
@@ -658,11 +734,16 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
             return self.abort(idx, AbortReason::OutOfOrder);
         }
 
-        if stage(&mut self.slots[idx].buf, frag.payload).is_err() {
-            self.slots[idx]
-                .engine
-                .process_event(ReassemblySlotEvent::CodecError);
-            return self.abort(idx, AbortReason::CapacityOverflow);
+        {
+            let Self { slots, staging, .. } = self;
+            let slot = &mut slots[idx];
+            let chain = slot.chain.as_mut().expect("an active chain has staging");
+            if staging.append(chain, frag.payload).is_err() {
+                self.slots[idx]
+                    .engine
+                    .process_event(ReassemblySlotEvent::CodecError);
+                return self.abort(idx, AbortReason::CapacityOverflow);
+            }
         }
 
         self.slots[idx].last_sn = frag.sn;
@@ -674,8 +755,15 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
         // The slot FSM's `more` guard decided Continue vs Final.
         match self.slots[idx].engine.get_current_state() {
             ReassemblySlotState::Complete => {
-                deliver(&self.slots[idx].buf);
-                self.slots[idx].release();
+                {
+                    let chain = self.slots[idx]
+                        .chain
+                        .as_ref()
+                        .expect("a completed chain has staging");
+                    deliver(self.staging.bytes(chain));
+                }
+                let Self { slots, staging, .. } = self;
+                slots[idx].release(staging);
                 IngestOutcome::Reassembled
             }
             _ => IngestOutcome::Continued,
@@ -685,7 +773,8 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
     /// The slot FSM has already been driven into `Aborted` by the caller's
     /// abort event; record the reason and reclaim the slot.
     fn abort(&mut self, idx: usize, reason: AbortReason) -> IngestOutcome {
-        self.slots[idx].release();
+        let Self { slots, staging, .. } = self;
+        slots[idx].release(staging);
         IngestOutcome::Aborted(reason)
     }
 
@@ -716,32 +805,13 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
 
 /// Build the typed `fragment.chunk` event. The slot FSM's only guard
 /// reads `more`, and the body never flows through the FSM (the Router
-/// stages it in the slot's `BoundedVec`), so the event carries just the
+/// stages it through the slot's arena handle), so the event carries just the
 /// wire M bit. R311in removed the schema's former `payload: bytes
 /// max-size 1472` field — it inlined a 1472-byte buffer into every queued
 /// event (x the per-slot queue depth x N slots) and was the no_std
 /// MCU-footprint blocker; the body was never read through the FSM.
 fn chunk_event(more: u8) -> ReassemblySlotFragmentChunkPayload {
     ReassemblySlotFragmentChunkPayload { more }
-}
-
-/// Append `payload` to the slot staging buffer, returning `Err` if the
-/// chain would exceed the slot `CAP` (the §7.1 capacity hard error).
-///
-/// The capacity check is EXPLICIT (`len + payload > CAP`) rather than
-/// relying on [`BoundedVec::push`] failing: on the `alloc` (AP) backing
-/// `push` never fails (`CAP` is advisory there), so without this check the
-/// AP reassembly buffer would grow unbounded past `slot_size` and defeat
-/// the §5.M malicious-peer pool-exhaustion defence. The explicit bound
-/// makes reassembly genuinely capacity-bounded on BOTH profiles.
-fn stage<const CAP: usize>(buf: &mut BoundedVec<u8, CAP>, payload: &[u8]) -> Result<(), ()> {
-    if buf.len().saturating_add(payload.len()) > CAP {
-        return Err(());
-    }
-    for &b in payload {
-        buf.push(b).map_err(|_| ())?;
-    }
-    Ok(())
 }
 
 /// Run one reassembly deadline sweep and report the eviction count.
@@ -762,11 +832,12 @@ fn stage<const CAP: usize>(buf: &mut BoundedVec<u8, CAP>, payload: &[u8]) -> Res
 /// ([`crate::multicast_rx::sweep_multicast_reassembling`]) reuse it without a
 /// false `session-unicast` coupling.
 #[cfg(feature = "alloc")]
-pub fn sweep_reporting<const SLOTS: usize, const CAP: usize, F>(
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP>,
+pub fn sweep_reporting<const SLOTS: usize, const CAP: usize, S, F>(
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     now_ms: u64,
     on_event: &mut F,
 ) where
+    S: ChainStaging<SLOTS, CAP>,
     F: FnMut(IterationEvent<'_>),
 {
     let timed_out = reasm.sweep(now_ms);

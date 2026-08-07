@@ -779,15 +779,16 @@ use crate::reassembly_dispatch::{Fragment as ReassemblyFragment, ReassemblyDispa
 /// (4 / 4096) profiles share one ingest path; the AP host passes its
 /// `TokioReassembly`, the MCU loop its `CoopReassembly`.
 #[cfg(feature = "reassembly")]
-pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F>(
+pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, S, F>(
     outcome: &DriverLoopOutcome,
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     actions: &SessionLinkActions<R, T>,
     now_ms: u64,
     on_event: &mut F,
 ) where
     R: SessionRuntime,
     T: TimeSource,
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
     F: FnMut(IterationEvent<'_>),
 {
     on_event(IterationEvent::Poll(outcome));

@@ -600,7 +600,11 @@ runtime-tokio = [
     "dep:sce-rust-runtime",
 ]
 runtime-tokio-uring = ["runtime-tokio"]
-runtime-zero-copy = []
+# R311y589 — no longer `[]`. Weak-forwards to the tokio host's pooled
+# reassembly arena, which is the first consumer any `sce:kind="buffer-pool"`
+# emit has had. Weak (`?/`) like its `reassembly` neighbour so selecting it in a
+# preset does not drag the tokio runtime into a build that did not ask for one.
+runtime-zero-copy = ["wz-runtime-tokio?/runtime-zero-copy"]
 
 # ----- domain: scouting (6 atomic) -----
 # R311ci — audit-only ratify. R311if — scouting-static wired (forwards

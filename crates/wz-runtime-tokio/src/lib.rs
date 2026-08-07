@@ -106,6 +106,12 @@ pub mod reassembly_pool_ap {
 #[cfg(feature = "reassembly")]
 pub mod reassembly;
 
+/// R311y589 — `runtime-zero-copy`: the pooled reassembly arena, and the FIRST
+/// consumer of an `sce:kind="buffer-pool"` emit's lifecycle FSM (the constants
+/// beside it have been read since R311in; the `Slot<S>` API had zero callers).
+#[cfg(feature = "runtime-zero-copy")]
+pub mod zero_copy;
+
 // Crate-local fixtures for this crate's OWN unit tests (recording driver
 // + actions builders). Kept in-crate — NOT in the test-support sibling —
 // so unit tests receive this crate's version of `SessionLinkActions`

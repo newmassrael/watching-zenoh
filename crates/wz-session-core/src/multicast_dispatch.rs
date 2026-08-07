@@ -1312,9 +1312,15 @@ pub fn multicast_chain_key(peer_idx: usize) -> [u8; 4] {
 /// ([`crate::multicast_rx`]) passes the fragment's decoded band.
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
 #[allow(clippy::too_many_arguments)]
-pub fn ingest_multicast_fragment<const MAX_PEERS: usize, const SLOTS: usize, const CAP: usize, F>(
+pub fn ingest_multicast_fragment<
+    const MAX_PEERS: usize,
+    const SLOTS: usize,
+    const CAP: usize,
+    S,
+    F,
+>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     src: SocketAddr,
     reliable: bool,
     sn: u64,
@@ -1323,6 +1329,7 @@ pub fn ingest_multicast_fragment<const MAX_PEERS: usize, const SLOTS: usize, con
     now_ms: u64,
     on_event: &mut F,
 ) where
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
     F: FnMut(IterationEvent<'_>),
 {
     ingest_multicast_fragment_qos(
@@ -1345,10 +1352,11 @@ pub fn ingest_multicast_fragment_qos<
     const MAX_PEERS: usize,
     const SLOTS: usize,
     const CAP: usize,
+    S,
     F,
 >(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     src: SocketAddr,
     reliable: bool,
     sn: u64,
@@ -1358,6 +1366,7 @@ pub fn ingest_multicast_fragment_qos<
     now_ms: u64,
     on_event: &mut F,
 ) where
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
     F: FnMut(IterationEvent<'_>),
 {
     // R311y227 — a qos peer's oversize frame fragments ride its per-`priority`
@@ -1455,10 +1464,12 @@ pub fn ingest_multicast_fragment_qos<
 /// chains are keyed by slot index ([`multicast_chain_key`]), so they must
 /// be aborted before the index can be re-issued to a new peer.
 #[cfg(feature = "reassembly")]
-pub fn abort_peer_chains<const SLOTS: usize, const CAP: usize>(
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP>,
+pub fn abort_peer_chains<const SLOTS: usize, const CAP: usize, S>(
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     peer_idx: usize,
-) {
+) where
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+{
     let key = multicast_chain_key(peer_idx);
     // R311y227 — a qos peer can hold an in-flight chain on ANY priority conduit,
     // so abort every `(priority, reliable)` chain before the slot recycles (else

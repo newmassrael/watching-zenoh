@@ -95499,10 +95499,10 @@
       "reason": "UNBUILT: F=io_uring fixed-buf adapter; P=ARCHITECTURE §9.5 row 3; C=alternative reactor under runtime-tokio; ORTHOGONAL io_uring perf concern, NOT a transport-shm prereq (R311xn)"
     },
     "runtime-zero-copy": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
       "source": "RFC §5.E buffer pool",
-      "reason": "UNBUILT: F=pool-slot Sample lifetime; P=RFC §5.E; C=opt-in perf over runtime-tokio-uring or runtime-coop; ORTHOGONAL to transport-shm (NOT a shm prereq — R311xn)"
+      "reason": "PARTIAL: F=pool-slot Sample lifetime; P=RFC §5.E; C=opt-in determinism over runtime-tokio-uring or runtime-coop; ORTHOGONAL to transport-shm (NOT a shm prereq — R311xn). BUILT at R311y589: crates/wz-runtime-tokio/src/zero_copy.rs stages every reassembly chain into the SCE sce:kind=buffer-pool emit and delivers the reassembled message as a borrow of the pool slot, which is exactly the declared F. This is the FIRST consumer any of the six generated pools has had — until now wz read only their CONSTANTS and the seven-state lifecycle FSM had zero callers, which is why the flag was `[]` and toggled nothing. The seam is wz_session_core::chain_staging::ChainStaging, so the Router's chain FSM, SN gate, quota and clock are the same code on both arenas and the default on-demand-heap arena is unchanged. RESIDUALS: only the CPU arm of the generated lifecycle is reachable (free -> cpu-mut -> free) — Slot<DmaArmedRx> has no impl block and nothing constructs Slot<CpuRef>, so the DMA arms wait on a consumer for the lwip pools; and the link RX read still fills its own buffer before the chain stages, so ARCHITECTURE §9.1 TX and §9.2 single-frame RX are not pool-routed yet."
     },
     "scouting-active": {
       "status": "active",
