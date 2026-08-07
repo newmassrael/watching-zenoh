@@ -107,9 +107,24 @@ impl FixedSlotRing {
         for chain in held {
             staging.release_raw(chain);
         }
-        result?;
+        result
+            .map_err(|e| registration_error(e, Self::required_locked_bytes(), memlock_limit()))?;
 
         Ok(Self { ring, registered })
+    }
+
+    /// Bytes [`Self::register`] asks the kernel to PIN: every pool slot, whole.
+    ///
+    /// R311y593. This is not an internal detail. `IORING_REGISTER_BUFFERS` pins
+    /// the pages at registration — that is the whole point of the row, no
+    /// per-call `get_user_pages` — and pinned pages are charged to
+    /// `RLIMIT_MEMLOCK`. So the adapter carries a DEPLOYMENT requirement that
+    /// scales with the pool the SCXML declares, and a host whose limit is below
+    /// it cannot register at all. Stating it as a constant lets a caller check
+    /// before trying, lets the failure path name the shortfall, and moves with
+    /// the pool dims instead of being a number written down twice.
+    pub const fn required_locked_bytes() -> usize {
+        SLOT_COUNT * SLOT_SIZE
     }
 
     /// How many pool slots are registered with the kernel.
@@ -199,6 +214,72 @@ impl FixedSlotRing {
     }
 }
 
+/// The process's `RLIMIT_MEMLOCK` as `(soft, hard)`.
+///
+/// `None` when the query itself failed — reported as an absence rather than as
+/// a zero, because "we could not read the limit" and "the limit is nothing"
+/// send a reader to different places.
+fn memlock_limit() -> Option<(u64, u64)> {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` only writes the struct it is handed, which is fully
+    // initialised above and lives for the call.
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut lim) };
+    // No casts: `rlim_t` IS `u64` on every target that has `io_uring`, and a
+    // cast that is a no-op today is a cast nobody re-checks when it stops being
+    // one.
+    (rc == 0).then_some((lim.rlim_cur, lim.rlim_max))
+}
+
+/// Turn a fixed-buffer registration failure into one a reader can act on.
+///
+/// R311y593. `register_buffers` reports a memlock shortfall as a bare `ENOMEM`,
+/// which `io::Error` renders as "Cannot allocate memory" — a message that reads
+/// like the process is out of heap and sends the reader to look for a leak.
+/// That cost a hosted CI round exactly this way: the lane was green on a
+/// workstation whose limit is 3.9 GiB and red on a runner whose limit is 8 MiB,
+/// against a pool that needs 32 MiB, and the error named none of the three
+/// numbers.
+///
+/// Pure in `(err, needed, limit)` so the message is testable without a syscall
+/// and without mutating a process-global limit — lowering `RLIMIT_MEMLOCK` to
+/// provoke the real error would race every other test in the binary.
+///
+/// Any errno OTHER than `ENOMEM` passes through untouched. This maps one
+/// specific confusion; dressing an `EINVAL` up as a memlock problem would
+/// manufacture a second one.
+fn registration_error(err: io::Error, needed: usize, limit: Option<(u64, u64)>) -> io::Error {
+    if err.raw_os_error() != Some(libc::ENOMEM) {
+        return err;
+    }
+    let measured = match limit {
+        Some((soft, hard)) => format!("RLIMIT_MEMLOCK is soft={soft} hard={hard} bytes"),
+        None => String::from("RLIMIT_MEMLOCK could not be read"),
+    };
+    io::Error::new(
+        io::ErrorKind::OutOfMemory,
+        format!(
+            "io_uring fixed-buffer registration needs {needed} bytes of LOCKABLE \
+             memory ({SLOT_COUNT} pool slots x {SLOT_SIZE} bytes, pinned at \
+             registration) and the kernel refused with ENOMEM; {measured}. This \
+             is a limit, not heap exhaustion: raise RLIMIT_MEMLOCK (ulimit -l, \
+             or LimitMEMLOCK= under systemd) to at least {needed} bytes."
+        ),
+    )
+}
+
+/// R311y593 — ⚠ the registering tests below want `--test-threads=1`.
+///
+/// Each one pins the WHOLE pool ([`FixedSlotRing::required_locked_bytes`]), so
+/// two running concurrently ask the kernel for twice it and the second is
+/// refused with ENOMEM. On a host whose `RLIMIT_MEMLOCK` is gigabytes that never
+/// shows; on one provisioned to exactly one registration's worth it is
+/// immediate. Layer C1br serializes them for this reason — a bare
+/// `cargo test -p wz-runtime-tokio --features runtime-tokio-uring` on a
+/// tightly-limited box can fail here without anything being wrong with the
+/// adapter.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +352,62 @@ mod tests {
         drop(rd);
         ChainStaging::<SLOT_COUNT, SLOT_SIZE>::release(&mut arena, chain);
         assert_eq!(arena.pool().free_count(), SLOT_COUNT);
+    }
+
+    /// R311y593 — a memlock shortfall must READ like one.
+    ///
+    /// The numbers are the whole value of the mapping: a reader who sees only
+    /// "Cannot allocate memory" looks for a leak, and a reader who sees the
+    /// requirement beside the measured limit runs `ulimit -l`. Asserting the
+    /// three numbers rather than the prose keeps this from passing on a message
+    /// that was reworded into saying nothing.
+    #[test]
+    fn a_memlock_shortfall_is_reported_as_a_limit_not_as_heap_exhaustion() {
+        let mapped = registration_error(
+            io::Error::from_raw_os_error(libc::ENOMEM),
+            FixedSlotRing::required_locked_bytes(),
+            Some((8 * 1024 * 1024, 8 * 1024 * 1024)),
+        );
+        let text = mapped.to_string();
+        assert!(
+            text.contains(&FixedSlotRing::required_locked_bytes().to_string()),
+            "the requirement must be named: {text}"
+        );
+        assert!(
+            text.contains("8388608"),
+            "the MEASURED limit must be named: {text}"
+        );
+        assert!(
+            text.contains("RLIMIT_MEMLOCK"),
+            "the knob to turn must be named: {text}"
+        );
+    }
+
+    /// The negative arm: mapping ENOMEM must not swallow every other errno.
+    ///
+    /// Without this the mapper could return the memlock message unconditionally
+    /// and the test above would still pass, which would turn a bad fd or a
+    /// kernel that refuses the opcode into a confident lie about memory limits.
+    #[test]
+    fn a_registration_failure_that_is_not_enomem_passes_through_unchanged() {
+        let original = io::Error::from_raw_os_error(libc::EINVAL);
+        let mapped = registration_error(original, FixedSlotRing::required_locked_bytes(), None);
+        assert_eq!(mapped.raw_os_error(), Some(libc::EINVAL));
+        assert!(
+            !mapped.to_string().contains("RLIMIT_MEMLOCK"),
+            "an EINVAL must not be dressed up as a memlock shortfall: {mapped}"
+        );
+    }
+
+    /// The requirement is DERIVED from the pool the SCXML declares, so a round
+    /// that resizes the pool moves it here too instead of leaving a stale number
+    /// in the lane's provisioning check.
+    #[test]
+    fn the_locked_byte_requirement_is_the_whole_pool() {
+        assert_eq!(
+            FixedSlotRing::required_locked_bytes(),
+            SLOT_COUNT * SLOT_SIZE
+        );
     }
 
     /// `commit_external` is bounded by the same rule `append` is, so a kernel
