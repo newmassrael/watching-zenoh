@@ -5040,6 +5040,78 @@ PY
     return 0
 }
 
+# ─── Layer C1bs — live-capture, the AF_PACKET tap (R311y594 / B1) ────
+#
+# Two capabilities, kept apart because they fail for different reasons and a
+# reader must not have to guess which one bit.
+#
+#   1. The FEED LOOP and the dissection wiring need no privilege at all — the
+#      module carries a canned `PacketSource` precisely so the part with logic
+#      in it is provable on any host. That half is a hard FAIL everywhere.
+#   2. The SOCKET (`AF_PACKET`, `SO_TIMESTAMP`, the CMSG walk) needs
+#      CAP_NET_RAW. That half is `#[ignore]`d and run here when the capability
+#      is present, because a path that exists and never runs is the shape this
+#      repo keeps paying for.
+#
+# The capability is PROBED by opening the socket, not by comparing uid to 0: a
+# container can grant CAP_NET_RAW to a non-root process and a root process can
+# be denied it by seccomp. Same arming-flag contract as C1br — a green SKIP on
+# hosted is the R311y265 masked-skip burn.
+layer_c1bs_live_capture() {
+    local out bin
+
+    (cd crates && cargo clippy -p wz-runtime-tokio \
+        --features live-capture --all-targets --quiet -- -D warnings) || return 1
+
+    out="$(cd crates && cargo test -p wz-runtime-tokio --features live-capture \
+        --lib live_capture:: --quiet 2>&1)" || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1bs FAIL: the live_capture filter matched no test"; echo "$out"; return 1; }
+
+    # The privileged half. Build as THIS user and run the binary under sudo, so
+    # the cargo target dir never acquires root-owned artefacts.
+    bin="$(cd crates && cargo test -p wz-runtime-tokio --features live-capture \
+        --lib --no-run --message-format=short 2>&1 \
+        | grep -oE 'target/debug/deps/wz_runtime_tokio-[a-f0-9]+' | tail -1)"
+    if [[ -z "$bin" ]]; then
+        echo "  C1bs FAIL: could not locate the built test binary" >&2
+        return 1
+    fi
+
+    local runner=()
+    if ./crates/"$bin" --list >/dev/null 2>&1 && _c1bs_has_net_raw; then
+        runner=()
+    elif sudo -n true 2>/dev/null; then
+        runner=(sudo -n)
+    else
+        if [[ "${WZ_LIVECAP_REQUIRE:-0}" == "1" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
+            echo "  C1bs FAIL: CAP_NET_RAW is absent and no passwordless sudo, and WZ_LIVECAP_REQUIRE/GITHUB_ACTIONS is set" >&2
+            return 1
+        fi
+        echo "  C1bs SKIP (the socket half needs CAP_NET_RAW; set WZ_LIVECAP_REQUIRE=1 to make it a FAIL)"
+        return 0
+    fi
+
+    out="$("${runner[@]}" ./crates/"$bin" \
+        live_capture::tests::a_real_tap_reads_a_packet_with_a_kernel_timestamp \
+        --ignored --exact 2>&1)" || { echo "$out"; return 1; }
+    # A filter that matches nothing reports `ok. 0 passed`, which is green and
+    # says nothing — the exact trap this lane exists to avoid.
+    grep -qE '^test result: ok\. 1 passed' <<<"$out" || {
+        echo "  C1bs FAIL: the privileged tap test did not run"; echo "$out"; return 1; }
+    return 0
+}
+
+# CAP_NET_RAW in the process's own effective set, read from /proc rather than
+# inferred from uid.
+_c1bs_has_net_raw() {
+    local eff
+    eff="$(awk '/^CapEff:/ {print $2}' /proc/self/status 2>/dev/null)" || return 1
+    [[ -n "$eff" ]] || return 1
+    # CAP_NET_RAW is bit 13.
+    python3 -c "import sys; sys.exit(0 if (int('$eff', 16) >> 13) & 1 else 1)"
+}
+
 layer_c1bq_zero_copy_arena() {
     local out
     (cd crates && cargo clippy -p wz-runtime-tokio \
@@ -10177,6 +10249,7 @@ run_layer C1bn layer_c1bn_passive_dissection_features || overall=1
 run_layer C1bo layer_c1bo_dissect_c_abi || overall=1
 run_layer C1bq layer_c1bq_zero_copy_arena || overall=1
 run_layer C1br layer_c1br_uring_fixed_buffers || overall=1
+run_layer C1bs layer_c1bs_live_capture || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1bl layer_c1bl_cargo_test_router_failfast || overall=1
 run_layer C1bm layer_c1bm_cargo_test_pico_failfast || overall=1

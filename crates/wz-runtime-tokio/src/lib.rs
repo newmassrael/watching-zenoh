@@ -594,6 +594,13 @@ pub mod zenoh_config;
 #[cfg(all(feature = "transport-link-raweth", target_os = "linux"))]
 pub mod raweth_socket;
 
+/// R311y594 (B1) — the LIVE capture source: an `AF_PACKET` tap feeding the
+/// same [`wz_capture::Dissection`] a pcap file does, with the KERNEL's
+/// timestamp as the observer's clock. Linux-only, and privileged — see the
+/// module docs for what it deliberately is not.
+#[cfg(all(feature = "live-capture", target_os = "linux"))]
+pub mod live_capture;
+
 /// R121k-2 — application-layer remote-declaration registries. Route
 /// decoded `Declare(Decl*|Undecl*)` records to user-registered
 /// callbacks. This round lands `RemoteSubscriberRegistry`

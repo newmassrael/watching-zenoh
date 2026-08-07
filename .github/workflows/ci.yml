@@ -2037,6 +2037,14 @@ jobs:
           WZ_URING_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C1br
 
+      # R311y594 (B1) — the live AF_PACKET tap. The feed loop is unprivileged
+      # and hard-fails anywhere; the socket half needs CAP_NET_RAW and is armed
+      # here so a green SKIP cannot stand in for it on hosted.
+      - name: Layer C1bs — live-capture AF_PACKET tap (R311y594)
+        env:
+          WZ_LIVECAP_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer C1bs
+
       - name: Layer C1as — reply source-info (R311y581 wiring)
         run: bash scripts/run-ci.sh --layer C1as
 

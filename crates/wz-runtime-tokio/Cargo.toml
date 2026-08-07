@@ -1143,6 +1143,13 @@ zenoh-config-emit = []
 # (raweth_unix.c:42), and a feature that refused to compile on macOS would make
 # the FRAMING half unreachable there too, for no reason -- it is pure data.
 transport-link-raweth = ["wz-session-core/transport-link-raweth", "dep:libc"]
+
+# R311y594 (B1) — the live capture source. Implies the raweth link because it
+# reuses that round's `AfPacketSocket`: one socket, opened the same way, read
+# for a different purpose. Its own feature rather than a free rider on
+# `transport-link-raweth`, because a deployment that speaks raweth is not
+# thereby asking to tap the wire.
+live-capture = ["transport-link-raweth", "dep:wz-capture"]
 # R311il — FOUNDATIONAL session gate. Forwards to wz-session-core's
 # `session-unicast`, which codegens the engine-free unicast session FSM
 # (sources/session/session_fsm_unicast.scxml, `--no-std`) into the
@@ -1777,6 +1784,13 @@ libc = { version = "0.2", optional = true }
 # `no_std` profile can carry a runtime loader at all. Optional, pulled ONLY by
 # `plugin-dynamic-loading`, so every other build is byte-identical.
 libloading = { version = "0.8", optional = true }
+
+# R311y594 (B1) — the capture front end the live tap feeds. Optional and pulled
+# only by `live-capture`; it stays a dev-dependency as well, because the pcap
+# end-to-end test uses it without asking for a privileged socket.
+[dependencies.wz-capture]
+path = "../wz-capture"
+optional = true
 
 [dev-dependencies]
 # R311y578 (G1) — the capture-side front end, used by
