@@ -279,8 +279,61 @@ declare -A BASELINE_MC_TEXT=(
     # unexplained asymmetry — the transport chain has read 8
     # (`parse_error::MAX_EXT_CHAIN_DEPTH`) since R68c while the network and
     # payload chains read 4.
-    ["thumbv7m-none-eabi"]=52064
-    ["thumbv7em-none-eabihf"]=51840
+    # R311y592 — REBASED, and the bytes are ATTRIBUTED TO ONE COMMIT rather than
+    # to "the arc". Hosted CI went red on `de5b8175` at hf=52124 (+284); the same
+    # Layer Q on this host reads 52124 too, byte-identical, so R311y267's
+    # reproducibility property held and the growth is CODE, not environment.
+    #
+    # Bisected by building `--layer Q` at each commit of the y589..y591 arc:
+    #
+    #   | commit                                    | hf    | delta |
+    #   |-------------------------------------------|-------|-------|
+    #   | 24c2f624 (at the y582 baseline)           | 51840 |    +0 |
+    #   | 6bc3d3df the ext-chain cliff removal      | 51700 |  -140 |
+    #   | b0b94672 the ChainStaging seam            | 52124 |  +424 |
+    #   | cb4890e5 io_uring / 07a721b2..de5b8175    | 52124 |    +0 |
+    #
+    # So the cliff removal SHRANK this artifact and the whole overshoot is one
+    # commit: `b0b94672`, which made `ReassemblyDispatcher` generic over a
+    # `ChainStaging` arena so `preset-ap-full` can reserve its reassembly memory
+    # up front. Per-symbol ELF diff of `6bc3d3df` vs `b0b94672` (arm-none-eabi-nm
+    # -S, `t`/`T` only) names +266 of the +424:
+    #
+    #   +178  __cortex_m_rt_main            (the inlined dispatcher body)
+    #   +108 / -64  Slot::release           (now takes `&mut S` to hand the
+    #                                        chain's staging back to the arena)
+    #    +90 / -90  HeapStaging::append vs the old private `stage::<1000>` (net 0)
+    #    +38  core::option::expect_failed   (NEW — see the debt note below)
+    #     +6  ReassemblyDispatcher::abort_channel
+    #
+    # The remainder is padding / .rodata layout.
+    #
+    # INTENTIONAL, and stated precisely: this artifact never instantiates the
+    # reserved arena. It runs the default `HeapStaging`, whose module doc calls
+    # itself "byte-for-byte the pre-seam behaviour" — true of SEMANTICS (the
+    # bytes still land in one growable buffer per chain, the explicit CAP
+    # comparison is preserved, and Q.6 boots and passes on all three mps2 boards)
+    # and false of ROM by 424 bytes on hf / 8 on thumbv7m. A generic seam is not
+    # free at the instantiation site even when the instantiation is the old
+    # behaviour. That is the cost of putting the deploy decision behind a trait,
+    # and it is accepted here rather than absorbed silently.
+    #
+    # NAMED DEBT, not paid in this round: 38 of those bytes are
+    # `core::option::expect_failed`, i.e. a PANIC-FORMATTING path this MCU binary
+    # did not carry before. It arrives because `Slot` now stores `key: Option<_>`
+    # and `chain: Option<S::Chain>` — ONE fact in two Options, whose agreement the
+    # four new `.expect("a completed chain has staging")` sites assert at runtime.
+    # Folding them into a single `Option<Armed<S>>` would delete both the
+    # duplicated invariant and the panic path. Left undone deliberately: it is a
+    # dispatcher-wide refactor and it does not on its own bring hf back inside the
+    # +-256 band (424 - 38 = 386).
+    #
+    # thumbv7m: 52072 here / 52068 hosted. The 4 B spread is the R311y268
+    # crate-metadata alignment jitter, carried as documented. The hosted figure is
+    # recorded below because the hosted job is the gate that blocks main.
+    # Old: 52064/51840 (R311y582).
+    ["thumbv7m-none-eabi"]=52068
+    ["thumbv7em-none-eabihf"]=52124
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
