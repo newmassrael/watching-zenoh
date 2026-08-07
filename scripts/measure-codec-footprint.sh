@@ -375,7 +375,22 @@ fi
 declare -A CODEC_DELTA_FLOOR=(
     [codec-frame]=0            # lane SKIPs on this binary; floor unused until it is measurable
     [codec-fragment]=-256      # measured 0: no session_glue surface, wz-codecs level only
-    [codec-keep-alive]=128     # measured 208: BODYLESS message, trivial codec
+    # R311y580 — RE-PINNED 128 -> 64 (measured 208 -> 96), and this is the
+    # deliberate re-pin the block above prescribes, not a silenced gate. NOT a
+    # re-pull: with the feature off, `parse_inbound`'s KeepAlive arm (-96) and
+    # `InboundFrame`'s drop glue for the variant (-77) both still disappear.
+    # Per-symbol diff of the two UNSTRIPPED builds (`-C strip=none`, crate
+    # disambiguators normalised out) is exactly three rows:
+    #     +96  wz_session_core::inbound::parse_inbound
+    #     +77  core::ptr::drop_glue::<wz_session_core::inbound::InboundFrame>
+    #     -39  wz_runtime_tokio::session_glue::poll_and_dispatch_one::{closure#0}
+    # The third row is the cause: R311y578 grew `parse_inbound` itself (the
+    # `extfragment::project_markers` projection on the Fragment arm, +94 B on
+    # the MCU axis too), which moved the inline boundary so the CALLER now
+    # absorbs work the arm used to own. That is the "a refactor consolidated
+    # the paths it used to own" case named above, measured rather than assumed.
+    # A bodyless message's arm being 96 B is still real elision.
+    [codec-keep-alive]=64      # measured 96 (R311y580, was 208 -> floor 128)
     [codec-init-body]=12000    # measured 14608
     [codec-open-body]=8000     # measured 10192
     [codec-close]=500          # measured 600 (R311y437, was 1944 -> floor 1500)

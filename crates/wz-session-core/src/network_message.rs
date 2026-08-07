@@ -183,9 +183,8 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
         // here is unchanged: `Ok(None)` (no envelope decoder for the MID)
         // absorbs the tail as `Unknown` and terminates, a codec error
         // propagates and fails the whole batch.
-        match decode_one_record(&mut cursor)? {
-            Some(msg) => messages.push(msg),
-            None => {
+        if !decode_one_record(&mut cursor, &mut messages)? {
+            {
                 let mid = cursor.peek_slice(1)?[0] & 0x1F;
                 let rem = cursor.remaining();
                 let body = cursor.peek_slice(rem)?.to_vec();
@@ -293,9 +292,9 @@ pub fn parse_frame_payload_best_effort(bytes: &[u8]) -> BatchParse {
         // The offset is recomputed per record rather than tracked, so it
         // cannot drift from the cursor the decoders actually advance.
         let offset = total - cursor.remaining();
-        match decode_one_record(&mut cursor) {
-            Ok(Some(msg)) => messages.push(msg),
-            Ok(None) => {
+        match decode_one_record(&mut cursor, &mut messages) {
+            Ok(true) => {}
+            Ok(false) => {
                 // An unknown MID: absorb the rest verbatim (the strict
                 // parse's own behaviour) and stop, since the record's
                 // length is unknowable and there is nothing to resync on.
@@ -335,53 +334,66 @@ pub fn parse_frame_payload_best_effort(bytes: &[u8]) -> BatchParse {
     }
 }
 
-/// Decode ONE record at the cursor. `Ok(None)` means the MID has no
-/// envelope decoder in this build — the caller decides whether that is a
-/// terminating `Unknown` absorb (both parsers) or something else.
+/// Decode ONE record at the cursor and PUSH it onto `out`. `Ok(false)` means
+/// the MID has no envelope decoder in this build — the caller decides whether
+/// that is a terminating `Unknown` absorb (both parsers) or something else.
 ///
 /// The single MID-dispatch SSOT: adding a `codec-*` feature adds an arm
 /// here and both the strict and the best-effort walk gain it together.
+///
+/// R311y580 — pushes through `out` rather than returning
+/// `Option<NetworkMessage>` by value, and that is a FOOTPRINT decision with a
+/// measured number behind it. `NetworkMessage` is a wide enum (its largest
+/// variants are boxed precisely because of that); returning one through an
+/// extra `Option` layer, out of a function, and into a `Vec::push` gave the
+/// thumbv7m multicast artifact +748 B in `parse_frame_payload` alone at
+/// `opt-level=s` — the whole of Layer Q's +868 regression, per-symbol ELF
+/// diff of `e8af0d92` against `8fd6c25c`. The SSOT the extraction bought is
+/// worth keeping; the extra move was not, and the out-param keeps both.
 #[cfg(feature = "codec-frame")]
-fn decode_one_record(cursor: &mut SceCursor<'_>) -> Result<Option<NetworkMessage>, CodecError> {
+fn decode_one_record(
+    cursor: &mut SceCursor<'_>,
+    out: &mut Vec<NetworkMessage>,
+) -> Result<bool, CodecError> {
     let header = cursor.peek_slice(1)?[0];
     let mid = header & 0x1F;
-    let msg = match mid {
+    match mid {
         #[cfg(feature = "codec-request")]
         wire_const::N_MID_REQUEST => {
             let req = wz_codecs::request::Request::decode(cursor)?;
-            NetworkMessage::Request(Box::new(req.try_into_owned()?))
+            out.push(NetworkMessage::Request(Box::new(req.try_into_owned()?)));
         }
         #[cfg(feature = "codec-push")]
         wire_const::N_MID_PUSH => {
             let push = wz_codecs::push::Push::decode(cursor)?;
-            NetworkMessage::Push(Box::new(push.try_into_owned()?))
+            out.push(NetworkMessage::Push(Box::new(push.try_into_owned()?)));
         }
         #[cfg(feature = "codec-response-final")]
         wire_const::N_MID_RESPONSE_FINAL => {
             let rf = wz_codecs::response_final::ResponseFinal::decode(cursor)?;
-            NetworkMessage::ResponseFinal(rf.try_into_owned()?)
+            out.push(NetworkMessage::ResponseFinal(rf.try_into_owned()?));
         }
         wire_const::N_MID_OAM => {
             let oam = wz_codecs::oam::Oam::decode(cursor)?;
-            NetworkMessage::Oam(oam.try_into_owned()?)
+            out.push(NetworkMessage::Oam(oam.try_into_owned()?));
         }
         wire_const::N_MID_INTEREST => {
             let interest = wz_codecs::interest::Interest::decode(cursor)?;
-            NetworkMessage::Interest(interest.try_into_owned()?)
+            out.push(NetworkMessage::Interest(interest.try_into_owned()?));
         }
         #[cfg(feature = "codec-response")]
         wire_const::N_MID_RESPONSE => {
             let resp = wz_codecs::response::Response::decode(cursor)?;
-            NetworkMessage::Response(Box::new(resp.try_into_owned()?))
+            out.push(NetworkMessage::Response(Box::new(resp.try_into_owned()?)));
         }
         #[cfg(feature = "codec-declare")]
         wire_const::N_MID_DECLARE => {
             let decl = wz_codecs::declare::Declare::decode(cursor)?;
-            NetworkMessage::Declare(Box::new(decl.try_into_owned()?))
+            out.push(NetworkMessage::Declare(Box::new(decl.try_into_owned()?)));
         }
-        _ => return Ok(None),
-    };
-    Ok(Some(msg))
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 // ── R311y578 — G4: the batch parse is best-effort for an OBSERVER while
