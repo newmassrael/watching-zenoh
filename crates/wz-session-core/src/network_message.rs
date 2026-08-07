@@ -361,39 +361,140 @@ fn decode_one_record(
         #[cfg(feature = "codec-request")]
         wire_const::N_MID_REQUEST => {
             let req = wz_codecs::request::Request::decode(cursor)?;
+            crate::ext_chain::check_request(&req)?;
             out.push(NetworkMessage::Request(Box::new(req.try_into_owned()?)));
         }
         #[cfg(feature = "codec-push")]
         wire_const::N_MID_PUSH => {
             let push = wz_codecs::push::Push::decode(cursor)?;
+            crate::ext_chain::check_push(&push)?;
             out.push(NetworkMessage::Push(Box::new(push.try_into_owned()?)));
         }
         #[cfg(feature = "codec-response-final")]
         wire_const::N_MID_RESPONSE_FINAL => {
             let rf = wz_codecs::response_final::ResponseFinal::decode(cursor)?;
+            crate::ext_chain::check_chain(rf.extensions.as_ref())?;
             out.push(NetworkMessage::ResponseFinal(rf.try_into_owned()?));
         }
         wire_const::N_MID_OAM => {
             let oam = wz_codecs::oam::Oam::decode(cursor)?;
+            crate::ext_chain::check_chain(oam.extensions.as_ref())?;
             out.push(NetworkMessage::Oam(oam.try_into_owned()?));
         }
         wire_const::N_MID_INTEREST => {
             let interest = wz_codecs::interest::Interest::decode(cursor)?;
+            crate::ext_chain::check_chain(interest.extensions.as_ref())?;
             out.push(NetworkMessage::Interest(interest.try_into_owned()?));
         }
         #[cfg(feature = "codec-response")]
         wire_const::N_MID_RESPONSE => {
             let resp = wz_codecs::response::Response::decode(cursor)?;
+            crate::ext_chain::check_response(&resp)?;
             out.push(NetworkMessage::Response(Box::new(resp.try_into_owned()?)));
         }
         #[cfg(feature = "codec-declare")]
         wire_const::N_MID_DECLARE => {
             let decl = wz_codecs::declare::Declare::decode(cursor)?;
+            crate::ext_chain::check_declare(&decl)?;
             out.push(NetworkMessage::Declare(Box::new(decl.try_into_owned()?)));
         }
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+// ── R311y582 — A1: a chain that never terminated must not reach a consumer.
+//    The check lives in `crate::ext_chain`; these are its firing legs. A rule
+//    that is merely PRESENT proves nothing, so each leg damages one thing and
+//    is paired with the control that leaves it green. ──
+#[cfg(all(test, feature = "codec-frame", feature = "codec-push"))]
+mod chain_saturation_tests {
+    use super::*;
+
+    /// A `Push` whose keyexpr is a bare id and whose body is a `MsgPut`
+    /// carrying `ext_count` unit extensions and a three-byte payload.
+    ///
+    /// The terminating extension's id is 3 on purpose: its header byte is
+    /// then `0x03`, a plausible VLE that the codec will read as `payload_len`
+    /// if the chain saturates — so an unguarded parse SUCCEEDS with the wrong
+    /// answer instead of failing. A fixture whose overflow byte was
+    /// implausible would prove only that the codec noticed a truncated read.
+    fn push_with_put_exts(ext_count: usize) -> Vec<u8> {
+        let mut wire = alloc::vec![wire_const::N_MID_PUSH, 0x01];
+        // MsgPut header: MID 0x01 plus Z, since the chain is present.
+        wire.push(0x01 | 0x80);
+        for i in 1..ext_count {
+            wire.push(0x80 | (i as u8));
+        }
+        wire.push(0x03);
+        wire.extend_from_slice(&[0x03, 0xAA, 0xBB, 0xCC]);
+        wire
+    }
+
+    /// THE CONTROL. Four extensions is exactly the cap, and the chain
+    /// terminates on its own, so nothing is refused and the payload is the
+    /// one on the wire. Without this leg the reject below could be produced
+    /// by a check that fires on every chain.
+    #[test]
+    fn a_chain_that_terminates_at_the_cap_is_accepted_with_the_right_payload() {
+        let wire = push_with_put_exts(crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH);
+        let msgs = parse_frame_payload(&wire).expect("a terminated chain must parse");
+        assert_eq!(msgs.len(), 1);
+        match &msgs[0] {
+            NetworkMessage::Push(p) => match &p.body {
+                wz_codecs::push::PushOwnedVariant::CodecZenohMsgPut(put) => {
+                    assert_eq!(put.payload.as_ref(), &[0xAAu8, 0xBB, 0xCC]);
+                    assert_eq!(
+                        put.extensions.as_ref().map_or(0, |e| e.len()),
+                        crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH
+                    );
+                }
+                other => panic!("expected a Put body, got {other:?}"),
+            },
+            other => panic!("expected a Push, got {other:?}"),
+        }
+    }
+
+    /// THE FIRING LEG. One more extension than the cap, and the generated
+    /// decode would return `Ok` with a payload of `[0x03, 0xAA, 0xBB]`. The
+    /// seam refuses instead — and refuses on the NESTED chain, which is the
+    /// one that costs a payload; the `Push`'s own chain is absent here.
+    #[test]
+    fn a_chain_past_the_cap_is_refused_at_the_dispatch_seam() {
+        let wire = push_with_put_exts(crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH + 1);
+        assert_eq!(
+            parse_frame_payload(&wire).unwrap_err(),
+            CodecError::TlvChainOverflow,
+            "the dispatch accepted a message whose inner chain never terminated"
+        );
+    }
+
+    /// An observer keeps what it read and reports where it stopped, rather
+    /// than losing the batch — G4's contract, which A1 must not undo. The
+    /// leading clean record survives; the saturated one does not become a
+    /// decoded message.
+    #[test]
+    fn the_best_effort_walk_halts_on_it_without_losing_the_earlier_record() {
+        let mut wire = wz_codecs::oam::Oam {
+            id: 7,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        wire.extend_from_slice(&push_with_put_exts(
+            crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH + 1,
+        ));
+
+        let best = parse_frame_payload_best_effort(&wire);
+        assert_eq!(best.messages.len(), 1, "the clean OAM record is kept");
+        assert!(
+            !best.is_complete(),
+            "the saturated record must halt the walk"
+        );
+        assert!(best
+            .messages
+            .iter()
+            .all(|m| !matches!(m, NetworkMessage::Push(_))));
+    }
 }
 
 // ── R311y578 — G4: the batch parse is best-effort for an OBSERVER while

@@ -248,8 +248,39 @@ declare -A BASELINE_MC_TEXT=(
     # Both axes are byte-identical to the runner again (thumbv7m 51368, hf
     # 51288 measured here and on the hosted job), so R311y267's reproducibility
     # property survives the bump. Old: 50956/51096 (R311y267).
-    ["thumbv7m-none-eabi"]=51368
-    ["thumbv7em-none-eabihf"]=51288
+    #
+    # R311y582 — rebased for the A1 ext-chain work, and the total is ATTRIBUTED
+    # rather than absorbed, because only part of it belongs to this round. Three
+    # measurements on this host, same toolchain (rustc 1.97.0 / gcc 10.3.1),
+    # `bash scripts/run-ci.sh --layer Q` each time:
+    #
+    #   | tree                              | thumbv7m | hf    |
+    #   |-----------------------------------|----------|-------|
+    #   | at this baseline, no A1 changes   | 51584    | 51428 |
+    #   | + the chain-saturation check      | 51888    | 51660 |
+    #   | + max-depth 4 -> 8 (this rebase)  | 52064    | 51840 |
+    #
+    # So of the +696 / +552 against the old figure: +216 / +140 was ALREADY
+    # THERE and belongs to some round between R311y357 and R311y581 — the
+    # +-256 band absorbed it silently, and the next change to touch this
+    # artifact was always going to pay the accumulated total. That is a
+    # property of a tolerance band worth stating: it hides drift up to the
+    # band width, and hands the bill to whoever arrives next.
+    #
+    # This round's own share is +480 / +412, in two parts. +304 / +232 is the
+    # chain-saturation check at the network dispatch seam, which stops a wz
+    # node acting on a message whose extension chain never terminated (a
+    # SILENT misread today, not an error — see
+    # `wz-session-core::ext_chain::chain_saturated`). That is correctness and
+    # is not negotiable against ROM. The remaining +176 / +180 is `max-depth`
+    # 4 -> 8 across the fifteen entry-flag chains in `sources/codecs/*.scxml`,
+    # which buys tolerance: wz can now READ a message carrying five to eight
+    # extensions rather than only refuse it safely. It also removes an
+    # unexplained asymmetry — the transport chain has read 8
+    # (`parse_error::MAX_EXT_CHAIN_DEPTH`) since R68c while the network and
+    # payload chains read 4.
+    ["thumbv7m-none-eabi"]=52064
+    ["thumbv7em-none-eabihf"]=51840
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck

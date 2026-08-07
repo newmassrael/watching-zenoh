@@ -35,7 +35,7 @@ pub struct Interest<'a> {
     pub header: u8,
     pub interest_id: u64,
     pub body: Option<InterestBody<'a>>,
-    pub extensions: Option<HeaplessVec<ExtEntry<'a>, 4>>,
+    pub extensions: Option<HeaplessVec<ExtEntry<'a>, 8>>,
 }
 
 // RFC variant-default-uniformity: at least one field's
@@ -96,8 +96,8 @@ impl<'a> Interest<'a> {
             None
         };
         let extensions = if (header & 0x80u8) != 0 {
-            let mut _vec: HeaplessVec<ExtEntry<'a>, 4> = HeaplessVec::new();
-            for _ in 0..4u32 {
+            let mut _vec: HeaplessVec<ExtEntry<'a>, 8> = HeaplessVec::new();
+            for _ in 0..8u32 {
                     if cursor.remaining() == 0 { break; }
                     let _entry = ExtEntry::decode(cursor)?;
                     let _continue = _entry.z();
@@ -170,7 +170,7 @@ impl<'a> Interest<'a> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 434;
+    pub const MAX_ENCODED_BYTES: usize = 602;
 
     /// Encode `self` into the caller-owned sink. Returns
     /// `CodecError::BufferOverflow` from a bounded sink when the

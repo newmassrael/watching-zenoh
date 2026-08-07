@@ -460,17 +460,38 @@ pub fn walk_ext_entry(c: &mut SpanCursor<'_>) -> Result<(bool, Field), CodecErro
 
 /// The Z-terminated ext chain: entries until one clears the Z bit, the cursor
 /// empties, or `max` entries have been read.
+///
+/// R311y582 (A1) — this is the ONE place the walker deliberately does NOT
+/// mirror the generated codec, and the divergence is the point rather than an
+/// oversight. The codec leaves this loop on the `max` bound with the last
+/// entry still saying "continue" and then reads the NEXT FIELD out of chain
+/// bytes, silently ([`crate::ext_chain::chain_saturated`] carries the
+/// measurement and why the generator does it). A dissector that reproduced
+/// that would draw a confident wrong tree, which is the single thing a
+/// dissector must never do — so the walker refuses instead.
+///
+/// The divergence is bounded to inputs no faithful fixture contains: for any
+/// chain that terminates within `max`, walker and codec still agree byte for
+/// byte, which is what every `agree`-driven test exercises. The saturating
+/// input is pinned separately by
+/// `a_chain_past_the_cap_is_refused_rather_than_misread`, so the difference is
+/// a MEASURED claim and not something a later reader has to rediscover.
 fn walk_ext_chain_z(c: &mut SpanCursor<'_>, max: usize) -> Result<Vec<Field>, CodecError> {
     let mut out = Vec::new();
+    let mut last_says_continue = false;
     for _ in 0..max {
         if c.remaining() == 0 {
             break;
         }
         let (z, f) = walk_ext_entry(c)?;
         out.push(f);
+        last_says_continue = z;
         if !z {
             break;
         }
+    }
+    if crate::ext_chain::chain_saturated(out.len(), max, last_says_continue) {
+        return Err(CodecError::TlvChainOverflow);
     }
     Ok(out)
 }
@@ -559,7 +580,9 @@ pub fn walk_msg_put(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         out.push(c.nested("encoding", walk_encoding)?);
     }
     if (header & 0x80) != 0 {
-        out.push(c.nested("extensions", |c| walk_ext_chain_z(c, 4))?);
+        out.push(c.nested("extensions", |c| {
+            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+        })?);
     }
     let (n, len) = c.vle_u64("payload_len")?;
     out.push(len);
@@ -581,7 +604,9 @@ pub fn walk_msg_del(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         out.push(c.nested("timestamp", walk_timestamp)?);
     }
     if (header & 0x80) != 0 {
-        out.push(c.nested("extensions", |c| walk_ext_chain_z(c, 4))?);
+        out.push(c.nested("extensions", |c| {
+            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+        })?);
     }
     Ok(out)
 }
@@ -609,7 +634,9 @@ pub fn walk_query(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         out.push(c.bytes("parameters", n as usize)?);
     }
     if (header & 0x80) != 0 {
-        out.push(c.nested("extensions", |c| walk_ext_chain_fill(c, 8))?);
+        out.push(c.nested("extensions", |c| {
+            walk_ext_chain_fill(c, crate::ext_chain::QUERY_EXT_CHAIN_DEPTH)
+        })?);
     }
     Ok(out)
 }
@@ -629,7 +656,9 @@ pub fn walk_reply(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         out.push(f);
     }
     if (header & 0x80) != 0 {
-        out.push(c.nested("extensions", |c| walk_ext_chain_z(c, 4))?);
+        out.push(c.nested("extensions", |c| {
+            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+        })?);
     }
     out.push(walk_put_or_del_body(c)?);
     Ok(out)
@@ -649,7 +678,9 @@ pub fn walk_err(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         out.push(c.nested("encoding", walk_encoding)?);
     }
     if (header & 0x80) != 0 {
-        out.push(c.nested("extensions", |c| walk_ext_chain_z(c, 4))?);
+        out.push(c.nested("extensions", |c| {
+            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+        })?);
     }
     let (n, len) = c.vle_u64("payload_len")?;
     out.push(len);
@@ -687,7 +718,9 @@ pub fn walk_push(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     ];
     out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, m))?);
     if (header & 0x80) != 0 {
-        out.push(c.nested("extensions", |c| walk_ext_chain_z(c, 4))?);
+        out.push(c.nested("extensions", |c| {
+            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+        })?);
     }
     out.push(walk_put_or_del_body(c)?);
     Ok(out)
@@ -710,7 +743,9 @@ pub fn walk_request(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     out.push(rid);
     out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, m))?);
     if (header & 0x80) != 0 {
-        out.push(c.nested("extensions", |c| walk_ext_chain_z(c, 4))?);
+        out.push(c.nested("extensions", |c| {
+            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+        })?);
     }
     // Query is the codec's default arm here, not MsgPut.
     out.push(match c.peek_u8()? & 0x1F {
@@ -738,7 +773,9 @@ pub fn walk_response(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     out.push(rid);
     out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, m))?);
     if (header & 0x80) != 0 {
-        out.push(c.nested("extensions", |c| walk_ext_chain_z(c, 4))?);
+        out.push(c.nested("extensions", |c| {
+            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+        })?);
     }
     out.push(match c.peek_u8()? & 0x1F {
         5 => c.nested("err", walk_err)?,
@@ -759,7 +796,9 @@ pub fn walk_response_final(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecEr
     let (_, rid) = c.vle_u64("request_id")?;
     out.push(rid);
     if (header & 0x80) != 0 {
-        out.push(c.nested("extensions", |c| walk_ext_chain_z(c, 4))?);
+        out.push(c.nested("extensions", |c| {
+            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+        })?);
     }
     Ok(out)
 }
@@ -801,7 +840,9 @@ pub fn walk_interest(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         out.push(c.nested("body", walk_interest_body)?);
     }
     if (header & 0x80) != 0 {
-        out.push(c.nested("extensions", |c| walk_ext_chain_z(c, 4))?);
+        out.push(c.nested("extensions", |c| {
+            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+        })?);
     }
     Ok(out)
 }
@@ -821,7 +862,9 @@ pub fn walk_oam(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let (_, id) = c.vle_u64("id")?;
     out.push(id);
     if (header & 0x80) != 0 {
-        out.push(c.nested("extensions", |c| walk_ext_chain_z(c, 4))?);
+        out.push(c.nested("extensions", |c| {
+            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+        })?);
     }
     match enc {
         1 => {
@@ -877,7 +920,9 @@ fn walk_declare_body(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
         let (_, id) = c.vle_u64("id")?;
         out.push(id);
         if with_exts && (header & 0x80) != 0 {
-            out.push(c.nested("extensions", |c| walk_ext_chain_z(c, 4))?);
+            out.push(c.nested("extensions", |c| {
+                walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+            })?);
         }
         Ok(out)
     }
@@ -897,7 +942,9 @@ fn walk_declare_body(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
             }) = out.first()
             {
                 if (*h as u8 & 0x80) != 0 {
-                    out.push(c.nested("extensions", |c| walk_ext_chain_z(c, 4))?);
+                    out.push(c.nested("extensions", |c| {
+                        walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+                    })?);
                 }
             }
             Ok(out)
@@ -934,7 +981,9 @@ pub fn walk_declare(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         out.push(f);
     }
     if (header & 0x80) != 0 {
-        out.push(c.nested("extensions", |c| walk_ext_chain_z(c, 4))?);
+        out.push(c.nested("extensions", |c| {
+            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+        })?);
     }
     out.push(walk_declare_body(c)?);
     Ok(out)
@@ -1766,6 +1815,172 @@ mod tests {
         assert_eq!(uint(&f, "payload_len"), 0);
         assert!(f.find("timestamp").is_none());
         assert!(f.find("encoding").is_none());
+    }
+
+    /// R311y582 (A1) — a chain LONGER than the codec's cap must not decode to
+    /// a confident wrong answer.
+    ///
+    /// The generated Z-terminated chain is `for _ in 0..MAX` over a
+    /// `HeaplessVec<_, MAX>` (`out/wz-codecs/msg_put.rs:107-119`), so the
+    /// `TooManyElements` arm is unreachable and the entry-flag emit carries no
+    /// post-loop overflow check (`vendor/sce` generator: the check is dropped
+    /// whenever `terminate_on` is `EntryFlag`). A 5th extension therefore ends
+    /// the loop on the FOR bound with the 4th entry's Z bit still set, and the
+    /// cursor sitting on the 5th extension's header — which the codec then
+    /// reads as `payload_len`.
+    ///
+    /// The fixture is built so the misread SUCCEEDS: the 5th extension's
+    /// header byte is `0x03`, a plausible VLE length that fits the bytes left.
+    /// So the failure is not an error, it is a Put whose payload is three
+    /// bytes that were never the payload. That is the shape a dissector must
+    /// never produce, and it is why this is a defect rather than a limit.
+    ///
+    /// R311y582 (A1) — the walker is told each chain's bound as a constant;
+    /// the codec gets it from its container type. This is the gate that keeps
+    /// the two from drifting: it reads `N` back OUT of every generated field's
+    /// type and compares.
+    ///
+    /// A regenerated codec at a different `max-depth` reds here, which is the
+    /// only warning that matters — a walker bound BELOW the codec's rejects
+    /// wire the codec accepts, and one ABOVE it walks into bytes the codec
+    /// never read. Neither shows up in any `agree` fixture, because both
+    /// parsers are fed chains far shorter than the cap.
+    #[test]
+    fn the_generated_chain_capacities_match_the_constants() {
+        use crate::ext_chain::{NETWORK_EXT_CHAIN_DEPTH, QUERY_EXT_CHAIN_DEPTH};
+
+        /// Recover the const-generic capacity from the field's own type.
+        fn cap<const N: usize>(
+            _: &Option<sce_forge_runtime::heapless::Vec<wz_codecs::ext_entry::ExtEntry<'_>, N>>,
+        ) -> usize {
+            N
+        }
+
+        // The network layer.
+        assert_eq!(
+            cap(&wz_codecs::push::Push::default().extensions),
+            NETWORK_EXT_CHAIN_DEPTH
+        );
+        assert_eq!(
+            cap(&wz_codecs::request::Request::default().extensions),
+            NETWORK_EXT_CHAIN_DEPTH
+        );
+        assert_eq!(
+            cap(&wz_codecs::response::Response::default().extensions),
+            NETWORK_EXT_CHAIN_DEPTH
+        );
+        assert_eq!(
+            cap(&wz_codecs::response_final::ResponseFinal::default().extensions),
+            NETWORK_EXT_CHAIN_DEPTH
+        );
+        assert_eq!(
+            cap(&wz_codecs::oam::Oam::default().extensions),
+            NETWORK_EXT_CHAIN_DEPTH
+        );
+        assert_eq!(
+            cap(&wz_codecs::interest::Interest::default().extensions),
+            NETWORK_EXT_CHAIN_DEPTH
+        );
+        assert_eq!(
+            cap(&wz_codecs::declare::Declare::default().extensions),
+            NETWORK_EXT_CHAIN_DEPTH
+        );
+
+        // The zenoh-payload layer.
+        assert_eq!(
+            cap(&wz_codecs::msg_put::MsgPut::default().extensions),
+            NETWORK_EXT_CHAIN_DEPTH
+        );
+        assert_eq!(
+            cap(&wz_codecs::msg_del::MsgDel::default().extensions),
+            NETWORK_EXT_CHAIN_DEPTH
+        );
+        assert_eq!(
+            cap(&wz_codecs::reply::Reply::default().extensions),
+            NETWORK_EXT_CHAIN_DEPTH
+        );
+        assert_eq!(
+            cap(&wz_codecs::err::Err::default().extensions),
+            NETWORK_EXT_CHAIN_DEPTH
+        );
+
+        // The four Declare sub-bodies that carry a chain. The first census for
+        // this round missed all four; naming them here is what keeps the next
+        // reader from repeating it.
+        assert_eq!(
+            cap(&wz_codecs::decl_queryable::DeclQueryable::default().extensions),
+            NETWORK_EXT_CHAIN_DEPTH
+        );
+        assert_eq!(
+            cap(&wz_codecs::undecl_subscriber::UndeclSubscriber::default().extensions),
+            NETWORK_EXT_CHAIN_DEPTH
+        );
+        assert_eq!(
+            cap(&wz_codecs::undecl_queryable::UndeclQueryable::default().extensions),
+            NETWORK_EXT_CHAIN_DEPTH
+        );
+        assert_eq!(
+            cap(&wz_codecs::undecl_token::UndeclToken::default().extensions),
+            NETWORK_EXT_CHAIN_DEPTH
+        );
+
+        // Query is the odd one out on BOTH axes: a larger depth and the
+        // fill-to-end strategy.
+        assert_eq!(
+            cap(&wz_codecs::query::Query::default().extensions),
+            QUERY_EXT_CHAIN_DEPTH
+        );
+    }
+
+    /// Two claims, and both halves matter:
+    ///
+    /// 1. the WALKER refuses — the observer never draws a wrong tree;
+    /// 2. the CODEC still misreads — pinned here so the defect is a measured
+    ///    fact with a witness rather than a note. When SCE honours
+    ///    `on-overflow="reject"` on the entry-flag path, THIS half flips, and
+    ///    that is the signal to delete wz's compensating check rather than
+    ///    carry it forever.
+    #[test]
+    fn a_chain_past_the_cap_is_refused_rather_than_misread() {
+        let cap = crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH;
+        let payload = [0xAAu8, 0xBB, 0xCC];
+        // ONE more extension than the cap, derived rather than written out:
+        // the first version of this test hardcoded five, and raising the cap
+        // in the same round turned it green while proving nothing. The
+        // terminating entry's id is 3 so its header byte (0x03) is exactly the
+        // VLE the codec mistakes for `payload_len` — that choice is what makes
+        // the misread SUCCEED instead of running off the end, and it holds at
+        // any cap.
+        let mut exts: Vec<Vec<u8>> = (1..=cap).map(|i| ext_unit(i as u8, true)).collect();
+        exts.push(ext_unit(0x3, false));
+        let bytes = msg_put(None, None, &exts, &payload);
+
+        // (1) The observer refuses rather than reporting a wrong payload.
+        let mut w = SpanCursor::new(&bytes);
+        assert_eq!(
+            walk_msg_put(&mut w).err(),
+            Some(CodecError::TlvChainOverflow),
+            "the walker accepted a chain that never terminated inside the bound"
+        );
+
+        // (2) The generated codec, for now, does NOT — and this is what that
+        //     costs. `payload_len` is read from the overflowing extension's
+        //     header byte, so the payload is three bytes that were never the
+        //     payload and one wire byte is left behind to desynchronise
+        //     whatever follows in the batch.
+        {
+            let mut c = SceCursor::new(&bytes);
+            let m = wz_codecs::msg_put::MsgPut::decode(&mut c)
+                .expect("the codec is expected to accept this today, silently");
+            assert_eq!(m.extensions.as_ref().map_or(0, |e| e.len()), cap);
+            assert_eq!(
+                m.payload,
+                &[0x03u8, 0xAA, 0xBB],
+                "if this changed, SCE now honours on-overflow on the entry-flag \
+                 path and wz's compensating check in walk_ext_chain_z can go"
+            );
+            assert_eq!(c.remaining(), 1, "one byte of the message left unread");
+        }
     }
 
     #[test]
