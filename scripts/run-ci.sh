@@ -4766,6 +4766,73 @@ layer_c1bf_cargo_clippy_all_features() {
             --quiet -- -D warnings) || return 1
     done
 }
+# ─── Layer C1bn — the PASSIVE-DISSECTION feature set, RUN ────────────
+#
+# R311y579. Five features and one whole CRATE landed across R311y578/y578a/y579
+# for the G1-G10 passive-dissection track, and NO lane ran any of their tests.
+# C1bf's per-crate `--all-features` clippy COMPILES them, which is a different
+# claim: a decoder whose spans are one byte off, a whitelist that admits
+# everything, an emitter zenoh cannot read -- all compile.
+#
+# The gap was REGISTERED as debt by R311y578 ("wz-capture and
+# transport-link-tls-keylog are in no lane, ~2 lines each") and this closes it
+# for both, plus the three R311y579 additions.
+#
+# Guards are AT-LEAST-ONE-PASSED (`[1-9][0-9]* passed`), not exact counts:
+# R311y569 recorded that a bare `N passed` guard goes stale the moment a test is
+# added or renamed, and the property this lane needs is "the filter matched
+# something", which the loose form states without a number to maintain.
+#
+# `transport-link-tls-keylog` is clippy-only here BY NECESSITY, not by choice:
+# its e2e (`tls_keylog_e2e`) drives a real loopback TLS session and lives in
+# wz-runtime-tokio's own test dir, where Layer C1u already runs it under
+# `transport-link-tls`. What no lane did was LINT the keylog feature's own two
+# arms, which is where an un-called `#[cfg]` helper reds -- the exact shape of
+# R311y578's G7 and of the four hosted reds R311y537 catalogued.
+layer_c1bn_passive_dissection_features() {
+    local out
+    (cd crates && cargo clippy -p wz-capture --all-targets --quiet -- -D warnings) || return 1
+    out="$(cd crates && cargo test -p wz-capture --quiet 2>&1)" || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1bn FAIL: wz-capture ran no tests"; echo "$out"; return 1; }
+
+    out="$(cd crates && cargo test -p wz-session-core --features dissect-serde dissect:: --quiet 2>&1)" \
+        || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1bn FAIL: the dissect filter matched no test"; echo "$out"; return 1; }
+
+    out="$(cd crates && cargo test -p wz-session-core --features transport-link-raweth raweth_link:: --quiet 2>&1)" \
+        || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1bn FAIL: the raweth_link filter matched no test"; echo "$out"; return 1; }
+
+    out="$(cd crates && cargo test -p wz-runtime-tokio --features transport-link-raweth raweth_socket:: --quiet 2>&1)" \
+        || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1bn FAIL: the raweth_socket filter matched no test"; echo "$out"; return 1; }
+
+    out="$(cd crates && cargo test -p wz-runtime-tokio --features zenoh-config-emit zenoh_config:: --quiet 2>&1)" \
+        || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1bn FAIL: the zenoh_config filter matched no test"; echo "$out"; return 1; }
+
+    # The keylog feature's OWN arms. Each pairs it with the link it installs the
+    # sink on; a lane that never selects a feature is a lane that never lints it.
+    (cd crates && cargo clippy -p wz-runtime-tokio \
+        --features transport-link-tls,transport-link-tls-keylog \
+        --all-targets --quiet -- -D warnings) || return 1
+    (cd crates && cargo clippy -p wz-runtime-tokio \
+        --features transport-link-quic,transport-link-tls-keylog \
+        --all-targets --quiet -- -D warnings) || return 1
+
+    # The no-default-features arms: each new module must compose STANDALONE, not
+    # only inside the default set that happens to bring its dependencies.
+    (cd crates && cargo clippy -p wz-session-core --no-default-features \
+        --features dissect --all-targets --quiet -- -D warnings) || return 1
+    (cd crates && cargo clippy -p wz-session-core --no-default-features \
+        --features transport-link-raweth --all-targets --quiet -- -D warnings) || return 1
+}
+
 # ─── Layer C1bg — storage-backend-filesystem: durable fs Volume/Storage ─
 #
 # R311y279: `storage-backend-filesystem` (OFF in the default set) is a durable,
@@ -9777,6 +9844,7 @@ run_layer C1bc layer_c1bc_cargo_test_mcast_qos || overall=1
 run_layer C1bd layer_c1bd_locator_iface || overall=1
 run_layer C1be layer_c1be_cargo_test_query_value || overall=1
 run_layer C1bf layer_c1bf_cargo_clippy_all_features || overall=1
+run_layer C1bn layer_c1bn_passive_dissection_features || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1bl layer_c1bl_cargo_test_router_failfast || overall=1
 run_layer C1bm layer_c1bm_cargo_test_pico_failfast || overall=1

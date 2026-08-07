@@ -501,11 +501,20 @@ mod tests {
 
     #[test]
     fn wz_transport_parameters_carry_onto_the_emitted_node() {
-        let wz = crate::config::WzConfig {
-            whatami: WhatAmI::Router,
-            batch_size: 4096,
-            lease_ms: 7000,
-            ..Default::default()
+        // Built by FIELD ASSIGNMENT, not a struct literal with
+        // `..Default::default()`: under `routing-peer` `WzConfig` carries a
+        // PRIVATE `interceptors` field, and the literal form then fails to
+        // compile with E0451 — on that feature arm only, which is why Layer
+        // C1bf's per-crate `--all-features` clippy is where it surfaces and
+        // why clippy's `field_reassign_with_default` suggestion must be
+        // declined here.
+        #[allow(clippy::field_reassign_with_default)]
+        let wz = {
+            let mut wz = crate::config::WzConfig::default();
+            wz.whatami = WhatAmI::Router;
+            wz.batch_size = 4096;
+            wz.lease_ms = 7000;
+            wz
         };
         let z = ZenohNodeConfig::from_wz(&wz);
         assert_eq!(z.mode, WhatAmI::Router);
