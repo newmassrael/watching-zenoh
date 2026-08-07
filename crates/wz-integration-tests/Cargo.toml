@@ -291,6 +291,14 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # Manager lives in the `storage_manager_service` module, gated
     # `storage-mgr-multi-storage-host` (lib.rs:1128), opt-in. Same additive-
     # unification note as the storage-* pins above.
+    # R311y579 (G8) — tests/zenoh_config_emit_zenohd_interop.rs emits a stock
+    # zenoh JSON5 config from `wz_runtime_tokio::zenoh_config` and stands a REAL
+    # zenohd up on it. The module is behind this opt-in feature (a deploy that
+    # never configures a zenoh alongside itself does not select it), so the pin
+    # is what puts the emitter in reach at all. Pure data (a String out of typed
+    # fields), so it composes nothing and cannot change any other test's
+    # behaviour under `--workspace` unification.
+    "zenoh-config-emit",
     "storage-mgr-multi-storage-host",
     # R311y475 (pico cross-impl leg) — the storage HISTORY serve interop e2e
     # (tests/wz_storage_history_serves_pico_zget.rs) seeds THREE timestamped

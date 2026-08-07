@@ -1106,6 +1106,15 @@ access-quota = [
 # list-key-id merge (the full engine) and the admin PUT wire (adminspace-write)
 # are deferred §5.23 layers.
 config-mutate-runtime = ["routing-peer"]
+# R311y579 (G8) — `zenoh-config-emit`: render the stringly JSON5 config a
+# STOCK zenoh node reads, and validate a topology before starting one. Pure
+# data (a `String` out of typed fields, via the `wz_session_core::json`
+# escaper SSOT), so it composes nothing and gates nothing else: a deploy that
+# never stands up a zenoh alongside itself simply does not select it. The
+# `transport-multilink` / `transport-qos` fields are carried from `WzConfig`
+# only on a build that HAS them, so this feature does not silently widen the
+# transport surface to obtain a number to emit.
+zenoh-config-emit = []
 # R311il — FOUNDATIONAL session gate. Forwards to wz-session-core's
 # `session-unicast`, which codegens the engine-free unicast session FSM
 # (sources/session/session_fsm_unicast.scxml, `--no-std`) into the

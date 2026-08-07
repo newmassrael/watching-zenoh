@@ -568,6 +568,13 @@ pub mod query;
 /// subset, re-applied to the forwarder under `config-mutate-runtime`.
 pub mod config;
 
+/// R311y579 (G8) — the OTHER direction of the same seam: emit the stringly
+/// JSON5 config a STOCK zenoh node reads, and validate a topology before
+/// starting one. `WzConfig` is how wz is configured; this is how wz configures
+/// the zenoh next to it.
+#[cfg(feature = "zenoh-config-emit")]
+pub mod zenoh_config;
+
 /// R121k-2 — application-layer remote-declaration registries. Route
 /// decoded `Declare(Decl*|Undecl*)` records to user-registered
 /// callbacks. This round lands `RemoteSubscriberRegistry`
