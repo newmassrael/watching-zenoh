@@ -817,6 +817,14 @@ transport-link-serial = [
 # generic `dial_locator` returns Unsupported for `tls/...`. NOT in the
 # default set — zenoh-pico ships TLS as an optional link (Z_FEATURE_LINK_TLS).
 transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64"]
+# R311y578 (G10) — TLS / QUIC session-key export in the NSS key-log format
+# (`crate::tls_keylog`). OFF by default and deliberately a compile-time gate
+# rather than a runtime one: exporting session keys makes the traffic readable
+# to whoever holds the file, so a production build should not contain the
+# capability at all. Even selected, it stays inert until `SSLKEYLOGFILE` names
+# a path — rustls reads that variable itself. Composes with either encrypted
+# link; both rustls configs install the same sink.
+transport-link-tls-keylog = []
 # R311ob — host WebSocket link backend. UNLIKE TLS (which forwards
 # transport-link-tcp because it reuses the TCP StreamEnvelope framing), WS is
 # a DATAGRAM-flow link (zenoh-pico `_z_new_link_ws` sets

@@ -82,6 +82,12 @@ pub fn quic_client_config_from_pem(
         None => builder.with_no_client_auth(),
     };
     config.alpn_protocols = vec![QUIC_ALPN.to_vec()];
+    // R311y578 (G10) — install the session-key sink. Inert in a build
+    // without `transport-link-tls-keylog`, and inert even there until
+    // `SSLKEYLOGFILE` names a destination (see `crate::tls_keylog`).
+    // Installed unconditionally rather than behind a `#[cfg]` here so the
+    // four config builders cannot drift from one another.
+    config.key_log = crate::tls_keylog::key_log();
     Ok(Arc::new(config))
 }
 
@@ -119,5 +125,8 @@ pub fn quic_server_config_from_pem(
     .with_single_cert(cert_chain, key)
     .map_err(invalid_data)?;
     config.alpn_protocols = vec![QUIC_ALPN.to_vec()];
+    // R311y578 (G10) — install the session-key sink, as the three sibling
+    // config builders do. See `crate::tls_keylog`.
+    config.key_log = crate::tls_keylog::key_log();
     Ok(Arc::new(config))
 }

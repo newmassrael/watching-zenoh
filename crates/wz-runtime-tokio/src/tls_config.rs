@@ -310,7 +310,7 @@ pub fn client_config_from_pem(
             .with_custom_certificate_verifier(Arc::new(AnyServerNameVerifier::new(roots))),
     };
 
-    let config = match client_auth {
+    let mut config = match client_auth {
         Some(auth) => {
             let cert_chain = certs_from_pem(auth.cert_chain_pem)?;
             let key = private_key_from_pem(auth.private_key_pem)?;
@@ -320,6 +320,12 @@ pub fn client_config_from_pem(
         }
         None => builder.with_no_client_auth(),
     };
+    // R311y578 (G10) — install the session-key sink. Inert in a build
+    // without `transport-link-tls-keylog`, and inert even there until
+    // `SSLKEYLOGFILE` names a destination (see `crate::tls_keylog`).
+    // Installed unconditionally rather than behind a `#[cfg]` here so the
+    // four config builders cannot drift from one another.
+    config.key_log = crate::tls_keylog::key_log();
 
     Ok(Arc::new(config))
 }
@@ -361,6 +367,13 @@ pub fn server_config_from_pem(
     }
     .with_single_cert(cert_chain, key)
     .map_err(invalid_data)?;
+    let mut config = config;
+    // R311y578 (G10) — install the session-key sink. Inert in a build
+    // without `transport-link-tls-keylog`, and inert even there until
+    // `SSLKEYLOGFILE` names a destination (see `crate::tls_keylog`).
+    // Installed unconditionally rather than behind a `#[cfg]` here so the
+    // four config builders cannot drift from one another.
+    config.key_log = crate::tls_keylog::key_log();
 
     Ok(Arc::new(config))
 }

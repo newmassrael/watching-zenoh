@@ -955,6 +955,14 @@ pub mod tls_pipeline;
 #[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
 pub mod tls_config;
 
+/// R311y578 (G10) — TLS / QUIC session-key export in the NSS key-log format,
+/// the mechanism that lets wz WITNESS its own encrypted transport rather than
+/// only assert that the handshake completed (the standing R311y534 debt).
+/// Off unless the `transport-link-tls-keylog` feature is selected AND
+/// `SSLKEYLOGFILE` names a destination — both, never either.
+#[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
+pub mod tls_keylog;
+
 /// R311ob — WebSocket-over-TCP backend for the WS link. The DATAGRAM-flow
 /// sibling of [`udp_pipeline`], NOT of TCP/TLS: zenoh-pico classes `ws` as
 /// `Z_LINK_CAP_FLOW_DATAGRAM`, so each batch rides one WebSocket BINARY
