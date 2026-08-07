@@ -4805,6 +4805,55 @@ layer_c1bf_cargo_clippy_all_features() {
 # `transport-link-tls`. What no lane did was LINT the keylog feature's own two
 # arms, which is where an un-called `#[cfg]` helper reds -- the exact shape of
 # R311y578's G7 and of the four hosted reds R311y537 catalogued.
+layer_c1bo_dissect_c_abi() {
+    # R311y587 — the dissection C ABI, driven from a REAL C translation unit.
+    #
+    # The Rust tests in `wz-capi-dissect` cover the functions. Only C covers
+    # what is ONLY true across the boundary: that the header compiles, that the
+    # symbols export under the names it declares, that the calling convention
+    # agrees, and that a string allocated in Rust can be released from C.
+    # R311y586 proved all four by hand, which is the shape that rots.
+    #
+    # `cc` absent -> SKIP, not FAIL: the Rust half still gates on every host,
+    # and a box without a C compiler is a provisioning fact rather than a
+    # defect. Hosted has one, so the leg runs where it matters.
+    local out cc
+    cc="${CC:-cc}"
+    command -v "$cc" >/dev/null 2>&1 || {
+        echo "  C1bo SKIP (no C compiler: $cc)"; return 0; }
+
+    (cd crates && cargo clippy -p wz-capi-dissect --all-targets --quiet -- -D warnings) || return 1
+    out="$(cd crates && cargo test -p wz-capi-dissect --quiet 2>&1)" || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1bo FAIL: wz-capi-dissect ran no tests"; echo "$out"; return 1; }
+
+    # The cdylib the C side links. `--release` on purpose: it is the artifact a
+    # consumer ships against, and a debug-only link would not exercise the
+    # symbol set LTO produces.
+    (cd crates && cargo build -p wz-capi-dissect --release --quiet) || return 1
+
+    local bin
+    bin="$(mktemp -d)/c_abi_consumer"
+    out="$("$cc" -Wall -Wextra -Werror \
+        -I crates/wz-capi-dissect/include \
+        crates/wz-capi-dissect/tests/c_abi_consumer.c \
+        -L crates/target/release -lwz_capi_dissect -o "$bin" 2>&1)" || {
+        echo "  C1bo FAIL: the C consumer did not compile or link"; echo "$out"; return 1; }
+    out="$(LD_LIBRARY_PATH=crates/target/release "$bin" 2>&1)" || {
+        echo "$out"; rm -rf "$(dirname "$bin")"; return 1; }
+    echo "$out"
+    rm -rf "$(dirname "$bin")"
+
+    # The header must compile as C++ too: the consumer this ABI exists for is
+    # [REDACTED], and a header that only works in C is found at integration time.
+    command -v c++ >/dev/null 2>&1 && {
+        out="$(c++ -fsyntax-only -x c++ -I crates/wz-capi-dissect/include \
+            crates/wz-capi-dissect/tests/c_abi_consumer.c 2>&1)" || {
+            echo "  C1bo FAIL: the header does not compile as C++"; echo "$out"; return 1; }
+    }
+    return 0
+}
+
 layer_c1bn_passive_dissection_features() {
     local out
     (cd crates && cargo clippy -p wz-capture --all-targets --quiet -- -D warnings) || return 1
@@ -9861,6 +9910,7 @@ run_layer C1bd layer_c1bd_locator_iface || overall=1
 run_layer C1be layer_c1be_cargo_test_query_value || overall=1
 run_layer C1bf layer_c1bf_cargo_clippy_all_features || overall=1
 run_layer C1bn layer_c1bn_passive_dissection_features || overall=1
+run_layer C1bo layer_c1bo_dissect_c_abi || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1bl layer_c1bl_cargo_test_router_failfast || overall=1
 run_layer C1bm layer_c1bm_cargo_test_pico_failfast || overall=1

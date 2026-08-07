@@ -2011,6 +2011,14 @@ jobs:
       # provisioning) and were measured green locally before being wired.
       - name: Layer C1bn — passive-dissection feature set, RUN (R311y579)
         run: bash scripts/run-ci.sh --layer C1bn
+      # R311y587 — the dissection C ABI, driven from a real C translation unit.
+      # The Rust tests cover the functions; only C covers what is true ONLY
+      # across the boundary (header compiles, symbols export under the names it
+      # declares, calling convention agrees, a Rust-allocated string frees from
+      # C). Probed: renaming the export breaks the link while all six Rust
+      # tests still pass, which is the class this leg exists for.
+      - name: Layer C1bo — dissection C ABI from real C (R311y587)
+        run: bash scripts/run-ci.sh --layer C1bo
 
       - name: Layer C1as — reply source-info (R311y581 wiring)
         run: bash scripts/run-ci.sh --layer C1as
