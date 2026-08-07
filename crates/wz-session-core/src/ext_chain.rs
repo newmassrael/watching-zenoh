@@ -77,11 +77,21 @@ pub fn chain_saturated(decoded: usize, capacity: usize, last_says_continue: bool
 /// which asks each generated container for its own `capacity()` — so a
 /// regenerated codec with a different depth reds a test rather than silently
 /// disagreeing with the walker.
-// Callers: the `dissect` walkers, and this crate's own chain-saturation
-// tests under `codec-frame`. NOT `codec-frame` alone — an MCU build that
-// parses batches and never dissects has no use for it, and R311y579 (G7)
-// says a helper is gated on who CALLS it.
-#[cfg(any(feature = "dissect", test))]
+// Callers, exactly: the `dissect` walkers, and this crate's own
+// chain-saturation tests — which live in `network_message` behind
+// `all(test, codec-frame, codec-push)`.
+//
+// R311y588 — the gate was `any(dissect, test)`, and a full local sweep found
+// the hole in SEVEN lanes: a `--lib` TEST build without `dissect` makes `test`
+// true, so the constant compiles, while its only test-side consumer needs
+// `codec-push` and is absent. Dead code under `-D warnings`. Third instance of
+// the R311y579 (G7) class in one session, and the first one no per-crate check
+// could have seen — every arm run by hand had either `dissect` or `codec-push`
+// in it.
+#[cfg(any(
+    feature = "dissect",
+    all(test, feature = "codec-frame", feature = "codec-push")
+))]
 pub const NETWORK_EXT_CHAIN_DEPTH: usize = 8;
 
 /// `Query`'s chain is generated with the fill-to-end strategy and its own,

@@ -1092,7 +1092,31 @@ layer_b_verify_codegen() {
     #             (crates/wz-integration-tests/tests/
     #             layer3_wireexpr_{local,nonlocal}.rs) is the real
     #             wire-interop check carried to R125e.
-    local LAYER2_KNOWN_DIVERGENCE=(request wireexpr)
+    #
+    #   msg_put, msg_del — R311y583 raised the ext-chain `max-depth` from 4
+    #             to 8 across every entry-flag chain in sources/codecs/,
+    #             for a measured reason: at 4, a Put carrying five
+    #             extensions decoded to Ok with a payload of three bytes
+    #             that were never the payload (the generated decode leaves
+    #             the loop on the FOR bound with the last entry's Z still
+    #             set and reads `payload_len` from the next extension's
+    #             header). SCE's upstream codec_zenoh_msg_{put,del}
+    #             fixtures are still at 4, so these two stems no longer
+    #             body-match. They are the ONLY two of the fifteen changed
+    #             that HAVE an upstream fixture, which is why the list
+    #             grows by two and not by fifteen.
+    #
+    #             Two things clear this entry, and they are separate: SCE
+    #             lifting its fixtures to the same depth, and SCE honouring
+    #             `on-overflow="reject"` on the entry-flag path at all
+    #             (claudedocs/sce-report-tlv-chain-entry-flag-overflow.md
+    #             — until then the depth is a cliff moved, not removed).
+    #             Layer 3 (crates/wz-integration-tests/tests/
+    #             layer3_msg_{put,del}.rs, byte-compared against
+    #             zenoh-pico's own encoder) is the real wire check and is
+    #             GREEN: the depth is a decoder bound and changes no
+    #             emitted byte.
+    local LAYER2_KNOWN_DIVERGENCE=(request wireexpr msg_put msg_del)
 
     local fail=0
     for scxml in sources/codecs/*.scxml sources/algorithms/*.scxml; do
