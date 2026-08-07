@@ -3138,8 +3138,13 @@ layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
 # subscriber-side history_selector + max_age + late-publisher tests
 # (--lib advanced_subscriber, which now also pulls liveliness-subscriber); the
 # cache-side _time parser + filter tests run under C1aq (--lib advanced_).
+#
+# R311y592 25 -> 28: the TEARDOWN-CANCELLATION trio. They land on THIS lane and
+# not on C1at because all three are `ext-pubsub-advanced-history`-gated — the
+# startup history GET is the one GET that is reliably in flight at a chosen
+# moment, so it is what the cancellation is measured through.
 layer_c1av_cargo_test_ext_pubsub_advanced_history() {
-    _runci_guarded_test "C1av advanced_subscriber" 25 \
+    _runci_guarded_test "C1av advanced_subscriber" 28 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \

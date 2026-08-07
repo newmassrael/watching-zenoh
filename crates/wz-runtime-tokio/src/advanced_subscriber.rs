@@ -76,6 +76,11 @@
 //! essential is the source identity that re-keys it).
 
 use std::collections::HashMap;
+// R311y592 — `HashSet` backs [`InFlight`] only, whose whole type is
+// `ext-pubsub-advanced-recovery`-gated; the import carries that same gate so a
+// recovery-off build does not warn on an unused import.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use wz_runtime_core::TimeSource;
@@ -865,9 +870,11 @@ fn recovery_query_timeout_ms(query_timeout: Duration) -> u32 {
 /// than before the fix: a reply keyed outside the subscription — previously refused
 /// by a conformant responder, now explicitly invited — was delivered into the
 /// subscriber's callback as though it were a sample on the subscribed keyexpr.
+#[allow(clippy::too_many_arguments)]
 fn issue_recovery_get<R, T>(
     session: &Session<R, T, Unicast>,
     statesref: &Arc<Mutex<State>>,
+    pending: &Arc<PendingGets>,
     keyexpr: &str,
     sub_keyexpr: &str,
     opts: QueryOptions,
@@ -880,6 +887,7 @@ fn issue_recovery_get<R, T>(
 {
     let reply_states = Arc::clone(statesref);
     let final_states = Arc::clone(statesref);
+    let final_pending = Arc::clone(pending);
     let final_finish = finish.clone();
     let sub_chunks: Vec<String> = sub_keyexpr.split('/').map(str::to_string).collect();
     let issued = session.query(
@@ -903,18 +911,36 @@ fn issue_recovery_get<R, T>(
                     .handle_recovered(rkey, rsn, sample);
             }
         },
-        move |_rid| {
+        move |rid| {
+            // R311y592 — forget the registration BEFORE running `finish`: a
+            // terminal Final means there is nothing left for a teardown to
+            // cancel, and `finish` re-enters the state lock.
+            final_pending.finish(rid);
             let mut guard = final_states
                 .lock()
                 .expect("advanced subscriber state mutex poisoned");
             final_finish(&mut guard);
         },
     );
-    if issued.is_err() {
-        let mut guard = statesref
-            .lock()
-            .expect("advanced subscriber state mutex poisoned");
-        finish(&mut guard);
+    match issued {
+        // R311y592 — record the GET so a teardown can cancel it. `record`
+        // answers `false` when the subscriber was dropped WHILE this GET was
+        // going out, and the only correct response is to undo the registration
+        // that has just been made: the guard's `cancel` has already run and
+        // will not run again, so an un-undone entry would outlive the
+        // subscriber holding the only remaining handle on `State`. Same shape
+        // as the cancelled-mid-fan rollback in `wz-capi-pico`'s C `z_get`.
+        Ok(handle) => {
+            if !pending.record(handle.rid()) {
+                session.cancel_pending_query(handle.rid());
+            }
+        }
+        Err(_) => {
+            let mut guard = statesref
+                .lock()
+                .expect("advanced subscriber state mutex poisoned");
+            finish(&mut guard);
+        }
     }
 }
 
@@ -926,9 +952,11 @@ fn issue_recovery_get<R, T>(
 /// meta chunk. MUST be called with the [`State`] lock RELEASED — `Session::query`
 /// re-enters the session (and locks the state again from the reply callback).
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
+#[allow(clippy::too_many_arguments)]
 fn issue_recovery_query<R, T>(
     session: &Session<R, T, Unicast>,
     statesref: &Arc<Mutex<State>>,
+    pending: &Arc<PendingGets>,
     base_keyexpr: &str,
     req: RecoveryRequest,
     dest: Locality,
@@ -973,6 +1001,7 @@ fn issue_recovery_query<R, T>(
     issue_recovery_get(
         session,
         statesref,
+        pending,
         &recovery_ke,
         base_keyexpr,
         opts,
@@ -1081,9 +1110,11 @@ fn history_selector(sample_depth: Option<usize>, max_age: Option<f64>) -> String
 /// [`State::finish_history`] clears `history_pending` + flushes the buffered
 /// history oldest-first. MUST be called with the [`State`] lock RELEASED.
 #[cfg(feature = "ext-pubsub-advanced-history")]
+#[allow(clippy::too_many_arguments)]
 fn issue_history_query<R, T>(
     session: &Session<R, T, Unicast>,
     statesref: &Arc<Mutex<State>>,
+    pending: &Arc<PendingGets>,
     base_keyexpr: &str,
     sample_depth: Option<usize>,
     max_age: Option<f64>,
@@ -1116,6 +1147,7 @@ fn issue_history_query<R, T>(
     issue_recovery_get(
         session,
         statesref,
+        pending,
         &history_ke,
         base_keyexpr,
         opts,
@@ -1136,6 +1168,7 @@ fn issue_history_query<R, T>(
 fn issue_late_publisher_query<R, T>(
     session: &Session<R, T, Unicast>,
     statesref: &Arc<Mutex<State>>,
+    pending: &Arc<PendingGets>,
     base_keyexpr: &str,
     zid: Vec<u8>,
     eid: u32,
@@ -1164,6 +1197,7 @@ fn issue_late_publisher_query<R, T>(
     issue_recovery_get(
         session,
         statesref,
+        pending,
         &recovery_ke,
         base_keyexpr,
         opts,
@@ -1186,6 +1220,7 @@ fn issue_late_publisher_query<R, T>(
 fn on_late_publisher_detected<R, T>(
     session: &Session<R, T, Unicast>,
     statesref: &Arc<Mutex<State>>,
+    pending: &Arc<PendingGets>,
     base_keyexpr: &str,
     sample_kind: LivelinessSampleKind,
     sample_keyexpr: &str,
@@ -1214,6 +1249,7 @@ fn on_late_publisher_detected<R, T>(
         issue_late_publisher_query(
             session,
             statesref,
+            pending,
             base_keyexpr,
             zid,
             eid,
@@ -1234,6 +1270,7 @@ fn on_late_publisher_detected<R, T>(
 fn run_periodic_tick<R, T>(
     session: &Session<R, T, Unicast>,
     statesref: &Arc<Mutex<State>>,
+    pending: &Arc<PendingGets>,
     base_keyexpr: &str,
     dest: Locality,
     timeout_ms: u32,
@@ -1250,7 +1287,15 @@ fn run_periodic_tick<R, T>(
         state.periodic_requests()
     };
     for req in requests {
-        issue_recovery_query(session, statesref, base_keyexpr, req, dest, timeout_ms);
+        issue_recovery_query(
+            session,
+            statesref,
+            pending,
+            base_keyexpr,
+            req,
+            dest,
+            timeout_ms,
+        );
     }
 }
 
@@ -1267,6 +1312,152 @@ struct PeriodicTask {
 impl Drop for PeriodicTask {
     fn drop(&mut self) {
         self.handle.abort();
+    }
+}
+
+/// R311y592 — the subscriber's in-flight recovery / history GETs, and the seam
+/// a teardown cancels them through.
+///
+/// This is pico's `_ze_advanced_subscriber_state_t::_cancellation_token`: ONE
+/// per subscriber state, carried by every recovery / history GET the subscriber
+/// issues (`vendor/zenoh-pico/src/api/advanced_subscriber.c:924-928`) and
+/// cancelled in the subscriber's drop handler (`advanced_subscriber.c:1230-1231`)
+/// so that every resource is released by the time undeclare returns.
+///
+/// wz reaches the same guarantee through the registration rather than through a
+/// token object, because [`Session::cancel_pending_query`] already IS this
+/// tree's cancellation primitive and pico's own token bottoms out in the same
+/// place (`_z_cancel_pending_query` is `_z_unregister_pending_query`,
+/// `vendor/zenoh-pico/src/session/query.c:290-298`). Adding a second mechanism
+/// would leave two spellings of one idea.
+///
+/// Why this matters beyond tidiness: [`State`] owns `on_sample`, and at the C
+/// ABI that is a C function pointer plus a context the application may free the
+/// moment `ze_undeclare_advanced_subscriber` returns. An in-flight GET keeps its
+/// own `Arc<Mutex<State>>`, so without this a reply landing one instant after
+/// the undeclare called into freed memory.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+struct PendingGets {
+    /// `Some` while the subscriber is live, `None` once cancelled. ONE optional
+    /// rather than a set plus a `cancelled` flag, so the two can never disagree
+    /// under a concurrent cancel — the discipline `wz-capi-pico`'s `CancelFan`
+    /// applies to the C `z_get` fan, for the same reason.
+    inner: Mutex<Option<InFlight>>,
+}
+
+/// The live half of [`PendingGets`].
+///
+/// Two sets rather than one because a GET can COMPLETE BEFORE IT IS RECORDED: a
+/// `Locality::SessionLocal` / `Any` query is answered by the loopback inside
+/// [`Session::query`], so `on_final` can run before the call returns the rid
+/// there is to record. `finished_early` absorbs exactly that ordering; every
+/// entry in it is removed by the matching `record`, so it cannot accumulate.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+#[derive(Default)]
+struct InFlight {
+    /// Issued, not yet terminal — the set a teardown must cancel.
+    live: HashSet<u64>,
+    /// Terminal before `record` saw them (the synchronous-loopback ordering).
+    finished_early: HashSet<u64>,
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl PendingGets {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(Some(InFlight::default())),
+        }
+    }
+
+    /// Lock, recovering from poisoning rather than propagating it.
+    ///
+    /// A panic in a reply callback poisons this mutex, and the guard below runs
+    /// in `Drop` — where a second panic would abort the process. The data behind
+    /// it is two sets of `u64` with no cross-field invariant a panic can leave
+    /// half-applied, so the poisoned guard is exactly as usable as a healthy one.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<InFlight>> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Record a GET that has just been issued. `false` means the subscriber was
+    /// torn down while this GET was going out, and the caller must undo the
+    /// registration it just made rather than leave a live pending query behind.
+    fn record(&self, rid: u64) -> bool {
+        match self.lock().as_mut() {
+            Some(in_flight) => {
+                // Already terminal (the loopback answered inside `query`): there
+                // is nothing left to cancel, so consume the marker instead of
+                // adding a rid that would never be removed.
+                if !in_flight.finished_early.remove(&rid) {
+                    in_flight.live.insert(rid);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A GET reached its terminal Final: forget it.
+    fn finish(&self, rid: u64) {
+        if let Some(in_flight) = self.lock().as_mut() {
+            if !in_flight.live.remove(&rid) {
+                in_flight.finished_early.insert(rid);
+            }
+        }
+    }
+
+    /// Take every still-outstanding rid and refuse all future ones. Idempotent:
+    /// a second call answers with an empty list.
+    fn cancel(&self) -> Vec<u64> {
+        match self.lock().take() {
+            Some(in_flight) => in_flight.live.into_iter().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// `(live, finished_early)` sizes. Test-only: the two sets are the whole
+    /// state of this type, and a test that asserts only on `live` cannot see
+    /// `finished_early` growing without bound.
+    ///
+    /// The gate is its ONE caller's gate copied verbatim
+    /// (`a_synchronously_answered_history_get_leaves_no_registration_behind`,
+    /// `all(history, cache)`), minus the `ext-pubsub-advanced-recovery` this
+    /// `impl` block already carries and which `history` implies. A bare
+    /// `cfg(test)` here is the G7 shape: `cfg(test)` WIDENS rather than gates,
+    /// so the method stays alive on every `--lib` test build and reds
+    /// `-D dead-code` on the recovery-only lane, where the caller is gone.
+    #[cfg(all(
+        test,
+        feature = "ext-pubsub-advanced-history",
+        feature = "ext-pubsub-advanced-cache"
+    ))]
+    fn sizes(&self) -> (usize, usize) {
+        match self.lock().as_ref() {
+            Some(in_flight) => (in_flight.live.len(), in_flight.finished_early.len()),
+            None => (0, 0),
+        }
+    }
+}
+
+/// RAII teardown for the subscriber's in-flight recovery / history GETs: on
+/// drop, unregister every one that has not reached its terminal Final.
+///
+/// The cancel action is a boxed closure rather than a stored `Session` because
+/// [`AdvancedSubscriber`] is generic over `R` alone while a session is
+/// `(R, T, Unicast)` — the same type-erasure [`LivelinessSubGuard`] applies to
+/// the late-publisher subscriber, for the same reason.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+struct RecoveryCancel {
+    pending: Arc<PendingGets>,
+    cancel: Box<dyn Fn(u64) + Send>,
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl Drop for RecoveryCancel {
+    fn drop(&mut self) {
+        for rid in self.pending.cancel() {
+            (self.cancel)(rid);
+        }
     }
 }
 
@@ -1307,6 +1498,13 @@ pub struct AdvancedSubscriber<R: SessionRuntime = crate::runtime_impl::TokioRunt
     /// when `RecoveryConfig::periodic_queries` was set.
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
     _periodic: Option<PeriodicTask>,
+    /// R311y592 — the in-flight recovery / history GET cancellation (RAII
+    /// cancel-on-drop), `None` only for the plain [`Self::declare`] form, which
+    /// issues no GET at all. Aborting `_periodic` stops the subscriber ASKING;
+    /// this is what stops it ANSWERING — the two are separate teardowns because
+    /// a GET already on the wire outlives the timer that started it.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    _recovery_cancel: Option<RecoveryCancel>,
     /// R311y84 — the heartbeat subscriber on `<ke>/@adv/pub/**` (RAII
     /// undeclare-on-drop), `Some` only when `RecoveryConfig::heartbeat` was set.
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -1346,6 +1544,35 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
     /// it) must read this, not the request.
     pub fn heartbeat_channel_is_live(&self) -> bool {
         self._heartbeat_sub.is_some()
+    }
+
+    /// R311y592 — this subscriber's in-flight recovery / history GET registry.
+    ///
+    /// Test-only, and the companion of the `cfg(test)` `_statesref` field: a
+    /// test that drives [`run_periodic_tick`] directly must hand it the SAME
+    /// registry the subscriber's own callbacks use, or the tick's GETs land
+    /// outside the teardown this type exists to guarantee.
+    ///
+    /// Panics on the plain [`Self::declare`] form, which issues no GET and so
+    /// has no registry — a direct tick against it would be meaningless.
+    ///
+    /// The gate is the UNION of its two callers' gates — `composed_periodic_
+    /// tick_recovers_lost_last_sample` (`all(recovery, cache, allow-loop)`) and
+    /// `a_synchronously_answered_history_get_leaves_no_registration_behind`
+    /// (`all(history, cache)`) — reduced by the `ext-pubsub-advanced-recovery`
+    /// this `impl` block already carries and which `history` implies. Not a bare
+    /// `cfg(test)`: see the note on [`PendingGets::sizes`].
+    #[cfg(all(
+        test,
+        feature = "ext-pubsub-advanced-cache",
+        any(feature = "pubsub-allow-loop", feature = "ext-pubsub-advanced-history")
+    ))]
+    fn pending_gets(&self) -> &Arc<PendingGets> {
+        &self
+            ._recovery_cancel
+            .as_ref()
+            .expect("declare_with_options subscribers own a recovery registry")
+            .pending
     }
 }
 
@@ -1443,6 +1670,9 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             #[cfg(test)]
             _statesref: state,
             _periodic: None,
+            // The plain miss-form `declare()` issues no recovery / history GET
+            // (its callback only orders), so there is nothing to cancel.
+            _recovery_cancel: None,
             _heartbeat_sub: None,
             // The plain miss-form `declare()` never sets history, so no
             // late-publisher liveliness subscriber.
@@ -1531,7 +1761,11 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: history.is_some(),
         }));
+        // R311y592 — the in-flight GET registry every issuing site below shares,
+        // and that the returned subscriber cancels through on drop.
+        let pending = Arc::new(PendingGets::new());
         let cb_state = Arc::clone(&state);
+        let cb_pending = Arc::clone(&pending);
         let q_session = session.clone();
         let q_base = base_keyexpr.clone();
         let subscriber = session.declare_subscriber(
@@ -1550,7 +1784,15 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                 // replies, which lock `cb_state` again). R311lh deferred-fire
                 // makes this re-entrant call safe.
                 if let Some(request) = request {
-                    issue_recovery_query(&q_session, &cb_state, &q_base, request, dest, timeout_ms);
+                    issue_recovery_query(
+                        &q_session,
+                        &cb_state,
+                        &cb_pending,
+                        &q_base,
+                        request,
+                        dest,
+                        timeout_ms,
+                    );
                 }
             },
         )?;
@@ -1564,6 +1806,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         let periodic_task = periodic.map(|period| {
             let p_session = session.clone();
             let p_state = Arc::clone(&state);
+            let p_pending = Arc::clone(&pending);
             let p_base = base_keyexpr.clone();
             let clock = Arc::clone(session.clock());
             // R311y87 (review C4) — clamp to >=1ms: a sub-ms Duration truncates
@@ -1573,7 +1816,9 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                 handle: tokio::spawn(async move {
                     loop {
                         clock.sleep(period_ms).await;
-                        run_periodic_tick(&p_session, &p_state, &p_base, dest, timeout_ms);
+                        run_periodic_tick(
+                            &p_session, &p_state, &p_pending, &p_base, dest, timeout_ms,
+                        );
                     }
                 }),
             }
@@ -1620,6 +1865,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                 &base_keyexpr,
             )) {
             let hb_state = Arc::clone(&state);
+            let hb_pending = Arc::clone(&pending);
             let hb_session = session.clone();
             let hb_base = base_keyexpr.clone();
             let hb_keyexpr = crate::advanced_ke::heartbeat_sub_ke(&base_keyexpr);
@@ -1645,6 +1891,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                         issue_recovery_query(
                             &hb_session,
                             &hb_state,
+                            &hb_pending,
                             &hb_base,
                             request,
                             dest,
@@ -1682,6 +1929,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             issue_history_query(
                 session,
                 &state,
+                &pending,
                 &base_keyexpr,
                 history.sample_depth,
                 history.max_age,
@@ -1711,6 +1959,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         let liveliness_sub: Option<LivelinessSubGuard> =
             if history.is_some_and(|h| h.detect_late_publishers) {
                 let lp_state = Arc::clone(&state);
+                let lp_pending = Arc::clone(&pending);
                 let lp_session = session.clone();
                 let lp_base = base_keyexpr.clone();
                 let lp_keyexpr = crate::advanced_ke::heartbeat_sub_ke(&base_keyexpr);
@@ -1724,6 +1973,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                         on_late_publisher_detected(
                             &lp_session,
                             &lp_state,
+                            &lp_pending,
                             &lp_base,
                             sample.kind,
                             sample.keyexpr,
@@ -1739,11 +1989,24 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                 None
             };
 
+        // R311y592 — the teardown that stops the subscriber ANSWERING. The
+        // session is captured by the boxed closure rather than stored, because
+        // `AdvancedSubscriber` is `R`-only while a session is `(R, T, Unicast)`
+        // — the type erasure `LivelinessSubGuard` applies for the same reason.
+        let c_session = session.clone();
+        let recovery_cancel = Some(RecoveryCancel {
+            pending: Arc::clone(&pending),
+            cancel: Box::new(move |rid| {
+                c_session.cancel_pending_query(rid);
+            }),
+        });
+
         Ok(Self {
             _subscriber: subscriber,
             #[cfg(test)]
             _statesref: state,
             _periodic: periodic_task,
+            _recovery_cancel: recovery_cancel,
             _heartbeat_sub: heartbeat_sub,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             _liveliness_sub: liveliness_sub,
@@ -2446,6 +2709,10 @@ mod tests {
         run_periodic_tick(
             &session,
             &sub._statesref,
+            // The subscriber's OWN registry, not a throwaway: driving the tick
+            // through a second one would exercise a code path production never
+            // takes and would leave the real registry unobserved.
+            sub.pending_gets(),
             "demo/data",
             Locality::SessionLocal,
             recovery_query_timeout_ms(Duration::from_secs(10)),
@@ -3297,5 +3564,243 @@ mod tests {
             before,
             "a Delete liveliness sample issues no recovery GET"
         );
+    }
+
+    /// R311y592 — the TEARDOWN CANCELLATION contract, and the CALIBRATION arm
+    /// for the test below it.
+    ///
+    /// This arm holds the subscriber ALIVE and drives the exact same two
+    /// injections, so it establishes that (a) the rid this test computes really
+    /// is the history GET's, (b) `deliver_local_reply` + `deliver_local_final`
+    /// really do reach `on_sample` through it. Without it the negative arm below
+    /// would pass on a mistyped rid, an un-intersecting keyexpr, or a
+    /// `source_info: None` that `recovered_sample_from_reply` silently refuses —
+    /// a proof that passes on absence rather than on the fix.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn a_late_history_reply_reaches_a_live_subscribers_callback() {
+        let (delivered, session, sub, rid) = history_pending_fixture();
+
+        deliver_history_reply(&session, rid);
+        assert!(
+            delivered.lock().unwrap().is_empty(),
+            "a recovered sample BUFFERS while the history GET is still pending"
+        );
+        deliver_history_final(&session, rid);
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0x42],
+            "the terminal Final flushed the buffer into the live subscriber's callback"
+        );
+        drop(sub);
+    }
+
+    /// R311y592 — dropping an advanced subscriber must CANCEL its in-flight
+    /// recovery / history GETs, so that nothing arriving afterwards reaches the
+    /// user's `on_sample`.
+    ///
+    /// This is pico's `_ze_advanced_subscriber_state_t::_cancellation_token`:
+    /// one token per subscriber state, cloned onto every recovery / history
+    /// `z_get` (`vendor/zenoh-pico/src/api/advanced_subscriber.c:924-928`) and
+    /// cancelled in the subscriber's drop handler
+    /// (`advanced_subscriber.c:1230-1231`) so that "all advanced subscriber
+    /// resources are released by the time `z_close()`/undeclare returns"
+    /// (the comment at `advanced_subscriber.c:1216-1219`).
+    ///
+    /// Before R311y592 wz had no such path: `PeriodicTask` aborted the re-ask
+    /// timer, but every GET already in flight kept its own `Arc<Mutex<State>>`
+    /// alive, and `State` owns `on_sample`. At the C ABI that callback is a C
+    /// function pointer plus a context the application is entitled to free the
+    /// moment `ze_undeclare_advanced_subscriber` returns — so a reply landing
+    /// one instant later called into freed memory. The calibration arm above
+    /// proves the injection reaches a LIVE subscriber; this arm proves it
+    /// reaches a dropped one's callback no longer.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn dropping_an_advanced_subscriber_cancels_its_in_flight_history_get() {
+        let (delivered, session, sub, rid) = history_pending_fixture();
+
+        assert_eq!(
+            session.observer().lock().unwrap().replies.len(),
+            1,
+            "the startup history GET is in flight before the drop"
+        );
+
+        drop(sub);
+
+        assert_eq!(
+            session.observer().lock().unwrap().replies.len(),
+            0,
+            "dropping the subscriber unregistered its in-flight history GET"
+        );
+
+        // ...and the same two injections the calibration arm delivers now reach
+        // nobody: the pending entry (which owned the only remaining handle on
+        // `State`, hence on `on_sample`) is gone.
+        deliver_history_reply(&session, rid);
+        deliver_history_final(&session, rid);
+        assert!(
+            delivered.lock().unwrap().is_empty(),
+            "no sample was delivered into a dropped subscriber's callback"
+        );
+    }
+
+    /// R311y592 — the OTHER ordering `PendingGets` has to survive: a GET the
+    /// LOOPBACK answers inside [`Session::query`], so its terminal Final runs
+    /// BEFORE the call returns the rid there is to record.
+    ///
+    /// A registry that only ever removed on `finish` would end this test holding
+    /// one rid that is already dead — harmless per GET, unbounded over a
+    /// long-lived subscriber re-asking on every heartbeat, and invisible to
+    /// every other test here because a stale rid changes no delivery. Both
+    /// counters are asserted: `live` empty is the claim, `finished_early` empty
+    /// is what stops the fix from being a leak in the other set.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-history",
+        feature = "ext-pubsub-advanced-cache"
+    ))]
+    #[test]
+    fn a_synchronously_answered_history_get_leaves_no_registration_behind() {
+        use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
+        use wz_session_core::sample::TimestampHint;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let pub_zid = vec![0x09u8];
+        let zid_hex = zid_to_zenoh_hex(&pub_zid);
+        let cache = AdvancedCache::declare(
+            &session,
+            format!("demo/data/@adv/pub/{zid_hex}/4/_"),
+            CacheConfig { max_samples: 8 },
+        )
+        .expect("advanced cache declares");
+        cache.cache_sample(CachedSample::new(
+            "demo/data",
+            vec![0x11],
+            Some(SourceInfo::new(&pub_zid, 4, 0)),
+            TimestampHint {
+                time: 100,
+                zid: pub_zid.clone(),
+            },
+            crate::sample::SampleKind::Put,
+        ));
+
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        let sub = AdvancedSubscriber::declare_with_options(
+            &session,
+            "demo/data",
+            AdvancedSubscriberOptions::new()
+                .with_history(HistoryConfig::new())
+                .with_get_locality(Locality::SessionLocal),
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            |_miss: Miss| {},
+        )
+        .expect("history-enabled advanced subscriber declares");
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0x11],
+            "the loopback answered the history GET synchronously, inside the declare"
+        );
+        assert_eq!(
+            sub.pending_gets().sizes(),
+            (0, 0),
+            "a synchronously-completed GET leaves NEITHER a live registration nor \
+             an early-finish marker behind"
+        );
+        assert_eq!(
+            session.observer().lock().unwrap().replies.len(),
+            0,
+            "and the session agrees: no pending query outlived the loopback answer"
+        );
+    }
+
+    /// Shared setup for the two arms above: a session with NO `@adv` answerer,
+    /// a history-enabled advanced subscriber (so exactly one GET — the startup
+    /// history query — is issued and stays pending), and that GET's rid.
+    ///
+    /// The rid is COMPUTED, not guessed: `alloc_next_request_id` is a plain
+    /// monotonic counter, so consuming one before the declare fixes the next
+    /// one, and `HistoryConfig::new()` (no `detect_late_publishers`) issues
+    /// exactly that one query. The calibration arm is what proves the
+    /// computation right.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[allow(clippy::type_complexity)]
+    fn history_pending_fixture() -> (
+        Arc<Mutex<Vec<u8>>>,
+        TokioSession,
+        AdvancedSubscriber<crate::runtime_impl::TokioRuntime>,
+        u64,
+    ) {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+        // `_driver` is dropped here deliberately: these arms drive the reply
+        // registry directly and never read the recorded link traffic.
+
+        let probe = session.actions().alloc_next_request_id();
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        let sub = AdvancedSubscriber::declare_with_options(
+            &session,
+            "demo/data",
+            AdvancedSubscriberOptions::new()
+                .with_history(HistoryConfig::new())
+                // Remote-only: no local `@adv` cache exists, and SessionLocal
+                // would synthesise a terminal Final at declare time and close
+                // the GET before either arm could inject anything.
+                .with_get_locality(Locality::Remote)
+                .with_query_timeout(Duration::from_secs(3600)),
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            |_miss: Miss| {},
+        )
+        .expect("history-enabled advanced subscriber declares");
+        (delivered, session, sub, probe + 1)
+    }
+
+    /// Inject one recovered Put reply for `rid`, keyed so it intersects the
+    /// subscriber's `demo/data` and carrying the `source_info` the recovered-
+    /// sample re-keying requires.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    fn deliver_history_reply(session: &TokioSession, rid: u64) {
+        use wz_session_core::reply::{InboundReply, InboundReplyBody};
+
+        let inbound = InboundReply {
+            rid,
+            keyexpr_literal: "demo/data".to_string(),
+            body: InboundReplyBody::Put {
+                payload: vec![0x42],
+                attachment: None,
+                encoding: None,
+                source_info: Some(SourceInfo::new(&[0x02], 7, 0)),
+                timestamp: None,
+            },
+        };
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .replies
+            .deliver_local_reply(&inbound);
+        session.drain_deferred_fires();
+    }
+
+    /// Inject the terminal Final for `rid` (what runs `finish_history` and
+    /// flushes the reorder buffer into `on_sample`).
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    fn deliver_history_final(session: &TokioSession, rid: u64) {
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .replies
+            .deliver_local_final(rid);
+        session.drain_deferred_fires();
     }
 }
