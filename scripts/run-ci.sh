@@ -4137,6 +4137,20 @@ layer_c1g_cargo_test_observer() {
 #                                               still compile when a role is
 #                                               present, so 14/15 cannot pass
 #                                               by deleting the seam)
+#
+# R311y578 (G7) — the CODEC-WITHOUT-SEAM subsets 17-18, the same lesson one
+# layer down. A helper's cfg must include the gate of every module that calls
+# it; `frame_encode::oam_body` had `codec-linkstate + codec-push` while its
+# ONLY consumer, `session_actions::dispatch_oam`, sits behind
+# `session-unicast`. Every sibling body encoder has an in-module caller and so
+# stays live on its own, which is why oam_body alone reded and why no lane saw
+# it: the combination was named by a consumer crate OUTSIDE this workspace,
+# whose feature choice owes nothing to wz's matrix. CLIPPY arms — dead code is
+# a warning, so a `build` arm cannot see it.
+#   17. every codec + reassembly, NO session-unicast  (the measured combination)
+#   18. the same +session-unicast                     (POSITIVE arm — 17 must
+#                                                      not pass by deleting the
+#                                                      helper)
 layer_c1h_arbitrary_subset_matrix() {
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features alloc --quiet \
@@ -4156,7 +4170,9 @@ layer_c1h_arbitrary_subset_matrix() {
         && cargo build -p wz-session-core --no-default-features --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,query-reply,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,pubsub-source-info,query-attachment,query-selector-parameters,query-reply-err,query-source-info --quiet \
         && cargo clippy -p wz-session-core --no-default-features --features session-extqos,codec-init-body --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features codec-open-body --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --no-default-features --features codec-init-body,session-unicast-open --quiet -- -D warnings)
+        && cargo clippy -p wz-session-core --no-default-features --features codec-init-body,session-unicast-open --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features alloc,codec-frame,codec-push,codec-declare,codec-request,codec-response,codec-response-final,codec-init-body,codec-open-body,codec-close,codec-keep-alive,codec-fragment,reassembly,codec-linkstate --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features alloc,codec-frame,codec-push,codec-declare,codec-request,codec-response,codec-response-final,codec-init-body,codec-open-body,codec-close,codec-keep-alive,codec-fragment,reassembly,codec-linkstate,session-unicast --quiet -- -D warnings)
 }
 
 # ─── Layer C1i — cargo test -p wz-runtime-tokio --features scouting-active ─

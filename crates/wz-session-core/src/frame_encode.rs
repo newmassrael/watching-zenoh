@@ -25,7 +25,14 @@ use crate::qos::Priority;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::{Declare, DeclareOwned};
 use wz_codecs::interest::{Interest, InterestOwned};
-#[cfg(all(feature = "codec-linkstate", feature = "codec-push"))]
+// R311y578 (G7) — tracks [`oam_body`]'s gate exactly, `session-unicast`
+// included: the import exists for that one signature, so any predicate the
+// function does not have makes the import unused under `-D warnings`.
+#[cfg(all(
+    feature = "codec-linkstate",
+    feature = "codec-push",
+    feature = "session-unicast"
+))]
 use wz_codecs::oam::OamOwned;
 #[cfg(feature = "codec-push")]
 use wz_codecs::push::{Push, PushOwned};
@@ -225,7 +232,28 @@ pub(crate) fn push_body(
 /// `try_as_borrowed().encode(sink)` projection as [`push_body`]. Co-gated on
 /// `codec-push` (the send path it feeds), so an encode-only `codec-linkstate`
 /// build does not compile this orphaned.
-#[cfg(all(feature = "codec-linkstate", feature = "codec-push"))]
+///
+/// R311y578 (G7) — `session-unicast` joined the gate, and the reason is the
+/// general rule rather than this one symbol: **a helper's cfg must include
+/// the gate of every module that calls it.** `oam_body` is the only body
+/// encoder in this module with NO in-module caller — every sibling
+/// ([`push_body`], [`declare_body`], [`request_body`], [`response_body`],
+/// [`response_final_body`], [`interest_body`]) is also reached from an
+/// `encode_frame_with_*` wrapper here, so they stay live on their own. Its
+/// sole consumer is `session_actions::dispatch_oam`, and `session_actions`
+/// is `all(alloc, session-unicast)`-gated at the `lib.rs` declaration. Select
+/// `codec-linkstate` + `codec-push` WITHOUT `session-unicast` and the
+/// function is genuinely unreachable, which `-D warnings` correctly rejects.
+///
+/// This was measured from a consumer crate outside the workspace, whose
+/// feature choice is its own and need not resemble any lane in wz's subset
+/// matrix. The matrix now carries the combination
+/// (`scripts/run-ci.sh`, Layer C1h) so the class does not reopen.
+#[cfg(all(
+    feature = "codec-linkstate",
+    feature = "codec-push",
+    feature = "session-unicast"
+))]
 pub(crate) fn oam_body(oam: &OamOwned) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
         oam.try_as_borrowed()
