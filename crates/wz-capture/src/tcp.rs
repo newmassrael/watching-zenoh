@@ -74,6 +74,17 @@ pub struct StreamAssembler {
     /// the capture, and that is a materially different claim.
     synced_from_syn: bool,
     stream: Vec<u8>,
+    /// R311y594b — absolute offset of the first byte still RETAINED.
+    ///
+    /// A file dissection keeps the whole stream because the file ends. A live
+    /// tap does not end, so the reassembled bytes of every connection would
+    /// grow without bound — the single largest of the five accumulations in
+    /// this crate. [`StreamAssembler::trim`] drops the oldest bytes and this
+    /// records where the retained region now starts, so the ABSOLUTE offset
+    /// space that `PassiveFrame::stream_offset` and the run map live in is
+    /// unchanged by trimming. Rebasing to zero instead would silently
+    /// re-point every offset a consumer already holds.
+    discarded: usize,
     runs: Vec<OffsetRun>,
     /// Segments ahead of `next_seq`, kept until the gap before them fills.
     pending: Vec<(u32, usize, Vec<u8>)>,
@@ -87,19 +98,46 @@ impl StreamAssembler {
         Self::default()
     }
 
-    /// The reassembled bytes so far.
+    /// The reassembled bytes still RETAINED. Starts at absolute offset
+    /// [`Self::retained_from`], which is `0` until something is trimmed.
     pub fn stream(&self) -> &[u8] {
         &self.stream
     }
 
-    /// Bytes reassembled so far.
+    /// Absolute offset of the first retained byte.
+    pub fn retained_from(&self) -> usize {
+        self.discarded
+    }
+
+    /// Bytes reassembled so far, INCLUDING any since trimmed — an absolute
+    /// count, so it never goes backwards when a live reader reclaims memory.
     pub fn len(&self) -> usize {
-        self.stream.len()
+        self.discarded + self.stream.len()
     }
 
     /// `true` when no bytes have been reassembled.
     pub fn is_empty(&self) -> bool {
-        self.stream.is_empty()
+        self.len() == 0
+    }
+
+    /// R311y594b — drop the oldest bytes until at most `keep` remain.
+    /// Returns how many were discarded by THIS call.
+    ///
+    /// Run map entries entirely inside the discarded region go with them; a
+    /// run straddling the new base is kept, because it still answers for the
+    /// bytes that survive. What a consumer loses is the ability to attribute
+    /// an offset it did not read in time, and [`Self::packet_for_offset`]
+    /// answers `None` there rather than pointing at the wrong packet.
+    pub fn trim(&mut self, keep: usize) -> usize {
+        if self.stream.len() <= keep {
+            return 0;
+        }
+        let cut = self.stream.len() - keep;
+        self.stream.drain(..cut);
+        self.discarded += cut;
+        let base = self.discarded;
+        self.runs.retain(|r| r.stream_offset + r.len > base);
+        cut
     }
 
     /// Whether the stream's origin was established from an observed SYN. When
@@ -133,6 +171,12 @@ impl StreamAssembler {
 
     /// Which capture packet carried the byte at `stream_offset`.
     pub fn packet_for_offset(&self, stream_offset: usize) -> Option<usize> {
+        // An offset whose bytes were trimmed is UNANSWERABLE, not answerable
+        // by the nearest surviving run: a live reader that reclaimed memory
+        // must not thereby start misattributing old messages to new packets.
+        if stream_offset < self.discarded {
+            return None;
+        }
         let idx = self
             .runs
             .partition_point(|r| r.stream_offset + r.len <= stream_offset);
@@ -204,7 +248,13 @@ impl StreamAssembler {
         }
         // Only the tail past `next` is new — the partial-overlap case.
         let fresh = &payload[already..];
-        let stream_offset = self.stream.len();
+        // R311y594b — ABSOLUTE, not an index into the retained Vec. Trimming
+        // drops bytes off the front, so `self.stream.len()` stops being the
+        // stream position the moment it happens; runs recorded relatively
+        // would all point one trim-length too early, and the run map went
+        // EMPTY in the first version of this because `retain` compared those
+        // relative offsets against an absolute base.
+        let stream_offset = self.discarded + self.stream.len();
         self.stream.extend_from_slice(fresh);
         self.runs.push(OffsetRun {
             stream_offset,

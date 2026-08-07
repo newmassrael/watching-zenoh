@@ -113,6 +113,10 @@ pub struct FlowDissection {
     pub session: PassiveSession,
     /// Decoded transport messages, in the order the observer produced them.
     pub frames: Vec<PassiveFrame>,
+    /// R311y594b — capture index of the last packet on this flow, the key
+    /// `Dissection` evicts by. A packet index rather than a timestamp because
+    /// every source has one and not every source has a clock.
+    last_activity: usize,
 }
 
 impl FlowDissection {
@@ -123,6 +127,7 @@ impl FlowDissection {
             high_to_low: StreamAssembler::new(),
             session: new_session(window_ms),
             frames: Vec::new(),
+            last_activity: 0,
         }
     }
 
@@ -182,6 +187,79 @@ impl FlowDissection {
     }
 }
 
+/// R311y594b — what a dissection is allowed to accumulate.
+///
+/// Every field is `None` by default, which is exactly the pre-R311y594b
+/// behaviour and the right one for a FILE: a capture ends, so keeping all of it
+/// is bounded by the input the user handed over. A LIVE tap does not end, and
+/// this crate had five accumulations that grew with it — the reassembled byte
+/// stream of every connection (much the largest), the run map, the decoded
+/// frames, the skipped-packet list, and the flow table itself.
+///
+/// Bounds rather than a fixed policy because the two consumers want opposite
+/// things: a file replay wants everything and a live viewer wants the recent
+/// past and its memory back. See [`Self::for_live_tap`] for a starting point.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DissectionLimits {
+    /// Per-chain reassembly deadline, in the capture's own milliseconds.
+    pub reassembly_window_ms: Option<u64>,
+    /// Decoded frames kept per flow. Beyond it the OLDEST go — a live viewer
+    /// is looking at what just happened.
+    pub frames_per_flow: Option<usize>,
+    /// Reassembled bytes kept per DIRECTION of each TCP flow.
+    pub stream_bytes_per_direction: Option<usize>,
+    /// Entries kept in the skipped-packet list.
+    pub skipped_packets: Option<usize>,
+    /// Flows kept. Beyond it the least recently active is evicted, which is
+    /// the one accumulation that cannot be trimmed in place: a 5-tuple that
+    /// never returns is a flow that is never freed.
+    pub max_flows: Option<usize>,
+}
+
+impl DissectionLimits {
+    /// A starting point for a live tap. Not tuned — these are the shapes, and
+    /// a deployment with a measured packet rate should set its own.
+    ///
+    /// 4 MiB per direction is minutes of a chatty zenoh session; 10 000 frames
+    /// per flow is more than a viewer scrolls; the 30 s reassembly window is
+    /// far longer than any real fragment chain and short enough that an
+    /// abandoned one does not hold a slot for the process's life.
+    pub fn for_live_tap() -> Self {
+        Self {
+            reassembly_window_ms: Some(30_000),
+            frames_per_flow: Some(10_000),
+            stream_bytes_per_direction: Some(4 * 1024 * 1024),
+            skipped_packets: Some(10_000),
+            max_flows: Some(1_024),
+        }
+    }
+}
+
+/// R311y594b — what the LIMITS cost, so a bound is never silent.
+///
+/// A dissection that drops to stay inside its budget and does not say so
+/// reports its own bound as if it were the wire's — the same rule
+/// [`SkippedPacket`] exists for one layer down.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DissectionDrops {
+    /// Decoded frames discarded to stay inside `frames_per_flow`.
+    pub frames: usize,
+    /// Reassembled bytes discarded to stay inside
+    /// `stream_bytes_per_direction`.
+    pub stream_bytes: usize,
+    /// Skipped-packet records discarded to stay inside `skipped_packets`.
+    pub skipped: usize,
+    /// Flows evicted to stay inside `max_flows`.
+    pub flows: usize,
+}
+
+impl DissectionDrops {
+    /// `true` when anything at all was given up.
+    pub fn any(&self) -> bool {
+        self.frames > 0 || self.stream_bytes > 0 || self.skipped > 0 || self.flows > 0
+    }
+}
+
 /// A whole capture, dissected: every TCP connection in it, read as a zenoh
 /// session.
 #[derive(Debug, Default)]
@@ -189,9 +267,10 @@ pub struct Dissection {
     flows: Vec<FlowDissection>,
     datagram_flows: Vec<DatagramDissection>,
     skipped: Vec<SkippedPacket>,
-    /// R311y594 — the per-chain reassembly window every flow observer is built
-    /// with, or `None` for the unreachable deadline `PassiveSession::new` has.
-    window_ms: Option<u64>,
+    /// R311y594b — what this dissection may accumulate.
+    limits: DissectionLimits,
+    /// What the limits have cost so far.
+    drops: DissectionDrops,
     #[cfg(feature = "reassembly")]
     /// Chains aborted because their deadline passed, across every flow.
     ///
@@ -217,10 +296,32 @@ impl Dissection {
     /// fed packet by packet.
     #[cfg(feature = "reassembly")]
     pub fn with_reassembly_window(window_ms: u64) -> Self {
+        Self::with_limits(DissectionLimits {
+            reassembly_window_ms: Some(window_ms),
+            ..DissectionLimits::default()
+        })
+    }
+
+    /// R311y594b — a dissection bounded by `limits`.
+    ///
+    /// [`Self::new`] is this with every bound absent, which is what a FILE
+    /// wants. A live tap wants [`DissectionLimits::for_live_tap`] or its own
+    /// measured numbers.
+    pub fn with_limits(limits: DissectionLimits) -> Self {
         Self {
-            window_ms: Some(window_ms),
+            limits,
             ..Self::default()
         }
+    }
+
+    /// What staying inside [`DissectionLimits`] has cost.
+    pub fn drops(&self) -> DissectionDrops {
+        self.drops
+    }
+
+    /// The bounds in force.
+    pub fn limits(&self) -> DissectionLimits {
+        self.limits
     }
 
     /// How many chains have been aborted for missing their deadline.
@@ -287,14 +388,23 @@ impl Dissection {
                     packet_index,
                     reason,
                 });
+                if let Some(cap) = self.limits.skipped_packets {
+                    if self.skipped.len() > cap {
+                        let cut = self.skipped.len() - cap;
+                        self.skipped.drain(..cut);
+                        self.drops.skipped += cut;
+                    }
+                }
                 return;
             }
         };
         let idx = match self.flows.iter().position(|f| f.flow == segment.flow) {
             Some(i) => i,
             None => {
-                self.flows
-                    .push(FlowDissection::new(segment.flow, self.window_ms));
+                self.flows.push(FlowDissection::new(
+                    segment.flow,
+                    self.limits.reassembly_window_ms,
+                ));
                 self.flows.len() - 1
             }
         };
@@ -316,8 +426,66 @@ impl Dissection {
         // Hand the observer exactly the bytes reassembly newly DELIVERED, not
         // the segment payload: a retransmission delivers none, and a held
         // out-of-order segment can deliver a whole chain at once.
-        let delivered: Vec<u8> = flow.assembler(direction).stream()[before..].to_vec();
+        //
+        // ⚠ `before` is an ABSOLUTE offset and `stream()` is the RETAINED tail,
+        // so the two are only the same index while nothing has been trimmed.
+        // Rebasing here is what keeps trimming from silently handing the
+        // observer the wrong bytes — the defect this arithmetic invites.
+        let base = flow.assembler(direction).retained_from();
+        debug_assert!(
+            before >= base,
+            "trimming must not outrun delivery: base {base} > before {before}"
+        );
+        let delivered: Vec<u8> = flow.assembler(direction).stream()[before - base..].to_vec();
         flow.advance(direction, &delivered);
+        flow.last_activity = packet_index;
+        self.enforce_flow_limits(idx);
+        self.evict_flows_beyond_cap();
+    }
+
+    /// R311y594b — bring one TCP flow back inside the per-flow bounds.
+    ///
+    /// Called AFTER the observer has been handed its bytes, never before: the
+    /// stream is trimmed from the front and the delivery offset is absolute, so
+    /// trimming first would cut ground the caller is still standing on.
+    fn enforce_flow_limits(&mut self, idx: usize) {
+        let flow = &mut self.flows[idx];
+        if let Some(cap) = self.limits.frames_per_flow {
+            if flow.frames.len() > cap {
+                let cut = flow.frames.len() - cap;
+                flow.frames.drain(..cut);
+                self.drops.frames += cut;
+            }
+        }
+        if let Some(keep) = self.limits.stream_bytes_per_direction {
+            self.drops.stream_bytes += flow.low_to_high.trim(keep);
+            self.drops.stream_bytes += flow.high_to_low.trim(keep);
+        }
+    }
+
+    /// R311y594b — the one accumulation that cannot be trimmed in place.
+    ///
+    /// A 5-tuple that never returns is a flow that is never freed, so past the
+    /// cap the LEAST RECENTLY ACTIVE goes. That is a real loss of history and
+    /// it is counted; a live tap on a busy host would otherwise hold every
+    /// connection it ever saw.
+    fn evict_flows_beyond_cap(&mut self) {
+        let Some(cap) = self.limits.max_flows else {
+            return;
+        };
+        while self.flows.len() > cap {
+            let Some(oldest) = self
+                .flows
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, f)| f.last_activity)
+                .map(|(i, _)| i)
+            else {
+                break;
+            };
+            self.flows.remove(oldest);
+            self.drops.flows += 1;
+        }
     }
 
     /// R311y584 (A3) — one UDP datagram: one whole wire message, decoded on
@@ -334,8 +502,10 @@ impl Dissection {
         let idx = match self.datagram_flows.iter().position(|f| f.flow == d.flow) {
             Some(i) => i,
             None => {
-                self.datagram_flows
-                    .push(DatagramDissection::new(d.flow, self.window_ms));
+                self.datagram_flows.push(DatagramDissection::new(
+                    d.flow,
+                    self.limits.reassembly_window_ms,
+                ));
                 self.datagram_flows.len() - 1
             }
         };
@@ -353,6 +523,13 @@ impl Dissection {
             .session
             .next_datagram(direction, &d.payload, d.packet_index);
         flow.frames.push(frame);
+        if let Some(cap) = self.limits.frames_per_flow {
+            if flow.frames.len() > cap {
+                let cut = flow.frames.len() - cap;
+                flow.frames.drain(..cut);
+                self.drops.frames += cut;
+            }
+        }
     }
 
     /// Dissect a whole classic pcap file from memory.
@@ -404,6 +581,160 @@ mod datagram_tests {
             eth.push(0);
         }
         eth
+    }
+
+    /// Ethernet + IPv4 + TCP carrying `payload` at `seq`, from low to high.
+    fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
+        let mut tcp = Vec::new();
+        tcp.extend_from_slice(&1111u16.to_be_bytes()); // sport (low)
+        tcp.extend_from_slice(&7447u16.to_be_bytes()); // dport
+        tcp.extend_from_slice(&seq.to_be_bytes());
+        tcp.extend_from_slice(&0u32.to_be_bytes()); // ack
+        tcp.push(5 << 4); // data offset = 5 words, no options
+        tcp.push(0x10); // ACK
+        tcp.extend_from_slice(&64u16.to_be_bytes()); // window
+        tcp.extend_from_slice(&0u16.to_be_bytes()); // checksum, unchecked
+        tcp.extend_from_slice(&0u16.to_be_bytes()); // urgent
+        tcp.extend_from_slice(payload);
+
+        let mut ip = alloc::vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
+        ip.extend_from_slice(&[10, 0, 0, 1]);
+        ip.extend_from_slice(&[10, 0, 0, 2]);
+        ip.extend_from_slice(&tcp);
+
+        let mut eth = alloc::vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// One length-prefixed KeepAlive: the smallest complete framed message.
+    fn framed_keepalive() -> Vec<u8> {
+        alloc::vec![1, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE]
+    }
+
+    /// R311y594b — THE ONE THAT MATTERS: trimming the retained stream must not
+    /// corrupt what the observer is handed next.
+    ///
+    /// The delivery slice is computed from an ABSOLUTE offset into a RETAINED
+    /// tail, so the moment trimming starts those two indices diverge. Get it
+    /// wrong and the observer is fed the wrong bytes — silently, because they
+    /// are still valid-looking wire. Twelve messages under an 8-byte cap forces
+    /// the trim to happen repeatedly WHILE decoding continues.
+    #[test]
+    fn trimming_the_stream_does_not_shift_what_the_observer_is_handed() {
+        let msg = framed_keepalive();
+        let mut d = Dissection::with_limits(DissectionLimits {
+            stream_bytes_per_direction: Some(8),
+            ..DissectionLimits::default()
+        });
+        for i in 0..12u32 {
+            let pkt = tcp_packet(1000 + i * msg.len() as u32, &msg);
+            d.push_packet(LINKTYPE_ETHERNET, i as usize, &pkt);
+        }
+
+        assert_eq!(d.flows().len(), 1);
+        assert_eq!(
+            d.flows()[0].frames.len(),
+            12,
+            "every message must still decode across repeated trims"
+        );
+        assert!(
+            d.drops().stream_bytes > 0,
+            "the cap must actually have bitten"
+        );
+    }
+
+    /// The CONTROL for the test above: unbounded keeps the whole stream, so a
+    /// pass there cannot come from trimming never happening.
+    #[test]
+    fn an_unbounded_dissection_trims_nothing() {
+        let msg = framed_keepalive();
+        let mut d = Dissection::new();
+        for i in 0..12u32 {
+            let pkt = tcp_packet(1000 + i * msg.len() as u32, &msg);
+            d.push_packet(LINKTYPE_ETHERNET, i as usize, &pkt);
+        }
+        assert_eq!(d.flows()[0].frames.len(), 12);
+        assert_eq!(
+            d.drops(),
+            DissectionDrops::default(),
+            "nothing may be given up"
+        );
+        assert_eq!(d.flows()[0].low_to_high.retained_from(), 0);
+    }
+
+    /// A trimmed offset is UNANSWERABLE rather than answered wrongly — the
+    /// property that keeps a live reader from misattributing an old message to
+    /// a new packet once it has reclaimed the bytes.
+    #[test]
+    fn an_offset_whose_bytes_were_trimmed_has_no_packet() {
+        let msg = framed_keepalive();
+        let mut d = Dissection::with_limits(DissectionLimits {
+            stream_bytes_per_direction: Some(4),
+            ..DissectionLimits::default()
+        });
+        for i in 0..10u32 {
+            let pkt = tcp_packet(1000 + i * msg.len() as u32, &msg);
+            d.push_packet(LINKTYPE_ETHERNET, i as usize, &pkt);
+        }
+        let flow = &d.flows()[0];
+        assert!(
+            flow.low_to_high.retained_from() > 0,
+            "something was trimmed"
+        );
+        assert_eq!(
+            flow.packet_for(Direction::A, 0),
+            None,
+            "offset 0 was trimmed away and must not resolve to a packet"
+        );
+        let live = flow.low_to_high.retained_from();
+        assert!(
+            flow.packet_for(Direction::A, live).is_some(),
+            "the first RETAINED offset must still attribute"
+        );
+    }
+
+    /// Frames are capped per flow, oldest first, and the loss is counted.
+    #[test]
+    fn frames_are_capped_per_flow_and_the_loss_is_counted() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let pkt = udp_packet([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, &keepalive);
+        let mut d = Dissection::with_limits(DissectionLimits {
+            frames_per_flow: Some(3),
+            ..DissectionLimits::default()
+        });
+        for i in 0..10 {
+            d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+        }
+        assert_eq!(d.datagram_flows()[0].frames.len(), 3);
+        assert_eq!(d.drops().frames, 7);
+    }
+
+    /// The flow TABLE is bounded too, which the other bounds cannot do: a
+    /// 5-tuple that never returns is memory that is never reclaimed.
+    #[test]
+    fn the_flow_table_evicts_the_least_recently_active() {
+        let msg = framed_keepalive();
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows: Some(2),
+            ..DissectionLimits::default()
+        });
+        // Three distinct connections, by source port.
+        for (i, seq) in [(0usize, 1000u32), (1, 2000), (2, 3000)] {
+            let mut pkt = tcp_packet(seq, &msg);
+            // Perturb the source port so each is its own 5-tuple.
+            let sport = 1111u16 + i as u16;
+            pkt[34..36].copy_from_slice(&sport.to_be_bytes());
+            d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+        }
+        assert_eq!(d.flows().len(), 2, "the cap holds");
+        assert_eq!(d.drops().flows, 1, "and the eviction is counted");
     }
 
     /// R311y594 — a pcap replay carries the FILE's clock into the observer.
