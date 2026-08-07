@@ -2430,6 +2430,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-capi-dissect"
+version = "0.1.0"
+dependencies = [
+ "wz-capture",
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-capi-pico"
 version = "0.1.0"
 dependencies = [

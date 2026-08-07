@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# R311y586 (A7) — the C ABI over the DISSECTION surface.
+#
+# Separate from `wz-capi-c` on purpose. That crate's whole contract is
+# "a zenoh-c drop-in": its symbol names, types and semantics are dictated by
+# an upstream header, and every symbol in it is answerable to that header.
+# The dissection surface is wz's own and answers to nobody, so putting it
+# there would mean a consumer could no longer tell which half of the library
+# it was linking against, and a zenoh-c ABI census would start reporting
+# symbols zenoh-c never had.
+[package]
+name = "wz-capi-dissect"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "wz_capi_dissect"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wz-capture = { path = "../wz-capture" }
+wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "alloc",
+    "dissect",
+    "codec-frame",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "codec-keep-alive",
+] }

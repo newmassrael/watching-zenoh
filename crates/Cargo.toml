@@ -51,6 +51,7 @@ members = [
     # zenoh; the seam is a byte stream plus a direction, so a live tap can
     # replace the file reader without touching the decode side.
     "wz-capture",
+    "wz-capi-dissect",
     "wz-codecs",
     "wz-codecs-test-support",
     # R311y492 (§5.22 plugin-dynamic-loading) — the host<->plugin C ABI contract,
