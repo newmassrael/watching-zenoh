@@ -562,7 +562,13 @@ pub use wz_session_core::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
 // / `build_interest_*`) still reference them.
 #[cfg(feature = "codec-frame")]
 pub use wz_session_core::network_message::parse_frame_payload;
+// R311y578 (G4) — the BEST-EFFORT twin, re-exported beside the strict one so a
+// consumer reaches both through the same path rather than discovering that the
+// observer contract exists only in the lower crate.
 pub use wz_session_core::network_message::NetworkMessage;
+pub use wz_session_core::network_message::{
+    parse_frame_payload_best_effort, BatchHalt, BatchParse,
+};
 
 // R76 / R311di-12 — DriverLoopOutcome extracted to
 // wz-session-core::driver_loop. Re-exported here so callsites

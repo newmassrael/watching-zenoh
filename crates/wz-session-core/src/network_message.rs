@@ -178,43 +178,15 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
     let mut messages = Vec::new();
     let mut cursor = SceCursor::new(bytes);
     while cursor.remaining() > 0 {
-        let header = cursor.peek_slice(1)?[0];
-        let mid = header & 0x1F;
-        match mid {
-            #[cfg(feature = "codec-request")]
-            wire_const::N_MID_REQUEST => {
-                let req = wz_codecs::request::Request::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Request(Box::new(req.try_into_owned()?)));
-            }
-            #[cfg(feature = "codec-push")]
-            wire_const::N_MID_PUSH => {
-                let push = wz_codecs::push::Push::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Push(Box::new(push.try_into_owned()?)));
-            }
-            #[cfg(feature = "codec-response-final")]
-            wire_const::N_MID_RESPONSE_FINAL => {
-                let rf = wz_codecs::response_final::ResponseFinal::decode(&mut cursor)?;
-                messages.push(NetworkMessage::ResponseFinal(rf.try_into_owned()?));
-            }
-            wire_const::N_MID_OAM => {
-                let oam = wz_codecs::oam::Oam::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Oam(oam.try_into_owned()?));
-            }
-            wire_const::N_MID_INTEREST => {
-                let interest = wz_codecs::interest::Interest::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Interest(interest.try_into_owned()?));
-            }
-            #[cfg(feature = "codec-response")]
-            wire_const::N_MID_RESPONSE => {
-                let resp = wz_codecs::response::Response::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Response(Box::new(resp.try_into_owned()?)));
-            }
-            #[cfg(feature = "codec-declare")]
-            wire_const::N_MID_DECLARE => {
-                let decl = wz_codecs::declare::Declare::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Declare(Box::new(decl.try_into_owned()?)));
-            }
-            _ => {
+        // R311y578 — the per-MID dispatch moved to `decode_one_record`, the
+        // SSOT this strict walk and the best-effort walk share. Behaviour
+        // here is unchanged: `Ok(None)` (no envelope decoder for the MID)
+        // absorbs the tail as `Unknown` and terminates, a codec error
+        // propagates and fails the whole batch.
+        match decode_one_record(&mut cursor)? {
+            Some(msg) => messages.push(msg),
+            None => {
+                let mid = cursor.peek_slice(1)?[0] & 0x1F;
                 let rem = cursor.remaining();
                 let body = cursor.peek_slice(rem)?.to_vec();
                 cursor.advance(rem)?;
@@ -224,4 +196,364 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
         }
     }
     Ok(messages)
+}
+
+/// R311y578 — why a batch parse stopped short of the payload's end.
+///
+/// A batch is a run of self-delimiting records with no per-record length
+/// prefix, so the ONLY way to find record N+1 is to have fully decoded
+/// record N. Once that fails there is nothing to resynchronise against:
+/// halting is correct, and the deliverable is saying WHERE and WHY.
+#[cfg(feature = "codec-frame")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchHalt {
+    /// A network MID this build has no envelope decoder for. Its body
+    /// length is unknowable, so the remaining bytes were absorbed into a
+    /// trailing [`NetworkMessage::Unknown`] and the walk stopped. Not
+    /// necessarily corruption: it is also what a peer speaking a MID
+    /// outside this build's `codec-*` selection looks like.
+    UnknownMid {
+        /// The masked MID (`header & 0x1F`).
+        mid: u8,
+        /// Byte offset of that header within the payload.
+        offset: usize,
+    },
+    /// A record's decoder failed. Everything before `offset` decoded
+    /// cleanly and is in [`BatchParse::messages`]; from `offset` on the
+    /// payload is unparsed.
+    ///
+    /// [`sce_forge_runtime::codec::CodecError::NeedMoreBytes`] here is the
+    /// ordinary shape of a TRUNCATED capture (a snaplen cut, a flow whose
+    /// tail was never captured), which is why the error value is carried
+    /// rather than flattened to a bool.
+    CodecError {
+        /// Byte offset of the failing record's header within the payload.
+        offset: usize,
+        /// The decoder's own error.
+        error: CodecError,
+    },
+}
+
+/// R311y578 — the outcome of a BEST-EFFORT batch parse.
+///
+/// [`parse_frame_payload`] is the PARTICIPANT contract: a record it cannot
+/// decode is a framing error on a session it owns, so the whole batch
+/// fails and the transport tears down. That is the right answer when an
+/// unparsable frame means the two ends have lost sync.
+///
+/// An OBSERVER owns nothing. Its batch may contain a MID this build was
+/// not compiled with, a record from a protocol revision it predates, or a
+/// tail the capture truncated — and in every one of those cases the
+/// records it COULD read are still real, still in order, and still worth
+/// more than the `Err` that discards them.
+#[cfg(feature = "codec-frame")]
+#[derive(Debug)]
+pub struct BatchParse {
+    /// Every record decoded before the walk stopped, in wire order.
+    pub messages: Vec<NetworkMessage>,
+    /// `None` when the whole payload decoded; otherwise where and why the
+    /// walk stopped.
+    pub halt: Option<BatchHalt>,
+    /// Bytes from the halt offset to the end of the payload — `0` when
+    /// the walk consumed everything. Carried separately from `offset`
+    /// because a consumer reporting "N bytes unparsed" should not have to
+    /// hold the payload to compute it.
+    pub unparsed_bytes: usize,
+}
+
+#[cfg(feature = "codec-frame")]
+impl BatchParse {
+    /// `true` when the entire payload decoded with no halt — the shape a
+    /// participant's strict parse also accepts.
+    pub fn is_complete(&self) -> bool {
+        self.halt.is_none()
+    }
+}
+
+/// R311y578 — decode a `Frame.payload` BEST-EFFORT: keep every record that
+/// decodes and report where the walk stopped, instead of failing the whole
+/// batch.
+///
+/// The record loop is [`parse_frame_payload`]'s, deliberately: the two
+/// contracts differ only in what they do at the seam where a record cannot
+/// be decoded, and duplicating the seven-arm MID dispatch to express that
+/// would put the codec selection in two places that could drift. This
+/// function owns the loop and the halt bookkeeping; the strict entry point
+/// stays byte-for-byte the caller-visible contract it always was.
+///
+/// Never returns `Err`. An empty payload is `messages = []`, `halt = None`
+/// — a valid empty batch, exactly as in the strict parse.
+#[cfg(feature = "codec-frame")]
+pub fn parse_frame_payload_best_effort(bytes: &[u8]) -> BatchParse {
+    let total = bytes.len();
+    let mut messages = Vec::new();
+    let mut cursor = SceCursor::new(bytes);
+    let mut halt = None;
+    while cursor.remaining() > 0 {
+        // The offset is recomputed per record rather than tracked, so it
+        // cannot drift from the cursor the decoders actually advance.
+        let offset = total - cursor.remaining();
+        match decode_one_record(&mut cursor) {
+            Ok(Some(msg)) => messages.push(msg),
+            Ok(None) => {
+                // An unknown MID: absorb the rest verbatim (the strict
+                // parse's own behaviour) and stop, since the record's
+                // length is unknowable and there is nothing to resync on.
+                let mid = bytes[offset] & 0x1F;
+                let rem = cursor.remaining();
+                let body = bytes[offset..].to_vec();
+                // `advance` past a slice the cursor already reports as
+                // remaining cannot fail; the outcome is checked anyway so
+                // a future cursor change cannot silently desync the walk.
+                if cursor.advance(rem).is_err() {
+                    halt = Some(BatchHalt::CodecError {
+                        offset,
+                        error: CodecError::NeedMoreBytes,
+                    });
+                    break;
+                }
+                messages.push(NetworkMessage::Unknown { mid, body });
+                halt = Some(BatchHalt::UnknownMid { mid, offset });
+                break;
+            }
+            Err(error) => {
+                halt = Some(BatchHalt::CodecError { offset, error });
+                break;
+            }
+        }
+    }
+    let unparsed_bytes = match halt {
+        Some(BatchHalt::UnknownMid { offset, .. }) | Some(BatchHalt::CodecError { offset, .. }) => {
+            total - offset
+        }
+        None => 0,
+    };
+    BatchParse {
+        messages,
+        halt,
+        unparsed_bytes,
+    }
+}
+
+/// Decode ONE record at the cursor. `Ok(None)` means the MID has no
+/// envelope decoder in this build — the caller decides whether that is a
+/// terminating `Unknown` absorb (both parsers) or something else.
+///
+/// The single MID-dispatch SSOT: adding a `codec-*` feature adds an arm
+/// here and both the strict and the best-effort walk gain it together.
+#[cfg(feature = "codec-frame")]
+fn decode_one_record(cursor: &mut SceCursor<'_>) -> Result<Option<NetworkMessage>, CodecError> {
+    let header = cursor.peek_slice(1)?[0];
+    let mid = header & 0x1F;
+    let msg = match mid {
+        #[cfg(feature = "codec-request")]
+        wire_const::N_MID_REQUEST => {
+            let req = wz_codecs::request::Request::decode(cursor)?;
+            NetworkMessage::Request(Box::new(req.try_into_owned()?))
+        }
+        #[cfg(feature = "codec-push")]
+        wire_const::N_MID_PUSH => {
+            let push = wz_codecs::push::Push::decode(cursor)?;
+            NetworkMessage::Push(Box::new(push.try_into_owned()?))
+        }
+        #[cfg(feature = "codec-response-final")]
+        wire_const::N_MID_RESPONSE_FINAL => {
+            let rf = wz_codecs::response_final::ResponseFinal::decode(cursor)?;
+            NetworkMessage::ResponseFinal(rf.try_into_owned()?)
+        }
+        wire_const::N_MID_OAM => {
+            let oam = wz_codecs::oam::Oam::decode(cursor)?;
+            NetworkMessage::Oam(oam.try_into_owned()?)
+        }
+        wire_const::N_MID_INTEREST => {
+            let interest = wz_codecs::interest::Interest::decode(cursor)?;
+            NetworkMessage::Interest(interest.try_into_owned()?)
+        }
+        #[cfg(feature = "codec-response")]
+        wire_const::N_MID_RESPONSE => {
+            let resp = wz_codecs::response::Response::decode(cursor)?;
+            NetworkMessage::Response(Box::new(resp.try_into_owned()?))
+        }
+        #[cfg(feature = "codec-declare")]
+        wire_const::N_MID_DECLARE => {
+            let decl = wz_codecs::declare::Declare::decode(cursor)?;
+            NetworkMessage::Declare(Box::new(decl.try_into_owned()?))
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(msg))
+}
+
+// ── R311y578 — G4: the batch parse is best-effort for an OBSERVER while
+//    staying strict for a PARTICIPANT. The fixtures are OAM records
+//    (`N_MID_OAM = 0x1F`), whose codec is ungated in wz-codecs, so the
+//    contract is pinned in every build that has `codec-frame` at all
+//    rather than only in the lanes that select a body codec. ──
+#[cfg(all(test, feature = "codec-frame"))]
+mod best_effort_batch_tests {
+    use super::*;
+    use alloc::vec;
+
+    /// One encoded OAM record. `Oam::default()`'s header carries its own
+    /// wire MID (`0x1F`), so the fixture is a real record through the real
+    /// encoder rather than a hand-typed byte string.
+    fn oam_record(id: u64) -> Vec<u8> {
+        wz_codecs::oam::Oam {
+            id,
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    fn oam_ids(messages: &[NetworkMessage]) -> Vec<u64> {
+        messages
+            .iter()
+            .filter_map(|m| match m {
+                NetworkMessage::Oam(o) => Some(o.id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A clean batch: both parsers agree, and the best-effort one reports
+    /// no halt. Without this the halt assertions below could be satisfied
+    /// by a parser that always halts.
+    #[test]
+    fn a_clean_batch_parses_identically_under_both_contracts() {
+        let mut wire = oam_record(7);
+        wire.extend_from_slice(&oam_record(8));
+
+        let strict = parse_frame_payload(&wire).expect("clean batch");
+        let best = parse_frame_payload_best_effort(&wire);
+
+        assert_eq!(oam_ids(&strict), vec![7, 8]);
+        assert_eq!(oam_ids(&best.messages), vec![7, 8]);
+        assert!(best.is_complete(), "no halt on a clean batch");
+        assert_eq!(best.halt, None);
+        assert_eq!(best.unparsed_bytes, 0);
+    }
+
+    /// An empty payload is a valid EMPTY batch under both contracts — not
+    /// a halt. A dissector that reported "unparsed" here would flag every
+    /// keepalive-shaped frame.
+    #[test]
+    fn an_empty_payload_is_a_complete_empty_batch() {
+        let best = parse_frame_payload_best_effort(&[]);
+        assert!(best.messages.is_empty());
+        assert!(best.is_complete());
+        assert_eq!(best.unparsed_bytes, 0);
+    }
+
+    /// THE CASE G4 EXISTS FOR. A truncated trailing record makes the
+    /// strict parse discard the whole batch — correct for a participant,
+    /// for which a half-record means the two ends lost sync. An observer
+    /// reading a capture whose tail was cut still has the earlier records,
+    /// and they are exactly as real as they were.
+    ///
+    /// The two arms run over the SAME bytes, so the difference is the
+    /// contract and nothing else.
+    #[test]
+    fn a_truncated_tail_loses_the_whole_batch_strictly_and_keeps_the_prefix_best_effort() {
+        let first = oam_record(7);
+        let second = oam_record(8);
+        let mut wire = first.clone();
+        // Keep only the second record's header byte: enough to dispatch on
+        // the MID, not enough to decode the body.
+        wire.push(second[0]);
+
+        // Participant: everything is lost.
+        assert!(
+            parse_frame_payload(&wire).is_err(),
+            "the strict contract fails the whole batch on a truncated record"
+        );
+
+        // Observer: the readable prefix survives, with a typed marker for
+        // where the payload stopped being readable.
+        let best = parse_frame_payload_best_effort(&wire);
+        assert_eq!(
+            oam_ids(&best.messages),
+            vec![7],
+            "the record that DID decode is kept"
+        );
+        assert!(!best.is_complete());
+        match best.halt {
+            Some(BatchHalt::CodecError { offset, error }) => {
+                assert_eq!(
+                    offset,
+                    first.len(),
+                    "the halt points at the failing record's own header, not at the \
+                     cursor's high-water mark"
+                );
+                assert_eq!(
+                    error,
+                    CodecError::NeedMoreBytes,
+                    "a truncated capture is NeedMoreBytes, which is why the error \
+                     value is carried rather than flattened to a bool"
+                );
+            }
+            other => panic!("expected a CodecError halt, got {other:?}"),
+        }
+        assert_eq!(best.unparsed_bytes, 1, "the lone header byte is unparsed");
+    }
+
+    /// An unknown MID mid-batch: both contracts absorb the tail as
+    /// `Unknown` and stop (its length is unknowable, so there is nothing
+    /// to resynchronise on), but only the best-effort one says WHERE.
+    ///
+    /// `0x00` is outside the seven-wide network MID set on purpose — the
+    /// authored catalog covers all seven, so a meaningful Unknown fixture
+    /// has to be synthetic.
+    #[test]
+    fn an_unknown_mid_halts_with_its_offset_under_both_contracts() {
+        let first = oam_record(7);
+        let mut wire = first.clone();
+        wire.extend_from_slice(&[0x00, 0xAB, 0xCD]);
+
+        let strict = parse_frame_payload(&wire).expect("unknown MID absorbs, not errors");
+        assert_eq!(oam_ids(&strict), vec![7]);
+        assert!(matches!(
+            strict.last(),
+            Some(NetworkMessage::Unknown { mid: 0x00, .. })
+        ));
+
+        let best = parse_frame_payload_best_effort(&wire);
+        assert_eq!(oam_ids(&best.messages), vec![7]);
+        match best.messages.last() {
+            Some(NetworkMessage::Unknown { mid, body }) => {
+                assert_eq!(*mid, 0x00);
+                assert_eq!(
+                    body.as_slice(),
+                    &[0x00, 0xAB, 0xCD],
+                    "the absorbed body starts AT the unknown header, not after it"
+                );
+            }
+            other => panic!("expected a trailing Unknown, got {other:?}"),
+        }
+        assert_eq!(
+            best.halt,
+            Some(BatchHalt::UnknownMid {
+                mid: 0x00,
+                offset: first.len()
+            })
+        );
+        assert_eq!(best.unparsed_bytes, 3);
+    }
+
+    /// The two walks share ONE per-MID dispatch (`decode_one_record`), so
+    /// a build's codec selection cannot differ between them. Asserted over
+    /// a batch of every record kind this build decodes: the strict and
+    /// best-effort message sequences must be identical whenever the strict
+    /// parse succeeds at all.
+    #[test]
+    fn both_walks_decode_the_same_records() {
+        let mut wire = Vec::new();
+        for id in 0..4u64 {
+            wire.extend_from_slice(&oam_record(id));
+        }
+        let strict = parse_frame_payload(&wire).expect("clean batch");
+        let best = parse_frame_payload_best_effort(&wire);
+        assert_eq!(oam_ids(&strict), oam_ids(&best.messages));
+        assert_eq!(strict.len(), best.messages.len());
+        assert!(best.is_complete());
+    }
 }

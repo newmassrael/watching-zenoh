@@ -90,11 +90,27 @@ use wz_codecs::open_body::{OpenBody, OpenBodyOwned};
 /// triad — the caller may forward them to a higher-layer dispatch
 /// (e.g. KeepAlive / Frame / Fragment) or drop them.
 ///
-/// No `Debug` derive: the wz-codecs structs (`InitBody`/`OpenBody`)
-/// are sce-codegen output and only derive `Default`. Callers
-/// pattern-match the variant and inspect typed fields directly; a
-/// log-style print on the whole frame is rare and can be composed
-/// at the call site if needed.
+/// R311y578 — DERIVES `Debug`. The prior note here said it could not,
+/// because "the wz-codecs structs (`InitBody`/`OpenBody`) are sce-codegen
+/// output and only derive `Default`". That stopped being true: the codegen
+/// emits `#[derive(Debug, Clone, PartialEq)]` on every `*Owned` mirror
+/// (`out/wz-codecs/init_body.rs:250`, `open_body.rs:179`,
+/// `ext_entry.rs:238`), so the derive costs nothing and was blocked only by
+/// a stale reason.
+///
+/// It is not cosmetic. A consumer OUTSIDE this workspace measured the gap
+/// as a hard compile error (`E0277`) on `panic!("{other:?}")` — anything
+/// that hands a decode to a log, a test failure message, or a view had to
+/// write a conversion layer first, for a type whose every field was already
+/// printable. `Clone` / `PartialEq` are deliberately NOT derived: the
+/// variants carry owned `Vec` payloads, and a decode is a one-shot value
+/// that consumers move rather than copy.
+///
+/// `serde` remains ABSENT and is not closable here: it would have to land
+/// on the codegen'd `*Owned` mirrors, whose derive set is SCE's
+/// (`rust_derive_policy::RustDeriveCategory::CodecStruct`) and whose tree
+/// is read-only from this workspace.
+#[derive(Debug)]
 pub enum InboundFrame {
     /// `_Z_MID_T_INIT` (0x01). `is_ack` mirrors the
     /// `_Z_FLAG_T_INIT_A` discriminator; `has_ext` mirrors the
@@ -469,3 +485,52 @@ pub fn inbound_to_fsm_event(
 // R2 (R311ww) — `decode_ext_chain` moved to the shared `crate::ext_chain` SSOT
 // (encode counterpart + the extauth dispatch's inner method chain consume it
 // too); imported above. Was an inline `fn` here.
+
+// ── R311y578 — G6: `InboundFrame` prints. Measured from OUTSIDE the
+//    workspace as a hard `E0277` on `panic!("{other:?}")`, so the gap was
+//    a compile error for every consumer that wanted to log, assert on, or
+//    view a decode. ──
+#[cfg(all(test, feature = "reassembly"))]
+mod debug_surface_tests {
+    use super::*;
+    use alloc::format;
+
+    /// The derive is not decorative: the rendering must carry the decoded
+    /// FIELD VALUES, so a log line or a failing assertion says what the
+    /// frame actually was. Asserted over a real `parse_inbound` decode of
+    /// a real emitted wire, not over a hand-built value.
+    #[test]
+    fn a_decoded_fragment_renders_its_fields() {
+        // T_MID_FRAGMENT (0x06) | R (0x20) | M (0x40): a reliable
+        // continuation fragment, VLE sn = 9, payload "hi".
+        let wire = [0x06 | 0x20 | 0x40, 0x09, b'h', b'i'];
+        let frame = parse_inbound(&wire).expect("decode the fragment");
+        let rendered = format!("{frame:?}");
+        assert!(
+            rendered.contains("Fragment"),
+            "the variant is named: {rendered}"
+        );
+        assert!(
+            rendered.contains("sn: 9"),
+            "the decoded sequence number is rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("reliable: true") && rendered.contains("more: true"),
+            "the header-flag discriminators are rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("104") && rendered.contains("105"),
+            "the payload bytes are rendered: {rendered}"
+        );
+    }
+
+    /// The rendering distinguishes two frames that differ only in a field
+    /// — a `Debug` that collapsed to a variant name would pass the
+    /// containment checks above while telling a consumer nothing.
+    #[test]
+    fn two_frames_differing_in_one_field_render_differently() {
+        let a = parse_inbound(&[0x06 | 0x20, 0x01, b'x']).expect("decode a");
+        let b = parse_inbound(&[0x06 | 0x20, 0x02, b'x']).expect("decode b");
+        assert_ne!(format!("{a:?}"), format!("{b:?}"));
+    }
+}
