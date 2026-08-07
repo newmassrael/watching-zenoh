@@ -30,6 +30,7 @@ const ETHERTYPE_VLAN: u16 = 0x8100;
 const ETHERTYPE_QINQ: u16 = 0x88A8;
 
 const IP_PROTO_TCP: u8 = 6;
+const IP_PROTO_UDP: u8 = 17;
 
 /// An IP endpoint: address bytes (4 for v4, 16 for v6) plus a port.
 ///
@@ -126,8 +127,14 @@ pub enum SkipReason {
     Truncated,
     /// Not IP (ARP, LLDP, ...), or not a protocol carried onward.
     NotIp,
-    /// IP, but not TCP.
-    NotTcp(u8),
+    /// IP, but neither TCP nor UDP — the two transports zenoh links use.
+    ///
+    /// R311y584 (A3) — was `NotTcp`, and UDP fell into it. That named skip
+    /// was honest about the byte stream having a hole and silent about WHICH
+    /// hole: scouting, multicast Join, and the whole UDP unicast link are all
+    /// carried there, so a capture of a multicast deployment produced a
+    /// dissection with no messages and no error.
+    NotTransport(u8),
     /// An IPv4 fragment other than the first. Reassembling IP fragments is a
     /// separate problem from reassembling a TCP stream and is NOT done here;
     /// naming it keeps a hole in the byte stream attributable.
@@ -136,22 +143,98 @@ pub enum SkipReason {
     Ipv6ExtensionChain(u8),
 }
 
-/// Decapsulate one captured packet down to a TCP segment.
+/// One UDP datagram lifted out of a captured packet.
+///
+/// R311y584 (A3) — deliberately NOT a [`Segment`] with the TCP fields left
+/// blank. A datagram has no sequence number and needs no reassembly: zenoh
+/// puts exactly ONE wire message in each one and relies on the datagram
+/// boundary instead of a length prefix
+/// (`wz-runtime-tokio/src/udp_pipeline.rs:34-36`). Giving it a `seq` field to
+/// ignore would invite a reader to treat the two the same, and they are not
+/// the same — the framing differs, which is the whole reason UDP could not
+/// simply be routed into the existing TCP path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Datagram {
+    /// The two endpoints, sorted, exactly as for TCP so a consumer keys both
+    /// transports the same way.
+    pub flow: FlowKey,
+    /// `true` when it travelled from [`FlowKey::low`] toward `high`.
+    pub from_low: bool,
+    /// The datagram body: one complete zenoh wire message.
+    pub payload: Vec<u8>,
+    /// Index of the packet this came out of.
+    pub packet_index: usize,
+}
+
+/// What a captured packet turned out to carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Transport {
+    /// A TCP segment, to be fed to a stream reassembler.
+    Tcp(Segment),
+    /// A UDP datagram, already a whole message.
+    Udp(Datagram),
+}
+
+/// Decapsulate one captured packet down to the transport payload zenoh uses.
+///
+/// R311y584 (A3) — returns both transports rather than TCP alone. The
+/// previous shape made "not TCP" a skip reason, which is where every
+/// multicast and scouting packet went.
 pub fn decapsulate(
     link_type: u32,
     packet_index: usize,
     bytes: &[u8],
-) -> Result<Segment, SkipReason> {
+) -> Result<Transport, SkipReason> {
     let (ip_bytes, is_v6) = strip_link(link_type, bytes)?;
     let (src, dst, proto, payload) = if is_v6 {
         strip_ipv6(ip_bytes)?
     } else {
         strip_ipv4(ip_bytes)?
     };
-    if proto != IP_PROTO_TCP {
-        return Err(SkipReason::NotTcp(proto));
+    match proto {
+        IP_PROTO_TCP => strip_tcp(src, dst, payload, packet_index).map(Transport::Tcp),
+        IP_PROTO_UDP => strip_udp(src, dst, payload, packet_index).map(Transport::Udp),
+        other => Err(SkipReason::NotTransport(other)),
     }
-    strip_tcp(src, dst, payload, packet_index)
+}
+
+/// The UDP header is eight fixed bytes: src port, dst port, length, checksum.
+///
+/// The header's own `length` field is READ and used, not ignored in favour of
+/// the slice length: a captured frame can carry trailing padding (Ethernet's
+/// 60-byte minimum pads a short datagram), and handing those pad bytes to the
+/// decoder as part of the message turns a valid Scout into a trailing-garbage
+/// parse error.
+fn strip_udp(
+    src: Endpoint,
+    dst: Endpoint,
+    bytes: &[u8],
+    packet_index: usize,
+) -> Result<Datagram, SkipReason> {
+    if bytes.len() < 8 {
+        return Err(SkipReason::Truncated);
+    }
+    let src_port = u16::from_be_bytes([bytes[0], bytes[1]]);
+    let dst_port = u16::from_be_bytes([bytes[2], bytes[3]]);
+    let declared = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
+    // `length` counts the header itself. A value below 8 is malformed; one
+    // past the captured bytes means the capture was snapped short.
+    if declared < 8 {
+        return Err(SkipReason::Truncated);
+    }
+    let body_len = declared - 8;
+    if bytes.len() < 8 + body_len {
+        return Err(SkipReason::Truncated);
+    }
+    let src = Endpoint::new(src.addr(), src_port);
+    let dst = Endpoint::new(dst.addr(), dst_port);
+    let (flow, from_low) = FlowKey::new(src, dst);
+    Ok(Datagram {
+        flow,
+        from_low,
+        payload: bytes[8..8 + body_len].to_vec(),
+        packet_index,
+    })
 }
 
 /// Returns the IP-layer bytes and whether they are IPv6.
@@ -310,10 +393,56 @@ mod tests {
     use super::*;
     use alloc::vec;
 
+    /// Decapsulate and require a TCP segment. R311y584 made `decapsulate`
+    /// return both transports; these legs are all about the TCP path, so the
+    /// unwrap is here rather than repeated at every call site.
+    #[track_caller]
+    fn tcp(link_type: u32, idx: usize, bytes: &[u8]) -> Result<Segment, SkipReason> {
+        match decapsulate(link_type, idx, bytes) {
+            Ok(Transport::Tcp(s)) => Ok(s),
+            Ok(Transport::Udp(d)) => panic!("expected TCP, got a datagram: {d:?}"),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Build an Ethernet + IPv4 + TCP packet. The fixture builder is here in
     /// the tests rather than in the library because nothing in production
     /// EMITS packets — a builder in `src` would be a second, unverified
     /// opinion about the layouts the parser reads.
+    /// R311y584 (A3) — Ethernet + IPv4 + UDP. Pads the Ethernet frame out to
+    /// the 60-byte minimum on purpose: a real NIC does, and the pad bytes are
+    /// exactly what makes the UDP header's own `length` field load-bearing
+    /// rather than decorative.
+    fn eth_ipv4_udp(src: [u8; 4], sport: u16, dst: [u8; 4], dport: u16, payload: &[u8]) -> Vec<u8> {
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&sport.to_be_bytes());
+        udp.extend_from_slice(&dport.to_be_bytes());
+        udp.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes()); // checksum (unverified)
+        udp.extend_from_slice(payload);
+
+        let mut ip = Vec::new();
+        ip.push(0x45);
+        ip.push(0);
+        ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&0u16.to_be_bytes());
+        ip.extend_from_slice(&0u16.to_be_bytes());
+        ip.push(64);
+        ip.push(IP_PROTO_UDP);
+        ip.extend_from_slice(&0u16.to_be_bytes());
+        ip.extend_from_slice(&src);
+        ip.extend_from_slice(&dst);
+        ip.extend_from_slice(&udp);
+
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
     fn eth_ipv4_tcp(
         src: [u8; 4],
         sport: u16,
@@ -366,7 +495,7 @@ mod tests {
             0x18,
             b"hello",
         );
-        let seg = decapsulate(LINKTYPE_ETHERNET, 3, &pkt).expect("decapsulate");
+        let seg = tcp(LINKTYPE_ETHERNET, 3, &pkt).expect("decapsulate");
         assert_eq!(seg.payload, b"hello");
         assert_eq!(seg.seq, 42);
         assert_eq!(seg.packet_index, 3);
@@ -383,8 +512,8 @@ mod tests {
     fn both_directions_share_one_flow_key() {
         let a = eth_ipv4_tcp([10, 0, 0, 1], 7447, [10, 0, 0, 2], 40000, 1, 0x18, b"a");
         let b = eth_ipv4_tcp([10, 0, 0, 2], 40000, [10, 0, 0, 1], 7447, 1, 0x18, b"b");
-        let sa = decapsulate(LINKTYPE_ETHERNET, 0, &a).expect("a");
-        let sb = decapsulate(LINKTYPE_ETHERNET, 1, &b).expect("b");
+        let sa = tcp(LINKTYPE_ETHERNET, 0, &a).expect("a");
+        let sb = tcp(LINKTYPE_ETHERNET, 1, &b).expect("b");
         assert_eq!(sa.flow, sb.flow, "one connection, one key");
         assert_ne!(sa.from_low, sb.from_low, "opposite directions");
     }
@@ -401,7 +530,7 @@ mod tests {
                 tagged.extend_from_slice(&[0x00, 0x64]); // VID 100
             }
             tagged.extend_from_slice(&plain[12..]);
-            let seg = decapsulate(LINKTYPE_ETHERNET, 0, &tagged)
+            let seg = tcp(LINKTYPE_ETHERNET, 0, &tagged)
                 .unwrap_or_else(|e| panic!("{tags:?} tags: {e:?}"));
             assert_eq!(seg.payload, b"tagged");
         }
@@ -416,7 +545,7 @@ mod tests {
         let mut pkt = eth_ipv4_tcp([10, 0, 0, 1], 1, [10, 0, 0, 2], 2, 9, 0x18, b"hi");
         assert!(pkt.len() < 60);
         pkt.resize(60, 0x00);
-        let seg = decapsulate(LINKTYPE_ETHERNET, 0, &pkt).expect("padded frame");
+        let seg = tcp(LINKTYPE_ETHERNET, 0, &pkt).expect("padded frame");
         assert_eq!(
             seg.payload, b"hi",
             "the IP header's total length bounds the payload, not the frame length"
@@ -437,11 +566,12 @@ mod tests {
         );
 
         // IP but UDP.
-        let mut udp = eth_ipv4_tcp([10, 0, 0, 1], 1, [10, 0, 0, 2], 2, 0, 0x18, b"x");
-        udp[14 + 9] = 17;
+        // IP, but a transport zenoh does not use (SCTP).
+        let mut sctp = eth_ipv4_tcp([10, 0, 0, 1], 1, [10, 0, 0, 2], 2, 0, 0x18, b"x");
+        sctp[14 + 9] = 132;
         assert_eq!(
-            decapsulate(LINKTYPE_ETHERNET, 0, &udp),
-            Err(SkipReason::NotTcp(17))
+            decapsulate(LINKTYPE_ETHERNET, 0, &sctp),
+            Err(SkipReason::NotTransport(132))
         );
 
         // A non-first IPv4 fragment.
@@ -472,7 +602,7 @@ mod tests {
     fn raw_and_cooked_link_types_reach_the_same_segment() {
         let eth = eth_ipv4_tcp([10, 0, 0, 1], 7447, [10, 0, 0, 2], 40000, 3, 0x18, b"body");
         let ip = &eth[14..];
-        let reference = decapsulate(LINKTYPE_ETHERNET, 0, &eth).expect("ethernet");
+        let reference = tcp(LINKTYPE_ETHERNET, 0, &eth).expect("ethernet");
 
         for (lt, framed) in [
             (LINKTYPE_RAW, ip.to_vec()),
@@ -490,7 +620,7 @@ mod tests {
                 v
             }),
         ] {
-            let seg = decapsulate(lt, 0, &framed).unwrap_or_else(|e| panic!("link {lt}: {e:?}"));
+            let seg = tcp(lt, 0, &framed).unwrap_or_else(|e| panic!("link {lt}: {e:?}"));
             assert_eq!(seg, reference, "link type {lt} decapsulates identically");
         }
     }
@@ -511,12 +641,65 @@ mod tests {
         }
         let total = (pkt.len() - 14) as u16;
         pkt[14 + 2..14 + 4].copy_from_slice(&total.to_be_bytes());
-        let seg = decapsulate(LINKTYPE_ETHERNET, 0, &pkt).expect("syn with options");
+        let seg = tcp(LINKTYPE_ETHERNET, 0, &pkt).expect("syn with options");
         assert!(seg.syn);
         assert!(
             seg.payload.is_empty(),
             "the options are header, not payload: {:?}",
             seg.payload
         );
+    }
+
+    /// R311y584 (A3) — the leg the old `NotTcp(17)` skip stood in for.
+    ///
+    /// Before this, every UDP packet in a capture became a named skip, which
+    /// meant scouting, multicast Join and the whole UDP unicast link produced
+    /// a dissection with no messages and no error.
+    #[test]
+    fn a_udp_datagram_is_decapsulated_rather_than_skipped() {
+        let pkt = eth_ipv4_udp([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, b"hello");
+        match decapsulate(LINKTYPE_ETHERNET, 5, &pkt) {
+            Ok(Transport::Udp(d)) => {
+                assert_eq!(d.payload, b"hello");
+                assert_eq!(d.packet_index, 5);
+                assert_eq!(d.flow.low.port.min(d.flow.high.port), 7446);
+            }
+            other => panic!("expected a datagram, got {other:?}"),
+        }
+    }
+
+    /// The UDP header's `length` field is READ, not inferred from the slice.
+    ///
+    /// The fixture's Ethernet frame is padded to the 60-byte minimum, so the
+    /// captured bytes run PAST the datagram. A reader that took "everything
+    /// after the header" would hand five bytes of payload plus a tail of
+    /// zeroes to the decoder, and a zenoh message followed by zero bytes
+    /// parses as trailing garbage rather than as the message it is.
+    #[test]
+    fn ethernet_padding_is_not_read_as_datagram_payload() {
+        let pkt = eth_ipv4_udp([10, 0, 0, 1], 1, [10, 0, 0, 2], 2, b"abc");
+        assert_eq!(pkt.len(), 60, "the fixture must actually be padded");
+        match decapsulate(LINKTYPE_ETHERNET, 0, &pkt) {
+            Ok(Transport::Udp(d)) => assert_eq!(d.payload, b"abc"),
+            other => panic!("expected a datagram, got {other:?}"),
+        }
+    }
+
+    /// Both directions of one UDP conversation key to the SAME flow, exactly
+    /// as they do for TCP — otherwise an observer would treat a request and
+    /// its reply as two unrelated sessions.
+    #[test]
+    fn both_directions_of_a_udp_flow_share_one_key() {
+        let a = eth_ipv4_udp([10, 0, 0, 1], 1000, [10, 0, 0, 2], 2000, b"x");
+        let b = eth_ipv4_udp([10, 0, 0, 2], 2000, [10, 0, 0, 1], 1000, b"y");
+        let (da, db) = match (
+            decapsulate(LINKTYPE_ETHERNET, 0, &a),
+            decapsulate(LINKTYPE_ETHERNET, 1, &b),
+        ) {
+            (Ok(Transport::Udp(x)), Ok(Transport::Udp(y))) => (x, y),
+            other => panic!("expected two datagrams, got {other:?}"),
+        };
+        assert_eq!(da.flow, db.flow);
+        assert_ne!(da.from_low, db.from_low);
     }
 }

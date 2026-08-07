@@ -270,7 +270,10 @@ mod tests {
         ip.extend_from_slice(&[10, 0, 0, 1]);
         ip.extend_from_slice(&[10, 0, 0, 2]);
         ip.extend_from_slice(&tcp);
-        decapsulate(LINKTYPE_IPV4, packet_index, &ip).expect("fixture decapsulates")
+        match decapsulate(LINKTYPE_IPV4, packet_index, &ip).expect("fixture decapsulates") {
+            crate::link::Transport::Tcp(s) => s,
+            other => panic!("the TCP fixture decapsulated as {other:?}"),
+        }
     }
 
     /// The ordinary case: a SYN establishes the origin, then contiguous data.

@@ -559,6 +559,50 @@ impl PassiveSession {
         })
     }
 
+    /// R311y584 (A3) — decode ONE datagram, which is one whole wire message.
+    ///
+    /// The datagram sibling of [`Self::next_frame`], and a separate entry
+    /// point rather than a flag on that one, because the FRAMING differs and
+    /// nothing else does. A datagram link carries no length prefix at all —
+    /// UDP preserves message boundaries, so one datagram is exactly one wire
+    /// message (`wz-runtime-tokio/src/udp_pipeline.rs:34-36`) — which means
+    /// there is no buffer to append to, no boundary to search for, and no
+    /// desynchronisation to recover from. Everything ABOVE the framing is
+    /// shared: the same fold, the same negotiated context, the same
+    /// [`Carried`] decode.
+    ///
+    /// `offset` is whatever coordinate the caller wants the frame reported
+    /// against — a packet index, a byte offset into a file. This layer never
+    /// interprets it, because for a datagram there is no stream for it to be
+    /// an offset INTO.
+    ///
+    /// Infallible in the [`PassiveStall`] sense: a datagram is either
+    /// decodable or not, and "not" arrives as an `Err` inside
+    /// [`PassiveFrame::frame`] rather than as a reason to wait for more bytes.
+    pub fn next_datagram(
+        &mut self,
+        direction: Direction,
+        bytes: &[u8],
+        offset: usize,
+    ) -> PassiveFrame {
+        let frame = parse_inbound(bytes);
+        if let Ok(ref f) = frame {
+            self.fold(direction, f);
+        }
+        let carried = self.decode_carried(direction, &frame);
+        PassiveFrame {
+            direction,
+            stream_offset: offset,
+            // Recorded as zero rather than as one of the two stream widths:
+            // a datagram has no prefix, and reporting 2 here would be a
+            // measurement of nothing.
+            prefix_width: 0,
+            frame,
+            context: self.context,
+            carried,
+        }
+    }
+
     /// R311y583 (A2) — take one decoded transport frame the rest of the way.
     ///
     /// Runs AFTER [`Self::fold`], so the context this reads is the one in

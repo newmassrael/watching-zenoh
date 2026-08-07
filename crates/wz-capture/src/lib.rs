@@ -41,7 +41,7 @@ use wz_session_core::passive::{
     Direction, FlowContext, PassiveFrame, PassiveSession, PassiveStall,
 };
 
-use crate::link::{FlowKey, SkipReason};
+use crate::link::{FlowKey, SkipReason, Transport};
 use crate::tcp::StreamAssembler;
 
 /// A packet the dissector could not turn into stream bytes, and why.
@@ -54,6 +54,38 @@ pub struct SkippedPacket {
     pub packet_index: usize,
     /// Why it produced nothing.
     pub reason: SkipReason,
+}
+
+/// R311y584 (A3) — one UDP flow being dissected.
+///
+/// Kept beside [`FlowDissection`] rather than inside it, because the two are
+/// not variants of one thing: a TCP flow needs a stream assembler and an
+/// offset-to-packet map, and a UDP flow needs neither. zenoh puts exactly one
+/// wire message in each datagram and relies on the boundary instead of a
+/// length prefix (`wz-runtime-tokio/src/udp_pipeline.rs:34-36`), so every
+/// mechanism the TCP side exists for is absent here. Folding them together
+/// would mean an `Option<StreamAssembler>` that is always `None` on one side
+/// and an offset field that means two different things.
+#[derive(Debug)]
+pub struct DatagramDissection {
+    /// The two endpoints, sorted.
+    pub flow: FlowKey,
+    /// The zenoh-level observer over both directions.
+    pub session: PassiveSession,
+    /// Decoded messages, in capture order. Each one's `stream_offset` is the
+    /// index of the packet that carried it — there is no stream for it to be
+    /// an offset into, so the field carries the only anchor that exists.
+    pub frames: Vec<PassiveFrame>,
+}
+
+impl DatagramDissection {
+    fn new(flow: FlowKey) -> Self {
+        Self {
+            flow,
+            session: PassiveSession::new(),
+            frames: Vec::new(),
+        }
+    }
 }
 
 /// One TCP connection being dissected as a zenoh session.
@@ -144,6 +176,7 @@ impl FlowDissection {
 #[derive(Debug, Default)]
 pub struct Dissection {
     flows: Vec<FlowDissection>,
+    datagram_flows: Vec<DatagramDissection>,
     skipped: Vec<SkippedPacket>,
 }
 
@@ -153,9 +186,15 @@ impl Dissection {
         Self::default()
     }
 
-    /// Every flow seen, in first-appearance order.
+    /// Every TCP flow seen, in first-appearance order.
     pub fn flows(&self) -> &[FlowDissection] {
         &self.flows
+    }
+
+    /// Every UDP flow seen, in first-appearance order. Where scouting,
+    /// multicast Join, and the UDP unicast link land.
+    pub fn datagram_flows(&self) -> &[DatagramDissection] {
+        &self.datagram_flows
     }
 
     /// Packets that yielded no stream bytes, each with its reason.
@@ -174,7 +213,11 @@ impl Dissection {
     /// link type is recorded in [`Self::skipped`] rather than dropped.
     pub fn push_packet(&mut self, link_type: u32, packet_index: usize, bytes: &[u8]) {
         let segment = match link::decapsulate(link_type, packet_index, bytes) {
-            Ok(s) => s,
+            Ok(Transport::Tcp(s)) => s,
+            Ok(Transport::Udp(d)) => {
+                self.push_datagram(d);
+                return;
+            }
             Err(reason) => {
                 self.skipped.push(SkippedPacket {
                     packet_index,
@@ -208,6 +251,31 @@ impl Dissection {
         flow.advance(direction, &delivered);
     }
 
+    /// R311y584 (A3) — one UDP datagram: one whole wire message, decoded on
+    /// the spot.
+    ///
+    /// No buffering and no reassembly, because there is nothing to reassemble
+    /// — which is exactly why this is four lines and the TCP path is not.
+    fn push_datagram(&mut self, d: link::Datagram) {
+        let idx = match self.datagram_flows.iter().position(|f| f.flow == d.flow) {
+            Some(i) => i,
+            None => {
+                self.datagram_flows.push(DatagramDissection::new(d.flow));
+                self.datagram_flows.len() - 1
+            }
+        };
+        let direction = if d.from_low {
+            Direction::A
+        } else {
+            Direction::B
+        };
+        let flow = &mut self.datagram_flows[idx];
+        let frame = flow
+            .session
+            .next_datagram(direction, &d.payload, d.packet_index);
+        flow.frames.push(frame);
+    }
+
     /// Dissect a whole classic pcap file from memory.
     pub fn from_pcap(bytes: &[u8]) -> Result<Self, pcap::PcapError> {
         let file = pcap::parse(bytes)?;
@@ -216,5 +284,89 @@ impl Dissection {
             out.push_packet(file.link_type, packet.index, &packet.data);
         }
         Ok(out)
+    }
+}
+
+// ── R311y584 (A3) — the UDP path end to end. `link` proves the parser; this
+//    proves the WIRING, which is a separate claim: a decapsulator that works
+//    and a dissection that never calls it look identical from the parser's
+//    own tests. ──
+#[cfg(test)]
+mod datagram_tests {
+    use super::*;
+    use crate::link::LINKTYPE_ETHERNET;
+
+    /// Ethernet + IPv4 + UDP carrying `payload`, padded to the 60-byte
+    /// minimum a real NIC emits.
+    fn udp_packet(src: [u8; 4], sport: u16, dst: [u8; 4], dport: u16, payload: &[u8]) -> Vec<u8> {
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&sport.to_be_bytes());
+        udp.extend_from_slice(&dport.to_be_bytes());
+        udp.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(payload);
+
+        let mut ip = alloc::vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+        ip.extend_from_slice(&src);
+        ip.extend_from_slice(&dst);
+        ip.extend_from_slice(&udp);
+
+        let mut eth = alloc::vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// A UDP datagram reaches a datagram flow and is decoded there, and it
+    /// does NOT appear as a skipped packet — which is what it did before A3.
+    #[test]
+    fn a_udp_packet_lands_in_a_datagram_flow_and_is_not_skipped() {
+        // A KeepAlive: the smallest complete transport message, one header
+        // byte, so the assertion is about the wiring and not about a codec.
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let mut d = Dissection::new();
+        let pkt = udp_packet([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, &keepalive);
+        d.push_packet(LINKTYPE_ETHERNET, 11, &pkt);
+
+        assert!(
+            d.skipped().is_empty(),
+            "a UDP packet must no longer be a skip: {:?}",
+            d.skipped()
+        );
+        assert!(d.flows().is_empty(), "no TCP flow should be created");
+        assert_eq!(d.datagram_flows().len(), 1);
+        let flow = &d.datagram_flows()[0];
+        assert_eq!(flow.frames.len(), 1);
+        // The packet index rides through as the frame's anchor — there is no
+        // stream for an offset to point into.
+        assert_eq!(flow.frames[0].stream_offset, 11);
+        assert!(
+            flow.frames[0].frame.is_ok(),
+            "decode failed: {:?}",
+            flow.frames[0].frame
+        );
+    }
+
+    /// Two datagrams between the same pair share one flow, in both
+    /// directions — the observer sees one conversation, not two.
+    #[test]
+    fn both_directions_reach_one_datagram_flow() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let mut d = Dissection::new();
+        // The reverse direction swaps the ADDRESSES as well as the ports.
+        // Swapping only the ports is a different conversation entirely, and
+        // the first version of this fixture did exactly that — it reported
+        // two flows and the code was right.
+        let there = udp_packet([10, 0, 0, 1], 1000, [10, 0, 0, 2], 2000, &keepalive);
+        let back = udp_packet([10, 0, 0, 2], 2000, [10, 0, 0, 1], 1000, &keepalive);
+        d.push_packet(LINKTYPE_ETHERNET, 0, &there);
+        d.push_packet(LINKTYPE_ETHERNET, 1, &back);
+        assert_eq!(d.datagram_flows().len(), 1);
+        assert_eq!(d.datagram_flows()[0].frames.len(), 2);
     }
 }
