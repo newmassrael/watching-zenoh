@@ -5092,13 +5092,23 @@ layer_c1bs_live_capture() {
         return 0
     fi
 
-    out="$("${runner[@]}" ./crates/"$bin" \
-        live_capture::tests::a_real_tap_reads_a_packet_with_a_kernel_timestamp \
-        --ignored --exact 2>&1)" || { echo "$out"; return 1; }
+    # BOTH ignored tests: the real socket read AND the flood measurement. The
+    # measurement does not gate on its rate -- a throughput number on a shared
+    # runner is noise -- but it RUNS, so the figure in the module docs has a
+    # second run behind it instead of being a sentence someone typed once.
+    # SERIALIZED, and measured: run in parallel these two failed 3 of 8 times.
+    # They share the loopback interface -- the flood's 20 000 packets arrive on
+    # the other test's tap and push its probe packet past the search budget --
+    # so this is resource coupling, not flakiness to retry away.
+    out="$("${runner[@]}" ./crates/"$bin" live_capture::tests:: \
+        --ignored --nocapture --test-threads=1 2>&1)" || { echo "$out"; return 1; }
     # A filter that matches nothing reports `ok. 0 passed`, which is green and
-    # says nothing — the exact trap this lane exists to avoid.
-    grep -qE '^test result: ok\. 1 passed' <<<"$out" || {
-        echo "  C1bs FAIL: the privileged tap test did not run"; echo "$out"; return 1; }
+    # says nothing -- the exact trap this lane exists to avoid.
+    grep -qE '^test result: ok\. 2 passed' <<<"$out" || {
+        echo "  C1bs FAIL: the privileged tap tests did not both run"; echo "$out"; return 1; }
+    # Surface the measurement in the lane log; a number nobody sees is a number
+    # nobody checks.
+    grep -E '^live tap: ' <<<"$out" || true
     return 0
 }
 
