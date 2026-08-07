@@ -4332,11 +4332,17 @@ layer_c1o_keyexpr_gating_behavior() {
 # 1. So the lane now ALSO runs its own subjects target-scoped with exact guards
 # -- the per-target counts are what the whole-crate exit code cannot show.
 layer_c1l_reassembly() {
-    _runci_guarded_test C1l 16 cargo test -p wz-session-core --features reassembly --lib reassembly --quiet \
+    # R311y580 — 16 -> 27: R311y578 added the eleven `chain_boundary_marker_tests`
+    # to `reassembly_dispatch`, and the guard was not moved with them. The number is
+    # DERIVED, not guessed: `--list` under this exact feature set enumerates 27, all
+    # of them `reassembly_dispatch::` (16 original + 11 new), so the filter did not
+    # widen onto foreign tests.
+    _runci_guarded_test C1l 27 cargo test -p wz-session-core --features reassembly --lib reassembly --quiet \
         || return 1
     _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features reassembly --test layer3_reassembly_rx --quiet \
         || return 1
-    _runci_guarded_test C1l 16 cargo test -p wz-session-core --features transport-fragmentation --lib reassembly --quiet \
+    # R311y580 — the same eleven, on the sibling feature arm.
+    _runci_guarded_test C1l 27 cargo test -p wz-session-core --features transport-fragmentation --lib reassembly --quiet \
         || return 1
     _runci_guarded_test C1l 1 cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_tx --quiet \
         || return 1

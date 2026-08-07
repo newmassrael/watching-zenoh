@@ -562,10 +562,21 @@ pub use wz_session_core::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
 // / `build_interest_*`) still reference them.
 #[cfg(feature = "codec-frame")]
 pub use wz_session_core::network_message::parse_frame_payload;
+pub use wz_session_core::network_message::NetworkMessage;
 // R311y578 (G4) — the BEST-EFFORT twin, re-exported beside the strict one so a
 // consumer reaches both through the same path rather than discovering that the
 // observer contract exists only in the lower crate.
-pub use wz_session_core::network_message::NetworkMessage;
+//
+// R311y580 — GATED, as its strict twin four lines above always was. All three
+// items are `#[cfg(feature = "codec-frame")]` in wz-session-core
+// (network_message.rs:209/251/287), so an ungated re-export is an E0432 in
+// every subset that omits the feature — Layer C1w (`--features
+// routing-accept`) is the one that reds. This is R311y578's OWN G7 rule
+// mirrored: there, a helper's cfg had to cover every module that CALLS it;
+// here, a re-export's cfg has to cover the item it re-exports. `NetworkMessage`
+// above stays ungated because the enum itself carries no cfg — only its
+// variants do.
+#[cfg(feature = "codec-frame")]
 pub use wz_session_core::network_message::{
     parse_frame_payload_best_effort, BatchHalt, BatchParse,
 };
