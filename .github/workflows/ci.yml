@@ -1085,6 +1085,18 @@ jobs:
         # before wiring.
         run: bash scripts/run-ci.sh --layer E7
 
+      # R311y581 — E7b / E7c were in scripts/run-ci.sh and never wired here, so
+      # both ran only in a local full sweep. Neither needs a foreign binary:
+      # they build wz-ap-demo and drive wz<->wz e2e fixtures, so this job's
+      # zenohd/pico provisioning is incidental and a plain runner would serve.
+      # They sit beside E7 because they are the same router-hat family. Both
+      # measured green locally before wiring.
+      - name: Layer E7b — router-connect-reconcile (feature ON + OFF arms)
+        run: bash scripts/run-ci.sh --layer E7b
+
+      - name: Layer E7c — adminspace-router-linkstate cross-node e2e
+        run: bash scripts/run-ci.sh --layer E7c
+
       - name: Layer E8 — router-hat data plane vs a zenoh-pico subscriber
         run: bash scripts/run-ci.sh --layer E8
 
@@ -1988,6 +2000,29 @@ jobs:
         run: bash scripts/run-ci.sh --layer C1an
       - name: Layer C1ao — config-mutate-runtime + admin json (R311y427)
         run: bash scripts/run-ci.sh --layer C1ao
+
+      # R311y581 — SEVEN lanes were registered in scripts/run-ci.sh and absent
+      # from this workflow's `--layer` set, so each ran ONLY in a local full
+      # sweep — the exact hazard three comments in this job already name. One of
+      # them, C1bn, was created by R311y579, the round that CLOSED the "no lane
+      # at all" debt for the same feature set. Closing one hole while opening
+      # another is not closing it, so `scripts/lib/unwired_lane_lint.py` now
+      # gates the diff in Layer C0. All five below are plain cargo (no
+      # provisioning) and were measured green locally before being wired.
+      - name: Layer C1bn — passive-dissection feature set, RUN (R311y579)
+        run: bash scripts/run-ci.sh --layer C1bn
+
+      - name: Layer C1as — reply source-info (R311y581 wiring)
+        run: bash scripts/run-ci.sh --layer C1as
+
+      - name: Layer C1az — rest-sse-subscribe (R311y581 wiring)
+        run: bash scripts/run-ci.sh --layer C1az
+
+      - name: Layer C1be — query-value (R311y581 wiring)
+        run: bash scripts/run-ci.sh --layer C1be
+
+      - name: Layer C1bh — storage host dir (R311y581 wiring)
+        run: bash scripts/run-ci.sh --layer C1bh
 
       # The measurement this job's own header asks for and has never had: it
       # declares "THIS JOB HAS NO OTHER DISK HEADROOM" while recording that

@@ -1387,6 +1387,11 @@ PY
     # Enforcement MEASURED by re-introducing one of the eight verbatim, not by
     # observing that the script runs.
     python3 scripts/lib/expired_blocker_lint.py || return 1
+    # R311y581 — the UNWIRED-LANE gate: a lane in run-ci.sh but not in
+    # ci.yml's --layer set runs ONLY in a local full sweep. Seven were found,
+    # one of them created by the round that closed the sibling debt. See the
+    # script's docstring for why this is a gate and not a fourth comment.
+    python3 scripts/lib/unwired_lane_lint.py || return 1
     # R311y569 — the COUNT-GUARD-to-binary gate. `run-ci.sh` carries 53 bare
     # `| grep -qE '^test result: ok\. N passed'` guards, and NOTHING tied N to
     # the binary it guards: rename a test, delete one, or add one, and the guard
