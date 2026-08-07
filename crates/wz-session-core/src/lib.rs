@@ -821,6 +821,14 @@ pub mod extfragment;
 ))]
 pub mod passive;
 
+/// R311y579 (G3 + G6-serde) — the LEAF-SCALAR field walker: a dissection that
+/// reports, per scalar, the byte span it was decoded from, in a wz-owned view
+/// model that can carry `serde` derives the codegen'd mirrors cannot. Gated on
+/// `dissect`, which selects the whole codec-* MID space on purpose: an observer
+/// reads every message it sees and encodes none.
+#[cfg(feature = "dissect")]
+pub mod dissect;
+
 /// R311y578 — SSOT for the `0x7` PATCH establishment ext: the protocol patch
 /// LEVEL wz announces (R121f1) and, newly, the peer's half plus the `min()`
 /// negotiation over it. The negotiated level is the sole gate on the

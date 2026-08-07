@@ -880,6 +880,35 @@ storage-mgr-wildcard-updates = [
 # DRIVER lives in wz-runtime-tokio (this is the no_std kernel sweep only).
 storage-mgr-garbage-collection = ["storage-mgr-wildcard-updates"]
 
+# R311y579 (G3) — `dissect`: the leaf-scalar field walker (`dissect` module).
+# Selects the WHOLE codec-* MID space rather than composing a subset, and that
+# is a design statement, not convenience: a dissector reads every message it
+# sees and encodes none, so a build that can decode a MID but not dissect it
+# would be a silent coverage hole in exactly the layer whose job is coverage.
+# The `wire_const` MID constants are themselves per-codec gated, so naming them
+# requires selecting them; the module's own gate test asserts its MID set
+# equals `network_message`'s.
+dissect = [
+    "alloc",
+    "codec-frame",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "codec-push",
+    "codec-request",
+    "codec-response",
+    "codec-response-final",
+    "codec-declare",
+]
+# R311y579 (G6-serde) — `Serialize` / `Deserialize` on the `dissect` view
+# model. Its own feature, not folded into `dissect`, because the JSON emit in
+# `dissect::to_json` deliberately needs NO serde: the measured G6 failure was a
+# consumer that could not get a decode into a log at all, and a dissector whose
+# only machine-readable output rides a dependency the target cannot link has
+# not fixed that. serde is `default-features = false` + `alloc`, so selecting
+# it does not drag `std` into a no_std profile.
+dissect-serde = ["dissect", "dep:serde"]
+
 # R311y22b — no [build-dependencies]: the statechart codegen moved to the
 # committed out/wz-session-core/*_sm.rs via the `xtask` codegen SSOT, so this
 # crate has no build script and pulls no sce-codegen toolchain.
@@ -967,6 +996,12 @@ zeroize = { version = "1", default-features = false, features = ["alloc"] }
 # `alloc::Vec<T>`. heapless 0.8 mirrors the wz-link-lwip pin so the two
 # heapless consumers stay version-aligned across the no_std tier.
 heapless = { version = "0.8", default-features = false }
+# R311y579 (G6-serde) — OPTIONAL, pulled only by `dissect-serde`, and only for
+# the wz-owned `dissect` view model. `default-features = false` + `alloc`
+# keeps the no_std profile intact: selecting the feature must not be how `std`
+# creeps back into an MCU build. It is deliberately NOT applied to the
+# codegen'd `*Owned` codec mirrors — that tree is SCE's and read-only here.
+serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
 
 [dev-dependencies]
 # R311ds — the four declare/* registries' wider behavioural tests
@@ -994,6 +1029,10 @@ wz-codecs-test-support = { path = "../wz-codecs-test-support" }
 # compatibility without running zenoh. Inert in the production / MCU artifact.
 bincode = "1.3"
 serde = { version = "1", features = ["derive"] }
+# R311y579 (G6-serde) — TEST-ONLY. The `dissect-serde` round-trip proof needs a
+# concrete serde format to round-trip THROUGH; `serde::Serialize` alone proves
+# only that the derive compiled. Inert in the production artifact.
+serde_json = "1"
 
 [lints]
 workspace = true

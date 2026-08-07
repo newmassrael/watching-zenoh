@@ -2743,6 +2743,7 @@ dependencies = [
  "sce-forge-runtime",
  "sce-rust-runtime",
  "serde",
+ "serde_json",
  "sha2",
  "sha3",
  "wz-codecs",
