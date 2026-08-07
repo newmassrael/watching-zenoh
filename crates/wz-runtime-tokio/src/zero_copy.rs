@@ -58,10 +58,15 @@ pub struct PooledChain {
 }
 
 impl PooledChain {
-    /// Pool index of this chain's slot. Tracing / test observability; the
-    /// Router never reads it.
+    /// Pool index of this chain's slot. Tracing / test observability, and the
+    /// `buf_index` [`crate::uring`] submits under; the Router never reads it.
     pub fn slot_idx(&self) -> usize {
         self.slot.idx()
+    }
+
+    /// Bytes staged so far — the offset the next append lands at.
+    pub fn staged_len(&self) -> usize {
+        self.len
     }
 }
 
@@ -86,6 +91,62 @@ impl<const SLOTS: usize, const CAP: usize> PooledStaging<SLOTS, CAP> {
     /// while the FSM went untouched, which is the whole thing being proved.
     pub fn pool(&self) -> &ReassemblyPoolAp {
         &self.pool
+    }
+
+    /// R311y589 — take a slot WITHOUT the arena's chain accounting.
+    ///
+    /// For [`crate::uring::FixedSlotRing::register`], which needs every slot's
+    /// address at once and is not starting chains. It goes through the
+    /// generated `pool_acquire_for_encode` like everything else — a registration
+    /// that reached into the pool's storage would be reading a private field and
+    /// would stop being a consumer of the FSM, which is the property the whole
+    /// feature is about.
+    #[cfg(feature = "runtime-tokio-uring")]
+    pub(crate) fn acquire_raw(&mut self) -> Option<PooledChain> {
+        self.pool
+            .pool_acquire_for_encode()
+            .map(|slot| PooledChain { slot, len: 0 })
+    }
+
+    /// Counterpart to [`Self::acquire_raw`].
+    #[cfg(feature = "runtime-tokio-uring")]
+    pub(crate) fn release_raw(&mut self, chain: PooledChain) {
+        chain.slot.pool_return(&mut self.pool);
+    }
+
+    /// The address of a held slot's bytes, for handing to the kernel as a
+    /// registered `iovec`.
+    #[cfg(feature = "runtime-tokio-uring")]
+    pub(crate) fn slot_ptr(&mut self, chain: &mut PooledChain) -> *mut u8 {
+        chain.slot.write(&mut self.pool).as_mut_ptr()
+    }
+
+    /// R311y589 — record that an EXTERNAL writer put `n` bytes into `chain`'s
+    /// slot, starting where the chain left off.
+    ///
+    /// This is the io_uring completion path and the reason row 3 is zero-copy
+    /// rather than one-copy: the kernel wrote through the registered buffer,
+    /// which IS this slot, so nothing is moved here — only the length advances.
+    /// [`ChainStaging::append`] is the row-2 counterpart and does copy, because
+    /// on that path the bytes arrived somewhere else first.
+    ///
+    /// Refuses past `CAP` on the same rule `append` uses, so a kernel that
+    /// returned more than the caller asked for cannot silently widen the chain.
+    #[cfg(feature = "runtime-tokio-uring")]
+    pub fn commit_external(
+        &mut self,
+        chain: &mut PooledChain,
+        n: usize,
+    ) -> Result<(), StagingError> {
+        let end = chain
+            .len
+            .checked_add(n)
+            .ok_or(StagingError::ChainCapExceeded)?;
+        if end > CAP {
+            return Err(StagingError::ChainCapExceeded);
+        }
+        chain.len = end;
+        Ok(())
     }
 }
 

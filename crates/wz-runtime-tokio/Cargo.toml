@@ -645,6 +645,17 @@ reassembly = ["wz-session-core/reassembly", "codec-frame"]
 # `preset-ap-full` INERT-MEMBER gate existed to say out loud.
 runtime-zero-copy = ["reassembly"]
 
+# R311y589 — runtime-tokio-uring: ARCHITECTURE §9.5 row 3, the `AP linux +
+# io_uring fixed buffers` incarnation of the SAME §5.E pool lifecycle. Implies
+# `runtime-zero-copy` because the fixed buffers it registers with the kernel ARE
+# that pool's slots — row 3 differs from row 2 only in the edge actions, which is
+# the whole point of the table, and an io_uring adapter with no pool to register
+# would be a second buffer story rather than this one.
+# `dep:libc` is NOT incidental: `register_buffers` takes `&[libc::iovec]`. It
+# built without naming it because another default feature happened to pull libc
+# in, which is precisely the coupling that reds a feature-subset lane later.
+runtime-tokio-uring = ["runtime-zero-copy", "dep:io-uring", "dep:libc"]
+
 # transport-fragmentation (R311jm) — forwards the session-core TX
 # fragmentation gate + the runtime `reassembly` RX wiring so the AP
 # profile fragments + reassembles full-duplex.
@@ -1502,6 +1513,15 @@ scouting-static = ["wz-session-core/scouting-static"]
 # codegen SSOT, so this crate has no build script and pulls no sce-codegen.
 
 [dependencies]
+# R311y589 — the LOW-LEVEL io_uring interface, deliberately not `tokio-uring`.
+# `tokio-uring` brings its own current-thread runtime, and wz already has a
+# multi-threaded one that everything else in this crate is written against; two
+# reactors competing for the same session would be a different feature from the
+# one ARCHITECTURE §9.5 row 3 describes. This crate is a thin `io_uring_setup` /
+# submission-queue binding, so the adapter registers the pool and submits SQEs
+# from wz's own runtime instead of importing a second one.
+# Linux-only and OPTIONAL: pulled solely by `runtime-tokio-uring`.
+io-uring = { version = "0.7", optional = true }
 # R311y492 — the host<->plugin C ABI contract, linked here and, INDEPENDENTLY,
 # by every plugin cdylib. Optional + pulled only by `plugin-dynamic-loading`.
 wz-plugin-abi = { path = "../wz-plugin-abi", optional = true }

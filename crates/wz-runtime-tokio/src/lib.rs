@@ -112,6 +112,12 @@ pub mod reassembly;
 #[cfg(feature = "runtime-zero-copy")]
 pub mod zero_copy;
 
+/// R311y589 — `runtime-tokio-uring`: ARCHITECTURE §9.5 row 3. The same §5.E pool
+/// [`zero_copy`] consumes, registered with the kernel as fixed buffers so
+/// `IORING_OP_READ_FIXED` writes a link's bytes straight into a chain's slot.
+#[cfg(feature = "runtime-tokio-uring")]
+pub mod uring;
+
 // Crate-local fixtures for this crate's OWN unit tests (recording driver
 // + actions builders). Kept in-crate — NOT in the test-support sibling —
 // so unit tests receive this crate's version of `SessionLinkActions`

@@ -2028,6 +2028,15 @@ jobs:
       - name: Layer C1bq — runtime-zero-copy arena, both arms (R311y589)
         run: bash scripts/run-ci.sh --layer C1bq
 
+      # R311y589 — the ARMING FLAG the runtime-tokio-uring inventory entry
+      # demanded before this could be a lane. io_uring is a kernel capability,
+      # so a SKIP is honest locally and a FAIL here: a green SKIP on hosted is
+      # the R311y265 masked-skip burn.
+      - name: Layer C1br — runtime-tokio-uring fixed buffers (R311y589)
+        env:
+          WZ_URING_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer C1br
+
       - name: Layer C1as — reply source-info (R311y581 wiring)
         run: bash scripts/run-ci.sh --layer C1as
 

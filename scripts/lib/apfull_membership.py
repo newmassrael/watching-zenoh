@@ -145,10 +145,15 @@ EXCLUSIONS = {
 # is now the first of those callers, so the entry would be FALSE rather than
 # stale. It was not re-worded or re-categorised: an inert member expires by
 # being built, and this is what that looks like.
-INERT_MEMBERS = {
-    "runtime-tokio-uring": "the io_uring reactor behind it; needs an ARMING FLAG with a "
-                           "hosted hard-fail before it can be a lane",
-}
+# R311y589 also removed `runtime-tokio-uring`, so the table is now EMPTY — and
+# empty is a state this gate has to keep working in, not a reason to delete it.
+# The check that matters most is the one that fires when a THIRD member appears;
+# an empty table makes that check strictest, because every inert member is then
+# unexpected. Its own entry named the condition for its removal ("needs an
+# ARMING FLAG with a hosted hard-fail before it can be a lane"); Layer C1br is
+# that flag, probed on both arms, so the entry expired by having its condition
+# met rather than by being re-worded.
+INERT_MEMBERS = {}
 
 
 def _predicate_alt_platform(atom, entry):

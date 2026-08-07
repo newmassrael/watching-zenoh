@@ -4857,6 +4857,61 @@ layer_c1bf_cargo_clippy_all_features() {
 # constants -- so a lane that only ran the 4x64 unit dims would never construct
 # the 32 MiB arena, which is exactly the configuration that stack-overflowed
 # before `heap_pool` existed.
+# ─── Layer C1br — runtime-tokio-uring, ARCHITECTURE §9.5 row 3 ───────
+#
+# R311y589. The inventory entry for this atom said it "needs an ARMING FLAG with
+# a hosted hard-fail before it can be a lane", and that condition is what this
+# lane implements rather than works around.
+#
+# io_uring is a KERNEL capability, so a box without it is a provisioning fact
+# and a SKIP is the honest local answer. A SKIP is also green, which is the
+# R311y265 masked-skip burn — so hosted (or `WZ_URING_REQUIRE=1`) turns the same
+# absence into a FAIL. Same idiom as WZ_LINT_REQUIRE / WZ_QZ_REQUIRE / WZ_A3_-
+# REQUIRE, and it is a bare string contract across two files: the token here
+# must match ci.yml's `env:`.
+#
+# The probe is a real `io_uring_setup`, not a kernel-version comparison: the
+# syscall is what the feature needs, and a container can refuse it on a kernel
+# whose version string says it should work.
+layer_c1br_uring_fixed_buffers() {
+    local out
+    if ! python3 -c '
+import ctypes, sys
+libc = ctypes.CDLL(None, use_errno=True)
+class P(ctypes.Structure):
+    _fields_ = [("sq_entries", ctypes.c_uint32), ("cq_entries", ctypes.c_uint32),
+                ("flags", ctypes.c_uint32), ("sq_thread_cpu", ctypes.c_uint32),
+                ("sq_thread_idle", ctypes.c_uint32), ("features", ctypes.c_uint32),
+                ("wq_fd", ctypes.c_uint32), ("resv", ctypes.c_uint32 * 3),
+                ("sq_off", ctypes.c_uint64 * 10), ("cq_off", ctypes.c_uint64 * 10)]
+p = P()
+sys.exit(0 if libc.syscall(425, 8, ctypes.byref(p)) >= 0 else 1)
+' 2>/dev/null; then
+        if [[ "${WZ_URING_REQUIRE:-0}" == "1" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
+            echo "  C1br FAIL: io_uring_setup refused and WZ_URING_REQUIRE/GITHUB_ACTIONS is set" >&2
+            return 1
+        fi
+        echo "  C1br SKIP (io_uring_setup refused by this kernel; set WZ_URING_REQUIRE=1 to make it a FAIL)"
+        return 0
+    fi
+
+    (cd crates && cargo clippy -p wz-runtime-tokio \
+        --features runtime-tokio-uring --all-targets --quiet -- -D warnings) || return 1
+
+    out="$(cd crates && cargo test -p wz-runtime-tokio --features runtime-tokio-uring \
+        --lib uring:: --quiet 2>&1)" || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1br FAIL: the uring filter matched no test"; echo "$out"; return 1; }
+
+    # The subset that has NO transport. R311y589 found a pre-existing dead-code
+    # hole exactly here: `reassembly_config`'s cfg omitted both its callers'
+    # gates, and nothing selected a `reassembly`-without-transport build until
+    # this feature implied one.
+    (cd crates && cargo build -p wz-runtime-tokio --no-default-features \
+        --features runtime-tokio-uring --quiet) || return 1
+    return 0
+}
+
 layer_c1bq_zero_copy_arena() {
     local out
     (cd crates && cargo clippy -p wz-runtime-tokio \
@@ -9993,6 +10048,7 @@ run_layer C1bf layer_c1bf_cargo_clippy_all_features || overall=1
 run_layer C1bn layer_c1bn_passive_dissection_features || overall=1
 run_layer C1bo layer_c1bo_dissect_c_abi || overall=1
 run_layer C1bq layer_c1bq_zero_copy_arena || overall=1
+run_layer C1br layer_c1br_uring_fixed_buffers || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1bl layer_c1bl_cargo_test_router_failfast || overall=1
 run_layer C1bm layer_c1bm_cargo_test_pico_failfast || overall=1

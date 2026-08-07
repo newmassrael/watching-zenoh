@@ -19,7 +19,11 @@
 //! [`crate::reassembly_pool_ap`], itself `reassembly`-gated); a deploy that
 //! never receives a `T_MID_FRAGMENT` compiles the whole pool out.
 
-use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
+use wz_session_core::reassembly_dispatch::ReassemblyDispatcher;
+// Follows `reassembly_config`'s gate, not the module's — same G7 rule, and an
+// import is where that rule is easiest to forget.
+#[cfg(any(feature = "transport-unicast", feature = "transport-multicast"))]
+use wz_session_core::reassembly_dispatch::ReassemblyConfig;
 
 /// Reassembly slot-pool dimensions for the AP tokio host. R311in — sourced
 /// from the SCE-codegen'd AP buffer-pool constants
@@ -78,6 +82,16 @@ pub type TokioReassembly = ReassemblyDispatcher<
 /// widening casts are the only adaptation. `pub(crate)`: consumed by both
 /// the unicast (`crate::session_glue`) and multicast (`crate::multicast_glue`)
 /// drive loops — one buffer-pool policy SSOT, two transports.
+///
+/// R311y589 — gated on the UNION of its callers rather than on this module's
+/// own feature, the R311y579 (G7) rule. Its two callers are
+/// [`crate::session_glue`] (`transport-unicast`) and
+/// [`crate::multicast_glue`] (`transport-multicast`); `reassembly` alone
+/// compiles it with neither, which is dead code under `-D warnings`. The hole
+/// predates this round and no lane had selected the arm that shows it — a
+/// `reassembly`-without-transport build — until `runtime-tokio-uring` implied
+/// `reassembly` and Layer C1bq built exactly that subset.
+#[cfg(any(feature = "transport-unicast", feature = "transport-multicast"))]
 pub(crate) fn reassembly_config() -> ReassemblyConfig {
     ReassemblyConfig::new(
         crate::reassembly_pool_ap::PER_PEER_QUOTA as u16,
