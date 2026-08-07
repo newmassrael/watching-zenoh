@@ -85,11 +85,19 @@ fn two_fragment_chain_reassembles_through_parse_inbound() {
             sn,
             more,
             payload,
+            markers,
             ..
         } = frame
         else {
             panic!("expected InboundFrame::Fragment");
         };
+        // R311y578 — `fragment_frame` builds a bare `VLE(sn) + tail` wire with
+        // no ext chain, so neither chain-boundary marker is on it. The
+        // dispatcher runs with markers OFF here (the patch-0 contract), which
+        // is why a marker-less chain still starts. The armed contract is
+        // exercised in `reassembly_dispatch`'s own suite and in
+        // `session_glue`'s round trip over wz's REAL emitted wire.
+        assert_eq!(markers, wz_session_core::extfragment::FragmentMarkers::NONE);
         d.ingest(
             Fragment {
                 peer_key: zid,
@@ -98,6 +106,7 @@ fn two_fragment_chain_reassembles_through_parse_inbound() {
                 more: u8::from(more),
                 payload: &payload,
                 priority: wz_session_core::qos::Priority::DEFAULT,
+                markers,
             },
             wz_session_core::sn::mask_from_res(0x02),
             0,

@@ -190,6 +190,14 @@ pub enum InboundFrame {
         /// reassembly dispatcher can key the chain by (peer, reliable, priority).
         /// [`Priority::DEFAULT`](crate::qos::Priority) for a pre-QoS chain.
         priority: crate::qos::Priority,
+        /// R311y578 — the chain-boundary markers projected from the Fragment's
+        /// own ext space (`0x2 First` / `0x3 Drop`,
+        /// [`crate::extfragment::project_markers`]). Decoded feature-agnostically,
+        /// like `priority`: wz reads whatever the peer sent, and whether the
+        /// markers are ENFORCED is the reassembly Router's call against the
+        /// negotiated patch level ([`crate::extpatch`]). Both `false` for a
+        /// patch-0 peer, which emits neither.
+        markers: crate::extfragment::FragmentMarkers,
     },
     /// MID outside the handshake/close/keepalive set.
     Unknown { mid: u8 },
@@ -364,6 +372,12 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
                 .advance(remaining)
                 .map_err(InboundParseError::Codec)?;
             let priority = ext_qos_priority(&extensions);
+            // R311y578 — project the chain-boundary markers BEFORE the ext
+            // chain moves into the variant. Both are unit exts in the
+            // Fragment's own id space (0x2 First / 0x3 Drop); the projector
+            // matches on extension identity, so the z64 `ext_qos` at 0x1
+            // above is never mistaken for one.
+            let markers = crate::extfragment::project_markers(&extensions);
             Ok(InboundFrame::Fragment {
                 reliable: (flags & wire_const::FLAG_T_FRAGMENT_R) != 0,
                 sn,
@@ -372,6 +386,7 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
                 has_ext,
                 extensions,
                 priority,
+                markers,
             })
         }
         #[cfg(feature = "codec-keep-alive")]

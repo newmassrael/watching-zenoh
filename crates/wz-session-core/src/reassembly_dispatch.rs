@@ -106,16 +106,45 @@ pub struct ReassemblyConfig {
     /// chain start; [`ReassemblyDispatcher::sweep`] aborts a chain that
     /// has not completed within the window (RFC 815 GC analogue, §4).
     pub reassembly_timeout_ms: u64,
+    /// R311y578 — honour the Fragment chain-boundary markers
+    /// ([`crate::extfragment`]: `0x2 First` / `0x3 Drop`). zenoh gates the
+    /// identical block on the NEGOTIATED protocol patch level
+    /// (`patch.has_fragmentation_markers()`,
+    /// `io/zenoh-transport/src/unicast/universal/rx.rs:155`), so this is
+    /// not a deploy preference — it is a per-session wire fact, resolved
+    /// from the peer's Init ([`crate::extpatch::negotiate_patch`]) and
+    /// pushed in with
+    /// [`ReassemblyDispatcher::set_fragmentation_markers`] once the
+    /// handshake settles.
+    ///
+    /// `false` is the pre-R311y578 behaviour and the correct behaviour
+    /// against a patch-0 peer, which emits no markers: enforcing the rules
+    /// against one would refuse every chain it sends.
+    pub fragmentation_markers: bool,
 }
 
 impl ReassemblyConfig {
     /// Construct an explicit config. See the field docs for the
-    /// no-`Default` rationale.
+    /// no-`Default` rationale. Chain-boundary markers start OFF — the
+    /// negotiated patch level is not known until the handshake completes,
+    /// and the dispatcher is built before it (see
+    /// [`Self::with_fragmentation_markers`] /
+    /// [`ReassemblyDispatcher::set_fragmentation_markers`]).
     pub const fn new(per_peer_quota: u16, reassembly_timeout_ms: u64) -> Self {
         Self {
             per_peer_quota,
             reassembly_timeout_ms,
+            fragmentation_markers: false,
         }
+    }
+
+    /// Builder form of [`Self::fragmentation_markers`], for a caller that
+    /// already knows the negotiated level at construction time (a test, or
+    /// a passive reader replaying a capture whose handshake it has already
+    /// parsed).
+    pub const fn with_fragmentation_markers(mut self, on: bool) -> Self {
+        self.fragmentation_markers = on;
+        self
     }
 }
 
@@ -129,6 +158,25 @@ pub enum AbortReason {
     /// Staging the fragment would exceed the slot's `CAP` (`slot_size`) —
     /// the §7.1 reassembly-capacity hard error (`codec.error`).
     CapacityOverflow,
+    /// R311y578 — the SENDER announced it abandoned the chain: a fragment
+    /// carrying the `0x3 Drop` marker ([`crate::extfragment`]). The slot
+    /// FSM's `fragment.drop` -> `Aborted` arm (`abort_peer_drop`) fires,
+    /// which is the transition the statechart has declared since R311im
+    /// and no Router code raised until this round.
+    ///
+    /// Distinct from [`Self::OutOfOrder`] on purpose: out-of-order is a
+    /// receiver-side inference about SNs, whereas this is the sender
+    /// SAYING SO on the wire. A passive reader needs the two apart —
+    /// the first is a lossy link, the second is a healthy sender whose TX
+    /// pipeline could not obtain a batch mid-fragmentation
+    /// (`io/zenoh-transport/src/common/pipeline.rs:400-404`).
+    SenderDropped,
+    /// R311y578 — a fragment carrying the `0x2 First` marker arrived while
+    /// a chain was already open on the same `(peer, reliable, priority)`
+    /// key. The sender restarted; the staged bytes are a stranded prefix
+    /// and are discarded before the new chain begins (zenoh
+    /// `guard.defrag.clear()` on `ext_first.is_some()`).
+    Superseded,
 }
 
 /// Why the Router refused a chain-starting fragment before allocating a
@@ -140,6 +188,19 @@ pub enum RefuseReason {
     PeerQuota,
     /// Every slot is occupied by another peer's in-progress chain.
     PoolExhausted,
+    /// R311y578 — the fragment would START a chain but carries no `0x2
+    /// First` marker, on a session whose negotiated patch level demands
+    /// one ([`ReassemblyConfig::fragmentation_markers`]). zenoh drops it
+    /// with "First fragment received without start marker"
+    /// (`unicast/universal/rx.rs:158-163`).
+    ///
+    /// This is the rule that separates a PARTICIPANT from an OBSERVER. A
+    /// participant that joined at session start sees every chain from its
+    /// first fragment, so the case looks like corruption. A reader that
+    /// attached to a live flow mid-chain sees it constantly, and staging
+    /// the headless tail would hand the upstream decoder a message that
+    /// begins in the middle of a network message.
+    MissingStartMarker,
 }
 
 /// Outcome of one [`ReassemblyDispatcher::ingest`] call.
@@ -193,6 +254,18 @@ pub struct Fragment<'a> {
     /// priority). [`Priority::DEFAULT`] for a pre-QoS / multicast chain, which
     /// collapses the key to the pre-QoS (peer, reliable) form.
     pub priority: Priority,
+    /// R311y578 — the chain-boundary markers projected from this fragment's
+    /// own ext chain (`0x2 First` / `0x3 Drop`,
+    /// [`crate::extfragment::project_markers`]). Two bits rather than the
+    /// owned ext chain, so the descriptor stays `Copy` and alloc-free on the
+    /// MCU profile.
+    ///
+    /// Read ONLY when [`ReassemblyConfig::fragmentation_markers`] is on —
+    /// the negotiated patch level decides whether the peer emits them at
+    /// all. [`crate::extfragment::FragmentMarkers::NONE`] is the
+    /// marker-less descriptor a patch-0 peer, a multicast join, or a
+    /// hand-built test fragment carries.
+    pub markers: crate::extfragment::FragmentMarkers,
 }
 
 /// Thin host binding for the generated [`ReassemblySlotActions`]. The
@@ -373,10 +446,105 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
+        if self.config.fragmentation_markers {
+            if let Some(outcome) = self.apply_chain_boundary_markers(&frag) {
+                return outcome;
+            }
+        }
         match self.find_active(frag.peer_key, frag.reliable, frag.priority) {
             Some(idx) => self.ingest_continuation(idx, frag, sn_mask, deliver),
             None => self.ingest_chain_start(frag, now_ms, deliver),
         }
+    }
+
+    /// R311y578 — the `0x2 First` / `0x3 Drop` chain-boundary rules, run
+    /// ahead of the SN machinery on a session whose negotiated patch level
+    /// carries them ([`ReassemblyConfig::fragmentation_markers`]).
+    ///
+    /// `Some(outcome)` means the fragment is CONSUMED here and must not
+    /// reach the staging path; `None` means carry on to the normal
+    /// start / continuation split, whose own `find_active` re-resolves the
+    /// slot this may have just released.
+    ///
+    /// The order is zenoh's, and the order is load-bearing
+    /// (`io/zenoh-transport/src/unicast/universal/rx.rs:155-170`):
+    ///
+    /// ```text
+    /// if ext_first.is_some()      { defrag.clear(); }
+    /// else if defrag.is_empty()   { return; }        // no marker, no chain
+    /// if ext_drop.is_some()       { defrag.clear(); return; }
+    /// ```
+    ///
+    /// so a `Drop` arriving onto an idle key is swallowed by the
+    /// missing-start-marker rule rather than reported as an abort — there
+    /// is nothing to abort, and the sender is announcing the end of a
+    /// chain this receiver never saw the start of.
+    fn apply_chain_boundary_markers(&mut self, frag: &Fragment<'_>) -> Option<IngestOutcome> {
+        let active = self.find_active(frag.peer_key, frag.reliable, frag.priority);
+        if frag.markers.first {
+            // A restart supersedes whatever is staged on this key. The
+            // stranded prefix is discarded through the FSM's peer-drop arm
+            // rather than dropped behind its back, so the slot leaves
+            // Receiving by a declared transition.
+            if let Some(idx) = active {
+                self.abort_peer_drop(idx, AbortReason::Superseded);
+            }
+            // Fall through: the marked fragment itself now starts a chain.
+            return None;
+        }
+        if active.is_none() {
+            // No marker and no chain in progress: this is not a chain
+            // start, whatever its SN says.
+            return Some(IngestOutcome::Refused(RefuseReason::MissingStartMarker));
+        }
+        if frag.markers.dropped {
+            let idx = active.expect("active is Some on this path");
+            return Some(self.abort_peer_drop(idx, AbortReason::SenderDropped));
+        }
+        None
+    }
+
+    /// R311y578 — the SINGLE producer of the slot FSM's `fragment.drop`
+    /// -> `Aborted` arm (`abort_peer_drop`), shared by both marker-driven
+    /// aborts. One seam by construction, rather than two callsites that
+    /// happen to agree: the drop fold and the supersede fold are the same
+    /// event on the wire ("the sender is not finishing this chain"), and a
+    /// probe on one is a probe on both only while there is literally one
+    /// place that raises it.
+    ///
+    /// Driving the FSM is not bookkeeping. `Slot::release` raises
+    /// `slot.release`, which only the three TERMINAL states answer, so a
+    /// slot whose Router-side key is cleared WITHOUT the abort transition
+    /// leaves its engine parked in `Receiving` — silently, since
+    /// `Receiving` accepts a `fragment.chunk` and completes on `more == 0`
+    /// exactly as `Empty` does. That desync is the shape a measured damage
+    /// probe found this round, and `the_drop_arm_leaves_the_slot_fsm_in_a_
+    /// declared_state` is the assertion that sees it.
+    fn abort_peer_drop(&mut self, idx: usize, reason: AbortReason) -> IngestOutcome {
+        self.slots[idx]
+            .engine
+            .process_event(ReassemblySlotEvent::FragmentDrop);
+        self.abort(idx, reason)
+    }
+
+    /// R311y578 — push the negotiated protocol patch level's verdict into
+    /// the Router. zenoh reads `self.config.patch.has_fragmentation_markers()`
+    /// off the established transport on every fragment; wz resolves it once
+    /// (the handshake settles the level and it never moves for the session)
+    /// and stores it, so the hot path stays a bool test.
+    ///
+    /// Separate from the constructor because the dispatcher outlives the
+    /// handshake: the slot pool is built at session bring-up, before any
+    /// Init has been exchanged, so the level is not knowable there.
+    pub fn set_fragmentation_markers(&mut self, on: bool) {
+        self.config.fragmentation_markers = on;
+    }
+
+    /// Whether the chain-boundary rules are currently armed. Observability
+    /// twin of [`Self::set_fragmentation_markers`]; a passive consumer
+    /// reads it to report which contract a decode ran under.
+    pub fn fragmentation_markers(&self) -> bool {
+        self.config.fragmentation_markers
     }
 
     /// Abort and reclaim every chain whose deadline has elapsed at
@@ -639,6 +807,11 @@ mod tests {
             more,
             payload,
             priority: Priority::DEFAULT,
+            // R311y578 — the pre-existing suite runs the markers-OFF
+            // contract (`ReassemblyConfig::new`), so a marker-less
+            // descriptor is exactly what those assertions describe. The
+            // armed contract has its own helper + module below.
+            markers: crate::extfragment::FragmentMarkers::NONE,
         }
     }
 
@@ -970,6 +1143,7 @@ mod tests {
             more,
             payload: p,
             priority: Priority::RealTime,
+            markers: crate::extfragment::FragmentMarkers::NONE,
         };
         let lo = |sn, more, p| Fragment {
             peer_key: PEER_A,
@@ -978,6 +1152,7 @@ mod tests {
             more,
             payload: p,
             priority: Priority::Background,
+            markers: crate::extfragment::FragmentMarkers::NONE,
         };
         assert_eq!(
             d.ingest(hi(1, 1, b"H1"), MASK, 0, |_| {}),
@@ -1019,6 +1194,7 @@ mod tests {
             more: 1,
             payload: b"x",
             priority: p,
+            markers: crate::extfragment::FragmentMarkers::NONE,
         };
         d.ingest(mk(1, Priority::RealTime), MASK, 0, |_| {});
         d.ingest(mk(1, Priority::Background), MASK, 0, |_| {});
@@ -1035,5 +1211,348 @@ mod tests {
             "low still present"
         );
         assert_eq!(d.active_chains(), 0);
+    }
+}
+
+// ── R311y578 — the Fragment chain-boundary markers (`0x2 First` /
+//    `0x3 Drop`), the rules zenoh gates on the negotiated patch level
+//    (`unicast/universal/rx.rs:155-170`). Before this round the Router
+//    read neither marker: the statechart had declared a `fragment.drop`
+//    -> Aborted transition since R311im with NO producer anywhere in the
+//    tree, and a fragment that started a chain without the `First` marker
+//    was accepted as a chain start. ──
+#[cfg(test)]
+mod chain_boundary_marker_tests {
+    use super::*;
+    use crate::extfragment::FragmentMarkers;
+    use alloc::vec::Vec;
+
+    const PEER: &[u8] = &[0xAA; 16];
+    const MASK: u64 = crate::sn::mask_from_res(0x02);
+
+    /// The dispatcher under the ARMED contract — what a session whose peer
+    /// negotiated patch >= 1 actually runs. One slot on purpose in the
+    /// reuse tests below, so a chain that fails to release its slot cannot
+    /// hide behind a spare.
+    fn armed<const S: usize, const C: usize>() -> ReassemblyDispatcher<S, C> {
+        ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000).with_fragmentation_markers(true))
+    }
+
+    fn marked<'a>(sn: u64, more: u8, payload: &'a [u8], markers: FragmentMarkers) -> Fragment<'a> {
+        Fragment {
+            peer_key: PEER,
+            reliable: true,
+            sn,
+            more,
+            payload,
+            priority: Priority::DEFAULT,
+            markers,
+        }
+    }
+
+    const FIRST: FragmentMarkers = FragmentMarkers {
+        first: true,
+        dropped: false,
+    };
+    const DROP: FragmentMarkers = FragmentMarkers {
+        first: false,
+        dropped: true,
+    };
+    const NONE: FragmentMarkers = FragmentMarkers::NONE;
+
+    /// The OBSERVER case, and the whole reason the rule exists: a reader
+    /// that attaches to a live flow sees a chain already in progress. Its
+    /// fragments carry no `First` marker, so they are not a chain start —
+    /// they are a headless tail, and staging them would hand the upstream
+    /// decoder a message that begins in the middle of a network message.
+    ///
+    /// Both the continuation AND its final fragment are refused, so the
+    /// `deliver` closure never fires. A panicking closure is the
+    /// assertion: a delivery here is exactly the failure being excluded.
+    #[test]
+    fn a_marker_less_chain_start_is_refused() {
+        let mut d = armed::<4, 256>();
+        assert_eq!(
+            d.ingest(marked(10, 1, b"tail-", NONE), MASK, 0, |_| panic!(
+                "a headless tail must never be delivered"
+            )),
+            IngestOutcome::Refused(RefuseReason::MissingStartMarker)
+        );
+        assert_eq!(d.active_chains(), 0, "no slot was consumed by the refusal");
+        assert_eq!(
+            d.ingest(marked(11, 0, b"end", NONE), MASK, 0, |_| panic!(
+                "a headless tail must never be delivered"
+            )),
+            IngestOutcome::Refused(RefuseReason::MissingStartMarker)
+        );
+        assert_eq!(d.active_chains(), 0);
+    }
+
+    /// The NEGATIVE arm the positive one needs: the identical marker-less
+    /// sequence DOES reassemble with the rules disarmed. Without this the
+    /// refusal above could be any decode failure; with it, the only
+    /// difference between reassembling and refusing is the negotiated
+    /// patch level — which is the claim.
+    #[test]
+    fn the_same_marker_less_chain_reassembles_when_the_rules_are_disarmed() {
+        let mut d: ReassemblyDispatcher<4, 256> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        assert!(!d.fragmentation_markers());
+        assert_eq!(
+            d.ingest(marked(10, 1, b"tail-", NONE), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        let mut got: Option<Vec<u8>> = None;
+        assert_eq!(
+            d.ingest(marked(11, 0, b"end", NONE), MASK, 0, |m| got =
+                Some(m.to_vec())),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(got.as_deref(), Some(&b"tail-end"[..]));
+    }
+
+    /// A marked chain start is accepted and the chain completes normally —
+    /// the rules must not break the ordinary path they gate.
+    #[test]
+    fn a_marked_chain_start_reassembles() {
+        let mut d = armed::<4, 256>();
+        assert_eq!(
+            d.ingest(marked(1, 1, b"hello ", FIRST), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        let mut got: Option<Vec<u8>> = None;
+        assert_eq!(
+            d.ingest(marked(2, 0, b"world", NONE), MASK, 0, |m| got =
+                Some(m.to_vec())),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(got.as_deref(), Some(&b"hello world"[..]));
+    }
+
+    /// The `First` marker SUPERSEDES a chain already open on the key, and
+    /// the assertion is on the BYTES, not on the outcome enum: the sender
+    /// restarted, so the stranded prefix must not survive into the
+    /// delivered message.
+    ///
+    /// The restart SN is deliberately consecutive with the stranded
+    /// chain's (`1 -> 2`), so a Router that ignored the marker would take
+    /// the second fragment as an in-order continuation and deliver
+    /// `AAABBBCCC`. Only a Router that reads the marker delivers `BBBCCC`.
+    #[test]
+    fn a_first_marker_discards_the_stranded_prefix() {
+        let mut d = armed::<4, 256>();
+        assert_eq!(
+            d.ingest(marked(1, 1, b"AAA", FIRST), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            d.ingest(marked(2, 1, b"BBB", FIRST), MASK, 0, |_| {}),
+            IngestOutcome::Begun,
+            "the restart opens a NEW chain rather than continuing the old one"
+        );
+        assert_eq!(d.active_chains(), 1, "one chain, not two");
+        let mut got: Option<Vec<u8>> = None;
+        assert_eq!(
+            d.ingest(marked(3, 0, b"CCC", NONE), MASK, 0, |m| got =
+                Some(m.to_vec())),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(
+            got.as_deref(),
+            Some(&b"BBBCCC"[..]),
+            "the superseded prefix must not ride along"
+        );
+    }
+
+    /// The same sequence with the rules DISARMED delivers the merged
+    /// blob — the exact wrong answer the marker exists to prevent, pinned
+    /// so the previous test cannot pass for an unrelated reason.
+    #[test]
+    fn without_the_rules_the_restart_merges_into_the_stranded_prefix() {
+        let mut d: ReassemblyDispatcher<4, 256> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        d.ingest(marked(1, 1, b"AAA", FIRST), MASK, 0, |_| {});
+        d.ingest(marked(2, 1, b"BBB", FIRST), MASK, 0, |_| {});
+        let mut got: Option<Vec<u8>> = None;
+        d.ingest(marked(3, 0, b"CCC", NONE), MASK, 0, |m| {
+            got = Some(m.to_vec())
+        });
+        assert_eq!(
+            got.as_deref(),
+            Some(&b"AAABBBCCC"[..]),
+            "disarmed, the marker is invisible and the two generations merge"
+        );
+    }
+
+    /// The `Drop` marker aborts the open chain with its OWN reason. The
+    /// distinction from `OutOfOrder` is the point: this is a healthy
+    /// sender announcing the abandon on the wire (zenoh's TX pipeline
+    /// mints it when it cannot obtain a batch mid-fragmentation), not a
+    /// receiver-side inference from sequence numbers.
+    #[test]
+    fn a_drop_marker_aborts_the_open_chain() {
+        let mut d = armed::<4, 256>();
+        d.ingest(marked(1, 1, b"AAA", FIRST), MASK, 0, |_| {});
+        assert_eq!(d.active_chains(), 1);
+        assert_eq!(
+            d.ingest(marked(2, 1, b"", DROP), MASK, 0, |_| panic!(
+                "an abandoned chain must never be delivered"
+            )),
+            IngestOutcome::Aborted(AbortReason::SenderDropped)
+        );
+        assert_eq!(d.active_chains(), 0, "the slot was reclaimed");
+    }
+
+    /// The Router drove the slot FSM through a DECLARED transition rather
+    /// than clearing its own chain state behind the engine's back.
+    ///
+    /// The discriminator is the engine's resting state, not slot reuse.
+    /// `Slot::release` raises `slot.release`, which only the three
+    /// TERMINAL states answer; a slot cleared without first being driven
+    /// to `Aborted` therefore stays parked in `Receiving` while the
+    /// Router-side key reads free — a desynchronised engine that every
+    /// behavioural assertion still passes, because `Receiving` and `Empty`
+    /// both accept a `fragment.chunk` and both complete on `more == 0`.
+    /// A measured damage probe confirmed it: deleting the
+    /// `process_event(FragmentDrop)` line left the whole suite green until
+    /// this assertion was added.
+    ///
+    /// One slot, so the reused engine IS the engine under test.
+    #[test]
+    fn the_drop_arm_leaves_the_slot_fsm_in_a_declared_state() {
+        let mut d = armed::<1, 256>();
+        d.ingest(marked(1, 1, b"AAA", FIRST), MASK, 0, |_| {});
+        assert_eq!(
+            d.slots[0].engine.get_current_state(),
+            ReassemblySlotState::Receiving,
+            "the chain is open"
+        );
+        d.ingest(marked(2, 1, b"", DROP), MASK, 0, |_| {});
+        assert_eq!(
+            d.slots[0].engine.get_current_state(),
+            ReassemblySlotState::Empty,
+            "fragment.drop -> Aborted -> (slot.release) -> Empty; a slot cleared \
+             without the abort transition is stranded in Receiving"
+        );
+        assert_eq!(d.active_chains(), 0);
+        // ...and the released slot serves the next chain with no residue.
+        assert_eq!(
+            d.ingest(marked(3, 1, b"XX", FIRST), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        let mut got: Option<Vec<u8>> = None;
+        assert_eq!(
+            d.ingest(marked(4, 0, b"YY", NONE), MASK, 0, |m| got =
+                Some(m.to_vec())),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(got.as_deref(), Some(&b"XXYY"[..]));
+    }
+
+    /// The SUPERSEDE fold reaches the FSM through the SAME seam. This is
+    /// asserted structurally, not behaviourally: a measured probe showed
+    /// that the engine's resting state is identical whether or not the
+    /// supersede raised the abort (a stranded `Receiving` re-arms into
+    /// `Receiving`, and both end at `Empty` once the chain completes), so
+    /// there is no observable difference to test for. What removes the
+    /// doubt is that both folds call ONE private helper
+    /// ([`ReassemblyDispatcher::abort_peer_drop`]) — this test pins that,
+    /// so a future edit splitting them back apart fails here rather than
+    /// silently reopening the desync the drop probe caught.
+    #[test]
+    fn both_marker_aborts_go_through_the_one_fsm_seam() {
+        // The needle is ASSEMBLED at compile time, so the joined form does
+        // not occur in this file's own source and cannot self-match.
+        let needle = concat!("ReassemblySlotEvent", "::", "FragmentDrop");
+        let src = include_str!("reassembly_dispatch.rs");
+        let raises = src.matches(needle).count();
+        assert_eq!(
+            raises, 1,
+            "exactly ONE `fragment.drop` producer; found {raises}. Both the \
+             supersede fold and the drop fold must route through \
+             `abort_peer_drop`, whose damage probe then covers both."
+        );
+        // ...and the supersede fold does reach an Aborted-then-reused slot:
+        // one slot, so the second chain can only proceed on a released one.
+        let mut d = armed::<1, 256>();
+        d.ingest(marked(1, 1, b"AAA", FIRST), MASK, 0, |_| {});
+        d.ingest(marked(2, 1, b"BBB", FIRST), MASK, 0, |_| {});
+        let mut got: Option<Vec<u8>> = None;
+        d.ingest(marked(3, 0, b"CCC", NONE), MASK, 0, |m| {
+            got = Some(m.to_vec())
+        });
+        assert_eq!(got.as_deref(), Some(&b"BBBCCC"[..]));
+        assert_eq!(
+            d.slots[0].engine.get_current_state(),
+            ReassemblySlotState::Empty
+        );
+    }
+
+    /// zenoh's ORDER, which is load-bearing: the missing-start-marker rule
+    /// runs BEFORE the drop rule, so a `Drop` arriving onto an idle key is
+    /// swallowed as "not a chain start" rather than reported as an abort.
+    /// There is nothing to abort — the sender is announcing the end of a
+    /// chain this receiver never saw the start of, which is precisely what
+    /// a mid-flow attach sees.
+    #[test]
+    fn a_drop_onto_an_idle_key_is_not_an_abort() {
+        let mut d = armed::<4, 256>();
+        assert_eq!(
+            d.ingest(marked(9, 1, b"", DROP), MASK, 0, |_| {}),
+            IngestOutcome::Refused(RefuseReason::MissingStartMarker)
+        );
+        assert_eq!(d.active_chains(), 0);
+    }
+
+    /// The gate is a per-session runtime fact, not a construction-time
+    /// one: the dispatcher is built at bring-up, before any Init settles
+    /// the patch level, so arming it after the fact must take effect.
+    #[test]
+    fn the_gate_is_armable_after_construction() {
+        let mut d: ReassemblyDispatcher<4, 256> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        assert!(!d.fragmentation_markers());
+        d.set_fragmentation_markers(true);
+        assert!(d.fragmentation_markers());
+        assert_eq!(
+            d.ingest(marked(1, 1, b"tail", NONE), MASK, 0, |_| {}),
+            IngestOutcome::Refused(RefuseReason::MissingStartMarker),
+            "the rules apply from the moment the level is known"
+        );
+        d.set_fragmentation_markers(false);
+        assert_eq!(
+            d.ingest(marked(1, 1, b"tail", NONE), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+    }
+
+    /// Every new terminal outcome reaches the observer mirror
+    /// (`ReassemblyDropReason`) with its own variant. A drop reason that
+    /// mapped onto an existing one would make the three cases
+    /// indistinguishable in exactly the consumer that needs them apart.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_new_outcomes_map_to_distinct_observer_reasons() {
+        use crate::driver_loop::ReassemblyDropReason;
+        let seen = [
+            ReassemblyDropReason::from_ingest(IngestOutcome::Aborted(AbortReason::SenderDropped)),
+            ReassemblyDropReason::from_ingest(IngestOutcome::Aborted(AbortReason::Superseded)),
+            ReassemblyDropReason::from_ingest(IngestOutcome::Refused(
+                RefuseReason::MissingStartMarker,
+            )),
+        ];
+        assert_eq!(
+            seen,
+            [
+                Some(ReassemblyDropReason::SenderDropped),
+                Some(ReassemblyDropReason::Superseded),
+                Some(ReassemblyDropReason::MissingStartMarker),
+            ]
+        );
+        // ...and they are not silently equal to the pre-existing reasons.
+        assert_ne!(
+            ReassemblyDropReason::SenderDropped,
+            ReassemblyDropReason::OutOfOrder
+        );
     }
 }

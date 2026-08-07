@@ -2342,8 +2342,13 @@ mod fragment_tx_tests {
         // Every emitted frame is a FRAGMENT within the MTU; reassemble through
         // the real RX path and check the SN/M-flag invariants the dispatcher
         // relies on.
-        let mut reasm: ReassemblyDispatcher<4, 4096> =
-            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        // R311y578 — markers ARMED, the contract a patch-1 peer (which every
+        // wz session is) actually runs under. Before this round the Router had
+        // no such mode at all and this same chain reassembled with the `0x2
+        // First` byte unread on the wire.
+        let mut reasm: ReassemblyDispatcher<4, 4096> = ReassemblyDispatcher::new(
+            ReassemblyConfig::new(2, 5_000).with_fragmentation_markers(true),
+        );
         let zid: &[u8] = &[0x09; 16];
         let mut reassembled: Option<Vec<u8>> = None;
         let mut prev_sn: Option<u64> = None;
@@ -2359,12 +2364,26 @@ mod fragment_tx_tests {
                 sn,
                 more,
                 payload,
+                markers,
                 ..
             } = parse_inbound(&frame).expect("parse emitted fragment")
             else {
                 panic!("emitted frame {i} is not a Fragment");
             };
             assert!(reliable, "a reliable PUT keeps the R bit on every fragment");
+            // R311y578 — the TX side has written the `0x2 First` marker onto
+            // fragment 0 since R311y206; this asserts the DECODE half reads it
+            // back off wz's own wire, and reads it back on that fragment only.
+            // The dispatcher below runs with the markers ARMED, so the chain
+            // completing at all is the end-to-end proof: with the projector
+            // blind, fragment 0 would refuse as a marker-less chain start and
+            // `reassembled` would stay `None`.
+            assert_eq!(
+                markers.first,
+                i == 0,
+                "the 0x2 First marker rides fragment 0 and no other (fragment {i})"
+            );
+            assert!(!markers.dropped, "a completed chain carries no 0x3 Drop");
             if let Some(p) = prev_sn {
                 assert_eq!(sn, p + 1, "fragment SNs must be consecutive");
             }
@@ -2382,6 +2401,7 @@ mod fragment_tx_tests {
                     more: u8::from(more),
                     payload: &payload,
                     priority: wz_session_core::qos::Priority::DEFAULT,
+                    markers,
                 },
                 wz_session_core::sn::mask_from_res(0x02),
                 0,
@@ -2615,6 +2635,10 @@ mod rx_sn_gate_tests {
             has_ext: false,
             extensions: Vec::new(),
             priority: wz_session_core::qos::Priority::DEFAULT,
+            // No Init was admitted by this fixture, so the session has no
+            // negotiated patch level and the chain-boundary rules are off
+            // (R311y578); a marker-less descriptor is what that contract sees.
+            markers: wz_session_core::extfragment::FragmentMarkers::NONE,
         };
         report_outcome_reassembling(&begin, &mut reasm, &actions, 0, &mut sink);
         assert_eq!(reasm.active_chains(), 1, "chain armed");
@@ -2692,6 +2716,7 @@ mod rx_sn_gate_tests {
             has_ext: false,
             extensions: Vec::new(),
             priority: Priority::InteractiveHigh,
+            markers: wz_session_core::extfragment::FragmentMarkers::NONE,
         };
         let f1 = DriverLoopOutcome::Fragment {
             reliable: true,
@@ -2701,6 +2726,7 @@ mod rx_sn_gate_tests {
             has_ext: false,
             extensions: Vec::new(),
             priority: Priority::InteractiveHigh,
+            markers: wz_session_core::extfragment::FragmentMarkers::NONE,
         };
         report_outcome_reassembling(&f0, &mut reasm, &actions, 0, &mut sink);
         report_outcome_reassembling(&f1, &mut reasm, &actions, 0, &mut sink);

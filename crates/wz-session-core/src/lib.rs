@@ -783,13 +783,36 @@ pub mod extauth;
 /// presence-detect) shared by the lowlatency / compression / shm establishment
 /// negotiations; each per-capability module keeps its named id + wrapper and
 /// delegates the identical mechanism here.
+/// R311y578 — `reassembly` / `transport-fragmentation` joined the gate: the
+/// Fragment chain-boundary markers ([`extfragment`], ids `0x2` / `0x3`) are
+/// unit exts in the Fragment message's own id space and share the identical
+/// encode + identity-detect mechanism, so they delegate here rather than
+/// re-deriving the third copy of it.
 #[cfg(any(
     feature = "transport-lowlatency",
     feature = "session-extcompression",
     feature = "transport-shm",
-    feature = "transport-qos"
+    feature = "transport-qos",
+    feature = "reassembly",
+    feature = "transport-fragmentation"
 ))]
 pub mod unit_ext;
+
+/// R311y578 — SSOT for the `T_MID_FRAGMENT` message's OWN ext id space: the
+/// `0x2 First` chain-start marker and the `0x3 Drop` chain-abandon marker
+/// (zenoh `fragment::ext::{First,Drop}`). The TX emit has carried `First`
+/// since R311y206; this module is where the RX INTERPRETATION reads both,
+/// and where the reassembly Router's chain-boundary rules anchor.
+#[cfg(any(feature = "reassembly", feature = "transport-fragmentation"))]
+pub mod extfragment;
+
+/// R311y578 — SSOT for the `0x7` PATCH establishment ext: the protocol patch
+/// LEVEL wz announces (R121f1) and, newly, the peer's half plus the `min()`
+/// negotiation over it. The negotiated level is the sole gate on the
+/// [`extfragment`] chain-boundary rules (zenoh
+/// `PatchType::has_fragmentation_markers`), so reading it is a precondition
+/// for honouring the markers without refusing every patch-0 peer's chains.
+pub mod extpatch;
 
 #[cfg(feature = "transport-lowlatency")]
 pub mod extlowlatency;

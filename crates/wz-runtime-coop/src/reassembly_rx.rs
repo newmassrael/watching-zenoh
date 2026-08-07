@@ -110,6 +110,11 @@ mod tests {
             // Pre-QoS MCU unicast chain: DEFAULT collapses the §2.3 key
             // back to the (peer, reliable) form these tests assert on.
             priority: Priority::DEFAULT,
+            // R311y578 — the MCU seam's config leaves the chain-boundary
+            // rules off (`ReassemblyConfig::new`), matching a peer whose
+            // negotiated patch level is 0, so a marker-less descriptor is
+            // the shape under test here.
+            markers: wz_session_core::extfragment::FragmentMarkers::NONE,
         }
     }
 

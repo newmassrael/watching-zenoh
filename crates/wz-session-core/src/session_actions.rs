@@ -540,6 +540,31 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// mutex so the merge advances without blocking the role ext slots.
     #[cfg(feature = "transport-lowlatency")]
     pub is_lowlatency: R::Mutex<bool>,
+    /// R311y578 — the NEGOTIATED protocol patch level for this session
+    /// (zenoh `TransportConfigUnicast::patch`). Seeded at
+    /// [`crate::extpatch::CURRENT_PATCH`] (wz's own announcement, R121f1)
+    /// and `min()`-capped against the peer's Init announcement by
+    /// [`Self::negotiate_patch_against_peer`], which is zenoh-pico's
+    /// `if (iam._patch > tmsg._patch) iam._patch = tmsg._patch`
+    /// (`transport.c:237-241`) on both sides.
+    ///
+    /// `None` until the first Init frame is admitted, and that is the point
+    /// of the `Option` rather than a `u8` seeded at `CURRENT_PATCH`: before
+    /// an exchange there IS no negotiated level, and a session that never
+    /// saw an Init — a fixture, a mid-flow attach, a replay that starts
+    /// after establishment — must not be handed wz's own announcement as
+    /// though the peer had agreed to it. It reads back as
+    /// [`crate::extpatch::NO_PATCH`], which keeps the markers off, which is
+    /// the conservative direction: it reassembles chains a strict reader
+    /// would refuse, rather than refusing chains a real peer is sending.
+    ///
+    /// Its one consumer today is
+    /// [`Self::fragmentation_markers_negotiated`], the gate on the Fragment
+    /// `0x2 First` / `0x3 Drop` chain-boundary rules. Ungated by feature:
+    /// the level is core establishment state that wz already puts on the
+    /// wire in every build, and a session that cannot read it back would
+    /// silently pin the markers off.
+    pub negotiated_patch: R::Mutex<Option<u8>>,
     /// transport-qos (R311y215) — the negotiated QoS-transport capability for
     /// THIS session (zenoh `TransportConfigUnicast::is_qos`). Seeded with the
     /// local offer ([`Self::set_qos_offer`]) at bring-up, then ANDed with the
@@ -1407,6 +1432,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // (`set_lowlatency_offer`) and the peer's offer is ANDed in.
                 #[cfg(feature = "transport-lowlatency")]
                 is_lowlatency: R::new_mutex(false),
+                // R311y578 — NOT YET NEGOTIATED. The first admitted Init
+                // seeds it from wz's own announced level and caps it at the
+                // peer's; until then there is no agreed level and the
+                // Fragment chain-boundary markers stay off.
+                negotiated_patch: R::new_mutex(None::<u8>),
                 // transport-qos — false until the AP layer offers it
                 // (`set_qos_offer`) and the peer's Init ext_qos offer is ANDed in.
                 #[cfg(feature = "transport-qos")]
@@ -2400,6 +2430,61 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "transport-lowlatency")]
     pub fn negotiate_lowlatency_against_peer(&self, peer_offered: bool) {
         R::with_mutex_mut(&self.is_lowlatency, |s| *s &= peer_offered);
+    }
+
+    /// R311y578 — cap this session's protocol patch level at the peer's
+    /// announcement, the `min()` zenoh-pico writes as
+    ///
+    /// ```c
+    /// if (iam._body._init._patch > tmsg._body._init._patch) {
+    ///     iam._body._init._patch = tmsg._body._init._patch;
+    /// }
+    /// ```
+    ///
+    /// (`src/transport/unicast/transport.c:237-241`). Called from the
+    /// establishment demux on every admitted Init frame, so the acceptor
+    /// caps on InitSyn and the initiator on InitAck — the same both-sides
+    /// shape as the lowlatency / compression merges above. Monotonically
+    /// non-increasing, so a second Init cannot raise a level a first one
+    /// lowered.
+    pub fn negotiate_patch_against_peer(&self, peer_patch: u8) {
+        R::with_mutex_mut(&self.negotiated_patch, |s| {
+            // The first Init starts from wz's OWN announcement (R121f1 puts
+            // `_Z_CURRENT_PATCH` on every Init wz sends), matching
+            // zenoh-pico's `iam._patch` starting at its current level; a
+            // later Init can only lower it further.
+            let local = s.unwrap_or(crate::extpatch::CURRENT_PATCH);
+            *s = Some(crate::extpatch::negotiate_patch(local, peer_patch));
+        });
+    }
+
+    /// R311y578 — the negotiated level itself, [`crate::extpatch::NO_PATCH`]
+    /// before any Init has been admitted. Read by
+    /// [`Self::fragmentation_markers_negotiated`]; exposed because a
+    /// passive consumer reporting on a session wants the level, not only
+    /// the one predicate wz currently derives from it.
+    pub fn negotiated_patch(&self) -> u8 {
+        R::with_mutex_mut(&self.negotiated_patch, |s| {
+            s.unwrap_or(crate::extpatch::NO_PATCH)
+        })
+    }
+
+    /// R311y578 — whether a patch level has been NEGOTIATED at all, as
+    /// opposed to defaulting. Distinguishes "the peer announced patch 0"
+    /// from "no Init has been seen", which read identically through
+    /// [`Self::negotiated_patch`] and mean different things to anything
+    /// reporting on a session it did not establish.
+    pub fn patch_was_negotiated(&self) -> bool {
+        R::with_mutex_mut(&self.negotiated_patch, |s| s.is_some())
+    }
+
+    /// R311y578 — zenoh `patch.has_fragmentation_markers()`: whether this
+    /// session's peer emits the Fragment `0x2 First` / `0x3 Drop`
+    /// chain-boundary markers, and therefore whether the reassembly Router
+    /// may enforce them ([`crate::reassembly_dispatch::ReassemblyDispatcher::
+    /// set_fragmentation_markers`]).
+    pub fn fragmentation_markers_negotiated(&self) -> bool {
+        crate::extpatch::has_fragmentation_markers(self.negotiated_patch())
     }
 
     /// transport-lowlatency — the negotiated lowlatency capability for this

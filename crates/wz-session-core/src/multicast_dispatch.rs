@@ -1391,6 +1391,16 @@ pub fn ingest_multicast_fragment_qos<
             // `(peer, reliable, priority)`, so a qos peer's two-priority oversize
             // frames reassemble on independent chains. DEFAULT for a non-qos peer.
             priority,
+            // R311y578 — multicast carries NO negotiated patch level: a
+            // multicast Join advertises no `0x7` ext and there is no per-peer
+            // Init exchange to take a `min()` over, so the chain-boundary
+            // rules stay OFF on this transport and the descriptor is
+            // marker-less. Upstream gates the multicast RX block on the same
+            // `patch.has_fragmentation_markers()` (`multicast/rx.rs:216`),
+            // whose value there comes from the manager config rather than a
+            // per-peer negotiation; wiring that source is left to the round
+            // that gives multicast a patch level to read.
+            markers: crate::extfragment::FragmentMarkers::NONE,
         },
         sn_mask,
         now_ms,

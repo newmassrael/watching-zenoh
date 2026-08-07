@@ -221,6 +221,19 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                         if !admit {
                             return DriverLoopOutcome::SideEffectOnly;
                         }
+                        // R311y578 — take the `min(local, peer)` protocol PATCH
+                        // level off every admitted Init frame (zenoh-pico
+                        // `transport.c:237-241` runs the same cap on both sides).
+                        // wz has emitted its own patch ext since R121f1 and never
+                        // read the peer's; the negotiated level is the sole gate
+                        // on the Fragment chain-boundary markers, so a session
+                        // that never took it can only ever leave them off.
+                        #[cfg(feature = "codec-init-body")]
+                        if let InboundFrame::Init { extensions, .. } = &frame {
+                            actions.negotiate_patch_against_peer(crate::extpatch::peer_patch(
+                                extensions,
+                            ));
+                        }
                         // transport-lowlatency — AND the peer's lowlatency offer into
                         // the session capability on every admitted Init frame (zenoh
                         // `is_lowlatency &= other_ext.is_some()`, both the acceptor's
@@ -524,6 +537,7 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                             has_ext,
                             extensions,
                             priority,
+                            markers,
                         } => {
                             // R311y215 (SN-safety F5) — as with Frame, drop a
                             // prioritized fragment on a non-QoS session.
@@ -559,6 +573,7 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                                 has_ext,
                                 extensions,
                                 priority,
+                                markers,
                             }
                         }
                         #[cfg(feature = "codec-init-body")]
@@ -798,11 +813,18 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
         more,
         payload,
         priority,
+        markers,
         ..
     } = outcome
     else {
         return;
     };
+    // R311y578 — arm the chain-boundary rules from the NEGOTIATED protocol
+    // patch level before the fragment is classified. zenoh re-reads
+    // `config.patch.has_fragmentation_markers()` per fragment
+    // (`unicast/universal/rx.rs:155`); wz reads the settled session value,
+    // which is why this is a bool write and not a negotiation.
+    reasm.set_fragmentation_markers(actions.fragmentation_markers_negotiated());
     // The negotiated SN ring mask resolves BEFORE the peer-ZID guard:
     // `negotiated_sn_mask` takes the `inbound_peer_init_caps` mutex, and the
     // guard below documents that nothing inside it re-enters a session mutex
@@ -826,6 +848,10 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
                 payload: payload.as_slice(),
                 // R311y215 — key the chain by (peer, reliable, priority).
                 priority: *priority,
+                // R311y578 — the `0x2 First` / `0x3 Drop` markers this
+                // fragment carried; honoured iff the level armed above says
+                // the peer emits them.
+                markers: *markers,
             },
             sn_mask,
             now_ms,

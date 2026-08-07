@@ -590,8 +590,13 @@ const FRAG_HEADER_BUDGET: usize = 1 + 10;
 /// marker on the chain's first fragment and silently drops the whole chain
 /// without it (zenoh-pico `src/transport/unicast/rx.c`, "First fragment
 /// received without the start marker").
+///
+/// R311y578 — the literal moved to [`crate::extfragment`], which is now the
+/// SSOT the emit here and the RX interpretation in
+/// [`crate::reassembly_dispatch`] share. Before, the marker byte existed only
+/// on the TX side and no reader anywhere in the tree matched against it.
 #[cfg(feature = "transport-fragmentation")]
-const FRAGMENT_FIRST_EXT_HEADER: u8 = 0x02;
+const FRAGMENT_FIRST_EXT_HEADER: u8 = crate::extfragment::FRAGMENT_FIRST_EXT_ID;
 
 /// Per-fragment payload capacity at this `mtu`. Floored at 1 so a pathological
 /// `mtu <= FRAG_HEADER_BUDGET` still terminates (one body byte per fragment)

@@ -189,6 +189,11 @@ pub enum DriverLoopOutcome {
         /// carried up so the drive loop keys the reassembly chain by (peer,
         /// reliable, priority). DEFAULT for a pre-QoS chain.
         priority: crate::qos::Priority,
+        /// R311y578 — the `0x2 First` / `0x3 Drop` chain-boundary markers,
+        /// carried up so the drive loop can hand them to the Router, which
+        /// owns the chain state the rules act on (clear-and-restart on
+        /// First, refuse a marker-less chain start, abort on Drop).
+        markers: crate::extfragment::FragmentMarkers,
     },
 }
 
@@ -331,6 +336,20 @@ pub enum ReassemblyDropReason {
     PeerQuota,
     /// Every slot was occupied by another peer's in-progress chain.
     PoolExhausted,
+    /// R311y578 — the SENDER announced the chain was abandoned (the
+    /// `0x3 Drop` marker). Kept apart from [`Self::OutOfOrder`]: this is a
+    /// healthy sender saying so on the wire, not a receiver-side inference
+    /// from SNs, and an observer that conflated the two would read a
+    /// congested-but-correct link as a lossy one.
+    SenderDropped,
+    /// R311y578 — a `0x2 First` marker restarted a chain that was already
+    /// open on the same key; the staged prefix was discarded.
+    Superseded,
+    /// R311y578 — the fragment would have started a chain but carried no
+    /// `0x2 First` marker on a session that negotiated them. The
+    /// observer-vs-participant case: a reader attached to a live flow sees
+    /// this for every chain already in progress when it attached.
+    MissingStartMarker,
 }
 
 #[cfg(feature = "reassembly")]
@@ -358,6 +377,15 @@ impl ReassemblyDropReason {
             }
             IngestOutcome::Refused(RefuseReason::PoolExhausted) => {
                 Some(ReassemblyDropReason::PoolExhausted)
+            }
+            IngestOutcome::Aborted(AbortReason::SenderDropped) => {
+                Some(ReassemblyDropReason::SenderDropped)
+            }
+            IngestOutcome::Aborted(AbortReason::Superseded) => {
+                Some(ReassemblyDropReason::Superseded)
+            }
+            IngestOutcome::Refused(RefuseReason::MissingStartMarker) => {
+                Some(ReassemblyDropReason::MissingStartMarker)
             }
             IngestOutcome::Begun | IngestOutcome::Continued | IngestOutcome::Reassembled => None,
         }
