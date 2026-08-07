@@ -907,6 +907,12 @@ dissect = [
     "codec-response",
     "codec-response-final",
     "codec-declare",
+    # R311y585 (A6) — the SCOUTING MID space. `dissect` claims to select the
+    # whole codec-* space so an observer can read every message it sees; these
+    # two were missing, which is why Scout / Hello had no walker while every
+    # transport and network MID had one.
+    "wz-codecs/codec-scout",
+    "wz-codecs/codec-hello",
 ]
 # R311y579 (G6-serde) — `Serialize` / `Deserialize` on the `dissect` view
 # model. Its own feature, not folded into `dissect`, because the JSON emit in

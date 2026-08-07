@@ -249,6 +249,12 @@ impl FlowContext {
         self.caps.map(|c| crate::sn::mask_from_res(c.seq_num_res))
     }
 
+    /// R311y585 (A5) — the batch ceiling the acceptor agreed to, `None` until
+    /// an InitAck has been observed.
+    pub fn batch_size(&self) -> Option<u16> {
+        self.caps.map(|c| c.batch_size)
+    }
+
     pub fn fragmentation_markers(&self) -> bool {
         self.patch
             .is_some_and(crate::extpatch::has_fragmentation_markers)
@@ -312,6 +318,19 @@ pub struct PassiveFrame {
     /// than borrowed so a consumer can keep a decoded frame beside the
     /// contract it was read under.
     pub context: FlowContext,
+    /// R311y585 (A5) — the frame's wire length exceeded the `batch_size` the
+    /// InitAck agreed to.
+    ///
+    /// A PROTOCOL VIOLATION by the sender, and the first consumer the
+    /// negotiated ceiling ever had: it was decoded, stored, and read by
+    /// nothing. `false` whenever no InitAck was observed — an unknown ceiling
+    /// cannot be exceeded, and reporting a violation against a ceiling this
+    /// observer guessed would be worse than reporting none.
+    ///
+    /// Not an error: the frame decoded, and a dissector shows it with the
+    /// violation flagged rather than dropping it. Dropping is what makes a
+    /// non-conforming peer invisible.
+    pub exceeds_negotiated_batch: bool,
     /// R311y583 (A2) — what this frame carried ABOVE the transport layer.
     ///
     /// Before A2 the tracker stopped here and every consumer re-did the same
@@ -567,6 +586,7 @@ impl PassiveSession {
             prefix_width: width,
             frame,
             context: self.context,
+            exceeds_negotiated_batch: self.exceeds_batch(payload_len),
             carried,
         })
     }
@@ -632,8 +652,18 @@ impl PassiveSession {
             prefix_width: 0,
             frame,
             context: self.context,
+            exceeds_negotiated_batch: self.exceeds_batch(bytes.len()),
             carried,
         }
+    }
+
+    /// R311y585 (A5) — did this frame's wire length break the negotiated
+    /// ceiling? Never true before an InitAck: see
+    /// [`PassiveFrame::exceeds_negotiated_batch`].
+    fn exceeds_batch(&self, wire_len: usize) -> bool {
+        self.context
+            .batch_size()
+            .is_some_and(|max| wire_len > max as usize)
     }
 
     /// R311y583 (A2) — take one decoded transport frame the rest of the way.
@@ -1336,5 +1366,49 @@ mod tests {
             s.keyexprs().resolve(Direction::A, &later),
             Resolved::Literal(alloc::string::String::from("demo/robots/1/pose"))
         );
+    }
+
+    /// R311y585 (A5) — the negotiated ceiling gets a consumer, and the
+    /// control leg is what makes it mean anything: the SAME frame is not a
+    /// violation when the ceiling is large, and is one when it is small.
+    #[test]
+    fn a_frame_over_the_negotiated_batch_size_is_flagged_not_dropped() {
+        // The fixture InitAck advertises no S-bit fields, so the ceiling is
+        // the wire default 65535 and nothing can exceed it.
+        let mut wide = established(vec![]);
+        assert_eq!(wide.context().batch_size(), Some(65535));
+        let payload = alloc::vec![0x5Au8; 64];
+        wide.push(Direction::A, &framed(&frame_wire(0, &payload), 2));
+        let f = wide.next_frame(Direction::A).expect("frame");
+        assert!(
+            !f.exceeds_negotiated_batch,
+            "a frame well under the ceiling must not be flagged"
+        );
+
+        // Now the same frame against a session whose acceptor agreed to 16.
+        let mut narrow = PassiveSession::new();
+        narrow.context.caps = Some(crate::peer_init_caps::PeerInitCaps {
+            seq_num_res: 2,
+            req_id_res: 2,
+            batch_size: 16,
+        });
+        narrow.push(Direction::A, &framed(&frame_wire(0, &payload), 2));
+        let g = narrow.next_frame(Direction::A).expect("frame");
+        assert!(
+            g.exceeds_negotiated_batch,
+            "a frame past the ceiling the acceptor agreed to is a violation"
+        );
+    }
+
+    /// Before an InitAck there is no ceiling, so there is nothing to exceed.
+    /// Guessing one and reporting a violation against it would be worse than
+    /// reporting none.
+    #[test]
+    fn an_unknown_ceiling_cannot_be_exceeded() {
+        let mut s = PassiveSession::new();
+        assert_eq!(s.context().batch_size(), None);
+        s.push(Direction::A, &framed(&init_wire(false, vec![]), 2));
+        let f = s.next_frame(Direction::A).expect("init");
+        assert!(!f.exceeds_negotiated_batch);
     }
 }

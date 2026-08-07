@@ -1103,6 +1103,103 @@ impl BatchDissection {
 /// The MID set is [`crate::network_message`]'s, and deliberately so: a build
 /// that can DECODE a record should be able to DISSECT it, and the gate in
 /// `tests` asserts the two sets are equal rather than trusting this comment.
+/// R311y585 (A6) — `Scout`: version, a packed cbyte, and an I-gated ZID.
+///
+/// The scouting messages live on a MID space the batch walk never reaches
+/// (`wire_const::S_MID_SCOUT` / `S_MID_HELLO`, disjoint from the transport
+/// MIDs), so until now `dissect` covered transport + network + zenoh and
+/// stopped. R311y584 made that gap reachable: UDP datagrams now arrive at the
+/// observer, and a scouting datagram is most of what a multicast capture
+/// contains.
+pub fn walk_scout(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
+    let (_, version) = c.u8("version")?;
+    let (cbyte, cbyte_field) = c.u8("cbyte")?;
+    let carrier = cbyte_field.span;
+    let mut out = alloc::vec![
+        version,
+        cbyte_field,
+        bits("what", carrier, (cbyte & 0x07) as u64),
+        flag("i", carrier, (cbyte & 0x08) != 0),
+        bits("zid_len_m1", carrier, ((cbyte >> 4) & 0x0F) as u64),
+    ];
+    // I-gated, and the LENGTH rides the same carrier: `(cbyte >> 4) + 1`.
+    if (cbyte & 0x08) != 0 {
+        out.push(c.bytes("zid", (((cbyte >> 4) & 0x0F) as usize) + 1)?);
+    }
+    Ok(out)
+}
+
+/// R311y585 (A6) — `Hello`: version, cbyte, an ALWAYS-present ZID, and an
+/// L-gated locator list.
+///
+/// `l` comes from the scouting HEADER byte (`FLAG_S_HELLO_L`), not from the
+/// body — the same shape as `Declare`'s sub-MID, and the reason this takes a
+/// parameter where [`walk_scout`] does not.
+pub fn walk_hello(c: &mut SpanCursor<'_>, l: bool) -> Result<Vec<Field>, CodecError> {
+    let (_, version) = c.u8("version")?;
+    let (cbyte, cbyte_field) = c.u8("cbyte")?;
+    let carrier = cbyte_field.span;
+    let mut out = alloc::vec![
+        version,
+        cbyte_field,
+        bits("whatami", carrier, (cbyte & 0x03) as u64),
+        bits("zid_len_m1", carrier, ((cbyte >> 4) & 0x0F) as u64),
+    ];
+    out.push(c.bytes("zid", (((cbyte >> 4) & 0x0F) as usize) + 1)?);
+    if l {
+        let (n, count) = c.vle_u64("num_locators")?;
+        out.push(count);
+        for _ in 0..n {
+            let start = c.offset();
+            let (len, len_field) = c.vle_u64("locator_len")?;
+            let text = c.text("locator", len as usize)?;
+            let end = c.offset();
+            // The GROUP is named apart from its leaf on purpose: `find`
+            // returns the first match by name, so a group called "locator"
+            // shadows the string field inside it and a consumer asking for
+            // the locator gets a nested node instead of the text.
+            out.push(group(
+                "locator_entry",
+                start,
+                end,
+                alloc::vec![len_field, text],
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// R311y585 (A6) — dissect ONE scouting datagram, header byte included.
+///
+/// A separate entry point from [`dissect_transport_message`] because the MID
+/// space is separate: `0x01` is `Scout` here and `Init` there. Handing a
+/// scouting datagram to the transport dispatcher does not fail, it decodes
+/// the wrong message — which is exactly the confident-wrong-answer failure a
+/// dissector exists to avoid, and the reason this is not a new arm on the
+/// existing walk.
+pub fn dissect_scouting_message(bytes: &[u8], base: usize) -> Result<Option<Field>, CodecError> {
+    let mut c = SpanCursor::with_base(bytes, base);
+    let start = c.offset();
+    let (header, header_field) = c.u8("header")?;
+    let carrier = header_field.span;
+    let mid = header & 0x1F;
+    let l = (header & wz_codecs::wire_const::FLAG_S_HELLO_L) != 0;
+    let mut fields = alloc::vec![header_field, bits("mid", carrier, mid as u64),];
+    let (name, body) = match mid {
+        wz_codecs::wire_const::S_MID_SCOUT => ("Scout", walk_scout(&mut c)?),
+        wz_codecs::wire_const::S_MID_HELLO => {
+            fields.push(flag("l", carrier, l));
+            ("Hello", walk_hello(&mut c, l)?)
+        }
+        // NOT an error: a byte that is not a scouting MID means these bytes
+        // are not a scouting message, which the caller decides what to do
+        // about. Mirrors `walk_network_record`'s absence-vs-failure split.
+        _ => return Ok(None),
+    };
+    fields.extend(body);
+    Ok(Some(group(name, start, c.offset(), fields)))
+}
+
 pub fn walk_network_record(c: &mut SpanCursor<'_>) -> Result<Option<Field>, CodecError> {
     use wz_codecs::wire_const;
     let mid = c.peek_u8()? & 0x1F;
@@ -2516,5 +2613,73 @@ mod tests {
         let back: BatchDissection =
             serde_json::from_str(&encoded).expect("serde could not read it back");
         assert_eq!(back, d);
+    }
+
+    /// R311y585 (A6) — Scout and Hello walk, and the two are told apart by a
+    /// MID space that OVERLAPS the transport one.
+    ///
+    /// `0x01` is `Scout` here and `Init` there, and the codecs will happily
+    /// decode a scouting datagram as a transport message: nothing errors, the
+    /// wrong tree appears. That is why `dissect_scouting_message` is a
+    /// separate entry point rather than another arm on the transport walk,
+    /// and this leg pins the distinction by feeding the SAME bytes to both.
+    #[test]
+    fn scouting_messages_walk_and_do_not_share_the_transport_mid_space() {
+        // Scout: header 0x01, version 0x09, cbyte = what(1) | I | zid_len_m1(3),
+        // then a 4-byte zid.
+        let cbyte = 0x01 | 0x08 | (3 << 4);
+        let wire = alloc::vec![0x01u8, 0x09, cbyte, 0xAA, 0xBB, 0xCC, 0xDD];
+        let f = dissect_scouting_message(&wire, 0)
+            .expect("walker")
+            .expect("0x01 is a scouting MID");
+        assert_eq!(f.name, "Scout");
+        assert_eq!(uint(&f, "version"), 0x09);
+        assert_eq!(raw(&f, "zid"), alloc::vec![0xAA, 0xBB, 0xCC, 0xDD]);
+        assert_tiles(&f, 0, wire.len());
+
+        // The SAME bytes handed to the transport dispatcher decode as an
+        // Init — a confident wrong answer, which is the whole reason the two
+        // spaces need separate entry points.
+        let as_transport = dissect_transport_message(&wire, 0);
+        assert!(
+            as_transport.is_ok(),
+            "the transport walk is expected to ACCEPT these bytes, wrongly"
+        );
+        assert_ne!(as_transport.expect("transport").name, "Scout");
+    }
+
+    /// Hello's locator list is gated by a flag on the HEADER byte, not by
+    /// anything in the body — so the walker takes it as a parameter, and a
+    /// header without `L` must not consume the bytes that follow.
+    #[test]
+    fn hello_reads_its_locator_list_only_when_the_header_says_so() {
+        let cbyte = 0x01 | (3 << 4); // whatami=1, zid_len_m1=3
+        let mut with_l = alloc::vec![0x02u8 | 0x20, 0x09, cbyte, 1, 2, 3, 4];
+        with_l.push(1); // num_locators
+        with_l.push(3); // locator_len
+        with_l.extend_from_slice(b"tcp");
+        let f = dissect_scouting_message(&with_l, 0)
+            .expect("walker")
+            .expect("0x02 is a scouting MID");
+        assert_eq!(f.name, "Hello");
+        assert_eq!(uint(&f, "num_locators"), 1);
+        assert_eq!(text(&f, "locator"), "tcp");
+        assert_tiles(&f, 0, with_l.len());
+
+        // Same body, L clear: the walk stops after the zid and the trailing
+        // bytes are NOT read as locators.
+        let without_l = alloc::vec![0x02u8, 0x09, cbyte, 1, 2, 3, 4, 1, 3, b't'];
+        let g = dissect_scouting_message(&without_l, 0)
+            .expect("walker")
+            .expect("scouting MID");
+        assert!(g.find("num_locators").is_none());
+        assert_eq!(g.span.end, 7, "the walk must stop after the zid");
+    }
+
+    /// A byte that is not a scouting MID is an ABSENCE, not a failure — the
+    /// caller decides what those bytes were.
+    #[test]
+    fn a_non_scouting_mid_is_reported_as_absence() {
+        assert_eq!(dissect_scouting_message(&[0x1F, 0x00], 0), Ok(None));
     }
 }
