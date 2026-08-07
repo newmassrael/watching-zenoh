@@ -2082,7 +2082,13 @@
         "(s) R311y267: same code read 50964 / 51164 / 51344 by build path alone; span 380B vs a 256B band.",
         "(t) R311y267 fix: rustc pinned + Layer Q remap-path-prefix; check-footprint FAILs a polluted ELF.",
         "(u) R311y268 corrects (t): thumbv7em-hf reads 51100 on the runner vs 51096 here, a +4 B residual.",
-        "(v) R311y268: residual is .text align jitter (path-derived crate metadata hash); .rodata identical."
+        "(v) R311y268: residual is .text align jitter (path-derived crate metadata hash); .rodata identical.",
+        "(w) R311y592 text thumbv7m=52068 thumbv7em-hf=52124 (data=4); bss 272268 unchanged, INFO-only.",
+        "(x) R311y592 cause: b0b94672 ChainStaging seam, +424 hf; bisected per commit, the arc rest +0.",
+        "(y) R311y592: 6bc3d3df ext-chain cliff removal SHRANK this bin -140 hf; only b0b94672 grew it.",
+        "(z) R311y592: this bin runs the DEFAULT HeapStaging, never the reserved arena; a seam is not free.",
+        "(aa) R311y592 debt: 38 B of it is core::option::expect_failed, a panic path Slot's two Options add.",
+        "(ab) R311y592: (d)'s co-rule was missed AGAIN at R311y519 and R311y582; table moved, this did not."
       ],
       "impact_scope": [
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
@@ -87688,6 +87694,64 @@
         "AND ASK IT WITH A FETCH. `git log origin/main` is a cached ref; three separate readings of \"the server is at X\" in this arc were reads of a stale cache. The fetch is the measurement.",
         "WHEN SCE PUSHES `5caa7e21f9` AND `58bd55df35`, re-bumping is one commit that changes eighteen banner lines and nothing else -- that number is now measured, so the re-bump does not need re-litigating.",
         "THE PUSH BLOCKER IS GONE: the pin resolves on SCE origin, so the wz commits can go to origin without waiting on the SCE side."
+      ]
+    },
+    "Round 311y592": {
+      "decision_summary": "R311y592 -- the advanced subscriber gets the teardown cancellation pico has had all along, and the MCU footprint red gets a cause rather than a rebase. wz aborted the periodic re-ask timer on drop but not the GETs already in flight, and each of those held the only remaining handle on a State that owns on_sample -- which at the C ABI is a function pointer plus a context the application may free the instant ze_undeclare_advanced_subscriber returns. The fix is pico state cancellation token, reached through Session::cancel_pending_query because pico own token bottoms out in the same unregister. Separately, hosted Layer Q had been red on de5b8175: bisecting per commit puts the whole +424 on b0b94672, the ChainStaging seam, and per-symbol ELF diff names +266 of it -- so the ext-chain cliff removal in the same arc SHRANK this artifact by 140 and the seam is what the MCU pays for a choice it never takes.",
+      "changes_bullets": [
+        "An advanced subscriber now CANCELS its in-flight recovery / history GETs when it is dropped. `crates/wz-runtime-tokio/src/advanced_subscriber.rs` gains `PendingGets` (the registry), `RecoveryCancel` (the RAII teardown) and threads the registry through the one choke point every GET issuer funnels into, `issue_recovery_get`.",
+        "The seam is `Session::cancel_pending_query`, not a new mechanism: pico's own token bottoms out in `_z_unregister_pending_query` (`vendor/zenoh-pico/src/session/query.c:290-298`), so wz reuses the primitive it already had rather than growing a second spelling of it.",
+        "`scripts/check-footprint.sh` BASELINE_MC_TEXT rebased 52064/51840 -> 52068/52124, with the +424 attributed to ONE commit by per-commit bisect and to five symbols by ELF diff.",
+        "Layer C1av's count guard moved 25 -> 28 for the three new tests. They land on C1av and not C1at because all three are `ext-pubsub-advanced-history`-gated."
+      ],
+      "verification_bullets": [
+        "THE DEFECT WAS PROVEN BEFORE IT WAS FIXED, AND BY THE SAME TEST. `dropping_an_advanced_subscriber_cancels_its_in_flight_history_get` failed at `left: 1 / right: 0` on the unmodified tree -- the pending GET survived the drop -- and passes after. Its CALIBRATION arm, `a_late_history_reply_reaches_a_live_subscribers_callback`, holds the subscriber alive and drives the identical two injections through to `on_sample`, so the negative arm cannot pass on a mistyped rid, a non-intersecting keyexpr or a refused `source_info`.",
+        "A THIRD TEST PINS THE OTHER ORDERING. A loopback-answered GET completes INSIDE `Session::query`, before the call returns the rid there is to record; `a_synchronously_answered_history_get_leaves_no_registration_behind` asserts BOTH counters are zero. Damage-probed: collapsing `record` to an unconditional insert reds it at `(1, 1)`, so it is not asserting on absence.",
+        "THE MCU FOOTPRINT RED WAS BISECTED, NOT ABSORBED. Local Layer Q reads hf=52124, byte-identical to the hosted job, so R311y267's reproducibility property held and the growth is code. Building `--layer Q` per commit: 24c2f624 = 51840 (+0), 6bc3d3df = 51700 (-140), b0b94672 = 52124 (+424), everything after = +0. The ext-chain cliff removal SHRANK this artifact; the whole overshoot is the ChainStaging seam.",
+        "PER-SYMBOL ATTRIBUTION of that +424 (arm-none-eabi-nm -S, t/T only): +178 __cortex_m_rt_main, +108/-64 Slot::release, +90/-90 HeapStaging::append vs the old stage::<1000> (net 0), +38 core::option::expect_failed, +6 abort_channel. The rest is padding / rodata.",
+        "LANES RUN GREEN: A3, A5, C0, C1, C1aq, C1ar, C1at, C1au, C1av (28), C1bf, C1bq, C2, E, Q. The pico ABI axis was re-measured by test rather than quoted: census 4/4, `pico_abi_option_layout` 1/1, `pico_pure_function_oracle` 8/8.",
+        "TWO LOCAL REDS WERE HARNESS, NOT CODE. Layer C1 failed twice with `could not execute process ... (never executed)` on a test binary cargo believed fresh -- stale fingerprints from running Layer E in the background alongside other cargo invocations on the same `crates/target`. A forced `--no-run` rebuild cleared it and C1 passes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-9-preset-mcu-multicast-pub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "A GENERIC SEAM IS NOT FREE AT THE INSTANTIATION SITE. `HeapStaging`'s module doc calls itself \"byte-for-byte the pre-seam behaviour\" -- true of semantics, false of ROM by 424 bytes on an MCU artifact that never instantiates the reserved arena. When a trait is introduced to give ONE profile a choice, measure what the OTHER profiles pay for the choice they did not take.",
+        "THE 38 BYTES ARE NAMED DEBT, NOT ROUNDING. `core::option::expect_failed` is a panic-formatting path this MCU binary did not carry before; it arrives because `Slot` stores `key: Option<_>` and `chain: Option<S::Chain>` -- one fact in two Options, asserted by four `.expect()` sites. Folding them into a single `Option<Armed<S>>` deletes both. Not done here: it is a dispatcher-wide refactor and 424 - 38 = 386 does not reach the band on its own.",
+        "THE SYNC-GROUP WAIT SHOULD NOT BE BUILT YET, AND THE REASON IS MEASURED. Upstream's `z_cancellation_token_cancel` runs the handlers then `_z_sync_group_wait` (`src/session/cancellation.c:146-150`), which blocks until every NOTIFIER taken from the token is dropped. Nothing in wz takes a notifier -- its C `z_get` fan registers on-cancel HANDLERS instead -- so implementing the barrier would add a driver with no producer. `cancel_with_timeout` stays refuted per R311y576: the public header declares exactly three token functions.",
+        "THE `is_cancelled` TIMING DIVERGENCE IS REAL AND UNOBSERVABLE. Upstream's is `_z_sync_group_is_closed`, set when the cancel COMPLETES; wz's atomic is set when it STARTS. The window is only visible from inside an on-cancel handler, and the only registrant is wz's own get fan. Recorded so a later round does not re-derive it as a gap.",
+        "THE COUNT-GUARD CO-RULE HELD, THE FOOTPRINT ONE HAS NOW FAILED THREE TIMES. C1av's guard caught the three new tests immediately. Caveat (d) of the preset section requires the check-footprint table and that caveat list to move together; R311y519 and R311y582 moved the table alone, exactly as R311y215 did before them."
+      ],
+      "publishable_decision_summary": "R311y592 -- the advanced subscriber gets the teardown cancellation pico has had all along, and the MCU footprint red gets a cause rather than a rebase. wz aborted the periodic re-ask timer on drop but not the GETs already in flight, and each of those held the only remaining handle on a State that owns on_sample -- which at the C ABI is a function pointer plus a context the application may free the instant ze_undeclare_advanced_subscriber returns. The fix is pico state cancellation token, reached through Session::cancel_pending_query because pico own token bottoms out in the same unregister. Separately, hosted Layer Q had been red on de5b8175: bisecting per commit puts the whole +424 on b0b94672, the ChainStaging seam, and per-symbol ELF diff names +266 of it -- so the ext-chain cliff removal in the same arc SHRANK this artifact by 140 and the seam is what the MCU pays for a choice it never takes.",
+      "publishable_changes_bullets": [
+        "An advanced subscriber now CANCELS its in-flight recovery / history GETs when it is dropped. `crates/wz-runtime-tokio/src/advanced_subscriber.rs` gains `PendingGets` (the registry), `RecoveryCancel` (the RAII teardown) and threads the registry through the one choke point every GET issuer funnels into, `issue_recovery_get`.",
+        "The seam is `Session::cancel_pending_query`, not a new mechanism: pico's own token bottoms out in `_z_unregister_pending_query` (`vendor/zenoh-pico/src/session/query.c:290-298`), so wz reuses the primitive it already had rather than growing a second spelling of it.",
+        "`scripts/check-footprint.sh` BASELINE_MC_TEXT rebased 52064/51840 -> 52068/52124, with the +424 attributed to ONE commit by per-commit bisect and to five symbols by ELF diff.",
+        "Layer C1av's count guard moved 25 -> 28 for the three new tests. They land on C1av and not C1at because all three are `ext-pubsub-advanced-history`-gated."
+      ],
+      "publishable_verification_bullets": [
+        "THE DEFECT WAS PROVEN BEFORE IT WAS FIXED, AND BY THE SAME TEST. `dropping_an_advanced_subscriber_cancels_its_in_flight_history_get` failed at `left: 1 / right: 0` on the unmodified tree -- the pending GET survived the drop -- and passes after. Its CALIBRATION arm, `a_late_history_reply_reaches_a_live_subscribers_callback`, holds the subscriber alive and drives the identical two injections through to `on_sample`, so the negative arm cannot pass on a mistyped rid, a non-intersecting keyexpr or a refused `source_info`.",
+        "A THIRD TEST PINS THE OTHER ORDERING. A loopback-answered GET completes INSIDE `Session::query`, before the call returns the rid there is to record; `a_synchronously_answered_history_get_leaves_no_registration_behind` asserts BOTH counters are zero. Damage-probed: collapsing `record` to an unconditional insert reds it at `(1, 1)`, so it is not asserting on absence.",
+        "THE MCU FOOTPRINT RED WAS BISECTED, NOT ABSORBED. Local Layer Q reads hf=52124, byte-identical to the hosted job, so R311y267's reproducibility property held and the growth is code. Building `--layer Q` per commit: 24c2f624 = 51840 (+0), 6bc3d3df = 51700 (-140), b0b94672 = 52124 (+424), everything after = +0. The ext-chain cliff removal SHRANK this artifact; the whole overshoot is the ChainStaging seam.",
+        "PER-SYMBOL ATTRIBUTION of that +424 (arm-none-eabi-nm -S, t/T only): +178 __cortex_m_rt_main, +108/-64 Slot::release, +90/-90 HeapStaging::append vs the old stage::<1000> (net 0), +38 core::option::expect_failed, +6 abort_channel. The rest is padding / rodata.",
+        "LANES RUN GREEN: A3, A5, C0, C1, C1aq, C1ar, C1at, C1au, C1av (28), C1bf, C1bq, C2, E, Q. The pico ABI axis was re-measured by test rather than quoted: census 4/4, `pico_abi_option_layout` 1/1, `pico_pure_function_oracle` 8/8.",
+        "TWO LOCAL REDS WERE HARNESS, NOT CODE. Layer C1 failed twice with `could not execute process ... (never executed)` on a test binary cargo believed fresh -- stale fingerprints from running Layer E in the background alongside other cargo invocations on the same `crates/target`. A forced `--no-run` rebuild cleared it and C1 passes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-9-preset-mcu-multicast-pub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A GENERIC SEAM IS NOT FREE AT THE INSTANTIATION SITE. `HeapStaging`'s module doc calls itself \"byte-for-byte the pre-seam behaviour\" -- true of semantics, false of ROM by 424 bytes on an MCU artifact that never instantiates the reserved arena. When a trait is introduced to give ONE profile a choice, measure what the OTHER profiles pay for the choice they did not take.",
+        "THE 38 BYTES ARE NAMED DEBT, NOT ROUNDING. `core::option::expect_failed` is a panic-formatting path this MCU binary did not carry before; it arrives because `Slot` stores `key: Option<_>` and `chain: Option<S::Chain>` -- one fact in two Options, asserted by four `.expect()` sites. Folding them into a single `Option<Armed<S>>` deletes both. Not done here: it is a dispatcher-wide refactor and 424 - 38 = 386 does not reach the band on its own.",
+        "THE SYNC-GROUP WAIT SHOULD NOT BE BUILT YET, AND THE REASON IS MEASURED. Upstream's `z_cancellation_token_cancel` runs the handlers then `_z_sync_group_wait` (`src/session/cancellation.c:146-150`), which blocks until every NOTIFIER taken from the token is dropped. Nothing in wz takes a notifier -- its C `z_get` fan registers on-cancel HANDLERS instead -- so implementing the barrier would add a driver with no producer. `cancel_with_timeout` stays refuted per R311y576: the public header declares exactly three token functions.",
+        "THE `is_cancelled` TIMING DIVERGENCE IS REAL AND UNOBSERVABLE. Upstream's is `_z_sync_group_is_closed`, set when the cancel COMPLETES; wz's atomic is set when it STARTS. The window is only visible from inside an on-cancel handler, and the only registrant is wz's own get fan. Recorded so a later round does not re-derive it as a gap.",
+        "THE COUNT-GUARD CO-RULE HELD, THE FOOTPRINT ONE HAS NOW FAILED THREE TIMES. C1av's guard caught the three new tests immediately. Caveat (d) of the preset section requires the check-footprint table and that caveat list to move together; R311y519 and R311y582 moved the table alone, exactly as R311y215 did before them."
       ]
     },
     "Round 311y6": {
