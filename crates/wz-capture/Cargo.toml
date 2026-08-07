@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# R311y578 (G1) — the CAPTURE-side input path: pcap ingest, link/IP/TCP
+# decapsulation, and TCP flow reassembly into the per-direction byte streams
+# `wz_session_core::passive` consumes.
+#
+# Its own crate, and deliberately not a module of wz-session-core: this layer
+# knows nothing about zenoh and wz-session-core knows nothing about capture
+# files. The seam between them is a byte stream plus a direction, which is
+# exactly what a live tap would also produce — so an AF_PACKET or a
+# ring-buffer source lands here later without touching the decode side.
+#
+# ZERO third-party dependencies. Every format below is a fixed-layout header
+# read out of a byte slice; pulling a parsing crate in would trade an
+# afternoon of struct reading for a supply-chain surface on a dogfood tool.
+[package]
+name = "wz-capture"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "alloc",
+    "codec-frame",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "codec-keep-alive",
+] }

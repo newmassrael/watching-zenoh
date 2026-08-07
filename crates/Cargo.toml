@@ -46,6 +46,11 @@ members = [
     # alternative was duplicating the race-free close and the drop-outside-the-lock
     # discipline — the two things a second copy would get wrong invisibly.
     "wz-capi-core",
+    # R311y578 (G1) — pcap ingest + link/IP/TCP decapsulation + TCP flow
+    # reassembly, feeding `wz_session_core::passive`. Knows nothing about
+    # zenoh; the seam is a byte stream plus a direction, so a live tap can
+    # replace the file reader without touching the decode side.
+    "wz-capture",
     "wz-codecs",
     "wz-codecs-test-support",
     # R311y492 (§5.22 plugin-dynamic-loading) — the host<->plugin C ABI contract,

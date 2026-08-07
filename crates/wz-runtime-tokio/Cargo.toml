@@ -1725,6 +1725,11 @@ libc = { version = "0.2", optional = true }
 libloading = { version = "0.8", optional = true }
 
 [dev-dependencies]
+# R311y578 (G1) — the capture-side front end, used by
+# `tests/pcap_dissect_e2e.rs` to prove a REAL wz handshake replays through
+# pcap -> decapsulation -> TCP reassembly -> the passive decoder. Dev-only:
+# nothing in the runtime reads a capture.
+wz-capture = { path = "../wz-capture" }
 # R311y519 — `test-util` is NOT part of tokio's `full`, and the writer_queue
 # unit tests need it: the sealed-write bound is WRITER_STALL_MS, so asserting
 # that it fires under real time would cost that wall-clock in every run. Paused

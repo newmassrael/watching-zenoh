@@ -2442,6 +2442,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-capture"
+version = "0.1.0"
+dependencies = [
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-codecs"
 version = "0.1.0"
 dependencies = [
@@ -2679,6 +2686,7 @@ dependencies = [
  "tokio-vsock",
  "uhlc",
  "wz-access-control",
+ "wz-capture",
  "wz-codecs",
  "wz-codecs-test-support",
  "wz-plugin-abi",
