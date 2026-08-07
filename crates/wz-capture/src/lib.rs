@@ -79,13 +79,24 @@ pub struct DatagramDissection {
 }
 
 impl DatagramDissection {
-    fn new(flow: FlowKey) -> Self {
+    fn new(flow: FlowKey, window_ms: Option<u64>) -> Self {
         Self {
             flow,
-            session: PassiveSession::new(),
+            session: new_session(window_ms),
             frames: Vec::new(),
         }
     }
+}
+
+/// R311y594 — one place that decides how a per-flow observer is built, so the
+/// TCP and datagram halves cannot drift into different defaults.
+fn new_session(window_ms: Option<u64>) -> PassiveSession {
+    #[cfg(feature = "reassembly")]
+    if let Some(ms) = window_ms {
+        return PassiveSession::with_reassembly_window(ms);
+    }
+    let _ = window_ms;
+    PassiveSession::new()
 }
 
 /// One TCP connection being dissected as a zenoh session.
@@ -105,12 +116,12 @@ pub struct FlowDissection {
 }
 
 impl FlowDissection {
-    fn new(flow: FlowKey) -> Self {
+    fn new(flow: FlowKey, window_ms: Option<u64>) -> Self {
         Self {
             flow,
             low_to_high: StreamAssembler::new(),
             high_to_low: StreamAssembler::new(),
-            session: PassiveSession::new(),
+            session: new_session(window_ms),
             frames: Vec::new(),
         }
     }
@@ -178,12 +189,44 @@ pub struct Dissection {
     flows: Vec<FlowDissection>,
     datagram_flows: Vec<DatagramDissection>,
     skipped: Vec<SkippedPacket>,
+    /// R311y594 — the per-chain reassembly window every flow observer is built
+    /// with, or `None` for the unreachable deadline `PassiveSession::new` has.
+    window_ms: Option<u64>,
+    #[cfg(feature = "reassembly")]
+    /// Chains aborted because their deadline passed, across every flow.
+    ///
+    /// COUNTED rather than silent: an expired chain is a message the reader
+    /// will never see completed, and a dissection that drops it without saying
+    /// so reports its own bound as if it were the wire's.
+    expired_chains: usize,
 }
 
 impl Dissection {
-    /// An empty dissection.
+    /// An empty dissection whose chains never expire.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// R311y594 — a dissection whose half-finished chains EXPIRE `window_ms`
+    /// after they open, judged against the CAPTURE's clock.
+    ///
+    /// For a live tap, where the quota alone bounds concurrency but not
+    /// duration: four abandoned chains per direction hold their slots for as
+    /// long as the reader runs. A file replay may want it too — it makes the
+    /// dissection of a capture identical whether it is replayed in one pass or
+    /// fed packet by packet.
+    #[cfg(feature = "reassembly")]
+    pub fn with_reassembly_window(window_ms: u64) -> Self {
+        Self {
+            window_ms: Some(window_ms),
+            ..Self::default()
+        }
+    }
+
+    /// How many chains have been aborted for missing their deadline.
+    #[cfg(feature = "reassembly")]
+    pub fn expired_chains(&self) -> usize {
+        self.expired_chains
     }
 
     /// Every TCP flow seen, in first-appearance order.
@@ -212,10 +255,31 @@ impl Dissection {
     /// A packet that is not TCP, is an IP fragment, or rides an unhandled
     /// link type is recorded in [`Self::skipped`] rather than dropped.
     pub fn push_packet(&mut self, link_type: u32, packet_index: usize, bytes: &[u8]) {
+        self.push_packet_at(link_type, packet_index, None, bytes)
+    }
+
+    /// R311y594 — the same, with the instant the packet was CAPTURED.
+    ///
+    /// `ts_millis` advances the observer's clock before the packet is decoded,
+    /// which is what makes a reassembly deadline enforceable. `None` leaves the
+    /// clock where it is — the pre-R311y594 behaviour, and the honest answer
+    /// for a source that has no timestamps at all.
+    ///
+    /// The clock is per-FLOW, not per-dissection, and it is advanced on the
+    /// flow this packet belongs to only. A capture holding two connections
+    /// whose traffic interleaves must not let one connection's silence expire
+    /// the other's chains, and a shared clock would do exactly that.
+    pub fn push_packet_at(
+        &mut self,
+        link_type: u32,
+        packet_index: usize,
+        ts_millis: Option<u64>,
+        bytes: &[u8],
+    ) {
         let segment = match link::decapsulate(link_type, packet_index, bytes) {
             Ok(Transport::Tcp(s)) => s,
             Ok(Transport::Udp(d)) => {
-                self.push_datagram(d);
+                self.push_datagram(d, ts_millis);
                 return;
             }
             Err(reason) => {
@@ -229,11 +293,16 @@ impl Dissection {
         let idx = match self.flows.iter().position(|f| f.flow == segment.flow) {
             Some(i) => i,
             None => {
-                self.flows.push(FlowDissection::new(segment.flow));
+                self.flows
+                    .push(FlowDissection::new(segment.flow, self.window_ms));
                 self.flows.len() - 1
             }
         };
         let flow = &mut self.flows[idx];
+        #[cfg(feature = "reassembly")]
+        if let Some(ms) = ts_millis {
+            self.expired_chains += flow.session.observe_at(ms);
+        }
         let direction = if segment.from_low {
             Direction::A
         } else {
@@ -256,11 +325,17 @@ impl Dissection {
     ///
     /// No buffering and no reassembly, because there is nothing to reassemble
     /// — which is exactly why this is four lines and the TCP path is not.
-    fn push_datagram(&mut self, d: link::Datagram) {
+    fn push_datagram(&mut self, d: link::Datagram, ts_millis: Option<u64>) {
+        // Without `reassembly` there is no chain to expire and so nothing to
+        // advance a clock FOR. Named here rather than silenced with an
+        // `#[allow]`, because the reason is the feature and not the lint.
+        #[cfg(not(feature = "reassembly"))]
+        let _ = ts_millis;
         let idx = match self.datagram_flows.iter().position(|f| f.flow == d.flow) {
             Some(i) => i,
             None => {
-                self.datagram_flows.push(DatagramDissection::new(d.flow));
+                self.datagram_flows
+                    .push(DatagramDissection::new(d.flow, self.window_ms));
                 self.datagram_flows.len() - 1
             }
         };
@@ -270,6 +345,10 @@ impl Dissection {
             Direction::B
         };
         let flow = &mut self.datagram_flows[idx];
+        #[cfg(feature = "reassembly")]
+        if let Some(ms) = ts_millis {
+            self.expired_chains += flow.session.observe_at(ms);
+        }
         let frame = flow
             .session
             .next_datagram(direction, &d.payload, d.packet_index);
@@ -281,7 +360,12 @@ impl Dissection {
         let file = pcap::parse(bytes)?;
         let mut out = Self::new();
         for packet in &file.packets {
-            out.push_packet(file.link_type, packet.index, &packet.data);
+            out.push_packet_at(
+                file.link_type,
+                packet.index,
+                Some(packet.ts_millis(file.timestamp_unit)),
+                &packet.data,
+            );
         }
         Ok(out)
     }
@@ -320,6 +404,54 @@ mod datagram_tests {
             eth.push(0);
         }
         eth
+    }
+
+    /// R311y594 — a pcap replay carries the FILE's clock into the observer.
+    ///
+    /// Asserted on `now_ms` rather than on an expiry, because this is the
+    /// WIRING claim and an expiry test would pass on a clock that advanced for
+    /// the wrong reason. The value is exact: 7 s + 250 ms of a microsecond-unit
+    /// file is 7250 ms, so a missing or mis-scaled conversion cannot pass.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_pcap_replay_advances_each_flows_observation_clock() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let pkt = udp_packet([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, &keepalive);
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &[(7, 250_000, &pkt)]);
+
+        let d = Dissection::from_pcap(&file).expect("parse");
+        assert_eq!(d.datagram_flows().len(), 1);
+        assert_eq!(d.datagram_flows()[0].session.now_ms(), 7_250);
+    }
+
+    /// The CONTROL: the untimestamped entry point leaves the clock alone, so
+    /// the test above cannot pass on a clock that advances by itself.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn an_untimestamped_push_leaves_the_clock_where_it_was() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let pkt = udp_packet([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, &keepalive);
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
+        assert_eq!(d.datagram_flows()[0].session.now_ms(), 0);
+    }
+
+    /// The sub-second field is microseconds or nanoseconds depending on the
+    /// file's MAGIC, and the same raw number means a THOUSANDFOLD different
+    /// time under the two. The fixture is deliberately larger than one second's
+    /// worth of nanoseconds so the two answers cannot coincide — a value under
+    /// 1000 would give 0 either way and the test would prove nothing.
+    #[test]
+    fn the_subsecond_field_is_scaled_by_the_files_declared_unit() {
+        let p = crate::pcap::Packet {
+            index: 0,
+            ts_secs: 7,
+            ts_frac: 1_500_000,
+            data: Vec::new(),
+            orig_len: 0,
+        };
+        assert_eq!(p.ts_millis(crate::pcap::TimestampUnit::Microseconds), 8_500);
+        assert_eq!(p.ts_millis(crate::pcap::TimestampUnit::Nanoseconds), 7_001);
     }
 
     /// A UDP datagram reaches a datagram flow and is decoded there, and it

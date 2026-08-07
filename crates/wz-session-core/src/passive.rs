@@ -450,6 +450,20 @@ pub struct PassiveSession {
     /// fold twice: `&=` is idempotent but `min` on the patch level is only
     /// idempotent for the same value, and the phase transition is not.
     init_seen: [bool; 2],
+    /// R311y594 — the OBSERVATION instant, in the same milliseconds
+    /// [`ReassemblyConfig::reassembly_timeout_ms`] is expressed in.
+    ///
+    /// An observer's clock is not its own: it is the capture's. A pcap packet
+    /// carries the time it was seen and a live tap knows when it arrived, so
+    /// the instant is an INPUT rather than something to read off the host —
+    /// which also makes a replayed file deterministic, and makes replaying it
+    /// at 100x not expire chains that never expired in the original.
+    ///
+    /// Stays `0` unless a caller advances it ([`Self::observe_at`]), which is
+    /// exactly the pre-R311y594 behaviour: a deadline armed at 0 against a
+    /// `u64::MAX` window is one nothing can reach.
+    #[cfg(feature = "reassembly")]
+    now_ms: u64,
 }
 
 /// Hand-written so a debug print never dumps buffered chain bytes: the chain
@@ -487,12 +501,17 @@ impl Default for PassiveSession {
             keyexprs: crate::passive_keyexpr::KeyexprTables::new(),
             #[cfg(feature = "reassembly")]
             reasm: core::array::from_fn(|_| {
-                // An observer cannot enforce a deadline it has no clock for
-                // (see `next_frame`), so the timeout is inert here and the
-                // quota is the only live defence. Markers start off and are
-                // pushed in per frame from the negotiated patch level.
+                // `u64::MAX` keeps the deadline unreachable for a caller that
+                // never advances the clock, which is every caller that has one
+                // stream of bytes and no time to attach to them. A caller that
+                // DOES have timestamps builds with
+                // `PassiveSession::with_reassembly_window` instead. Markers
+                // start off and are pushed in per frame from the negotiated
+                // patch level.
                 ReassemblyDispatcher::new(ReassemblyConfig::new(PASSIVE_CHAIN_QUOTA, u64::MAX))
             }),
+            #[cfg(feature = "reassembly")]
+            now_ms: 0,
         }
     }
 }
@@ -521,8 +540,58 @@ pub const PASSIVE_CHAIN_CAP: usize = 65_536;
 
 impl PassiveSession {
     /// A fresh observer with no bytes and no inferred context.
+    ///
+    /// Its reassembly deadline is unreachable — see
+    /// [`Self::with_reassembly_window`] for the caller that has a clock.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// R311y594 — an observer whose half-finished chains EXPIRE.
+    ///
+    /// `window_ms` is the per-chain deadline, armed when the chain opens and
+    /// enforced by [`Self::observe_at`]. A window is only meaningful to a
+    /// caller that also advances the clock; one that does not gets the same
+    /// behaviour as [`Self::new`] no matter what it passes here, which is why
+    /// the window is a CONSTRUCTOR argument rather than a setter — changing it
+    /// mid-flight would re-arm deadlines that are already running and there is
+    /// no honest answer to what they should become.
+    ///
+    /// Without a window the per-direction quota (4) is the whole defence, and
+    /// a quota is a bound on CONCURRENCY, not on DURATION: a peer that opens
+    /// four chains and abandons them holds those slots for as long as the
+    /// reader runs. Bounded for a file that ends; not for a live tap.
+    #[cfg(feature = "reassembly")]
+    pub fn with_reassembly_window(window_ms: u64) -> Self {
+        Self {
+            reasm: core::array::from_fn(|_| {
+                ReassemblyDispatcher::new(ReassemblyConfig::new(PASSIVE_CHAIN_QUOTA, window_ms))
+            }),
+            ..Self::default()
+        }
+    }
+
+    /// Advance the observation clock to `now_ms` and abort every chain whose
+    /// deadline has passed. Returns how many were aborted.
+    ///
+    /// COUNTED, not silent: an expired chain is data the reader will never see
+    /// completed, and a dissection that drops it without saying so reports a
+    /// hole as if it were the wire's. The caller decides whether to surface it.
+    ///
+    /// Monotonicity is the CALLER's to keep — a capture whose packets are out
+    /// of order would otherwise walk the clock backwards. Going backwards is
+    /// harmless here (nothing expires), which is the right failure for a
+    /// timestamp that cannot be trusted.
+    #[cfg(feature = "reassembly")]
+    pub fn observe_at(&mut self, now_ms: u64) -> usize {
+        self.now_ms = now_ms;
+        self.reasm[0].sweep(now_ms) + self.reasm[1].sweep(now_ms)
+    }
+
+    /// The observation instant last handed to [`Self::observe_at`].
+    #[cfg(feature = "reassembly")]
+    pub fn now_ms(&self) -> u64 {
+        self.now_ms
     }
 
     /// The current inferred context. Read it BESIDE a frame rather than after
@@ -727,13 +796,13 @@ impl PassiveSession {
                         markers: *markers,
                     },
                     sn_mask,
-                    // An observer has no monotonic clock — a capture's
-                    // timestamps are the CAPTURE's, not this session's, and a
-                    // replayed file has none at all. The config's window is
-                    // `u64::MAX` for the same reason, so this instant only
-                    // ever arms a deadline nothing sweeps; the per-direction
-                    // quota is what bounds a chain that never completes.
-                    0,
+                    // R311y594 — the observation instant, which an observer
+                    // takes from the capture rather than from the host (see
+                    // `now_ms`). Stays 0 for a caller that never advances it,
+                    // and a deadline armed at 0 against the default
+                    // `u64::MAX` window is unreachable — so this is the
+                    // previous behaviour until someone supplies a clock.
+                    self.now_ms,
                     |bytes| joined = Some(bytes.to_vec()),
                 );
                 match joined {
@@ -922,7 +991,13 @@ mod tests {
     /// force, and return it. `exts` rides BOTH Inits, which is what makes a
     /// capability negotiated rather than merely offered.
     fn established(exts: Vec<ExtEntryOwned>) -> PassiveSession {
-        let mut s = PassiveSession::new();
+        establish(PassiveSession::new(), exts)
+    }
+
+    /// The handshake walk, over a session the caller built — so a test that
+    /// needs a non-default construction (a reassembly window) drives the SAME
+    /// handshake rather than a second copy of it that can drift from this one.
+    fn establish(mut s: PassiveSession, exts: Vec<ExtEntryOwned>) -> PassiveSession {
         s.push(Direction::A, &framed(&init_wire(false, exts.clone()), 2));
         s.push(Direction::B, &framed(&init_wire(true, exts), 2));
         s.next_frame(Direction::A).expect("init syn");
@@ -1243,6 +1318,62 @@ mod tests {
             }
             other => panic!("expected a reassembled batch, got {other:?}"),
         }
+    }
+
+    /// R311y594 — a chain that never completes EXPIRES once the clock passes
+    /// its window, and the expiry is COUNTED.
+    ///
+    /// The half-chain is left open deliberately: this is the live-tap shape,
+    /// where the second fragment never arrives and the quota alone would hold
+    /// the slot for as long as the reader runs.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn an_abandoned_chain_expires_once_the_observed_clock_passes_the_window() {
+        let mut s = establish(PassiveSession::with_reassembly_window(5_000), vec![]);
+        let record = oam_record(9);
+        let (head, _) = record.split_at(1);
+
+        s.push(Direction::A, &framed(&fragment_wire(0, true, head), 2));
+        s.next_frame(Direction::A).expect("fragment 1");
+
+        // The deadline was armed at the clock's value when the chain opened,
+        // which is 0 — nothing has advanced it yet.
+        assert_eq!(
+            s.observe_at(4_999),
+            0,
+            "a chain inside its window must not be aborted"
+        );
+        assert_eq!(s.observe_at(5_000), 1, "the deadline is reached AT 5_000");
+        assert_eq!(
+            s.observe_at(60_000),
+            0,
+            "an expired chain is gone, not expired again on every sweep"
+        );
+        assert_eq!(s.now_ms(), 60_000);
+    }
+
+    /// The CONTROL that keeps the test above from passing on an expiry that
+    /// fires unconditionally: the default constructor's window is unreachable,
+    /// so the same abandoned chain survives a clock advanced past any deadline
+    /// a caller could have meant.
+    ///
+    /// This is also the compatibility claim — every pre-R311y594 consumer built
+    /// with `new()` and none of them acquired an expiry by upgrading.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn the_default_observer_has_no_reachable_deadline() {
+        let mut s = established(vec![]);
+        let record = oam_record(9);
+        let (head, _) = record.split_at(1);
+
+        s.push(Direction::A, &framed(&fragment_wire(0, true, head), 2));
+        s.next_frame(Direction::A).expect("fragment 1");
+
+        assert_eq!(
+            s.observe_at(u64::MAX - 1),
+            0,
+            "the default window is unreachable, so nothing may expire"
+        );
     }
 
     /// A capture that starts mid-session has no InitAck, so the SN resolution

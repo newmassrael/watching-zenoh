@@ -95,6 +95,29 @@ impl Packet {
     pub fn is_truncated(&self) -> bool {
         (self.data.len() as u32) < self.orig_len
     }
+
+    /// R311y594 — this packet's capture time in MILLISECONDS, the unit
+    /// `wz_session_core::passive::PassiveSession::observe_at` and
+    /// `ReassemblyConfig::reassembly_timeout_ms` already speak.
+    ///
+    /// Converting HERE, where the file's declared unit is in hand, rather than
+    /// exporting the raw pair and letting each consumer scale it: `ts_frac` is
+    /// microseconds or nanoseconds depending on the file's MAGIC, so a consumer
+    /// that assumed either would be right on half the corpus and quietly wrong
+    /// on the other — a factor of 1000 in a deadline, which reads as "chains
+    /// never expire" or "everything expires".
+    ///
+    /// Epoch-based rather than capture-relative, because it feeds a monotonic
+    /// clock whose ORIGIN is irrelevant and whose DIFFERENCES are not. The
+    /// `u64` holds the Unix epoch in milliseconds until well past year 500
+    /// million.
+    pub fn ts_millis(&self, unit: TimestampUnit) -> u64 {
+        let sub_ms = match unit {
+            TimestampUnit::Microseconds => u64::from(self.ts_frac) / 1_000,
+            TimestampUnit::Nanoseconds => u64::from(self.ts_frac) / 1_000_000,
+        };
+        u64::from(self.ts_secs) * 1_000 + sub_ms
+    }
 }
 
 /// A parsed classic pcap file.

@@ -24,6 +24,17 @@ publish = false
 [lints]
 workspace = true
 
+# R311y594 — `reassembly` is DEFAULT-ON, and its absence was a real hole rather
+# than a choice: a capture front end whose Fragments stay opaque cannot do the
+# per-channel reassembly the analyzer requirement asks for, and nothing in the
+# workspace made that visible because a build that ALSO contains
+# `wz-runtime-tokio` unifies the feature back on. Building `-p wz-capture`
+# alone is what shows it. Kept switchable for a consumer that genuinely wants
+# transport frames and nothing above them.
+[features]
+default = ["reassembly"]
+reassembly = ["wz-session-core/reassembly"]
+
 [dependencies]
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "alloc",
