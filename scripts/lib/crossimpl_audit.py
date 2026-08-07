@@ -209,7 +209,7 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # time either of the two populations R311y572 NAMED has moved. `proven=128
 # partial=39` did not move for either step, which is exactly the blindness this
 # counter exists to cover.
-FOREIGN_ADJUDICATOR_LINKS = 790
+FOREIGN_ADJUDICATOR_LINKS = 796
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

@@ -144,19 +144,30 @@ pub struct PubKeyMethod {
     private_key: RsaPrivateKey,
     /// This node's RSA public key (sent on InitSyn / InitAck).
     public_key: RsaPublicKey,
-    /// Responder side: the accepted-initiator-key policy, modelling zenoh's
-    /// `Option<HashSet<ZPublicKey>>` (`AuthPubKey.lookup`):
-    /// - `None` = accept ANY initiator key (zenoh's `disable_lookup`).
-    /// - `Some(set)` = membership REQUIRED; a key not in `set` is rejected, and a
-    ///   `Some(empty)` rejects EVERY key — zenoh-faithful (`recv_init_syn` bails
-    ///   on `!lookup.contains(key)`, pubkey.rs:566-570).
+    /// The accepted-peer-key policy, modelling zenoh's
+    /// `Option<HashSet<ZPublicKey>>` (`AuthPubKey.lookup`). zenoh carries ONE such
+    /// field per authenticator and consults it on BOTH sides of the handshake —
+    /// but under TWO DIFFERENT RULES, and the difference is load-bearing:
+    /// - RESPONDER (`recv_init_syn`, pubkey.rs:566-570) — `None` accepts any
+    ///   initiator key; `Some(set)` requires membership, so a `Some(empty)`
+    ///   rejects EVERY key. See [`PubKeyMethod::admits_initiator`].
+    /// - INITIATOR (`recv_init_ack`, pubkey.rs:414-418) — the same `None`, but the
+    ///   membership test is guarded by `!lookup.is_empty()`, so a `Some(empty)`
+    ///   accepts ANY responder key. See [`PubKeyMethod::admits_responder`].
     ///
-    /// A DELIBERATE divergence from a bare `Vec` whose "empty = accept any" would
-    /// silently admit everyone for a `responder(key, vec![])` meant as lockdown
-    /// (the dangerous direction). zenoh's own config path can only build
-    /// `Some(empty)` (the `known_keys_file` loader is an unimplemented `@TODO`),
-    /// which is why a stock pubkey zenohd rejects all clients — see the
-    /// wz<->zenohd interop test.
+    /// R311y576 built the initiator half; before it, wz stored this field and read
+    /// it on the responder side only, so a wz initiator admitted any responder key
+    /// whatever its caller configured. The asymmetry is not a wz reading of the
+    /// prose: a stock pubkey zenohd's lookup IS `Some(empty)`, and it completes a
+    /// handshake it DIALS while rejecting every handshake it accepts — measured in
+    /// `pubkey_zenohd_interop.rs`, both directions.
+    ///
+    /// The `Vec` (rather than a bare "empty = accept any") is a DELIBERATE choice
+    /// in the same direction: a `responder(key, vec![])` meant as lockdown must not
+    /// silently admit everyone. zenoh's own config path can only ever build
+    /// `Some(empty)` (its `known_keys_file` loader is an unimplemented `@TODO` at
+    /// pubkey.rs:122), which is exactly why a stock pubkey zenohd rejects all
+    /// clients that dial it.
     lookup: Option<Vec<RsaPublicKey>>,
     /// Responder side: the per-handshake `u64` challenge, injected via
     /// [`AuthMethod::set_challenge_nonce`] (the accept seam's OS-entropy draw --
@@ -175,21 +186,37 @@ pub struct PubKeyMethod {
 impl PubKeyMethod {
     /// An INITIATOR-side method authenticating with `private_key`. It offers its
     /// public key on InitSyn and proves possession by decrypting + relaying the
-    /// responder's challenge. It does no responder-side key gating (`lookup` =
-    /// `None`), and that is a RESIDUAL, not parity: zenoh's initiator DOES gate
-    /// the responder's key when it carries a lookup — `recv_init_ack` bails
-    /// `Unauthorized PubKey` on a `bob_pubkey` outside a non-empty set
-    /// (`io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs:413-418`
-    /// at zenoh 1.5.0), the mirror of the responder-side check at `:567-570`.
-    /// This doc previously asserted the opposite from memory; R311y440 read the
-    /// source. Closing it needs a lookup on this side plus the PEM/key-file
-    /// loading (`pubkey.rs:82-124`) that would populate it.
+    /// responder's challenge. It carries NO accepted-responder-key set, so it
+    /// admits whichever key answers — zenoh's `disable_lookup` semantic on the
+    /// initiator side. To gate the responder's key, use
+    /// [`PubKeyMethod::initiator_with_lookup`].
     pub fn initiator(private_key: RsaPrivateKey) -> Self {
+        Self::initiator_with_lookup(private_key, None)
+    }
+
+    /// An INITIATOR-side method that also GATES the responder's public key, the
+    /// mirror of [`PubKeyMethod::responder`]'s initiator gating: `None` admits any
+    /// responder key, `Some(set)` requires membership — EXCEPT that a
+    /// `Some(empty)` admits any key, because zenoh's initiator check is guarded by
+    /// `!lookup.is_empty()` where its responder check is not
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs:414-418`
+    /// versus `:566-570`, zenoh 1.5.0). Carrying that asymmetry rather than
+    /// reusing the responder rule is what lets a wz responder complete a handshake
+    /// a stock zenohd DIALS: zenohd's own lookup is `Some(empty)`.
+    ///
+    /// Until R311y576 this constructor did not exist and the gate was unbuilt, so
+    /// a wz initiator relayed the challenge to, and completed a session with, any
+    /// responder that answered. The doc on [`PubKeyMethod::initiator`] recorded it
+    /// as a residual for 136 rounds.
+    pub fn initiator_with_lookup(
+        private_key: RsaPrivateKey,
+        lookup: Option<Vec<RsaPublicKey>>,
+    ) -> Self {
         let public_key = RsaPublicKey::from(&private_key);
         Self {
             private_key,
             public_key,
-            lookup: None,
+            lookup,
             challenge: 0,
             peer_pubkey: None,
             resp_pubkey: None,
@@ -216,13 +243,31 @@ impl PubKeyMethod {
         }
     }
 
-    /// Whether this responder admits `peer`. Mirrors zenoh `recv_init_syn`'s
-    /// `if let Some(lookup) { contains }`: `None` accepts any key; `Some(set)`
-    /// requires membership (an empty `Some` therefore rejects all).
-    fn admits(&self, peer: &RsaPublicKey) -> bool {
+    /// Whether this RESPONDER admits the initiator key `peer`. Mirrors zenoh
+    /// `recv_init_syn`'s `if let Some(lookup) { contains }` (pubkey.rs:566-570):
+    /// `None` accepts any key; `Some(set)` requires membership, so an empty `Some`
+    /// rejects all.
+    fn admits_initiator(&self, peer: &RsaPublicKey) -> bool {
         match &self.lookup {
             None => true,
             Some(set) => set.iter().any(|k| k == peer),
+        }
+    }
+
+    /// Whether this INITIATOR admits the responder key `peer`. Mirrors zenoh
+    /// `recv_init_ack`'s `if !lookup.is_empty() && !lookup.contains(..)`
+    /// (pubkey.rs:414-418) — the SAME field as [`Self::admits_initiator`] under a
+    /// DIFFERENT rule: an empty `Some` accepts every key here, where on the
+    /// responder side it rejects every key.
+    ///
+    /// The divergence is upstream's, not wz's, and it is the reason a stock
+    /// zenohd (whose lookup is `Some(empty)`, `AuthPubKey::new` at pubkey.rs:54-61)
+    /// can dial into an authenticated session while admitting nobody who dials it.
+    /// Collapsing the two rules onto one would silently break that direction.
+    fn admits_responder(&self, peer: &RsaPublicKey) -> bool {
+        match &self.lookup {
+            None => true,
+            Some(set) => set.is_empty() || set.iter().any(|k| k == peer),
         }
     }
 }
@@ -247,6 +292,14 @@ impl AuthMethod for PubKeyMethod {
             return Err(AuthError::Rejected("pubkey: missing InitAck"));
         };
         let (resp_pubkey, challenge_ct) = decode_init_ack(&body)?;
+        // Gate the RESPONDER's key BEFORE spending a decryption on its challenge —
+        // zenoh checks the lookup at pubkey.rs:414-418, above the `decrypt_blinded`
+        // at `:419-427`. The order is observable: an unauthorized key whose
+        // ciphertext is also malformed must report unauthorized, not a decode
+        // failure, or the reject reason leaks which check ran first.
+        if !self.admits_responder(&resp_pubkey) {
+            return Err(AuthError::Rejected("pubkey: unauthorized responder key"));
+        }
         // Decrypt the responder's challenge with OUR private key — proves we hold
         // it. Keep the bytes OPAQUE (relay verbatim; never interpreted).
         let decrypted = decrypt_blinded(&self.private_key, &challenge_ct)?;
@@ -290,7 +343,7 @@ impl AuthMethod for PubKeyMethod {
         };
         let mut cursor = SceCursor::new(&body);
         let peer = read_pubkey(&mut cursor)?;
-        if !self.admits(&peer) {
+        if !self.admits_initiator(&peer) {
             return Err(AuthError::Rejected("pubkey: unauthorized public key"));
         }
         self.peer_pubkey = Some(peer);
@@ -447,6 +500,103 @@ mod tests {
         assert_eq!(
             r,
             Err(AuthError::Rejected("pubkey: unauthorized public key"))
+        );
+    }
+
+    // ── R311y576: the INITIATOR-side lookup gate ─────────────────────────
+    //
+    // Four tests over one axis. Before y576 the initiator carried no gate at
+    // all, so `an_unauthorized_responder_key_is_rejected` is the plane's
+    // existence proof and the other three pin its exact shape — in particular
+    // that the empty set means the OPPOSITE of what it means on the responder
+    // side, which is the one thing a reimplementation gets wrong by symmetry.
+
+    #[test]
+    fn an_unauthorized_responder_key_is_rejected_by_the_initiator() {
+        // The initiator's lookup holds some OTHER key, not the responder's, so
+        // the handshake must die at the initiator's InitAck check — zenoh
+        // `recv_init_ack` bails "Unauthorized PubKey" (pubkey.rs:414-418).
+        let init = keypair();
+        let init_pub = RsaPublicKey::from(&init);
+        let unrelated = RsaPublicKey::from(&keypair());
+        let r = run_handshake(
+            PubKeyMethod::initiator_with_lookup(init, Some(vec![unrelated])),
+            // The RESPONDER admits this initiator, so the only check that can
+            // reject is the new initiator-side one.
+            PubKeyMethod::responder(keypair(), Some(vec![init_pub])),
+            0x42,
+        );
+        assert_eq!(
+            r,
+            Err(AuthError::Rejected("pubkey: unauthorized responder key")),
+            "an initiator carrying a non-empty lookup must reject a responder \
+             key outside it"
+        );
+    }
+
+    #[test]
+    fn an_authorized_responder_key_is_admitted_by_the_initiator() {
+        // The positive arm the test above needs to mean anything: the SAME
+        // shape with the responder's real key in the lookup authenticates.
+        let init = keypair();
+        let init_pub = RsaPublicKey::from(&init);
+        let resp = keypair();
+        let resp_pub = RsaPublicKey::from(&resp);
+        let r = run_handshake(
+            PubKeyMethod::initiator_with_lookup(init, Some(vec![resp_pub])),
+            PubKeyMethod::responder(resp, Some(vec![init_pub])),
+            0x42,
+        );
+        assert_eq!(r, Ok(()), "membership admits the responder key");
+    }
+
+    #[test]
+    fn some_empty_lookup_admits_any_responder_key() {
+        // THE DISCRIMINATOR between the two rules, and the reason they are two
+        // functions. The same `Some(vec![])` that makes a RESPONDER reject
+        // every initiator (`some_empty_lookup_rejects_all`, above) makes an
+        // INITIATOR admit every responder, because zenoh guards the initiator's
+        // membership test with `!lookup.is_empty()` (pubkey.rs:415) and does not
+        // guard the responder's (pubkey.rs:567).
+        //
+        // This is not a wz reading of upstream prose. A stock zenohd's lookup IS
+        // `Some(empty)` (`AuthPubKey::new`, pubkey.rs:54-61) and it completes a
+        // pubkey handshake it DIALS while rejecting every one it accepts — both
+        // directions measured against the real router in
+        // `wz-integration-tests/tests/pubkey_zenohd_interop.rs`.
+        let init = keypair();
+        let init_pub = RsaPublicKey::from(&init);
+        let r = run_handshake(
+            PubKeyMethod::initiator_with_lookup(init, Some(Vec::new())),
+            PubKeyMethod::responder(keypair(), Some(vec![init_pub])),
+            0x42,
+        );
+        assert_eq!(
+            r,
+            Ok(()),
+            "an EMPTY Some-lookup admits every responder key — the inverse of \
+             the responder-side rule, and zenoh-faithful"
+        );
+    }
+
+    #[test]
+    fn the_initiator_gate_runs_before_the_challenge_decryption() {
+        // ORDER, not just outcome. zenoh checks the lookup at pubkey.rs:414-418
+        // and decrypts at `:419-427`. Hand the initiator an InitAck whose key is
+        // unauthorized AND whose ciphertext is garbage that cannot decrypt: if
+        // the gate runs first the verdict is "unauthorized responder key", if it
+        // runs second it is "decryption error". A gate placed after the decrypt
+        // would still reject this handshake, so outcome alone cannot see the
+        // difference and only the reason string can.
+        let init = keypair();
+        let unrelated = RsaPublicKey::from(&keypair());
+        let mut initiator = PubKeyMethod::initiator_with_lookup(init, Some(vec![unrelated]));
+        let stranger = RsaPublicKey::from(&keypair());
+        let body = encode_init_ack(&stranger, b"not a valid RSA ciphertext");
+        assert_eq!(
+            initiator.open_recv_init_ack(Some(AuthSubExt::Zbuf(body))),
+            Err(AuthError::Rejected("pubkey: unauthorized responder key")),
+            "the lookup must be consulted BEFORE the challenge decryption"
         );
     }
 

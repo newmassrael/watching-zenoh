@@ -7866,11 +7866,15 @@ layer_z_zenohd_interop() {
     # as the router leg.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test usrpwd_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
-    # R4c — wz<->zenohd PUBKEY WIRE interop (needs zenohd + openssl, no plugin).
-    # Stock zenohd cannot admit a pubkey client (known_keys_file is an
-    # unimplemented upstream TODO -> Some(empty) lookup rejects all), so this
-    # proves the achievable interop: zenohd DECODES wz's pubkey InitSyn and
-    # rejects only at the lookup (wz's wire is canonical-router decodable).
+    # R4c — wz<->zenohd PUBKEY WIRE interop, BOTH directions (needs zenohd +
+    # openssl, no plugin). Leg a (R4c): wz DIALS. Stock zenohd cannot admit a
+    # pubkey client (known_keys_file is an unimplemented upstream TODO ->
+    # Some(empty) lookup rejects all), so that leg proves the achievable interop:
+    # zenohd DECODES wz's pubkey InitSyn and rejects only at the lookup. Leg b
+    # (R311y576): zenohd DIALS, and this one reaches ESTABLISHED — the same
+    # Some(empty) lookup that rejects every initiator EXEMPTS the empty set on the
+    # responder-key side (pubkey.rs:414-418), so the success path was always on
+    # this side. Leg b is also the foreign anchor for wz's own initiator gate.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test pubkey_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311y392 — wz <-> zenohd UNIXPIPE cross-impl, BOTH directions (leg a: wz
