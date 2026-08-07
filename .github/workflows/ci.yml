@@ -2538,3 +2538,80 @@ jobs:
         # `ci` job cannot reach. R311y13: clippy -D warnings, not bare `check`.
         shell: bash
         run: (cd crates && cargo clippy -p wz-runtime-tokio --features transport-link-quic-datagram -- -D warnings)
+
+      # ── R311y581 — the lane now RUNS, not only compiles ──────────────
+      #
+      # Every step above this line is `clippy`. That makes this job a
+      # COMPILATION witness, and until now it was the whole of wz's evidence for
+      # macOS and Windows — while the `platform-macos` / `platform-windows`
+      # inventory atoms sat UNVERIFIED for the recorded reason "NO wz CI lane".
+      # That reason was FALSE from R311y13 onward: this lane has existed and
+      # passed on both hosts since. What was actually missing is the thing the
+      # atoms claim — that wz RUNS there — and no amount of clippy says it. An
+      # endianness assumption, a path separator, a socket option macOS rejects, a
+      # Windows loopback that needs a bind before connect: every one compiles.
+      #
+      # Each step guards on "at least one test passed" rather than an exact
+      # count. R311y569 recorded that a bare `N passed` guard goes stale the
+      # moment a test is added or renamed; the property needed here is only that
+      # the filter matched something, so a zero-test run cannot read green (which
+      # it otherwise would — libtest exits 0 on an empty selection).
+      - name: cargo test — wz-session-core (the host-independent core)
+        # The no_std + alloc core: codecs, key expressions, the session FSM's
+        # pure logic, the R311y579 dissector. It touches no socket and no
+        # filesystem, so a failure here is a genuine host-portability defect in
+        # wz's own logic (a byte-order assumption, a `usize` width, a
+        # `char`-vs-byte slip) rather than a platform integration gap.
+        shell: bash
+        run: |
+          set -o pipefail
+          out="$( (cd crates && cargo test -p wz-session-core) 2>&1 )" || { echo "$out"; exit 1; }
+          echo "$out" | grep -E '^test result' || true
+          grep -qE '^test result: ok\. [1-9][0-9]* passed' <<< "$out" || {
+            echo "portability FAIL: wz-session-core selected NO tests on ${{ runner.os }}" >&2
+            echo "$out" >&2
+            exit 1
+          }
+
+      - name: cargo test — wz-runtime-tokio AP surface (unit)
+        # The default AP feature set, which is deliberately the portable one (tcp
+        # + udp; unixsock / unixpipe / vsock / raweth are all off by default and
+        # are the Linux- or unix-only backends). These are the tokio-side unit
+        # tests, so this is where a runtime assumption that only holds on Linux
+        # surfaces.
+        shell: bash
+        run: |
+          set -o pipefail
+          out="$( (cd crates && cargo test -p wz-runtime-tokio --lib) 2>&1 )" || { echo "$out"; exit 1; }
+          echo "$out" | grep -E '^test result' || true
+          grep -qE '^test result: ok\. [1-9][0-9]* passed' <<< "$out" || {
+            echo "portability FAIL: wz-runtime-tokio --lib selected NO tests on ${{ runner.os }}" >&2
+            echo "$out" >&2
+            exit 1
+          }
+
+      - name: cargo test — a REAL wz<->wz session over loopback TCP
+        # THE LOAD-BEARING STEP, and the reason the two above are not enough: it
+        # drives an actual four-way handshake between a wz acceptor and a wz
+        # initiator over a real loopback TCP socket, to Established, on this
+        # host's own network stack. That is the property `platform-macos` /
+        # `platform-windows` assert, and it is the first time either has been
+        # asserted rather than inferred from a clean compile.
+        #
+        # Both fixtures are in-process and socket-only: no spawned binary, no
+        # foreign implementation, no tmpfs path — so they are portable by
+        # construction, unlike the pico / zenohd interop corpus, which needs
+        # provisioned foreign binaries this job has none of.
+        shell: bash
+        run: |
+          set -o pipefail
+          out="$( (cd crates && cargo test -p wz-runtime-tokio --test accept_and_open_session --test connect_and_open_session) 2>&1 )" || { echo "$out"; exit 1; }
+          echo "$out" | grep -E '^test result' || true
+          # BOTH fixtures must report a passing count: one guard would be
+          # satisfied by one file while the other silently selected nothing.
+          count="$(grep -cE '^test result: ok\. [1-9][0-9]* passed' <<< "$out")"
+          [ "$count" -ge 2 ] || {
+            echo "portability FAIL: expected a passing result from BOTH session fixtures on ${{ runner.os }}, got $count" >&2
+            echo "$out" >&2
+            exit 1
+          }
