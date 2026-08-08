@@ -1425,6 +1425,19 @@ PY
         echo "  inert families already stay covered." >&2
         return 1
     fi
+    # R311y606 — the PYTHON-FLOOR lint, FIRST because every check below it is
+    # a python script and their answers are only as portable as the interpreter
+    # that runs them. R311y605 landed `import tomllib` (stdlib from 3.11) in
+    # the census two lines down; the hosted lanes run ubuntu-22.04 / python
+    # 3.10, so C0 died in `import` on the first hosted run and hid the 29 steps
+    # behind it, while staying green on the 3.12 workstation that verified the
+    # round. Two arms: `ast.parse(feature_version=)` for grammar (no table --
+    # CPython's parser knows when each construct arrived) and a short
+    # self-checking table for stdlib modules newer than the floor. The floor is
+    # DERIVED from `runs-on:` rather than written down, so bumping the image
+    # moves it. Enforcement MEASURED on four arms: the y605 import verbatim, a
+    # PEP 695 alias, an unrecorded runner image, and a misspelt table entry.
+    python3 scripts/lib/python_floor_lint.py || return 1
     # R311y565 — the EXPIRED-BLOCKER lint. Eight times across y561-y563 a field
     # or a family sat unimplemented behind a comment naming its own reason, and
     # the reason had already dissolved -- twice in the round that wrote it. Each

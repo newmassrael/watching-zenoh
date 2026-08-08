@@ -43,6 +43,22 @@ until someone decides -- select it, or declare why not. Rule 3 (no stale
 excuse) is what stops the exclusion table from becoming the thing it was meant
 to prevent.
 
+## Why cargo and not a TOML parse (R311y606)
+
+The first version read the two `Cargo.toml` files with `tomllib`, which is
+stdlib only from Python 3.11. The hosted lane runs `ubuntu-22.04`, whose
+python3 is 3.10, so Layer C0 died in `import` on the very first hosted run
+after this gate landed -- and took the 29 steps behind it down with it, while
+the same layer stayed green on a 3.12 workstation.
+
+Asking cargo removes both halves of that. `cargo metadata --no-deps` costs
+~50ms, needs no network, and its `packages[].features` map is the manifest
+feature table verbatim (verified identical to the `tomllib` parse on both
+manifests, values included). It is also cargo's OWN parse of a format this
+repo does not own, so the census can no longer disagree with the resolver that
+actually builds the feature -- which is the property the gate is asserting.
+`feature_implies.py` already reads the same JSON for the same reason.
+
 ## What it does NOT check
 
 That the selected codec is actually USED as an oracle. Selecting a feature
@@ -52,13 +68,16 @@ makes an agreement test possible; writing one is the walker author's job, and
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-CODECS_MANIFEST = ROOT / "crates" / "wz-codecs" / "Cargo.toml"
-SESSION_MANIFEST = ROOT / "crates" / "wz-session-core" / "Cargo.toml"
+WORKSPACE_MANIFEST = ROOT / "crates" / "Cargo.toml"
+
+CODECS_PACKAGE = "wz-codecs"
+SESSION_PACKAGE = "wz-session-core"
 
 # The surface under census: the feature whose doc makes the "reads every message
 # it sees" claim.
@@ -79,13 +98,42 @@ EXCLUDED = {
 }
 
 
-def exposed_codec_features(manifest: Path) -> set[str]:
+def workspace_feature_tables() -> dict[str, dict[str, list[str]]]:
+    """Every workspace member's `[features]` table, as cargo itself reads it.
+
+    Raises rather than returning a partial answer: a census that cannot read
+    its input must not report coverage. The same rule the deploy lanes apply to
+    a missing python3.
+    """
+    cmd = [
+        "cargo",
+        "metadata",
+        "--format-version=1",
+        "--no-deps",
+        "--manifest-path",
+        str(WORKSPACE_MANIFEST),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError as e:
+        raise RuntimeError("cargo is not on PATH") from e
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"`cargo metadata` failed (rc={proc.returncode}): "
+            f"{proc.stderr.strip() or '<no stderr>'}"
+        )
+    md = json.loads(proc.stdout)
+    return {p["name"]: p.get("features", {}) for p in md["packages"]}
+
+
+def exposed_codec_features(features: dict[str, list[str]]) -> set[str]:
     """Every `codec-*` feature `wz-codecs` declares."""
-    data = tomllib.loads(manifest.read_text(encoding="utf-8"))
-    return {name for name in data.get("features", {}) if name.startswith("codec-")}
+    return {name for name in features if name.startswith("codec-")}
 
 
-def selected_codec_features(manifest: Path, root_feature: str) -> tuple[set[str], list[str]]:
+def selected_codec_features(
+    features: dict[str, list[str]], root_feature: str
+) -> tuple[set[str], list[str]]:
     """The `codec-*` features `root_feature` selects, transitively.
 
     Two forms reach `wz-codecs`: this crate's own `codec-X` forwarder, and a
@@ -96,10 +144,8 @@ def selected_codec_features(manifest: Path, root_feature: str) -> tuple[set[str]
     routes through a forwarder of a DIFFERENT name, which would make the two
     sides disagree silently.
     """
-    data = tomllib.loads(manifest.read_text(encoding="utf-8"))
-    features: dict[str, list[str]] = data.get("features", {})
     if root_feature not in features:
-        raise KeyError(f"{manifest} has no `{root_feature}` feature")
+        raise KeyError(f"{SESSION_PACKAGE} has no `{root_feature}` feature")
 
     resolved: set[str] = set()
     mismatched: list[str] = []
@@ -142,23 +188,32 @@ def selected_codec_features(manifest: Path, root_feature: str) -> tuple[set[str]
 
 
 def main() -> int:
-    for path in (CODECS_MANIFEST, SESSION_MANIFEST):
-        if not path.is_file():
-            print(f"dissect-feature-census: cannot read {path}", file=sys.stderr)
+    try:
+        tables = workspace_feature_tables()
+    except RuntimeError as e:
+        print(f"dissect-feature-census: {e}", file=sys.stderr)
+        return 1
+    for pkg in (CODECS_PACKAGE, SESSION_PACKAGE):
+        if pkg not in tables:
+            print(
+                f"dissect-feature-census: {pkg!r} is not a member of "
+                f"{WORKSPACE_MANIFEST}",
+                file=sys.stderr,
+            )
             return 1
 
-    exposed = exposed_codec_features(CODECS_MANIFEST)
+    exposed = exposed_codec_features(tables[CODECS_PACKAGE])
     if not exposed:
         # A version that found nothing would exit 0 forever and read as
         # coverage. Same rule as count_guard_lint.py's empty-scope failure.
         print(
             "dissect-feature-census: found NO codec-* feature in "
-            f"{CODECS_MANIFEST} -- the parse is broken, not the manifest",
+            f"{CODECS_PACKAGE} -- the read is broken, not the manifest",
             file=sys.stderr,
         )
         return 1
     try:
-        selected, mismatched = selected_codec_features(SESSION_MANIFEST, SURFACE)
+        selected, mismatched = selected_codec_features(tables[SESSION_PACKAGE], SURFACE)
     except KeyError as e:
         print(f"dissect-feature-census: {e}", file=sys.stderr)
         return 1
