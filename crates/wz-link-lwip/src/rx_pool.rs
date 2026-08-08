@@ -26,13 +26,16 @@
 //!
 //! It is the pool-facing half: reserve, fill, read, release. It does not
 //! model the ARMING half (`link_arm_rx` -> `dma_start_rx` -> `rx_complete`),
-//! because arming needs something this API cannot yet give: the ADDRESS of a
+//! because arming needs something this API does not give: the ADDRESS of a
 //! slot that is armed but not yet filled, to hand to a MAC's buffer-request
-//! callback. The emitted `Slot<DmaArmedRx>` carries only `idx()` and the
-//! pool's `storage` is private, so a descriptor-ring adapter cannot be built
-//! on the arm path today (measured against `out/wz-link-lwip/
-//! session_rx_pool_mcu.rs` at vendor/sce `ef4c2fe4d5`). A CPU-fill adapter
-//! needs none of that, which is why this half lands first.
+//! callback.
+//!
+//! R311y606 — that used to read "cannot be built", measured against the emit
+//! at vendor/sce `ef4c2fe4d5`, where `Slot<DmaArmedRx>` carried only `idx()`
+//! and the pool's `storage` was private. It was sent upstream and answered:
+//! `62794d8c4b` publishes the address and the reverse map, and the arm half
+//! now lives in [`rx_ring`](crate::rx_ring). A CPU-fill adapter still needs
+//! none of it, which is why the two halves are still two traits.
 //!
 //! Nor does it model a CIRCULAR-DMA source (zenoh-pico's serial port,
 //! `vendor/zenoh-pico/src/system/threadx/stm32/network.c:4`), where the

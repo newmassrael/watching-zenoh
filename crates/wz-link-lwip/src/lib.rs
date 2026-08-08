@@ -180,6 +180,13 @@ pub mod rx_sockets;
 /// dims; this consumes their LIFECYCLE, which until now had no caller.
 pub mod rx_pool;
 
+/// R311y606 — the same seam's ARMING half: slots a bus master fills through a
+/// published address. Split from [`rx_pool`] because a CPU-fill adapter must
+/// not have to implement arming, and because the two halves became buildable
+/// a pin apart — the address accessors this needs arrived in vendor/sce
+/// `62794d8c4b`.
+pub mod rx_ring;
+
 // R311lu — also under `test-support` so the exposed `lwip_test_link` harness
 // (which uses `std::sync` for its Once / Mutex) compiles for sibling crates'
 // tests, not only this crate's own `#[cfg(test)]` build.
