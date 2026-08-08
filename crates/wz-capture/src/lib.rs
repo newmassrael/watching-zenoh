@@ -1041,6 +1041,69 @@ mod datagram_tests {
         );
     }
 
+    /// R311y605 — a multicast JOIN is NAMED, not reported as an unknown MID.
+    ///
+    /// The hole this closes was silent in the worst way: the datagram flow was
+    /// created, the packet was not skipped, and `frame.is_ok()` — the assertion
+    /// the sibling test above makes — was TRUE, because
+    /// `InboundFrame::Unknown { mid: 7 }` is a successful parse. Every
+    /// coarse-grained check passed while the single most informative message on
+    /// zenoh's multicast session group (a peer announcing its zid, its lease and
+    /// its initial per-channel sequence numbers) arrived as an unnamed byte.
+    ///
+    /// So this asserts the VARIANT and its fields, not that a decode happened.
+    #[test]
+    fn a_multicast_join_is_decoded_rather_than_reported_as_an_unknown_mid() {
+        use wz_session_core::inbound::InboundFrame;
+
+        // The codec's own encode, so the fixture is not my reading of the
+        // layout. S set, so the capability pair rides along.
+        let join = wz_codecs::join::Join {
+            version: 0x09,
+            cbyte: (3 << 4) | 0x01,
+            zid: &[0xA0, 0xA1, 0xA2, 0xA3],
+            sn_res: Some(0x00),
+            batch_size: Some(0x1000),
+            // 10 whole seconds, which a pico beacon sends as T=1 + VLE 10.
+            lease: 10,
+            next_sn_reliable: 7,
+            next_sn_best_effort: 9,
+        };
+        let mut wire = alloc::vec![
+            wz_session_core::wire_const::T_MID_JOIN
+                | wz_session_core::wire_const::FLAG_T_JOIN_S
+                | wz_session_core::wire_const::FLAG_T_JOIN_T
+        ];
+        wire.extend_from_slice(&join.encode_to_vec(1));
+
+        let mut d = Dissection::new();
+        // The real multicast session group: zenoh shares 224.0.0.224:7446 for
+        // the scout group and the multicast session group alike.
+        let pkt = udp_packet([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, &wire);
+        d.push_packet(LINKTYPE_ETHERNET, 3, &pkt);
+
+        assert!(d.skipped().is_empty(), "{:?}", d.skipped());
+        assert_eq!(d.datagram_flows().len(), 1);
+        let frame = &d.datagram_flows()[0].frames[0].frame;
+        match frame {
+            Ok(InboundFrame::Join { body, has_ext, .. }) => {
+                assert!(!has_ext, "this JOIN carries no ext chain");
+                assert_eq!(body.zid.as_ref(), &[0xA0, 0xA1, 0xA2, 0xA3]);
+                assert_eq!(body.batch_size, Some(0x1000));
+                assert_eq!(body.next_sn_reliable, 7);
+                assert_eq!(body.next_sn_best_effort, 9);
+                // The T flag is projected at the decode boundary, so no
+                // consumer of a decode ever sees the wire's seconds.
+                assert_eq!(body.lease, 10_000, "the T flag was not projected");
+            }
+            other => panic!(
+                "a multicast JOIN must decode as InboundFrame::Join; got {other:?}. \
+                 `Unknown {{ mid: 7 }}` is the pre-R311y605 state and it is a \
+                 SUCCESSFUL parse, which is why nothing noticed"
+            ),
+        }
+    }
+
     /// Two datagrams between the same pair share one flow, in both
     /// directions — the observer sees one conversation, not two.
     #[test]

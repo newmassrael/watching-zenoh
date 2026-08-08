@@ -2049,6 +2049,18 @@ mod tests {
         f
     }
 
+    /// `field` must be a BITS subfield holding this value. Distinct from
+    /// [`uint`] on purpose: a subfield of a carrier byte and a field of its own
+    /// are different things on the wire, and a helper that accepted either
+    /// would let a walker demote one to the other unnoticed.
+    #[track_caller]
+    fn bits_of(root: &Field, name: &str) -> u64 {
+        match root.find(name).map(|f| &f.value) {
+            Some(FieldValue::Bits(v)) => *v,
+            other => panic!("{name} is not a bits subfield: {other:?}"),
+        }
+    }
+
     /// `field` must hold this unsigned value.
     #[track_caller]
     fn uint(root: &Field, name: &str) -> u64 {
@@ -3146,6 +3158,187 @@ mod tests {
             ),
             "a fragment payload must stay raw"
         );
+    }
+
+    /// Drive `dissect_transport_message` and the generated BODY codec over the
+    /// same bytes and reject any disagreement on how much they consumed.
+    ///
+    /// The transport twin of [`agree`], and it has to be its own helper: a
+    /// transport message's header byte is the DISSECTOR's to read, while the
+    /// generated body codecs start after it and take the header's flag bits as
+    /// arguments. Returns the walked field so the caller can assert values.
+    #[track_caller]
+    fn agree_transport(
+        name: &'static str,
+        bytes: &[u8],
+        body_consumed: impl FnOnce(u8, &[u8]) -> usize,
+    ) -> Field {
+        let by_codec = 1 + body_consumed(bytes[0], &bytes[1..]);
+        let f = match dissect_transport_message(bytes, 0) {
+            Ok(f) => f,
+            Err(e) => panic!("{name}: the walker rejected a fixture the codec accepted: {e:?}"),
+        };
+        assert_eq!(f.name, name, "the walker named it {}", f.name);
+        assert_eq!(
+            f.span.end, by_codec,
+            "{name}: the walker consumed {} bytes, the codec {by_codec}",
+            f.span.end
+        );
+        assert_tiles(&f, 0, by_codec);
+        f
+    }
+
+    /// R311y605 — the three TRANSPORT MIDs whose walkers had no codec in the
+    /// build, judged against the codecs the census now forces `dissect` to
+    /// select.
+    ///
+    /// Join is the one that mattered: ten hand-walked fields, TWO header flags
+    /// with unrelated meanings one bit apart (`S` at 0x40 gates the optional
+    /// `sn_res` / `batch_size` pair, `T` at 0x20 changes the lease's unit), and
+    /// before this round not one test anywhere in the dissect suite. The
+    /// fixtures are the CODEC's own encode rather than hand-laid bytes, so a
+    /// walker that disagrees with the codec fails here instead of agreeing with
+    /// my reading of the layout.
+    #[test]
+    fn the_transport_walkers_agree_with_their_generated_codecs() {
+        use sce_forge_runtime::codec::SceCursor;
+
+        // JOIN with S set, so the optional capability pair is present. Encoded
+        // by the codec; the header byte is the dissector's half and is written
+        // here because the body codec does not own it.
+        let join = wz_codecs::join::Join {
+            version: 0x09,
+            // whatami = peer (0x01) in the low bits, zid_len-1 = 3 in the high.
+            cbyte: (3 << 4) | 0x01,
+            zid: &[0xA0, 0xA1, 0xA2, 0xA3],
+            sn_res: Some(0x00),
+            batch_size: Some(0x1000),
+            lease: 10_000,
+            next_sn_reliable: 7,
+            next_sn_best_effort: 9,
+        };
+        let mut bytes =
+            alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_JOIN_S];
+        bytes.extend_from_slice(&join.encode_to_vec(1));
+        let f = agree_transport("Join", &bytes, |header, body| {
+            let s = u8::from(header & wz_codecs::wire_const::FLAG_T_JOIN_S != 0);
+            let mut c = SceCursor::new(body);
+            let j = wz_codecs::join::Join::decode(&mut c, s).expect("codec rejected the join");
+            assert_eq!(j.zid, &[0xA0, 0xA1, 0xA2, 0xA3]);
+            assert_eq!(j.batch_size, Some(0x1000));
+            assert_eq!(j.next_sn_reliable, 7);
+            body.len() - c.remaining()
+        });
+        assert_eq!(uint(&f, "version"), 0x09);
+        assert_eq!(raw(&f, "zid"), alloc::vec![0xA0, 0xA1, 0xA2, 0xA3]);
+        assert_eq!(uint(&f, "batch_size"), 0x1000);
+        assert_eq!(uint(&f, "lease"), 10_000);
+        assert_eq!(uint(&f, "next_sn_reliable"), 7);
+        assert_eq!(uint(&f, "next_sn_best_effort"), 9);
+        assert_eq!(bits_of(&f, "whatami"), 0x01);
+        assert_eq!(bits_of(&f, "zid_len"), 4);
+
+        // JOIN with S CLEAR — the discriminating arm. The walker must NOT read
+        // the two optionals, and the codec agrees on the shorter body. Without
+        // this leg a walker that read them unconditionally would still pass the
+        // leg above.
+        let minimal = wz_codecs::join::Join {
+            sn_res: None,
+            batch_size: None,
+            ..join
+        };
+        let mut bytes = alloc::vec![wz_codecs::wire_const::T_MID_JOIN];
+        bytes.extend_from_slice(&minimal.encode_to_vec(0));
+        let f = agree_transport("Join", &bytes, |header, body| {
+            let s = u8::from(header & wz_codecs::wire_const::FLAG_T_JOIN_S != 0);
+            let mut c = SceCursor::new(body);
+            wz_codecs::join::Join::decode(&mut c, s).expect("codec rejected the minimal join");
+            body.len() - c.remaining()
+        });
+        assert!(
+            f.find("batch_size").is_none(),
+            "an S-clear JOIN must not carry batch_size"
+        );
+        assert!(
+            f.find("sn_res").is_none(),
+            "an S-clear JOIN must not carry sn_res"
+        );
+
+        // FRAGMENT — R and M set, no Z, so the codec's `sn` + tail payload is
+        // the whole body. The walker must leave the payload RAW: it is a slice
+        // of a message that does not begin there.
+        let frag = wz_codecs::fragment::Fragment {
+            sn: 3,
+            payload: &[0xDE, 0xAD],
+        };
+        let mut bytes = alloc::vec![
+            wz_codecs::wire_const::T_MID_FRAGMENT
+                | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
+                | wz_codecs::wire_const::FLAG_T_FRAGMENT_M
+        ];
+        bytes.extend_from_slice(&frag.encode_to_vec());
+        let f = agree_transport("Fragment", &bytes, |_, body| {
+            let mut c = SceCursor::new(body);
+            let fr = wz_codecs::fragment::Fragment::decode(&mut c).expect("codec rejected");
+            assert_eq!(fr.sn, 3);
+            assert_eq!(fr.payload, &[0xDE, 0xAD]);
+            body.len() - c.remaining()
+        });
+        assert_eq!(uint(&f, "sn"), 3);
+        assert_eq!(raw(&f, "payload"), alloc::vec![0xDE, 0xAD]);
+
+        // KEEP_ALIVE — an empty body. The codec consuming ZERO bytes is the
+        // whole claim: a walker that read one would disagree here.
+        let bytes = alloc::vec![wz_codecs::wire_const::T_MID_KEEP_ALIVE];
+        agree_transport("KeepAlive", &bytes, |_, body| {
+            let mut c = SceCursor::new(body);
+            wz_codecs::keep_alive::KeepAlive::decode(&mut c).expect("codec rejected");
+            body.len() - c.remaining()
+        });
+    }
+
+    /// R311y605 — the T flag changes the lease's UNIT, and the dissector does
+    /// NOT project it.
+    ///
+    /// Recorded as a test rather than as a comment because it is a real
+    /// divergence between two of wz's own readers of the same byte:
+    /// [`crate::join_decode::decode_join`] returns milliseconds (it projects
+    /// `T`), and the walker reports the raw VLE. Both are right for their
+    /// consumer — a field tree must show what is ON the wire, at the offset it
+    /// occupies — and an analyst reading `lease` off a dissection of a pico
+    /// beacon is reading seconds. Pinned so it is a decision rather than a
+    /// surprise.
+    #[test]
+    fn a_t_flagged_join_dissects_its_lease_in_the_wire_unit() {
+        use wz_codecs::wire_const::{FLAG_T_JOIN_T, T_MID_JOIN};
+
+        let join = wz_codecs::join::Join {
+            version: 0x09,
+            cbyte: 0x01,
+            zid: &[0xB0],
+            sn_res: None,
+            batch_size: None,
+            // 10 SECONDS on the wire, which is the pico default beacon's form.
+            lease: 10,
+            next_sn_reliable: 0,
+            next_sn_best_effort: 0,
+        };
+        let mut bytes = alloc::vec![T_MID_JOIN | FLAG_T_JOIN_T];
+        bytes.extend_from_slice(&join.encode_to_vec(0));
+
+        let f = dissect_transport_message(&bytes, 0).expect("join did not dissect");
+        assert_eq!(
+            uint(&f, "lease"),
+            10,
+            "the dissection reports the wire VLE, unprojected"
+        );
+        assert!(
+            f.find("t").is_some(),
+            "the T flag must be surfaced, or the unit is unknowable from the tree"
+        );
+        // The decoder projects the same bytes to milliseconds.
+        let decoded = crate::join_decode::decode_join(&bytes).expect("decode_join rejected it");
+        assert_eq!(decoded.lease, 10_000);
     }
 
     #[test]

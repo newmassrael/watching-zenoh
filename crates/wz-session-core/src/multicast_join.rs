@@ -21,6 +21,11 @@
 
 use alloc::vec::Vec;
 
+// R311y605 — the cursor is now `decode_join_qos`'s alone: the base-body decode
+// that used to need it here moved to `crate::join_decode`. Gated, or the
+// `transport-qos`-off subset build fails on an unused import under
+// `-D warnings` (measured by `--features alloc,session-multicast,codec-join`).
+#[cfg(feature = "transport-qos")]
 use sce_forge_runtime::codec::SceCursor;
 use wz_codecs::join::Join;
 #[cfg(feature = "multicast-declarations")]
@@ -179,10 +184,14 @@ pub fn decode_join_qos(
     if header & wire_const::FLAG_T_Z == 0 {
         return None; // no extension chain -> non-qos JOIN
     }
-    let s = u8::from(header & wire_const::FLAG_T_JOIN_S != 0);
-    let mut cursor = SceCursor::new(&bytes[1..]);
-    // Re-decode the base body to advance the cursor to the extension chain.
-    Join::decode(&mut cursor, s).ok()?;
+    // R311y605 — the base body's width comes from the SHARED decode
+    // ([`crate::join_decode::decode_join_body`]) rather than from a second
+    // S-flag projection here. It used to re-decode with its own `s`, which
+    // meant the bit that selects two optional body fields was read in two
+    // places; the hoist that gave `parse_inbound` a JOIN arm made that three,
+    // so it became one.
+    let (_, consumed) = crate::join_decode::decode_join_body(header, &bytes[1..]).ok()?;
+    let mut cursor = SceCursor::new(&bytes[1 + consumed..]);
     let ext_header = *cursor.peek_slice(1).ok()?.first()?;
     cursor.advance(1).ok()?;
     if ext_header & EXT_FULL_ID_MASK != JOIN_QOS_EXT_HEADER {
@@ -198,45 +207,12 @@ pub fn decode_join_qos(
     Some(pairs)
 }
 
-/// If `bytes` is a multicast JOIN datagram, decode its full body (a
-/// borrowed view into `bytes`). Returns `None` for a non-JOIN MID or a
-/// malformed body. The returned `lease` is ALWAYS milliseconds — the
-/// `T` header flag's seconds form is projected back here (R311kr), so
-/// consumers never see the wire unit. The caller validates the
-/// announcement (§3.2 rejection rules — [`validate_join`]) before
-/// feeding it to
-/// [`MulticastDispatcher::ingest_join`](crate::multicast_dispatch::MulticastDispatcher::ingest_join).
-pub fn decode_join(bytes: &[u8]) -> Option<Join<'_>> {
-    let header = *bytes.first()?;
-    if header & 0x1f != wire_const::T_MID_JOIN {
-        return None;
-    }
-    // The `join` codec gates its optional sn_res / batch_size on `s & 0x01`,
-    // so project the wire S flag (header bit 6, `FLAG_T_JOIN_S` = 0x40, per
-    // zenoh-pico transport.h:61) to that bit. A minimal JOIN clears S so
-    // `s` is 0, but project from the named flag (not a raw shift) so a
-    // future richer JOIN decodes correctly — header bit 5 is the distinct
-    // `_Z_FLAG_T_JOIN_T` lease-unit flag (handled below), NOT S, so a
-    // `header >> 5` shift would read the wrong bit.
-    let s = u8::from(header & wire_const::FLAG_T_JOIN_S != 0);
-    let mut cursor = SceCursor::new(&bytes[1..]);
-    let mut join = Join::decode(&mut cursor, s).ok()?;
-    // R311kr — T flag = the lease VLE is in SECONDS; project back to the
-    // milliseconds every wz consumer speaks (pico decode parity,
-    // codec/transport.c:161-164: `_lease = _lease * 1000`). The default
-    // pico beacon (lease 10000ms) arrives as T=1 + VLE 10, so skipping
-    // this read it as 10ms. R311ku — the projection SSOT is
-    // `crate::lease` (shared with the unicast OPEN decode boundary).
-    join.lease = crate::lease::lease_from_wire(header & wire_const::FLAG_T_JOIN_T != 0, join.lease);
-    Some(join)
-}
-
-/// If `bytes` is a multicast JOIN datagram, decode it and return the
-/// announcer's zid (a sub-slice borrow of `bytes`). Returns `None` for a
-/// non-JOIN MID or a malformed body. Thin projection of [`decode_join`].
-pub fn decode_join_zid(bytes: &[u8]) -> Option<&[u8]> {
-    decode_join(bytes).map(|join| join.zid)
-}
+// R311y605 — the DECODE half now lives in [`crate::join_decode`], gated on
+// `codec-join` alone, because the passive observer's `parse_inbound` is a second
+// consumer and is not a multicast participant. Re-exported here so every
+// existing `multicast_join::decode_join` caller is unchanged, and so this
+// module still reads as the JOIN wire SSOT it is.
+pub use crate::join_decode::{decode_join, decode_join_zid};
 
 /// §3.2 rejection rules for an inbound JOIN announcement, ahead of
 /// [`MulticastDispatcher::ingest_join`](crate::multicast_dispatch::MulticastDispatcher::ingest_join)

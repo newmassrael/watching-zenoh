@@ -50,4 +50,26 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     # `raweth_link` is pure header parsing with no dependencies of its own, so
     # the cost is a struct and two functions.
     "transport-link-raweth",
+    # R311y605 — the multicast JOIN, and for the same reason as raweth above:
+    # not behind a `wz-capture` feature, because a capture front end reads what
+    # is on the wire. Its absence was silent in the worst available way — the
+    # datagram flow was created, the packet was not skipped, and the frame
+    # parsed SUCCESSFULLY as `Unknown { mid: 7 }`, so every coarse assertion
+    # held while the announcement traffic on zenoh's multicast session group
+    # (a peer's zid, lease and initial per-channel SNs) arrived unnamed.
+    "codec-join",
+] }
+
+# R311y605 — the JOIN test fixture is built by the CODEC's own encode rather
+# than by a hand-laid byte string, so a walker or a decode that disagrees with
+# the codec fails instead of agreeing with the fixture author's reading of the
+# layout. dev-only: nothing in the crate's own code reaches wz-codecs, which
+# stays reached through the session SSOT (`wz_session_core::wire_const`).
+# Features named explicitly rather than left to unification — a subset build
+# that happened not to unify `codec-join` on would otherwise fail here for a
+# reason that looks like the test's.
+[dev-dependencies]
+wz-codecs = { path = "../wz-codecs", default-features = false, features = [
+    "alloc",
+    "codec-join",
 ] }

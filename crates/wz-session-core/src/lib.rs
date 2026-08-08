@@ -419,7 +419,13 @@ pub mod ext_header;
         feature = "codec-close",
         feature = "codec-keep-alive",
         feature = "codec-frame",
-        feature = "session-extauth"
+        feature = "session-extauth",
+        // R311y605 — `parse_inbound`'s JOIN arm decodes the Z-gated chain that
+        // trails the base body (the QoS-SN advertisement zenoh and pico both
+        // send), so `codec-join` alone must bring this module in. Found by a
+        // FEATURE SUBSET build, not by the workspace build: `--features
+        // alloc,codec-join` is the only shape where no sibling codec pulls it.
+        feature = "codec-join"
     )
 ))]
 mod ext_chain;
@@ -427,6 +433,16 @@ mod ext_chain;
 /// Lease-deadline check outcome (R77 helper surface). no_std +
 /// no_alloc clean (pure enum); unconditional.
 pub mod lease;
+
+/// R311y605 — the JOIN datagram DECODE, gated on `codec-join` alone.
+///
+/// Hoisted out of [`multicast_join`] (which needs `session-multicast` for its
+/// encode + validate halves) when a second, non-participant consumer arrived:
+/// the passive observer's [`inbound::parse_inbound`], which reported every JOIN
+/// as `Unknown { mid: 0x07 }`. Re-exported from [`multicast_join`], so that
+/// module remains the JOIN wire SSOT for a participant reader.
+#[cfg(feature = "codec-join")]
+pub mod join_decode;
 
 /// R311ky — deferred callback firing (the F-6 structural fix): the
 /// staging queue + per-listener take-call-restore cell that let

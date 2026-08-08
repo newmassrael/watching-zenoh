@@ -9617,6 +9617,110 @@
         "verify-codegen.sh Layer 2 활성화 — R15 carry 유지 (SCE-MAP/source-hash strip option or body-only diff reporter)."
       ]
     },
+    "Round 1619": {
+      "decision_summary": "R311y605 -- the multicast JOIN the passive observer could not read, and the feature census that named the gap instead of an accident finding it",
+      "changes_bullets": [
+        "scripts/lib/dissect_feature_census.py (new): the codec-* space wz-codecs exposes vs the set `dissect` selects, with an EXCLUDED table carrying a reason per non-selection and rule-3 staleness checks on both directions. Wired into run-ci Layer C0.",
+        "The census named three unselected features on its first run: codec-fragment, codec-join, codec-keep-alive. All three are TRANSPORT MIDs, which the existing network-MID set-equality gate (dissect.rs::the_dissector_and_the_decoder_recognise_the_same_mid_set) structurally cannot see -- it walks the 32 network MIDs, and the three prior occurrences of this class lived on the scouting space (R311y585), inside an OAM body (R311y597), and here.",
+        "crates/wz-session-core/src/join_decode.rs (new): the JOIN decode hoisted out of multicast_join (which is session-multicast-gated for its encode + validate halves) so it is gated on codec-join alone. Both header-flag projections -- S at 0x40 gating the optional sn_res/batch_size pair, T at 0x20 changing the lease UNIT -- now live in exactly one function, `decode_join_body`, which returns the real CodecError plus the byte count consumed.",
+        "crates/wz-session-core/src/inbound.rs: InboundFrame::Join, and the T_MID_JOIN arm of parse_inbound. This is the reach fix: parse_inbound is what the PASSIVE observer reads a capture through, and it reported every multicast peer announcement as Unknown { mid: 7 }.",
+        "inbound_to_fsm_event maps Join to FramingError, byte-for-byte the pre-y605 outcome when it fell through to Unknown: gaining the ability to DECODE a message must not change what the session FSM does with it.",
+        "crates/wz-session-core/src/multicast_join.rs: decode_join / decode_join_zid re-exported from join_decode, so every existing caller is unchanged. decode_join_qos now takes the base-body width from the shared decode instead of re-projecting S itself -- that bit was read in two places and the hoist would have made it three.",
+        "crates/wz-capture: selects codec-join, for the same reason raweth is not optional here -- a capture front end reads what is on the wire. dev-dependency on wz-codecs (codec-join) so the JOIN fixture is the codec's own encode.",
+        "crates/wz-session-core/Cargo.toml: `dissect` selects codec-fragment, codec-join, codec-keep-alive.",
+        "Three cfg-union holes found by the `--features alloc,codec-join` SUBSET build, which is the only shape where no sibling codec pulls the shared parts in: lib.rs `mod ext_chain`, ext_chain.rs `decode_ext_chain`, and wz-codecs `wire_const::FLAG_T_Z` (whose doc said \"shared across every T_MID_T_* header\" while its predicate listed five of six).",
+        "run-ci Layer C1bn: a join_tests filter arm, plus clippy under `--no-default-features --features codec-join` and `alloc,codec-join`."
+      ],
+      "verification_bullets": [
+        "Census enforcement MEASURED, not observed: removing codec-join from the dissect feature list reds dissect_feature_census.py (exit 1, names the feature); restoring it greens it.",
+        "The capture-side hole was measured as a hard COMPILE error before the fix -- InboundFrame::Join did not exist and wire_const::FLAG_T_JOIN_T was configured out in a wz-capture build.",
+        "New tests: dissect::tests::the_transport_walkers_agree_with_their_generated_codecs (Join S-set and S-clear, Fragment, KeepAlive, each judged against the generated codec's own consumption); dissect::tests::a_t_flagged_join_dissects_its_lease_in_the_wire_unit; inbound::join_tests (6); wz-capture datagram_tests::a_multicast_join_is_decoded_rather_than_reported_as_an_unknown_mid.",
+        "Damage probe, three arms, each firing only its own legs with green controls. Arm 1 (S read as a raw header>>5 shift): 4 of 6 join tests red, and the S-CLEAR leg stayed GREEN -- correct by accident, which is why the S-set leg exists. Arm 2 (T projection applied unconditionally): 3 red including both lease legs. Arm 3 (ext chain read from a hardcoded offset 10): exactly 1 red, the Z-flagged leg.",
+        "The capture test asserts the VARIANT and its fields rather than frame.is_ok(): Unknown { mid: 7 } is a SUCCESSFUL parse, so the sibling test's assertion held throughout the defect's life.",
+        "Local lanes run and green: C0, A5 (201 BUILT + 0 inert), C1 (92s), C1bn, C1bf, C1bo, C1bs, C1h, C1l, C1m, C1p, C1q, C2, C3, C4, L. Feature subsets swept by hand around codec-join: alloc / codec-join / alloc,codec-join / alloc,codec-join,session-unicast / the session-multicast combo with and without transport-qos.",
+        "Hosted run for 1f7d2f2f READ this session: run 31264675176, SUCCESS, 15 jobs, 0 failures. The R311y604 unread-run carry is discharged."
+      ],
+      "impact_refs": [
+        "5.12-codec",
+        "5.1-transport"
+      ],
+      "carry_forward_bullets": [
+        "The dissect feature census covers the `dissect` surface only. wz-capture's own codec selection is NOT censused, and that surface has real absences with no declared reason: it selects no scouting codec at all, so a scout / hello datagram in a capture still reaches the wrong MID space (the R311y597 B1 item, whose placement question is still open).",
+        "codec-serial is the census's one EXCLUDED entry. The reason given is that it is LINK framing with no MID and no standard DLT to arrive through, which matches dissect_name_census.py carrying `crc32` on the same ground -- but the consequence half of that exclusion (a serial capture is unreadable) is a real reach gap, not merely an out-of-scope note.",
+        "The walker reports JOIN's lease in the WIRE unit while decode_join projects it to milliseconds. Pinned by a test as a decision; an analyst reading `lease` off a dissection of a pico beacon is reading seconds and must read the `t` flag beside it.",
+        "Still open on the analyzer axis, unchanged this round: F3 (walk_err's SHM path untested), F4 (the linkstate walker's deliberate cap divergence unpinned), F5 (no roll-up of the per-object retransmit / checksum counters), C1 (pcapng unread -- the format wireshark writes by DEFAULT), C2 (IPv4 fragment reassembly), C7 (desynchronisation terminal, no resync), C8 (multicast carries FragmentMarkers::NONE so First/Drop cannot be judged there)."
+      ],
+      "publishable_decision_summary": "R311y605 -- the multicast JOIN the passive observer could not read, and the feature census that named the gap instead of an accident finding it",
+      "publishable_changes_bullets": [
+        "scripts/lib/dissect_feature_census.py (new): the codec-* space wz-codecs exposes vs the set `dissect` selects, with an EXCLUDED table carrying a reason per non-selection and rule-3 staleness checks on both directions. Wired into run-ci Layer C0.",
+        "The census named three unselected features on its first run: codec-fragment, codec-join, codec-keep-alive. All three are TRANSPORT MIDs, which the existing network-MID set-equality gate (dissect.rs::the_dissector_and_the_decoder_recognise_the_same_mid_set) structurally cannot see -- it walks the 32 network MIDs, and the three prior occurrences of this class lived on the scouting space (R311y585), inside an OAM body (R311y597), and here.",
+        "crates/wz-session-core/src/join_decode.rs (new): the JOIN decode hoisted out of multicast_join (which is session-multicast-gated for its encode + validate halves) so it is gated on codec-join alone. Both header-flag projections -- S at 0x40 gating the optional sn_res/batch_size pair, T at 0x20 changing the lease UNIT -- now live in exactly one function, `decode_join_body`, which returns the real CodecError plus the byte count consumed.",
+        "crates/wz-session-core/src/inbound.rs: InboundFrame::Join, and the T_MID_JOIN arm of parse_inbound. This is the reach fix: parse_inbound is what the PASSIVE observer reads a capture through, and it reported every multicast peer announcement as Unknown { mid: 7 }.",
+        "inbound_to_fsm_event maps Join to FramingError, byte-for-byte the pre-y605 outcome when it fell through to Unknown: gaining the ability to DECODE a message must not change what the session FSM does with it.",
+        "crates/wz-session-core/src/multicast_join.rs: decode_join / decode_join_zid re-exported from join_decode, so every existing caller is unchanged. decode_join_qos now takes the base-body width from the shared decode instead of re-projecting S itself -- that bit was read in two places and the hoist would have made it three.",
+        "crates/wz-capture: selects codec-join, for the same reason raweth is not optional here -- a capture front end reads what is on the wire. dev-dependency on wz-codecs (codec-join) so the JOIN fixture is the codec's own encode.",
+        "crates/wz-session-core/Cargo.toml: `dissect` selects codec-fragment, codec-join, codec-keep-alive.",
+        "Three cfg-union holes found by the `--features alloc,codec-join` SUBSET build, which is the only shape where no sibling codec pulls the shared parts in: lib.rs `mod ext_chain`, ext_chain.rs `decode_ext_chain`, and wz-codecs `wire_const::FLAG_T_Z` (whose doc said \"shared across every T_MID_T_* header\" while its predicate listed five of six).",
+        "run-ci Layer C1bn: a join_tests filter arm, plus clippy under `--no-default-features --features codec-join` and `alloc,codec-join`."
+      ],
+      "publishable_verification_bullets": [
+        "Census enforcement MEASURED, not observed: removing codec-join from the dissect feature list reds dissect_feature_census.py (exit 1, names the feature); restoring it greens it.",
+        "The capture-side hole was measured as a hard COMPILE error before the fix -- InboundFrame::Join did not exist and wire_const::FLAG_T_JOIN_T was configured out in a wz-capture build.",
+        "New tests: dissect::tests::the_transport_walkers_agree_with_their_generated_codecs (Join S-set and S-clear, Fragment, KeepAlive, each judged against the generated codec's own consumption); dissect::tests::a_t_flagged_join_dissects_its_lease_in_the_wire_unit; inbound::join_tests (6); wz-capture datagram_tests::a_multicast_join_is_decoded_rather_than_reported_as_an_unknown_mid.",
+        "Damage probe, three arms, each firing only its own legs with green controls. Arm 1 (S read as a raw header>>5 shift): 4 of 6 join tests red, and the S-CLEAR leg stayed GREEN -- correct by accident, which is why the S-set leg exists. Arm 2 (T projection applied unconditionally): 3 red including both lease legs. Arm 3 (ext chain read from a hardcoded offset 10): exactly 1 red, the Z-flagged leg.",
+        "The capture test asserts the VARIANT and its fields rather than frame.is_ok(): Unknown { mid: 7 } is a SUCCESSFUL parse, so the sibling test's assertion held throughout the defect's life.",
+        "Local lanes run and green: C0, A5 (201 BUILT + 0 inert), C1 (92s), C1bn, C1bf, C1bo, C1bs, C1h, C1l, C1m, C1p, C1q, C2, C3, C4, L. Feature subsets swept by hand around codec-join: alloc / codec-join / alloc,codec-join / alloc,codec-join,session-unicast / the session-multicast combo with and without transport-qos.",
+        "Hosted run for 1f7d2f2f READ this session: run 31264675176, SUCCESS, 15 jobs, 0 failures. The R311y604 unread-run carry is discharged."
+      ],
+      "publishable_impact_refs": [
+        "5.12-codec",
+        "5.1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The dissect feature census covers the `dissect` surface only. wz-capture's own codec selection is NOT censused, and that surface has real absences with no declared reason: it selects no scouting codec at all, so a scout / hello datagram in a capture still reaches the wrong MID space (the R311y597 B1 item, whose placement question is still open).",
+        "codec-serial is the census's one EXCLUDED entry. The reason given is that it is LINK framing with no MID and no standard DLT to arrive through, which matches dissect_name_census.py carrying `crc32` on the same ground -- but the consequence half of that exclusion (a serial capture is unreadable) is a real reach gap, not merely an out-of-scope note.",
+        "The walker reports JOIN's lease in the WIRE unit while decode_join projects it to milliseconds. Pinned by a test as a decision; an analyst reading `lease` off a dissection of a pico beacon is reading seconds and must read the `t` flag beside it.",
+        "Still open on the analyzer axis, unchanged this round: F3 (walk_err's SHM path untested), F4 (the linkstate walker's deliberate cap divergence unpinned), F5 (no roll-up of the per-object retransmit / checksum counters), C1 (pcapng unread -- the format wireshark writes by DEFAULT), C2 (IPv4 fragment reassembly), C7 (desynchronisation terminal, no resync), C8 (multicast carries FragmentMarkers::NONE so First/Drop cannot be judged there)."
+      ]
+    },
+    "Round 1620": {
+      "decision_summary": "Round 1619 impact_refs were domain names, not section ids; frozen ledger forbids amending, so the correct refs are carried here",
+      "changes_bullets": [
+        "mnemosyne.toml: the two dangling refs from Round 1619 registered in [[orphan_ledger]] as kind = atomic_entry_ref, reason pointing here.",
+        "This entry carries the impact_refs Round 1619 should have had: the two atomic section ids for the codec and transport feature-catalog atoms.",
+        "No code change. Round 1619 is the round; this is its reference correction."
+      ],
+      "verification_bullets": [
+        "Round 1619 was appended with `--impact \"5.12-codec,5.1-transport\"`. Those are DOMAIN names from the A3 grading census, not atomic section ids, and validate-workspace rejected with `atomic orphan new (entries=2, sections=0)`.",
+        "Re-appending Round 1619 with corrected refs was attempted and correctly REFUSED by the frozen-ledger gate (Round 161 §41), which is why this is a new entry plus an orphan-ledger registration rather than an amendment.",
+        "validate-workspace after this entry: T1 orphan total unchanged at 14 with new=+0, atomic orphan_refs carried as ledger rather than new."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "The two names are one keystroke apart from a real section id and there is no gate that would have caught it before the append: `--impact` takes free text, and validate-workspace only sees the damage afterwards, at which point the entry is frozen. A pre-append existence check on each ref would turn this from a post-hoc orphan-ledger row into a refusal."
+      ],
+      "publishable_decision_summary": "Round 1619 impact_refs were domain names, not section ids; frozen ledger forbids amending, so the correct refs are carried here",
+      "publishable_changes_bullets": [
+        "mnemosyne.toml: the two dangling refs from Round 1619 registered in [[orphan_ledger]] as kind = atomic_entry_ref, reason pointing here.",
+        "This entry carries the impact_refs Round 1619 should have had: the two atomic section ids for the codec and transport feature-catalog atoms.",
+        "No code change. Round 1619 is the round; this is its reference correction."
+      ],
+      "publishable_verification_bullets": [
+        "Round 1619 was appended with `--impact \"5.12-codec,5.1-transport\"`. Those are DOMAIN names from the A3 grading census, not atomic section ids, and validate-workspace rejected with `atomic orphan new (entries=2, sections=0)`.",
+        "Re-appending Round 1619 with corrected refs was attempted and correctly REFUSED by the frozen-ledger gate (Round 161 §41), which is why this is a new entry plus an orphan-ledger registration rather than an amendment.",
+        "validate-workspace after this entry: T1 orphan total unchanged at 14 with new=+0, atomic orphan_refs carried as ledger rather than new."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The two names are one keystroke apart from a real section id and there is no gate that would have caught it before the append: `--impact` takes free text, and validate-workspace only sees the damage afterwards, at which point the entry is frozen. A pre-append existence check on each ref would turn this from a post-hoc orphan-ledger row into a refusal."
+      ]
+    },
     "Round 17": {
       "decision_summary": "OQ-W24 full closure — RFC §5.I.0 'Tier definitions' subsection landed as atomic-store new section via R287/R289 add_section primitive (first watching-zenoh use of new section creation surface).",
       "changes_bullets": [

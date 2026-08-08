@@ -567,7 +567,13 @@ pub mod wire_const {
         feature = "codec-open-body",
         feature = "codec-close",
         feature = "codec-keep-alive",
-        feature = "codec-frame"
+        feature = "codec-frame",
+        // R311y605 — JOIN carries a Z-gated chain too (the QoS-SN
+        // advertisement), and its readers reach the bit through this name. The
+        // doc above says "shared across every `T_MID_T_*` header" while the
+        // predicate listed five of six; a `--features codec-join` subset build
+        // is what made the sixth visible.
+        feature = "codec-join"
     ))]
     pub const FLAG_T_Z: u8 = 0x80;
 

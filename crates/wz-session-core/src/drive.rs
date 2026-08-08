@@ -588,6 +588,14 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                         InboundFrame::Close { .. } => {
                             unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
                         }
+                        // R311y605 — a JOIN reaches `inbound_to_fsm_event` as
+                        // `Some(FramingError)`, exactly as it did before it was
+                        // decodable at all (it fell through to `Unknown` then).
+                        // Same unreachability, same reason.
+                        #[cfg(feature = "codec-join")]
+                        InboundFrame::Join { .. } => {
+                            unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
+                        }
                         InboundFrame::Unknown { .. } => {
                             // inbound_to_fsm_event projects these to Some(event),
                             // so the outer Some arm handled them — this branch

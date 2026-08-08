@@ -97,7 +97,12 @@ pub(crate) fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
     feature = "codec-close",
     feature = "codec-keep-alive",
     feature = "codec-frame",
-    feature = "session-extauth"
+    feature = "session-extauth",
+    // R311y605 — `parse_inbound`'s JOIN arm decodes the Z-gated chain trailing
+    // the base body (the QoS-SN advertisement zenoh and pico both send). A
+    // helper's cfg must contain the gate of every module that CALLS it, which
+    // only an `--features alloc,codec-join` subset build can show.
+    feature = "codec-join"
 ))]
 pub(crate) fn decode_ext_chain(
     cursor: &mut sce_forge_runtime::codec::SceCursor<'_>,

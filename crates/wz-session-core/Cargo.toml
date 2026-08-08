@@ -918,6 +918,17 @@ dissect = [
     # `value` because the walker could not name the OAM id that selects it.
     # This is the second time this list was short of the claim above it.
     "wz-codecs/codec-linkstate",
+    # R311y605 — the THIRD time, and the first found by a gate rather than by
+    # accident (`scripts/lib/dissect_feature_census.py`). These three are the
+    # TRANSPORT MID space, which the sibling network-MID set-equality gate
+    # cannot see: `dissect_transport_message` hand-walks Join / Fragment /
+    # KeepAlive against `wire_const`, so their walkers stayed compiled and
+    # their CODECS did not. A hand-walked arm with no codec in the build is
+    # judged only against the fixture author's reading of the layout, which is
+    # the thing under test -- Join was ten such fields with no test at all.
+    "codec-fragment",
+    "codec-join",
+    "codec-keep-alive",
 ]
 # R311y579 (G6-serde) — `Serialize` / `Deserialize` on the `dissect` view
 # model. Its own feature, not folded into `dissect`, because the JSON emit in

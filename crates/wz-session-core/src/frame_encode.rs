@@ -983,6 +983,8 @@ mod tests {
                         InboundFrame::KeepAlive { .. } => "KeepAlive",
                         #[cfg(feature = "reassembly")]
                         InboundFrame::Fragment { .. } => "Fragment",
+                        #[cfg(feature = "codec-join")]
+                        InboundFrame::Join { .. } => "Join",
                         InboundFrame::Unknown { .. } => "Unknown",
                         InboundFrame::Frame { .. } => unreachable!(),
                     }

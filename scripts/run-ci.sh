@@ -1447,6 +1447,18 @@ PY
     # (one already happened: `locator` -> `locator_entry`, R311y585). This
     # DEMANDS the name instead, and carries the linkstate gap by name.
     python3 scripts/lib/dissect_name_census.py || return 1
+    # R311y605 — the DISSECT FEATURE CENSUS, the name census's sibling one level
+    # up. `dissect`'s doc says it selects the whole codec-* MID space so "an
+    # observer reads every message it sees", and the claim had been wrong THREE
+    # times (scout/hello R311y585, linkstate R311y597, join/fragment/keep-alive
+    # R311y605) — each found by accident, while someone was writing a walker.
+    #
+    # The existing MID gate cannot see any of them: it walks the 32 NETWORK
+    # MIDs, and the three gaps live on the scouting space, inside an OAM body,
+    # and on the TRANSPORT space respectively. The FEATURE space is the one
+    # place every carrier appears exactly once, so that is where the gate goes.
+    # Enforcement MEASURED by removing `codec-join` from the feature list.
+    python3 scripts/lib/dissect_feature_census.py || return 1
     # R311y569 — the COUNT-GUARD-to-binary gate. `run-ci.sh` carries 53 bare
     # `| grep -qE '^test result: ok\. N passed'` guards, and NOTHING tied N to
     # the binary it guards: rename a test, delete one, or add one, and the guard
@@ -5237,6 +5249,16 @@ layer_c1bn_passive_dissection_features() {
     grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
         echo "  C1bn FAIL: the dissect filter matched no test"; echo "$out"; return 1; }
 
+    # R311y605 — the JOIN arm of `parse_inbound`. Its own filter because the
+    # `dissect::` one above cannot reach it: the tests live in `inbound`, and
+    # the defect they pin was that the PASSIVE observer's parser reported every
+    # multicast peer announcement as `Unknown { mid: 7 }` — a SUCCESSFUL parse,
+    # which is why no coarse assertion anywhere noticed.
+    out="$(cd crates && cargo test -p wz-session-core --features dissect,session-unicast inbound::join_tests:: --quiet 2>&1)" \
+        || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1bn FAIL: the join_tests filter matched no test"; echo "$out"; return 1; }
+
     out="$(cd crates && cargo test -p wz-session-core --features transport-link-raweth raweth_link:: --quiet 2>&1)" \
         || { echo "$out"; return 1; }
     grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
@@ -5267,6 +5289,16 @@ layer_c1bn_passive_dissection_features() {
         --features dissect --all-targets --quiet -- -D warnings) || return 1
     (cd crates && cargo clippy -p wz-session-core --no-default-features \
         --features transport-link-raweth --all-targets --quiet -- -D warnings) || return 1
+    # R311y605 — `codec-join`, in BOTH shapes, and the second one is the one
+    # that earned its place. `codec-join` alone leaves `inbound` out (the module
+    # is alloc-gated), so it proves only that `join_decode` composes;
+    # `alloc,codec-join` is the ONLY shape in which no sibling codec pulls in
+    # `ext_chain`, `FLAG_T_Z`, or `Vec`, and it found three separate cfg-union
+    # holes that the workspace build and every richer subset unified away.
+    (cd crates && cargo clippy -p wz-session-core --no-default-features \
+        --features codec-join --all-targets --quiet -- -D warnings) || return 1
+    (cd crates && cargo clippy -p wz-session-core --no-default-features \
+        --features alloc,codec-join --all-targets --quiet -- -D warnings) || return 1
 }
 
 # ─── Layer C1bg — storage-backend-filesystem: durable fs Volume/Storage ─

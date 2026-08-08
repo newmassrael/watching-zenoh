@@ -30,7 +30,13 @@
     feature = "codec-open-body",
     feature = "codec-close",
     feature = "codec-keep-alive",
-    feature = "codec-frame"
+    feature = "codec-frame",
+    // R311y605 — the JOIN arm reads an ext chain and returns a Vec of entries
+    // like every other arm, so it joins this union. It does NOT join the three
+    // inside `parse_inbound`: it binds its own cursor after the base body,
+    // because the JOIN codec has no ext awareness and the chain's start is
+    // whatever the body consumed.
+    feature = "codec-join"
 ))]
 use alloc::vec::Vec;
 
@@ -41,7 +47,8 @@ use crate::parse_error::InboundParseError;
     feature = "codec-open-body",
     feature = "codec-close",
     feature = "codec-keep-alive",
-    feature = "codec-frame"
+    feature = "codec-frame",
+    feature = "codec-join"
 ))]
 use crate::ext_chain::decode_ext_chain;
 #[cfg(any(
@@ -49,7 +56,8 @@ use crate::ext_chain::decode_ext_chain;
     feature = "codec-open-body",
     feature = "codec-close",
     feature = "codec-keep-alive",
-    feature = "codec-frame"
+    feature = "codec-frame",
+    feature = "codec-join"
 ))]
 use sce_forge_runtime::codec::SceCursor;
 #[cfg(any(
@@ -57,7 +65,8 @@ use sce_forge_runtime::codec::SceCursor;
     feature = "codec-open-body",
     feature = "codec-close",
     feature = "codec-keep-alive",
-    feature = "codec-frame"
+    feature = "codec-frame",
+    feature = "codec-join"
 ))]
 use wz_codecs::ext_entry::ExtEntryOwned;
 #[cfg(any(
@@ -65,7 +74,8 @@ use wz_codecs::ext_entry::ExtEntryOwned;
     feature = "codec-open-body",
     feature = "codec-close",
     feature = "codec-keep-alive",
-    feature = "codec-frame"
+    feature = "codec-frame",
+    feature = "codec-join"
 ))]
 use wz_codecs::wire_const;
 
@@ -73,6 +83,8 @@ use wz_codecs::wire_const;
 use wz_codecs::close::Close;
 #[cfg(feature = "codec-init-body")]
 use wz_codecs::init_body::{InitBody, InitBodyOwned};
+#[cfg(feature = "codec-join")]
+use wz_codecs::join::JoinOwned;
 #[cfg(feature = "codec-keep-alive")]
 use wz_codecs::keep_alive::KeepAlive;
 #[cfg(feature = "codec-open-body")]
@@ -214,6 +226,33 @@ pub enum InboundFrame {
         /// negotiated patch level ([`crate::extpatch`]). Both `false` for a
         /// patch-0 peer, which emits neither.
         markers: crate::extfragment::FragmentMarkers,
+    },
+    /// `_Z_MID_T_JOIN` (0x07). The MULTICAST peer announcement: version,
+    /// whatami + zid, the optional S-gated capability pair (`sn_res` /
+    /// `batch_size`), the lease, and the per-channel initial sequence numbers.
+    ///
+    /// R311y605 — decoded here because the PASSIVE observer reads a capture
+    /// through this function, and a JOIN arrived as `Unknown { mid: 0x07 }`:
+    /// on zenoh's multicast session group the announcement traffic IS the
+    /// JOINs, so an analyzer over a multicast capture saw its most
+    /// informative message as unnamed bytes.
+    ///
+    /// It is NOT admissible on a unicast session, and that is the drive
+    /// seam's call rather than this one's: [`inbound_to_fsm_event`] maps it to
+    /// `FramingError`, byte-for-byte the pre-R311y605 behaviour when it fell
+    /// through to `Unknown`. The same separation `Frame`'s `priority` and
+    /// `Fragment`'s `markers` already use — wz decodes whatever the peer
+    /// sent, and whether it is HONORED is decided one layer up.
+    ///
+    /// `body.lease` is ALWAYS milliseconds: the `_Z_FLAG_T_JOIN_T` seconds
+    /// form is projected back during decode (R311kr,
+    /// [`crate::join_decode::decode_join`]), the same boundary rule
+    /// `Open`'s lease follows.
+    #[cfg(feature = "codec-join")]
+    Join {
+        has_ext: bool,
+        body: JoinOwned,
+        extensions: Vec<ExtEntryOwned>,
     },
     /// MID outside the handshake/close/keepalive set.
     Unknown { mid: u8 },
@@ -422,6 +461,30 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
                 extensions,
             })
         }
+        // R311y605 — the MULTICAST peer announcement. Self-contained rather
+        // than riding the shared `cursor`: the generated `Join` codec has no
+        // ext awareness, so the chain starts wherever the base body stopped
+        // and `join_base_len` derives that from the codec's own consumption.
+        // `decode_join` is the SSOT shared with the multicast participant path
+        // (`crate::join_decode`), which is what keeps the S bit's two optional
+        // fields and the T bit's lease UNIT projected in exactly one place.
+        #[cfg(feature = "codec-join")]
+        wire_const::T_MID_JOIN => {
+            let (join, consumed) = crate::join_decode::decode_join_body(header, &bytes[1..])?;
+            let body = join.try_into_owned()?;
+            let join_has_ext = (header & wire_const::FLAG_T_Z) != 0;
+            let extensions = if join_has_ext {
+                let mut ext_cursor = SceCursor::new(&bytes[1 + consumed..]);
+                decode_ext_chain(&mut ext_cursor)?
+            } else {
+                Vec::new()
+            };
+            Ok(InboundFrame::Join {
+                has_ext: join_has_ext,
+                body,
+                extensions,
+            })
+        }
         other => Ok(InboundFrame::Unknown { mid: other }),
     }
 }
@@ -478,6 +541,13 @@ pub fn inbound_to_fsm_event(
         // payload dispatch path.
         #[cfg(feature = "reassembly")]
         InboundFrame::Fragment { .. } => None,
+        // R311y605 — a JOIN is a MULTICAST message and has no place on a
+        // unicast session, so it stays a framing error here. Deliberately
+        // identical to the pre-R311y605 outcome, when it fell through to
+        // `Unknown` and hit the arm below: gaining the ability to DECODE a
+        // message must not change what the session FSM does with it.
+        #[cfg(feature = "codec-join")]
+        InboundFrame::Join { .. } => Some(E::FramingError),
         InboundFrame::Unknown { .. } => Some(E::FramingError),
     }
 }
@@ -532,5 +602,170 @@ mod debug_surface_tests {
         let a = parse_inbound(&[0x06 | 0x20, 0x01, b'x']).expect("decode a");
         let b = parse_inbound(&[0x06 | 0x20, 0x02, b'x']).expect("decode b");
         assert_ne!(format!("{a:?}"), format!("{b:?}"));
+    }
+}
+
+// ── R311y605 — the JOIN arm. `parse_inbound` is what the PASSIVE observer
+//    reads a capture through, and it reported every multicast peer
+//    announcement as `Unknown { mid: 0x07 }` — a successful parse, which is
+//    why nothing downstream noticed. ──
+#[cfg(all(test, feature = "codec-join"))]
+mod join_tests {
+    use super::*;
+
+    /// Encode a JOIN through the codec, with the header byte's flags supplied
+    /// by the caller. The fixture is the CODEC's bytes rather than a hand-laid
+    /// string, so a decode that disagrees with the codec fails here.
+    fn join_wire(flags: u8, join: &wz_codecs::join::Join<'_>) -> Vec<u8> {
+        let s = u8::from(flags & wire_const::FLAG_T_JOIN_S != 0);
+        let mut wire = alloc::vec![wire_const::T_MID_JOIN | flags];
+        wire.extend_from_slice(&join.encode_to_vec(s));
+        wire
+    }
+
+    fn sample() -> wz_codecs::join::Join<'static> {
+        wz_codecs::join::Join {
+            version: 0x09,
+            // whatami = peer (0x01), zid_len-1 = 3.
+            cbyte: (3 << 4) | 0x01,
+            zid: &[0xA0, 0xA1, 0xA2, 0xA3],
+            sn_res: Some(0x00),
+            batch_size: Some(0x1000),
+            lease: 10_000,
+            next_sn_reliable: 7,
+            next_sn_best_effort: 9,
+        }
+    }
+
+    #[test]
+    fn a_join_decodes_into_its_own_variant_with_its_fields() {
+        let wire = join_wire(wire_const::FLAG_T_JOIN_S, &sample());
+        match parse_inbound(&wire).expect("parse_inbound rejected the join") {
+            InboundFrame::Join {
+                has_ext,
+                body,
+                extensions,
+            } => {
+                assert!(!has_ext);
+                assert!(extensions.is_empty());
+                assert_eq!(body.version, 0x09);
+                assert_eq!(body.zid.as_ref(), &[0xA0, 0xA1, 0xA2, 0xA3]);
+                assert_eq!(body.sn_res, Some(0x00));
+                assert_eq!(body.batch_size, Some(0x1000));
+                assert_eq!(body.lease, 10_000);
+                assert_eq!(body.next_sn_reliable, 7);
+                assert_eq!(body.next_sn_best_effort, 9);
+            }
+            other => panic!("not a Join: {other:?}"),
+        }
+    }
+
+    /// The S-clear form. The discriminating arm: a decode that read the two
+    /// optionals unconditionally would consume two bytes too many and either
+    /// fail or mis-report the lease, and the S-set leg above cannot see that.
+    #[test]
+    fn an_s_clear_join_carries_no_capability_pair() {
+        let minimal = wz_codecs::join::Join {
+            sn_res: None,
+            batch_size: None,
+            ..sample()
+        };
+        let wire = join_wire(0, &minimal);
+        match parse_inbound(&wire).expect("parse_inbound rejected the minimal join") {
+            InboundFrame::Join { body, .. } => {
+                assert_eq!(body.sn_res, None);
+                assert_eq!(body.batch_size, None);
+                assert_eq!(body.lease, 10_000, "the lease must still be read");
+                assert_eq!(body.next_sn_best_effort, 9);
+            }
+            other => panic!("not a Join: {other:?}"),
+        }
+    }
+
+    /// The T flag makes the lease VLE SECONDS. Projected at this boundary, so
+    /// no consumer of a decode ever sees the wire unit — the rule
+    /// `Open`'s lease already follows, and the reason a pico beacon
+    /// (lease 10000ms, sent as T=1 + VLE 10) is not read as 10ms.
+    #[test]
+    fn a_t_flagged_lease_is_projected_to_milliseconds() {
+        let seconds = wz_codecs::join::Join {
+            lease: 10,
+            sn_res: None,
+            batch_size: None,
+            ..sample()
+        };
+        let wire = join_wire(wire_const::FLAG_T_JOIN_T, &seconds);
+        match parse_inbound(&wire).expect("parse_inbound rejected the join") {
+            InboundFrame::Join { body, .. } => assert_eq!(body.lease, 10_000),
+            other => panic!("not a Join: {other:?}"),
+        }
+        // Negative arm: the same VLE without T is milliseconds already, so a
+        // decode that multiplied unconditionally would show 10_000 here too.
+        let wire = join_wire(0, &seconds);
+        match parse_inbound(&wire).expect("parse_inbound rejected the join") {
+            InboundFrame::Join { body, .. } => assert_eq!(body.lease, 10),
+            other => panic!("not a Join: {other:?}"),
+        }
+    }
+
+    /// A Z-flagged JOIN's ext chain starts where the BASE BODY stopped, which
+    /// is why the arm derives that offset from the codec's own consumption
+    /// rather than from the field widths. With S set the base body is longer by
+    /// three bytes, so a hardcoded offset would read the chain from inside the
+    /// body — and the QoS ext is the one zenoh and pico actually send.
+    #[test]
+    fn a_z_flagged_join_reads_its_ext_chain_after_the_base_body() {
+        // `_Z_MSG_EXT_ID_JOIN_QOS` = id 0x1 | M (0x10) | ENC_ZBUF (0x40).
+        const JOIN_QOS_EXT_HEADER: u8 = 0x51;
+        let mut ext = alloc::vec![JOIN_QOS_EXT_HEADER, 2, 0x11, 0x22];
+        let mut wire = join_wire(wire_const::FLAG_T_JOIN_S | wire_const::FLAG_T_Z, &sample());
+        wire.append(&mut ext);
+        match parse_inbound(&wire).expect("parse_inbound rejected the qos join") {
+            InboundFrame::Join {
+                has_ext,
+                extensions,
+                body,
+            } => {
+                assert!(has_ext);
+                assert_eq!(
+                    extensions.len(),
+                    1,
+                    "the chain must be read from after the base body: {extensions:?}"
+                );
+                assert_eq!(extensions[0].ext_id(), 0x01);
+                // The body is still fully read — the chain did not eat into it.
+                assert_eq!(body.next_sn_best_effort, 9);
+            }
+            other => panic!("not a Join: {other:?}"),
+        }
+    }
+
+    /// A truncated JOIN is a codec ERROR, not an `Unknown` and not a silent
+    /// empty body. Absence and failure are different verdicts.
+    #[test]
+    fn a_truncated_join_reports_the_codec_error() {
+        let wire = join_wire(wire_const::FLAG_T_JOIN_S, &sample());
+        let err = parse_inbound(&wire[..wire.len() - 2]).expect_err("a short join must not decode");
+        assert!(
+            matches!(err, InboundParseError::Codec(_)),
+            "expected a codec error, got {err:?}"
+        );
+    }
+
+    /// Gaining the ability to DECODE a JOIN must not change what the unicast
+    /// session FSM does with one. It is a multicast message with no place on a
+    /// unicast link, and it mapped to `FramingError` before this round by
+    /// falling through to `Unknown` — so it maps to `FramingError` now.
+    #[cfg(feature = "session-unicast")]
+    #[test]
+    fn a_join_on_a_unicast_session_is_still_a_framing_error() {
+        use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+        let wire = join_wire(wire_const::FLAG_T_JOIN_S, &sample());
+        let frame = parse_inbound(&wire).expect("decode the join");
+        assert!(matches!(frame, InboundFrame::Join { .. }));
+        assert!(matches!(
+            inbound_to_fsm_event(&frame),
+            Some(E::FramingError)
+        ));
     }
 }
