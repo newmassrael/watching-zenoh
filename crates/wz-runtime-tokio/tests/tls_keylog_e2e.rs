@@ -15,10 +15,23 @@
 //!
 //! This drives a REAL wz-to-wz session to Established over loopback TLS with
 //! `SSLKEYLOGFILE` set, and asserts the exported file is the NSS key-log
-//! format Wireshark's `tls.keylog_file` preference consumes — right labels,
-//! right field count, right hex widths — and that the two ends' secrets
-//! AGREE, which is what makes them the keys to THIS session rather than
-//! plausible hex.
+//! format Wireshark's `tls.keylog_file` preference consumes: right labels,
+//! right field count, right hex widths, the two ends' secrets AGREEING, each
+//! label carrying its OWN secret, and every line naming ONE client_random.
+//!
+//! R311y597 corrected an overclaim here. This doc used to say agreement was
+//! "what makes them the keys to THIS session"; it is not. Agreement is
+//! trivially true of an export that logged one secret under every label, and
+//! the file is useless to its consumer if the lines disagree about which
+//! session they describe — Wireshark matches a line to a capture BY
+//! client_random. Those two properties are now asserted rather than implied.
+//!
+//! ⚠ What is still NOT proven: that these secrets DECRYPT the session's
+//! ciphertext. That needs an oracle which holds the capture and the keys
+//! together — `tshark -o tls.keylog_file:` is the obvious one and is NOT
+//! installed on this machine (`wireshark` and `editcap` are; the CLI is not).
+//! Until that leg exists, this file proves the export is well-formed,
+//! self-consistent and correctly keyed, not that it opens the traffic.
 //!
 //! Its own test binary because `SSLKEYLOGFILE` is process-global and rustls
 //! samples it once per `KeyLogFile`; a sibling test in the same process would
@@ -188,6 +201,51 @@ async fn a_tls_session_exports_its_keys_in_nss_format() {
         agreed += 1;
     }
     assert_eq!(agreed, 4);
+
+    // R311y597 — the two properties the assertions above CANNOT see, and both
+    // are shapes a wrong export would wear while passing everything so far.
+    //
+    // (1) The four secrets must DIFFER. Every check up to here is per-label:
+    //     present, well-formed, right length, both ends agreeing. An export
+    //     that logged ONE secret under all four labels satisfies every one of
+    //     them — agreement is trivially true when the value is the same
+    //     everywhere. Distinctness is what says four secrets were derived
+    //     rather than one copied.
+    //     The expected count is DERIVED from the labels present rather than
+    //     written down: this assertion was first authored as a literal `4`
+    //     and the export carries five secrets (`EXPORTER_SECRET` too, which
+    //     the agreement loop above does not cover). A pinned number would
+    //     have to be revisited every time the label set moves; "one distinct
+    //     secret per distinct label" is the invariant either way.
+    let mut distinct: Vec<&str> = lines.iter().map(|l| l.secret.as_str()).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    let mut labels: Vec<&str> = lines.iter().map(|l| l.label.as_str()).collect();
+    labels.sort_unstable();
+    labels.dedup();
+    assert_eq!(
+        distinct.len(),
+        labels.len(),
+        "each label must carry its OWN secret: {} distinct secret(s) across {} \
+         label(s) in {} lines:\n{contents}",
+        distinct.len(),
+        labels.len(),
+        lines.len(),
+    );
+
+    // (2) Every line must carry the SAME client_random. This is the field the
+    //     consumer this format exists for keys on — Wireshark matches a
+    //     keylog line to a capture BY client_random — so a file whose lines
+    //     disagree about which session they describe is well-formed and
+    //     useless. Nothing above compares the field across lines at all.
+    let mut randoms: Vec<&str> = lines.iter().map(|l| l.client_random.as_str()).collect();
+    randoms.sort_unstable();
+    randoms.dedup();
+    assert_eq!(
+        randoms.len(),
+        1,
+        "one session must export one client_random, got {randoms:?}",
+    );
 
     // And a single client_random across the whole file: one session, one log.
     let mut randoms: Vec<&str> = lines.iter().map(|l| l.client_random.as_str()).collect();
