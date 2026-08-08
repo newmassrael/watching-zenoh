@@ -1427,6 +1427,15 @@ PY
     # one of them created by the round that closed the sibling debt. See the
     # script's docstring for why this is a gate and not a fourth comment.
     python3 scripts/lib/unwired_lane_lint.py || return 1
+    # R311y595 — the DISSECT NAME CENSUS. `Field::name`'s doc declares that a
+    # field is named after the generated codec's struct field, and nothing
+    # compared the two: the prose was the specification and the walkers were
+    # the implementation. A census rather than a golden JSON test on purpose --
+    # a golden test reds on every legitimate walker addition and decays into a
+    # reflex update, which is exactly how an accidental rename would slip past
+    # (one already happened: `locator` -> `locator_entry`, R311y585). This
+    # DEMANDS the name instead, and carries the linkstate gap by name.
+    python3 scripts/lib/dissect_name_census.py || return 1
     # R311y569 — the COUNT-GUARD-to-binary gate. `run-ci.sh` carries 53 bare
     # `| grep -qE '^test result: ok\. N passed'` guards, and NOTHING tied N to
     # the binary it guards: rename a test, delete one, or add one, and the guard

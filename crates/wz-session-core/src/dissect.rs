@@ -140,6 +140,49 @@ impl FieldValue {
 }
 
 /// One named field of a dissected message, with the bytes it came from.
+///
+/// # The field-name vocabulary, and where each name comes from
+///
+/// R311y595. A consumer that RENDERS the tree needs none of this — the JSON
+/// shape (`name` / `start` / `end` / `kind` / `value`, recursively) is closed and
+/// a new walker cannot change it. A consumer that LOOKS A NAME UP does, because
+/// then it is depending on a specific string, and the three sources those
+/// strings come from have very different stability:
+///
+/// | source | count | who decides |
+/// |---|---:|---|
+/// | a generated codec's struct field | 41 | the wire spec, via `out/wz-codecs` |
+/// | zenoh's own flag letters and variant names | 27 | the wire spec |
+/// | **wz's own vocabulary** | **17** | **this crate** |
+///
+/// Only the third is a wz decision, and it is enumerated here so that keying on
+/// one is an informed choice rather than an accident. `scripts/lib/`
+/// `dissect_name_census.py` holds the same three sets and FAILS Layer C0 if a
+/// walker invents a name outside them, if a codec field goes unwalked without a
+/// declared reason, or if either allowlist goes stale.
+///
+/// The seventeen, with why each is not simply the codec's name:
+///
+/// * `hdr` — a nested record's header byte, where the codec's field is `header`
+/// * `ext` — one entry of an extension chain; the codec models the chain
+/// * `ext_id` — the extension id bits, split out of the entry header
+/// * `mapping` — zenoh-protocol's `WireExpr::mapping`; wz's codec encodes it as
+///   the local/nonlocal variant TAG rather than as a field
+/// * `has_schema` — the packed encoding's bit 0, surfaced as a flag
+/// * `zid_len_m1` — the zid length is stored minus one, and the name says what
+///   the bytes hold rather than what they mean
+/// * `locator_entry` — one locator record. **Not** `locator`: [`Field::find`] is
+///   first-match-by-name, so a group sharing its leaf's name shadows it (R311y585)
+/// * `keyexprs` / `subscribers` / `queryables` / `tokens` — the Declare body's
+///   four groups
+/// * `current` / `future` — Interest mode bits
+/// * `restricted` — an Interest options bit
+/// * `what` — Scout's what-am-I-looking-for bits
+/// * `rest` — trailing bytes a walker read but does not name further
+/// * `unparsed` — bytes after a halt; the best-effort marker, not a wire field
+///
+/// ⚠ Eleven codec fields have no walker and are carried by name in the census —
+/// eight of them the `linkstate` family, which has no walker at all.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
     feature = "dissect-serde",
