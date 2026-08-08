@@ -223,8 +223,12 @@ fn wz_router_routes_pico_put_to_pico_sub() {
         .args([
             "-k", KEY_PUT, "-v", VALUE_PUT, "-e", &endpoint, "-m", "client",
         ])
-        .stdout(Stdio::from(put_stdout))
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(
+            put_stdout.try_clone().expect("dup stdout handle"),
+        ))
+        .stderr(Stdio::from(
+            put_stdout.try_clone().expect("dup stderr handle"),
+        ))
         .spawn()
         .expect("spawn z_put via stdbuf");
 

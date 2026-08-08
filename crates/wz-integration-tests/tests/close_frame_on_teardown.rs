@@ -57,8 +57,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, spawn_counting_relay, spawn_on_ephemeral_port, wait_for_substring,
-    wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, RelayFault,
+    graceful_terminate, read_captured, spawn_counting_relay, spawn_on_ephemeral_port,
+    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, RelayFault,
 };
 
 use wz_codecs::wire_const::T_MID_CLOSE;
@@ -127,6 +127,9 @@ fn who_sends_a_session_close_at_teardown() {
     let (_acc2, mut acc2_reader, upstream) = spawn_acceptor(&demo);
     let relay = spawn_counting_relay(upstream, T_MID_CLOSE, RelayFault::None);
     let z_put = zenoh_pico_cli_binary("z_put");
+    // R311y606 — captured, not discarded: this exit status is ASSERTED,
+    // and an asserted failure with no output is unanswerable.
+    let mut capture = tempfile::tempfile().expect("zenoh-pico z_put capture");
     let status = Command::new(&z_put)
         .args([
             "-k",
@@ -138,14 +141,15 @@ fn who_sends_a_session_close_at_teardown() {
             "-m",
             "client",
         ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(capture.try_clone().expect("dup stdout handle")))
+        .stderr(Stdio::from(capture.try_clone().expect("dup stderr handle")))
         .status()
         .expect("spawn zenoh-pico z_put");
     assert!(
         status.success(),
         "the real zenoh-pico z_put exited {status:?} through the relay, so leg 2 \
-         never reached a teardown to measure"
+         never reached a teardown to measure\n--- its stdout+stderr ---\n{}",
+        read_captured(&mut capture)
     );
     require_delivery(&mut acc2_reader, "leg 2 (zenoh-pico z_put)");
     // The count is read after the child has exited, so its FIN has already been

@@ -52,8 +52,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    wait_for_substring, wz_capi_pico_cdylib, zenoh_pico_cli_binary, zenoh_pico_include_dirs,
-    zenoh_pico_library_dir, ChildGuard, PortReservation,
+    read_captured, wait_for_substring, wz_capi_pico_cdylib, zenoh_pico_cli_binary,
+    zenoh_pico_include_dirs, zenoh_pico_library_dir, ChildGuard, PortReservation,
 };
 
 /// The driver: upstream's `z_put.c` shape, with the options struct actually
@@ -193,7 +193,7 @@ fn run_arm(driver: &Path, keyexpr: &str, arm: &str) -> String {
         .arg(zenoh_pico_cli_binary("z_sub_attachment"))
         .args(["-k", keyexpr, "-l", &listen, "-m", "peer"])
         .stdout(Stdio::from(observer_out))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(stdout.try_clone().expect("dup stderr handle")))
         .spawn()
         .expect("spawn the real zenoh-pico z_sub_attachment observer");
     let _observer = ChildGuard::wrap(format!("z_sub_attachment[{arm}]"), observer);
@@ -202,13 +202,20 @@ fn run_arm(driver: &Path, keyexpr: &str, arm: &str) -> String {
         .unwrap_or_else(|e| panic!("{arm}: observer never became ready: {e}"));
     // The observer has bound; the reservation may go.
     drop(port);
+    // R311y606 — captured, not discarded: this exit status is ASSERTED,
+    // and an asserted failure with no output is unanswerable.
+    let mut capture = tempfile::tempfile().expect("the driver capture");
     let status = Command::new(driver)
         .args([keyexpr, &listen])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(capture.try_clone().expect("dup stdout handle")))
+        .stderr(Stdio::from(capture.try_clone().expect("dup stderr handle")))
         .status()
         .unwrap_or_else(|e| panic!("{arm}: failed to run the driver: {e}"));
-    assert!(status.success(), "{arm}: the driver exited {status:?}");
+    assert!(
+        status.success(),
+        "{arm}: the driver exited {status:?}\n--- its stdout+stderr ---\n{}",
+        read_captured(&mut capture)
+    );
 
     // Both the PUT and the DELETE must have landed before the observer's log is
     // read; the driver's own sleeps cover the send side, this covers the

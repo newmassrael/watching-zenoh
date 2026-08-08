@@ -478,7 +478,7 @@ fn drive_subscriber(
             .args(["-l", &endpoint, "-m", "peer", "-k", "demo/capic/**"])
             .env("LD_LIBRARY_PATH", libdir)
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the upstream subscriber"),
     );
@@ -759,7 +759,7 @@ fn upstream_z_get_shm_on_wz_capi_c_is_answered_identically_by_a_real_pico_querya
                     reply,
                 ])
                 .stdout(Stdio::from(qbl_writer))
-                .stderr(Stdio::null())
+                .stderr(Stdio::from(qbl_out.try_clone().expect("dup stderr handle")))
                 .spawn()
                 .expect("spawn the real zenoh-pico z_queryable"),
         );

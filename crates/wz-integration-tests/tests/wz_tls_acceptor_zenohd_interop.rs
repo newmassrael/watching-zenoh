@@ -162,8 +162,12 @@ fn wz_tls_acceptor_receives_pico_put_via_zenohd() {
             "-m",
             "client",
         ])
-        .stdout(Stdio::from(put_stdout))
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(
+            put_stdout.try_clone().expect("dup stdout handle"),
+        ))
+        .stderr(Stdio::from(
+            put_stdout.try_clone().expect("dup stderr handle"),
+        ))
         .spawn()
         .expect("spawn z_put via stdbuf");
 

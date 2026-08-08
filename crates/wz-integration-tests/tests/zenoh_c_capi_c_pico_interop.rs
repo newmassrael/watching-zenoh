@@ -152,7 +152,7 @@ fn upstream_z_sub_on_wz_capi_c_receives_from_a_real_pico_zput() {
             .args(["-l", &endpoint, "-m", "peer", "-k", "demo/capic/**"])
             .env("LD_LIBRARY_PATH", &libdir)
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the compiled z_sub drop-in"),
     );
@@ -177,7 +177,7 @@ fn upstream_z_sub_on_wz_capi_c_receives_from_a_real_pico_zput() {
         .arg(&z_put)
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
         .stdout(Stdio::from(put_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(put_out.try_clone().expect("dup stderr handle")))
         .status()
         .expect("run the real zenoh-pico z_put");
     assert!(
@@ -256,7 +256,7 @@ fn upstream_z_put_on_wz_capi_c_reaches_a_real_pico_zsub() {
             .arg(&z_sub)
             .args(["-l", &endpoint, "-m", "peer", "-k", "demo/example/**"])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_sub"),
     );
@@ -372,7 +372,7 @@ fn upstream_z_delete_on_wz_capi_c_is_decoded_by_a_real_pico_zsub() {
             .arg(&z_sub)
             .args(["-l", &endpoint, "-m", "peer", "-k", "demo/example/**"])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_sub"),
     );
@@ -513,7 +513,7 @@ fn upstream_z_sub_on_wz_capi_c_renders_a_pico_attachment_through_zenohd() {
             .args(["-e", &endpoint, "-m", "client", "-k", "demo/capic/**"])
             .env("LD_LIBRARY_PATH", &libdir)
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the compiled z_sub drop-in"),
     );
@@ -551,7 +551,7 @@ fn upstream_z_sub_on_wz_capi_c_renders_a_pico_attachment_through_zenohd() {
             "3",
         ])
         .stdout(Stdio::from(pub_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(pub_out.try_clone().expect("dup stderr handle")))
         .status()
         .expect("run the real zenoh-pico z_pub_attachment");
     assert!(
@@ -651,7 +651,7 @@ fn upstream_z_pub_on_wz_capi_c_reaches_a_real_pico_zsub_and_sees_it_match() {
             .arg(&z_sub)
             .args(["-l", &endpoint, "-m", "peer", "-k", "demo/example/**"])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_sub"),
     );
@@ -790,7 +790,9 @@ fn upstream_z_liveliness_on_wz_capi_c_is_seen_alive_by_real_pico() {
             .arg(&z_sub_liveliness)
             .args(["-l", &endpoint, "-m", "peer", "-k", "demo/liveliness/**"])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                watcher_out.try_clone().expect("dup stderr handle"),
+            ))
             .spawn()
             .expect("spawn the real zenoh-pico z_sub_liveliness"),
     );
@@ -907,7 +909,9 @@ fn upstream_z_sub_liveliness_on_wz_capi_c_sees_a_real_pico_token_come_and_go() {
             .arg(&z_liveliness)
             .args(["-e", &endpoint, "-m", "client", "-k", key])
             .stdout(Stdio::from(token_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                token_out.try_clone().expect("dup stderr handle"),
+            ))
             .spawn()
             .expect("spawn the real zenoh-pico z_liveliness"),
     );
@@ -1010,7 +1014,7 @@ fn upstream_z_queryable_on_wz_capi_c_answers_a_real_pico_zget() {
             .arg(&z_get)
             .args(["-e", &endpoint, "-m", "client", "-k", key])
             .stdout(Stdio::from(get_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_get"),
     );
@@ -1081,7 +1085,7 @@ fn upstream_z_get_on_wz_capi_c_is_answered_by_a_real_pico_queryable() {
             .arg(&z_queryable)
             .args(["-l", &endpoint, "-m", "peer", "-k", key, "-v", value])
             .stdout(Stdio::from(qbl_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(qbl_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_queryable"),
     );
@@ -1202,7 +1206,7 @@ fn upstream_z_queryable_with_channels_on_wz_capi_c_answers_from_its_own_thread()
             .arg(&z_get)
             .args(["-e", &endpoint, "-m", "client", "-k", key])
             .stdout(Stdio::from(get_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_get"),
     );
@@ -1293,7 +1297,7 @@ fn upstream_z_pull_on_wz_capi_c_pulls_a_real_pico_sample_out_of_a_ring() {
         .arg(&z_put)
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
         .stdout(Stdio::from(put_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(put_out.try_clone().expect("dup stderr handle")))
         .status()
         .expect("run the real zenoh-pico z_put");
     assert!(
@@ -1462,7 +1466,9 @@ fn upstream_z_ping_on_wz_capi_c_round_trips_against_a_real_pico_pong() {
             .arg(&z_pong)
             .args(["-l", &endpoint, "-m", "peer"])
             .stdout(Stdio::from(pong_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                pong_out.try_clone().expect("dup stderr handle"),
+            ))
             .spawn()
             .expect("spawn the real zenoh-pico z_pong"),
     );
@@ -1579,7 +1585,7 @@ fn upstream_z_pub_on_wz_capi_c_carries_its_put_encoding_to_a_real_pico() {
             .arg(&z_sub)
             .args(["-l", &endpoint, "-m", "peer", "-k", "demo/example/**"])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_sub_attachment"),
     );
@@ -1723,7 +1729,7 @@ fn upstream_z_pub_thr_on_wz_capi_c_carries_its_publisher_qos_to_a_real_pico() {
             .arg(&z_sub)
             .args(["-l", &endpoint, "-m", "peer", "-k", key])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_sub_attachment"),
     );
@@ -1963,7 +1969,7 @@ int main(int argc, char **argv) {
                 .args(["-l", &endpoint, "-m", "peer", key])
                 .env("LD_LIBRARY_PATH", libdir)
                 .stdout(Stdio::from(writer))
-                .stderr(Stdio::null())
+                .stderr(Stdio::from(qbl_out.try_clone().expect("dup stderr handle")))
                 .spawn()
                 .unwrap_or_else(|why| panic!("spawn the {arm} queryable: {why}")),
         );
@@ -2000,7 +2006,7 @@ int main(int argc, char **argv) {
                 .arg(&z_get)
                 .args(["-k", key, "-e", &endpoint, "-m", "client"])
                 .stdout(Stdio::from(get_writer))
-                .stderr(Stdio::null())
+                .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
                 .spawn()
                 .expect("spawn the real zenoh-pico z_get_attachment"),
         );
@@ -2194,7 +2200,7 @@ int main(int argc, char **argv) {
                 .arg(&z_queryable)
                 .args(["-k", key, "-l", &endpoint, "-m", "peer"])
                 .stdout(Stdio::from(writer))
-                .stderr(Stdio::null())
+                .stderr(Stdio::from(qbl_out.try_clone().expect("dup stderr handle")))
                 .spawn()
                 .expect("spawn the real zenoh-pico z_queryable"),
         );
@@ -2217,7 +2223,7 @@ int main(int argc, char **argv) {
                 .args(["-e", &endpoint, "-m", "client", key])
                 .env("LD_LIBRARY_PATH", libdir)
                 .stdout(Stdio::from(get_writer))
-                .stderr(Stdio::null())
+                .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
                 .spawn()
                 .unwrap_or_else(|why| panic!("spawn the {arm} driver: {why}")),
         );

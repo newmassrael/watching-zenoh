@@ -939,8 +939,8 @@ fn zenoh_ext_cache_refuses_a_get_without_anyke() {
             // from — the same KE family wz's history GET uses.
             .arg("demo/example/adv/@adv/**")
             .env("RUST_LOG", "error")
+            .stderr(Stdio::from(writer.try_clone().expect("dup stderr handle")))
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
             .spawn()
             .expect("spawn pico z_get"),
     );
@@ -1066,8 +1066,10 @@ fn zenoh_ext_advanced_sub_recovers_a_wz_cache() {
             .arg("-k")
             .arg("demo/wzadv/**")
             .env("RUST_LOG", "error")
+            .stderr(Stdio::from(
+                sub_writer.try_clone().expect("dup stderr handle"),
+            ))
             .stdout(Stdio::from(sub_writer))
-            .stderr(Stdio::null())
             .spawn()
             .expect("spawn z_advanced_sub"),
     );
@@ -1263,8 +1265,8 @@ fn spawn_zenoh_advanced_sub(port: u16, keyexpr: &str) -> (ChildGuard, std::fs::F
             .arg("-k")
             .arg(keyexpr)
             .env("RUST_LOG", "error")
+            .stderr(Stdio::from(writer.try_clone().expect("dup stderr handle")))
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
             .spawn()
             .expect("spawn z_advanced_sub"),
     );

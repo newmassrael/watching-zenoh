@@ -1438,6 +1438,17 @@ PY
     # moves it. Enforcement MEASURED on four arms: the y605 import verbatim, a
     # PEP 695 alias, an unrecorded runner image, and a misspelt table entry.
     python3 scripts/lib/python_floor_lint.py || return 1
+    # R311y606 — the DISCARDED-EVIDENCE lint. Layer E failed twice in six
+    # sweeps with nothing to read but `exited ExitStatus(65280)`: the harness
+    # captured each foreign child's stdout, printed it in the panic, and sent
+    # stderr to /dev/null — and a C program under test (zenoh-pico, openssl)
+    # says WHY it refused on stderr. 53 chains had that asymmetry. The gate is
+    # over the ASYMMETRY, not over `Stdio::null()`: a leg that captures neither
+    # stream has made a choice, one that captures a stream and bins the other
+    # has a reader and is feeding it half the story. Enforcement MEASURED by
+    # re-binning one of the 53 — and the gate's FIRST run found a 54th that the
+    # hand sweep had missed, because its two calls were not adjacent lines.
+    python3 scripts/lib/discarded_evidence_lint.py || return 1
     # R311y565 — the EXPIRED-BLOCKER lint. Eight times across y561-y563 a field
     # or a family sat unimplemented behind a comment naming its own reason, and
     # the reason had already dissolved -- twice in the round that wrote it. Each

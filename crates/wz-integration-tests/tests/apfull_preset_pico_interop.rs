@@ -104,6 +104,9 @@ fn apfull_preset_acceptor_round_trips_with_a_real_pico_z_put() {
     );
     let endpoint = format!("tcp/127.0.0.1:{port}");
 
+    // R311y606 — captured, not discarded: this exit status is ASSERTED,
+    // and an asserted failure with no output is unanswerable.
+    let mut capture = tempfile::tempfile().expect("zenoh-pico z_put capture");
     let put = Command::new(&z_put)
         .args([
             "-k",
@@ -115,15 +118,16 @@ fn apfull_preset_acceptor_round_trips_with_a_real_pico_z_put() {
             "-m",
             "client",
         ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(capture.try_clone().expect("dup stdout handle")))
+        .stderr(Stdio::from(capture.try_clone().expect("dup stderr handle")))
         .status()
         .expect("spawn zenoh-pico z_put");
     assert!(
         put.success(),
         "the real zenoh-pico z_put exited {put:?} against the AP-full acceptor — \
          it could not complete the session handshake, which is the composition \
-         failure this leg exists to catch"
+         failure this leg exists to catch\n--- its stdout+stderr ---\n{}",
+        read_captured(&mut capture)
     );
 
     let fired = wait_for_substring(&mut demo_reader, "SUBSCRIBER FIRED", EXCHANGE_TIMEOUT);

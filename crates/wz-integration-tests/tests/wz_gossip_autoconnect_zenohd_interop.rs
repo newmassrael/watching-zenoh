@@ -185,7 +185,18 @@ fn spawn_linkstate_zenohd(spec: ZenohdSpec<'_>) -> (ChildGuard, File) {
     if let Some(dial) = spec.dial_port {
         command.arg("-e").arg(format!("tcp/127.0.0.1:{dial}"));
     }
-    command.stdout(Stdio::from(writer)).stderr(Stdio::null());
+    // R311y606 — both streams into the SAME capture. MEASURED before changing
+    // it: zenohd's tracing output is entirely stdout (3348 bytes to stdout, 0
+    // to stderr on a plain `-l tcp/127.0.0.1:0` run), so leg 1's absence guard
+    // was reading the right stream and is NOT retroactively suspect. What the
+    // binned stderr did drop is the other half — a panic, an abort, a dynamic
+    // loader failure — which is exactly the class that leaves an exit code and
+    // no reason.
+    command
+        .stderr(Stdio::from(
+            writer.try_clone().expect("dup zenohd stderr handle"),
+        ))
+        .stdout(Stdio::from(writer));
     let label = spec.label;
     let mut guard = ChildGuard::wrap(label, command.spawn().expect("spawn zenohd"));
     if let Err(e) =

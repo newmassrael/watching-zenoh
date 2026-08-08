@@ -225,8 +225,8 @@ fn run_pico_get(port: u16, budget: Duration) -> (bool, Duration, String) {
                 "-e",
                 &format!("tcp/127.0.0.1:{port}"),
             ])
+            .stderr(Stdio::from(writer.try_clone().expect("dup stderr handle")))
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
             .spawn()
             .expect("spawn zenoh-pico z_get_liveliness"),
     );

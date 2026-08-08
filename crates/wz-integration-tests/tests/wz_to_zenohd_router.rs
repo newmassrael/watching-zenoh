@@ -470,8 +470,10 @@ fn wz_queryable_replies_via_zenohd_to_pico_zget() {
                     .args(["-oL", "-eL"])
                     .arg(&z_get)
                     .args(["-k", queryable_key, "-e", &endpoint, "-m", "client"])
+                    .stderr(Stdio::from(
+                        out_writer.try_clone().expect("dup stderr handle"),
+                    ))
                     .stdout(Stdio::from(out_writer))
-                    .stderr(Stdio::null())
                     .spawn()
                     .expect("spawn z_get via stdbuf"),
             );
@@ -620,8 +622,10 @@ fn wz_liveliness_token_visible_via_zenohd_to_pico_zget_liveliness() {
                     .args(["-oL", "-eL"])
                     .arg(&z_get_liveliness)
                     .args(["-k", query_pattern, "-e", &endpoint, "-m", "client"])
+                    .stderr(Stdio::from(
+                        out_writer.try_clone().expect("dup stderr handle"),
+                    ))
                     .stdout(Stdio::from(out_writer))
-                    .stderr(Stdio::null())
                     .spawn()
                     .expect("spawn z_get_liveliness via stdbuf"),
             );
@@ -694,8 +698,10 @@ fn spawn_ready_z_queryable(
                 .args(["-oL", "-eL"])
                 .arg(z_queryable)
                 .args(["-k", key, "-v", value, "-e", endpoint, "-m", "client"])
+                .stderr(Stdio::from(
+                    out_writer.try_clone().expect("dup stderr handle"),
+                ))
                 .stdout(Stdio::from(out_writer))
-                .stderr(Stdio::null())
                 .spawn()
                 .expect("spawn z_queryable via stdbuf"),
         );
@@ -842,8 +848,10 @@ fn spawn_declaring_z_liveliness(
                 .args(["-oL", "-eL"])
                 .arg(z_liveliness)
                 .args(["-k", token_keyexpr, "-e", endpoint, "-m", "client"])
+                .stderr(Stdio::from(
+                    out_writer.try_clone().expect("dup stderr handle"),
+                ))
                 .stdout(Stdio::from(out_writer))
-                .stderr(Stdio::null())
                 .spawn()
                 .expect("spawn z_liveliness via stdbuf"),
         );

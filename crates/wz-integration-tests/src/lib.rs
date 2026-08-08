@@ -2187,8 +2187,10 @@ pub mod common {
                     .args(["-oL", "-eL"])
                     .arg(z_sub)
                     .args(["-k", sub_key, "-e", endpoint, "-m", "client"])
+                    .stderr(Stdio::from(
+                        out_writer.try_clone().expect("dup stderr handle"),
+                    ))
                     .stdout(Stdio::from(out_writer))
-                    .stderr(Stdio::null())
                     .spawn()
                     .expect("spawn z_sub via stdbuf"),
             );
@@ -2249,8 +2251,10 @@ pub mod common {
                     .args([
                         "-k", key, "-v", value, "-e", endpoint, "-m", "client", "-n", "30",
                     ])
+                    .stderr(Stdio::from(
+                        out_writer.try_clone().expect("dup stderr handle"),
+                    ))
                     .stdout(Stdio::from(out_writer))
-                    .stderr(Stdio::null())
                     .spawn()
                     .expect("spawn z_pub via stdbuf"),
             );
@@ -2305,8 +2309,10 @@ pub mod common {
                     .args(["-oL", "-eL"])
                     .arg(z_queryable)
                     .args(["-k", key, "-v", value, "-e", endpoint, "-m", "client"])
+                    .stderr(Stdio::from(
+                        out_writer.try_clone().expect("dup stderr handle"),
+                    ))
                     .stdout(Stdio::from(out_writer))
-                    .stderr(Stdio::null())
                     .spawn()
                     .expect("spawn z_queryable via stdbuf"),
             );
@@ -2378,8 +2384,10 @@ pub mod common {
                     // the positive cross-impl observables of the y150 future-push and
                     // the y151 undeclare-re-arm on the pico querier's OWN filter state.
                     .args(matching.then_some("-a"))
+                    .stderr(Stdio::from(
+                        out_writer.try_clone().expect("dup stderr handle"),
+                    ))
                     .stdout(Stdio::from(out_writer))
-                    .stderr(Stdio::null())
                     .spawn()
                     .expect("spawn z_querier via stdbuf"),
             );
@@ -2429,8 +2437,10 @@ pub mod common {
                     .args(["-oL", "-eL"])
                     .arg(z_liveliness)
                     .args(["-k", keyexpr, "-e", endpoint, "-m", "client"])
+                    .stderr(Stdio::from(
+                        out_writer.try_clone().expect("dup stderr handle"),
+                    ))
                     .stdout(Stdio::from(out_writer))
-                    .stderr(Stdio::null())
                     .spawn()
                     .expect("spawn z_liveliness via stdbuf"),
             );
@@ -2482,8 +2492,10 @@ pub mod common {
                     .args(["-oL", "-eL"])
                     .arg(z_sub_liveliness)
                     .args(["-k", keyexpr, "-e", endpoint, "-m", "client"])
+                    .stderr(Stdio::from(
+                        out_writer.try_clone().expect("dup stderr handle"),
+                    ))
                     .stdout(Stdio::from(out_writer))
-                    .stderr(Stdio::null())
                     .spawn()
                     .expect("spawn z_sub_liveliness via stdbuf"),
             );
@@ -2943,8 +2955,14 @@ pub mod common {
             .arg("--no-multicast-scouting")
             .arg("--rest-http-port")
             .arg("none")
-            .stdout(Stdio::from(writer))
-            .stderr(Stdio::null());
+            // R311y606 — stderr goes to the SAME capture as stdout rather than
+            // to /dev/null. zenohd's readiness needles are log lines and the
+            // filter can send them either way; discarding one half made a
+            // failed spawn unanswerable.
+            .stderr(Stdio::from(
+                writer.try_clone().expect("dup zenohd stderr handle"),
+            ))
+            .stdout(Stdio::from(writer));
         // Additional listeners (e.g. a unixpipe endpoint alongside the tcp one). Only a
         // TCP announcement carries the `tcp/127.0.0.1:` needle, so a non-tcp extra
         // listen can never be mistaken for the port being discovered.
@@ -3040,8 +3058,14 @@ pub mod common {
             .arg("tcp/127.0.0.1:0")
             .arg("--rest-http-port")
             .arg("none")
-            .stdout(Stdio::from(writer))
-            .stderr(Stdio::null());
+            // R311y606 — stderr goes to the SAME capture as stdout rather than
+            // to /dev/null. zenohd's readiness needles are log lines and the
+            // filter can send them either way; discarding one half made a
+            // failed spawn unanswerable.
+            .stderr(Stdio::from(
+                writer.try_clone().expect("dup zenohd stderr handle"),
+            ))
+            .stdout(Stdio::from(writer));
         let mut guard = ChildGuard::wrap(
             label,
             command
@@ -4071,8 +4095,8 @@ mod tests {
         let (writer, mut reader) = shipped_capture_pair("corpse");
         let mut child = Command::new("sh")
             .args(["-c", "echo starting; exit 3"])
+            .stderr(Stdio::from(writer.try_clone().expect("dup stderr handle")))
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
             .spawn()
             .expect("spawn the corpse stand-in");
 
@@ -4122,8 +4146,8 @@ mod tests {
                 "-c",
                 "sleep 0.3; echo \"reached at: tcp/127.0.0.1:41059\"; sleep 30",
             ])
+            .stderr(Stdio::from(writer.try_clone().expect("dup stderr handle")))
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
             .spawn()
             .expect("spawn the live stand-in");
         let mut guard = ChildGuard::wrap("live capture stand-in", child);

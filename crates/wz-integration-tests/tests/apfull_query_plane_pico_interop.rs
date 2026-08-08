@@ -403,8 +403,10 @@ fn apfull_query_reply_err_decoded_by_a_real_pico_z_get() {
                 .args(["-oL", "-eL"])
                 .arg(&z_get)
                 .args(["-k", QUERY_KEYEXPR, "-e", &endpoint, "-m", "client"])
+                .stderr(Stdio::from(
+                    out_writer.try_clone().expect("dup stderr handle"),
+                ))
                 .stdout(Stdio::from(out_writer))
-                .stderr(Stdio::null())
                 .spawn()
                 .expect("spawn z_get via stdbuf"),
         );

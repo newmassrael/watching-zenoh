@@ -203,8 +203,10 @@ fn spawn_seeding_zpub(key: &str, value: &str, port: u16) -> ChildGuard {
                 .args([
                     "-k", key, "-v", value, "-e", &endpoint, "-m", "client", "-n", "3",
                 ])
+                .stderr(Stdio::from(
+                    out_writer.try_clone().expect("dup stderr handle"),
+                ))
                 .stdout(Stdio::from(out_writer))
-                .stderr(Stdio::null())
                 .spawn()
                 .expect("spawn z_pub via stdbuf"),
         );
@@ -522,8 +524,10 @@ fn zget_once(key: &str, port: u16) -> String {
             .args(["-oL", "-eL"])
             .arg(&z_get)
             .args(["-k", key, "-e", &endpoint, "-m", "client"])
+            .stderr(Stdio::from(
+                out_writer.try_clone().expect("dup stderr handle"),
+            ))
             .stdout(Stdio::from(out_writer))
-            .stderr(Stdio::null())
             .spawn()
             .expect("spawn z_get via stdbuf"),
     );

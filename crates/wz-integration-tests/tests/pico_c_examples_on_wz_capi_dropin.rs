@@ -265,7 +265,7 @@ fn pico_zsub_source_on_wz_capi_receives_from_real_pico_zput() {
                 "1",
             ])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the compiled z_sub drop-in"),
     );
@@ -289,12 +289,12 @@ fn pico_zsub_source_on_wz_capi_receives_from_real_pico_zput() {
         .arg(&z_put)
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
         .stdout(Stdio::from(put_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(put_out.try_clone().expect("dup stderr handle")))
         .status()
         .expect("run the real zenoh-pico z_put");
     assert!(
         put.success(),
-        "real zenoh-pico z_put exited {put:?}\n--- its stdout ---\n{}",
+        "real zenoh-pico z_put exited {put:?}\n--- its stdout+stderr ---\n{}",
         read_captured(&mut put_out)
     );
 
@@ -319,7 +319,7 @@ fn pico_zsub_source_on_wz_capi_receives_from_real_pico_zput() {
     assert!(
         captured.contains(key),
         "the payload arrived but not on the key the foreign publisher used \
-         ({key}); wz's inbound keyexpr resolution disagrees.\n--- stdout ---\n{captured}"
+         ({key}); wz's inbound keyexpr resolution disagrees.\n--- stdout+stderr ---\n{captured}"
     );
 
     graceful_terminate(sub.child_mut(), Duration::from_secs(5));
@@ -385,7 +385,9 @@ fn pico_zqueryable_source_on_wz_capi_answers_real_pico_zget() {
                 "1",
             ])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                qable_out.try_clone().expect("dup stderr handle"),
+            ))
             .spawn()
             .expect("spawn the compiled z_queryable drop-in"),
     );
@@ -407,7 +409,7 @@ fn pico_zqueryable_source_on_wz_capi_answers_real_pico_zget() {
         .arg(&z_get)
         .args(["-e", &endpoint, "-m", "client", "-k", selector])
         .stdout(Stdio::from(get_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
         .status()
         .expect("run the real zenoh-pico z_get");
     assert!(get.success(), "real zenoh-pico z_get exited {get:?}");
@@ -501,7 +503,7 @@ fn pico_zput_source_on_wz_capi_declares_and_reaches_real_pico_zsub() {
                 "1",
             ])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_sub"),
     );
@@ -631,7 +633,9 @@ fn pico_zping_source_on_wz_capi_round_trips_through_real_pico_zpong() {
             .arg(&z_pong)
             .args(["-l", &endpoint, "-m", "peer"])
             .stdout(Stdio::from(pong_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                pong_out.try_clone().expect("dup stderr handle"),
+            ))
             .spawn()
             .expect("spawn the real zenoh-pico z_pong"),
     );
@@ -660,7 +664,9 @@ fn pico_zping_source_on_wz_capi_round_trips_through_real_pico_zpong() {
                 "500",
             ])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                ping_out.try_clone().expect("dup stderr handle"),
+            ))
             .spawn()
             .expect("spawn the compiled z_ping drop-in"),
     );
@@ -773,7 +779,7 @@ fn pico_zliveliness_source_on_wz_capi_is_seen_alive_then_dropped_by_real_pico() 
                 "2",
             ])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_sub_liveliness"),
     );
@@ -807,7 +813,9 @@ fn pico_zliveliness_source_on_wz_capi_is_seen_alive_then_dropped_by_real_pico() 
             TOKEN_HOLD_SECS,
         ])
         .stdout(Stdio::from(holder_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(
+            holder_out.try_clone().expect("dup stderr handle"),
+        ))
         .status()
         .expect("run the compiled z_liveliness drop-in");
     assert!(token.success(), "z_liveliness.c on wz exited {token:?}");
@@ -891,7 +899,7 @@ fn pico_zsubliveliness_source_on_wz_capi_sees_real_pico_token_come_and_go() {
                 "2",
             ])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the compiled z_sub_liveliness drop-in"),
     );
@@ -926,12 +934,14 @@ fn pico_zsubliveliness_source_on_wz_capi_sees_real_pico_token_come_and_go() {
             TOKEN_HOLD_SECS,
         ])
         .stdout(Stdio::from(holder_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(
+            holder_out.try_clone().expect("dup stderr handle"),
+        ))
         .status()
         .expect("run the real zenoh-pico z_liveliness");
     assert!(
         token.success(),
-        "real zenoh-pico z_liveliness exited {token:?}\n--- its stdout ---\n{}",
+        "real zenoh-pico z_liveliness exited {token:?}\n--- its stdout+stderr ---\n{}",
         read_captured(&mut holder_out)
     );
 
@@ -1008,7 +1018,7 @@ fn pico_zget_source_on_wz_capi_queries_real_pico_zqueryable() {
             .arg(&z_queryable)
             .args(["-l", &endpoint, "-m", "peer", "-k", "demo/dropin/**"])
             .stdout(Stdio::from(qbl_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(qbl_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_queryable"),
     );
@@ -1031,12 +1041,12 @@ fn pico_zget_source_on_wz_capi_queries_real_pico_zqueryable() {
         .arg(&dropin)
         .args(["-e", &endpoint, "-m", "client", "-k", selector])
         .stdout(Stdio::from(get_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
         .status()
         .expect("run upstream z_get.c on wz's C ABI");
     assert!(
         get.success(),
-        "upstream z_get.c on wz's C ABI exited {get:?}\n--- its stdout ---\n{}",
+        "upstream z_get.c on wz's C ABI exited {get:?}\n--- its stdout+stderr ---\n{}",
         read_captured(&mut get_out)
     );
 
@@ -1126,7 +1136,7 @@ fn pico_zpub_source_on_wz_capi_is_told_about_a_real_pico_zsub_arriving_and_leavi
             .arg(&dropin)
             .args(["-l", &endpoint, "-m", "peer", "-k", key, "-a", "-n", "60"])
             .stdout(Stdio::from(pub_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(pub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the compiled z_pub drop-in"),
     );
@@ -1159,12 +1169,12 @@ fn pico_zpub_source_on_wz_capi_is_told_about_a_real_pico_zsub_arriving_and_leavi
             "2",
         ])
         .stdout(Stdio::from(sub_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
         .status()
         .expect("run the real zenoh-pico z_sub");
     assert!(
         sub.success(),
-        "real zenoh-pico z_sub exited {sub:?}\n--- its stdout ---\n{}",
+        "real zenoh-pico z_sub exited {sub:?}\n--- its stdout+stderr ---\n{}",
         read_captured(&mut sub_out)
     );
 
@@ -1309,7 +1319,9 @@ fn pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router() {
         .arg(&dropin)
         .args(["-e", &endpoint, "-m", "client"])
         .stdout(Stdio::from(info_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(
+            info_out.try_clone().expect("dup stderr handle"),
+        ))
         .status()
         .expect("run the compiled z_info drop-in");
     assert!(info.success(), "z_info.c on wz exited {info:?}");
@@ -1445,7 +1457,9 @@ fn pico_zinfo_source_on_wz_capi_pads_a_short_zenohd_zid_to_32() {
         .arg(&dropin)
         .args(["-e", &endpoint, "-m", "client"])
         .stdout(Stdio::from(info_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(
+            info_out.try_clone().expect("dup stderr handle"),
+        ))
         .status()
         .expect("run the compiled z_info drop-in");
     assert!(info.success(), "z_info.c on wz exited {info:?}");
@@ -1494,7 +1508,9 @@ fn pico_zinfo_source_on_wz_capi_reports_a_real_pico_peer_as_a_peer() {
             .arg(&z_sub)
             .args(["-l", &endpoint, "-m", "peer", "-k", "demo/dropin/**"])
             .stdout(Stdio::from(peer_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                peer_out.try_clone().expect("dup stderr handle"),
+            ))
             .spawn()
             .expect("spawn the real zenoh-pico z_sub as a listener"),
     );
@@ -1514,7 +1530,9 @@ fn pico_zinfo_source_on_wz_capi_reports_a_real_pico_peer_as_a_peer() {
         .arg(&dropin)
         .args(["-e", &endpoint, "-m", "client"])
         .stdout(Stdio::from(info_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(
+            info_out.try_clone().expect("dup stderr handle"),
+        ))
         .status()
         .expect("run the compiled z_info drop-in");
     assert!(info.success(), "z_info.c on wz exited {info:?}");
@@ -1654,7 +1672,7 @@ fn pico_zpubthr_source_on_wz_capi_batches_to_a_real_pico_zsub() {
             .arg(&z_sub)
             .args(["-l", &endpoint, "-m", "peer", "-k", key, "-n", "50"])
             .stdout(Stdio::from(sub_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_sub as a listener"),
     );
@@ -1678,7 +1696,7 @@ fn pico_zpubthr_source_on_wz_capi_batches_to_a_real_pico_zsub() {
             .arg(&dropin)
             .args(["-e", &endpoint, "-m", "client", "-k", key, "-s", "64"])
             .stdout(Stdio::from(pub_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(pub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the compiled z_pub_thr drop-in"),
     );
@@ -1695,7 +1713,7 @@ fn pico_zpubthr_source_on_wz_capi_batches_to_a_real_pico_zsub() {
     });
     assert!(
         status.success(),
-        "the real pico subscriber exited {status:?}\n--- its stdout ---\n{}",
+        "the real pico subscriber exited {status:?}\n--- its stdout+stderr ---\n{}",
         read_captured(&mut sub_out)
     );
     let foreign = read_captured(&mut sub_out);
@@ -1755,7 +1773,9 @@ fn pico_zgetlat_source_on_wz_capi_round_trips_through_real_pico_zqueryable() {
             .arg(&z_queryable)
             .args(["-l", &endpoint, "-m", "peer", "-k", key])
             .stdout(Stdio::from(qable_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                qable_out.try_clone().expect("dup stderr handle"),
+            ))
             .spawn()
             .expect("spawn the real zenoh-pico z_queryable as a listener"),
     );
@@ -1784,7 +1804,7 @@ fn pico_zgetlat_source_on_wz_capi_round_trips_through_real_pico_zqueryable() {
             "200",
         ])
         .stdout(Stdio::from(lat_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(lat_out.try_clone().expect("dup stderr handle")))
         .status()
         .expect("run the compiled z_get_lat drop-in");
     let printed = read_captured(&mut lat_out);
@@ -1792,7 +1812,7 @@ fn pico_zgetlat_source_on_wz_capi_round_trips_through_real_pico_zqueryable() {
         lat.success(),
         "z_get_lat.c on wz exited {lat:?} — a querier that never delivered a \
          reply BLOCKS in its load_loop, so a non-zero exit or a timeout here \
-         means the querier plane did not round-trip.\n--- its stdout ---\n\
+         means the querier plane did not round-trip.\n--- its stdout+stderr ---\n\
          {printed}\n--- REAL pico z_queryable stdout ---\n{}",
         read_captured(&mut qable_out)
     );
@@ -1812,7 +1832,7 @@ fn pico_zgetlat_source_on_wz_capi_round_trips_through_real_pico_zqueryable() {
     );
     assert!(
         !printed.contains("Tx failed"),
-        "z_querier_get reported a transmit failure.\n--- stdout ---\n{printed}"
+        "z_querier_get reported a transmit failure.\n--- stdout+stderr ---\n{printed}"
     );
 
     // Cross-check against the counterparty: the foreign process must have SEEN
@@ -1887,7 +1907,7 @@ fn pico_zpubattachment_source_on_wz_capi_is_fully_decoded_by_real_pico() {
             .arg(&z_sub_attachment)
             .args(["-l", &endpoint, "-m", "peer", "-k", "demo/**", "-n", "2"])
             .stdout(Stdio::from(sub_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_sub_attachment as a listener"),
     );
@@ -1900,17 +1920,22 @@ fn pico_zpubattachment_source_on_wz_capi_is_fully_decoded_by_real_pico() {
     }
     drop(reservation);
 
+    // R311y606 — captured, not discarded. A process whose exit status is
+    // ASSERTED must leave its reason behind: these legs failed twice in one
+    // Layer E measurement with nothing to read but the exit code.
+    let mut pub_out = tempfile::tempfile().expect("z_pub_attachment capture");
     let publisher = Command::new("stdbuf")
         .args(["-oL", "-eL"])
         .arg(&dropin)
         .args(["-e", &endpoint, "-m", "client", "-n", "2"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(pub_out.try_clone().expect("dup stdout handle")))
+        .stderr(Stdio::from(pub_out.try_clone().expect("dup stderr handle")))
         .status()
         .expect("run the compiled z_pub_attachment drop-in");
     assert!(
         publisher.success(),
-        "z_pub_attachment.c on wz exited {publisher:?}"
+        "z_pub_attachment.c on wz exited {publisher:?}\n--- its stdout+stderr ---\n{}",
+        read_captured(&mut pub_out)
     );
 
     let status = wait_for_exit(sub.child_mut(), EXCHANGE_TIMEOUT).unwrap_or_else(|why| {
@@ -1922,7 +1947,7 @@ fn pico_zpubattachment_source_on_wz_capi_is_fully_decoded_by_real_pico() {
     });
     assert!(
         status.success(),
-        "the real pico subscriber exited {status:?}\n--- its stdout ---\n{}",
+        "the real pico subscriber exited {status:?}\n--- its stdout+stderr ---\n{}",
         read_captured(&mut sub_out)
     );
     let foreign = read_captured(&mut sub_out);
@@ -2025,7 +2050,7 @@ fn pico_zsub_source_on_wz_capi_receives_from_a_real_pico_declared_publisher() {
                 "-k", "demo/**", "-n", "1",
             ])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the compiled z_sub drop-in"),
     );
@@ -2048,12 +2073,12 @@ fn pico_zsub_source_on_wz_capi_receives_from_a_real_pico_declared_publisher() {
         .arg(&z_pub)
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-n", "4"])
         .stdout(Stdio::from(pub_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(pub_out.try_clone().expect("dup stderr handle")))
         .status()
         .expect("run the real zenoh-pico z_pub");
     assert!(
         published.success(),
-        "real zenoh-pico z_pub exited {published:?}\n--- its stdout ---\n{}",
+        "real zenoh-pico z_pub exited {published:?}\n--- its stdout+stderr ---\n{}",
         read_captured(&mut pub_out)
     );
 
@@ -2075,7 +2100,7 @@ fn pico_zsub_source_on_wz_capi_receives_from_a_real_pico_declared_publisher() {
     assert!(
         captured.contains("Pub from Pico"),
         "a sample arrived on the key but not the payload the foreign DECLARED \
-         publisher sends.\n--- stdout ---\n{captured}"
+         publisher sends.\n--- stdout+stderr ---\n{captured}"
     );
 
     graceful_terminate(sub.child_mut(), Duration::from_secs(5));
@@ -2302,7 +2327,7 @@ fn pico_zsubchannel_source_on_wz_capi_receives_through_a_fifo_channel() {
             .arg(&dropin)
             .args(["-l", &endpoint, "-m", "peer", "-k", "demo/dropin/**"])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the compiled z_sub_channel drop-in"),
     );
@@ -2323,12 +2348,12 @@ fn pico_zsubchannel_source_on_wz_capi_receives_through_a_fifo_channel() {
         .arg(&z_put)
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
         .stdout(Stdio::from(put_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(put_out.try_clone().expect("dup stderr handle")))
         .status()
         .expect("run the real zenoh-pico z_put");
     assert!(
         put.success(),
-        "real zenoh-pico z_put exited {put:?}\n--- its stdout ---\n{}",
+        "real zenoh-pico z_put exited {put:?}\n--- its stdout+stderr ---\n{}",
         read_captured(&mut put_out)
     );
 
@@ -2349,7 +2374,7 @@ fn pico_zsubchannel_source_on_wz_capi_receives_through_a_fifo_channel() {
     assert!(
         captured.contains(key),
         "the payload came through the channel but not on the key the foreign \
-         publisher used ({key}).\n--- stdout ---\n{captured}"
+         publisher used ({key}).\n--- stdout+stderr ---\n{captured}"
     );
 
     graceful_terminate(sub.child_mut(), Duration::from_secs(5));
@@ -2401,7 +2426,7 @@ fn pico_zqueryablechannel_source_on_wz_capi_answers_real_pico_zget_after_the_dis
             .arg(&dropin)
             .args(["-l", &endpoint, "-m", "peer", "-k", key, "-v", value])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(qbl_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the compiled z_queryable_channel drop-in"),
     );
@@ -2422,12 +2447,12 @@ fn pico_zqueryablechannel_source_on_wz_capi_answers_real_pico_zget_after_the_dis
         .arg(&z_get)
         .args(["-e", &endpoint, "-m", "client", "-k", key])
         .stdout(Stdio::from(get_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
         .status()
         .expect("run the real zenoh-pico z_get");
     assert!(
         get.success(),
-        "real zenoh-pico z_get exited {get:?}\n--- its stdout ---\n{}",
+        "real zenoh-pico z_get exited {get:?}\n--- its stdout+stderr ---\n{}",
         read_captured(&mut get_out)
     );
 
@@ -2451,7 +2476,7 @@ fn pico_zqueryablechannel_source_on_wz_capi_answers_real_pico_zget_after_the_dis
     assert!(
         responder.contains("[Queryable handler] Received Query"),
         "the reply arrived but the drop-in never printed its channel-handler \
-         line, so the query did not travel through `z_recv`.\n--- stdout ---\n{responder}"
+         line, so the query did not travel through `z_recv`.\n--- stdout+stderr ---\n{responder}"
     );
 
     graceful_terminate(qbl.child_mut(), Duration::from_secs(5));
@@ -2488,7 +2513,7 @@ fn pico_zbytes_source_on_wz_capi_prints_what_the_real_pico_prints() {
         .expect("run upstream z_bytes linked to the REAL zenoh-pico");
     assert!(
         oracle_out.status.success(),
-        "upstream z_bytes.c on the REAL zenoh-pico exited {:?}\n--- stdout ---\n{}\
+        "upstream z_bytes.c on the REAL zenoh-pico exited {:?}\n--- stdout+stderr ---\n{}\
          \n--- stderr ---\n{}",
         oracle_out.status,
         String::from_utf8_lossy(&oracle_out.stdout),
@@ -2565,7 +2590,7 @@ fn pico_zadvancedsub_source_on_wz_capi_receives_from_the_real_pico_advanced_pub(
             .arg(&dropin)
             .args(["-l", &endpoint, "-m", "peer", "-k", key])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the compiled z_advanced_sub drop-in"),
     );
@@ -2588,7 +2613,7 @@ fn pico_zadvancedsub_source_on_wz_capi_receives_from_the_real_pico_advanced_pub(
             .arg(&oracle_pub)
             .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", value])
             .stdout(Stdio::from(pub_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(pub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the REAL zenoh-pico z_advanced_pub"),
     );
@@ -2626,12 +2651,12 @@ fn pico_zadvancedsub_source_on_wz_capi_receives_from_the_real_pico_advanced_pub(
         detected.contains(key),
         "the publisher-detection line does not carry the subscribed key ({key}), \
          so the derived `@adv` keyexpr is not the one the publisher announced \
-         under.\n--- stdout ---\n{detected}"
+         under.\n--- stdout+stderr ---\n{detected}"
     );
     assert!(
         captured.contains(key),
         "the sample arrived but not on the key the foreign advanced publisher \
-         used ({key}).\n--- stdout ---\n{captured}"
+         used ({key}).\n--- stdout+stderr ---\n{captured}"
     );
 
     graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
@@ -2695,7 +2720,7 @@ fn pico_zpull_source_on_wz_capi_keeps_the_newest_when_the_ring_overflows() {
                 "10000",
             ])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the compiled z_pull drop-in"),
     );
@@ -2714,22 +2739,29 @@ fn pico_zpull_source_on_wz_capi_keeps_the_newest_when_the_ring_overflows() {
     if wait_for_substring(&mut sub_out, "Nothing to pull", EXCHANGE_TIMEOUT).is_err() {
         panic!(
             "the z_pull.c drop-in never reached its first empty drain, so the \
-             publish window below would not be bounded.\n--- stdout ---\n{}",
+             publish window below would not be bounded.\n--- stdout+stderr ---\n{}",
             read_captured(&mut sub_out)
         );
     }
 
     for idx in 1..=4 {
         let payload = format!("EVICT-{idx}");
+        // R311y606 — see the note on z_pub_attachment above: an asserted exit
+        // status with a discarded stderr is an unanswerable failure.
+        let mut put_out = tempfile::tempfile().expect("z_put capture");
         let put = Command::new("stdbuf")
             .args(["-oL", "-eL"])
             .arg(&z_put)
             .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", &payload])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(put_out.try_clone().expect("dup stdout handle")))
+            .stderr(Stdio::from(put_out.try_clone().expect("dup stderr handle")))
             .status()
             .expect("run the real zenoh-pico z_put");
-        assert!(put.success(), "real zenoh-pico z_put #{idx} exited {put:?}");
+        assert!(
+            put.success(),
+            "real zenoh-pico z_put #{idx} exited {put:?}\n--- its stdout+stderr ---\n{}",
+            read_captured(&mut put_out)
+        );
     }
 
     // The drain fires at the end of the interval; allow for it plus slack.
@@ -2743,7 +2775,7 @@ fn pico_zpull_source_on_wz_capi_keeps_the_newest_when_the_ring_overflows() {
     assert!(
         captured.contains("EVICT-3"),
         "the ring kept only ONE of its two slots — capacity is not being honoured.\n\
-         --- stdout ---\n{captured}"
+         --- stdout+stderr ---\n{captured}"
     );
     assert!(
         !captured.contains("EVICT-1") && !captured.contains("EVICT-2"),
@@ -2788,7 +2820,7 @@ fn pico_zadvancedpub_source_on_wz_capi_reaches_the_real_pico_advanced_sub() {
             .arg(&z_advanced_sub)
             .args(["-l", &endpoint, "-m", "peer", "-k", key])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_advanced_sub"),
     );
@@ -2832,7 +2864,7 @@ fn pico_zadvancedpub_source_on_wz_capi_reaches_the_real_pico_advanced_sub() {
     assert!(
         foreign.contains(key),
         "the foreign advanced subscriber received the value on a different key \
-         than {key}.\n--- stdout ---\n{foreign}"
+         than {key}.\n--- stdout+stderr ---\n{foreign}"
     );
 
     graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
@@ -2869,7 +2901,7 @@ fn pico_zquerier_source_on_wz_capi_gets_a_reply_from_real_pico_zqueryable() {
             .arg(&z_queryable)
             .args(["-l", &endpoint, "-m", "peer", "-k", key, "-v", value])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(qbl_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_queryable"),
     );
@@ -2943,7 +2975,7 @@ fn pico_zgetchannel_source_on_wz_capi_receives_replies_through_a_channel() {
             .arg(&z_queryable)
             .args(["-l", &endpoint, "-m", "peer", "-k", key, "-v", value])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(qbl_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_queryable"),
     );
@@ -3071,7 +3103,7 @@ fn pico_zgetliveliness_source_on_wz_capi_sees_a_real_pico_token_through_zenohd()
             .arg(&z_liveliness)
             .args(["-e", &endpoint, "-m", "client", "-k", key])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(tok_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_liveliness"),
     );
@@ -3160,7 +3192,7 @@ fn pico_zgetattachment_source_on_wz_capi_reads_a_real_pico_reply_attachment() {
             .arg(&z_queryable_attachment)
             .args(["-l", &endpoint, "-m", "peer", "-k", key, "-v", value])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(qbl_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_queryable_attachment"),
     );
@@ -3264,7 +3296,7 @@ fn pico_zqueryableattachment_source_on_wz_capi_is_read_by_real_pico_zgetattachme
         .arg(&z_get_attachment)
         .args(["-e", &endpoint, "-m", "client", "-k", key])
         .stdout(Stdio::from(get_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
         .spawn()
         .expect("spawn the real zenoh-pico z_get_attachment");
     let get = bounded_exit("real pico z_get_attachment", get, &mut get_out);
@@ -3272,7 +3304,7 @@ fn pico_zqueryableattachment_source_on_wz_capi_is_read_by_real_pico_zgetattachme
     let responder = read_captured(&mut qbl_out);
     assert!(
         get.success(),
-        "real zenoh-pico z_get_attachment exited {get:?}\n--- its stdout ---\n{foreign}"
+        "real zenoh-pico z_get_attachment exited {get:?}\n--- its stdout+stderr ---\n{foreign}"
     );
     assert!(
         foreign.contains(value),
@@ -3355,7 +3387,7 @@ fn pico_zqueryablelat_source_on_wz_capi_answers_real_pico_zgetlat() {
         .arg(&z_get_lat)
         .args(["-e", &endpoint, "-m", "client", "-n", "5", "-w", "500"])
         .stdout(Stdio::from(lat_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(lat_out.try_clone().expect("dup stderr handle")))
         .spawn()
         .expect("spawn the real zenoh-pico z_get_lat");
     let lat = bounded_exit("real pico z_get_lat", lat, &mut lat_out);
@@ -3364,7 +3396,7 @@ fn pico_zqueryablelat_source_on_wz_capi_answers_real_pico_zgetlat() {
     assert!(
         lat.success(),
         "real zenoh-pico z_get_lat exited {lat:?} — a queryable that never replied \
-         stalls it.\n--- its stdout ---\n{foreign}\n\
+         stalls it.\n--- its stdout+stderr ---\n{foreign}\n\
          --- z_queryable_lat.c (on wz) stdout+stderr ---\n{responder}"
     );
     // One line per completed round trip. Fewer than the five asked for means a
@@ -3441,7 +3473,7 @@ fn pico_zsubattachment_source_on_wz_capi_decodes_a_real_pico_attachment() {
             .arg(&z_pub_attachment)
             .args(["-e", &endpoint, "-m", "client", "-k", key])
             .stdout(Stdio::from(pub_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(pub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_pub_attachment"),
     );
@@ -3534,7 +3566,7 @@ fn pico_zsubthr_source_on_wz_capi_measures_a_real_pico_batched_stream() {
             .arg(&z_pub_thr)
             .args(["-e", &endpoint, "-m", "client"])
             .stdout(Stdio::from(pub_writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(pub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_pub_thr"),
     );
@@ -3660,12 +3692,12 @@ fn pico_zsubst_source_on_wz_capi_receives_from_real_pico_zput() {
         .arg(&z_put)
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
         .stdout(Stdio::from(put_writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(put_out.try_clone().expect("dup stderr handle")))
         .status()
         .expect("run the real zenoh-pico z_put");
     assert!(
         put.success(),
-        "real zenoh-pico z_put exited {put:?}\n--- its stdout ---\n{}",
+        "real zenoh-pico z_put exited {put:?}\n--- its stdout+stderr ---\n{}",
         read_captured(&mut put_out)
     );
 
@@ -3695,7 +3727,7 @@ fn pico_zsubst_source_on_wz_capi_receives_from_real_pico_zput() {
     assert!(
         captured.contains(key),
         "the payload arrived but not on the key the foreign publisher used \
-         ({key}); wz's inbound keyexpr resolution disagrees.\n--- stdout ---\n{captured}"
+         ({key}); wz's inbound keyexpr resolution disagrees.\n--- stdout+stderr ---\n{captured}"
     );
 
     graceful_terminate(sub.child_mut(), Duration::from_secs(5));
@@ -3749,7 +3781,7 @@ fn pico_zpubst_source_on_wz_capi_reaches_real_pico_zsub() {
                 "1",
             ])
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
             .spawn()
             .expect("spawn the real zenoh-pico z_sub"),
     );
@@ -4167,7 +4199,9 @@ fn pico_zpong_source_on_wz_capi_echoes_for_the_real_pico_zping() {
             "500",
         ])
         .stdout(Stdio::from(writer))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(
+            ping_out.try_clone().expect("dup stderr handle"),
+        ))
         .spawn()
         .expect("spawn the real zenoh-pico z_ping");
     let status = bounded_exit("real zenoh-pico z_ping", ping, &mut ping_out);
@@ -4328,7 +4362,7 @@ fn assert_not_a_stub_main(example: &str, exe: &std::path::Path) {
         !printed.contains("ERROR: Zenoh pico"),
         "{example} on wz took its feature-gated STUB branch, so the leg that \
          drives it is exercising a printf and no wz code at all.\n\
-         --- stdout ---\n{printed}\n--- stderr ---\n{}",
+         --- stdout+stderr ---\n{printed}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr),
     );
 }

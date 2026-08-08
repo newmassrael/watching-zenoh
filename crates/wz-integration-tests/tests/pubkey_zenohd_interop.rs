@@ -97,18 +97,27 @@ fn generate_zenohd_pkcs1_keypair() -> (NamedTempFile, NamedTempFile) {
     // `-traditional` forces the PKCS#1 `BEGIN RSA PRIVATE KEY` form: OpenSSL 3.0's
     // `genrsa` defaults to PKCS#8 (`BEGIN PRIVATE KEY`), which zenoh's
     // `from_pkcs1_pem` rejects ("unexpected PEM type label").
+    // R311y606 — captured, not discarded. openssl reports WHY it refused on
+    // stderr, and this assertion used to swallow it: "openssl genrsa failed"
+    // is the same message for a missing binary, a bad flag and a full disk.
+    let mut gen_out = tempfile::tempfile().expect("openssl genrsa capture");
     let gen = Command::new("openssl")
         .arg("genrsa")
         .arg("-traditional")
         .arg("-out")
         .arg(priv_pem.path())
         .arg("2048")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(gen_out.try_clone().expect("dup stdout handle")))
+        .stderr(Stdio::from(gen_out.try_clone().expect("dup stderr handle")))
         .status()
         .expect("run openssl genrsa (is openssl on PATH?)");
-    assert!(gen.success(), "openssl genrsa failed");
+    assert!(
+        gen.success(),
+        "openssl genrsa failed\n--- its stdout+stderr ---\n{}",
+        read_captured(&mut gen_out)
+    );
 
+    let mut pub_out = tempfile::tempfile().expect("openssl rsa capture");
     let pubgen = Command::new("openssl")
         .arg("rsa")
         .arg("-in")
@@ -116,11 +125,15 @@ fn generate_zenohd_pkcs1_keypair() -> (NamedTempFile, NamedTempFile) {
         .arg("-RSAPublicKey_out")
         .arg("-out")
         .arg(pub_pem.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(pub_out.try_clone().expect("dup stdout handle")))
+        .stderr(Stdio::from(pub_out.try_clone().expect("dup stderr handle")))
         .status()
         .expect("run openssl rsa -RSAPublicKey_out");
-    assert!(pubgen.success(), "openssl public-key extraction failed");
+    assert!(
+        pubgen.success(),
+        "openssl public-key extraction failed\n--- its stdout+stderr ---\n{}",
+        read_captured(&mut pub_out)
+    );
 
     (priv_pem, pub_pem)
 }

@@ -223,8 +223,8 @@ fn spawn_zenoh_ext_view_size(port: u16, group: &str, size: usize) -> (ChildGuard
             .arg("--id")
             .arg(ORACLE_MEMBER)
             .env("RUST_LOG", "error")
+            .stderr(Stdio::from(writer.try_clone().expect("dup stderr handle")))
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::null())
             .spawn()
             .expect("spawn z_view_size"),
     );
