@@ -913,6 +913,11 @@ dissect = [
     # transport and network MID had one.
     "wz-codecs/codec-scout",
     "wz-codecs/codec-hello",
+    # R311y597 — the LINKSTATE carrier, missing for the same reason and found
+    # the same way: `walk_oam` rendered a topology advertisement as an opaque
+    # `value` because the walker could not name the OAM id that selects it.
+    # This is the second time this list was short of the claim above it.
+    "wz-codecs/codec-linkstate",
 ]
 # R311y579 (G6-serde) — `Serialize` / `Deserialize` on the `dissect` view
 # model. Its own feature, not folded into `dissect`, because the JSON emit in

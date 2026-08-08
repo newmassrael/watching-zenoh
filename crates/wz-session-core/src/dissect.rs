@@ -151,9 +151,9 @@ impl FieldValue {
 ///
 /// | source | count | who decides |
 /// |---|---:|---|
-/// | a generated codec's struct field | 41 | the wire spec, via `out/wz-codecs` |
+/// | a generated codec's struct field | 50 | the wire spec, via `out/wz-codecs` |
 /// | zenoh's own flag letters and variant names | 27 | the wire spec |
-/// | **wz's own vocabulary** | **17** | **this crate** |
+/// | **wz's own vocabulary** | **20** | **this crate** |
 ///
 /// Only the third is a wz decision, and it is enumerated here so that keying on
 /// one is an informed choice rather than an accident. `scripts/lib/`
@@ -161,7 +161,7 @@ impl FieldValue {
 /// walker invents a name outside them, if a codec field goes unwalked without a
 /// declared reason, or if either allowlist goes stale.
 ///
-/// The seventeen, with why each is not simply the codec's name:
+/// The twenty, with why each is not simply the codec's name:
 ///
 /// * `hdr` — a nested record's header byte, where the codec's field is `header`
 /// * `ext` — one entry of an extension chain; the codec models the chain
@@ -184,9 +184,15 @@ impl FieldValue {
 ///   carries the SHM marker. **Not** `payload`, and the split is the point:
 ///   the codec's field IS the payload, these bytes are an ADDRESS, and sharing
 ///   one name is exactly what let a reader take one for the other (R311y597)
+/// * `linkstate` — an OAM ZBuf body walked as a `LinkstateList`; the codec
+///   names the body `value`, and only the OAM id says which body it is
+/// * `linkstate_entry` — one `Linkstate` record, held apart from the
+///   `link_states` aggregate by the same shadowing rule as `locator_entry`
 ///
-/// ⚠ Eleven codec fields have no walker and are carried by name in the census —
-/// eight of them the `linkstate` family, which has no walker at all.
+/// ⚠ Two codec fields have no walker and are carried by name in the census.
+/// R311y597 closed nine of the eleven at once by landing the `linkstate`
+/// walker — the census's stale-declaration rule FORCED them out rather than
+/// leaving them to be noticed, which is the behaviour it was built for.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
     feature = "dissect-serde",
@@ -372,6 +378,30 @@ impl<'a> SpanCursor<'a> {
                     end: self.offset(),
                 },
                 value: FieldValue::Uint(v),
+            },
+        ))
+    }
+
+    /// Read a base-128 VLE `u16` — the `LinkstateWeight.weight` width.
+    ///
+    /// R311y597 — a distinct reader rather than [`Self::vle_u64`] with a cast,
+    /// because the two DISAGREE on the same bytes: the codec calls
+    /// `read_vle_u16` and refuses a value past `u16`, so a walker reading it
+    /// as a `u64` would render a field the codec would have rejected. A
+    /// dissector that accepts more than its codec is not describing the same
+    /// wire.
+    pub fn vle_u16(&mut self, name: &'static str) -> Result<(u16, Field), CodecError> {
+        let start = self.offset();
+        let v = self.cur.read_vle_u16()?;
+        Ok((
+            v,
+            Field {
+                name: name.into(),
+                span: Span {
+                    start,
+                    end: self.offset(),
+                },
+                value: FieldValue::Uint(v as u64),
             },
         ))
     }
@@ -979,7 +1009,7 @@ pub fn walk_oam(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         bits("encoding", carrier, enc as u64),
         flag("z", carrier, (header & 0x80) != 0),
     ];
-    let (_, id) = c.vle_u64("id")?;
+    let (oam_id, id) = c.vle_u64("id")?;
     out.push(id);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
@@ -994,7 +1024,19 @@ pub fn walk_oam(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         2 => {
             let (n, len) = c.vle_u64("value_len")?;
             out.push(len);
-            out.push(c.bytes("value", n as usize)?);
+            // R311y597 — the OAM id selects the body's meaning. Only
+            // `OAM_LINKSTATE_ID` on a ZBuf body is a topology advertisement;
+            // every other id keeps the opaque `value`, because walking bytes
+            // whose shape this build does not know is how a dissector starts
+            // inventing structure.
+            let start = c.offset();
+            let value = c.bytes("value", n as usize)?;
+            out.push(match (oam_id, &value.value) {
+                (wz_codecs::wire_const::OAM_LINKSTATE_ID, FieldValue::Bytes(body)) => {
+                    walk_linkstate_body(body, start).unwrap_or(value)
+                }
+                _ => value,
+            });
         }
         _ => {}
     }
@@ -1270,22 +1312,141 @@ pub fn walk_hello(c: &mut SpanCursor<'_>, l: bool) -> Result<Vec<Field>, CodecEr
         let (n, count) = c.vle_u64("num_locators")?;
         out.push(count);
         for _ in 0..n {
-            let start = c.offset();
-            let (len, len_field) = c.vle_u64("locator_len")?;
-            let text = c.text("locator", len as usize)?;
-            let end = c.offset();
-            // The GROUP is named apart from its leaf on purpose: `find`
-            // returns the first match by name, so a group called "locator"
-            // shadows the string field inside it and a consumer asking for
-            // the locator gets a nested node instead of the text.
-            out.push(group(
-                "locator_entry",
-                start,
-                end,
-                alloc::vec![len_field, text],
-            ));
+            out.push(walk_locator_entry(c)?);
         }
     }
+    Ok(out)
+}
+
+/// One `Locator` record: a VLE length then that many UTF-8 bytes.
+///
+/// R311y597 — lifted out of [`walk_hello`] because linkstate carries the SAME
+/// record, and a second inline copy is how the two would drift apart on the
+/// next change to either.
+///
+/// The GROUP is named apart from its leaf on purpose: [`Field::find`] returns
+/// the first match by name, so a group called `locator` shadows the string
+/// field inside it and a consumer asking for the locator gets a nested node
+/// instead of the text.
+fn walk_locator_entry(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
+    let start = c.offset();
+    let (len, len_field) = c.vle_u64("locator_len")?;
+    let text = c.text("locator", len as usize)?;
+    Ok(group(
+        "locator_entry",
+        start,
+        c.offset(),
+        alloc::vec![len_field, text],
+    ))
+}
+
+/// One `Linkstate` record — a node's advertised identity and its adjacency.
+///
+/// `options` is a presence bitfield and every optional field below is gated on
+/// one of its bits, so which fields APPEAR is itself the information; the bits
+/// are not surfaced separately because the field's presence already carries
+/// them and naming four flags would add vocabulary that says nothing new.
+///
+/// ⚠ `psid` occurs at TWO depths with two meanings — the record's own
+/// peer-local id, and one per entry of `links` naming a neighbour. That is the
+/// codec's own naming, kept rather than corrected, but it means
+/// `find("psid")` answers with the record's own (the outermost, first match).
+fn walk_linkstate_entry(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
+    let start = c.offset();
+    let (options, options_field) = c.u8("options")?;
+    let mut fields = alloc::vec![options_field];
+    let (_, psid) = c.vle_u64("psid")?;
+    fields.push(psid);
+    let (_, sn) = c.vle_u64("sn")?;
+    fields.push(sn);
+    if (options & 0x01) != 0 {
+        let (n, len) = c.vle_u64("zid_len")?;
+        fields.push(len);
+        fields.push(c.bytes("zid", n as usize)?);
+    }
+    if (options & 0x02) != 0 {
+        let (_, w) = c.u8("whatami")?;
+        fields.push(w);
+    }
+    if (options & 0x04) != 0 {
+        let (n, count) = c.vle_u64("num_locators")?;
+        fields.push(count);
+        let lstart = c.offset();
+        let mut entries = Vec::new();
+        for _ in 0..n {
+            entries.push(walk_locator_entry(c)?);
+        }
+        fields.push(group("locators", lstart, c.offset(), entries));
+    }
+    let (link_count, links_len) = c.vle_u64("links_len")?;
+    fields.push(links_len);
+    let links_start = c.offset();
+    let mut links = Vec::new();
+    for _ in 0..link_count {
+        let (_, p) = c.vle_u64("psid")?;
+        links.push(p);
+    }
+    fields.push(group("links", links_start, c.offset(), links));
+    // The weights repeat is counted by `links_len`, NOT by a length of its
+    // own — one weight per link, gated by a separate options bit.
+    if (options & 0x08) != 0 {
+        let w_start = c.offset();
+        let mut weights = Vec::new();
+        for _ in 0..link_count {
+            let (_, w) = c.vle_u16("weight")?;
+            weights.push(w);
+        }
+        fields.push(group("weights", w_start, c.offset(), weights));
+    }
+    Ok(group("linkstate_entry", start, c.offset(), fields))
+}
+
+/// The `LinkstateList` body an `OAM_LINKSTATE` carries: a count then that many
+/// records.
+///
+/// R311y597 — this is the walker `dissect.rs` used to say it did not have.
+/// The decoders existed (`out/wz-codecs/linkstate{,_link,_list,_weight}.rs`)
+/// and `walk_oam` rendered the whole body as an opaque `value`, so a capture
+/// could carry a full topology advertisement and show a reader a byte blob.
+///
+/// ⚠ The heapless caps the CODEC carries (`HeaplessVec<_, 64>` on locators,
+/// links and weights) are NOT mirrored here. A walker reads a capture on a
+/// host, and refusing a 65-link router's advertisement would hide exactly the
+/// large topology an analyst opened the capture for. The divergence is
+/// deliberate and one-directional: this walker accepts advertisements the
+/// codec would refuse, never the reverse.
+/// Walk an `OAM_LINKSTATE` ZBuf body, or decline.
+///
+/// R311y597 — declining rather than failing is the whole contract. Before this
+/// walker existed `walk_oam` could not fail on a body at all: it read `n` bytes
+/// and was done. A walker that propagates a parse error would make a message
+/// that used to dissect stop dissecting, so a truncated advertisement, a
+/// future zenoh's extra field, or an id collision would cost the reader the
+/// ENVELOPE too — the transport framing, the extensions, everything — over a
+/// body it could have shown as bytes.
+///
+/// Partial success also declines: a body that parses but leaves bytes over is
+/// not a link-state list this build understands, and rendering the prefix as
+/// a topology while silently dropping the tail is the confident-wrong-answer
+/// failure again.
+fn walk_linkstate_body(body: &[u8], base: usize) -> Option<Field> {
+    let mut c = SpanCursor::with_base(body, base);
+    let fields = walk_linkstate_list(&mut c).ok()?;
+    if c.remaining() != 0 {
+        return None;
+    }
+    Some(group("linkstate", base, base + body.len(), fields))
+}
+
+fn walk_linkstate_list(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
+    let (n, count) = c.vle_u64("num_link_states")?;
+    let mut out = alloc::vec![count];
+    let start = c.offset();
+    let mut entries = Vec::new();
+    for _ in 0..n {
+        entries.push(walk_linkstate_entry(c)?);
+    }
+    out.push(group("link_states", start, c.offset(), entries));
     Ok(out)
 }
 
@@ -1895,6 +2056,181 @@ mod tests {
             Some(FieldValue::Uint(v)) => *v,
             other => panic!("{name} is not a uint: {other:?}"),
         }
+    }
+
+    /// R311y597 — the linkstate walker, judged against the CODEC's own encode
+    /// rather than against a hand-laid byte string.
+    ///
+    /// Building the fixture by hand would test the walker against my reading
+    /// of the layout, which is the thing under test. Encoding through
+    /// `LinkstateList` means the bytes are the codec's, so a walker that
+    /// disagrees with the codec fails here instead of agreeing with a mistake.
+    #[test]
+    fn an_oam_linkstate_body_is_walked_into_its_topology() {
+        use sce_forge_runtime::heapless::Vec as HeaplessVec;
+        use wz_codecs::linkstate::Linkstate;
+        use wz_codecs::linkstate_link::LinkstateLink;
+        use wz_codecs::linkstate_list::LinkstateList;
+        use wz_codecs::linkstate_weight::LinkstateWeight;
+        use wz_codecs::locator::Locator;
+
+        let mut locators = HeaplessVec::new();
+        locators
+            .push(Locator {
+                locator_len: 9,
+                locator: "tcp/1.2.3",
+            })
+            .unwrap();
+        let mut links = HeaplessVec::new();
+        links.push(LinkstateLink { psid: 7 }).unwrap();
+        links.push(LinkstateLink { psid: 9 }).unwrap();
+        let mut weights = HeaplessVec::new();
+        weights.push(LinkstateWeight { weight: 100 }).unwrap();
+        weights.push(LinkstateWeight { weight: 300 }).unwrap();
+
+        let zid = [0xAAu8, 0xBB];
+        let mut states = HeaplessVec::new();
+        states
+            .push(Linkstate {
+                // zid | whatami | locators | weights
+                options: 0x01 | 0x02 | 0x04 | 0x08,
+                psid: 3,
+                sn: 42,
+                zid_len: Some(zid.len() as u64),
+                zid: Some(&zid),
+                whatami: Some(1),
+                num_locators: Some(1),
+                locators: Some(locators),
+                links_len: 2,
+                links,
+                weights: Some(weights),
+            })
+            .unwrap();
+        let list = LinkstateList {
+            num_link_states: 1,
+            link_states: states,
+        };
+        let body = list.encode_to_vec();
+
+        // Wrap it as the OAM carries it: header (MID 0x1F, ZBuf encoding),
+        // VLE id = OAM_LINKSTATE_ID, VLE body length, body.
+        let mut wire = alloc::vec![0x1Fu8 | 0x40];
+        wire.extend(vle(wz_codecs::wire_const::OAM_LINKSTATE_ID));
+        wire.extend(vle(body.len() as u64));
+        wire.extend_from_slice(&body);
+
+        let mut c = SpanCursor::new(&wire);
+        let fields = walk_oam(&mut c).expect("an OAM-LINKSTATE must walk");
+        let root = group("Oam", 0, wire.len(), fields);
+
+        assert_eq!(c.remaining(), 0, "the walker left bytes unread");
+        assert_tiles(&root, 0, wire.len());
+        assert!(
+            root.find("value").is_none(),
+            "a topology advertisement must not stay an opaque `value`",
+        );
+
+        let entry = root
+            .find("linkstate_entry")
+            .expect("one record must be named");
+        assert_eq!(uint(entry, "psid"), 3, "the record's OWN psid, outermost");
+        assert_eq!(uint(entry, "sn"), 42);
+        assert_eq!(uint(entry, "whatami"), 1);
+        assert_eq!(raw(entry, "zid"), zid.to_vec());
+        assert_eq!(
+            entry.find("locator").map(|f| &f.value),
+            Some(&FieldValue::Text("tcp/1.2.3".into())),
+        );
+
+        // The neighbour ids live under `links`, and asking the RECORD for
+        // `psid` must still answer with its own — the shadowing the doc warns
+        // about, pinned rather than left to the reader.
+        let links_group = entry.find("links").expect("links group");
+        let neighbours: Vec<u64> = match &links_group.value {
+            FieldValue::Nested(v) => v
+                .iter()
+                .map(|f| match f.value {
+                    FieldValue::Uint(n) => n,
+                    _ => panic!("a link entry must be a uint"),
+                })
+                .collect(),
+            other => panic!("links is not a group: {other:?}"),
+        };
+        assert_eq!(neighbours, alloc::vec![7, 9]);
+
+        // 300 does not fit a single VLE byte, so a walker reading weights at
+        // the wrong width would still read 100 correctly and fail here.
+        let weights_group = entry.find("weights").expect("weights group");
+        let read: Vec<u64> = match &weights_group.value {
+            FieldValue::Nested(v) => v
+                .iter()
+                .map(|f| match f.value {
+                    FieldValue::Uint(n) => n,
+                    _ => panic!("a weight must be a uint"),
+                })
+                .collect(),
+            other => panic!("weights is not a group: {other:?}"),
+        };
+        assert_eq!(read, alloc::vec![100, 300]);
+    }
+
+    /// The linkstate walk DECLINES rather than failing — the envelope must
+    /// survive a body this build cannot read.
+    ///
+    /// Two shapes, and the second is the one a length check alone would miss:
+    /// a body too short for the records it announces, and a body that parses
+    /// completely but leaves bytes over. Both are "not a link-state list this
+    /// build understands", and both must come back as `value`.
+    #[test]
+    fn an_unparsable_linkstate_body_declines_instead_of_killing_the_envelope() {
+        for (body, label) in [
+            (
+                alloc::vec![7u8, 8, 9],
+                "announces 7 records and carries none",
+            ),
+            (
+                alloc::vec![0u8, 0xFF],
+                "parses as an empty list, tail left over",
+            ),
+        ] {
+            let mut wire = alloc::vec![0x1Fu8 | 0x40];
+            wire.extend(vle(wz_codecs::wire_const::OAM_LINKSTATE_ID));
+            wire.extend(vle(body.len() as u64));
+            wire.extend_from_slice(&body);
+
+            let mut c = SpanCursor::new(&wire);
+            let fields = walk_oam(&mut c)
+                .unwrap_or_else(|e| panic!("{label}: the envelope must still walk, got {e:?}"));
+            let root = group("Oam", 0, wire.len(), fields);
+            assert_eq!(raw(&root, "value"), body, "{label}");
+            assert!(
+                root.find("linkstate").is_none(),
+                "{label}: a declined body must not be shown as a topology",
+            );
+            assert_eq!(c.remaining(), 0, "{label}");
+        }
+    }
+
+    /// The CONTROL: an OAM with a DIFFERENT id keeps its opaque `value`.
+    /// Without this leg, walking every ZBuf body as a linkstate would pass.
+    #[test]
+    fn an_oam_that_is_not_linkstate_keeps_its_opaque_value() {
+        let payload = [0xDEu8, 0xAD, 0xBE, 0xEF];
+        let other_id = wz_codecs::wire_const::OAM_LINKSTATE_ID + 1;
+        let mut wire = alloc::vec![0x1Fu8 | 0x40];
+        wire.extend(vle(other_id));
+        wire.extend(vle(payload.len() as u64));
+        wire.extend_from_slice(&payload);
+
+        let mut c = SpanCursor::new(&wire);
+        let fields = walk_oam(&mut c).expect("walk");
+        let root = group("Oam", 0, wire.len(), fields);
+
+        assert_eq!(raw(&root, "value"), payload.to_vec());
+        assert!(
+            root.find("linkstate").is_none(),
+            "only the linkstate id selects the topology walk",
+        );
     }
 
     #[track_caller]

@@ -77,9 +77,11 @@ PROTOCOL_VARIANTS = {
 }
 
 # OWN: the names the DISSECTOR invents, each with the reason it is not a codec
-# field. This is the whole of wz's own vocabulary on this surface -- 17 names --
-# and a consumer keying on any of them is keying on a wz decision rather than on
-# the protocol. Adding one is a deliberate act, which is the point of listing them.
+# field. This is the whole of wz's own vocabulary on this surface, and a consumer
+# keying on any of them is keying on a wz decision rather than on the protocol.
+# Adding one is a deliberate act, which is the point of listing them. The COUNT is
+# deliberately not written here: it moved twice in one round and a hand-kept tally
+# is exactly what this file exists to replace.
 OWN_VOCABULARY = {
     "hdr": "the header byte of a nested record, where the codec's own field is `header`",
     "ext": "one entry of an extension chain; the codec models the chain, not the entry",
@@ -106,22 +108,17 @@ OWN_VOCABULARY = {
     "an ADDRESS, so sharing the name is what let a reader take one for the other "
     "(R311y597). Opaque on purpose -- wz and stock zenoh put DIFFERENT descriptor "
     "layouts here and nothing on the wire tells them apart",
+    "linkstate": "the OAM ZBuf body walked as a LinkstateList. The codec models the "
+    "body as `value`; this name says WHICH body it is, since only the OAM id "
+    "distinguishes a topology advertisement from an opaque blob (R311y597)",
+    "linkstate_entry": "one Linkstate record. NOT `link_states`, which is the "
+    "aggregate the group itself is named for; same first-match-by-name shadowing "
+    "rule as `locator_entry`",
 }
 
 # AWAITING: codec fields no walker emits yet, each with WHY. Rule 3 makes closing
 # one mandatory rather than optional: land the walker and this entry must go.
 AWAITING_WALKER = {
-    "psid": "linkstate has no walker (open debt C1)",
-    "links": "linkstate has no walker (open debt C1)",
-    "links_len": "linkstate has no walker (open debt C1)",
-    "weights": "linkstate has no walker (open debt C1)",
-    "weight": "linkstate has no walker (open debt C1)",
-    "options": "linkstate has no walker (open debt C1)",
-    "link_states": "linkstate has no walker (open debt C1)",
-    "num_link_states": "linkstate has no walker (open debt C1)",
-    "locators": "the aggregate field; Hello's walker emits per-entry records "
-    "(`num_locators` / `locator_len` / `locator_entry`), and linkstate's half has "
-    "no walker at all (open debt C1)",
     "crc32": "serial_envelope is LINK framing, not a zenoh message -- outside the "
     "dissector's MID space by design",
     "header_flags": "ext_envelope's codec-internal split of the header byte; the "
