@@ -31,6 +31,10 @@
 
 extern crate alloc;
 
+/// R311y606 — IP fragment reassembly. Its own module rather than part of
+/// [`link`] because it holds STATE across packets and `link` is deliberately a
+/// pure decapsulator; the same division `passive`'s chain reassembly is under.
+pub mod frag;
 pub mod link;
 pub mod pcap;
 pub mod pcapng;
@@ -346,6 +350,13 @@ pub struct DissectionLimits {
     /// the one accumulation that cannot be trimmed in place: a 5-tuple that
     /// never returns is a flow that is never freed.
     pub max_flows: Option<usize>,
+    /// R311y606 — half-assembled IP datagrams held at once. Beyond it the
+    /// OLDEST is evicted.
+    ///
+    /// Separate from `max_flows` because a fragment table entry is not a flow:
+    /// it is keyed by the datagram's identification, so a single busy flow can
+    /// hold many at once and a bound on flows would not touch them.
+    pub max_pending_fragments: Option<usize>,
 }
 
 impl DissectionLimits {
@@ -363,6 +374,10 @@ impl DissectionLimits {
             stream_bytes_per_direction: Some(4 * 1024 * 1024),
             skipped_packets: Some(10_000),
             max_flows: Some(1_024),
+            // 256 concurrent half-assembled datagrams is far past what a real
+            // link produces at once — fragmentation is bursty and short-lived —
+            // and it bounds the table at well under the ceiling times the cap.
+            max_pending_fragments: Some(256),
         }
     }
 }
@@ -497,6 +512,12 @@ pub struct Dissection {
     /// `health()` adds this to the live flows' own, so a total survives
     /// eviction; a flow is either live or counted here, never both.
     evicted_streams: StreamTally,
+    /// R311y606 — half-assembled IP datagrams. Bounded by
+    /// [`DissectionLimits::max_pending_fragments`] and by the same
+    /// `reassembly_window_ms` deadline the message chains use, because the two
+    /// answer the same question one layer apart: how long may a piece of
+    /// something wait for the rest of it.
+    fragments: frag::FragmentTable,
     #[cfg(feature = "reassembly")]
     /// Chains aborted because their deadline passed, across every flow.
     ///
@@ -535,6 +556,10 @@ impl Dissection {
     /// measured numbers.
     pub fn with_limits(limits: DissectionLimits) -> Self {
         Self {
+            fragments: frag::FragmentTable::bounded(
+                limits.max_pending_fragments,
+                limits.reassembly_window_ms,
+            ),
             limits,
             ..Self::default()
         }
@@ -570,6 +595,86 @@ impl Dissection {
             transport_checksum_absent: self.checksums[5],
             packets_skipped: self.skipped.len() + self.drops.skipped,
             drops: self.drops,
+        }
+    }
+
+    /// R311y606 — place one piece of a fragmented IP datagram, and dissect the
+    /// whole datagram if this piece completed it.
+    ///
+    /// A piece that does NOT complete one is recorded in [`Self::skipped`] the
+    /// way it always was: it yielded no stream bytes, which is exactly what
+    /// that list means. The difference is that the bytes are no longer gone —
+    /// they are in the table, and the packet that completes the datagram is
+    /// the one that produces frames.
+    fn push_fragment(&mut self, piece: link::IpFragment, ts_millis: Option<u64>) {
+        let packet_index = piece.packet_index;
+        let ip_checksum = piece.checksums.ip;
+        let Some(done) = self.fragments.push(piece, ts_millis) else {
+            self.skipped.push(SkippedPacket {
+                packet_index,
+                reason: SkipReason::IpFragmentPending,
+            });
+            self.trim_skipped();
+            return;
+        };
+        // The transport checksum covers the whole datagram, so this is the
+        // first point at which it CAN be judged — and it must be judged here,
+        // because `transport_from_ip` is handed the verdict rather than
+        // computing it (a reassembled datagram has no header to recompute the
+        // pseudo-header lengths from without doing exactly this).
+        let checksums = link::Checksums {
+            ip: ip_checksum,
+            transport: link::reassembled_transport_checksum(
+                &done.key.src,
+                &done.key.dst,
+                done.key.proto,
+                &done.payload,
+            ),
+        };
+        match link::transport_from_ip(
+            done.key.src,
+            done.key.dst,
+            done.key.proto,
+            &done.payload,
+            done.packet_index,
+            checksums,
+        ) {
+            Ok(Transport::Udp(d) | Transport::RawEth(d)) => self.push_datagram(d, ts_millis),
+            Ok(Transport::Tcp(s)) => self.push_segment(s, ts_millis),
+            // A reassembled datagram cannot be either of these: vsock never
+            // reaches the IP path, and a fragment of a fragment is not a shape
+            // IP has. Recorded rather than ignored so the impossibility is
+            // observable if it ever stops being one.
+            Ok(Transport::Vsock(_) | Transport::IpFragment(_)) => {
+                self.skipped.push(SkippedPacket {
+                    packet_index: done.packet_index,
+                    reason: SkipReason::NotTransport(done.key.proto),
+                });
+                self.trim_skipped();
+            }
+            Err(reason) => {
+                self.skipped.push(SkippedPacket {
+                    packet_index: done.packet_index,
+                    reason,
+                });
+                self.trim_skipped();
+            }
+        }
+    }
+
+    /// What IP fragment reassembly has cost and seen.
+    pub fn fragment_stats(&self) -> frag::FragmentStats {
+        self.fragments.stats()
+    }
+
+    /// Keep [`Self::skipped`] inside its bound, counting what that costs.
+    fn trim_skipped(&mut self) {
+        if let Some(cap) = self.limits.skipped_packets {
+            if self.skipped.len() > cap {
+                let cut = self.skipped.len() - cap;
+                self.skipped.drain(..cut);
+                self.drops.skipped += cut;
+            }
         }
     }
 
@@ -670,21 +775,35 @@ impl Dissection {
                 self.push_vsock(r, ts_millis);
                 return;
             }
+            // R311y606 — a piece of a fragmented datagram. The table is the
+            // only thing here that can answer "is it whole yet", and when it
+            // says yes the reassembled bytes re-enter through the SAME
+            // transport strip a whole datagram takes, so nothing downstream
+            // learns that this one arrived in pieces.
+            Ok(Transport::IpFragment(f)) => {
+                self.push_fragment(f, ts_millis);
+                return;
+            }
             Err(reason) => {
                 self.skipped.push(SkippedPacket {
                     packet_index,
                     reason,
                 });
-                if let Some(cap) = self.limits.skipped_packets {
-                    if self.skipped.len() > cap {
-                        let cut = self.skipped.len() - cap;
-                        self.skipped.drain(..cut);
-                        self.drops.skipped += cut;
-                    }
-                }
+                self.trim_skipped();
                 return;
             }
         };
+        self.push_segment(segment, ts_millis);
+    }
+
+    /// Feed one TCP segment to its flow's assembler and the observer behind it.
+    ///
+    /// R311y606 — split out of [`Self::push_packet_at`] so a segment recovered
+    /// by fragment reassembly takes the identical path. Duplicating it was the
+    /// alternative, and the duplicate would have been the copy that forgot the
+    /// `retained_from` rebase below.
+    fn push_segment(&mut self, segment: link::Segment, ts_millis: Option<u64>) {
+        let packet_index = segment.packet_index;
         self.tally_checksums(&segment.checksums);
         let idx = match self.flows.iter().position(|f| f.flow == segment.flow) {
             Some(i) => i,
@@ -1074,6 +1193,157 @@ mod datagram_tests {
         assert!(
             d.drops().stream_bytes > 0,
             "the cap must actually have bitten"
+        );
+    }
+
+    /// Ethernet + IPv4 carrying `payload` as ONE PIECE of a fragmented
+    /// datagram, at `offset` bytes with the More-Fragments flag `more`.
+    ///
+    /// Builds the IP header directly rather than post-editing `udp_packet`'s,
+    /// because the total-length field must describe THIS piece and the
+    /// identification must be shared — two fields a patch would have to get
+    /// right in a place a reader would not look for them.
+    fn ipv4_fragment(
+        src: [u8; 4],
+        dst: [u8; 4],
+        ident: u16,
+        proto: u8,
+        offset: usize,
+        more: bool,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        assert_eq!(offset % 8, 0, "IP encodes the offset in 8-byte units");
+        let flags_off = (offset as u16 / 8) | if more { 0x2000 } else { 0 };
+        let mut ip = alloc::vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + payload.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&ident.to_be_bytes());
+        ip.extend_from_slice(&flags_off.to_be_bytes());
+        ip.extend_from_slice(&[64, proto, 0, 0]);
+        ip.extend_from_slice(&src);
+        ip.extend_from_slice(&dst);
+        ip.extend_from_slice(payload);
+
+        let mut eth = alloc::vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// R311y606 — a zenoh datagram split across two IP fragments decodes, and
+    /// decodes ONLY because the pieces were put back together.
+    ///
+    /// The discriminator is the payload SIZE. The message is padded past what
+    /// one piece carries, so the first piece alone cannot contain it: before
+    /// this round that piece went to `strip_udp`, which read the header's own
+    /// length, found the captured bytes short, and returned `Truncated` — the
+    /// datagram lost and the network's MTU blamed on the capture's snaplen.
+    #[test]
+    fn a_fragmented_zenoh_datagram_decodes_only_after_reassembly() {
+        // A KeepAlive followed by padding the UDP length covers, so the
+        // datagram is genuinely larger than one piece.
+        let mut msg = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        msg.extend_from_slice(&[0u8; 47]);
+
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&7447u16.to_be_bytes());
+        udp.extend_from_slice(&7446u16.to_be_bytes());
+        udp.extend_from_slice(&((8 + msg.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(&msg);
+
+        let src = [10, 0, 0, 1];
+        let dst = [10, 0, 0, 2];
+        let cut = 24; // a multiple of 8, as IP requires
+        let first = ipv4_fragment(src, dst, 0x4242, 17, 0, true, &udp[..cut]);
+        let rest = ipv4_fragment(src, dst, 0x4242, 17, cut, false, &udp[cut..]);
+
+        // The FIRST piece alone yields nothing and says why.
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &first);
+        assert_eq!(d.datagram_flows().len(), 0, "one piece is not a datagram");
+        assert_eq!(
+            d.skipped().iter().map(|s| s.reason).collect::<Vec<_>>(),
+            alloc::vec![link::SkipReason::IpFragmentPending],
+            "a held piece is named as held, not as lost"
+        );
+        assert_eq!(d.fragment_stats().completed, 0);
+
+        // The second completes it, and the whole datagram decodes.
+        d.push_packet(LINKTYPE_ETHERNET, 1, &rest);
+        assert_eq!(d.fragment_stats().completed, 1);
+        assert_eq!(d.fragment_stats().pieces, 2);
+        assert_eq!(
+            d.datagram_flows().len(),
+            1,
+            "the reassembled datagram must reach the datagram path"
+        );
+        assert_eq!(
+            d.datagram_flows()[0].frames.len(),
+            1,
+            "and must decode to the message it carried"
+        );
+        // Positioned at the packet that COMPLETED it, not at the first piece.
+        // `stream_offset` is where the datagram path records the packet index.
+        assert_eq!(d.datagram_flows()[0].frames[0].stream_offset, 1);
+    }
+
+    /// The NEGATIVE arm: the same bytes delivered as one unfragmented datagram
+    /// decode identically.
+    ///
+    /// Without it, a reassembler that silently mangled the payload would still
+    /// produce "one flow, one frame" above, because a KeepAlive is one byte and
+    /// the padding is never read.
+    #[test]
+    fn the_reassembled_bytes_equal_the_unfragmented_ones() {
+        let mut msg = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        msg.extend_from_slice(&[0u8; 47]);
+
+        let mut whole = Dissection::new();
+        whole.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7446, &msg),
+        );
+
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&7447u16.to_be_bytes());
+        udp.extend_from_slice(&7446u16.to_be_bytes());
+        udp.extend_from_slice(&((8 + msg.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(&msg);
+        let mut split = Dissection::new();
+        split.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &ipv4_fragment([10, 0, 0, 1], [10, 0, 0, 2], 1, 17, 0, true, &udp[..16]),
+        );
+        split.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &ipv4_fragment([10, 0, 0, 1], [10, 0, 0, 2], 1, 17, 16, false, &udp[16..]),
+        );
+
+        assert_eq!(
+            whole.datagram_flows().len(),
+            1,
+            "the control arm must decode"
+        );
+        assert_eq!(split.datagram_flows().len(), 1);
+        // Compared through Debug because `InboundFrame` is not `PartialEq` —
+        // and a rendered comparison is the right one anyway: it fails with both
+        // frames printed, which is what a byte-for-byte claim wants to show.
+        assert_eq!(
+            alloc::format!("{:?}", split.datagram_flows()[0].frames[0].frame),
+            alloc::format!("{:?}", whole.datagram_flows()[0].frames[0].frame),
+            "reassembly must reproduce the datagram byte for byte"
+        );
+        assert_eq!(
+            split.datagram_flows()[0].flow,
+            whole.datagram_flows()[0].flow,
+            "and must land on the same flow key"
         );
     }
 

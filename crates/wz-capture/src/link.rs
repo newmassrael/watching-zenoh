@@ -96,7 +96,12 @@ impl Endpoint {
         Some(u64::from_le_bytes(raw))
     }
 
-    fn new(addr_bytes: &[u8], port: u32) -> Self {
+    /// `pub(crate)` and not `pub`: R311y606 needs it in [`crate::frag`]'s
+    /// tests to build a fragment key, and a crate-private constructor is the
+    /// smallest thing that allows. Still not public — an endpoint outside this
+    /// crate should come from a decapsulated packet, not be asserted into
+    /// existence.
+    pub(crate) fn new(addr_bytes: &[u8], port: u32) -> Self {
         let mut addr = [0u8; 16];
         addr[..addr_bytes.len()].copy_from_slice(addr_bytes);
         Self {
@@ -216,10 +221,22 @@ pub enum SkipReason {
     /// carried there, so a capture of a multicast deployment produced a
     /// dissection with no messages and no error.
     NotTransport(u8),
-    /// An IPv4 fragment other than the first. Reassembling IP fragments is a
-    /// separate problem from reassembling a TCP stream and is NOT done here;
-    /// naming it keeps a hole in the byte stream attributable.
+    /// An IPv4 fragment other than the first.
+    ///
+    /// R311y606 — RETAINED but no longer produced by [`decapsulate`], which now
+    /// reports every piece as [`Transport::IpFragment`] and leaves the
+    /// reassembly decision to the consumer. A consumer that does not reassemble
+    /// records this, so the vocabulary a reader chases a hole with is unchanged.
     Ipv4Fragment,
+    /// R311y606 — a piece of a fragmented datagram that is now IN the
+    /// reassembly table, waiting for the rest of it.
+    ///
+    /// Distinct from [`Self::Ipv4Fragment`] on purpose: those bytes were LOST,
+    /// these are held. A packet recorded here yielded no frames of its own and
+    /// belongs in the skipped list for that reason, but the datagram it belongs
+    /// to may still arrive — and when it does, the packet that COMPLETES it is
+    /// the one that produces the frames.
+    IpFragmentPending,
     /// An IPv6 packet whose extension-header chain could not be walked to a
     /// transport, carrying the header that stopped it.
     ///
@@ -319,6 +336,63 @@ pub enum Transport {
     /// is keyed by MAC with no ports, so a consumer that reports "UDP flow"
     /// over it would be naming a transport that is not there.
     RawEth(Datagram),
+    /// R311y606 — one piece of a fragmented IP datagram, v4 or v6.
+    ///
+    /// Reported rather than skipped. Reassembling needs a table and a deadline,
+    /// which is per-capture state this function does not hold — the same
+    /// division [`Self::Vsock`] is under, where the parser reports the record
+    /// and [`crate::Dissection`] holds the running count. A consumer that does
+    /// not want to reassemble treats this exactly as the old skip.
+    IpFragment(IpFragment),
+}
+
+/// The fragment fields of one piece of a fragmented IP datagram.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FragmentInfo {
+    /// The datagram's identification: 16 bits on IPv4, 32 on IPv6. Widened to
+    /// `u32` so one type carries both — the value is only ever compared, and
+    /// the two families never share a key because their addresses differ in
+    /// length.
+    pub ident: u32,
+    /// This piece's first byte, as an offset into the reassembled payload.
+    /// Both families encode it in 8-byte units; this is already multiplied out.
+    pub offset: usize,
+    /// Whether more pieces follow. The LAST piece is the one that declares the
+    /// total length, and it is the only piece that can.
+    pub more: bool,
+}
+
+/// One piece of a fragmented IP datagram, with what it takes to place it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IpFragment {
+    /// Source address, port zero — a fragment other than the first carries no
+    /// transport header, so no port is knowable here for any of them.
+    pub src: Endpoint,
+    /// Destination address, port zero.
+    pub dst: Endpoint,
+    /// The upper-layer protocol the reassembled datagram will carry.
+    pub proto: u8,
+    /// Where this piece goes and whether it is the last.
+    pub info: FragmentInfo,
+    /// This piece's bytes.
+    pub payload: Vec<u8>,
+    /// Index of the captured packet this came from.
+    pub packet_index: usize,
+    /// IP-header verdict only. The transport checksum is deliberately absent:
+    /// it covers the whole datagram, so no single fragment can verify it, and
+    /// reporting `Some(false)` for a piece would call every fragmented capture
+    /// corrupt.
+    pub checksums: Checksums,
+}
+
+/// What an IP header resolved to, before the transport layer is read.
+struct IpDatagram<'a> {
+    src: Endpoint,
+    dst: Endpoint,
+    proto: u8,
+    payload: &'a [u8],
+    /// `Some` when this packet is one piece of a larger datagram.
+    fragment: Option<FragmentInfo>,
 }
 
 /// Decapsulate one captured packet down to the transport payload zenoh uses.
@@ -340,27 +414,87 @@ pub fn decapsulate(
         }
     }
     let (ip_bytes, is_v6) = strip_link(link_type, bytes)?;
-    let (src, dst, proto, payload) = if is_v6 {
+    let ip = if is_v6 {
         strip_ipv6(ip_bytes)?
     } else {
         strip_ipv4(ip_bytes)?
     };
+    let ip_checksum = if is_v6 {
+        None
+    } else {
+        Some(ipv4_header_ok(&ip_bytes[..ipv4_header_len(ip_bytes)]))
+    };
+    // R311y606 — a fragment leaves here before the transport strip, because
+    // there is no transport to strip. Even the FIRST fragment must: its header
+    // is present but the body behind it is a prefix, and reading it as whole is
+    // how a fragmented TCP segment used to advance the stream by less than the
+    // sender sent — which desynchronises the flow, and desynchronisation is
+    // terminal (`passive.rs:394`).
+    if let Some(info) = ip.fragment {
+        return Ok(Transport::IpFragment(IpFragment {
+            src: ip.src,
+            dst: ip.dst,
+            proto: ip.proto,
+            info,
+            payload: ip.payload.to_vec(),
+            packet_index,
+            checksums: Checksums {
+                ip: ip_checksum,
+                transport: None,
+            },
+        }));
+    }
     // R311y597 — computed here, where both the addresses (for the pseudo
     // header) and the transport body are in hand, and REPORTED rather than
     // acted on. See [`Checksums`] for why a bad one is not a skip.
     let checksums = Checksums {
-        ip: if is_v6 {
-            None
-        } else {
-            Some(ipv4_header_ok(&ip_bytes[..ipv4_header_len(ip_bytes)]))
-        },
-        transport: transport_checksum(&src, &dst, proto, payload),
+        ip: ip_checksum,
+        transport: transport_checksum(&ip.src, &ip.dst, ip.proto, ip.payload),
     };
+    transport_from_ip(
+        ip.src,
+        ip.dst,
+        ip.proto,
+        ip.payload,
+        packet_index,
+        checksums,
+    )
+}
+
+/// Read the transport layer of a whole IP datagram.
+///
+/// Split out of [`decapsulate`] so a REASSEMBLED datagram takes the same path
+/// as one that arrived whole. The alternative was re-synthesising an IP header
+/// around the reassembled bytes just to feed it back through the front door,
+/// and a synthesised header is a second place for the fields to be wrong.
+pub fn transport_from_ip(
+    src: Endpoint,
+    dst: Endpoint,
+    proto: u8,
+    payload: &[u8],
+    packet_index: usize,
+    checksums: Checksums,
+) -> Result<Transport, SkipReason> {
     match proto {
         IP_PROTO_TCP => strip_tcp(src, dst, payload, packet_index, checksums).map(Transport::Tcp),
         IP_PROTO_UDP => strip_udp(src, dst, payload, packet_index, checksums).map(Transport::Udp),
         other => Err(SkipReason::NotTransport(other)),
     }
+}
+
+/// The transport checksum of a reassembled datagram.
+///
+/// Public for the same reason [`transport_from_ip`] is: the verdict can only be
+/// reached once every piece is in hand, so the reassembler is the only caller
+/// that can produce it, and it must produce the same value the whole-datagram
+/// path does.
+pub fn reassembled_transport_checksum(
+    src: &Endpoint,
+    dst: &Endpoint,
+    proto: u8,
+    payload: &[u8],
+) -> Option<bool> {
+    transport_checksum(src, dst, proto, payload)
 }
 
 /// The IPv4 header's own declared length, clamped to what was captured.
@@ -584,7 +718,7 @@ fn strip_link(link_type: u32, bytes: &[u8]) -> Result<(&[u8], bool), SkipReason>
     }
 }
 
-fn strip_ipv4(bytes: &[u8]) -> Result<(Endpoint, Endpoint, u8, &[u8]), SkipReason> {
+fn strip_ipv4(bytes: &[u8]) -> Result<IpDatagram<'_>, SkipReason> {
     if bytes.len() < 20 {
         return Err(SkipReason::Truncated);
     }
@@ -592,12 +726,20 @@ fn strip_ipv4(bytes: &[u8]) -> Result<(Endpoint, Endpoint, u8, &[u8]), SkipReaso
     if ihl < 20 || bytes.len() < ihl {
         return Err(SkipReason::Truncated);
     }
-    // Fragment offset is the low 13 bits of the flags/offset word. A non-zero
-    // offset means this is NOT the first fragment and carries no TCP header.
-    let frag_off = u16::from_be_bytes([bytes[6], bytes[7]]) & 0x1FFF;
-    if frag_off != 0 {
-        return Err(SkipReason::Ipv4Fragment);
-    }
+    // The flags/offset word: bit 13 is More Fragments, the low 13 bits are the
+    // offset in 8-byte units.
+    //
+    // R311y606 — BOTH halves decide. Reading the offset alone called a first
+    // fragment (offset 0, MF set) a whole datagram and handed its prefix to the
+    // transport, which is a silent truncation rather than a named skip.
+    let flags_off = u16::from_be_bytes([bytes[6], bytes[7]]);
+    let frag_off = (flags_off & 0x1FFF) as usize * 8;
+    let more = flags_off & 0x2000 != 0;
+    let fragment = (more || frag_off != 0).then(|| FragmentInfo {
+        ident: u16::from_be_bytes([bytes[4], bytes[5]]) as u32,
+        offset: frag_off,
+        more,
+    });
     let total_len = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
     // Trust the header's total length when it fits, so trailing link padding
     // (an Ethernet frame padded to 60 bytes) is not read as payload. Fall
@@ -607,15 +749,13 @@ fn strip_ipv4(bytes: &[u8]) -> Result<(Endpoint, Endpoint, u8, &[u8]), SkipReaso
     } else {
         bytes.len()
     };
-    let proto = bytes[9];
-    let src = &bytes[12..16];
-    let dst = &bytes[16..20];
-    Ok((
-        Endpoint::new(src, 0),
-        Endpoint::new(dst, 0),
-        proto,
-        &bytes[ihl..end],
-    ))
+    Ok(IpDatagram {
+        src: Endpoint::new(&bytes[12..16], 0),
+        dst: Endpoint::new(&bytes[16..20], 0),
+        proto: bytes[9],
+        payload: &bytes[ihl..end],
+        fragment,
+    })
 }
 
 /// Whether an IPv6 next-header value names an EXTENSION HEADER rather than an
@@ -717,7 +857,7 @@ fn strip_vsockmon(bytes: &[u8], packet_index: usize) -> Result<VsockRecord, Skip
 /// is already unusual.
 const IPV6_MAX_EXT_HEADERS: usize = 8;
 
-fn strip_ipv6(bytes: &[u8]) -> Result<(Endpoint, Endpoint, u8, &[u8]), SkipReason> {
+fn strip_ipv6(bytes: &[u8]) -> Result<IpDatagram<'_>, SkipReason> {
     if bytes.len() < 40 {
         return Err(SkipReason::Truncated);
     }
@@ -740,13 +880,24 @@ fn strip_ipv6(bytes: &[u8]) -> Result<(Endpoint, Endpoint, u8, &[u8]), SkipReaso
     // rather than a limit, and the work is this loop.
     let mut next_header = bytes[6];
     let mut at = 40usize;
+    // R311y606 — set by the Fragment header if the chain carries one. The walk
+    // CONTINUES past it either way now: a first fragment's remaining chain is
+    // what names the upper-layer protocol, and a later fragment's `next_header`
+    // field carries the same value, so both arrive with `proto` correct.
+    let mut fragment: Option<FragmentInfo> = None;
     for _ in 0..IPV6_MAX_EXT_HEADERS {
         // Not an extension header: hand the protocol byte back and let
         // `decapsulate` classify it, exactly as `strip_ipv4` does. TCP and UDP
         // reach their arms; anything else lands on `NotTransport`, which names
         // the real cause.
         if !is_ipv6_extension_header(next_header) {
-            return Ok((src, dst, next_header, &bytes[at.min(end)..end]));
+            return Ok(IpDatagram {
+                src,
+                dst,
+                proto: next_header,
+                payload: &bytes[at.min(end)..end],
+                fragment,
+            });
         }
         let step = match next_header {
             // ESP encrypts everything after it, so there is nothing to walk to
@@ -754,18 +905,30 @@ fn strip_ipv6(bytes: &[u8]) -> Result<(Endpoint, Endpoint, u8, &[u8]), SkipReaso
             // 253 / 254 are reserved for experimentation and carry no length
             // this reader may assume.
             50 | 253 | 254 => return Err(SkipReason::Ipv6ExtensionChain(next_header)),
-            // Fragment: fixed 8 bytes. Offset 0 is the FIRST fragment and
-            // carries the transport header, so the walk continues into it; any
-            // other offset has no transport header to find, which is the same
-            // limit the IPv4 path names.
+            // Fragment: fixed 8 bytes, and the only extension header that
+            // makes this packet a PIECE rather than a datagram.
+            //
+            // R311y606 — the walk now continues for every offset, not only
+            // zero. A later fragment has no transport header behind this one,
+            // but it does not need one: `next_header` names the protocol the
+            // reassembled datagram will carry, and the bytes after this header
+            // are the piece's payload. Stopping at offset != 0 is what made
+            // every fragmented IPv6 datagram unreadable.
             44 => {
                 if end < at + 8 {
                     return Err(SkipReason::Truncated);
                 }
-                let offset = u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]) >> 3;
-                if offset != 0 {
-                    return Err(SkipReason::Ipv6Fragment);
-                }
+                let off_word = u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]);
+                fragment = Some(FragmentInfo {
+                    ident: u32::from_be_bytes([
+                        bytes[at + 4],
+                        bytes[at + 5],
+                        bytes[at + 6],
+                        bytes[at + 7],
+                    ]),
+                    offset: (off_word >> 3) as usize * 8,
+                    more: off_word & 0x1 != 0,
+                });
                 next_header = bytes[at];
                 8
             }
@@ -855,7 +1018,20 @@ mod tests {
                 panic!("expected TCP, got a datagram: {d:?}")
             }
             Ok(Transport::Vsock(r)) => panic!("expected TCP, got a vsock record: {r:?}"),
+            Ok(Transport::IpFragment(f)) => panic!("expected TCP, got an IP fragment: {f:?}"),
             Err(e) => Err(e),
+        }
+    }
+
+    /// Decapsulate and require an IP fragment. The sibling of [`tcp`] for the
+    /// R311y606 legs, and it PANICS on a whole datagram rather than returning
+    /// an option: a test that meant to build a fragment and built a whole
+    /// packet would otherwise assert about the wrong thing.
+    #[track_caller]
+    fn fragment(link_type: u32, idx: usize, bytes: &[u8]) -> IpFragment {
+        match decapsulate(link_type, idx, bytes) {
+            Ok(Transport::IpFragment(f)) => f,
+            other => panic!("expected an IP fragment, got {other:?}"),
         }
     }
 
@@ -1028,13 +1204,16 @@ mod tests {
             Err(SkipReason::NotTransport(132))
         );
 
-        // A non-first IPv4 fragment.
+        // A non-first IPv4 fragment. R311y606 — this is no longer a skip: the
+        // piece is REPORTED, with the offset it claims, and the reassembly
+        // decision belongs to the consumer. The leg is kept here because the
+        // packet it builds is the same one that used to be lost.
         let mut frag = eth_ipv4_tcp([10, 0, 0, 1], 1, [10, 0, 0, 2], 2, 0, 0x18, b"x");
         frag[14 + 6..14 + 8].copy_from_slice(&0x0001u16.to_be_bytes());
-        assert_eq!(
-            decapsulate(LINKTYPE_ETHERNET, 0, &frag),
-            Err(SkipReason::Ipv4Fragment)
-        );
+        let piece = fragment(LINKTYPE_ETHERNET, 0, &frag);
+        assert_eq!(piece.info.offset, 8);
+        assert!(!piece.info.more);
+        assert_eq!(piece.proto, IP_PROTO_TCP);
 
         // An IPv6 extension-header chain. R311y597 — this leg was MISSING,
         // which is why the test's name was a claim it did not keep: the one
@@ -1071,10 +1250,12 @@ mod tests {
             frag[2..4].copy_from_slice(&(185u16 << 3).to_be_bytes());
             eth_ipv6([0x20; 16], [0x21; 16], 44, &frag)
         };
-        assert_eq!(
-            decapsulate(LINKTYPE_ETHERNET, 0, &ipv6_frag),
-            Err(SkipReason::Ipv6Fragment)
-        );
+        // R311y606 — reported, not skipped, and the v6 identification is the
+        // full 32 bits.
+        let piece = fragment(LINKTYPE_ETHERNET, 0, &ipv6_frag);
+        assert_eq!(piece.info.offset, 1480);
+        assert!(!piece.info.more);
+        assert_eq!(piece.proto, IP_PROTO_TCP);
 
         // A link type this build does not decapsulate.
         assert_eq!(
@@ -1544,24 +1725,40 @@ mod tests {
         assert_eq!(seg.seq, 7);
     }
 
-    /// A FIRST fragment carries the transport header, so the walk continues
-    /// into it — the same rule the IPv4 path applies.
+    /// Every piece of a fragmented IPv6 datagram is reported as a piece —
+    /// INCLUDING the first, which is the leg this test used to get wrong.
+    ///
+    /// R311y606. The old shape walked the first fragment through to TCP and
+    /// asserted its payload, which is the silent-truncation defect stated as an
+    /// expectation: `f1` was a PREFIX of that segment, and delivering it
+    /// advanced the stream by less than the sender sent. The fix is that offset
+    /// zero with M set is a fragment like any other.
     #[test]
-    fn a_first_ipv6_fragment_is_walked_and_a_later_one_is_named() {
+    fn every_ipv6_fragment_is_reported_as_a_piece() {
         let mut first = alloc::vec![0u8; 8];
         first[0] = IP_PROTO_TCP;
         first[2..4].copy_from_slice(&0x0001u16.to_be_bytes()); // offset 0, M set
+        first[4..8].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
         first.extend_from_slice(&tcp_body(7447, 40000, 5, 0x18, b"f1"));
-        let seg = tcp(LINKTYPE_ETHERNET, 0, &eth_ipv6(V6_A, V6_B, 44, &first))
-            .expect("the first fragment has the transport header");
-        assert_eq!(seg.payload, b"f1");
+        let piece = fragment(LINKTYPE_ETHERNET, 0, &eth_ipv6(V6_A, V6_B, 44, &first));
+        assert_eq!(piece.info.offset, 0);
+        assert!(piece.info.more, "M is set, so this is not the last piece");
+        assert_eq!(piece.info.ident, 0xDEAD_BEEF);
+        assert_eq!(piece.proto, IP_PROTO_TCP);
+        // The piece's bytes are the TCP header and its prefix — carried, not
+        // parsed. Parsing them here is exactly what used to happen.
+        assert_eq!(&piece.payload[20..], b"f1");
 
         let mut later = alloc::vec![0u8; 8];
         later[0] = IP_PROTO_TCP;
         later[2..4].copy_from_slice(&(64u16 << 3).to_be_bytes());
+        later[4..8].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        let piece = fragment(LINKTYPE_ETHERNET, 0, &eth_ipv6(V6_A, V6_B, 44, &later));
+        assert_eq!(piece.info.offset, 512);
+        assert!(!piece.info.more);
         assert_eq!(
-            decapsulate(LINKTYPE_ETHERNET, 0, &eth_ipv6(V6_A, V6_B, 44, &later)),
-            Err(SkipReason::Ipv6Fragment),
+            piece.info.ident, 0xDEAD_BEEF,
+            "both pieces must key to one datagram"
         );
     }
 
