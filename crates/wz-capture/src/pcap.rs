@@ -18,10 +18,14 @@
 //! (`pcap-savefile(5)`; the nanosecond magics are the `0x3c4d` variant
 //! libpcap 1.5 introduced.)
 //!
-//! **pcapng is NOT read here.** It is a different, block-structured format,
-//! and accepting its magic while parsing it as classic pcap would produce
-//! confident nonsense. [`PcapError::LooksLikePcapNg`] names it explicitly so
-//! the failure is legible rather than "bad magic".
+//! **pcapng is not read here** — it is read by [`crate::pcapng`] (R311y605),
+//! because it is a different, block-structured format whose byte order, link
+//! type and timestamp resolution are all per-SECTION or per-INTERFACE rather
+//! than per-file. Accepting its magic while parsing it as classic pcap would
+//! produce confident nonsense, so [`PcapError::LooksLikePcapNg`] still names it
+//! explicitly here and the failure stays legible rather than "bad magic".
+//! [`crate::Dissection::from_capture`] is the entry point that dispatches
+//! between the two on the magic.
 
 use alloc::vec::Vec;
 

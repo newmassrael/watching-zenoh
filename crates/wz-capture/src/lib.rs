@@ -33,6 +33,7 @@ extern crate alloc;
 
 pub mod link;
 pub mod pcap;
+pub mod pcapng;
 pub mod tcp;
 pub mod ws;
 
@@ -922,6 +923,56 @@ impl Dissection {
         }
         Ok(out)
     }
+
+    /// R311y605 — dissect a whole pcapng file from memory.
+    ///
+    /// Each packet is pushed under ITS OWN interface's link type, which is the
+    /// whole reason [`pcapng`] is a separate reader: a `dumpcap -i any` capture
+    /// carries interfaces with different link layers, and one link type applied
+    /// to all of them decapsulates half the file as the wrong thing.
+    pub fn from_pcapng(bytes: &[u8]) -> Result<Self, pcapng::PcapngError> {
+        let file = pcapng::parse(bytes)?;
+        let mut out = Self::new();
+        for packet in &file.packets {
+            out.push_packet_at(
+                packet.link_type,
+                packet.index,
+                file.ts_millis(packet),
+                &packet.data,
+            );
+        }
+        Ok(out)
+    }
+
+    /// R311y605 — dissect a capture file of EITHER format, chosen by its magic.
+    ///
+    /// The entry point a consumer that was handed "a capture" wants. Dispatch
+    /// rather than a fallback chain: trying one parser and then the other would
+    /// report the SECOND one's error for a file that was really a damaged
+    /// instance of the first, and "bad pcapng magic" is a useless diagnosis for
+    /// a truncated classic pcap.
+    pub fn from_capture(bytes: &[u8]) -> Result<Self, CaptureError> {
+        if pcapng::looks_like_pcapng(bytes) {
+            Self::from_pcapng(bytes).map_err(CaptureError::Pcapng)
+        } else {
+            Self::from_pcap(bytes).map_err(CaptureError::Pcap)
+        }
+    }
+}
+
+/// R311y605 — why a capture file could not be read, in either format.
+///
+/// Deliberately NOT a flattened single enum: the two formats fail in genuinely
+/// different ways (a classic pcap has a file header and a magic; a pcapng has
+/// neither, it has a block chain and a per-section byte order), and merging
+/// them would either lose the detail or invent variants that can never occur
+/// for one of the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureError {
+    /// The file was classic pcap and did not read.
+    Pcap(pcap::PcapError),
+    /// The file was pcapng and did not read.
+    Pcapng(pcapng::PcapngError),
 }
 
 // ── R311y584 (A3) — the UDP path end to end. `link` proves the parser; this
@@ -1226,6 +1277,112 @@ mod datagram_tests {
         let d = Dissection::from_pcap(&file).expect("parse");
         assert_eq!(d.datagram_flows().len(), 1);
         assert_eq!(d.datagram_flows()[0].session.now_ms(), 7_250);
+    }
+
+    /// R311y605 — a pcapng capture DISSECTS, and reaches it through the
+    /// format-sniffing entry point a consumer that was handed "a capture" uses.
+    ///
+    /// This is the WIRING claim, separate from `pcapng`'s own parser tests: a
+    /// reader that parses perfectly and a dissection that never calls it look
+    /// identical from the parser's side, which is the shape R311y602 recorded
+    /// for the WebSocket deframer. So the assertion is on decoded MESSAGES.
+    ///
+    /// Until this round `from_pcap` on this file returned
+    /// `PcapError::LooksLikePcapNg` — a hard failure for the format wireshark,
+    /// tshark and dumpcap all write by default.
+    #[test]
+    fn a_pcapng_capture_dissects_through_the_sniffing_entry_point() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let pkt = udp_packet([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, &keepalive);
+        // if_tsresol 6 (microseconds); 7_250_000 ticks is 7250 ms.
+        let file = crate::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &[(0, 7_250_000, &pkt)]);
+
+        // The classic reader still refuses it, and says which format it is.
+        assert!(matches!(
+            crate::pcap::parse(&file),
+            Err(crate::pcap::PcapError::LooksLikePcapNg)
+        ));
+
+        let d = Dissection::from_capture(&file).expect("a pcapng capture must dissect");
+        assert!(d.skipped().is_empty(), "{:?}", d.skipped());
+        assert_eq!(d.datagram_flows().len(), 1);
+        assert_eq!(
+            d.datagram_flows()[0].frames.len(),
+            1,
+            "the message must decode, not merely the file parse"
+        );
+        assert!(d.datagram_flows()[0].frames[0].frame.is_ok());
+        #[cfg(feature = "reassembly")]
+        assert_eq!(
+            d.datagram_flows()[0].session.now_ms(),
+            7_250,
+            "the interface's resolution must reach the observer's clock"
+        );
+    }
+
+    /// The DISCRIMINATOR for the entry point: a classic pcap still goes to the
+    /// classic reader, and a damaged one reports the CLASSIC error rather than
+    /// "bad pcapng magic". Dispatch on the magic, not a fallback chain.
+    #[test]
+    fn the_sniffing_entry_point_sends_each_format_to_its_own_reader() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let pkt = udp_packet([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, &keepalive);
+        let classic = crate::pcap::write(LINKTYPE_ETHERNET, &[(1, 0, &pkt)]);
+        let d = Dissection::from_capture(&classic).expect("classic must still work");
+        assert_eq!(d.datagram_flows().len(), 1);
+
+        // A classic file with a broken magic must not be diagnosed as pcapng.
+        let mut damaged = classic.clone();
+        damaged[0] = 0xFF;
+        match Dissection::from_capture(&damaged) {
+            Err(CaptureError::Pcap(crate::pcap::PcapError::BadMagic(_))) => {}
+            other => panic!("expected the CLASSIC diagnosis, got {other:?}"),
+        }
+
+        // And a pcapng whose block chain is broken must not be diagnosed as a
+        // bad classic magic.
+        let mut ng = crate::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &[(0, 0, &pkt)]);
+        ng[4..8].copy_from_slice(&13u32.to_le_bytes());
+        match Dissection::from_capture(&ng) {
+            Err(CaptureError::Pcapng(crate::pcapng::PcapngError::BadBlockLength {
+                claimed: 13,
+                ..
+            })) => {}
+            other => panic!("expected the PCAPNG diagnosis, got {other:?}"),
+        }
+    }
+
+    /// R311y605 — the multi-interface case, end to end, and the reason the
+    /// pcapng reader keeps link type per-packet.
+    ///
+    /// Interface 0 is Ethernet and interface 1 is a link type this build does
+    /// not handle. A dissection that applied interface 0's link type to both
+    /// would decapsulate the second packet as Ethernet and could produce a
+    /// flow from it; applying each packet's own means the second is SKIPPED by
+    /// name, which is the honest answer.
+    #[test]
+    fn a_two_interface_capture_decapsulates_each_packet_as_its_own_link() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let pkt = udp_packet([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, &keepalive);
+        // 147 is LINKTYPE_USER0 — reserved for private use and not one this
+        // build decapsulates, so it must land in `skipped`.
+        let file = crate::pcapng::write(
+            &[(LINKTYPE_ETHERNET, 6), (147, 6)],
+            &[(0, 0, &pkt), (1, 0, &pkt)],
+        );
+        let d = Dissection::from_capture(&file).expect("parse");
+        assert_eq!(
+            d.datagram_flows().len(),
+            1,
+            "only the ethernet packet may produce a flow"
+        );
+        assert_eq!(
+            d.skipped().len(),
+            1,
+            "the second interface's packet must be skipped, not misread: {:?}",
+            d.skipped()
+        );
+        assert_eq!(d.skipped()[0].packet_index, 1);
     }
 
     /// The CONTROL: the untimestamped entry point leaves the clock alone, so

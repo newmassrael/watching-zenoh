@@ -9779,6 +9779,68 @@
         "Analyzer reach still open and unchanged: pcapng is unread (C1) -- the format wireshark and dumpcap write by DEFAULT, so a capture from a modern tool is a hard error today; IPv4 fragment reassembly (C2); desynchronisation is terminal with no resync (C7); multicast carries FragmentMarkers::NONE so First/Drop cannot be judged there (C8)."
       ]
     },
+    "Round 1622": {
+      "decision_summary": "R311y605c -- read pcapng, the format every capture tool writes by default, with the per-interface link type and resolution the classic reader has no room for",
+      "changes_bullets": [
+        "crates/wz-capture/src/pcapng.rs (new, 17 unit tests): the pcapng reader. Blocks SHB / IDB / EPB / SPB and the obsolete Packet Block; unknown block types skipped by their declared length, which is what the format's self-describing structure is for (name-resolution, statistics, decryption-secret and custom blocks all appear in real wireshark output).",
+        "Its own module and its own Packet type rather than a variant of pcap::PcapFile, because pcapng keeps per-SECTION byte order and per-INTERFACE link type and timestamp resolution where classic pcap keeps all three per-file. Folding it in would mean applying one interface's link type to every packet, which for a `dumpcap -i any` or two-`-i` capture decapsulates half the file as the wrong link layer -- silently, since a wrong link header parses into a plausible IP packet often enough to produce flows.",
+        "Timestamps resolve to milliseconds where the interface's own if_tsresol exponent is in hand, in BOTH directions: finer than a millisecond divides (micro, nano), coarser multiplies (if_tsresol 3 is milliseconds, 0 is whole seconds), and the high bit selects base 2.",
+        "The 64-bit timestamp is read as ONE count with the high word first, not as the seconds/fraction pair the classic layout invites.",
+        "A new SECTION clears the interface list, because ids in the next section index ITS interfaces and the link type may differ.",
+        "A packet naming an undescribed interface is a hard error, not a guess: the interface carries the link type.",
+        "The trailing block_total_length is checked against the leading one -- the format duplicates that field precisely so a reader can detect the mismatch.",
+        "crates/wz-capture/src/lib.rs: Dissection::from_pcapng and Dissection::from_capture, the latter dispatching on the magic. CaptureError keeps the two formats' errors apart rather than flattening them.",
+        "crates/wz-capture/src/pcap.rs: the module doc's \"pcapng is NOT read here\" now points at the new reader instead of implying nothing can read it."
+      ],
+      "verification_bullets": [
+        "The gap was measurable before the fix and the test asserts it still is at the classic reader: `pcap::parse` on a pcapng file returns PcapError::LooksLikePcapNg, which is what \"open the capture your tool just produced\" did.",
+        "Damage probe, three arms, each firing only its own legs with green controls. Arm 1 (from_pcapng applies interfaces[0].link_type to every packet): only the two-interface end-to-end leg red, both single-interface legs green -- which is exactly why the per-packet link type needed its own test. Arm 2 (ticks_per_second ignores the declared exponent and assumes the default 6): the resolution leg and the big-endian leg red, 97 green. Arm 3 (from_capture as a try-pcap-then-pcapng fallback chain): only the dispatch discriminator red.",
+        "The writer is paired with byte-level assertions on the header it emits (the_writers_header_is_the_formats_header), because a round trip through one author's belief proves only self-consistency.",
+        "The two-interface leg asserts the second packet is SKIPPED BY NAME rather than merely absent: interface 1 declares LINKTYPE_USER0 147, which this build does not decapsulate, so \"skipped\" is the honest answer and \"misread as ethernet\" is the failure being excluded.",
+        "wz-capture 99 tests pass (was 80 before this round).",
+        "Local lanes: C0 pass, C1 pass (100s), C1bn pass (90s), C1bs pass (32s), C1bf pass (44s), C2 pass (56s), C3 pass (25s). C2/C3/C1bn/C1bs first went RED on a real clippy finding (`% 4 != 0` vs `is_multiple_of`), fixed and re-run green."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "The Decryption Secrets Block (type 0x0000000A) is skipped as unknown. That is correct for now and it is also where a TLS keylog would arrive INSIDE a capture rather than beside it -- the R311y597 B4 item's oracle question, unchanged: wz still cannot prove exported secrets decrypt anything, and tshark is not installed on this host.",
+        "Interface statistics blocks (ISB) are skipped, so a capture's own declared drop counts are not surfaced. The dissection reports the drops IT caused (DissectionDrops) and not the ones the capture tool already had, and those are different numbers.",
+        "An SPB's timestamp is zero because the block carries none. A capture of SPBs therefore cannot drive a reassembly deadline, and nothing warns a consumer of that.",
+        "`from_capture` is the entry point a consumer should use; `from_pcap` remains public and a caller that keeps using it still gets LooksLikePcapNg. No gate makes the new entry point the preferred one.",
+        "Analyzer reach still open: IPv4 fragment reassembly (C2, needs a table plus a timeout -- an independent round); desynchronisation terminal with no resync (C7); multicast carries FragmentMarkers::NONE so First/Drop cannot be judged there (C8); the three non-IP links with no standard DLT (unixsock, unixpipe, serial); scouting datagrams still reach the wrong MID space (B1, placement undecided)."
+      ],
+      "publishable_decision_summary": "R311y605c -- read pcapng, the format every capture tool writes by default, with the per-interface link type and resolution the classic reader has no room for",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/pcapng.rs (new, 17 unit tests): the pcapng reader. Blocks SHB / IDB / EPB / SPB and the obsolete Packet Block; unknown block types skipped by their declared length, which is what the format's self-describing structure is for (name-resolution, statistics, decryption-secret and custom blocks all appear in real wireshark output).",
+        "Its own module and its own Packet type rather than a variant of pcap::PcapFile, because pcapng keeps per-SECTION byte order and per-INTERFACE link type and timestamp resolution where classic pcap keeps all three per-file. Folding it in would mean applying one interface's link type to every packet, which for a `dumpcap -i any` or two-`-i` capture decapsulates half the file as the wrong link layer -- silently, since a wrong link header parses into a plausible IP packet often enough to produce flows.",
+        "Timestamps resolve to milliseconds where the interface's own if_tsresol exponent is in hand, in BOTH directions: finer than a millisecond divides (micro, nano), coarser multiplies (if_tsresol 3 is milliseconds, 0 is whole seconds), and the high bit selects base 2.",
+        "The 64-bit timestamp is read as ONE count with the high word first, not as the seconds/fraction pair the classic layout invites.",
+        "A new SECTION clears the interface list, because ids in the next section index ITS interfaces and the link type may differ.",
+        "A packet naming an undescribed interface is a hard error, not a guess: the interface carries the link type.",
+        "The trailing block_total_length is checked against the leading one -- the format duplicates that field precisely so a reader can detect the mismatch.",
+        "crates/wz-capture/src/lib.rs: Dissection::from_pcapng and Dissection::from_capture, the latter dispatching on the magic. CaptureError keeps the two formats' errors apart rather than flattening them.",
+        "crates/wz-capture/src/pcap.rs: the module doc's \"pcapng is NOT read here\" now points at the new reader instead of implying nothing can read it."
+      ],
+      "publishable_verification_bullets": [
+        "The gap was measurable before the fix and the test asserts it still is at the classic reader: `pcap::parse` on a pcapng file returns PcapError::LooksLikePcapNg, which is what \"open the capture your tool just produced\" did.",
+        "Damage probe, three arms, each firing only its own legs with green controls. Arm 1 (from_pcapng applies interfaces[0].link_type to every packet): only the two-interface end-to-end leg red, both single-interface legs green -- which is exactly why the per-packet link type needed its own test. Arm 2 (ticks_per_second ignores the declared exponent and assumes the default 6): the resolution leg and the big-endian leg red, 97 green. Arm 3 (from_capture as a try-pcap-then-pcapng fallback chain): only the dispatch discriminator red.",
+        "The writer is paired with byte-level assertions on the header it emits (the_writers_header_is_the_formats_header), because a round trip through one author's belief proves only self-consistency.",
+        "The two-interface leg asserts the second packet is SKIPPED BY NAME rather than merely absent: interface 1 declares LINKTYPE_USER0 147, which this build does not decapsulate, so \"skipped\" is the honest answer and \"misread as ethernet\" is the failure being excluded.",
+        "wz-capture 99 tests pass (was 80 before this round).",
+        "Local lanes: C0 pass, C1 pass (100s), C1bn pass (90s), C1bs pass (32s), C1bf pass (44s), C2 pass (56s), C3 pass (25s). C2/C3/C1bn/C1bs first went RED on a real clippy finding (`% 4 != 0` vs `is_multiple_of`), fixed and re-run green."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The Decryption Secrets Block (type 0x0000000A) is skipped as unknown. That is correct for now and it is also where a TLS keylog would arrive INSIDE a capture rather than beside it -- the R311y597 B4 item's oracle question, unchanged: wz still cannot prove exported secrets decrypt anything, and tshark is not installed on this host.",
+        "Interface statistics blocks (ISB) are skipped, so a capture's own declared drop counts are not surfaced. The dissection reports the drops IT caused (DissectionDrops) and not the ones the capture tool already had, and those are different numbers.",
+        "An SPB's timestamp is zero because the block carries none. A capture of SPBs therefore cannot drive a reassembly deadline, and nothing warns a consumer of that.",
+        "`from_capture` is the entry point a consumer should use; `from_pcap` remains public and a caller that keeps using it still gets LooksLikePcapNg. No gate makes the new entry point the preferred one.",
+        "Analyzer reach still open: IPv4 fragment reassembly (C2, needs a table plus a timeout -- an independent round); desynchronisation terminal with no resync (C7); multicast carries FragmentMarkers::NONE so First/Drop cannot be judged there (C8); the three non-IP links with no standard DLT (unixsock, unixpipe, serial); scouting datagrams still reach the wrong MID space (B1, placement undecided)."
+      ]
+    },
     "Round 17": {
       "decision_summary": "OQ-W24 full closure — RFC §5.I.0 'Tier definitions' subsection landed as atomic-store new section via R287/R289 add_section primitive (first watching-zenoh use of new section creation surface).",
       "changes_bullets": [
