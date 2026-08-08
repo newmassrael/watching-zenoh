@@ -216,3 +216,127 @@ async fn wz_to_wz_over_quic_datagram_reaches_established_and_delivers_put() {
         "exactly one delivery from the Put over the quic datagram link"
     );
 }
+
+/// R311y601 — the quic-datagram twin of the `quic` named-locator test: a
+/// `quic-datagram/NAME:port` locator dials and binds, with the LOCATOR's name as
+/// the verified SNI.
+///
+/// Worth its own test rather than trusting the `quic` one, because the two
+/// share the cert config (`DialConfig.quic`) but NOT the dispatch: they are
+/// separate `Proto` variants routed to separate arms over separate
+/// `BoundListener` / `DialedLink` variants, and R311y408 is the record of an arm
+/// that compiled only under a feature combination nobody built. The whole point
+/// of adding both arms was that neither can stand in for the other.
+///
+/// Cert says `localhost`, config deliberately says `wrong.example`: the NAMED
+/// dial can only succeed by reading the locator, the NUMERIC one can only fail
+/// by still reading the config.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_named_quic_datagram_locator_verifies_against_the_locator_name() {
+    use wz_runtime_tokio::session_open::{
+        bind_locator, dial_locator, AcceptConfig, QuicAcceptConfig,
+    };
+
+    let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("generate self-signed localhost cert");
+    let cert_pem = issued.cert.pem();
+    let key_pem = issued.key_pair.serialize_pem();
+    let server_config = quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
+        .expect("build quic server config");
+    let client_config =
+        quic_client_config_from_pem(cert_pem.as_bytes(), None).expect("build quic client config");
+
+    let accept_cfg = AcceptConfig::default().with_quic(QuicAcceptConfig { server_config });
+    let dial_cfg = DialConfig::default().with_quic(QuicDialConfig {
+        client_config,
+        server_name: "wrong.example".to_string(),
+    });
+
+    // ── Half 1: bind by NAME, dial by NAME, both reach Established.
+    let mut listener = bind_locator(
+        parse_any_locator("quic-datagram/localhost:0").expect("parse listen locator"),
+        &accept_cfg,
+    )
+    .await
+    .expect("bind quic-datagram/localhost:0 — the NAME acceptor arm");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    let acc_open = async move {
+        let (accepted, _peer) = listener.accept_raw().await.expect("accept a peer");
+        let link = accepted
+            .handshake()
+            .await
+            .expect("quic-datagram server-side accept completes");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4];
+        accept_and_open_session(
+            link,
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("acceptor reaches Established over the named quic-datagram link")
+    };
+    let init_open = async {
+        let locator = parse_any_locator(&format!("quic-datagram/localhost:{port}"))
+            .expect("parse name locator");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x01; 4];
+        connect_and_open_session(
+            locator,
+            params,
+            &dial_cfg,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect(
+            "quic-datagram/localhost must verify against `localhost` (the LOCATOR name), not \
+             the configured `wrong.example`",
+        )
+    };
+    let (opened_acc, opened_init) = tokio::join!(acc_open, init_open);
+    assert!(
+        opened_init.actions.trace_snapshot().record_established_at >= 1,
+        "initiator established over the NAMED quic-datagram locator"
+    );
+    assert!(
+        opened_acc.actions.trace_snapshot().record_established_at >= 1,
+        "acceptor established on the NAMED quic-datagram bind"
+    );
+
+    // ── Half 2: the NUMERIC dial with the same config must fail on the SNI.
+    let mut listener = bind_locator(
+        parse_any_locator("quic-datagram/127.0.0.1:0").expect("parse numeric listen locator"),
+        &accept_cfg,
+    )
+    .await
+    .expect("re-bind for the numeric half");
+    let port = listener.local_addr().expect("local_addr").port();
+    let acc = async move {
+        if let Ok((accepted, _peer)) = listener.accept_raw().await {
+            let _ = accepted.handshake().await;
+        }
+    };
+    let dial = async {
+        let locator = parse_any_locator(&format!("quic-datagram/127.0.0.1:{port}"))
+            .expect("parse numeric locator");
+        dial_locator(locator, &dial_cfg).await
+    };
+    let (_, numeric) = tokio::join!(acc, dial);
+    let Err(err) = numeric else {
+        panic!(
+            "a NUMERIC quic-datagram locator must still verify against \
+             DialConfig.quic.server_name — it succeeded, which means the configured name is no \
+             longer being read"
+        );
+    };
+    assert_ne!(
+        err.kind(),
+        std::io::ErrorKind::Unsupported,
+        "the numeric arm is wired; its failure must be the certificate check (got {err:?})"
+    );
+}

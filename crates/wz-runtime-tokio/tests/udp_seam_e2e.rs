@@ -463,3 +463,82 @@ async fn udp_stray_new_src_does_not_tear_down_a_one_shot_session() {
         "the established one-shot session survived the stray new-src datagram"
     );
 }
+
+/// R311y601 — a `udp/NAME:port` LISTEN resolves, which is the accept-side twin
+/// of the named udp DIAL R311y524 wired against pico's
+/// `getaddrinfo(.., SOCK_DGRAM, IPPROTO_UDP)`
+/// (`src/link/transport/udp/udp_posix.c:32-40`).
+///
+/// Until this round `bind_locator`'s `AnyLocator::Named` arm handled only
+/// tcp / ws / tls and swept everything else into one catch-all, so a deploy
+/// could dial `udp/HOST:port` but not listen on one — an asymmetry that reads
+/// as a transport gap rather than as a missing arm. Both ends of this test use
+/// the NAME, so the resolve runs on the listen half too.
+///
+/// Stops at Established rather than repeating the `Put`: the data plane over
+/// udp is already proven by `wz_accepts_a_session_over_udp_via_the_bind_endpoint_seam`
+/// above, and what is new here is only which address the two ends found.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_named_udp_listen_resolves_and_accepts_a_named_dial() {
+    let mut bound = bind_endpoint("udp/localhost:0")
+        .await
+        .expect("bind_endpoint accepts a udp/ listen by NAME");
+    assert_eq!(
+        bound.transport_name(),
+        "udp",
+        "the named bind yields a udp listener, not a tcp one"
+    );
+    let port = bound
+        .local_addr()
+        .expect("a udp listener has a bound IP addr")
+        .port();
+
+    let acc_open = async {
+        let (accepted, peer) = bound
+            .accept_raw()
+            .await
+            .expect("accept_raw peeks the udp peer");
+        assert!(
+            matches!(peer, AcceptedPeer::Ip(_)),
+            "a udp accept yields a REAL IP peer (the datagram source)"
+        );
+        let link = accepted.handshake().await.expect("udp post-accept wrap");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4];
+        accept_and_open_session(
+            link,
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("acceptor reaches Established on the NAMED udp bind")
+    };
+    let init_open = async {
+        let locator =
+            parse_any_locator(&format!("udp/localhost:{port}")).expect("parse udp name locator");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x01; 4];
+        connect_and_open_session(
+            locator,
+            params,
+            &DialConfig::default(),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("initiator reaches Established over the NAMED udp locator")
+    };
+    let (opened_acc, opened_init) = tokio::join!(acc_open, init_open);
+
+    assert!(
+        opened_init.actions.trace_snapshot().record_established_at >= 1,
+        "initiator established over the NAMED udp locator"
+    );
+    assert!(
+        opened_acc.actions.trace_snapshot().record_established_at >= 1,
+        "acceptor established on the NAMED udp bind"
+    );
+}

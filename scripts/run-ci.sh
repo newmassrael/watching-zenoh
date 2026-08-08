@@ -1663,7 +1663,7 @@ layer_c1u_cargo_test_tls() {
     # all — it is a citation, and a citation has to say when it is wrong.
     _runci_guarded_test C1u + cargo test -p wz-session-core --features alloc --lib locator --quiet \
         || return 1
-    _runci_guarded_test C1u 2 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet \
+    _runci_guarded_test C1u 3 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet \
         || return 1
     _runci_guarded_test C1u 6 cargo test -p wz-runtime-tokio --features transport-link-tls --test session_reconnect_e2e --quiet \
         || return 1
@@ -1718,7 +1718,7 @@ layer_c1v_cargo_test_ws() {
     # its own message.
     _runci_guarded_test C1v + cargo test -p wz-session-core --features alloc --lib locator --quiet \
         || return 1
-    _runci_guarded_test C1v 1 cargo test -p wz-runtime-tokio --features transport-link-ws --test ws_e2e --quiet \
+    _runci_guarded_test C1v 3 cargo test -p wz-runtime-tokio --features transport-link-ws --test ws_e2e --quiet \
         || return 1
     _runci_guarded_test C1v 6 cargo test -p wz-runtime-tokio --features transport-link-ws --test session_reconnect_e2e --quiet \
         || return 1
@@ -1841,7 +1841,7 @@ layer_c1ab_cargo_test_vsock() {
 layer_c1ac_cargo_test_quic() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-quic --test quic_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-quic --test quic_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-quic --quiet -- -D warnings)
 }
@@ -2573,7 +2573,7 @@ layer_c1ai_cargo_test_liveliness_history() {
 layer_c1aj_cargo_test_quic_datagram() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test quic_datagram_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test quic_datagram_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
         && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test link_endpoints_pairing --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic-datagram --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-quic-datagram --quiet -- -D warnings)

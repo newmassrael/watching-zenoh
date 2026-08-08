@@ -38,7 +38,8 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
-    accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, bind_locator, connect_and_open_session, dial_locator, AcceptConfig,
+    DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio::ws_pipeline::accept_ws;
@@ -177,5 +178,83 @@ async fn wz_to_wz_over_ws_reaches_established_and_delivers_put() {
         fired.load(Ordering::SeqCst),
         1,
         "exactly one delivery from the Put over the ws link"
+    );
+}
+
+/// R311y601 — a `ws/NAME:port` locator resolves on BOTH halves: the acceptor
+/// binds `ws/localhost:0` and the dialer reaches it at `ws/localhost:<port>`,
+/// completing the RFC6455 upgrade. Before this round the dial half answered
+/// `Unsupported` for every non-tcp name ("DNS-name dial is wired only for tcp
+/// and udp") and the bind half had no `Proto::Ws` NAME arm reachable without
+/// tcp, so neither end of this test could be built.
+///
+/// Both ends deliberately use the NAME rather than `127.0.0.1`: `localhost`
+/// resolves to two addresses on a dual-stack host, the acceptor binds exactly
+/// one of them, and the dialer must therefore WALK its candidates to find the
+/// one that answers. That walk is the divergence from zenoh (which takes
+/// `lookup_host(..).next()` only) and this is the test that exercises it —
+/// asserting only "connected" would pass on a first-candidate-only
+/// implementation whenever resolution happened to order them agreeably.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_named_ws_locator_resolves_on_both_the_dial_and_the_bind_half() {
+    let mut listener = bind_locator(
+        parse_any_locator("ws/localhost:0").expect("parse ws listen locator"),
+        &AcceptConfig::default(),
+    )
+    .await
+    .expect("bind ws/localhost:0 — the NAME acceptor arm");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    let acc = async move {
+        let (accepted, _peer) = listener.accept_raw().await.expect("accept a ws peer");
+        accepted
+            .handshake()
+            .await
+            .expect("RFC6455 server upgrade over the named-bound listener")
+    };
+    let dial = async move {
+        let locator =
+            parse_any_locator(&format!("ws/localhost:{port}")).expect("parse ws name locator");
+        dial_locator(locator, &DialConfig::default())
+            .await
+            .expect("ws/localhost dial resolves and upgrades")
+    };
+    let (accepted, dialed) = tokio::join!(acc, dial);
+
+    // `DialedLink` is not `Debug`, so assert by shape rather than equality.
+    assert!(
+        matches!(dialed, DialedLink::Ws(_)),
+        "the named dial produced a WebSocket link, not some other transport"
+    );
+    assert!(
+        matches!(accepted, DialedLink::Ws(_)),
+        "the named bind accepted a WebSocket link, not a bare TCP one"
+    );
+}
+
+/// R311y601 (the discriminator) — a `ws/NAME` that cannot be reached must fail
+/// through the RESOLVER or the network, never with `Unsupported`.
+///
+/// This is the assertion that separates "wired" from "refused", and it is the
+/// one that fails on the pre-R311y601 tree: that code answered `Unsupported`
+/// for every non-tcp name regardless of whether the name existed, so a test
+/// asserting only `is_err()` would have passed unchanged and proved nothing.
+/// `.invalid` is the RFC6761 reserved TLD, so a conforming resolver returns
+/// NXDOMAIN; a resolver that hijacks NXDOMAIN instead yields an address nothing
+/// listens on, and the dial then fails with `ConnectionRefused`. Both are
+/// non-`Unsupported`, which is why the assertion is stated that way rather than
+/// pinning one kind.
+#[tokio::test]
+async fn an_unreachable_ws_name_fails_as_a_dial_not_as_an_unsupported_scheme() {
+    let locator = parse_any_locator("ws/wz-r311y601-nonexistent.invalid:7447")
+        .expect("parse ws name locator");
+    let Err(err) = dial_locator(locator, &DialConfig::default()).await else {
+        panic!("dialing an unroutable ws name must error, got Ok");
+    };
+    assert_ne!(
+        err.kind(),
+        std::io::ErrorKind::Unsupported,
+        "a `ws/NAME` dial is WIRED: the failure must come from the resolver or the \
+         network, not from the seam refusing the scheme (got {err:?})"
     );
 }

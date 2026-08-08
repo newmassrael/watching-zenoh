@@ -156,6 +156,81 @@ pub async fn bind_tcp_host(host: &str, iface: Option<&str>) -> io::Result<TcpLis
     }))
 }
 
+/// Resolve a `host:port` locator address to the candidate [`SocketAddr`]s a
+/// non-TCP dial / bind should try, in resolver order.
+///
+/// The name-resolution SSOT for every scheme whose backend primitive takes a
+/// `SocketAddr` and therefore cannot resolve for itself (`tls`, `ws`, `quic`,
+/// `quic-datagram`, and the accept side of `udp`). TCP does not route through
+/// here: [`dial_tcp_host`] / [`bind_tcp_host`] hand the whole string to
+/// `TcpStream::connect` / their own bind walk, which already resolve.
+///
+/// ## Divergence from zenoh, stated because it is deliberate
+///
+/// zenoh resolves the same addresses with `lookup_host(..).next()` and uses the
+/// FIRST result only — `get_tls_addr` (`io/zenoh-links/zenoh-link-tls/src/utils.rs:590`),
+/// `get_ws_addr` (`io/zenoh-links/zenoh-link-ws/src/lib.rs:79`), `get_quic_addr`
+/// (`io/zenoh-links/zenoh-link-quic/src/utils.rs:502`) are the same four lines
+/// three times. wz returns EVERY resolved address so the caller can walk them,
+/// matching what wz's own `tcp` path has always done ([`dial_tcp_host`] walks
+/// the `ToSocketAddrs` set) and what `TcpStream::connect` does for free. That is
+/// a superset: on a host whose name resolves to one address the two are
+/// identical, and on a dual-stack name whose first record is unreachable zenoh
+/// fails where wz succeeds. It can never make wz fail where zenoh succeeds,
+/// which is the property that makes the divergence safe to keep.
+///
+/// # Errors
+///
+/// The resolver's own error, or [`io::ErrorKind::AddrNotAvailable`] when the
+/// name resolves to an EMPTY set — which `lookup_host` reports as `Ok` with no
+/// items, and which every caller would otherwise turn into a silent "no
+/// candidates, nothing tried" success-shaped loop exit.
+pub async fn resolve_locator_addrs(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+    let addrs: Vec<SocketAddr> = lookup_host((host, port)).await?.collect();
+    if addrs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            format!("no addresses resolved for {host}:{port}"),
+        ));
+    }
+    Ok(addrs)
+}
+
+/// Try `dial` against each candidate address in turn and return the first
+/// success — the walk half of [`resolve_locator_addrs`], factored out so every
+/// named non-TCP scheme walks identically instead of hand-rolling the loop.
+///
+/// On total failure the LAST attempt's error is surfaced (not a synthesized
+/// one), because that is the error a caller can act on: a name resolving to a
+/// single unreachable address must report that address's `ConnectionRefused`,
+/// not a generic "all candidates failed". `addrs` is never empty by
+/// [`resolve_locator_addrs`]'s contract; the `AddrNotAvailable` fallback exists
+/// only so a hand-built empty vector cannot silently return a success-shaped
+/// error-free `None`.
+pub async fn first_reachable<T, F, Fut>(
+    addrs: Vec<SocketAddr>,
+    what: &str,
+    mut dial: F,
+) -> io::Result<T>
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = io::Result<T>>,
+{
+    let mut last_err: Option<io::Error> = None;
+    for addr in addrs {
+        match dial(addr).await {
+            Ok(link) => return Ok(link),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            format!("no addresses resolved for {what}"),
+        )
+    }))
+}
+
 /// Listen backlog wz applies to every TCP listener — zenoh's `socket.listen(1024)`
 /// (`io/zenoh-link-commons/src/tcp.rs` `new_listener`), vs tokio/mio's hard-coded
 /// default of 128 (`mio` `TcpListener::bind`). The backlog is the kernel's queue

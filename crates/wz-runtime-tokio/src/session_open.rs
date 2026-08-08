@@ -62,6 +62,19 @@ use crate::link_pipeline::{
     accept_tcp_on, bind_tcp, bind_tcp_host, dial_tcp, dial_tcp_host,
     wire_tcp_stream_with_lowlatency, TcpReadDriver,
 };
+// R311y601 — the DNS-name seam for the schemes whose backend primitives take a
+// `SocketAddr` and so cannot resolve for themselves. Gated on exactly the union
+// of the arms that call it: `tcp` resolves inside `dial_tcp_host` /
+// `bind_tcp_host` and never reaches here, so a tcp-only build would find these
+// unused (a `-D warnings` failure, not a harmless import).
+#[cfg(any(
+    feature = "transport-link-tls",
+    feature = "transport-link-ws",
+    feature = "transport-link-quic",
+    feature = "transport-link-quic-datagram",
+    feature = "transport-link-udp",
+))]
+use crate::link_pipeline::{first_reachable, resolve_locator_addrs};
 use crate::runtime_impl::TokioTime;
 use crate::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy};
 use crate::session_glue::{
@@ -1716,12 +1729,27 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
         // no_std parser classified the address token as a NAME; resolution is a
         // std-layer concern, so a `tcp` name dials via the std-resolver host
         // dial [`dial_tcp_host`] (which feeds the addr string to the resolver).
-        // The datagram/TLS/WS protos keep the numeric-only contract for now:
-        // their name dial is a typed `Unsupported`, a CLEAN extension point
-        // (add the arm when a `ws/HOST` / `tls/HOST` dial is actually wanted),
-        // NOT a silent fallback or a string-prefix special-case. The `Tcp` arm
-        // is unconditional like the `Ip(Proto::Tcp)` arm above — tcp is the
-        // always-on baseline stream transport.
+        // The `Tcp` arm is unconditional like the `Ip(Proto::Tcp)` arm above —
+        // tcp is the always-on baseline stream transport.
+        //
+        // R311y601 — every remaining proto is wired here too, closing the
+        // "`<proto>/HOST` DNS dial is Unsupported" residual the transport-link
+        // atoms have carried since R311y305. zenoh resolves a locator name for
+        // EVERY link family, not just tcp — `get_tls_addr`
+        // (`io/zenoh-links/zenoh-link-tls/src/utils.rs:590`), `get_ws_addr`
+        // (`zenoh-link-ws/src/lib.rs:79`) and `get_quic_addr`
+        // (`zenoh-link-quic/src/utils.rs:502`) are the same `lookup_host` call
+        // three times — so refusing one was a parity gap, not a narrowing. The
+        // backend primitives take a `SocketAddr`, so each arm resolves through
+        // the [`resolve_locator_addrs`] SSOT and walks the candidates with
+        // [`first_reachable`]; the arm is otherwise its numeric twin verbatim.
+        //
+        // The match is EXHAUSTIVE per proto, with a `#[cfg(not(..))]` twin for
+        // each backend — the shape `dial_locator`'s `Ip` arm and `bind_locator`
+        // both already use, and the reason the former `other` catch-all is gone:
+        // a NEW `Proto` variant must force a compile-time decision here rather
+        // than silently inheriting "name dial unsupported" (the R311y408 lesson,
+        // applied to the second match in this function).
         AnyLocator::Named {
             proto,
             host,
@@ -1749,13 +1777,121 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 io::ErrorKind::Unsupported,
                 "udp session-open requires the transport-link-udp feature",
             )),
-            other => Err(io::Error::new(
+            // A `ws/NAME:port` dial: resolve, then the numeric arm's `dial_ws`
+            // (TCP connect + RFC6455 client handshake) per candidate. The
+            // request URI `dial_ws` builds carries the RESOLVED address, exactly
+            // as zenoh's `get_ws_url` does — it formats the URL from
+            // `get_ws_addr(..)`, the resolved `SocketAddr`, not from the name
+            // (`zenoh-link-ws/src/lib.rs:86-93`).
+            #[cfg(feature = "transport-link-ws")]
+            Proto::Ws => {
+                let addrs = resolve_locator_addrs(&host, port).await?;
+                let iface = iface.as_deref();
+                Ok(DialedLink::Ws(Box::new(
+                    first_reachable(addrs, &format!("ws/{host}:{port}"), |addr| {
+                        dial_ws(addr, iface)
+                    })
+                    .await?,
+                )))
+            }
+            #[cfg(not(feature = "transport-link-ws"))]
+            Proto::Ws => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                format!(
-                    "DNS-name dial is wired only for tcp and udp; {other:?} needs a \
-                     numeric address (name resolution for this transport is not yet \
-                     implemented)"
-                ),
+                "ws session-open requires the transport-link-ws feature",
+            )),
+            // A `tls/NAME:port` dial, and the SNI is the one place a named
+            // locator is NOT its numeric twin: the name in the locator IS the
+            // verified server name, which is what zenoh does
+            // (`get_tls_server_name` = `ServerName::try_from(get_tls_host(..))`,
+            // `zenoh-link-tls/src/utils.rs:605`). The numeric arm keeps reading
+            // `cfg.tls.server_name` because a numeric locator carries no name to
+            // verify against — that decoupling is a wz superset, and it applies
+            // exactly where zenoh would need an IP SAN. So the rule is one line:
+            // a locator that names the peer verifies against that name; one that
+            // does not falls back to the configured name.
+            //
+            // A name that is not a valid TLS server name (an IP literal reaching
+            // this arm cannot, by construction — it would have parsed as `Ip`)
+            // is `InvalidInput`, NOT `Unsupported`: the transport is wired, the
+            // argument is wrong.
+            #[cfg(feature = "transport-link-tls")]
+            Proto::Tls => match &cfg.tls {
+                Some(t) => {
+                    let server_name = ServerName::try_from(host.clone()).map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("tls dial: {host:?} is not a valid TLS server name: {e}"),
+                        )
+                    })?;
+                    let addrs = resolve_locator_addrs(&host, port).await?;
+                    let iface = iface.as_deref();
+                    Ok(DialedLink::Tls(Box::new(
+                        first_reachable(addrs, &format!("tls/{host}:{port}"), |addr| {
+                            dial_tls(addr, t.client_config.clone(), server_name.clone(), iface)
+                        })
+                        .await?,
+                    )))
+                }
+                None => Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "tls dial requires DialConfig.tls (rustls client config + server name)",
+                )),
+            },
+            #[cfg(not(feature = "transport-link-tls"))]
+            Proto::Tls => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "tls session-open requires the transport-link-tls feature",
+            )),
+            // A `quic/NAME:port` dial. The SNI follows the same rule as `tls`
+            // above — the locator's name wins over `cfg.quic.server_name` —
+            // which is also zenoh's (`get_quic_host` feeds the SNI,
+            // `zenoh-link-quic/src/utils.rs:509`). quinn takes the SNI as a
+            // `&str`, so there is no `ServerName` parse to fail here.
+            #[cfg(feature = "transport-link-quic")]
+            Proto::Quic => match &cfg.quic {
+                Some(q) => {
+                    let addrs = resolve_locator_addrs(&host, port).await?;
+                    let iface = iface.as_deref();
+                    Ok(DialedLink::Quic(Box::new(
+                        first_reachable(addrs, &format!("quic/{host}:{port}"), |addr| {
+                            dial_quic(addr, q.client_config.clone(), &host, iface)
+                        })
+                        .await?,
+                    )))
+                }
+                None => Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "quic dial requires DialConfig.quic (rustls client config + SNI name)",
+                )),
+            },
+            #[cfg(not(feature = "transport-link-quic"))]
+            Proto::Quic => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "quic session-open requires the transport-link-quic feature",
+            )),
+            // A `quic-datagram/NAME:port` dial — the datagram twin of the arm
+            // above, sharing `cfg.quic`'s cert and the locator-name SNI rule.
+            #[cfg(feature = "transport-link-quic-datagram")]
+            Proto::QuicDatagram => match &cfg.quic {
+                Some(q) => {
+                    let addrs = resolve_locator_addrs(&host, port).await?;
+                    let iface = iface.as_deref();
+                    Ok(DialedLink::QuicDatagram(Box::new(
+                        first_reachable(addrs, &format!("quic-datagram/{host}:{port}"), |addr| {
+                            dial_quic_datagram(addr, q.client_config.clone(), &host, iface)
+                        })
+                        .await?,
+                    )))
+                }
+                None => Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "quic-datagram dial requires DialConfig.quic (rustls client config + SNI name)",
+                )),
+            },
+            #[cfg(not(feature = "transport-link-quic-datagram"))]
+            Proto::QuicDatagram => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "quic-datagram session-open requires the transport-link-quic-datagram feature",
             )),
         },
         // R311nv — a `serial/...` endpoint dials through the tty backend:
@@ -2113,11 +2249,87 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     "tls acceptor requires AcceptConfig.tls (a server cert + key)",
                 )),
             },
-            // A non-tcp NAME is unwired for two reasons (acceptor + non-tcp
-            // name resolution), kept distinct from the numeric arm's message.
-            other => Err(unsupported(&format!(
-                "{other:?} acceptor and non-tcp name resolution are both unwired"
-            ))),
+            // R311y601 — the remaining three NAME acceptors, so the listen half
+            // resolves names for every scheme its dial half does. Each resolves
+            // through the [`resolve_locator_addrs`] SSOT and binds the first
+            // candidate that takes, mirroring `bind_tcp_host`'s walk; the arm is
+            // otherwise its numeric twin. Without these a deploy could dial
+            // `quic/HOST:port` but not listen on one, and the asymmetry would
+            // read as a transport gap rather than a missing four lines.
+            #[cfg(feature = "transport-link-udp")]
+            Proto::Udp => {
+                let addrs = resolve_locator_addrs(&host, port).await?;
+                let iface = iface.as_deref();
+                Ok(BoundListener::Udp(
+                    first_reachable(addrs, &format!("udp/{host}:{port}"), |addr| {
+                        bind_udp_demux(addr, iface)
+                    })
+                    .await?,
+                ))
+            }
+            #[cfg(not(feature = "transport-link-udp"))]
+            Proto::Udp => Err(unsupported(
+                "udp acceptor requires the transport-link-udp feature",
+            )),
+            // `bind_quic` / `bind_quic_datagram` are SYNC, so the walk's async
+            // contract is satisfied by an `async move` wrapper rather than by a
+            // different helper — the resolve-then-walk shape stays one.
+            #[cfg(feature = "transport-link-quic")]
+            Proto::Quic => match &cfg.quic {
+                Some(q) => {
+                    let addrs = resolve_locator_addrs(&host, port).await?;
+                    let iface = iface.as_deref();
+                    Ok(BoundListener::Quic(
+                        first_reachable(addrs, &format!("quic/{host}:{port}"), |addr| async move {
+                            bind_quic(addr, q.server_config.clone(), iface)
+                        })
+                        .await?,
+                    ))
+                }
+                None => Err(unsupported(
+                    "quic acceptor requires AcceptConfig.quic (a server cert + key)",
+                )),
+            },
+            #[cfg(not(feature = "transport-link-quic"))]
+            Proto::Quic => Err(unsupported(
+                "quic acceptor requires the transport-link-quic feature",
+            )),
+            #[cfg(feature = "transport-link-quic-datagram")]
+            Proto::QuicDatagram => match &cfg.quic {
+                Some(q) => {
+                    let addrs = resolve_locator_addrs(&host, port).await?;
+                    let iface = iface.as_deref();
+                    Ok(BoundListener::QuicDatagram(
+                        first_reachable(
+                            addrs,
+                            &format!("quic-datagram/{host}:{port}"),
+                            |addr| async move {
+                                bind_quic_datagram(addr, q.server_config.clone(), iface)
+                            },
+                        )
+                        .await?,
+                    ))
+                }
+                None => Err(unsupported(
+                    "quic-datagram acceptor requires AcceptConfig.quic (a server cert + key)",
+                )),
+            },
+            #[cfg(not(feature = "transport-link-quic-datagram"))]
+            Proto::QuicDatagram => Err(unsupported(
+                "quic-datagram acceptor requires the transport-link-quic-datagram feature",
+            )),
+            // With the ws / tls BACKEND off their arms above vanish, so the
+            // `Proto` match is exhaustive only through these twins — the same
+            // cfg/not(cfg) pairing every sibling arm carries. No catch-all: a
+            // NEW `Proto` variant must force a decision here (R311y408).
+            #[cfg(not(feature = "transport-link-ws"))]
+            Proto::Ws => Err(unsupported(
+                "ws acceptor requires the transport-link-ws feature",
+            )),
+            #[cfg(not(feature = "transport-link-tls"))]
+            Proto::Tls => Err(unsupported(
+                "tls acceptor requires the transport-link-tls feature",
+            )),
         },
         AnyLocator::Serial(_) => Err(unsupported(
             "serial accept is a tty open (accept_serial), not a listen bind; unwired",

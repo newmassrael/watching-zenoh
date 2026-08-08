@@ -306,3 +306,137 @@ async fn a_listen_iface_bind_decides_whether_a_loopback_quic_dial_connects() {
          was built and then not handed to quinn"
     );
 }
+
+/// R311y601 — a `quic/NAME:port` locator dials and binds, and (as for `tls`)
+/// the name in the LOCATOR is the SNI the certificate is verified against.
+///
+/// zenoh does the same: `get_quic_addr` resolves the locator with `lookup_host`
+/// and `get_quic_host` feeds the SNI, both off the same address
+/// (`io/zenoh-links/zenoh-link-quic/src/utils.rs:502,509`). Before this round wz
+/// answered `Unsupported` for `quic/NAME` on the dial half, and the bind half
+/// had no `Proto::Quic` NAME arm at all.
+///
+/// Same two-sided discriminator as the TLS test: the cert is for `localhost`
+/// while `QuicDialConfig.server_name` deliberately says `wrong.example`, so the
+/// NAMED dial can only succeed by reading the locator, and the NUMERIC dial can
+/// only fail by still reading the config.
+///
+/// Both halves go through the full session open rather than stopping at
+/// `dial_locator`, and that is not gratuitous: quinn's `open_bi` puts nothing on
+/// the wire until the stream is written, so a server-side `accept_bi` waits
+/// forever on a dialer that connects and then goes quiet. The InitSyn is the
+/// write that unblocks it — which is why the first draft of this test timed out
+/// at the acceptor and why the sibling TLS/WS tests can stop at the link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_named_quic_locator_verifies_against_the_locator_name_not_the_configured_one() {
+    use wz_runtime_tokio::session_open::{
+        bind_locator, dial_locator, AcceptConfig, QuicAcceptConfig,
+    };
+
+    let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("generate self-signed localhost cert");
+    let cert_pem = issued.cert.pem();
+    let key_pem = issued.key_pair.serialize_pem();
+    let server_config = quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
+        .expect("build quic server config");
+    let client_config =
+        quic_client_config_from_pem(cert_pem.as_bytes(), None).expect("build quic client config");
+
+    let accept_cfg = AcceptConfig::default().with_quic(QuicAcceptConfig { server_config });
+    let dial_cfg = DialConfig::default().with_quic(QuicDialConfig {
+        client_config,
+        // Syntactically fine, and NOT what the cert says.
+        server_name: "wrong.example".to_string(),
+    });
+
+    // ── Half 1: bind by NAME, dial by NAME, both reach Established.
+    let mut listener = bind_locator(
+        parse_any_locator("quic/localhost:0").expect("parse quic listen locator"),
+        &accept_cfg,
+    )
+    .await
+    .expect("bind quic/localhost:0 — the NAME acceptor arm");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    let acc_open = async move {
+        let (accepted, _peer) = listener.accept_raw().await.expect("accept a quic peer");
+        let link = accepted
+            .handshake()
+            .await
+            .expect("quic server-side accept completes");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4];
+        accept_and_open_session(
+            link,
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("acceptor reaches Established over the named quic link")
+    };
+    let init_open = async {
+        let locator =
+            parse_any_locator(&format!("quic/localhost:{port}")).expect("parse quic name locator");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x01; 4];
+        connect_and_open_session(
+            locator,
+            params,
+            &dial_cfg,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect(
+            "quic/localhost must verify against `localhost` (the LOCATOR name), not the \
+             configured `wrong.example`",
+        )
+    };
+    let (opened_acc, opened_init) = tokio::join!(acc_open, init_open);
+    assert!(
+        opened_init.actions.trace_snapshot().record_established_at >= 1,
+        "initiator established over the NAMED quic locator"
+    );
+    assert!(
+        opened_acc.actions.trace_snapshot().record_established_at >= 1,
+        "acceptor established on the NAMED quic bind"
+    );
+
+    // ── Half 2: the NUMERIC dial with the same config must fail on the SNI, so
+    //    the configured name is demonstrably still what a nameless locator uses.
+    //    The acceptor is driven only far enough to present its cert; whatever it
+    //    then reports is not the assertion under test.
+    let mut listener = bind_locator(
+        parse_any_locator("quic/127.0.0.1:0").expect("parse numeric quic listen locator"),
+        &accept_cfg,
+    )
+    .await
+    .expect("re-bind for the numeric half");
+    let port = listener.local_addr().expect("local_addr").port();
+    let acc = async move {
+        if let Ok((accepted, _peer)) = listener.accept_raw().await {
+            let _ = accepted.handshake().await;
+        }
+    };
+    let dial = async {
+        let locator = parse_any_locator(&format!("quic/127.0.0.1:{port}"))
+            .expect("parse numeric quic locator");
+        dial_locator(locator, &dial_cfg).await
+    };
+    let (_, numeric) = tokio::join!(acc, dial);
+    let Err(err) = numeric else {
+        panic!(
+            "a NUMERIC quic locator must still verify against DialConfig.quic.server_name, so a \
+             `wrong.example` config against a `localhost` cert has to fail — it succeeded, which \
+             means the configured name is no longer being read"
+        );
+    };
+    assert_ne!(
+        err.kind(),
+        std::io::ErrorKind::Unsupported,
+        "the numeric arm is wired; its failure must be the certificate check (got {err:?})"
+    );
+}

@@ -172,3 +172,115 @@ async fn dial_locator_tls_without_config_is_unsupported() {
         "tls dial without DialConfig.tls is Unsupported"
     );
 }
+
+/// R311y601 — a `tls/NAME:port` locator dials, and the name in the LOCATOR is
+/// the name the certificate is verified against.
+///
+/// That rule is zenoh's: `get_tls_server_name` is
+/// `ServerName::try_from(get_tls_host(address))`
+/// (`io/zenoh-links/zenoh-link-tls/src/utils.rs:605`) — the locator host IS the
+/// SNI, there is no separate configured name to disagree with it. wz's numeric
+/// arm reads `DialConfig.tls.server_name` because a numeric locator names
+/// nobody, and that decoupling is a deliberate superset (it is what lets one
+/// `localhost` cert be dialed at `tls/127.0.0.1:port` with no IP SAN). This
+/// test pins the seam between the two.
+///
+/// The discriminator is the deliberately WRONG configured name. The cert is for
+/// `localhost`; the config says `wrong.example`. So:
+///
+/// - `tls/localhost:<port>` must SUCCEED — proving the arm took the SNI from
+///   the locator. Had it used the configured name the handshake would die on a
+///   SAN mismatch.
+/// - `tls/127.0.0.1:<port>` must FAIL with that same config — proving the
+///   numeric arm still honours the configured name, i.e. the named arm changed
+///   one path and not both.
+///
+/// Neither half alone is enough: the first would also pass if `server_name`
+/// were being ignored everywhere, and the second would also pass if the whole
+/// scheme were broken. Together they pin which name each arm reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_named_tls_locator_verifies_against_the_locator_name_not_the_configured_one() {
+    use tokio_rustls::rustls::pki_types::ServerName;
+    use wz_runtime_tokio::session_open::{
+        bind_locator, dial_locator, AcceptConfig, DialedLink, TlsAcceptConfig, TlsDialConfig,
+    };
+
+    let (server_config, client_config) = loopback_tls_configs();
+    let accept_cfg = AcceptConfig::default().with_tls(TlsAcceptConfig { server_config });
+    // The cert is for `localhost`; this config deliberately says otherwise.
+    let dial_cfg = DialConfig::default().with_tls(TlsDialConfig {
+        client_config,
+        server_name: ServerName::try_from("wrong.example".to_string())
+            .expect("a syntactically valid but WRONG server name"),
+    });
+
+    let mut listener = bind_locator(
+        parse_any_locator("tls/127.0.0.1:0").expect("parse tls listen locator"),
+        &accept_cfg,
+    )
+    .await
+    .expect("bind tls/127.0.0.1:0");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    // ── Half 1: the NAMED dial succeeds, so the SNI came from the locator.
+    let acc = async move {
+        let (accepted, _peer) = listener.accept_raw().await.expect("accept a tls peer");
+        accepted
+            .handshake()
+            .await
+            .expect("rustls server handshake with the localhost cert")
+    };
+    let dial = async {
+        let locator =
+            parse_any_locator(&format!("tls/localhost:{port}")).expect("parse tls name locator");
+        dial_locator(locator, &dial_cfg).await
+    };
+    let (accepted, dialed) = tokio::join!(acc, dial);
+    let dialed = dialed.expect(
+        "tls/localhost dial must verify against `localhost` (the LOCATOR name), not the \
+         configured `wrong.example`",
+    );
+    assert!(
+        matches!(dialed, DialedLink::Tls(_)),
+        "the named dial produced a TLS link"
+    );
+    assert!(
+        matches!(accepted, DialedLink::Tls(_)),
+        "the acceptor completed its side of the same handshake"
+    );
+
+    // ── Half 2: the NUMERIC dial with the same config must fail, so the
+    //    configured name is still what a nameless locator verifies against.
+    let mut listener = bind_locator(
+        parse_any_locator("tls/127.0.0.1:0").expect("parse tls listen locator"),
+        &accept_cfg,
+    )
+    .await
+    .expect("re-bind tls/127.0.0.1:0 for the numeric half");
+    let port = listener.local_addr().expect("local_addr").port();
+    let acc = async move {
+        // The server side sees the client abort on its SAN check; either
+        // outcome is fine here — the assertion under test is the DIALER's.
+        let _ = listener.accept_raw().await;
+    };
+    let dial = async {
+        let locator =
+            parse_any_locator(&format!("tls/127.0.0.1:{port}")).expect("parse numeric tls locator");
+        dial_locator(locator, &dial_cfg).await
+    };
+    let (_, numeric) = tokio::join!(acc, dial);
+    let Err(err) = numeric else {
+        panic!(
+            "a NUMERIC tls locator must still verify against DialConfig.tls.server_name, so a \
+             `wrong.example` config against a `localhost` cert has to fail — it succeeded, which \
+             means the configured name is no longer being read"
+        );
+    };
+    // A SAN mismatch surfaces as a rustls alert through the stream, never as
+    // the seam refusing the scheme.
+    assert_ne!(
+        err.kind(),
+        std::io::ErrorKind::Unsupported,
+        "the numeric arm is wired; its failure must be the certificate check (got {err:?})"
+    );
+}
