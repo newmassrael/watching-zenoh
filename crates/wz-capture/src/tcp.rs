@@ -90,6 +90,22 @@ pub struct StreamAssembler {
     pending: Vec<(u32, usize, Vec<u8>)>,
     fin_seen: bool,
     rst_seen: bool,
+    /// R311y597 — segments carrying ONLY bytes already delivered.
+    ///
+    /// [`SegmentOutcome::Duplicate`] decided this from the first commit and
+    /// nothing counted it: `push` returned the verdict and every caller
+    /// discarded it, so a health summary could report a flow without the one
+    /// number that says the link is retransmitting. The judgement existed; the
+    /// measurement did not.
+    retransmits: usize,
+    /// Segments that arrived AHEAD of the expected sequence and were held.
+    out_of_order: usize,
+    /// Segments carrying some bytes already delivered AND some new ones.
+    ///
+    /// Kept apart from [`Self::retransmits`] because they are different
+    /// events: one wasted a whole segment, the other made progress alongside a
+    /// repeat, and a reader diagnosing a link wants to tell them apart.
+    partial_overlaps: usize,
 }
 
 impl StreamAssembler {
@@ -218,9 +234,39 @@ impl StreamAssembler {
         };
 
         let outcome = self.absorb(next, seg.seq, &seg.payload, seg.packet_index);
+        match outcome {
+            SegmentOutcome::Duplicate => self.retransmits += 1,
+            SegmentOutcome::HeldOutOfOrder => self.out_of_order += 1,
+            _ => {}
+        }
         // Absorbing may have completed the gap a held segment waited on.
         self.drain_pending();
         outcome
+    }
+
+    /// Segments that carried only bytes already delivered — pure
+    /// retransmissions.
+    ///
+    /// ⚠ The three anomaly counters count EVENTS, not a partition of the
+    /// segments pushed. A segment held out of order and later absorbed with an
+    /// overlap contributes to [`Self::out_of_order`] once and to
+    /// [`Self::partial_overlaps`] once, because both happened to it. Summing
+    /// them and comparing against a packet count is the misuse this note
+    /// exists to prevent.
+    pub fn retransmits(&self) -> usize {
+        self.retransmits
+    }
+
+    /// Segments that arrived ahead of the expected sequence and were held.
+    /// See the caveat on [`Self::retransmits`].
+    pub fn out_of_order(&self) -> usize {
+        self.out_of_order
+    }
+
+    /// Segments that repeated some bytes and delivered others. See the caveat
+    /// on [`Self::retransmits`].
+    pub fn partial_overlaps(&self) -> usize {
+        self.partial_overlaps
     }
 
     /// Absorb one payload against the current `next_seq`, handling the
@@ -247,6 +293,9 @@ impl StreamAssembler {
             return SegmentOutcome::Duplicate;
         }
         // Only the tail past `next` is new — the partial-overlap case.
+        if already > 0 {
+            self.partial_overlaps += 1;
+        }
         let fresh = &payload[already..];
         // R311y594b — ABSOLUTE, not an index into the retained Vec. Trimming
         // drops bytes off the front, so `self.stream.len()` stops being the
@@ -380,6 +429,52 @@ mod tests {
 
     /// A PARTIAL overlap contributes only its tail. Dropping it whole would
     /// lose real bytes; appending it whole would duplicate the prefix.
+    /// R311y597 — the anomaly counters. The verdicts existed from the first
+    /// commit and nothing counted them.
+    ///
+    /// The CONTROL is the half that makes this a measurement: a clean stream
+    /// must leave all three at zero. A counter that only ever goes up reads as
+    /// working no matter what it counts.
+    #[test]
+    fn tcp_anomalies_are_counted_and_a_clean_stream_counts_none() {
+        let mut clean = StreamAssembler::new();
+        clean.push(&seg(100, 0x02, b"", 0));
+        clean.push(&seg(101, 0x18, b"abcd", 1));
+        clean.push(&seg(105, 0x18, b"efgh", 2));
+        assert_eq!(
+            (
+                clean.retransmits(),
+                clean.out_of_order(),
+                clean.partial_overlaps()
+            ),
+            (0, 0, 0),
+            "an in-order stream has no anomalies to report",
+        );
+
+        let mut s = StreamAssembler::new();
+        s.push(&seg(100, 0x02, b"", 0));
+        s.push(&seg(101, 0x18, b"abcd", 1));
+        // A pure retransmission of bytes already delivered.
+        s.push(&seg(101, 0x18, b"abcd", 2));
+        // Ahead of what the stream expects, so held.
+        s.push(&seg(111, 0x18, b"jjjj", 3));
+        // Overlaps: `cd` was delivered, `ef` is new.
+        s.push(&seg(103, 0x18, b"cdef", 4));
+
+        assert_eq!(s.retransmits(), 1, "one whole segment was wasted");
+        assert_eq!(s.out_of_order(), 1, "one segment arrived early");
+        assert_eq!(
+            s.partial_overlaps(),
+            1,
+            "one segment repeated and progressed"
+        );
+        assert_eq!(
+            s.stream(),
+            b"abcdef",
+            "the counters must not have changed what was reassembled",
+        );
+    }
+
     #[test]
     fn a_partial_overlap_contributes_only_its_new_tail() {
         let mut s = StreamAssembler::new();
