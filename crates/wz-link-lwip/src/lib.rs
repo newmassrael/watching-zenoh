@@ -174,6 +174,12 @@ pub mod session_rx_pool_mcu_multicast {
 
 pub mod rx_sockets;
 
+/// R311y599 — the receive SEAM over the buffer-pool emits: slots a reader
+/// borrows and returns, hiding whether the CPU copied the bytes in or a
+/// peripheral wrote them. [`rx_sockets`] consumes the same emits for their
+/// dims; this consumes their LIFECYCLE, which until now had no caller.
+pub mod rx_pool;
+
 // R311lu — also under `test-support` so the exposed `lwip_test_link` harness
 // (which uses `std::sync` for its Once / Mutex) compiles for sibling crates'
 // tests, not only this crate's own `#[cfg(test)]` build.
