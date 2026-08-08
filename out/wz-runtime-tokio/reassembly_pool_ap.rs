@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: e812b8b9426089658c190b079d72f4505398532fde65fe2c41c3ec6148939d1b
-// template-hash: e9541de728219e5b918752124cad2b5ba2950a5da7bb328f3588c49d2bba35c4
+// template-hash: 894d11dad693c1040e16152130c83103ca132cfd62152461f0760e932c41c490
 // generated-at: 0
 // SCE-MAP: reassembly_pool_ap.scxml:59
 
@@ -39,14 +39,31 @@ pub const SLOT_COUNT: usize = 32;
 /// Bytes per slot (`<sce:slot-size>`).
 pub const SLOT_SIZE: usize = 1048576;
 
-/// SRAM region name (`<sce:section>`). Round-tripped here so that
-/// downstream linker integration can read it without re-parsing
-/// the SCXML.
+/// SRAM region name (`<sce:section>`), round-tripped so downstream
+/// tooling can read it without re-parsing the SCXML.
+///
+/// The Rust emit does not place the pool in this region, and the
+/// constant is not a hook for doing so. The C11 emit places its
+/// storage with `__attribute__((section))` because storage there is a
+/// file-static array of bytes and nothing else; the Rust pool owns its
+/// storage inline alongside `slot_states`, and the region the sidecar
+/// linker fragment declares is `(NOLOAD)` — nothing initialises it.
+/// Putting this whole struct there would leave the freelist reading
+/// whatever SRAM held at reset.
+///
+/// Placing it correctly means splitting the storage out into its own
+/// placed static, which makes the pool a singleton rather than a type
+/// the caller instantiates. That is the "MCU Rust variant" the spec
+/// names (§synth-5-E codegen contract), and it is a different author
+/// API from this one — not something a consumer can bolt on with
+/// `#[link_section]`.
 pub const SECTION: &'static str = "heap";
 
-/// DMA alignment in bytes (`<sce:alignment>`). Power-of-2
-/// violations surface in the emitted linker fragment, where the
-/// constraint is observable through `ALIGN(<n>)` directives.
+/// DMA alignment in bytes (`<sce:alignment>`). Carried into the slot
+/// type's `#[repr(align)]` below, so it is the alignment of every
+/// slot rather than a number the pool merely reports. Non-powers of
+/// two and a `slot-size` that is not a multiple of this are rejected
+/// at parse time.
 pub const ALIGNMENT: u32 = 64;
 
 /// DMA channel binding (`<sce:dma-channel>`). Empty when the pool is
@@ -241,15 +258,48 @@ impl<S> Slot<S> {
 // Pool struct — owns storage + per-slot state array
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+/// One slot's bytes, carrying the pool's declared DMA alignment.
+///
+/// `<sce:alignment>` describes every slot, not the table that holds
+/// them. A bare `[[u8; SLOT_SIZE]; SLOT_COUNT]` has alignment 1 no
+/// matter what the pool declares, so slot 0 landed whereever the
+/// containing static did and every later slot sat at a multiple of
+/// `SLOT_SIZE` from it — on the boundary only when `SLOT_SIZE`
+/// happened to be a multiple of the alignment. Two things ride on
+/// getting this right: the address handed to a peripheral, and the
+/// per-slot cache maintenance, which operates by cache line and so
+/// reaches into a neighbouring slot whenever a slot does not start on
+/// one.
+///
+/// The parser rejects a `slot-size` that is not a multiple of
+/// `alignment`, so the padding here is always zero — the assertions
+/// below say so where the compiler can check it rather than leaving
+/// the reader to trust it.
+#[derive(Clone, Copy)]
+#[repr(C, align(64))]
+struct SlotBytes([u8; SLOT_SIZE]);
+
+const _: () = assert!(
+    core::mem::align_of::<SlotBytes>() == ALIGNMENT as usize,
+    "slot alignment must be the declared <sce:alignment> (RFC §synth-5-E lines 1024-1073)",
+);
+const _: () = assert!(
+    core::mem::size_of::<SlotBytes>() == SLOT_SIZE,
+    "slot stride must equal <sce:slot-size> — padding here would mean the pool \
+     silently occupies more SRAM than the author budgeted",
+);
+
 /// Generated buffer-pool. Each slot's lifecycle state is tracked in
 /// `slot_states[]`; the phantom-typed `Slot<S>` API guarantees that
 /// at compile time, author code can only invoke the FSM transitions
 /// declared in spec §synth-5-E lines 1141-1156. Calling, e.g.,
 /// `pool_return` on a `Slot<DmaArmedRx>` is a type error caught by
 /// rustc rather than a runtime check.
+#[repr(C)]
 pub struct ReassemblyPoolAp {
-    /// Slot storage. Each slot is `[u8; SLOT_SIZE]`.
-    storage: [[u8; SLOT_SIZE]; SLOT_COUNT],
+    /// Slot storage. Each slot is `SLOT_SIZE` bytes on the declared
+    /// DMA boundary.
+    storage: [SlotBytes; SLOT_COUNT],
     /// Per-slot lifecycle state. Replaces the α-era `in_use: [bool;
     /// SLOT_COUNT]` bitmap with the full seven-state FSM tracking.
     slot_states: [SlotState; SLOT_COUNT],
@@ -265,7 +315,7 @@ impl ReassemblyPoolAp {
     /// Construct an empty pool — every slot starts on the freelist.
     pub fn new() -> Self {
         Self {
-            storage: [[0u8; SLOT_SIZE]; SLOT_COUNT],
+            storage: [SlotBytes([0u8; SLOT_SIZE]); SLOT_COUNT],
             slot_states: [SlotState::Free; SLOT_COUNT],
         }
     }
@@ -309,6 +359,61 @@ impl ReassemblyPoolAp {
         self.slot_states.get(idx).copied()
     }
 
+    /// Which slot a buffer address names, if any.
+    ///
+    /// The return leg of address publication. Peripheral completion
+    /// callbacks conventionally hand back the buffer address they were
+    /// given (`rx_frame_cb(addr, len)`), while every edge back into
+    /// the pool is keyed by slot index. Without this the driver keeps
+    /// a shadow table of a layout the pool already knows, and a slip
+    /// in that table advances the wrong slot.
+    ///
+    /// Only an exact slot base resolves. An interior or foreign
+    /// pointer is `None` rather than being rounded down to the slot
+    /// containing it: a completion naming an address the pool never
+    /// published is a driver bug, and rounding would turn it into a
+    /// plausible-looking index.
+    pub fn slot_index_of_ptr(&self, ptr: *const u8) -> Option<usize> {
+        let base = self.storage.as_ptr() as usize;
+        let addr = ptr as usize;
+        if addr < base {
+            return None;
+        }
+        let stride = core::mem::size_of::<SlotBytes>();
+        let offset = addr - base;
+        if offset % stride != 0 {
+            return None;
+        }
+        let idx = offset / stride;
+        (idx < SLOT_COUNT).then_some(idx)
+    }
+
+    /// Address of a slot in `dma-armed-tx`, for the descriptor
+    /// the bus master reads it from.
+    ///
+    /// `dma-armed-tx` hands out no handle — the caller reached it
+    /// through `link_arm_tx`, which consumed one — so the slot is
+    /// named by index, the same key the completion signal carries.
+    /// `None` unless the slot really is in `dma-armed-tx`, so an
+    /// address cannot be lifted out of a slot some other owner holds.
+    ///
+    /// Returning a raw pointer rather than a slice is the point. A
+    /// `&[u8]` handed out here would be a live Rust reference to
+    /// memory a peripheral is about to read, which is the aliasing
+    /// the DMA states exist to deny; a raw pointer carries the address
+    /// and no promise about the memory. Obtaining one is safe because
+    /// nothing can be read or written through it without an `unsafe`
+    /// block at the point of use, which is where the contract actually
+    /// binds: the pointer is valid only while the slot stays in
+    /// `dma-armed-tx`, and the CPU must not write through it while
+    /// the transfer runs.
+    pub fn dma_armed_tx_ptr(&self, idx: usize) -> Option<*const u8> {
+        if self.slot_states.get(idx) != Some(&SlotState::DmaArmedTx) {
+            return None;
+        }
+        Some(self.storage[idx].0.as_ptr())
+    }
+
     /// Number of slots currently on the freelist.
     pub fn free_count(&self) -> usize {
         self.slot_states.iter().filter(|s| **s == SlotState::Free).count()
@@ -344,12 +449,12 @@ impl Slot<CpuMut> {
 
     /// Read-only borrow of the slot's bytes.
     pub fn read<'a>(&'a self, pool: &'a ReassemblyPoolAp) -> &'a [u8; SLOT_SIZE] {
-        &pool.storage[self.idx]
+        &pool.storage[self.idx].0
     }
 
     /// Mutable borrow of the slot's bytes.
     pub fn write<'a>(&'a mut self, pool: &'a mut ReassemblyPoolAp) -> &'a mut [u8; SLOT_SIZE] {
-        &mut pool.storage[self.idx]
+        &mut pool.storage[self.idx].0
     }
 }
 
@@ -372,7 +477,46 @@ impl Slot<CpuRef> {
     /// Read-only borrow of the slot's bytes — `cpu-ref` is a shared
     /// CPU-read state per spec line 1135.
     pub fn read<'a>(&'a self, pool: &'a ReassemblyPoolAp) -> &'a [u8; SLOT_SIZE] {
-        &pool.storage[self.idx]
+        &pool.storage[self.idx].0
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Address publication for `dma-armed-rx` — where the slot passes
+// into a bus master's hands and therefore has to be findable by it.
+//
+// The states that can produce an address through the CPU accessors
+// are `cpu-mut` and `cpu-ref`, and those are exactly the two no bus
+// master owns. Without this the arm edges hand back a handle that
+// names a slot the peripheral is about to use and no way to say
+// where it is.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+impl Slot<DmaArmedRx> {
+    /// Address of this slot, for the descriptor the bus master reads
+    /// it from. Spec §synth-5-E lines 1024-1073 (the slot table is
+    /// DMA-aligned so that this address is one a peripheral accepts).
+    ///
+    /// Borrows rather than consumes: publishing the address is not a
+    /// transition. The caller writes it into the peripheral's
+    /// descriptor and then advances the slot with `dma_start_rx`,
+    /// which is where the state actually changes.
+    ///
+    /// Returning a raw pointer rather than a slice is the point. A
+    /// `&mut [u8]` handed out here would be a live Rust reference to
+    /// memory the peripheral is about to write, which is the aliasing
+    /// `dma-armed-rx` exists to deny; a raw pointer carries the
+    /// address and no promise about the memory. Obtaining one is safe
+    /// because nothing can be read or written through it without an
+    /// `unsafe` block at the point of use, which is where the contract
+    /// binds: valid only while the slot stays in `dma-armed-rx`,
+    /// and the CPU must not read through it before the completion
+    /// edge.
+    ///
+    /// Takes `&mut ReassemblyPoolAp` because a pointer valid for writes
+    /// has to be derived from a mutable borrow.
+    pub fn dma_armed_rx_ptr(&self, pool: &mut ReassemblyPoolAp) -> *mut u8 {
+        pool.storage[self.idx].0.as_mut_ptr()
     }
 }
 
