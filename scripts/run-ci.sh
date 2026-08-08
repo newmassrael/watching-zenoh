@@ -5117,7 +5117,12 @@ layer_c1bs_live_capture() {
         echo "  C1bs FAIL: the privileged tap tests did not both run"; echo "$out"; return 1; }
     # Surface the measurement in the lane log; a number nobody sees is a number
     # nobody checks.
-    grep -E '^live tap: ' <<<"$out" || true
+    # NOT anchored: with `--test-threads=1 --nocapture` libtest prints the test
+    # NAME on the same line before the test's own stdout, so `^live tap:` never
+    # matches. Measured on hosted run 31228323741, where the lane passed and
+    # printed nothing -- the number this echo exists to surface was invisible in
+    # exactly the way its own comment warns about.
+    grep -oE 'live tap: .*' <<<"$out" || true
     return 0
 }
 
