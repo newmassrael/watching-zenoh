@@ -379,7 +379,15 @@ impl Dissection {
     ) {
         let segment = match link::decapsulate(link_type, packet_index, bytes) {
             Ok(Transport::Tcp(s)) => s,
-            Ok(Transport::Udp(d)) => {
+            // R311y597 — raweth joins the datagram path rather than getting
+            // one of its own, and the reason is measured, not assumed: pico
+            // encodes exactly ONE transport message per frame
+            // (`raweth/tx.c:192`, and `send_n_msg` builds a fresh frame per
+            // network message) and decodes exactly one back (`rx.c:104`).
+            // That is the same contract UDP carries, so the same ingestion is
+            // correct — had it batched, `next_datagram` would have reported
+            // the first message and dropped the rest.
+            Ok(Transport::Udp(d) | Transport::RawEth(d)) => {
                 self.push_datagram(d, ts_millis);
                 return;
             }

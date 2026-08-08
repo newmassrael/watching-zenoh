@@ -43,4 +43,11 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     "codec-open-body",
     "codec-close",
     "codec-keep-alive",
+    # R311y597 — the raweth (L2) FRAMING, and deliberately NOT behind a
+    # `wz-capture` feature of its own. A capture front end reads what is on the
+    # wire; making the one non-IP link zenoh speaks optional would mean a
+    # default build that silently drops it, which is the state this closes.
+    # `raweth_link` is pure header parsing with no dependencies of its own, so
+    # the cost is a struct and two functions.
+    "transport-link-raweth",
 ] }

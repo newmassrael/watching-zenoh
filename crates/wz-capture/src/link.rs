@@ -179,6 +179,13 @@ pub enum Transport {
     Tcp(Segment),
     /// A UDP datagram, already a whole message.
     Udp(Datagram),
+    /// A raweth (L2) frame's payload — one whole message, like a datagram.
+    ///
+    /// R311y597. A separate variant from [`Self::Udp`] even though both carry
+    /// a [`Datagram`], because the two are only alike in SHAPE: a raweth flow
+    /// is keyed by MAC with no ports, so a consumer that reports "UDP flow"
+    /// over it would be naming a transport that is not there.
+    RawEth(Datagram),
 }
 
 /// Decapsulate one captured packet down to the transport payload zenoh uses.
@@ -191,6 +198,11 @@ pub fn decapsulate(
     packet_index: usize,
     bytes: &[u8],
 ) -> Result<Transport, SkipReason> {
+    if link_type == LINKTYPE_ETHERNET {
+        if let Some(d) = strip_raweth(bytes, packet_index) {
+            return Ok(Transport::RawEth(d));
+        }
+    }
     let (ip_bytes, is_v6) = strip_link(link_type, bytes)?;
     let (src, dst, proto, payload) = if is_v6 {
         strip_ipv6(ip_bytes)?
@@ -239,6 +251,54 @@ fn strip_udp(
         flow,
         from_low,
         payload: bytes[8..8 + body_len].to_vec(),
+        packet_index,
+    })
+}
+
+/// A raweth (L2) frame, or `None` if this is not one.
+///
+/// R311y597 — before this, every non-IP ethertype died on
+/// [`SkipReason::NotIp`] at the Ethernet arm, so zenoh-pico's raweth link was
+/// invisible to a capture even though the framing had been sitting in
+/// `wz_session_core::raweth_link` since R311y579.
+///
+/// ## Why this runs BEFORE `strip_link` rather than as a case inside it
+///
+/// The generic VLAN walk would half-succeed on the VLAN form and be wrong in a
+/// way that looks right. pico spells its VLAN type `0x0081` so a little-endian
+/// `memcpy` lands the real `81 00`, which the generic walk consumes; it then
+/// reads pico's ethertype from the correct offset and treats the NEXT two
+/// bytes as payload. Those two bytes are raweth's `data_length`. Delegating to
+/// [`RawEthHeader::decode`] instead keeps one implementation of pico's layout,
+/// including its VLAN detection, rather than a second one that agrees until it
+/// does not.
+///
+/// ## Both byte orders are accepted, and that is not laxity
+///
+/// pico `memcpy`s the header struct, so `ethtype` lands in the SENDER's byte
+/// order (`raweth_link`'s module doc). A little-endian pico puts `0x72e0` on
+/// the wire as `e0 72` and a big-endian one as `72 e0`. The sender's
+/// endianness is not observable from the capture, so a reader that accepted
+/// only one spelling would be blind to half the deployments — for a property
+/// that is pico's, not this parser's, to normalise.
+fn strip_raweth(bytes: &[u8], packet_index: usize) -> Option<Datagram> {
+    use wz_session_core::raweth_link::{self, RawEthHeader, DEFAULT_ETHTYPE};
+
+    let (header, _) = RawEthHeader::decode(bytes).ok()?;
+    if header.ethtype != DEFAULT_ETHTYPE && header.ethtype != DEFAULT_ETHTYPE.swap_bytes() {
+        return None;
+    }
+    let (_, payload) = raweth_link::deframe(bytes).ok()?;
+    // MACs, not addresses, and no ports — `Endpoint` carries the six bytes and
+    // `is_ipv4()` answers false, so nothing downstream can mistake one for an
+    // address it could route.
+    let src = Endpoint::new(&header.smac, 0);
+    let dst = Endpoint::new(&header.dmac, 0);
+    let (flow, from_low) = FlowKey::new(src, dst);
+    Some(Datagram {
+        flow,
+        from_low,
+        payload: payload.to_vec(),
         packet_index,
     })
 }
@@ -448,7 +508,9 @@ mod tests {
     fn tcp(link_type: u32, idx: usize, bytes: &[u8]) -> Result<Segment, SkipReason> {
         match decapsulate(link_type, idx, bytes) {
             Ok(Transport::Tcp(s)) => Ok(s),
-            Ok(Transport::Udp(d)) => panic!("expected TCP, got a datagram: {d:?}"),
+            Ok(Transport::Udp(d) | Transport::RawEth(d)) => {
+                panic!("expected TCP, got a datagram: {d:?}")
+            }
             Err(e) => Err(e),
         }
     }
@@ -770,6 +832,97 @@ mod tests {
         };
         assert_eq!(da.flow, db.flow);
         assert_ne!(da.from_low, db.from_low);
+    }
+
+    // ---- R311y597: raweth (L2) ---------------------------------------------
+
+    /// The fixture is built with `raweth_link`'s OWN framer, so a walker that
+    /// disagrees with wz's framing fails here instead of agreeing with my
+    /// reading of pico's header.
+    fn raweth_frame(smac: [u8; 6], dmac: [u8; 6], ethtype: u16, payload: &[u8]) -> Vec<u8> {
+        use wz_session_core::raweth_link::{frame, RawEthHeader};
+        let h = RawEthHeader::new(dmac, smac, ethtype, payload.len() as u16);
+        frame(&h, payload).expect("raweth frame")
+    }
+
+    /// THE GAP. A raweth frame used to die on `NotIp` at the Ethernet arm.
+    #[test]
+    fn a_raweth_frame_yields_its_payload_as_a_datagram() {
+        use wz_session_core::raweth_link::DEFAULT_ETHTYPE;
+        let smac = [0x30, 0x03, 0xc8, 0x37, 0x25, 0xa1];
+        let dmac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        let pkt = raweth_frame(smac, dmac, DEFAULT_ETHTYPE, b"zenoh-batch");
+
+        match decapsulate(LINKTYPE_ETHERNET, 11, &pkt) {
+            Ok(Transport::RawEth(d)) => {
+                assert_eq!(d.payload, b"zenoh-batch");
+                assert_eq!(d.packet_index, 11);
+                // Keyed by MAC, and neither endpoint claims to be an address.
+                assert!(!d.flow.low.is_ipv4() && !d.flow.high.is_ipv4());
+                assert_eq!(d.flow.low.port, 0);
+                let mut macs = alloc::vec![d.flow.low.addr(), d.flow.high.addr()];
+                macs.sort();
+                assert_eq!(macs, alloc::vec![&smac[..], &dmac[..]]);
+            }
+            other => panic!("expected a raweth datagram, got {other:?}"),
+        }
+    }
+
+    /// BOTH byte orders of pico's ethertype are admitted, because the sender's
+    /// endianness is not observable and pico `memcpy`s the field.
+    #[test]
+    fn a_raweth_frame_is_recognised_in_either_byte_order() {
+        use wz_session_core::raweth_link::DEFAULT_ETHTYPE;
+        for (ethtype, label) in [
+            (DEFAULT_ETHTYPE, "as a little-endian pico writes it"),
+            (
+                DEFAULT_ETHTYPE.swap_bytes(),
+                "as a big-endian pico writes it",
+            ),
+        ] {
+            let pkt = raweth_frame([1; 6], [2; 6], ethtype, b"x");
+            assert!(
+                matches!(
+                    decapsulate(LINKTYPE_ETHERNET, 0, &pkt),
+                    Ok(Transport::RawEth(_))
+                ),
+                "{label}",
+            );
+        }
+    }
+
+    /// The CONTROL, and it is the leg that keeps the change honest: another
+    /// non-IP ethertype must STILL be `NotIp`. Admitting every non-IP frame as
+    /// raweth would pass the two legs above.
+    #[test]
+    fn a_non_raweth_ethertype_is_still_not_ip() {
+        let pkt = raweth_frame([1; 6], [2; 6], 0x1234, b"x");
+        assert_eq!(
+            decapsulate(LINKTYPE_ETHERNET, 0, &pkt),
+            Err(SkipReason::NotIp),
+        );
+        // ...and an ordinary IPv4 frame must not be diverted into raweth.
+        let ip = eth_ipv4_udp([10, 0, 0, 1], 1, [10, 0, 0, 2], 2, b"abc");
+        assert!(matches!(
+            decapsulate(LINKTYPE_ETHERNET, 0, &ip),
+            Ok(Transport::Udp(_))
+        ));
+    }
+
+    /// A frame whose `data_length` overruns what was captured is declined, not
+    /// read past — the payload is cut to the header's claim, so a NIC-padded
+    /// short frame does not hand pad bytes to the decoder.
+    #[test]
+    fn a_raweth_payload_is_cut_to_its_declared_length() {
+        use wz_session_core::raweth_link::DEFAULT_ETHTYPE;
+        let mut pkt = raweth_frame([1; 6], [2; 6], DEFAULT_ETHTYPE, b"abc");
+        while pkt.len() < 60 {
+            pkt.push(0); // the NIC's minimum-frame padding
+        }
+        match decapsulate(LINKTYPE_ETHERNET, 0, &pkt) {
+            Ok(Transport::RawEth(d)) => assert_eq!(d.payload, b"abc"),
+            other => panic!("expected a raweth datagram, got {other:?}"),
+        }
     }
 
     // ---- R311y597: the IPv6 leg, which had NO tests at all ----------------
