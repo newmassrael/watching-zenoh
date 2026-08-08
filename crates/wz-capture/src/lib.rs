@@ -165,6 +165,9 @@ pub struct FlowDissection {
     /// decision is made on the stream's opening rather than on whatever
     /// happened to arrive in the first segment.
     held: [Vec<u8>; 2],
+    /// R311y603 — bytes delivered per direction on an AF_VSOCK flow, which is
+    /// the sequence number vsockmon does not carry. Untouched on a tcp flow.
+    vsock_seq: [u32; 2],
 }
 
 impl FlowDissection {
@@ -178,6 +181,7 @@ impl FlowDissection {
             last_activity: 0,
             framing: Framing::Undecided,
             held: [Vec::new(), Vec::new()],
+            vsock_seq: [0, 0],
         }
     }
 
@@ -518,6 +522,14 @@ impl Dissection {
                 self.push_datagram(d, ts_millis);
                 return;
             }
+            // R311y603 — a vsock record is a piece of a BYTE STREAM, so it goes
+            // through the same assembler tcp does; what it lacks is a sequence
+            // number, which `push_vsock` synthesises from the flow's own running
+            // byte count.
+            Ok(Transport::Vsock(r)) => {
+                self.push_vsock(r, ts_millis);
+                return;
+            }
             Err(reason) => {
                 self.skipped.push(SkippedPacket {
                     packet_index,
@@ -621,6 +633,85 @@ impl Dissection {
             self.flows.remove(oldest);
             self.drops.flows += 1;
         }
+    }
+
+    /// R311y603 — one AF_VSOCK record, fed into the flow's byte stream.
+    ///
+    /// ## Why a synthesised sequence number is the honest answer here
+    ///
+    /// `vsockmon` records carry no sequence number, and they do not need one:
+    /// AF_VSOCK is reliable and in-order, and the monitor device records what
+    /// the kernel DELIVERED, so a capture holds each byte exactly once and in
+    /// order. The assembler wants a sequence anyway — it is the mechanism that
+    /// maps a stream offset back to a packet, which is this crate's whole
+    /// point — so the running byte count per direction becomes the sequence.
+    ///
+    /// That is a synthesis, and it is confined to this function deliberately.
+    /// It cannot live in [`link::decapsulate`], which sees one packet and has
+    /// no flow state to count with, and putting it there would have meant
+    /// inventing a number in the parser. Here it is exactly what it claims to
+    /// be: the offset of these bytes in the stream this flow has delivered so
+    /// far. Retransmission and reordering repair are dead weight on this path
+    /// rather than wrong — there is nothing to repair — and the offset map they
+    /// come with is the reason to use them anyway.
+    fn push_vsock(&mut self, record: link::VsockRecord, ts_millis: Option<u64>) {
+        let idx = match self.flows.iter().position(|f| f.flow == record.flow) {
+            Some(i) => i,
+            None => {
+                self.flows.push(FlowDissection::new(
+                    record.flow,
+                    self.limits.reassembly_window_ms,
+                ));
+                self.flows.len() - 1
+            }
+        };
+        let direction = if record.from_low {
+            Direction::A
+        } else {
+            Direction::B
+        };
+        let flow = &mut self.flows[idx];
+        #[cfg(feature = "reassembly")]
+        if let Some(ms) = ts_millis {
+            self.expired_chains += flow.session.observe_at(ms);
+        }
+        #[cfg(not(feature = "reassembly"))]
+        let _ = ts_millis;
+
+        let d = dir_index(direction);
+        let seq = flow.vsock_seq[d];
+        flow.vsock_seq[d] = seq.wrapping_add(record.payload.len() as u32);
+        let segment = link::Segment {
+            flow: record.flow,
+            from_low: record.from_low,
+            seq,
+            // A vsockmon record has no flags to read; a stream that begins at
+            // the capture's first record is what the assembler already handles
+            // for a mid-stream tcp capture.
+            syn: false,
+            fin: false,
+            rst: false,
+            payload: record.payload,
+            packet_index: record.packet_index,
+            // No checksum exists at this layer: AF_VSOCK is not a network
+            // protocol and vsockmon carries none. `None` is the same answer the
+            // raweth path gives, and for the same reason.
+            checksums: link::Checksums {
+                ip: None,
+                transport: None,
+            },
+        };
+        let before = flow.assembler(direction).len();
+        match direction {
+            Direction::A => flow.low_to_high.push(&segment),
+            Direction::B => flow.high_to_low.push(&segment),
+        };
+        let base = flow.assembler(direction).retained_from();
+        let delivered: Vec<u8> = flow.assembler(direction).stream()[before - base..].to_vec();
+        flow.advance(direction, &delivered);
+        flow.last_activity = record.packet_index;
+        self.enforce_flow_limits(idx);
+        self.evict_flows_beyond_cap();
     }
 
     /// R311y584 (A3) — one UDP datagram: one whole wire message, decoded on
@@ -1170,5 +1261,190 @@ mod ws_flow_tests {
             "the held bytes must be replayed once the decision is made, not dropped"
         );
         assert_eq!(flow.frames.len(), 1);
+    }
+}
+
+// ── R311y603 — the AF_VSOCK path end to end. `link` proves the vsockmon
+//    parser; this proves the WIRING and the SEQUENCE SYNTHESIS, which is the
+//    part that has no parser to be proven by: vsockmon carries no sequence
+//    number, so the stream position is a number this crate makes up, and a
+//    number a crate makes up is a number that has to be tested. ──
+#[cfg(test)]
+mod vsock_flow_tests {
+    use super::*;
+    use crate::link::LINKTYPE_VSOCK;
+    use wz_session_core::inbound::InboundFrame;
+
+    const OP_PAYLOAD: u16 = 4;
+    const OP_CONNECT: u16 = 1;
+
+    /// One vsockmon record. `transport_hdr` is whatever the transport put
+    /// between the header and the payload — its LENGTH is what the reader
+    /// skips by, which is the field this fixture exists to exercise.
+    fn vsockmon(
+        src_cid: u64,
+        src_port: u32,
+        dst_cid: u64,
+        dst_port: u32,
+        op: u16,
+        transport_hdr: &[u8],
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&src_cid.to_le_bytes());
+        out.extend_from_slice(&dst_cid.to_le_bytes());
+        out.extend_from_slice(&src_port.to_le_bytes());
+        out.extend_from_slice(&dst_port.to_le_bytes());
+        out.extend_from_slice(&op.to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes()); // AF_VSOCK_TRANSPORT_VIRTIO
+        out.extend_from_slice(&(transport_hdr.len() as u16).to_le_bytes());
+        out.extend_from_slice(&[0u8, 0]); // reserved
+        out.extend_from_slice(transport_hdr);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// One length-prefixed KeepAlive: a vsock link is `SOCK_STREAM` and carries
+    /// the same StreamEnvelope framing tcp does.
+    fn framed_keepalive() -> Vec<u8> {
+        alloc::vec![1, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE]
+    }
+
+    /// THE ONE THAT MATTERS. Before this round `DLT_VSOCK` was absent from the
+    /// link-type table, so every packet of a `vsock/...` zenoh session came
+    /// back as `UnsupportedLinkType(271)` — a NAMED skip, so never silent, but
+    /// an under-promise: the DLT and `vsockmon.ko` both exist and nothing was
+    /// blocking it. VM-to-VM is the shape an AP deployment actually takes.
+    #[test]
+    fn a_vsock_carried_zenoh_session_decodes() {
+        let mut d = Dissection::new();
+        let msg = framed_keepalive();
+        // A virtio transport header of a plausible width, present precisely so
+        // the reader must skip by the declared length rather than a constant.
+        let vhdr = alloc::vec![0xAAu8; 44];
+
+        d.push_packet(
+            LINKTYPE_VSOCK,
+            0,
+            &vsockmon(3, 40000, 2, 7447, OP_PAYLOAD, &vhdr, &msg),
+        );
+        d.push_packet(
+            LINKTYPE_VSOCK,
+            1,
+            &vsockmon(2, 7447, 3, 40000, OP_PAYLOAD, &vhdr, &msg),
+        );
+
+        assert!(d.skipped().is_empty(), "no packet should be skipped");
+        assert_eq!(d.flows().len(), 1, "both directions are one flow");
+        let flow = &d.flows()[0];
+        assert_eq!(flow.frames.len(), 2, "one message from each direction");
+        for f in &flow.frames {
+            assert!(matches!(f.frame, Ok(InboundFrame::KeepAlive { .. })));
+            assert_eq!(f.prefix_width, 2, "a vsock link is length-prefixed");
+        }
+        // The flow is keyed by CID, not by an IP address that is not there.
+        assert_eq!(flow.flow.low.vsock_cid(), Some(2));
+        assert_eq!(flow.flow.high.vsock_cid(), Some(3));
+    }
+
+    /// THE SYNTHESISED SEQUENCE, which is the only invented number on this
+    /// path. Three records in one direction must concatenate into ONE stream —
+    /// a counter that failed to advance would replay the first record's offset
+    /// and the assembler would treat records 2 and 3 as retransmissions, so the
+    /// second and third messages would vanish. Asserting only "it decodes"
+    /// would pass on that: the first message decodes either way.
+    #[test]
+    fn successive_records_concatenate_instead_of_overwriting() {
+        let mut d = Dissection::new();
+        let msg = framed_keepalive();
+        for i in 0..3usize {
+            d.push_packet(
+                LINKTYPE_VSOCK,
+                i,
+                &vsockmon(3, 40000, 2, 7447, OP_PAYLOAD, &[], &msg),
+            );
+        }
+        let flow = &d.flows()[0];
+        assert_eq!(
+            flow.frames.len(),
+            3,
+            "each record advances the stream; a stuck counter loses all but the first"
+        );
+        // And each message is still attributable to the record that carried it.
+        for (i, f) in flow.frames.iter().enumerate() {
+            assert_eq!(
+                flow.packet_for(f.direction, f.stream_offset),
+                Some(i),
+                "message {i} must name the packet it came out of"
+            );
+        }
+    }
+
+    /// A message SPLIT across two records must still decode, which is the whole
+    /// reason a vsock flow goes through the stream assembler rather than being
+    /// treated as a datagram.
+    #[test]
+    fn a_message_split_across_two_records_is_reassembled() {
+        let mut d = Dissection::new();
+        let msg = framed_keepalive();
+        d.push_packet(
+            LINKTYPE_VSOCK,
+            0,
+            &vsockmon(3, 40000, 2, 7447, OP_PAYLOAD, &[], &msg[..1]),
+        );
+        assert_eq!(
+            d.flows()[0].frames.len(),
+            0,
+            "half a message decodes nothing"
+        );
+        d.push_packet(
+            LINKTYPE_VSOCK,
+            1,
+            &vsockmon(3, 40000, 2, 7447, OP_PAYLOAD, &[], &msg[1..]),
+        );
+        assert_eq!(d.flows()[0].frames.len(), 1, "the halves join into one");
+    }
+
+    /// A non-payload op carries no data by the kernel header's own statement,
+    /// and must be skipped BY NAME rather than fed in as empty bytes.
+    #[test]
+    fn a_non_payload_record_is_skipped_by_name() {
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_VSOCK,
+            0,
+            &vsockmon(3, 40000, 2, 7447, OP_CONNECT, &[], &[]),
+        );
+        assert_eq!(d.skipped().len(), 1);
+        assert_eq!(
+            d.skipped()[0].reason,
+            SkipReason::VsockNonPayload(OP_CONNECT)
+        );
+        assert!(d.flows().is_empty(), "a connect record opens no flow");
+    }
+
+    /// The two 32-bit vsock ports must not collide after the widening from
+    /// `u16`. Two flows differing ONLY above bit 16 are the case a truncating
+    /// key would merge into one, silently interleaving two sessions' bytes.
+    #[test]
+    fn two_vsock_ports_differing_above_bit_16_are_distinct_flows() {
+        let mut d = Dissection::new();
+        let msg = framed_keepalive();
+        d.push_packet(
+            LINKTYPE_VSOCK,
+            0,
+            &vsockmon(3, 0x0001_0001, 2, 7447, OP_PAYLOAD, &[], &msg),
+        );
+        d.push_packet(
+            LINKTYPE_VSOCK,
+            1,
+            &vsockmon(3, 0x0002_0001, 2, 7447, OP_PAYLOAD, &[], &msg),
+        );
+        assert_eq!(
+            d.flows().len(),
+            2,
+            "ports 0x00010001 and 0x00020001 share their low 16 bits; a u16 key \
+             would interleave two sessions into one stream"
+        );
     }
 }

@@ -23,6 +23,26 @@ pub const LINKTYPE_IPV4: u32 = 228;
 pub const LINKTYPE_IPV6: u32 = 229;
 /// `LINKTYPE_LINUX_SLL2` — the 20-byte cooked v2 header.
 pub const LINKTYPE_LINUX_SLL2: u32 = 276;
+/// `LINKTYPE_VSOCK` — AF_VSOCK, captured through the kernel's `vsockmon`
+/// device (`DLT_VSOCK`, `/usr/include/pcap/dlt.h:1448`).
+///
+/// R311y603. Absent from this table, a `vsock/...` zenoh link — the VM-to-VM
+/// shape an AP deployment actually takes — came back as
+/// [`SkipReason::UnsupportedLinkType`]`(271)`. That was a NAMED skip and so
+/// never silent, but it was an under-promise: both the DLT and `vsockmon.ko`
+/// exist, so nothing was blocking it.
+pub const LINKTYPE_VSOCK: u32 = 271;
+
+/// Bytes of `struct af_vsockmon_hdr` (`/usr/include/linux/vsockmon.h`), read
+/// off that header rather than remembered: `__le64 src_cid` + `__le64 dst_cid`
+/// + `__le32 src_port` + `__le32 dst_port` + `__le16 op` + `__le16 transport`
+/// + `__le16 len` + 2 reserved.
+const VSOCKMON_HDR_LEN: usize = 32;
+
+/// `AF_VSOCK_OP_PAYLOAD` — the only op that carries data. The header's own
+/// comment is explicit: "If af_vsockmon_hdr->op is AF_VSOCK_OP_PAYLOAD then
+/// the payload follows the transport header. Other ops do not have a payload."
+const AF_VSOCK_OP_PAYLOAD: u16 = 4;
 
 const ETHERTYPE_IPV4: u16 = 0x0800;
 const ETHERTYPE_IPV6: u16 = 0x86DD;
@@ -32,17 +52,23 @@ const ETHERTYPE_QINQ: u16 = 0x88A8;
 const IP_PROTO_TCP: u8 = 6;
 const IP_PROTO_UDP: u8 = 17;
 
-/// An IP endpoint: address bytes (4 for v4, 16 for v6) plus a port.
+/// One end of a flow: address bytes plus a port.
 ///
 /// The address is a fixed 16-byte buffer with a length, not an enum: the
 /// flow key only ever compares and orders it, and a `[u8; 16]` keeps the key
-/// `Copy` and hashable without a v4/v6 split rippling into every consumer.
+/// `Copy` and hashable without an address-family split rippling into every
+/// consumer. The LENGTH is also what distinguishes the families — 4 for IPv4,
+/// 16 for IPv6, and (R311y603) 8 for an AF_VSOCK context id, so a vsock flow
+/// can never collide with an IP one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Endpoint {
     addr: [u8; 16],
     addr_len: u8,
-    /// TCP port, host order.
-    pub port: u16,
+    /// TCP / UDP port, host order — or an AF_VSOCK port, which is 32 bits
+    /// wide (`struct af_vsockmon_hdr.src_port`, `linux/vsockmon.h`). The field
+    /// is `u32` for that reason: truncating a vsock port to 16 bits would
+    /// silently alias two distinct flows onto one key.
+    pub port: u32,
 }
 
 impl Endpoint {
@@ -56,7 +82,21 @@ impl Endpoint {
         self.addr_len == 4
     }
 
-    fn new(addr_bytes: &[u8], port: u16) -> Self {
+    /// The context id of an AF_VSOCK endpoint, or `None` for an IP one.
+    ///
+    /// Distinguished by the address LENGTH rather than by a flag: a vsock
+    /// endpoint is the only 8-byte one, so a consumer that asks this question
+    /// gets an answer the key itself already encodes.
+    pub fn vsock_cid(&self) -> Option<u64> {
+        if self.addr_len != 8 {
+            return None;
+        }
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(&self.addr[..8]);
+        Some(u64::from_le_bytes(raw))
+    }
+
+    fn new(addr_bytes: &[u8], port: u32) -> Self {
         let mut addr = [0u8; 16];
         addr[..addr_bytes.len()].copy_from_slice(addr_bytes);
         Self {
@@ -180,14 +220,34 @@ pub enum SkipReason {
     /// separate problem from reassembling a TCP stream and is NOT done here;
     /// naming it keeps a hole in the byte stream attributable.
     Ipv4Fragment,
-    /// An IPv6 packet whose first next-header is a genuine EXTENSION HEADER,
-    /// which this build does not walk.
+    /// An IPv6 packet whose extension-header chain could not be walked to a
+    /// transport, carrying the header that stopped it.
     ///
     /// R311y597 — the payload is the extension header's own number, and it is
     /// now only ever one of [`is_ipv6_extension_header`]'s set. It previously
     /// carried any next-header that was not TCP, so a reader saw UDP (17) and
     /// ICMPv6 (58) reported as unwalked chains.
+    ///
+    /// R311y603 — the chain IS walked now, so this narrowed from "any chain" to
+    /// the three cases that genuinely cannot be walked: ESP (50), whose
+    /// remainder is encrypted, the two experimental numbers (253 / 254) that
+    /// carry no length this reader may assume, and a chain longer than
+    /// [`IPV6_MAX_EXT_HEADERS`].
     Ipv6ExtensionChain(u8),
+    /// An IPv6 fragment other than the first, which has no transport header to
+    /// find. The v6 twin of [`Self::Ipv4Fragment`], and named separately
+    /// because a reader chasing a hole should not have to guess which address
+    /// family produced it.
+    Ipv6Fragment,
+    /// R311y603 — a `vsockmon` record whose op is not `AF_VSOCK_OP_PAYLOAD`,
+    /// carrying the op itself.
+    ///
+    /// CONNECT / DISCONNECT / CONTROL records are the credit-and-lifecycle
+    /// traffic of the transport, and by the kernel header's own statement they
+    /// have no payload at all. Skipping them is correct; skipping them ANONYMOUS
+    /// would leave a reader unable to tell a quiet link from a link whose
+    /// records this build could not read.
+    VsockNonPayload(u16),
 }
 
 /// One UDP datagram lifted out of a captured packet.
@@ -215,6 +275,25 @@ pub struct Datagram {
     pub checksums: Checksums,
 }
 
+/// R311y603 — one AF_VSOCK record's payload, lifted out of a `vsockmon`
+/// capture.
+///
+/// The byte-stream twin of [`Datagram`]: same flow keying, same direction bit,
+/// but the payload is a piece OF a stream rather than a whole message, because
+/// zenoh's vsock link is `SOCK_STREAM` and carries the same length-prefixed
+/// StreamEnvelope framing tcp does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VsockRecord {
+    /// The two endpoints, sorted, keyed by `(cid, port)`.
+    pub flow: FlowKey,
+    /// `true` when it travelled from [`FlowKey::low`] toward `high`.
+    pub from_low: bool,
+    /// The record's payload bytes.
+    pub payload: Vec<u8>,
+    /// Index of the packet this came out of.
+    pub packet_index: usize,
+}
+
 /// What a captured packet turned out to carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Transport {
@@ -222,6 +301,17 @@ pub enum Transport {
     Tcp(Segment),
     /// A UDP datagram, already a whole message.
     Udp(Datagram),
+    /// R311y603 — the payload of one AF_VSOCK record.
+    ///
+    /// A distinct variant from [`Self::Tcp`] even though both feed a byte
+    /// stream, because a vsockmon record has NO sequence number: the transport
+    /// is reliable and in-order and the monitor device records what the kernel
+    /// delivered, so the stream position is the running byte count and nothing
+    /// else. Handing this back as a `Segment` with a fabricated `seq` would put
+    /// that fabrication in the parser, where the running count cannot be known;
+    /// [`crate::Dissection`] holds the counter and synthesises the sequence
+    /// there, one layer up, where it is per-flow state rather than a guess.
+    Vsock(VsockRecord),
     /// A raweth (L2) frame's payload — one whole message, like a datagram.
     ///
     /// R311y597. A separate variant from [`Self::Udp`] even though both carry
@@ -241,6 +331,9 @@ pub fn decapsulate(
     packet_index: usize,
     bytes: &[u8],
 ) -> Result<Transport, SkipReason> {
+    if link_type == LINKTYPE_VSOCK {
+        return strip_vsockmon(bytes, packet_index).map(Transport::Vsock);
+    }
     if link_type == LINKTYPE_ETHERNET {
         if let Some(d) = strip_raweth(bytes, packet_index) {
             return Ok(Transport::RawEth(d));
@@ -305,8 +398,8 @@ fn strip_udp(
     if bytes.len() < 8 + body_len {
         return Err(SkipReason::Truncated);
     }
-    let src = Endpoint::new(src.addr(), src_port);
-    let dst = Endpoint::new(dst.addr(), dst_port);
+    let src = Endpoint::new(src.addr(), src_port as u32);
+    let dst = Endpoint::new(dst.addr(), dst_port as u32);
     let (flow, from_low) = FlowKey::new(src, dst);
     Ok(Datagram {
         flow,
@@ -565,17 +658,68 @@ const fn is_ipv6_extension_header(next_header: u8) -> bool {
     )
 }
 
+/// R311y603 — one `vsockmon` record: a 32-byte transport-independent header, a
+/// transport header whose length the first one declares, then the payload.
+///
+/// The layout is read straight off `/usr/include/linux/vsockmon.h` on this
+/// machine, and the `len` field is what makes the transport header skippable
+/// without knowing which transport it is — the header's own stated purpose:
+/// "so that no transport-specific knowledge is necessary to process packets".
+/// That is why this reader needs nothing about virtio.
+fn strip_vsockmon(bytes: &[u8], packet_index: usize) -> Result<VsockRecord, SkipReason> {
+    if bytes.len() < VSOCKMON_HDR_LEN {
+        return Err(SkipReason::Truncated);
+    }
+    let le64 = |at: usize| {
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(&bytes[at..at + 8]);
+        u64::from_le_bytes(raw)
+    };
+    let le32 =
+        |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+    let le16 = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+
+    let src_cid = le64(0);
+    let dst_cid = le64(8);
+    let src_port = le32(16);
+    let dst_port = le32(20);
+    let op = le16(24);
+    let transport_hdr_len = le16(28) as usize;
+
+    if op != AF_VSOCK_OP_PAYLOAD {
+        return Err(SkipReason::VsockNonPayload(op));
+    }
+    let payload_at = VSOCKMON_HDR_LEN
+        .checked_add(transport_hdr_len)
+        .ok_or(SkipReason::Truncated)?;
+    if bytes.len() < payload_at {
+        return Err(SkipReason::Truncated);
+    }
+    // The CID goes in as its little-endian bytes, giving an 8-byte address —
+    // a length no IP endpoint can have, so a vsock flow cannot collide with an
+    // IP one in the shared key space.
+    let src = Endpoint::new(&src_cid.to_le_bytes(), src_port);
+    let dst = Endpoint::new(&dst_cid.to_le_bytes(), dst_port);
+    let (flow, from_low) = FlowKey::new(src, dst);
+    Ok(VsockRecord {
+        flow,
+        from_low,
+        payload: bytes[payload_at..].to_vec(),
+        packet_index,
+    })
+}
+
+/// How many extension headers this build will walk before giving up.
+///
+/// RFC 8200 sets no limit, so a corrupt or hostile capture can present a chain
+/// that never terminates; a bound turns that into a named skip instead of a
+/// loop. Eight is far past anything real — a packet with more than two or three
+/// is already unusual.
+const IPV6_MAX_EXT_HEADERS: usize = 8;
+
 fn strip_ipv6(bytes: &[u8]) -> Result<(Endpoint, Endpoint, u8, &[u8]), SkipReason> {
     if bytes.len() < 40 {
         return Err(SkipReason::Truncated);
-    }
-    let next_header = bytes[6];
-    // Refuse ONLY a genuine extension header. Everything else is returned
-    // through for `decapsulate` to classify, exactly as `strip_ipv4` does with
-    // its protocol byte: TCP and UDP reach their arms, and anything else lands
-    // on `NotTransport`, which names the real cause.
-    if is_ipv6_extension_header(next_header) {
-        return Err(SkipReason::Ipv6ExtensionChain(next_header));
     }
     let payload_len = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
     let end = if 40 + payload_len <= bytes.len() {
@@ -583,12 +727,82 @@ fn strip_ipv6(bytes: &[u8]) -> Result<(Endpoint, Endpoint, u8, &[u8]), SkipReaso
     } else {
         bytes.len()
     };
-    Ok((
-        Endpoint::new(&bytes[8..24], 0),
-        Endpoint::new(&bytes[24..40], 0),
-        next_header,
-        &bytes[40..end],
-    ))
+    let src = Endpoint::new(&bytes[8..24], 0);
+    let dst = Endpoint::new(&bytes[24..40], 0);
+
+    // R311y603 — WALK the chain rather than refusing at its first link.
+    //
+    // A zenoh session over IPv6 with any extension header present produced a
+    // dissection with no messages: the transport header is a few bytes past the
+    // one this used to stop at, and every one of those bytes is a fixed-layout
+    // field this crate already reads five other kinds of. The named skip was
+    // the right SHAPE — it said which header stopped it — but it named work
+    // rather than a limit, and the work is this loop.
+    let mut next_header = bytes[6];
+    let mut at = 40usize;
+    for _ in 0..IPV6_MAX_EXT_HEADERS {
+        // Not an extension header: hand the protocol byte back and let
+        // `decapsulate` classify it, exactly as `strip_ipv4` does. TCP and UDP
+        // reach their arms; anything else lands on `NotTransport`, which names
+        // the real cause.
+        if !is_ipv6_extension_header(next_header) {
+            return Ok((src, dst, next_header, &bytes[at.min(end)..end]));
+        }
+        let step = match next_header {
+            // ESP encrypts everything after it, so there is nothing to walk to
+            // — the same honest refusal as TLS without keys, one layer down.
+            // 253 / 254 are reserved for experimentation and carry no length
+            // this reader may assume.
+            50 | 253 | 254 => return Err(SkipReason::Ipv6ExtensionChain(next_header)),
+            // Fragment: fixed 8 bytes. Offset 0 is the FIRST fragment and
+            // carries the transport header, so the walk continues into it; any
+            // other offset has no transport header to find, which is the same
+            // limit the IPv4 path names.
+            44 => {
+                if end < at + 8 {
+                    return Err(SkipReason::Truncated);
+                }
+                let offset = u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]) >> 3;
+                if offset != 0 {
+                    return Err(SkipReason::Ipv6Fragment);
+                }
+                next_header = bytes[at];
+                8
+            }
+            // Authentication Header measures in 4-byte units and counts from 2,
+            // which is NOT the (len+1)*8 rule every other header here uses —
+            // reading it with the common formula would land the walk in the
+            // middle of the payload and decode noise.
+            51 => {
+                if end < at + 2 {
+                    return Err(SkipReason::Truncated);
+                }
+                let len = (bytes[at + 1] as usize + 2) * 4;
+                if end < at + len {
+                    return Err(SkipReason::Truncated);
+                }
+                next_header = bytes[at];
+                len
+            }
+            // Hop-by-Hop, Routing, Destination Options, Mobility, HIP, Shim6:
+            // the common form, 8-byte units counted from 1.
+            _ => {
+                if end < at + 2 {
+                    return Err(SkipReason::Truncated);
+                }
+                let len = (bytes[at + 1] as usize + 1) * 8;
+                if end < at + len {
+                    return Err(SkipReason::Truncated);
+                }
+                next_header = bytes[at];
+                len
+            }
+        };
+        at += step;
+    }
+    // Past the bound: still a chain this build did not walk to the end, and the
+    // header it stopped on is the actionable part.
+    Err(SkipReason::Ipv6ExtensionChain(next_header))
 }
 
 fn strip_tcp(
@@ -609,8 +823,8 @@ fn strip_tcp(
         return Err(SkipReason::Truncated);
     }
     let flags = bytes[13];
-    let src = Endpoint::new(src.addr(), src_port);
-    let dst = Endpoint::new(dst.addr(), dst_port);
+    let src = Endpoint::new(src.addr(), src_port as u32);
+    let dst = Endpoint::new(dst.addr(), dst_port as u32);
     let (flow, from_low) = FlowKey::new(src, dst);
     Ok(Segment {
         flow,
@@ -640,6 +854,7 @@ mod tests {
             Ok(Transport::Udp(d) | Transport::RawEth(d)) => {
                 panic!("expected TCP, got a datagram: {d:?}")
             }
+            Ok(Transport::Vsock(r)) => panic!("expected TCP, got a vsock record: {r:?}"),
             Err(e) => Err(e),
         }
     }
@@ -824,11 +1039,15 @@ mod tests {
         // An IPv6 extension-header chain. R311y597 — this leg was MISSING,
         // which is why the test's name was a claim it did not keep: the one
         // variant it never built was the one whose branch was wrong.
-        let ipv6_frag = {
+        //
+        // R311y603 — the chain is WALKED now, so the leg moved to a header that
+        // genuinely cannot be walked. ESP encrypts its remainder, which is a
+        // limit rather than unfinished work.
+        let ipv6_esp = {
             let mut ip = Vec::new();
             ip.extend_from_slice(&0x6000_0000u32.to_be_bytes());
             ip.extend_from_slice(&8u16.to_be_bytes());
-            ip.push(44); // Fragment header
+            ip.push(50); // ESP
             ip.push(64);
             ip.extend_from_slice(&[0u8; 32]);
             ip.extend_from_slice(&[0u8; 8]);
@@ -838,8 +1057,23 @@ mod tests {
             eth
         };
         assert_eq!(
+            decapsulate(LINKTYPE_ETHERNET, 0, &ipv6_esp),
+            Err(SkipReason::Ipv6ExtensionChain(50))
+        );
+
+        // R311y603 — a NON-FIRST IPv6 fragment, the v6 twin of the IPv4 leg
+        // above. Named separately so a reader chasing a hole is not left to
+        // guess the address family.
+        let ipv6_frag = {
+            let mut frag = alloc::vec![0u8; 8];
+            frag[0] = IP_PROTO_TCP;
+            // Offset 185 (bytes 1480), M clear. Non-zero offset is the point.
+            frag[2..4].copy_from_slice(&(185u16 << 3).to_be_bytes());
+            eth_ipv6([0x20; 16], [0x21; 16], 44, &frag)
+        };
+        assert_eq!(
             decapsulate(LINKTYPE_ETHERNET, 0, &ipv6_frag),
-            Err(SkipReason::Ipv6ExtensionChain(44))
+            Err(SkipReason::Ipv6Fragment)
         );
 
         // A link type this build does not decapsulate.
@@ -1215,37 +1449,151 @@ mod tests {
     /// have traded one protocol for the other.
     #[test]
     fn an_ipv6_tcp_segment_still_reaches_the_tcp_arm() {
-        let mut tcp_body = Vec::new();
-        tcp_body.extend_from_slice(&7447u16.to_be_bytes());
-        tcp_body.extend_from_slice(&40000u16.to_be_bytes());
-        tcp_body.extend_from_slice(&99u32.to_be_bytes()); // seq
-        tcp_body.extend_from_slice(&0u32.to_be_bytes()); // ack
-        tcp_body.push(5 << 4);
-        tcp_body.push(0x18);
-        tcp_body.extend_from_slice(&0xFFFFu16.to_be_bytes());
-        tcp_body.extend_from_slice(&0u16.to_be_bytes());
-        tcp_body.extend_from_slice(&0u16.to_be_bytes());
-        tcp_body.extend_from_slice(b"hi");
-
-        let pkt = eth_ipv6(V6_A, V6_B, IP_PROTO_TCP, &tcp_body);
+        let pkt = eth_ipv6(
+            V6_A,
+            V6_B,
+            IP_PROTO_TCP,
+            &tcp_body(7447, 40000, 99, 0x18, b"hi"),
+        );
         let seg = tcp(LINKTYPE_ETHERNET, 0, &pkt).expect("decapsulate");
         assert_eq!(seg.payload, b"hi");
         assert_eq!(seg.seq, 99);
     }
 
-    /// A GENUINE extension header still refuses, and the reason still carries
-    /// the header's own number. This is the half of the old behaviour that was
-    /// correct, and the leg exists so the fix cannot silently drop it.
+    /// A bare TCP header + body, for the tests that build what sits BEHIND an
+    /// IPv6 extension chain. Extracted from the test above rather than written
+    /// twice: a chain-walk test whose TCP fixture differs from the no-chain
+    /// one's proves less than it looks like, because a difference in the
+    /// fixture and a difference in the walk are then indistinguishable.
+    fn tcp_body(sport: u16, dport: u16, seq: u32, flags: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&sport.to_be_bytes());
+        out.extend_from_slice(&dport.to_be_bytes());
+        out.extend_from_slice(&seq.to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes()); // ack
+        out.push(5 << 4); // data offset, no options
+        out.push(flags);
+        out.extend_from_slice(&0xFFFFu16.to_be_bytes()); // window
+        out.extend_from_slice(&0u16.to_be_bytes()); // checksum, unverified
+        out.extend_from_slice(&0u16.to_be_bytes()); // urgent
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// R311y603 — the extension headers that genuinely CANNOT be walked still
+    /// refuse, and the reason still carries the header's own number.
+    ///
+    /// This list shrank from eleven to three in the round that added the walk,
+    /// and the shrink is the deliverable rather than a test being relaxed: ESP
+    /// (50) encrypts everything after it, and 253 / 254 are reserved for
+    /// experimentation with no length a reader may assume. Those three are
+    /// LIMITS. The other eight were WORK, and the tests below do it.
     #[test]
-    fn a_genuine_ipv6_extension_header_is_still_refused_by_name() {
-        for ext in [0u8, 43, 44, 50, 51, 60, 135, 139, 140, 253, 254] {
+    fn an_unwalkable_ipv6_extension_header_is_still_refused_by_name() {
+        for ext in [50u8, 253, 254] {
             let pkt = eth_ipv6(V6_A, V6_B, ext, b"whatever");
             assert_eq!(
                 decapsulate(LINKTYPE_ETHERNET, 0, &pkt),
                 Err(SkipReason::Ipv6ExtensionChain(ext)),
-                "next-header {ext} is an extension header and must be named as one",
+                "next-header {ext} cannot be walked and must be named as such",
             );
         }
+    }
+
+    /// THE ONE THAT MATTERS. Every walkable extension header must land the
+    /// walk on the TCP segment behind it — a zenoh session over IPv6 with a
+    /// Hop-by-Hop option present produced a dissection with no messages, and
+    /// nothing said why beyond naming the header.
+    ///
+    /// Each header is built with a REAL length field rather than padding,
+    /// because the failure mode of a chain walker is landing a few bytes off:
+    /// an off-by-N would not error, it would decode a different flow out of
+    /// the middle of the payload. Asserting the recovered ports and body is
+    /// what catches that; asserting only "not an error" would not.
+    #[test]
+    fn every_walkable_ipv6_extension_header_is_stepped_over_to_the_transport() {
+        // The (len+1)*8 family: Hop-by-Hop, Routing, Destination Options,
+        // Mobility, HIP, Shim6.
+        for ext in [0u8, 43, 60, 135, 139, 140] {
+            let mut chain = alloc::vec![0u8; 8];
+            chain[0] = IP_PROTO_TCP;
+            chain[1] = 0; // (0 + 1) * 8 = this 8-byte header
+            chain.extend_from_slice(&tcp_body(7447, 40000, 99, 0x18, b"hi"));
+            let pkt = eth_ipv6(V6_A, V6_B, ext, &chain);
+            let seg = tcp(LINKTYPE_ETHERNET, 0, &pkt)
+                .unwrap_or_else(|e| panic!("next-header {ext} must be walked, got {e:?}"));
+            assert_eq!(seg.payload, b"hi", "walked to the wrong offset for {ext}");
+            assert_eq!(seg.seq, 99);
+        }
+    }
+
+    /// The Authentication Header measures in 4-byte units counted from 2, not
+    /// in 8-byte units counted from 1. Reading it with the common formula lands
+    /// the walk inside the payload, so it gets its own leg with a length the
+    /// two rules disagree about: `len = 1` means 12 bytes by AH's rule and 16
+    /// by the common one.
+    #[test]
+    fn the_authentication_header_uses_its_own_length_rule() {
+        let mut chain = alloc::vec![0u8; 12];
+        chain[0] = IP_PROTO_TCP;
+        chain[1] = 1; // (1 + 2) * 4 = 12
+        chain.extend_from_slice(&tcp_body(7447, 40000, 7, 0x18, b"ah"));
+        let pkt = eth_ipv6(V6_A, V6_B, 51, &chain);
+        let seg = tcp(LINKTYPE_ETHERNET, 0, &pkt).expect("AH must be walked");
+        assert_eq!(seg.payload, b"ah");
+        assert_eq!(seg.seq, 7);
+    }
+
+    /// A FIRST fragment carries the transport header, so the walk continues
+    /// into it — the same rule the IPv4 path applies.
+    #[test]
+    fn a_first_ipv6_fragment_is_walked_and_a_later_one_is_named() {
+        let mut first = alloc::vec![0u8; 8];
+        first[0] = IP_PROTO_TCP;
+        first[2..4].copy_from_slice(&0x0001u16.to_be_bytes()); // offset 0, M set
+        first.extend_from_slice(&tcp_body(7447, 40000, 5, 0x18, b"f1"));
+        let seg = tcp(LINKTYPE_ETHERNET, 0, &eth_ipv6(V6_A, V6_B, 44, &first))
+            .expect("the first fragment has the transport header");
+        assert_eq!(seg.payload, b"f1");
+
+        let mut later = alloc::vec![0u8; 8];
+        later[0] = IP_PROTO_TCP;
+        later[2..4].copy_from_slice(&(64u16 << 3).to_be_bytes());
+        assert_eq!(
+            decapsulate(LINKTYPE_ETHERNET, 0, &eth_ipv6(V6_A, V6_B, 44, &later)),
+            Err(SkipReason::Ipv6Fragment),
+        );
+    }
+
+    /// Two headers in a row, because a walker that handles one can still be a
+    /// walker that does not loop.
+    #[test]
+    fn a_chain_of_two_headers_reaches_the_transport() {
+        let mut second = alloc::vec![0u8; 8];
+        second[0] = IP_PROTO_TCP;
+        second.extend_from_slice(&tcp_body(7447, 40000, 11, 0x18, b"two"));
+        let mut first = alloc::vec![0u8; 8];
+        first[0] = 60; // -> Destination Options
+        first.extend_from_slice(&second);
+        let seg = tcp(LINKTYPE_ETHERNET, 0, &eth_ipv6(V6_A, V6_B, 0, &first))
+            .expect("hop-by-hop then destination-options then TCP");
+        assert_eq!(seg.payload, b"two");
+        assert_eq!(seg.seq, 11);
+    }
+
+    /// A chain that never terminates must stop at the bound and NAME the
+    /// header it stopped on, not loop. Each header points at another of its own
+    /// kind, so the only thing that ends this walk is the cap.
+    #[test]
+    fn an_endless_chain_stops_at_the_bound_instead_of_looping() {
+        let mut chain = Vec::new();
+        for _ in 0..IPV6_MAX_EXT_HEADERS + 2 {
+            chain.extend_from_slice(&[60u8, 0, 0, 0, 0, 0, 0, 0]);
+        }
+        assert_eq!(
+            decapsulate(LINKTYPE_ETHERNET, 0, &eth_ipv6(V6_A, V6_B, 60, &chain)),
+            Err(SkipReason::Ipv6ExtensionChain(60)),
+        );
     }
 
     /// THE SECOND FAILURE OF THE SAME LINE, and the reason "also allow UDP"
