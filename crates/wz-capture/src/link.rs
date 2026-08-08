@@ -90,6 +90,45 @@ impl FlowKey {
     }
 }
 
+/// What a packet's checksums said, REPORTED rather than acted on.
+///
+/// R311y597 — this build verified nothing at all before, so a corrupted packet
+/// was read as good and its garbage entered the byte stream as though the peer
+/// had sent it.
+///
+/// ## Why it reports instead of dropping, which is not timidity
+///
+/// A NIC computes TX checksums in hardware, so a capture taken on the SENDING
+/// host routinely sees zeroed or stale fields — the packet is fine and the
+/// checksum has not been filled in yet. Dropping on a bad checksum would make
+/// a loopback or same-host capture disappear almost entirely, which is exactly
+/// the case a developer captures most. Wireshark defaults its own validation
+/// off for this reason. The verdict is therefore evidence a reader can weigh,
+/// not a gate this crate applies on their behalf.
+///
+/// This crate's own fixtures write zero checksums, and they keep working
+/// precisely because nothing acts on the verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Checksums {
+    /// The IPv4 header checksum. `None` for IPv6, which has none at all —
+    /// the field was removed on the grounds that the layers below and above
+    /// already cover it.
+    pub ip: Option<bool>,
+    /// The TCP or UDP checksum. `None` when a UDP datagram over IPv4 carried
+    /// zero, which is the sender explicitly DECLINING to compute one
+    /// (RFC 768) rather than getting it wrong. Over IPv6 zero is illegal and
+    /// reports `Some(false)`.
+    pub transport: Option<bool>,
+}
+
+impl Checksums {
+    /// `true` when a checksum was present and did not verify — the only state
+    /// that is evidence of corruption rather than of absence.
+    pub fn any_invalid(&self) -> bool {
+        self.ip == Some(false) || self.transport == Some(false)
+    }
+}
+
 /// One TCP segment lifted out of a captured packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
@@ -112,6 +151,8 @@ pub struct Segment {
     /// Index of the packet this came out of, carried through so a decoded
     /// message can be reported against the packet that carried it.
     pub packet_index: usize,
+    /// What this packet's checksums said. Reported, never acted on.
+    pub checksums: Checksums,
 }
 
 /// Why a captured packet yielded no TCP segment.
@@ -170,6 +211,8 @@ pub struct Datagram {
     pub payload: Vec<u8>,
     /// Index of the packet this came out of.
     pub packet_index: usize,
+    /// What this packet's checksums said. Reported, never acted on.
+    pub checksums: Checksums,
 }
 
 /// What a captured packet turned out to carry.
@@ -209,11 +252,28 @@ pub fn decapsulate(
     } else {
         strip_ipv4(ip_bytes)?
     };
+    // R311y597 — computed here, where both the addresses (for the pseudo
+    // header) and the transport body are in hand, and REPORTED rather than
+    // acted on. See [`Checksums`] for why a bad one is not a skip.
+    let checksums = Checksums {
+        ip: if is_v6 {
+            None
+        } else {
+            Some(ipv4_header_ok(&ip_bytes[..ipv4_header_len(ip_bytes)]))
+        },
+        transport: transport_checksum(&src, &dst, proto, payload),
+    };
     match proto {
-        IP_PROTO_TCP => strip_tcp(src, dst, payload, packet_index).map(Transport::Tcp),
-        IP_PROTO_UDP => strip_udp(src, dst, payload, packet_index).map(Transport::Udp),
+        IP_PROTO_TCP => strip_tcp(src, dst, payload, packet_index, checksums).map(Transport::Tcp),
+        IP_PROTO_UDP => strip_udp(src, dst, payload, packet_index, checksums).map(Transport::Udp),
         other => Err(SkipReason::NotTransport(other)),
     }
+}
+
+/// The IPv4 header's own declared length, clamped to what was captured.
+fn ipv4_header_len(bytes: &[u8]) -> usize {
+    let ihl = bytes.first().map_or(0, |b| ((b & 0x0F) as usize) * 4);
+    ihl.clamp(0, bytes.len())
 }
 
 /// The UDP header is eight fixed bytes: src port, dst port, length, checksum.
@@ -228,6 +288,7 @@ fn strip_udp(
     dst: Endpoint,
     bytes: &[u8],
     packet_index: usize,
+    checksums: Checksums,
 ) -> Result<Datagram, SkipReason> {
     if bytes.len() < 8 {
         return Err(SkipReason::Truncated);
@@ -252,7 +313,65 @@ fn strip_udp(
         from_low,
         payload: bytes[8..8 + body_len].to_vec(),
         packet_index,
+        checksums,
     })
+}
+
+/// The 16-bit one's-complement sum RFC 1071 defines, folded to a checksum.
+///
+/// Returns the value the field must hold. Verification runs the same sum over
+/// the bytes WITH the field in place and expects `0`, which is the standard
+/// property and avoids having to zero and restore the field.
+fn ones_complement(bytes: &[u8], seed: u32) -> u16 {
+    let mut sum = seed;
+    let mut chunks = bytes.chunks_exact(2);
+    for c in &mut chunks {
+        sum += u32::from(u16::from_be_bytes([c[0], c[1]]));
+    }
+    // An odd trailing byte is padded on the RIGHT with zero.
+    if let [last] = chunks.remainder() {
+        sum += u32::from(u16::from_be_bytes([*last, 0]));
+    }
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+/// The IPv4 header checksum, verified over the header as captured.
+fn ipv4_header_ok(header: &[u8]) -> bool {
+    ones_complement(header, 0) == 0
+}
+
+/// The TCP / UDP checksum, verified over the pseudo-header plus the segment.
+///
+/// `None` means the sender declined: a UDP datagram over IPv4 whose field is
+/// zero carried no checksum at all (RFC 768), which is legal and is NOT a
+/// failure. Over IPv6 the checksum is mandatory, so zero there is a real
+/// `Some(false)`.
+fn transport_checksum(src: &Endpoint, dst: &Endpoint, proto: u8, body: &[u8]) -> Option<bool> {
+    // The field sits at offset 16 in TCP and 6 in UDP.
+    let field_at = if proto == IP_PROTO_TCP { 16 } else { 6 };
+    if body.len() < field_at + 2 {
+        return None;
+    }
+    let field = u16::from_be_bytes([body[field_at], body[field_at + 1]]);
+    let is_v4 = src.is_ipv4();
+    if field == 0 && proto == IP_PROTO_UDP && is_v4 {
+        return None;
+    }
+    // Pseudo-header: the addresses, the protocol, and the transport length.
+    let mut seed: u32 = 0;
+    for addr in [src.addr(), dst.addr()] {
+        for c in addr.chunks_exact(2) {
+            seed += u32::from(u16::from_be_bytes([c[0], c[1]]));
+        }
+    }
+    let len = body.len() as u32;
+    seed += u32::from(proto as u16);
+    seed += (len >> 16) & 0xFFFF;
+    seed += len & 0xFFFF;
+    Some(ones_complement(body, seed) == 0)
 }
 
 /// A raweth (L2) frame, or `None` if this is not one.
@@ -300,6 +419,14 @@ fn strip_raweth(bytes: &[u8], packet_index: usize) -> Option<Datagram> {
         from_low,
         payload: payload.to_vec(),
         packet_index,
+        // A raweth frame has NEITHER: no IP header to checksum and no
+        // transport pseudo-header to build one over. `None`/`None` is the
+        // honest report, not an unchecked default -- the Ethernet FCS the NIC
+        // verifies is stripped before a capture ever sees the frame.
+        checksums: Checksums {
+            ip: None,
+            transport: None,
+        },
     })
 }
 
@@ -469,6 +596,7 @@ fn strip_tcp(
     dst: Endpoint,
     bytes: &[u8],
     packet_index: usize,
+    checksums: Checksums,
 ) -> Result<Segment, SkipReason> {
     if bytes.len() < 20 {
         return Err(SkipReason::Truncated);
@@ -493,6 +621,7 @@ fn strip_tcp(
         rst: flags & 0x04 != 0,
         payload: bytes[data_off..].to_vec(),
         packet_index,
+        checksums,
     })
 }
 
@@ -832,6 +961,106 @@ mod tests {
         };
         assert_eq!(da.flow, db.flow);
         assert_ne!(da.from_low, db.from_low);
+    }
+
+    // ---- R311y597: checksums ------------------------------------------------
+
+    /// A REAL IPv4 + UDP packet whose two checksums were computed by an
+    /// INDEPENDENT implementation (a short Python one's-complement), not by
+    /// the code under test.
+    ///
+    /// That distinction is the whole value of the fixture. Generating the
+    /// expected value with `ones_complement` itself would assert only that the
+    /// function agrees with itself, which is true of a wrong one.
+    /// `ip ck = 0x66ca`, `udp ck = 0xe1a4`, payload `"zenoh"`.
+    #[rustfmt::skip]
+    const GOOD_CHECKSUM_PKT: [u8; 47] = [
+        0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+        0x08, 0x00, 0x45, 0x00, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x40, 0x11,
+        0x66, 0xca, 0x0a, 0x00, 0x00, 0x01, 0x0a, 0x00, 0x00, 0x02, 0x1d, 0x17,
+        0x9c, 0x40, 0x00, 0x0d, 0xe1, 0xa4, 0x7a, 0x65, 0x6e, 0x6f, 0x68,
+    ];
+
+    fn checksums_of(pkt: &[u8]) -> Checksums {
+        match decapsulate(LINKTYPE_ETHERNET, 0, pkt) {
+            Ok(Transport::Udp(d)) => d.checksums,
+            other => panic!("expected a datagram, got {other:?}"),
+        }
+    }
+
+    /// Correct checksums verify — against a vector this crate did not compute.
+    #[test]
+    fn a_correctly_checksummed_packet_verifies() {
+        let c = checksums_of(&GOOD_CHECKSUM_PKT);
+        assert_eq!(c.ip, Some(true), "the IPv4 header checksum must verify");
+        assert_eq!(c.transport, Some(true), "the UDP checksum must verify");
+        assert!(!c.any_invalid());
+    }
+
+    /// Corruption is CAUGHT — and separately for each layer, so a verifier
+    /// that only ever answered "true" or that conflated the two fails here.
+    #[test]
+    fn corruption_is_caught_in_the_layer_it_happened_in() {
+        // A payload byte is covered by the UDP checksum and not by the IP one.
+        let mut body = GOOD_CHECKSUM_PKT;
+        body[44] ^= 0xFF;
+        let c = checksums_of(&body);
+        assert_eq!(c.ip, Some(true), "the IP header was not touched");
+        assert_eq!(c.transport, Some(false), "a flipped payload byte must show");
+        assert!(c.any_invalid());
+
+        // The IP TTL is covered by the IP checksum and is NOT in the UDP
+        // pseudo-header, so exactly the opposite verdict must come back.
+        let mut ttl = GOOD_CHECKSUM_PKT;
+        ttl[22] ^= 0xFF;
+        let c = checksums_of(&ttl);
+        assert_eq!(c.ip, Some(false), "a flipped TTL must show");
+        assert_eq!(c.transport, Some(true), "the UDP body was not touched");
+    }
+
+    /// A UDP datagram over IPv4 with a ZERO checksum declined to compute one
+    /// (RFC 768). That is absence, not corruption, and the two must not be
+    /// reported the same way — every fixture in this file is that shape.
+    #[test]
+    fn a_zero_udp_checksum_over_ipv4_is_absence_not_failure() {
+        let pkt = eth_ipv4_udp([10, 0, 0, 1], 1, [10, 0, 0, 2], 2, b"abc");
+        let c = checksums_of(&pkt);
+        assert_eq!(c.transport, None, "zero over IPv4 means none was computed");
+        // ...and the SAME fixture's IP header checksum really is wrong, because
+        // the builder writes zero there too and zero is not special for IPv4.
+        // The two layers reporting differently on one packet is the point: an
+        // implementation that folded them into a single verdict could not say
+        // this, and this is the shape every fixture in this file has.
+        assert_eq!(
+            c.ip,
+            Some(false),
+            "a zero IPv4 header checksum is wrong, not absent",
+        );
+    }
+
+    /// IPv6 has no header checksum at all, so claiming one either way would be
+    /// an invention.
+    #[test]
+    fn ipv6_reports_no_header_checksum() {
+        let pkt = eth_ipv6(V6_A, V6_B, IP_PROTO_UDP, &udp_body(1, 2, b"x"));
+        let c = checksums_of(&pkt);
+        assert_eq!(c.ip, None);
+    }
+
+    /// A raweth frame has neither checksum available: no IP header, and no
+    /// pseudo-header to build a transport one over.
+    #[test]
+    fn a_raweth_frame_reports_neither_checksum() {
+        use wz_session_core::raweth_link::DEFAULT_ETHTYPE;
+        let pkt = raweth_frame([1; 6], [2; 6], DEFAULT_ETHTYPE, b"x");
+        match decapsulate(LINKTYPE_ETHERNET, 0, &pkt) {
+            Ok(Transport::RawEth(d)) => {
+                assert_eq!(d.checksums.ip, None);
+                assert_eq!(d.checksums.transport, None);
+                assert!(!d.checksums.any_invalid());
+            }
+            other => panic!("expected a raweth datagram, got {other:?}"),
+        }
     }
 
     // ---- R311y597: raweth (L2) ---------------------------------------------
