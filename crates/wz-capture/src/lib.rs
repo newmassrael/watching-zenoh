@@ -391,6 +391,92 @@ impl DissectionDrops {
     }
 }
 
+/// R311y605 (F5) — the totals across a whole dissection.
+///
+/// Every counter this crate had was PER-OBJECT by design: the TCP anomaly
+/// counts live on each [`StreamAssembler`] (R311y597 B3) and the checksum
+/// verdicts on each [`link::Segment`] / [`link::Datagram`] (R311y597 C4). That
+/// is the right granularity for both — an analyst asks "which connection is
+/// retransmitting", not "how many retransmissions are in this file" — and it
+/// left the health question a consumer actually opens a capture with
+/// ("is anything wrong here at all?") answerable only by walking every flow
+/// and every direction, which no consumer existed to do.
+///
+/// ## Two things this deliberately does NOT do
+///
+/// **It does not partition packets.** The three stream counters count EVENTS,
+/// and one segment can be both out of order and a partial overlap, so it
+/// contributes to two of them. Summing these against a packet count is the
+/// available misuse and the reason it is said here rather than left implied.
+///
+/// **It does not fold absence into failure.** A checksum has THREE states, not
+/// two: verified, present-and-wrong, and absent. A NIC computes TX checksums in
+/// hardware, so a capture taken on the sending host routinely shows zeroed
+/// fields for perfectly good packets, and a UDP datagram over IPv4 may decline
+/// to carry one at all (RFC 768). Collapsing absent into invalid would make
+/// every loopback capture — the one a developer takes most — look corrupt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DissectionHealth {
+    /// Segments the assembler judged already-delivered, over every flow and
+    /// both directions. See the event-counting caveat above.
+    pub retransmits: usize,
+    /// Segments held because they arrived ahead of the stream.
+    pub out_of_order: usize,
+    /// Segments that overlapped delivered bytes and carried new ones too.
+    pub partial_overlaps: usize,
+    /// IPv4 header checksums that verified.
+    pub ip_checksum_valid: usize,
+    /// IPv4 header checksums that were present and did NOT verify — the only
+    /// state here that is evidence of corruption.
+    pub ip_checksum_invalid: usize,
+    /// Packets with no IP header checksum to check: IPv6 (the field was
+    /// removed) and the non-IP links.
+    pub ip_checksum_absent: usize,
+    /// TCP / UDP checksums that verified.
+    pub transport_checksum_valid: usize,
+    /// TCP / UDP checksums that were present and did NOT verify.
+    pub transport_checksum_invalid: usize,
+    /// Packets whose transport checksum was absent — a UDP-over-IPv4 zero
+    /// (the sender declining, RFC 768) or a layer that has none.
+    pub transport_checksum_absent: usize,
+    /// Packets that yielded no stream bytes, INCLUDING any whose record was
+    /// discarded to stay inside [`DissectionLimits::skipped_packets`]. So this
+    /// is `skipped().len() + drops().skipped`, and it is the honest total where
+    /// the retained list alone is a floor.
+    pub packets_skipped: usize,
+    /// What staying inside the limits has cost — repeated here so one value
+    /// answers "is this dissection complete?".
+    pub drops: DissectionDrops,
+}
+
+impl DissectionHealth {
+    /// `true` when a checksum was present and did not verify, anywhere.
+    ///
+    /// Deliberately NOT "anything looks unusual": retransmissions and
+    /// reordering are normal on a real network and an `any_*` that included
+    /// them would be true for almost every capture.
+    pub fn any_checksum_invalid(&self) -> bool {
+        self.ip_checksum_invalid > 0 || self.transport_checksum_invalid > 0
+    }
+}
+
+/// The per-direction stream counters, summed. Kept as a type so an evicted
+/// flow's totals can be carried after the flow itself is gone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct StreamTally {
+    retransmits: usize,
+    out_of_order: usize,
+    partial_overlaps: usize,
+}
+
+impl StreamTally {
+    fn add_assembler(&mut self, a: &StreamAssembler) {
+        self.retransmits += a.retransmits();
+        self.out_of_order += a.out_of_order();
+        self.partial_overlaps += a.partial_overlaps();
+    }
+}
+
 /// A whole capture, dissected: every TCP connection in it, read as a zenoh
 /// session.
 #[derive(Debug, Default)]
@@ -402,6 +488,14 @@ pub struct Dissection {
     limits: DissectionLimits,
     /// What the limits have cost so far.
     drops: DissectionDrops,
+    /// R311y605 (F5) — checksum verdicts, tallied as packets arrive. They must
+    /// be counted here and not derived later: a `Checksums` rides on the
+    /// `Segment` / `Datagram`, which is consumed by the assembler and gone.
+    checksums: [usize; 6],
+    /// R311y605 (F5) — the stream counters of flows the flow-cap has EVICTED.
+    /// `health()` adds this to the live flows' own, so a total survives
+    /// eviction; a flow is either live or counted here, never both.
+    evicted_streams: StreamTally,
     #[cfg(feature = "reassembly")]
     /// Chains aborted because their deadline passed, across every flow.
     ///
@@ -448,6 +542,51 @@ impl Dissection {
     /// What staying inside [`DissectionLimits`] has cost.
     pub fn drops(&self) -> DissectionDrops {
         self.drops
+    }
+
+    /// R311y605 (F5) — the whole dissection's counters in one value.
+    ///
+    /// The per-object counters remain the authority for "which flow"; this is
+    /// the "is anything wrong at all" question, which previously required a
+    /// consumer to walk every flow and both of its directions. Read the caveats
+    /// on [`DissectionHealth`] before summing anything here against a packet
+    /// count.
+    pub fn health(&self) -> DissectionHealth {
+        let mut streams = self.evicted_streams;
+        for flow in &self.flows {
+            streams.add_assembler(&flow.low_to_high);
+            streams.add_assembler(&flow.high_to_low);
+        }
+        DissectionHealth {
+            retransmits: streams.retransmits,
+            out_of_order: streams.out_of_order,
+            partial_overlaps: streams.partial_overlaps,
+            ip_checksum_valid: self.checksums[0],
+            ip_checksum_invalid: self.checksums[1],
+            ip_checksum_absent: self.checksums[2],
+            transport_checksum_valid: self.checksums[3],
+            transport_checksum_invalid: self.checksums[4],
+            transport_checksum_absent: self.checksums[5],
+            packets_skipped: self.skipped.len() + self.drops.skipped,
+            drops: self.drops,
+        }
+    }
+
+    /// Tally one packet's checksum verdicts. Called on every path that produces
+    /// a `Checksums`, which is every path that reaches a transport — a packet
+    /// counted on one axis and not the other would make the six buckets
+    /// disagree about how many packets there were.
+    fn tally_checksums(&mut self, c: &link::Checksums) {
+        self.checksums[match c.ip {
+            Some(true) => 0,
+            Some(false) => 1,
+            None => 2,
+        }] += 1;
+        self.checksums[match c.transport {
+            Some(true) => 3,
+            Some(false) => 4,
+            None => 5,
+        }] += 1;
     }
 
     /// The bounds in force.
@@ -545,6 +684,7 @@ impl Dissection {
                 return;
             }
         };
+        self.tally_checksums(&segment.checksums);
         let idx = match self.flows.iter().position(|f| f.flow == segment.flow) {
             Some(i) => i,
             None => {
@@ -630,7 +770,12 @@ impl Dissection {
             else {
                 break;
             };
-            self.flows.remove(oldest);
+            let gone = self.flows.remove(oldest);
+            // R311y605 (F5) — carry the evicted flow's stream counters, or a
+            // live tap's totals would silently reset every time the flow cap
+            // recycled a slot.
+            self.evicted_streams.add_assembler(&gone.low_to_high);
+            self.evicted_streams.add_assembler(&gone.high_to_low);
             self.drops.flows += 1;
         }
     }
@@ -710,6 +855,10 @@ impl Dissection {
         let delivered: Vec<u8> = flow.assembler(direction).stream()[before - base..].to_vec();
         flow.advance(direction, &delivered);
         flow.last_activity = record.packet_index;
+        // Counted on this path too, even though both verdicts are `None` here:
+        // a path that skipped the tally would make the six buckets disagree
+        // about how many packets the dissection saw.
+        self.tally_checksums(&segment.checksums);
         self.enforce_flow_limits(idx);
         self.evict_flows_beyond_cap();
     }
@@ -725,6 +874,7 @@ impl Dissection {
         // `#[allow]`, because the reason is the feature and not the lint.
         #[cfg(not(feature = "reassembly"))]
         let _ = ts_millis;
+        self.tally_checksums(&d.checksums);
         let idx = match self.datagram_flows.iter().position(|f| f.flow == d.flow) {
             Some(i) => i,
             None => {
@@ -873,6 +1023,103 @@ mod datagram_tests {
         assert!(
             d.drops().stream_bytes > 0,
             "the cap must actually have bitten"
+        );
+    }
+
+    /// R311y605 (F5) — the roll-up reaches counters that were only per-object.
+    ///
+    /// The claim is specifically that `health()` sees what a consumer would
+    /// otherwise have had to walk every flow and both directions to find, so
+    /// the fixture makes the per-flow counter non-zero and then asserts the
+    /// total MATCHES it rather than merely being non-zero: a `health()` that
+    /// returned `Default::default()` passes an is-it-non-zero test on a clean
+    /// capture, which is most captures.
+    #[test]
+    fn the_roll_up_totals_what_the_per_flow_counters_hold() {
+        let msg = framed_keepalive();
+        let mut d = Dissection::new();
+        // Send the same segment twice: the second is a retransmission.
+        let pkt = tcp_packet(1000, &msg);
+        d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
+        d.push_packet(LINKTYPE_ETHERNET, 1, &pkt);
+
+        let per_flow = &d.flows()[0].low_to_high;
+        assert_eq!(
+            per_flow.retransmits(),
+            1,
+            "the fixture must actually retransmit"
+        );
+        let h = d.health();
+        assert_eq!(h.retransmits, per_flow.retransmits());
+        assert_eq!(h.out_of_order, per_flow.out_of_order());
+        assert_eq!(h.partial_overlaps, per_flow.partial_overlaps());
+        // Every packet is counted exactly once on EACH axis, or the six buckets
+        // would disagree about how many packets the dissection saw.
+        assert_eq!(
+            h.ip_checksum_valid + h.ip_checksum_invalid + h.ip_checksum_absent,
+            2,
+            "every packet must be counted on the ip axis exactly once"
+        );
+        assert_eq!(
+            h.transport_checksum_valid + h.transport_checksum_invalid + h.transport_checksum_absent,
+            2,
+            "and exactly once on the transport axis"
+        );
+        // `tcp_packet` writes a ZERO TCP checksum, which over IPv4 is
+        // present-and-wrong: TCP has no declining form. That is the INVALID
+        // bucket, not the absent one.
+        assert_eq!(h.transport_checksum_invalid, 2, "{h:?}");
+        assert_eq!(h.transport_checksum_absent, 0, "{h:?}");
+        assert!(h.any_checksum_invalid());
+        assert_eq!(h.packets_skipped, 0);
+
+        // The DISCRIMINATOR for the bucket above: `udp_packet` writes the SAME
+        // zero bytes, and over IPv4 a zero UDP checksum is the sender DECLINING
+        // (RFC 768) — absent, not wrong. A roll-up that folded absence into
+        // failure would put both here, and every loopback capture would read as
+        // corrupt.
+        let mut u = Dissection::new();
+        let ka = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        u.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, &ka),
+        );
+        let uh = u.health();
+        assert_eq!(uh.transport_checksum_absent, 1, "{uh:?}");
+        assert_eq!(uh.transport_checksum_invalid, 0, "{uh:?}");
+    }
+
+    /// R311y605 (F5) — a total that survives flow EVICTION.
+    ///
+    /// The failure this pins is a live tap's: the flow cap recycles a slot, the
+    /// evicted flow's counters go with it, and the dissection's totals silently
+    /// walk backwards. A roll-up computed only from the live flows passes every
+    /// other test in this file.
+    #[test]
+    fn an_evicted_flows_counters_stay_in_the_total() {
+        let msg = framed_keepalive();
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows: Some(1),
+            ..DissectionLimits::default()
+        });
+        // Flow 1, with a retransmission on it.
+        let a = tcp_packet(1000, &msg);
+        d.push_packet(LINKTYPE_ETHERNET, 0, &a);
+        d.push_packet(LINKTYPE_ETHERNET, 1, &a);
+        assert_eq!(d.health().retransmits, 1);
+
+        // A second flow evicts the first. `tcp_packet` fixes the ports, so a
+        // different SOURCE ADDRESS is what makes this a different 5-tuple.
+        let mut b = tcp_packet(2000, &msg);
+        b[26] = 99;
+        d.push_packet(LINKTYPE_ETHERNET, 2, &b);
+        assert_eq!(d.flows().len(), 1, "the cap must have evicted");
+        assert_eq!(d.drops().flows, 1);
+        assert_eq!(
+            d.health().retransmits,
+            1,
+            "the evicted flow's retransmission must survive its flow"
         );
     }
 

@@ -2323,6 +2323,137 @@ mod tests {
         );
     }
 
+    /// R311y605 (F3) — `walk_err`'s SHM path, which was UNWITNESSED.
+    ///
+    /// `payload_or_shm_descriptor` was applied to both `walk_msg_put` and
+    /// `walk_err` in R311y597 and only the Put got a test. The Err arm is the
+    /// same three lines over a DIFFERENT header layout — Err has no `T`
+    /// timestamp bit, so its `E` and `Z` bits sit where Put's `E` and `Z` do
+    /// but the body in between differs, and a walker that read Put's shape
+    /// here would find the chain at the wrong offset and report no marker.
+    /// That failure mode is silent: no marker means the descriptor is called a
+    /// payload, which is exactly the misreading R311y597 closed for Put.
+    #[test]
+    fn an_shm_marked_err_does_not_call_its_descriptor_a_payload_either() {
+        let descriptor = [0x04u8, 0x07, 0x00];
+        // Err: MID 0x05, Z set (the chain carries the marker), E clear.
+        let marked = concat(&[
+            alloc::vec![0x05u8 | 0x80],
+            ext_unit(crate::ext_header::body_ext_id::SHM, false),
+            vle(descriptor.len() as u64),
+            descriptor.to_vec(),
+        ]);
+
+        let mut w = SpanCursor::new(&marked);
+        let fields = walk_err(&mut w).expect("an SHM-marked err must still walk");
+        let root = group("Err", 0, marked.len(), fields);
+
+        assert!(
+            root.find("payload").is_none(),
+            "the descriptor must not be reachable under the name `payload`",
+        );
+        let shm = root
+            .find("shm_descriptor")
+            .expect("the descriptor must be named");
+        assert_eq!(shm.value, FieldValue::Opaque);
+        assert_eq!(shm.span.end - shm.span.start, descriptor.len());
+        assert_eq!(w.remaining(), 0, "the walker left bytes unread");
+
+        // CONTROL: the same shape with a non-SHM ext id is still a payload, so
+        // an arm that renamed every Err payload unconditionally fails here.
+        let body = b"real data";
+        let plain = concat(&[
+            alloc::vec![0x05u8 | 0x80],
+            ext_unit(0x01, false),
+            vle(body.len() as u64),
+            body.to_vec(),
+        ]);
+        let mut w = SpanCursor::new(&plain);
+        let fields = walk_err(&mut w).expect("walk");
+        let root = group("Err", 0, plain.len(), fields);
+        assert_eq!(raw(&root, "payload"), body.to_vec());
+        assert!(root.find("shm_descriptor").is_none());
+    }
+
+    /// R311y605 (F4) — the linkstate walker's cap divergence, PINNED.
+    ///
+    /// The walker deliberately does NOT mirror the codec's
+    /// `HeaplessVec<_, 64>` bound: refusing to render a large topology hides
+    /// exactly what an analyst opened the capture for. So the two disagree
+    /// ONE-DIRECTIONALLY by design — the walker accepts advertisements the
+    /// codec rejects, never the reverse.
+    ///
+    /// That was documented and unasserted, which is the weaker half of the
+    /// pair: a future round that "fixed the inconsistency" by adding the cap to
+    /// the walker would have broken the analyst's case with every test green.
+    /// Both directions are asserted here, on the SAME bytes, so the claim is
+    /// the divergence rather than either half of it.
+    #[test]
+    fn the_linkstate_walker_reads_a_topology_the_codec_refuses() {
+        use wz_codecs::linkstate_list::LinkstateList;
+
+        // 65 entries: one past the codec's cap. Only the COUNT prefix is
+        // hand-written — each record's bytes come from the `Linkstate` codec's
+        // own encode, because the list codec cannot ENCODE 65 either and a
+        // hand-laid record would test the walker against my reading of the
+        // layout (the first attempt at this fixture omitted `links_len` and the
+        // walker was right to refuse it).
+        const N: usize = 65;
+        let one = wz_codecs::linkstate::Linkstate {
+            options: 0,
+            psid: 7,
+            sn: 1,
+            zid_len: None,
+            zid: None,
+            whatami: None,
+            num_locators: None,
+            locators: None,
+            links_len: 0,
+            links: sce_forge_runtime::heapless::Vec::new(),
+            weights: None,
+        }
+        .encode_to_vec();
+        let mut body = vle(N as u64);
+        for _ in 0..N {
+            body.extend_from_slice(&one);
+        }
+
+        // The CODEC refuses it.
+        let mut c = SceCursor::new(&body);
+        let codec = LinkstateList::decode(&mut c);
+        assert!(
+            codec.is_err(),
+            "the codec's HeaplessVec<_, 64> must refuse a 65-link advertisement"
+        );
+
+        // The WALKER reads it, and reads all 65.
+        let mut w = SpanCursor::new(&body);
+        let fields = walk_linkstate_list(&mut w).expect("the walker must accept it");
+        let root = group("linkstate", 0, w.offset(), fields);
+        let entries = match root.find("link_states").map(|f| &f.value) {
+            Some(FieldValue::Nested(v)) => v.len(),
+            other => panic!("link_states is not nested: {other:?}"),
+        };
+        assert_eq!(
+            entries, N,
+            "the walker must render every entry, not the codec's first 64"
+        );
+        assert_eq!(w.remaining(), 0, "the walker left bytes unread");
+
+        // CONTROL: at 64 the two AGREE, so the divergence above is about the
+        // cap and not about the walker reading a different layout entirely.
+        let mut body64 = vle(64);
+        for _ in 0..64usize {
+            body64.extend_from_slice(&one);
+        }
+        let mut c = SceCursor::new(&body64);
+        let by_codec = LinkstateList::decode(&mut c).expect("64 is inside the cap");
+        assert_eq!(by_codec.link_states.len(), 64);
+        let mut w = SpanCursor::new(&body64);
+        walk_linkstate_list(&mut w).expect("the walker reads 64 too");
+        assert_eq!(w.remaining(), 0);
+    }
+
     /// A sub-codec's span really is that field's bytes: slicing the message at
     /// the span and decoding it STANDALONE must succeed and consume exactly
     /// the span's width. A span that merely starts in the right place passes

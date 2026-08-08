@@ -9721,6 +9721,64 @@
         "The two names are one keystroke apart from a real section id and there is no gate that would have caught it before the append: `--impact` takes free text, and validate-workspace only sees the damage afterwards, at which point the entry is frozen. A pre-append existence check on each ref would turn this from a post-hoc orphan-ledger row into a refusal."
       ]
     },
+    "Round 1621": {
+      "decision_summary": "R311y605b -- the three analyzer debts whose only defence was a comment: two untested paths and a per-object counter set with no total",
+      "changes_bullets": [
+        "F3 -- dissect.rs::an_shm_marked_err_does_not_call_its_descriptor_a_payload_either. `payload_or_shm_descriptor` was applied to BOTH walk_msg_put and walk_err at R311y597 and only the Put got a test; the Err arm has a different header layout (no T timestamp bit) so a walker reading Put's shape would find the chain at the wrong offset, report no marker, and call the descriptor a payload -- silently, which is the exact misreading R311y597 closed for Put. Carries its own non-SHM control.",
+        "F4 -- dissect.rs::the_linkstate_walker_reads_a_topology_the_codec_refuses. The walker deliberately does not mirror the codec's HeaplessVec<_, 64> cap, because refusing a 65-link router's advertisement hides what an analyst opened the capture for. That was documented and unasserted: a future round \"fixing the inconsistency\" would have broken the analyst's case with every test green. Both directions asserted on the same bytes, plus a 64-entry control where the two AGREE.",
+        "F5 -- wz-capture: DissectionHealth + Dissection::health(). Every counter this crate had was per-object by design (TCP anomalies on each StreamAssembler, checksum verdicts on each Segment/Datagram), which left \"is anything wrong in this capture at all\" answerable only by walking every flow and both directions.",
+        "Checksums are tallied at INGEST on all three paths (tcp, datagram, vsock) because a Checksums rides on the Segment/Datagram and is gone once the assembler consumes it. Six buckets, not four: absent and invalid stay separate.",
+        "Evicted flows' stream counters are carried into `evicted_streams` at eviction, so a live tap's totals do not walk backwards when the flow cap recycles a slot.",
+        "The F4 fixture's 65 records come from the Linkstate codec's own encode with only the count prefix hand-written -- the first attempt hand-laid the record, omitted `links_len`, and the walker was right to refuse it."
+      ],
+      "verification_bullets": [
+        "Damage probe, four arms, each firing only its own legs with a green control.",
+        "F3 arm (walk_err stops detecting the SHM marker): the Err leg red, the PUT leg green -- which is the whole point, since the Put leg is what existed before and could not see this.",
+        "F4 arm (the walker mirrors the codec's 64 cap): the 65-entry leg red, both pre-existing OAM linkstate tests green.",
+        "F5 arm A (health() ignores evicted_streams): the eviction leg red, the roll-up leg green.",
+        "F5 arm B (checksum absence folded into failure, `_ => 4`): the roll-up leg red on the UDP discriminator -- `tcp_packet` and `udp_packet` write the SAME zero checksum bytes and must land in DIFFERENT buckets (TCP has no declining form; a zero UDP checksum over IPv4 is RFC 768 declining).",
+        "The roll-up test asserts health() EQUALS the per-flow counter rather than being non-zero: a health() returning Default::default() passes an is-it-non-zero test on a clean capture, which is most captures.",
+        "wz-capture 80 tests pass; wz-session-core dissect filter 35 pass.",
+        "Local lanes: C0 pass (85s), C1bn pass (262s), C1bs pass (85s), C2 pass (27s)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "DissectionHealth has no consumer yet -- it is a library surface, and the analyzer's health summary is the requirement it exists for. The same \"no production caller\" shape as the MCU pool items, and worth naming rather than assuming a getter counts as done.",
+        "The roll-up covers the counters that EXIST. It does not add the ones the register still lists as absent: per-keyexpr throughput and share (C11), passive SN-gap loss tracking (C12), and query-reply RTT correlation (C13) are all still zero files.",
+        "Analyzer reach still open and unchanged: pcapng is unread (C1) -- the format wireshark and dumpcap write by DEFAULT, so a capture from a modern tool is a hard error today; IPv4 fragment reassembly (C2); desynchronisation is terminal with no resync (C7); multicast carries FragmentMarkers::NONE so First/Drop cannot be judged there (C8)."
+      ],
+      "publishable_decision_summary": "R311y605b -- the three analyzer debts whose only defence was a comment: two untested paths and a per-object counter set with no total",
+      "publishable_changes_bullets": [
+        "F3 -- dissect.rs::an_shm_marked_err_does_not_call_its_descriptor_a_payload_either. `payload_or_shm_descriptor` was applied to BOTH walk_msg_put and walk_err at R311y597 and only the Put got a test; the Err arm has a different header layout (no T timestamp bit) so a walker reading Put's shape would find the chain at the wrong offset, report no marker, and call the descriptor a payload -- silently, which is the exact misreading R311y597 closed for Put. Carries its own non-SHM control.",
+        "F4 -- dissect.rs::the_linkstate_walker_reads_a_topology_the_codec_refuses. The walker deliberately does not mirror the codec's HeaplessVec<_, 64> cap, because refusing a 65-link router's advertisement hides what an analyst opened the capture for. That was documented and unasserted: a future round \"fixing the inconsistency\" would have broken the analyst's case with every test green. Both directions asserted on the same bytes, plus a 64-entry control where the two AGREE.",
+        "F5 -- wz-capture: DissectionHealth + Dissection::health(). Every counter this crate had was per-object by design (TCP anomalies on each StreamAssembler, checksum verdicts on each Segment/Datagram), which left \"is anything wrong in this capture at all\" answerable only by walking every flow and both directions.",
+        "Checksums are tallied at INGEST on all three paths (tcp, datagram, vsock) because a Checksums rides on the Segment/Datagram and is gone once the assembler consumes it. Six buckets, not four: absent and invalid stay separate.",
+        "Evicted flows' stream counters are carried into `evicted_streams` at eviction, so a live tap's totals do not walk backwards when the flow cap recycles a slot.",
+        "The F4 fixture's 65 records come from the Linkstate codec's own encode with only the count prefix hand-written -- the first attempt hand-laid the record, omitted `links_len`, and the walker was right to refuse it."
+      ],
+      "publishable_verification_bullets": [
+        "Damage probe, four arms, each firing only its own legs with a green control.",
+        "F3 arm (walk_err stops detecting the SHM marker): the Err leg red, the PUT leg green -- which is the whole point, since the Put leg is what existed before and could not see this.",
+        "F4 arm (the walker mirrors the codec's 64 cap): the 65-entry leg red, both pre-existing OAM linkstate tests green.",
+        "F5 arm A (health() ignores evicted_streams): the eviction leg red, the roll-up leg green.",
+        "F5 arm B (checksum absence folded into failure, `_ => 4`): the roll-up leg red on the UDP discriminator -- `tcp_packet` and `udp_packet` write the SAME zero checksum bytes and must land in DIFFERENT buckets (TCP has no declining form; a zero UDP checksum over IPv4 is RFC 768 declining).",
+        "The roll-up test asserts health() EQUALS the per-flow counter rather than being non-zero: a health() returning Default::default() passes an is-it-non-zero test on a clean capture, which is most captures.",
+        "wz-capture 80 tests pass; wz-session-core dissect filter 35 pass.",
+        "Local lanes: C0 pass (85s), C1bn pass (262s), C1bs pass (85s), C2 pass (27s)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "DissectionHealth has no consumer yet -- it is a library surface, and the analyzer's health summary is the requirement it exists for. The same \"no production caller\" shape as the MCU pool items, and worth naming rather than assuming a getter counts as done.",
+        "The roll-up covers the counters that EXIST. It does not add the ones the register still lists as absent: per-keyexpr throughput and share (C11), passive SN-gap loss tracking (C12), and query-reply RTT correlation (C13) are all still zero files.",
+        "Analyzer reach still open and unchanged: pcapng is unread (C1) -- the format wireshark and dumpcap write by DEFAULT, so a capture from a modern tool is a hard error today; IPv4 fragment reassembly (C2); desynchronisation is terminal with no resync (C7); multicast carries FragmentMarkers::NONE so First/Drop cannot be judged there (C8)."
+      ]
+    },
     "Round 17": {
       "decision_summary": "OQ-W24 full closure — RFC §5.I.0 'Tier definitions' subsection landed as atomic-store new section via R287/R289 add_section primitive (first watching-zenoh use of new section creation surface).",
       "changes_bullets": [
