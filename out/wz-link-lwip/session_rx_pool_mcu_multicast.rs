@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: e812b8b9426089658c190b079d72f4505398532fde65fe2c41c3ec6148939d1b
-// template-hash: 3f00b6ad29c2eff5bb5558a6167abdac4572045d11f8d695901879b002032c6b
+// template-hash: e9541de728219e5b918752124cad2b5ba2950a5da7bb328f3588c49d2bba35c4
 // generated-at: 0
 // SCE-MAP: session_rx_pool_mcu_multicast.scxml:46
 
@@ -94,23 +94,25 @@ pub enum SlotState {
 // (free → dma-armed-rx).
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/// Phantom marker for `SlotState::CpuMut`. Held by author code while
-/// the slot is in exclusive CPU-write state.
+/// Phantom marker for `SlotState::CpuMut`.
+/// Held by author code while the slot is in exclusive
+/// CPU-write state.
 #[derive(Debug)]
 pub struct CpuMut;
 
-/// Phantom marker for `SlotState::CpuRef`. Held by author code while
-/// the slot is in shared CPU-read state (post-RX-IRQ).
+/// Phantom marker for `SlotState::DmaArmedRx`.
+/// Returned from `link_arm_rx` so the author can register the
+/// slot index with the peripheral's RX descriptor. Hand it to
+/// `dma_start_rx` when the peripheral begins writing.
+#[derive(Debug)]
+pub struct DmaArmedRx;
+
+/// Phantom marker for `SlotState::CpuRef`.
+/// Held by author code while the slot is in shared CPU-read
+/// state (post-RX-IRQ).
 #[derive(Debug)]
 pub struct CpuRef;
 
-/// Phantom marker for `SlotState::DmaArmedRx`. Returned from
-/// `link_arm_rx` so the author can register the slot index with the
-/// peripheral's RX descriptor; the slot then progresses through
-/// `DmaBusyRx → CpuRef` via IRQ handlers (not exposed in this
-/// atomic).
-#[derive(Debug)]
-pub struct DmaArmedRx;
 
 /// Phantom-typed slot handle. The state parameter `S` is one of the
 /// marker types above. Since `idx` is private, code outside this
@@ -277,9 +279,148 @@ impl Slot<CpuRef> {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Slot<DmaArmedRx> — exposed for the author to register the slot
-// index against a peripheral RX descriptor. The IRQ-driven
-// progression `DmaArmedRx → DmaBusyRx → CpuRef` (spec lines
-// 1149-1150) is owned by the runtime and not directly invocable.
-// `Slot::idx()` is the only public method here.
+// Runtime seam — the six FSM edges the DMA controller, the
+// peripheral, and the completion IRQs own (spec §synth-5-E lines
+// 1144, 1145, 1149, 1150, 1153, 1156).
+//
+// These are not part of the author-visible API on spec lines
+// 1232-1237, but they are emitted, because leaving them out does not
+// make them unreachable — it makes the pool a one-way sink.
+// `pool_acquire_for_encode` and `link_arm_rx` hand slots out;
+// `dma-busy-tx → free` and `dma-busy-rx → cpu-ref` are the only
+// edges that hand them back, and both live here. Without this block
+// a slot armed for DMA never returns to the freelist and the pool
+// drains permanently.
+//
+// Two shapes, decided by whether the edge's source state is one the
+// API can hand back as a `Slot<S>`:
+//
+//   * source is holdable — the caller has the handle, so the method
+//     consumes it and Rust's move semantics invalidate the old state.
+//   * source is DMA-owned — no handle exists by construction. The
+//     completion signal carries a channel/descriptor index and
+//     nothing else, so the pool method takes `idx` and mints the
+//     resulting handle.
+//
+// Every one is `unsafe`, and that is a real contract rather than a
+// naming convention: calling one before the hardware event it names
+// hands out a view of memory the peripheral is still writing.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+impl SessionRxPoolMcuMulticast {
+    /// `dma-armed-tx → dma-busy-tx` — DMA controller signal.
+    /// Spec §synth-5-E line 1144.
+    ///
+    /// Runtime-owned edge. `dma-armed-tx` hands out no handle, so
+    /// the slot is named by index — which is what the completion
+    /// signal actually carries.
+    ///
+    /// Refuses a slot that is not in `dma-armed-tx`, so a spurious
+    /// or replayed interrupt cannot advance an unrelated slot.
+    ///
+    /// # Safety
+    /// The caller must have observed DMA controller signal for this slot.
+    /// Calling it early publishes memory the peripheral still owns.
+    pub unsafe fn dma_start_tx(&mut self, idx: usize) -> bool {
+        if self.slot_states.get(idx) != Some(&SlotState::DmaArmedTx) {
+            return false;
+        }
+        self.slot_states[idx] = SlotState::DmaBusyTx;
+        true
+    }
+
+    /// `dma-busy-tx → free` — TX-complete IRQ; pool_return(slot).
+    /// Spec §synth-5-E line 1145.
+    ///
+    /// Runtime-owned edge. `dma-busy-tx` hands out no handle, so
+    /// the slot is named by index — which is what the completion
+    /// signal actually carries.
+    ///
+    /// Refuses a slot that is not in `dma-busy-tx`, so a spurious
+    /// or replayed interrupt cannot advance an unrelated slot.
+    ///
+    /// # Safety
+    /// The caller must have observed TX-complete IRQ; pool_return(slot) for this slot.
+    /// Calling it early publishes memory the peripheral still owns.
+    pub unsafe fn tx_complete(&mut self, idx: usize) -> bool {
+        if self.slot_states.get(idx) != Some(&SlotState::DmaBusyTx) {
+            return false;
+        }
+        self.slot_states[idx] = SlotState::Free;
+        true
+    }
+
+    /// `dma-busy-rx → cpu-ref` — RX-complete IRQ.
+    /// Spec §synth-5-E line 1150.
+    ///
+    /// Runtime-owned edge. `dma-busy-rx` hands out no handle, so
+    /// the slot is named by index — which is what the completion
+    /// signal actually carries.
+    ///
+    /// Refuses a slot that is not in `dma-busy-rx`, so a spurious
+    /// or replayed interrupt cannot advance an unrelated slot.
+    ///
+    /// # Safety
+    /// The caller must have observed RX-complete IRQ for this slot.
+    /// Calling it early publishes memory the peripheral still owns.
+    pub unsafe fn rx_complete(&mut self, idx: usize) -> Option<Slot<CpuRef>> {
+        if self.slot_states.get(idx) != Some(&SlotState::DmaBusyRx) {
+            return None;
+        }
+        self.slot_states[idx] = SlotState::CpuRef;
+        Some(Slot { idx, _state: PhantomData })
+    }
+
+    /// `dma-armed-tx → cpu-mut` — un-arm before DMA start (error path).
+    /// Spec §synth-5-E line 1156.
+    ///
+    /// Runtime-owned edge. `dma-armed-tx` hands out no handle, so
+    /// the slot is named by index — which is what the completion
+    /// signal actually carries.
+    ///
+    /// Refuses a slot that is not in `dma-armed-tx`, so a spurious
+    /// or replayed interrupt cannot advance an unrelated slot.
+    ///
+    /// # Safety
+    /// The caller must have observed un-arm before DMA start (error path) for this slot.
+    /// Calling it early publishes memory the peripheral still owns.
+    pub unsafe fn un_arm_tx(&mut self, idx: usize) -> Option<Slot<CpuMut>> {
+        if self.slot_states.get(idx) != Some(&SlotState::DmaArmedTx) {
+            return None;
+        }
+        self.slot_states[idx] = SlotState::CpuMut;
+        Some(Slot { idx, _state: PhantomData })
+    }
+
+}
+
+impl Slot<DmaArmedRx> {
+    /// `dma-armed-rx → dma-busy-rx` — peripheral start.
+    /// Spec §synth-5-E line 1149.
+    ///
+    /// Runtime-owned edge. Consumes the handle, so the
+    /// `dma-armed-rx` view cannot outlive the transition.
+    ///
+    /// # Safety
+    /// The caller must have observed peripheral start for this slot.
+    /// Calling it early publishes memory the peripheral still owns.
+    pub unsafe fn dma_start_rx(self, pool: &mut SessionRxPoolMcuMulticast) {
+        pool.slot_states[self.idx] = SlotState::DmaBusyRx;
+    }
+}
+
+impl Slot<CpuRef> {
+    /// `cpu-ref → cpu-mut` — in-place mutate.
+    /// Spec §synth-5-E line 1153.
+    ///
+    /// Runtime-owned edge. Consumes the handle, so the
+    /// `cpu-ref` view cannot outlive the transition.
+    ///
+    /// # Safety
+    /// The caller must have observed in-place mutate for this slot.
+    /// Calling it early publishes memory the peripheral still owns.
+    pub unsafe fn mutate_in_place(self, pool: &mut SessionRxPoolMcuMulticast) -> Slot<CpuMut> {
+        pool.slot_states[self.idx] = SlotState::CpuMut;
+        Slot { idx: self.idx, _state: PhantomData }
+    }
+}

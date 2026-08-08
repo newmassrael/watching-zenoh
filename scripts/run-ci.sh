@@ -1127,7 +1127,18 @@ layer_b_verify_codegen() {
     #             zenoh-pico's own encoder) is the real wire check and is
     #             GREEN: the depth is a decoder bound and changes no
     #             emitted byte.
-    local LAYER2_KNOWN_DIVERGENCE=(request wireexpr msg_put msg_del)
+    #
+    #             R311y598 — CLOSED, and the FIRST condition is what closed
+    #             it. Vendor pin ef4c2fe4d5 lifts both upstream fixtures to
+    #             max-depth="8" (codec_zenoh_msg_put.scxml:82,
+    #             codec_zenoh_msg_del.scxml:68), so the two stems body-match
+    #             wz again and are REMOVED from the list below. MEASURED:
+    #             Layer B at this pin reports `msg_put OK` / `msg_del OK`.
+    #             The removal is the point, not bookkeeping — the array is
+    #             read ONLY on a failing pair, so a stale entry would excuse
+    #             a FUTURE genuine divergence in these stems as
+    #             audit-traced.
+    local LAYER2_KNOWN_DIVERGENCE=(request wireexpr)
 
     local fail=0
     for scxml in sources/codecs/*.scxml sources/algorithms/*.scxml; do
