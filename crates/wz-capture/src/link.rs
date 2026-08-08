@@ -139,7 +139,13 @@ pub enum SkipReason {
     /// separate problem from reassembling a TCP stream and is NOT done here;
     /// naming it keeps a hole in the byte stream attributable.
     Ipv4Fragment,
-    /// An IPv6 packet whose extension-header chain this build does not walk.
+    /// An IPv6 packet whose first next-header is a genuine EXTENSION HEADER,
+    /// which this build does not walk.
+    ///
+    /// R311y597 — the payload is the extension header's own number, and it is
+    /// now only ever one of [`is_ipv6_extension_header`]'s set. It previously
+    /// carried any next-header that was not TCP, so a reader saw UDP (17) and
+    /// ICMPv6 (58) reported as unwalked chains.
     Ipv6ExtensionChain(u8),
 }
 
@@ -332,14 +338,56 @@ fn strip_ipv4(bytes: &[u8]) -> Result<(Endpoint, Endpoint, u8, &[u8]), SkipReaso
     ))
 }
 
+/// Whether an IPv6 next-header value names an EXTENSION HEADER rather than an
+/// upper-layer protocol (RFC 8200 §4.1 plus the IANA additions). Walking a
+/// chain of these needs per-header length rules this build does not implement,
+/// so they are refused by name.
+///
+/// R311y597 — this predicate is the fix, and the shape it replaced is worth
+/// recording. The test was `next_header != IP_PROTO_TCP`, which refused UDP
+/// and every other protocol as though it were an unwalked chain. Two failures
+/// came out of that one line, and the second is the reason a bare "allow UDP
+/// too" patch would not have been enough:
+///
+/// 1. An IPv6 UDP datagram never reached the UDP arm [`decapsulate`] already
+///    had, so IPv6 multicast scouting and IPv6 UDP unicast links produced a
+///    dissection with no messages.
+/// 2. The skip NAMED THE WRONG CAUSE. `Ipv6ExtensionChain(17)` says "this
+///    build cannot walk the chain" about a packet with no chain at all, which
+///    points a reader at writing a chain walker rather than at the missing
+///    branch. A skip reason that misattributes is worse than a generic one.
+///
+/// The IPv4 path never had either failure because [`strip_ipv4`] returns its
+/// protocol byte through and lets [`decapsulate`] classify it. This restores
+/// the same division of labour: refuse only what genuinely cannot be parsed
+/// here, and let the caller name everything else.
+const fn is_ipv6_extension_header(next_header: u8) -> bool {
+    matches!(
+        next_header,
+        0        // Hop-by-Hop Options
+        | 43     // Routing
+        | 44     // Fragment
+        | 50     // Encapsulating Security Payload
+        | 51     // Authentication Header
+        | 60     // Destination Options
+        | 135    // Mobility
+        | 139    // Host Identity Protocol
+        | 140    // Shim6
+        | 253    // reserved for experimentation
+        | 254 // reserved for experimentation
+    )
+}
+
 fn strip_ipv6(bytes: &[u8]) -> Result<(Endpoint, Endpoint, u8, &[u8]), SkipReason> {
     if bytes.len() < 40 {
         return Err(SkipReason::Truncated);
     }
     let next_header = bytes[6];
-    // No extension-header walk: a chain would need per-header length rules
-    // and none of them appear on a zenoh TCP flow. Named rather than guessed.
-    if next_header != IP_PROTO_TCP {
+    // Refuse ONLY a genuine extension header. Everything else is returned
+    // through for `decapsulate` to classify, exactly as `strip_ipv4` does with
+    // its protocol byte: TCP and UDP reach their arms, and anything else lands
+    // on `NotTransport`, which names the real cause.
+    if is_ipv6_extension_header(next_header) {
         return Err(SkipReason::Ipv6ExtensionChain(next_header));
     }
     let payload_len = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
@@ -582,6 +630,27 @@ mod tests {
             Err(SkipReason::Ipv4Fragment)
         );
 
+        // An IPv6 extension-header chain. R311y597 — this leg was MISSING,
+        // which is why the test's name was a claim it did not keep: the one
+        // variant it never built was the one whose branch was wrong.
+        let ipv6_frag = {
+            let mut ip = Vec::new();
+            ip.extend_from_slice(&0x6000_0000u32.to_be_bytes());
+            ip.extend_from_slice(&8u16.to_be_bytes());
+            ip.push(44); // Fragment header
+            ip.push(64);
+            ip.extend_from_slice(&[0u8; 32]);
+            ip.extend_from_slice(&[0u8; 8]);
+            let mut eth = vec![0x02; 12];
+            eth.extend_from_slice(&ETHERTYPE_IPV6.to_be_bytes());
+            eth.extend_from_slice(&ip);
+            eth
+        };
+        assert_eq!(
+            decapsulate(LINKTYPE_ETHERNET, 0, &ipv6_frag),
+            Err(SkipReason::Ipv6ExtensionChain(44))
+        );
+
         // A link type this build does not decapsulate.
         assert_eq!(
             decapsulate(999, 0, &[0u8; 64]),
@@ -701,5 +770,130 @@ mod tests {
         };
         assert_eq!(da.flow, db.flow);
         assert_ne!(da.from_low, db.from_low);
+    }
+
+    // ---- R311y597: the IPv6 leg, which had NO tests at all ----------------
+    //
+    // That absence is the finding, not a footnote. `strip_ipv6` is reachable
+    // from all four link types `strip_link` handles, and every one of its legs
+    // was unwitnessed — which is how a branch that refused UDP survived the
+    // round that added UDP support to the IPv4 side.
+
+    /// Ethernet + IPv6 + an ARBITRARY next-header, so a leg can aim at the
+    /// classification directly. `body` is placed after the 40-byte fixed
+    /// header with `payload_len` set to its length, which is what a packet
+    /// with no extension chain looks like.
+    fn eth_ipv6(src: [u8; 16], dst: [u8; 16], next_header: u8, body: &[u8]) -> Vec<u8> {
+        let mut ip = Vec::new();
+        ip.extend_from_slice(&0x6000_0000u32.to_be_bytes()); // version 6
+        ip.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        ip.push(next_header);
+        ip.push(64); // hop limit
+        ip.extend_from_slice(&src);
+        ip.extend_from_slice(&dst);
+        ip.extend_from_slice(body);
+
+        let mut eth = vec![0x02; 12];
+        eth.extend_from_slice(&ETHERTYPE_IPV6.to_be_bytes());
+        eth.extend_from_slice(&ip);
+        eth
+    }
+
+    fn udp_body(sport: u16, dport: u16, payload: &[u8]) -> Vec<u8> {
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&sport.to_be_bytes());
+        udp.extend_from_slice(&dport.to_be_bytes());
+        udp.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes()); // checksum (unverified)
+        udp.extend_from_slice(payload);
+        udp
+    }
+
+    const V6_A: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01];
+    const V6_B: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02];
+
+    /// THE DEFECT. An IPv6 UDP datagram must reach the UDP arm. Before
+    /// R311y597 this returned `Ipv6ExtensionChain(17)`, so IPv6 multicast
+    /// scouting and IPv6 UDP unicast links were invisible to a capture.
+    #[test]
+    fn an_ipv6_udp_datagram_reaches_the_udp_arm() {
+        let pkt = eth_ipv6(V6_A, V6_B, IP_PROTO_UDP, &udp_body(7447, 7447, b"scout"));
+        match decapsulate(LINKTYPE_ETHERNET, 5, &pkt) {
+            Ok(Transport::Udp(d)) => {
+                assert_eq!(d.payload, b"scout");
+                assert_eq!(d.packet_index, 5);
+                assert_eq!(d.flow.low.addr(), &V6_A);
+                assert_eq!(d.flow.low.port, 7447);
+            }
+            other => panic!("expected an IPv6 datagram, got {other:?}"),
+        }
+    }
+
+    /// The TCP leg the old branch did allow — kept so the fix is shown not to
+    /// have traded one protocol for the other.
+    #[test]
+    fn an_ipv6_tcp_segment_still_reaches_the_tcp_arm() {
+        let mut tcp_body = Vec::new();
+        tcp_body.extend_from_slice(&7447u16.to_be_bytes());
+        tcp_body.extend_from_slice(&40000u16.to_be_bytes());
+        tcp_body.extend_from_slice(&99u32.to_be_bytes()); // seq
+        tcp_body.extend_from_slice(&0u32.to_be_bytes()); // ack
+        tcp_body.push(5 << 4);
+        tcp_body.push(0x18);
+        tcp_body.extend_from_slice(&0xFFFFu16.to_be_bytes());
+        tcp_body.extend_from_slice(&0u16.to_be_bytes());
+        tcp_body.extend_from_slice(&0u16.to_be_bytes());
+        tcp_body.extend_from_slice(b"hi");
+
+        let pkt = eth_ipv6(V6_A, V6_B, IP_PROTO_TCP, &tcp_body);
+        let seg = tcp(LINKTYPE_ETHERNET, 0, &pkt).expect("decapsulate");
+        assert_eq!(seg.payload, b"hi");
+        assert_eq!(seg.seq, 99);
+    }
+
+    /// A GENUINE extension header still refuses, and the reason still carries
+    /// the header's own number. This is the half of the old behaviour that was
+    /// correct, and the leg exists so the fix cannot silently drop it.
+    #[test]
+    fn a_genuine_ipv6_extension_header_is_still_refused_by_name() {
+        for ext in [0u8, 43, 44, 50, 51, 60, 135, 139, 140, 253, 254] {
+            let pkt = eth_ipv6(V6_A, V6_B, ext, b"whatever");
+            assert_eq!(
+                decapsulate(LINKTYPE_ETHERNET, 0, &pkt),
+                Err(SkipReason::Ipv6ExtensionChain(ext)),
+                "next-header {ext} is an extension header and must be named as one",
+            );
+        }
+    }
+
+    /// THE SECOND FAILURE OF THE SAME LINE, and the reason "also allow UDP"
+    /// would have been the wrong fix. A non-transport upper-layer protocol
+    /// (ICMPv6 here) is not an extension header, and reporting it as an
+    /// unwalked chain points a reader at building a chain walker that would
+    /// not have helped. It must classify exactly as the IPv4 path does.
+    #[test]
+    fn a_non_transport_ipv6_protocol_is_not_reported_as_an_extension_chain() {
+        const IP_PROTO_ICMPV6: u8 = 58;
+        let pkt = eth_ipv6(V6_A, V6_B, IP_PROTO_ICMPV6, b"\x80\x00\x00\x00");
+        assert_eq!(
+            decapsulate(LINKTYPE_ETHERNET, 0, &pkt),
+            Err(SkipReason::NotTransport(IP_PROTO_ICMPV6)),
+        );
+    }
+
+    /// IPv6 has no header checksum and no `total_length` — only `payload_len`,
+    /// counted from the END of the fixed header rather than from its start.
+    /// Getting that origin wrong reads link padding as payload, so it is
+    /// pinned the same way the IPv4 leg pins its own.
+    #[test]
+    fn ipv6_payload_len_is_measured_from_the_end_of_the_fixed_header() {
+        let mut pkt = eth_ipv6(V6_A, V6_B, IP_PROTO_UDP, &udp_body(1, 2, b"abc"));
+        while pkt.len() < 60 {
+            pkt.push(0); // the pad a real NIC adds
+        }
+        match decapsulate(LINKTYPE_ETHERNET, 0, &pkt) {
+            Ok(Transport::Udp(d)) => assert_eq!(d.payload, b"abc"),
+            other => panic!("expected a datagram, got {other:?}"),
+        }
     }
 }
