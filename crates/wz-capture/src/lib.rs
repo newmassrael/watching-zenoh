@@ -34,6 +34,7 @@ extern crate alloc;
 pub mod link;
 pub mod pcap;
 pub mod tcp;
+pub mod ws;
 
 use alloc::vec::Vec;
 
@@ -88,6 +89,16 @@ impl DatagramDissection {
     }
 }
 
+/// Index a per-direction array. `Direction` is the seam's vocabulary and has
+/// no numeric form of its own, so the mapping lives in one place rather than
+/// being spelled out at each use.
+fn dir_index(direction: Direction) -> usize {
+    match direction {
+        Direction::A => 0,
+        Direction::B => 1,
+    }
+}
+
 /// R311y594 — one place that decides how a per-flow observer is built, so the
 /// TCP and datagram halves cannot drift into different defaults.
 fn new_session(window_ms: Option<u64>) -> PassiveSession {
@@ -97,6 +108,37 @@ fn new_session(window_ms: Option<u64>) -> PassiveSession {
     }
     let _ = window_ms;
     PassiveSession::new()
+}
+
+/// R311y602 — what the bytes of a TCP flow turn out to BE.
+///
+/// A `ws/...` zenoh link is ordinary TCP, so nothing below this crate can tell
+/// it apart from a `tcp/...` one; the difference is a framing layer inside the
+/// byte stream. Until enough bytes arrive to settle it there is nothing to
+/// decide on, which is what [`Self::Undecided`] is — deliberately a state
+/// rather than a default of `Stream`, because guessing `Stream` and being
+/// wrong is precisely the silent failure this variant exists to end.
+#[derive(Debug)]
+pub enum Framing {
+    /// The opening is still consistent with an HTTP upgrade and shorter than
+    /// one ([`ws::UpgradeVerdict::NeedMore`]); nothing is fed onward yet.
+    Undecided,
+    /// zenoh's length-prefixed byte stream, straight into the observer.
+    Stream,
+    /// RFC6455 frames wrapping one zenoh batch each, per direction.
+    WebSocket {
+        /// [`Direction::A`]'s deframer (`low` -> `high`).
+        a: ws::WsDeframer,
+        /// [`Direction::B`]'s deframer.
+        b: ws::WsDeframer,
+    },
+}
+
+impl Framing {
+    /// Is this flow carrying WebSocket?
+    pub fn is_websocket(&self) -> bool {
+        matches!(self, Framing::WebSocket { .. })
+    }
 }
 
 /// One TCP connection being dissected as a zenoh session.
@@ -117,6 +159,12 @@ pub struct FlowDissection {
     /// `Dissection` evicts by. A packet index rather than a timestamp because
     /// every source has one and not every source has a clock.
     last_activity: usize,
+    /// R311y602 — what this flow's bytes turned out to be.
+    framing: Framing,
+    /// Bytes held back per direction while [`Framing::Undecided`], so the
+    /// decision is made on the stream's opening rather than on whatever
+    /// happened to arrive in the first segment.
+    held: [Vec<u8>; 2],
 }
 
 impl FlowDissection {
@@ -128,7 +176,14 @@ impl FlowDissection {
             session: new_session(window_ms),
             frames: Vec::new(),
             last_activity: 0,
+            framing: Framing::Undecided,
+            held: [Vec::new(), Vec::new()],
         }
+    }
+
+    /// R311y602 — what this flow's byte stream turned out to be.
+    pub fn framing(&self) -> &Framing {
+        &self.framing
     }
 
     /// The assembler for one direction.
@@ -161,10 +216,82 @@ impl FlowDissection {
     /// across them — direction B's Init is what completes direction A's
     /// capability fold — so a frame that was un-decodable a moment ago can
     /// become decodable because the OTHER direction advanced.
+    /// R311y602 — decide the framing, then route the bytes to it.
+    ///
+    /// While `Undecided` the bytes are HELD, not forwarded: handing the
+    /// observer a `GET / HTTP/1.1` opening desynchronises it permanently, and
+    /// the whole reason this state exists is that four bytes settle the
+    /// question. The held bytes of BOTH directions are replayed the moment
+    /// either one reaches the threshold, because the decision is a property of
+    /// the connection and only one direction has to speak to reveal it.
     fn advance(&mut self, direction: Direction, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
+        if matches!(self.framing, Framing::Undecided) {
+            self.held[dir_index(direction)].extend_from_slice(bytes);
+            self.framing = match ws::http_upgrade_verdict(&self.held[dir_index(direction)]) {
+                // Still consistent with an opening and shorter than it. Holding
+                // is only safe because the verdict answers `No` on DIVERGENCE
+                // rather than on a byte count — a fixed threshold would hold a
+                // flow whose whole first message is shorter than it.
+                ws::UpgradeVerdict::NeedMore => return,
+                ws::UpgradeVerdict::Yes => Framing::WebSocket {
+                    a: ws::WsDeframer::new(),
+                    b: ws::WsDeframer::new(),
+                },
+                ws::UpgradeVerdict::No => Framing::Stream,
+            };
+            for dir in [Direction::A, Direction::B] {
+                let held = core::mem::take(&mut self.held[dir_index(dir)]);
+                if !held.is_empty() {
+                    self.feed(dir, &held);
+                }
+            }
+            return;
+        }
+        self.feed(direction, bytes);
+    }
+
+    /// Route already-classified bytes into the framing this flow uses.
+    fn feed(&mut self, direction: Direction, bytes: &[u8]) {
+        match self.framing {
+            // Unreachable by construction: `advance` decides before it feeds.
+            Framing::Undecided => {}
+            Framing::Stream => self.feed_stream(direction, bytes),
+            Framing::WebSocket { .. } => self.feed_websocket(direction, bytes),
+        }
+    }
+
+    /// R311y602 — the ws half: deframe, then decode each message as a
+    /// DATAGRAM.
+    ///
+    /// `next_datagram` and not `next_frame` because a ws message carries no
+    /// length prefix — the WebSocket message boundary IS the framing, exactly
+    /// as a UDP datagram boundary is (zenoh's ws link reports
+    /// `is_streamed() = false`). The offset reported is the stream offset the
+    /// message's first frame began at, so `packet_for` still attributes a
+    /// decoded message to the packet that carried it.
+    fn feed_websocket(&mut self, direction: Direction, bytes: &[u8]) {
+        let Framing::WebSocket { a, b } = &mut self.framing else {
+            return;
+        };
+        let deframer = match direction {
+            Direction::A => a,
+            Direction::B => b,
+        };
+        deframer.push(bytes);
+        let mut ready: Vec<(usize, Vec<u8>)> = Vec::new();
+        while let Some(msg) = deframer.next_message() {
+            ready.push(msg);
+        }
+        for (offset, payload) in ready {
+            let frame = self.session.next_datagram(direction, &payload, offset);
+            self.frames.push(frame);
+        }
+    }
+
+    fn feed_stream(&mut self, direction: Direction, bytes: &[u8]) {
         self.session.push(direction, bytes);
         loop {
             let mut progressed = false;
@@ -839,5 +966,209 @@ mod datagram_tests {
         d.push_packet(LINKTYPE_ETHERNET, 1, &back);
         assert_eq!(d.datagram_flows().len(), 1);
         assert_eq!(d.datagram_flows()[0].frames.len(), 2);
+    }
+}
+
+// ── R311y602 — the WEBSOCKET path end to end. `ws` proves the deframer; this
+//    proves the WIRING, and the wiring is the whole defect: a deframer that
+//    works and a dissection that never reaches it look identical from the
+//    deframer's own tests, and "looks identical while producing nothing" is
+//    exactly what this round exists to end. ──
+#[cfg(test)]
+mod ws_flow_tests {
+    use super::*;
+    use crate::link::LINKTYPE_ETHERNET;
+    use wz_session_core::inbound::InboundFrame;
+
+    /// Ethernet + IPv4 + TCP, with both ports explicit so a test can build
+    /// BOTH directions of one connection.
+    fn tcp_packet(sport: u16, dport: u16, seq: u32, payload: &[u8]) -> Vec<u8> {
+        let (src, dst) = if sport == 1111 {
+            ([10u8, 0, 0, 1], [10u8, 0, 0, 2])
+        } else {
+            ([10u8, 0, 0, 2], [10u8, 0, 0, 1])
+        };
+        let mut tcp = Vec::new();
+        tcp.extend_from_slice(&sport.to_be_bytes());
+        tcp.extend_from_slice(&dport.to_be_bytes());
+        tcp.extend_from_slice(&seq.to_be_bytes());
+        tcp.extend_from_slice(&0u32.to_be_bytes());
+        tcp.push(5 << 4);
+        tcp.push(0x10);
+        tcp.extend_from_slice(&64u16.to_be_bytes());
+        tcp.extend_from_slice(&0u16.to_be_bytes());
+        tcp.extend_from_slice(&0u16.to_be_bytes());
+        tcp.extend_from_slice(payload);
+
+        let mut ip = alloc::vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
+        ip.extend_from_slice(&src);
+        ip.extend_from_slice(&dst);
+        ip.extend_from_slice(&tcp);
+
+        let mut eth = alloc::vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// One RFC6455 BINARY frame, masked the way a client's really is.
+    fn binary_frame(payload: &[u8], mask: Option<[u8; 4]>) -> Vec<u8> {
+        let mut out = alloc::vec![0x82u8];
+        let masked_bit = if mask.is_some() { 0x80u8 } else { 0 };
+        out.push(masked_bit | payload.len() as u8);
+        match mask {
+            Some(key) => {
+                out.extend_from_slice(&key);
+                for (i, b) in payload.iter().enumerate() {
+                    out.push(b ^ key[i & 3]);
+                }
+            }
+            None => out.extend_from_slice(payload),
+        }
+        out
+    }
+
+    /// A BARE KeepAlive — no length prefix, because a ws message boundary IS
+    /// the framing.
+    fn bare_keepalive() -> Vec<u8> {
+        alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE]
+    }
+
+    /// THE ONE THAT MATTERS. A zenoh session over `ws/...` is ordinary TCP, so
+    /// every layer below this crate handles it perfectly and the messages
+    /// still never appeared: the byte stream begins `GET / HTTP/1.1` and
+    /// continues in RFC6455 frames, which the observer cannot read and does
+    /// not refuse. The capture came back with no zenoh in it — the one answer
+    /// indistinguishable from a capture that genuinely had none.
+    ///
+    /// Both directions carry a message, and the client's is MASKED, because
+    /// those are the two halves that fail separately: the masking is
+    /// client-to-server only, so a deframer without it leaves the acceptor's
+    /// direction reading fine while the dialer's decodes into noise.
+    #[test]
+    fn a_ws_carried_zenoh_session_decodes_instead_of_vanishing() {
+        let mut d = Dissection::new();
+        let client_open = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n";
+        let server_open = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n";
+
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &tcp_packet(1111, 7447, 1000, client_open),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &tcp_packet(7447, 1111, 2000, server_open),
+        );
+        let msg = bare_keepalive();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            2,
+            &tcp_packet(
+                1111,
+                7447,
+                1000 + client_open.len() as u32,
+                &binary_frame(&msg, Some([0x37, 0xFA, 0x21, 0x3D])),
+            ),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            3,
+            &tcp_packet(
+                7447,
+                1111,
+                2000 + server_open.len() as u32,
+                &binary_frame(&msg, None),
+            ),
+        );
+
+        assert_eq!(d.flows().len(), 1, "one connection");
+        let flow = &d.flows()[0];
+        assert!(
+            flow.framing().is_websocket(),
+            "the flow must be RECOGNISED as WebSocket; classified as a plain \
+             stream it decodes nothing and says nothing"
+        );
+        assert_eq!(
+            flow.frames.len(),
+            2,
+            "one message from each direction — the masked half is the one that \
+             goes missing on its own"
+        );
+        for f in &flow.frames {
+            assert!(
+                matches!(f.frame, Ok(InboundFrame::KeepAlive { .. })),
+                "each ws message decodes to the KeepAlive it carried"
+            );
+            assert_eq!(
+                f.prefix_width, 0,
+                "a ws message carries no length prefix; reporting one would be \
+                 a measurement of nothing"
+            );
+            assert!(
+                flow.packet_for(f.direction, f.stream_offset).is_some(),
+                "attribution survives the extra framing layer: every decoded \
+                 message still names the packet that carried it"
+            );
+        }
+    }
+
+    /// The negative arm, and it is what makes the positive one mean something:
+    /// a plain `tcp/...` zenoh flow must NOT be classified as WebSocket. With
+    /// detection that answered yes too eagerly, the test above would pass
+    /// while every ordinary capture in the field broke.
+    #[test]
+    fn a_plain_tcp_zenoh_flow_is_not_taken_for_websocket() {
+        let mut d = Dissection::new();
+        let framed = alloc::vec![1u8, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &framed));
+
+        let flow = &d.flows()[0];
+        assert!(!flow.framing().is_websocket());
+        assert_eq!(flow.frames.len(), 1, "the stream path still decodes it");
+        assert_eq!(
+            flow.frames[0].prefix_width, 2,
+            "and still reports the 2-byte prefix it actually read"
+        );
+    }
+
+    /// A flow whose opening is shorter than the detector needs must WAIT, not
+    /// guess. One byte at a time is the pathological arrival pattern that
+    /// makes a detector reading "the first segment" wrong.
+    #[test]
+    fn detection_waits_for_enough_bytes_rather_than_guessing_on_one() {
+        let mut d = Dissection::new();
+        let client_open = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n";
+        for (i, byte) in client_open.iter().enumerate() {
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                i,
+                &tcp_packet(1111, 7447, 1000 + i as u32, &[*byte]),
+            );
+        }
+        let msg = bare_keepalive();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            client_open.len(),
+            &tcp_packet(
+                1111,
+                7447,
+                1000 + client_open.len() as u32,
+                &binary_frame(&msg, None),
+            ),
+        );
+
+        let flow = &d.flows()[0];
+        assert!(
+            flow.framing().is_websocket(),
+            "the held bytes must be replayed once the decision is made, not dropped"
+        );
+        assert_eq!(flow.frames.len(), 1);
     }
 }
