@@ -101,3 +101,23 @@ pub mod establishment_ext_id {
     /// `_Z_MSG_EXT_ID_INIT_PATCH` — the z64 protocol patch LEVEL.
     pub const PATCH: u8 = 0x07;
 }
+
+/// Ext ids in the ZENOH-BODY space — the chain that rides a `Put` / `Del` /
+/// `Query` / `Reply` / `Err` body, which is a DIFFERENT carrier from
+/// [`establishment_ext_id`] above. The two spaces reuse numeric values freely
+/// (`0x2` is `Shm` in both, and they are not the same extension), so an id is
+/// only meaningful together with the carrier it was read from.
+///
+/// R311y597 — this module exists for the same reason the establishment table
+/// does, and the SHM id is the case that forced it. `extshm` is gated on
+/// `transport-shm` and `dissect` on `dissect`; they are INDEPENDENT features,
+/// so a dissector that reached into `extshm` for the id would fail to compile
+/// in every observer build that does not also implement SHM. An observer must
+/// recognise ids whose capability it cannot itself perform — that is the whole
+/// asymmetry between reading a wire and speaking it.
+pub mod body_ext_id {
+    /// `zenoh::put::ext::Shm` — `zextunit!(0x2, true)`, the MANDATORY-bit UNIT
+    /// marker meaning the payload slot holds a DESCRIPTOR rather than the
+    /// data. The bytes it stands in for never traverse the network.
+    pub const SHM: u8 = 0x02;
+}

@@ -46,7 +46,10 @@ use wz_codecs::ext_zbuf::ExtZbufOwned;
 /// carries 0x1 source_info + 0x3 attachment — 0x2 was unoccupied). DISTINCT from
 /// the establishment 0x2 Shm ext (the Init / Open id space); a body ext and an
 /// establishment ext share the numeric value but never the carrier.
-pub const SHM_BODY_EXT_ID: u8 = 0x02;
+/// R311y597 — derives from the unconditional table rather than restating the
+/// value, because the dissector needs the same id from a build that does not
+/// select `transport-shm`.
+pub const SHM_BODY_EXT_ID: u8 = crate::ext_header::body_ext_id::SHM;
 
 /// The scoped wz SHM descriptor: the wire stand-in for an SHM-backed payload. A
 /// `segment_id` (the POSIX shm object name the receiver re-opens), the payload

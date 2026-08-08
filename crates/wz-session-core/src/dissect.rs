@@ -180,6 +180,10 @@ impl FieldValue {
 /// * `what` — Scout's what-am-I-looking-for bits
 /// * `rest` — trailing bytes a walker read but does not name further
 /// * `unparsed` — bytes after a halt; the best-effort marker, not a wire field
+/// * `shm_descriptor` — the `Put` / `Err` payload slot when the body ext chain
+///   carries the SHM marker. **Not** `payload`, and the split is the point:
+///   the codec's field IS the payload, these bytes are an ADDRESS, and sharing
+///   one name is exactly what let a reader take one for the other (R311y597)
 ///
 /// ⚠ Eleven codec fields have no walker and are carried by name in the census —
 /// eight of them the `linkstate` family, which has no walker at all.
@@ -466,6 +470,56 @@ impl<'a> SpanCursor<'a> {
 
 // ── Shared leaf walkers ──────────────────────────────────────────────
 
+/// Whether a walked extension chain carried an entry with the given id.
+///
+/// Reads the walker's OWN output rather than re-parsing the bytes, and looks
+/// only at the chain's DIRECT entries — deliberately not [`Field::find`],
+/// which is first-match-by-name across the whole subtree and would happily
+/// match an `ext_id` nested inside something else.
+fn chain_carries_ext_id(chain: &[Field], id: u64) -> bool {
+    chain.iter().any(|entry| match &entry.value {
+        FieldValue::Nested(leaves) => leaves
+            .iter()
+            .any(|f| f.name == "ext_id" && f.value == FieldValue::Bits(id)),
+        _ => false,
+    })
+}
+
+/// The `Put` / `Err` payload slot, which is NOT always a payload.
+///
+/// R311y597 — when the body ext chain carries the SHM marker
+/// ([`crate::ext_header::body_ext_id::SHM`]) the sender put a DESCRIPTOR here
+/// in place of the data, and the data itself never traversed the network.
+/// Rendering those bytes as `payload` made a reader take an address for
+/// content, which is precisely the misreading this module exists to prevent —
+/// and it is worse than showing nothing, because nothing is visibly nothing.
+///
+/// The interior is deliberately NOT walked, and that is a decision rather than
+/// a gap this round ran out of time for. TWO INCOMPATIBLE LAYOUTS reach this
+/// slot and nothing on the wire discriminates them: wz emits its own scoped
+/// `VLE(length) VLE(segment_id) VLE(generation)`
+/// (`extshm::encode_shm_descriptor`, live from `push_build.rs`), while stock
+/// zenoh emits a `ShmBufInfo` carrying a `MetadataDescriptor` plus a
+/// `ChunkDescriptor`. ANY bytes parse as three VLEs, so guessing wz's layout
+/// on zenoh's traffic would emit confident wrong fields — the same defect
+/// wearing a different name. [`FieldValue::Opaque`] states what is true: the
+/// span is accounted for and the interior was not broken down.
+fn payload_or_shm_descriptor(
+    c: &mut SpanCursor<'_>,
+    n: usize,
+    is_shm: bool,
+) -> Result<Field, CodecError> {
+    if is_shm {
+        let (_, field) = c.opaque("shm_descriptor", |cur| {
+            cur.peek_slice(n)?;
+            cur.advance(n)
+        })?;
+        Ok(field)
+    } else {
+        c.bytes("payload", n)
+    }
+}
+
 /// `ExtEntry` — a TLV entry: one header byte (id in bits 0..4, a 2-bit body
 /// encoding in bits 5..6, the Z continuation in bit 7) then the body its
 /// encoding selects.
@@ -639,14 +693,17 @@ pub fn walk_msg_put(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     if (header & 0x40) != 0 {
         out.push(c.nested("encoding", walk_encoding)?);
     }
+    let mut is_shm = false;
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+            let chain = walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)?;
+            is_shm = chain_carries_ext_id(&chain, crate::ext_header::body_ext_id::SHM as u64);
+            Ok(chain)
         })?);
     }
     let (n, len) = c.vle_u64("payload_len")?;
     out.push(len);
-    out.push(c.bytes("payload", n as usize)?);
+    out.push(payload_or_shm_descriptor(c, n as usize, is_shm)?);
     Ok(out)
 }
 
@@ -737,14 +794,17 @@ pub fn walk_err(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     if (header & 0x40) != 0 {
         out.push(c.nested("encoding", walk_encoding)?);
     }
+    let mut is_shm = false;
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+            let chain = walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)?;
+            is_shm = chain_carries_ext_id(&chain, crate::ext_header::body_ext_id::SHM as u64);
+            Ok(chain)
         })?);
     }
     let (n, len) = c.vle_u64("payload_len")?;
     out.push(len);
-    out.push(c.bytes("payload", n as usize)?);
+    out.push(payload_or_shm_descriptor(c, n as usize, is_shm)?);
     Ok(out)
 }
 
@@ -1853,6 +1913,68 @@ mod tests {
         }
     }
 
+    /// R311y597 — an SHM-marked `Put` must NOT present its descriptor as
+    /// `payload`.
+    ///
+    /// The two assertions are different claims and both are needed. That the
+    /// bytes are named `shm_descriptor` is what stops a reader taking an
+    /// address for content. That they are `Opaque` rather than `Bytes` is what
+    /// stops the OTHER misreading — a consumer seeing decoded-looking bytes and
+    /// concluding the interior was understood, when wz and stock zenoh put
+    /// incompatible layouts here and nothing on the wire tells them apart.
+    #[test]
+    fn an_shm_marked_put_does_not_call_its_descriptor_a_payload() {
+        let descriptor = [0x04u8, 0x07, 0x00];
+        let marked = msg_put(
+            None,
+            None,
+            &[ext_unit(crate::ext_header::body_ext_id::SHM, false)],
+            &descriptor,
+        );
+
+        let mut w = SpanCursor::new(&marked);
+        let fields = walk_msg_put(&mut w).expect("an SHM-marked put must still walk");
+        let root = group("MsgPut", 0, marked.len(), fields);
+
+        assert!(
+            root.find("payload").is_none(),
+            "the descriptor must not be reachable under the name `payload`",
+        );
+        let shm = root
+            .find("shm_descriptor")
+            .expect("the descriptor must be named");
+        assert_eq!(
+            shm.value,
+            FieldValue::Opaque,
+            "the interior must not be claimed as understood",
+        );
+        assert_eq!(
+            shm.span.end - shm.span.start,
+            descriptor.len(),
+            "the span must still account for every byte",
+        );
+        assert_eq!(w.remaining(), 0, "the walker left bytes unread");
+    }
+
+    /// The CONTROL for the leg above: the same message shape with a chain that
+    /// carries no SHM marker is still a payload. Without this, renaming every
+    /// payload unconditionally would pass.
+    #[test]
+    fn a_put_without_the_shm_marker_still_has_a_payload() {
+        let body = b"real data";
+        let plain = msg_put(None, None, &[ext_unit(0x01, false)], body);
+
+        let mut w = SpanCursor::new(&plain);
+        let fields = walk_msg_put(&mut w).expect("walk");
+        let root = group("MsgPut", 0, plain.len(), fields);
+
+        assert_eq!(raw(&root, "payload"), body.to_vec());
+        assert!(
+            root.find("shm_descriptor").is_none(),
+            "an unmarked put must not claim an SHM descriptor",
+        );
+    }
+
     /// A sub-codec's span really is that field's bytes: slicing the message at
     /// the span and decoding it STANDALONE must succeed and consume exactly
     /// the span's width. A span that merely starts in the right place passes
@@ -2183,7 +2305,14 @@ mod tests {
         //    entry clears Z, so the wire itself terminated it. The field after
         //    the chain must still read its own bytes. A guard that refused
         //    everything would pass rows 1 and 2 and fail here.
-        let exact: Vec<Vec<u8>> = (1..=cap).map(|i| ext_unit(i as u8, i != cap)).collect();
+        // R311y597 — the filler ids start ABOVE the body-ext space's assigned
+        // values on purpose. `1..=cap` used to be the range, and it contains
+        // `0x2`, which in a Put body IS the SHM marker: this row was building
+        // an SHM Put by accident and asserting its descriptor was a payload.
+        // The row is about chain DEPTH, so its ids must carry no meaning.
+        let exact: Vec<Vec<u8>> = (1..=cap)
+            .map(|i| ext_unit((i + 0x10) as u8 & 0x1F, i != cap))
+            .collect();
         let ok = msg_put(None, None, &exact, &payload);
 
         let mut w = SpanCursor::new(&ok);

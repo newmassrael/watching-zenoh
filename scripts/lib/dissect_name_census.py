@@ -101,6 +101,11 @@ OWN_VOCABULARY = {
     "what": "Scout's what-am-I-looking-for bits",
     "rest": "trailing bytes of a record the walker read but does not name further",
     "unparsed": "bytes after a halt -- the best-effort marker, not a wire field",
+    "shm_descriptor": "the Put/Err payload slot when the body ext chain carries the "
+    "SHM marker. NOT `payload`: the codec's field is the payload and these bytes are "
+    "an ADDRESS, so sharing the name is what let a reader take one for the other "
+    "(R311y597). Opaque on purpose -- wz and stock zenoh put DIFFERENT descriptor "
+    "layouts here and nothing on the wire tells them apart",
 }
 
 # AWAITING: codec fields no walker emits yet, each with WHY. Rule 3 makes closing
