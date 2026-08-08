@@ -57,8 +57,7 @@ use wz_runtime_core::TimeSource;
 // build into E0425 the moment the method's own gate was widened.
 #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
 use wz_codecs::declare::DeclareOwned;
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-use wz_codecs::ext_zint::ExtZint;
+use wz_codecs::ext_entry::ExtEntryOwned;
 #[cfg(feature = "codec-response")]
 use wz_codecs::response::ResponseOwned;
 
@@ -1245,18 +1244,19 @@ impl<R: SessionRuntime, T: TimeSource> Deref for SessionLinkActions<R, T> {
 /// R121f1 carry surfaced when wz initiator dialed zenoh-pico
 /// peer-listen; the wz↔wz path (R121f) was symptom-free because
 /// both ends previously emitted Init bodies with `Z=0`.
+///
+/// R311y605 — built through [`crate::extpatch::encode_patch_ext`] rather than
+/// from a literal here. The header was spelled `0x07 | 0x20` while
+/// [`crate::extpatch::peer_patch`] — wz's own READER of this very entry —
+/// matches on `PATCH_EXT_ID | EXT_ENC_Z64` through the named constants. Two
+/// spellings of one wire fact, on the two sides of the same extension: had
+/// either moved, wz would have emitted an extension its own reader skips, and
+/// the only witness would have been a foreign peer. The literal is also why a
+/// `grep extpatch` over this crate finds a complete reader and no emit, which
+/// is how a stale "the Patch ext is not attached" claim survived in the
+/// inventory and how THIS round first re-derived it.
 pub fn default_init_patch_ext_entry() -> ExtEntryOwned {
-    // header byte layout per `vendor/zenoh-pico/include/zenoh-pico/
-    // protocol/ext.h:47-65`:
-    //   bits 0..3 = ext_id 0x07 (INIT_PATCH)
-    //   bit 4     = M (mandatory) = 0
-    //   bits 5..6 = enc = 0x01 (ZINT)
-    //   bit 7     = Z (chain continuation) — encoder owns this bit
-    //               via `encode_ext_chain`, so leave it cleared here.
-    ExtEntryOwned {
-        header: 0x07 | 0x20, // _Z_MSG_EXT_ID_INIT_PATCH literal
-        body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value: 1 }),
-    }
+    crate::extpatch::encode_patch_ext()
 }
 
 // R311dz-pre — bridge the observer's generic reply drain to the action
