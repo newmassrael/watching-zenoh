@@ -220,7 +220,25 @@ KIND_CLASS = {
     # alternative to also accept.
     "wz->zenoh-c": {"zenoh-c-lib"},
     "zenoh-c->wz": {"zenoh-c-lib"},
-    "codec-parity": {"codec"},
+    # R311y628 — `pico-lib` joins, on this dict's OWN stated reasoning: "linking
+    # or dlopening the real implementation is a STRONGER witness than spawning
+    # it, so a kind that accepts the spawned CLI must accept the library." That
+    # note is R311y536's, which added `pico-lib` to the two DIRECTIONAL pico
+    # kinds and did not revisit this one — `codec-parity` predates the class
+    # existing, so its `{codec}` was never a judgement about dlopen, it was
+    # written before dlopen was an option here.
+    #
+    # The two classes are the same thing by the property that matters: the real
+    # C implementation running in THIS process, adjudicating wz's answer. The
+    # only difference is link-time versus runtime resolution, and the runtime
+    # form is if anything the stricter one — `RTLD_LOCAL` keeps the two `z_*`
+    # symbol sets apart, where a program linking both resolves each name once
+    # and can silently compare a library against itself.
+    #
+    # NOT a loosening: the spawn classes (`pico`, `zenohd`, ...) are still
+    # refused, which is what this entry exists to say. Measured by probe — a
+    # `codec-parity` claim from a spawned-CLI file still fails A4-7.
+    "codec-parity": {"codec", "pico-lib"},
 }
 
 TEST_ATTR_RE = re.compile(r"^\s*#\[(?:tokio::)?test\b")

@@ -209,7 +209,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # time either of the two populations R311y572 NAMED has moved. `proven=128
 # partial=39` did not move for either step, which is exactly the blindness this
 # counter exists to cover.
-FOREIGN_ADJUDICATOR_LINKS = 796
+# R311y628 took it to 801, in ONE step of five, and the step is a different
+# shape from every one above it. Those added a witness for a behaviour someone
+# had thought to check; this one added a GENERATED corpus -- the whole 8-bit
+# transport header space against a body ladder -- and claimed the five transport
+# codecs it drives through both decoders. Every claim is `partial` on purpose:
+# the differential compares the ACCEPT/REJECT verdict, so it adjudicates each
+# codec's BOUNDARY and not its contents.
+FOREIGN_ADJUDICATOR_LINKS = 801
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

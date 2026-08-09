@@ -6338,6 +6338,19 @@ layer_epico_library_oracles() {
         _pico_cli_unavailable "Layer Epico" || return 1
         return 0
     fi
+    # R311y629 — the wz SIDE, and its absence is what this lane found on its very
+    # first hosted run: `pico_pure_function_oracle` and `pico_abi_symbol_census`
+    # dlopen wz's `libwz_capi_pico.so` BESIDE pico's library, and nothing in the
+    # cross-impl job builds it. Seven of eight legs panicked with "run
+    # `cargo build -p wz-capi-pico` first" — on a test that has existed since
+    # R311y568 and, until this lane, had only ever been run by hand on a
+    # developer box where the cdylib happened to be lying around.
+    #
+    # BUILT rather than skipped, on this file's own rule: SKIP on a FOREIGN
+    # binary a machine may legitimately lack, never on a wz one we can produce.
+    # A lane that skipped here would go green having compared nothing, and
+    # Layer A4 reads "this lane is in ci.yml" as evidence its proofs executed.
+    (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
     _runci_guarded_test "Epico transport-decode differential" 2 \
         cargo test -p wz-integration-tests \
         --test pico_transport_decode_differential -- --ignored --quiet --test-threads=1 \

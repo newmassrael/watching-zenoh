@@ -276,6 +276,9 @@ const KNOWN_DIVERGENCES: &[(u8, usize)] = &[
 /// agreement over the whole corpus. The two counts below are what make the
 /// agreement a measurement — a corpus that is entirely rejected, or entirely
 /// accepted, by both proves nothing about either.
+// wz-proves: none -- harness control: it proves the two decoders RUN and that
+// the corpus reaches every verdict, which is what keeps the oracle below from
+// being vacuous. It adjudicates no atom of its own.
 #[test]
 #[ignore = "needs libzenohpico.so (CMake build product); Layer E runs via --ignored"]
 fn both_decoders_run_and_the_corpus_reaches_both_verdicts() {
@@ -332,6 +335,15 @@ fn both_decoders_run_and_the_corpus_reaches_both_verdicts() {
 ///
 /// The report names the header byte and the length, because those two are what
 /// a person needs to reproduce it by hand.
+// The transport MIDs the generated corpus actually drives through both
+// decoders. `partial` on every line and deliberately so: this compares the
+// ACCEPT/REJECT verdict, not decoded fields, so it adjudicates each codec's
+// BOUNDARY and not its contents.
+// wz-proves: codec-init-body codec-parity partial
+// wz-proves: codec-open-body codec-parity partial
+// wz-proves: codec-close codec-parity partial
+// wz-proves: codec-keep-alive codec-parity partial
+// wz-proves: codec-frame codec-parity partial
 #[test]
 #[ignore = "needs libzenohpico.so (CMake build product); Layer E runs via --ignored"]
 fn wz_and_pico_agree_on_what_is_a_transport_message() {
