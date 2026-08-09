@@ -462,11 +462,21 @@ pub mod join_decode;
 ///
 /// `alloc`-gated for the owned bodies + ext chain, like [`inbound`]; the two
 /// body codecs are gated individually so a HELLO-only reader carries one.
+///
+/// R311y608 — named `scouting_message` and not `scouting`, after pico's own
+/// `_z_scouting_message_t` / `_z_scouting_message_decode`. `scouting` was
+/// already taken by the SCE-generated active-scouting STATE MACHINE below, and
+/// the two are different things one word apart: this is the wire decode, that
+/// is the FSM that drives a scout. R311y607 took the shorter name and the
+/// collision was invisible to every build it ran — the two modules sit behind
+/// disjoint features (`codec-scout`/`codec-hello` vs `scouting-active`), so
+/// only a build enabling BOTH sees them at once, and hosted Layer C1bf
+/// (`wz-runtime-tokio --all-features`) was the first that did.
 #[cfg(all(
     feature = "alloc",
     any(feature = "codec-scout", feature = "codec-hello")
 ))]
-pub mod scouting;
+pub mod scouting_message;
 
 /// R311ky — deferred callback firing (the F-6 structural fix): the
 /// staging queue + per-listener take-call-restore cell that let

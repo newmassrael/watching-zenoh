@@ -1449,6 +1449,16 @@ PY
     # re-binning one of the 53 — and the gate's FIRST run found a 54th that the
     # hand sweep had missed, because its two calls were not adjacent lines.
     python3 scripts/lib/discarded_evidence_lint.py || return 1
+    # R311y608 — the DUPLICATE-MODULE lint. R311y607 declared `pub mod
+    # scouting;` in a crate root that already declared `pub mod scouting { .. }`
+    # (the SCE-generated FSM), behind a DISJOINT feature, so rustc raises E0428
+    # only for a build that enables both -- and every build that round ran
+    # enabled one. Three hosted jobs then failed at once on one cause (C1's
+    # workspace feature unification, M's multicast lane, C1bf's --all-features).
+    # A build-based gate would have to guess which combination unions the two
+    # cfgs; the invariant does not depend on features, so it is checked by
+    # reading the declarations. Enforcement MEASURED by restoring the collision.
+    python3 scripts/lib/duplicate_module_lint.py || return 1
     # R311y565 — the EXPIRED-BLOCKER lint. Eight times across y561-y563 a field
     # or a family sat unimplemented behind a comment naming its own reason, and
     # the reason had already dissolved -- twice in the round that wrote it. Each

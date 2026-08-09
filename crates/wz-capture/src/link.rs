@@ -330,6 +330,24 @@ impl Datagram {
             self.flow.low
         }
     }
+
+    /// R311y608 — where this datagram came FROM, the other half of
+    /// [`Self::destination`].
+    ///
+    /// Needed because zenoh's scouting is a REQUEST/RESPONSE exchange whose
+    /// two halves travel to different addresses: the SCOUT goes to the group,
+    /// and the HELLO answering it goes back to the address the scout was sent
+    /// from (`socket.send_to(wbuf.as_slice(), peer)`,
+    /// `zenoh/src/net/runtime/orchestrator.rs:1179`). Correlating them needs
+    /// the source of one against the destination of the other, and un-sorting
+    /// [`FlowKey`] at each call site is how one of them gets it backwards.
+    pub fn source(&self) -> Endpoint {
+        if self.from_low {
+            self.flow.low
+        } else {
+            self.flow.high
+        }
+    }
 }
 
 /// R311y603 — one AF_VSOCK record's payload, lifted out of a `vsockmon`

@@ -340,6 +340,53 @@ pub struct PassiveFrame {
     /// to hold, so leaving them out made the context inferred and then unused
     /// by its own crate.
     pub carried: Carried,
+    /// R311y608 — this message cannot occur on the link that carried it, so it
+    /// was decoded and reported but NOT folded into the session context.
+    ///
+    /// Only ever true for an INIT or an OPEN on a multicast-capability link
+    /// (see [`PassiveSession::next_datagram_on`]). Always `false` on a stream
+    /// link, which is unicast by construction.
+    ///
+    /// A flag rather than an error, for the reason
+    /// [`Self::exceeds_negotiated_batch`] is one: the bytes decoded, and what
+    /// makes them worth showing is precisely that they arrived where they
+    /// cannot belong.
+    pub inadmissible_on_link: bool,
+}
+
+/// R311y608 — does the link a datagram arrived on have a HANDSHAKE?
+///
+/// Named after what it decides rather than after the link kind, because the
+/// two links that answer [`Self::Absent`] have nothing else in common: UDP
+/// multicast is IP and raweth is L2 with no addresses this layer can read. What
+/// they share is pico's multicast receive path, which is the whole content of
+/// the question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkHandshake {
+    /// A unicast link. INIT and OPEN establish the session on it — the shape
+    /// every `tcp/...`, `udp/...` unicast, vsock and ws link takes.
+    Present,
+    /// A multicast-capability link: UDP multicast, or pico's raweth. There is
+    /// no handshake to observe, and an INIT or OPEN seen here is discarded by
+    /// every real participant.
+    Absent,
+}
+
+/// Is this one of the two messages a multicast-capability link discards?
+///
+/// Written over the DECODED frame rather than over the MID byte, so a build
+/// without `codec-init-body` — where those bytes come back
+/// `Unknown { mid: 0x01 }` — answers `false` and folds nothing either way. The
+/// alternative, masking the header here, would have this function claim
+/// knowledge of a message the build cannot name.
+fn is_handshake_message(frame: &InboundFrame) -> bool {
+    match frame {
+        #[cfg(feature = "codec-init-body")]
+        InboundFrame::Init { .. } => true,
+        #[cfg(feature = "codec-open-body")]
+        InboundFrame::Open { .. } => true,
+        _ => false,
+    }
 }
 
 /// R311y583 (A2) — the layer above a transport frame, as far as an observer
@@ -657,6 +704,10 @@ impl PassiveSession {
             context: self.context,
             exceeds_negotiated_batch: self.exceeds_batch(payload_len),
             carried,
+            // A byte STREAM is a unicast link by construction — zenoh has no
+            // multicast stream transport — so the question this flag answers
+            // cannot arise here.
+            inadmissible_on_link: false,
         })
     }
 
@@ -707,9 +758,57 @@ impl PassiveSession {
         bytes: &[u8],
         offset: usize,
     ) -> PassiveFrame {
+        self.next_datagram_on(direction, bytes, offset, LinkHandshake::Present)
+    }
+
+    /// R311y608 — the same, told whether the link that carried it HAS a
+    /// handshake.
+    ///
+    /// # Why an observer needs to be told
+    ///
+    /// A handshake is a property of the LINK, not of the bytes. pico gives
+    /// every multicast-capability link — UDP multicast and its raweth L2 link
+    /// alike — the multicast receive path, and that path takes an INIT or an
+    /// OPEN and deliberately does nothing with it: "multicast transports are
+    /// not expected to handle INIT messages"
+    /// (`vendor/zenoh-pico/src/transport/multicast/rx.c:493-504`). It decodes
+    /// the message and drops it on the floor.
+    ///
+    /// An observer that FOLDS one has invented a session no participant has:
+    /// the peer's zid, its lease and its negotiated capabilities all enter a
+    /// context that describes nothing, and every frame reported afterwards is
+    /// judged against it — including [`PassiveFrame::exceeds_negotiated_batch`],
+    /// which would then flag violations of a ceiling nobody agreed to.
+    ///
+    /// The message is still REPORTED, and flagged
+    /// ([`PassiveFrame::inadmissible_on_link`]). Dropping it would hide the one
+    /// thing worth seeing: an INIT on a link that cannot have one is an
+    /// anomaly, and a dissector that shows nothing there is indistinguishable
+    /// from one that failed to decode.
+    ///
+    /// The raweth case is the one that made this reachable, and it is
+    /// reachable ONLY through the link type: pico sets
+    /// `Z_LINK_CAP_TRANSPORT_RAWETH` on every raweth link unconditionally
+    /// (`src/transport/raweth/link.c:476`) and routes it into
+    /// `_z_new_transport_multicast` (`src/transport/multicast/transport.c:42`),
+    /// whatever the destination MAC is — its own default mapping addresses
+    /// `aa:bb:cc:dd:ee:ff` (`raweth/link.c:66`), whose I/G bit is CLEAR, so a
+    /// reader that judged L2 multicast by that bit would miss pico's default
+    /// deployment entirely.
+    pub fn next_datagram_on(
+        &mut self,
+        direction: Direction,
+        bytes: &[u8],
+        offset: usize,
+        handshake: LinkHandshake,
+    ) -> PassiveFrame {
         let frame = parse_inbound(bytes);
+        let inadmissible =
+            handshake == LinkHandshake::Absent && frame.as_ref().is_ok_and(is_handshake_message);
         if let Ok(ref f) = frame {
-            self.fold(direction, f);
+            if !inadmissible {
+                self.fold(direction, f);
+            }
         }
         let carried = self.decode_carried(direction, &frame);
         PassiveFrame {
@@ -723,6 +822,7 @@ impl PassiveSession {
             context: self.context,
             exceeds_negotiated_batch: self.exceeds_batch(bytes.len()),
             carried,
+            inadmissible_on_link: inadmissible,
         }
     }
 

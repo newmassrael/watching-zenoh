@@ -47,7 +47,7 @@ use wz_session_core::parse_error::InboundParseError;
 use wz_session_core::passive::{
     Direction, FlowContext, PassiveFrame, PassiveSession, PassiveStall,
 };
-use wz_session_core::scouting::{parse_scouting, ScoutingFrame};
+use wz_session_core::scouting_message::{parse_scouting, ScoutingFrame};
 
 use crate::link::{FlowKey, SkipReason, Transport};
 use crate::tcp::StreamAssembler;
@@ -155,14 +155,123 @@ pub struct ScoutingDatagram {
 /// - Destination alone would route the multicast JOIN (`0x07`), which really
 ///   is a transport message on the multicast session group, out of the
 ///   transport decoder that R311y605 built for it.
-fn is_scouting_datagram(d: &link::Datagram) -> bool {
-    let Some(&header) = d.payload.first() else {
-        return false;
-    };
+///
+/// # R311y608 — and why the destination is only half the exchange
+///
+/// The rule above is sound for the REQUEST and blind to the RESPONSE. zenoh's
+/// scout responder answers from a unicast socket straight back to the asker —
+/// `socket.send_to(wbuf.as_slice(), peer)` on the socket
+/// `get_best_match(&peer.ip(), ucast_sockets)` returns
+/// (`zenoh/src/net/runtime/orchestrator.rs:1167-1180`) — so a HELLO's
+/// destination is UNICAST and `is_ip_multicast()` is false for every one of
+/// them. `S_MID_HELLO` is `0x02` and so is `T_MID_OPEN`, so each answered
+/// scout produced a confident `Open`: the same misread R311y607 closed on the
+/// request half, still open on the reply half.
+///
+/// Nothing in a HELLO's own bytes can settle it — a participant knows because
+/// the reply arrives on the socket it scouted FROM (pico reads it with
+/// `_z_link_recv_zbuf` on the link `__z_scout_loop` opened,
+/// `vendor/zenoh-pico/src/session/scout.c:54-68`). A passive observer has no
+/// socket, so it keeps the one thing that survives into a capture: WHICH
+/// ENDPOINT ASKED. A `0x02` addressed to an endpoint that was seen sending a
+/// SCOUT is the answer to it; a `0x02` addressed to anyone else is an Open.
+///
+/// [`ScoutingCorrelation`] is that memory, and it is why this is a method on
+/// [`Dissection`] rather than a free function over one datagram.
+fn scouting_mid(d: &link::Datagram) -> Option<u8> {
+    let &header = d.payload.first()?;
     let mid = header & 0x1F;
-    d.destination().is_ip_multicast()
-        && (mid == wz_session_core::wire_const::S_MID_SCOUT
-            || mid == wz_session_core::wire_const::S_MID_HELLO)
+    (mid == wz_session_core::wire_const::S_MID_SCOUT
+        || mid == wz_session_core::wire_const::S_MID_HELLO)
+        .then_some(mid)
+}
+
+/// R311y608 — which kind of datagram link a [`link::Datagram`] came off.
+///
+/// Both kinds are carried by the same struct — that is R311y597's decision and
+/// a sound one, since pico puts exactly one wire message in each — so the kind
+/// is lost the moment the two arms are collapsed. It has to be threaded because
+/// ONE question depends on it and no field of the datagram answers it: does
+/// this link have a handshake?
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatagramLink {
+    /// A UDP datagram. Whether it has a handshake depends on the destination:
+    /// unicast does, a multicast group does not.
+    Udp,
+    /// pico's raweth L2 link. NEVER has a handshake, whatever the destination
+    /// MAC says.
+    RawEth,
+}
+
+impl DatagramLink {
+    /// Does a session handshake happen on this link?
+    ///
+    /// The raweth answer is unconditional, and that is the whole reason this
+    /// enum exists rather than an address rule: pico sets
+    /// `Z_LINK_CAP_TRANSPORT_RAWETH` on every raweth link
+    /// (`vendor/zenoh-pico/src/transport/raweth/link.c:476`) and hands that
+    /// capability to `_z_new_transport_multicast`
+    /// (`src/transport/multicast/transport.c:42-45`), whose receive path
+    /// discards INIT and OPEN. The destination MAC is not consulted anywhere in
+    /// that chain — and pico's own default mapping addresses
+    /// `aa:bb:cc:dd:ee:ff` (`raweth/link.c:66`), whose I/G bit is CLEAR, so the
+    /// obvious "L2 multicast is the low bit of the first octet" rule would read
+    /// pico's default deployment as a unicast link with a handshake and be
+    /// wrong about every frame on it.
+    ///
+    /// No scouting arm, and that is measured too: pico's scout loop takes the
+    /// locator apart and REFUSES anything whose protocol is not `udp`
+    /// (`src/session/scout.c:38-48`, `_Z_ERR_TRANSPORT_NOT_AVAILABLE`), and
+    /// zenoh's Rust implementation has no raweth link at all. So a SCOUT cannot
+    /// travel here — the `0x01` this arm makes inadmissible is not a scout
+    /// being rescued, it is a message no participant sends and none accepts.
+    fn handshake(self, d: &link::Datagram) -> wz_session_core::passive::LinkHandshake {
+        use wz_session_core::passive::LinkHandshake;
+        match self {
+            DatagramLink::RawEth => LinkHandshake::Absent,
+            DatagramLink::Udp if d.destination().is_ip_multicast() => LinkHandshake::Absent,
+            DatagramLink::Udp => LinkHandshake::Present,
+        }
+    }
+}
+
+/// R311y608 — the endpoints observed ASKING, so the answers can be recognised.
+///
+/// A bounded, insertion-ordered set rather than a `BTreeSet`: the bound has to
+/// evict the OLDEST to be useful on a long live tap (a scouting host that has
+/// gone silent is the one whose slot should go), and the cardinality is the
+/// number of distinct scouting hosts in a capture — small enough that a linear
+/// scan is cheaper than the ordering a tree would maintain.
+///
+/// Eviction is COUNTED, not silent: dropping an asker turns its next answer
+/// back into an `Open`, so a bound that bit without saying so would look
+/// exactly like the defect this type exists to fix.
+#[derive(Debug, Default)]
+struct ScoutingCorrelation {
+    askers: Vec<link::Endpoint>,
+}
+
+impl ScoutingCorrelation {
+    /// Record that `who` sent a SCOUT. Returns how many askers were evicted.
+    fn observed_scout_from(&mut self, who: link::Endpoint, cap: Option<usize>) -> usize {
+        if self.askers.contains(&who) {
+            return 0;
+        }
+        self.askers.push(who);
+        match cap {
+            Some(max) if self.askers.len() > max => {
+                let cut = self.askers.len() - max;
+                self.askers.drain(..cut);
+                cut
+            }
+            _ => 0,
+        }
+    }
+
+    /// Did `who` ask? — i.e. is a HELLO addressed there an ANSWER?
+    fn asked(&self, who: &link::Endpoint) -> bool {
+        self.askers.contains(who)
+    }
 }
 
 /// Index a per-direction array. `Direction` is the seam's vocabulary and has
@@ -428,6 +537,13 @@ pub struct DissectionLimits {
     /// it is keyed by the datagram's identification, so a single busy flow can
     /// hold many at once and a bound on flows would not touch them.
     pub max_pending_fragments: Option<usize>,
+    /// R311y608 — endpoints remembered as having sent a SCOUT. Beyond it the
+    /// OLDEST asker goes, and [`DissectionDrops::scout_askers`] says so.
+    ///
+    /// Its own bound rather than a share of `max_flows`, because an asker is
+    /// not a flow either: one host scouting on a schedule keeps a single slot
+    /// for the life of the tap while its flows come and go.
+    pub max_scout_askers: Option<usize>,
 }
 
 impl DissectionLimits {
@@ -449,6 +565,10 @@ impl DissectionLimits {
             // link produces at once — fragmentation is bursty and short-lived —
             // and it bounds the table at well under the ceiling times the cap.
             max_pending_fragments: Some(256),
+            // One slot per scouting host. 1 024 is the same order as
+            // `max_flows` and each entry is an `Endpoint`, so the whole set is
+            // smaller than a single flow's frame list.
+            max_scout_askers: Some(1_024),
         }
     }
 }
@@ -469,12 +589,25 @@ pub struct DissectionDrops {
     pub skipped: usize,
     /// Flows evicted to stay inside `max_flows`.
     pub flows: usize,
+    /// R311y608 — scouting askers forgotten to stay inside
+    /// `max_scout_askers`.
+    ///
+    /// The most consequential of the five, per lost entry: forgetting an asker
+    /// does not lose a record, it changes how a LATER message is READ. The next
+    /// HELLO answering that endpoint has no evidence of an exchange behind it
+    /// and decodes as an `Open` — the exact misread R311y608 closed. A bound
+    /// that bit silently would look like the bug coming back.
+    pub scout_askers: usize,
 }
 
 impl DissectionDrops {
     /// `true` when anything at all was given up.
     pub fn any(&self) -> bool {
-        self.frames > 0 || self.stream_bytes > 0 || self.skipped > 0 || self.flows > 0
+        self.frames > 0
+            || self.stream_bytes > 0
+            || self.skipped > 0
+            || self.flows > 0
+            || self.scout_askers > 0
     }
 }
 
@@ -602,6 +735,12 @@ pub struct Dissection {
     /// Distinct from every other counter on this struct, all of which are what
     /// THIS reader did. See [`Self::capture_reported_drops`].
     capture_reported_drops: Option<u64>,
+    /// R311y608 — which endpoints have been observed SCOUTING, so the unicast
+    /// HELLOs answering them are read as answers and not as `Open`s.
+    ///
+    /// Dissection-wide and not per-flow, because the exchange spans two flows:
+    /// a SCOUT is keyed `(asker, group)` and its answer `(asker, responder)`.
+    scouts: ScoutingCorrelation,
 }
 
 impl Dissection {
@@ -716,7 +855,13 @@ impl Dissection {
             done.packet_index,
             checksums,
         ) {
-            Ok(Transport::Udp(d) | Transport::RawEth(d)) => self.push_datagram(d, ts_millis),
+            // R311y608 — `Udp` unconditionally, and it is not a shortcut:
+            // `transport_from_ip` answers only `Tcp` or `Udp` (`link.rs:536`),
+            // because a raweth frame is recognised BEFORE the IP walk and never
+            // has an IP header to be fragmented.
+            Ok(Transport::Udp(d) | Transport::RawEth(d)) => {
+                self.push_datagram(d, ts_millis, DatagramLink::Udp)
+            }
             Ok(Transport::Tcp(s)) => self.push_segment(s, ts_millis),
             // A reassembled datagram cannot be either of these: vsock never
             // reaches the IP path, and a fragment of a fragment is not a shape
@@ -764,6 +909,37 @@ impl Dissection {
     /// the format has nowhere to put the figure.
     pub fn capture_reported_drops(&self) -> Option<u64> {
         self.capture_reported_drops
+    }
+
+    /// R311y607/y608 — which of zenoh's two message namespaces this datagram
+    /// belongs to: `Some(mid)` for the scouting one, `None` for the transport
+    /// one.
+    ///
+    /// Returns the MID rather than a bool so the caller can tell a question
+    /// from an answer without re-masking the header — the SCOUT is what has to
+    /// be remembered, and only it.
+    ///
+    /// Two sufficient conditions, and neither subsumes the other:
+    ///
+    /// 1. A MULTICAST destination (R311y607). A multicast transport has no
+    ///    handshake at all, so `0x01` / `0x02` there cannot be Init / Open.
+    /// 2. A HELLO addressed to an endpoint this capture saw SCOUT (R311y608).
+    ///    The answer travels back unicast, so rule 1 is blind to it, and
+    ///    nothing in its bytes distinguishes it from an `Open`.
+    ///
+    /// Everything else is transport, INCLUDING a `0x02` toward an endpoint
+    /// that never asked. That fallback is the load-bearing half: it is the
+    /// second message of every `udp/...` handshake, and a rule that claimed it
+    /// would be the same misread pointed the other way.
+    fn datagram_namespace(&self, d: &link::Datagram) -> Option<u8> {
+        let mid = scouting_mid(d)?;
+        if d.destination().is_ip_multicast() {
+            return Some(mid);
+        }
+        if mid == wz_session_core::wire_const::S_MID_HELLO && self.scouts.asked(&d.destination()) {
+            return Some(mid);
+        }
+        None
     }
 
     /// Keep [`Self::skipped`] inside its bound, counting what that costs.
@@ -862,8 +1038,17 @@ impl Dissection {
             // That is the same contract UDP carries, so the same ingestion is
             // correct — had it batched, `next_datagram` would have reported
             // the first message and dropped the rest.
-            Ok(Transport::Udp(d) | Transport::RawEth(d)) => {
-                self.push_datagram(d, ts_millis);
+            // R311y608 — and the two arms are told apart HERE, because this is
+            // the last place that knows which one it was. A raweth link has no
+            // handshake whatever its destination MAC says (see
+            // [`link_handshake`]), and its `Endpoint` is a MAC that no address
+            // rule downstream can read.
+            Ok(Transport::Udp(d)) => {
+                self.push_datagram(d, ts_millis, DatagramLink::Udp);
+                return;
+            }
+            Ok(Transport::RawEth(d)) => {
+                self.push_datagram(d, ts_millis, DatagramLink::RawEth);
                 return;
             }
             // R311y603 — a vsock record is a piece of a BYTE STREAM, so it goes
@@ -1086,11 +1271,16 @@ impl Dissection {
     /// the spot.
     ///
     /// R311y607 — "one wire message" is now "one wire message IN ONE OF TWO
-    /// NAMESPACES"; [`is_scouting_datagram`] is what decides which.
+    /// NAMESPACES"; [`Dissection::datagram_namespace`] is what decides which.
+    ///
+    /// R311y608 — and `link` says which KIND of datagram link carried it, a
+    /// fact that exists only above this call: both kinds arrive as a
+    /// [`link::Datagram`], and a raweth one's endpoints are MACs that no
+    /// address rule can read.
     ///
     /// No buffering and no reassembly, because there is nothing to reassemble
     /// — which is exactly why this is four lines and the TCP path is not.
-    fn push_datagram(&mut self, d: link::Datagram, ts_millis: Option<u64>) {
+    fn push_datagram(&mut self, d: link::Datagram, ts_millis: Option<u64>, link: DatagramLink) {
         // Without `reassembly` there is no chain to expire and so nothing to
         // advance a clock FOR. Named here rather than silenced with an
         // `#[allow]`, because the reason is the feature and not the lint.
@@ -1112,13 +1302,25 @@ impl Dissection {
         } else {
             Direction::B
         };
-        let scouting = is_scouting_datagram(&d);
+        // Decided BEFORE the flow is borrowed, and against `self`, because the
+        // answer depends on an exchange that spans two DIFFERENT flows: the
+        // SCOUT's key is (asker, group) and the HELLO's is (asker, responder).
+        let scouting = self.datagram_namespace(&d);
+        if scouting == Some(wz_session_core::wire_const::S_MID_SCOUT) {
+            // Recorded on the ROUTING decision, not on a successful decode: a
+            // build with `codec-hello` and without `codec-scout` still has to
+            // recognise the answers, and it cannot name the question.
+            let evicted = self
+                .scouts
+                .observed_scout_from(d.source(), self.limits.max_scout_askers);
+            self.drops.scout_askers += evicted;
+        }
         let flow = &mut self.datagram_flows[idx];
         #[cfg(feature = "reassembly")]
         if let Some(ms) = ts_millis {
             self.expired_chains += flow.session.observe_at(ms);
         }
-        if scouting {
+        if scouting.is_some() {
             // Decoded WITHOUT touching the session: a scouting message is not
             // part of any session, so folding it would let a pre-session
             // datagram move state that only a peer's handshake may move.
@@ -1129,9 +1331,12 @@ impl Dissection {
             });
             return;
         }
-        let frame = flow
-            .session
-            .next_datagram(direction, &d.payload, d.packet_index);
+        let frame = flow.session.next_datagram_on(
+            direction,
+            &d.payload,
+            d.packet_index,
+            link.handshake(&d),
+        );
         flow.frames.push(frame);
         if let Some(cap) = self.limits.frames_per_flow {
             if flow.frames.len() > cap {
@@ -1404,17 +1609,348 @@ mod datagram_tests {
         assert_eq!(flow.scouting[0].packet_index, 0);
     }
 
+    /// R311y608 — THE OTHER HALF OF THE EXCHANGE, and it does not come back on
+    /// the group it was asked on.
+    ///
+    /// zenoh's scout responder answers from a UNICAST socket straight to the
+    /// asker — `socket.send_to(wbuf.as_slice(), peer)` where `peer` is the
+    /// address the SCOUT arrived FROM, on the socket
+    /// `get_best_match(&peer.ip(), ucast_sockets)` picks
+    /// (`zenoh/src/net/runtime/orchestrator.rs:1167-1180`). So a HELLO's
+    /// destination is unicast, R311y607's destination-is-multicast half is
+    /// false for it, and `S_MID_HELLO` is `0x02` — the same byte as
+    /// `T_MID_OPEN`. Every HELLO in every capture came back a confident `Open`:
+    /// the reply half of scouting was misread exactly the way the request half
+    /// was before R311y607.
+    ///
+    /// What separates them is the EXCHANGE, which is the only thing that can:
+    /// the reply is addressed to the endpoint the request was sent from, and
+    /// pico reads it on the very socket it scouted from
+    /// (`_z_link_recv_zbuf(&zl, ..)` on the link `__z_scout_loop` opened,
+    /// `src/session/scout.c:54-68`). A passive observer has no socket, so it
+    /// keeps the correlation instead.
+    #[test]
+    fn the_hello_answering_a_scout_comes_back_unicast_and_is_still_a_hello() {
+        let asker = [192, 168, 1, 5];
+        let asker_port = 43210;
+        let scout = udp_packet(asker, asker_port, SCOUT_GROUP, 7446, &scout_message());
+        // The responder speaks from its own unicast locator port, to the exact
+        // (address, port) the scout came from.
+        let hello = udp_packet(
+            [192, 168, 1, 9],
+            7447,
+            asker,
+            asker_port,
+            &hello_with_locators(),
+        );
+
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &scout);
+        d.push_packet(LINKTYPE_ETHERNET, 1, &hello);
+
+        // Two flows: the scout's is toward the group, the hello's is between
+        // the two hosts. They are different keys and that is the point — a
+        // per-flow rule could never have connected them.
+        assert_eq!(d.datagram_flows().len(), 2, "{:?}", d.datagram_flows());
+        let reply = d
+            .datagram_flows()
+            .iter()
+            .find(|f| f.flow.high.addr() == [192, 168, 1, 9])
+            .expect("the reply flow, the one with no multicast endpoint");
+        assert!(
+            reply.frames.is_empty(),
+            "a HELLO must not enter the transport list: {:?}",
+            reply.frames
+        );
+        assert_eq!(reply.scouting.len(), 1, "the HELLO must be reported");
+        match &reply.scouting[0].frame {
+            Ok(ScoutingFrame::Hello { body, .. }) => {
+                assert_eq!(body.version, 0x09);
+                assert_eq!(body.whatami(), 0x01, "the whatami must survive");
+                let locators = body.locators.as_ref().expect("the L flag was set");
+                assert_eq!(locators.len(), 1);
+                assert_eq!(
+                    locators[0].locator.as_str(),
+                    PEER_LOCATOR,
+                    "the locator list is the whole point of a HELLO — it is how \
+                     the asker learns where to connect"
+                );
+            }
+            other => panic!("the unicast HELLO decoded as {other:?}"),
+        }
+
+        // R311y608 (closing the R311y607 carry): the scouting route does not
+        // merely produce a different VALUE, it must not move session state.
+        // Asserted on the observer rather than on the frame count, because a
+        // fold spliced into the scouting branch would leave both lists exactly
+        // as they are here and change only this.
+        assert!(
+            matches!(
+                reply.session.context().phase,
+                wz_session_core::passive::SessionPhase::Unseen
+            ),
+            "a scouting message has no session to advance: {:?}",
+            reply.session.context()
+        );
+    }
+
+    /// THE MISREAD, stated as an assertion that PASSES ON THE BROKEN BUILD.
+    ///
+    /// A real HELLO sets `FLAG_S_HELLO_L` for its locator list, and that bit is
+    /// `0x20` — the same bit `FLAG_T_OPEN_A` is (`wz-codecs/src/lib.rs:554`
+    /// and `:701`). So the header zenoh puts on the wire, read in the transport
+    /// namespace, is not a malformed anything: it is a well-formed OpenAck,
+    /// whose `lease` is the HELLO's version byte. Before R311y608 that is what
+    /// every answered scout produced, and this arm is what says the ambiguity
+    /// is real rather than asserted.
+    #[test]
+    fn the_same_hello_bytes_read_as_transport_are_a_confident_open_ack() {
+        let misread = wz_session_core::inbound::parse_inbound(&hello_with_locators())
+            .expect("this is the defect: it does not fail, it misreads");
+        assert!(
+            matches!(
+                misread,
+                wz_session_core::inbound::InboundFrame::Open { is_ack: true, .. }
+            ),
+            "a HELLO read in the transport namespace comes back an OpenAck, not \
+             an error: {misread:?}"
+        );
+    }
+
+    /// The NEGATIVE arm on the correlation: the SAME unicast HELLO bytes, with
+    /// no SCOUT ever observed from that endpoint, stay on the transport side.
+    ///
+    /// This is what stops the fix from becoming the previous defect pointing
+    /// the other way. `0x02` toward a unicast peer is `T_MID_OPEN` — the second
+    /// message of every `udp/...` handshake — and a rule that read the MID
+    /// alone would swallow all of them while the positive test above still
+    /// passed.
+    ///
+    /// It also states the residual honestly: with no exchange in the capture
+    /// there is no evidence, and an observer that guessed "scouting" here would
+    /// be asserting something the bytes do not carry.
+    #[test]
+    fn an_unsolicited_unicast_0x02_is_still_an_open() {
+        let hello = udp_packet(
+            [192, 168, 1, 9],
+            7447,
+            [192, 168, 1, 5],
+            43210,
+            &hello_with_locators(),
+        );
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &hello);
+
+        let flow = &d.datagram_flows()[0];
+        assert!(
+            flow.scouting.is_empty(),
+            "with no SCOUT observed there is no evidence of an exchange"
+        );
+        assert_eq!(flow.frames.len(), 1, "it stays on the transport side");
+        assert!(
+            matches!(
+                flow.frames[0].frame,
+                Ok(wz_session_core::inbound::InboundFrame::Open { .. })
+            ),
+            "an unsolicited 0x02 is an Open: {:?}",
+            flow.frames[0].frame
+        );
+    }
+
+    /// The correlation is keyed on the ENDPOINT that asked, not on the address
+    /// — two processes on one host scout from different ports, and a HELLO
+    /// answering one of them is not evidence about the other.
+    #[test]
+    fn a_hello_to_a_port_that_never_scouted_is_not_an_answer() {
+        let asker = [192, 168, 1, 5];
+        let scout = udp_packet(asker, 43210, SCOUT_GROUP, 7446, &scout_message());
+        // Same host, a DIFFERENT port: an ordinary udp session's Open.
+        let hello = udp_packet([192, 168, 1, 9], 7447, asker, 51000, &hello_with_locators());
+
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &scout);
+        d.push_packet(LINKTYPE_ETHERNET, 1, &hello);
+
+        let reply = d
+            .datagram_flows()
+            .iter()
+            .find(|f| f.flow.high.addr() == [192, 168, 1, 9])
+            .expect("the reply flow");
+        assert!(
+            reply.scouting.is_empty(),
+            "the scout came from :43210 and this is addressed to :51000"
+        );
+        assert_eq!(reply.frames.len(), 1);
+    }
+
+    /// The bound on remembered askers BITES and SAYS SO — and what it costs is
+    /// not a lost record but a changed READING: the forgotten asker's next
+    /// answer decodes as an `Open` again.
+    #[test]
+    fn forgetting_an_asker_is_counted_because_it_changes_a_later_reading() {
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_scout_askers: Some(1),
+            ..DissectionLimits::default()
+        });
+        let first = [192, 168, 1, 5];
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet(first, 43210, SCOUT_GROUP, 7446, &scout_message()),
+        );
+        // A second asker evicts the first.
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &udp_packet([192, 168, 1, 6], 43211, SCOUT_GROUP, 7446, &scout_message()),
+        );
+        assert_eq!(d.drops().scout_askers, 1, "the bound must not be silent");
+        assert!(d.drops().any());
+
+        // The answer to the FORGOTTEN asker is back to being an Open.
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            2,
+            &udp_packet([192, 168, 1, 9], 7447, first, 43210, &hello_with_locators()),
+        );
+        let reply = d
+            .datagram_flows()
+            .iter()
+            .find(|f| f.flow.high.addr() == [192, 168, 1, 9])
+            .expect("the reply flow");
+        assert!(
+            reply.scouting.is_empty(),
+            "this is the COST of the bound, and the counter above is what \
+             separates it from the defect coming back"
+        );
+    }
+
+    /// An Init body the transport decoder accepts, on the wire.
+    fn init_message() -> Vec<u8> {
+        let mut wire = alloc::vec![wz_session_core::wire_const::T_MID_INIT, 0x09, 0x38];
+        wire.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        wire
+    }
+
+    /// Ethernet carrying pico's raweth framing, built with `raweth_link`'s OWN
+    /// framer so the fixture cannot agree with a hand-laid reading.
+    ///
+    /// The destination MAC is pico's DEFAULT mapping,
+    /// `aa:bb:cc:dd:ee:ff` (`vendor/zenoh-pico/src/transport/raweth/link.c:66`)
+    /// — deliberately, because its I/G bit is CLEAR. Any rule that judged this
+    /// link by the address would call it unicast.
+    fn raweth_packet(payload: &[u8]) -> Vec<u8> {
+        use wz_session_core::raweth_link::{frame, RawEthHeader, DEFAULT_ETHTYPE};
+        let h = RawEthHeader::new(
+            [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+            [0x30, 0x03, 0xC8, 0x37, 0x25, 0xA1],
+            DEFAULT_ETHTYPE,
+            payload.len() as u16,
+        );
+        frame(&h, payload).expect("raweth frame")
+    }
+
+    /// R311y608 — an INIT on a raweth link is REPORTED and NOT FOLDED.
+    ///
+    /// pico gives every raweth link `Z_LINK_CAP_TRANSPORT_RAWETH`
+    /// (`raweth/link.c:476`) and routes that capability into
+    /// `_z_new_transport_multicast` (`multicast/transport.c:42-45`), whose
+    /// receive path takes an INIT and does nothing with it (`multicast/rx.c`
+    /// `:493-504`). So no participant on this link has a session from these
+    /// bytes — and an observer that folded them would hold a peer's zid, lease
+    /// and negotiated capabilities for a session that does not exist, and would
+    /// judge every later frame against that fiction.
+    ///
+    /// The discriminator is the LINK TYPE and it has to be: the destination MAC
+    /// here is pico's own default, whose I/G bit is clear.
+    #[test]
+    fn an_init_on_a_raweth_link_is_reported_but_never_folded() {
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &raweth_packet(&init_message()));
+
+        let flow = &d.datagram_flows()[0];
+        assert_eq!(flow.frames.len(), 1, "it must still be SHOWN");
+        assert!(
+            matches!(
+                flow.frames[0].frame,
+                Ok(wz_session_core::inbound::InboundFrame::Init { .. })
+            ),
+            "the bytes decode — that was never the problem: {:?}",
+            flow.frames[0].frame
+        );
+        assert!(
+            flow.frames[0].inadmissible_on_link,
+            "and the report must say the link cannot carry it"
+        );
+        assert!(
+            matches!(
+                flow.session.context().phase,
+                wz_session_core::passive::SessionPhase::Unseen
+            ),
+            "no session may come into existence from a message pico discards: \
+             {:?}",
+            flow.session.context()
+        );
+    }
+
+    /// The NEGATIVE arm: everything raweth actually carries still folds. A
+    /// guard that suppressed the whole link would be a worse defect than the
+    /// one it replaced — raweth's traffic IS the multicast transport's
+    /// (JOIN, FRAME, KEEP_ALIVE), and pico handles all of it.
+    #[test]
+    fn a_join_on_a_raweth_link_is_admissible() {
+        let join = wz_codecs::join::Join {
+            version: 0x09,
+            cbyte: (3 << 4) | 0x01,
+            zid: &[1, 2, 3, 4],
+            sn_res: None,
+            batch_size: None,
+            lease: 10_000,
+            next_sn_reliable: 7,
+            next_sn_best_effort: 9,
+        };
+        let mut wire = alloc::vec![wz_session_core::wire_const::T_MID_JOIN];
+        wire.extend_from_slice(&join.encode_to_vec(0));
+
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &raweth_packet(&wire));
+
+        let flow = &d.datagram_flows()[0];
+        assert_eq!(flow.frames.len(), 1);
+        assert!(
+            !flow.frames[0].inadmissible_on_link,
+            "a JOIN is exactly what this link exists to carry: {:?}",
+            flow.frames[0].frame
+        );
+    }
+
+    /// The same INIT over UNICAST UDP still establishes a session — the guard
+    /// must key on the link and not on the message.
+    #[test]
+    fn the_same_init_over_unicast_udp_still_folds() {
+        let pkt = udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &init_message());
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
+
+        let flow = &d.datagram_flows()[0];
+        assert!(!flow.frames[0].inadmissible_on_link);
+        assert!(
+            !matches!(
+                flow.session.context().phase,
+                wz_session_core::passive::SessionPhase::Unseen
+            ),
+            "a unicast Init DOES open a session: {:?}",
+            flow.session.context()
+        );
+    }
+
     /// The NEGATIVE arm on the MID half: the SAME byte `0x01` toward a
     /// UNICAST peer is an ordinary Init and must stay one. A discriminator
     /// that keyed on the MID alone would swallow the start of every `udp/...`
     /// session, and the positive test above would still pass.
     #[test]
     fn a_unicast_init_is_still_an_init() {
-        // An Init body the transport decoder accepts: version, then the
-        // whatami/zid carrier byte, then the zid.
-        let mut wire = alloc::vec![wz_session_core::wire_const::T_MID_INIT, 0x09, 0x38];
-        wire.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
-        let pkt = udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire);
+        let pkt = udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &init_message());
         let mut d = Dissection::new();
         d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
 
@@ -1734,6 +2270,42 @@ mod datagram_tests {
     }
 
     /// A HELLO carrying no locator list, built by the HELLO codec.
+    /// The locator a HELLO in these tests advertises.
+    const PEER_LOCATOR: &str = "udp/192.168.1.9:7447";
+
+    /// R311y608 — the HELLO zenoh actually puts on the wire: WITH its locator
+    /// list, which the responder always fills (`locators: self.get_locators()`,
+    /// `zenoh/src/net/runtime/orchestrator.rs:1164`).
+    ///
+    /// The list is what makes this the realistic shape and also what makes the
+    /// misread confident: carrying it sets `FLAG_S_HELLO_L`, which is `0x20`,
+    /// which in the transport namespace is `FLAG_T_OPEN_A`. The bare-HELLO
+    /// fixture next to this one has no flags at all and is the shape a
+    /// locator-less answer takes.
+    fn hello_with_locators() -> Vec<u8> {
+        use wz_session_core::codec_owned::{owned_bytes, owned_string};
+        let zid = [0x55u8, 0x66, 0x77, 0x88];
+        let owned: wz_codecs::hello::HelloOwned = wz_codecs::hello::HelloOwned {
+            version: 0x09,
+            cbyte: (((zid.len() as u8) - 1) << 4) | 0x01,
+            zid: owned_bytes(&zid).expect("zid"),
+            num_locators: Some(1),
+            locators: Some(alloc::vec![wz_codecs::locator::LocatorOwned {
+                locator_len: PEER_LOCATOR.len() as u64,
+                locator: owned_string(PEER_LOCATOR).expect("locator"),
+            }]),
+        };
+        let body = owned
+            .try_as_borrowed()
+            .expect("borrowed projection")
+            .encode_to_vec(1);
+        let mut wire = alloc::vec![
+            wz_session_core::wire_const::S_MID_HELLO | wz_session_core::wire_const::FLAG_S_HELLO_L
+        ];
+        wire.extend_from_slice(&body);
+        wire
+    }
+
     fn hello_message() -> Vec<u8> {
         let hello = wz_codecs::hello::Hello {
             version: 0x09,
