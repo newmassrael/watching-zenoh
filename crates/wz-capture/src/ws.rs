@@ -47,6 +47,7 @@
 //! they are dropped — but [`WsDeframer::skipped_frames`] counts them, because
 //! this module exists to end a silent hole and must not open a smaller one.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 /// A continuation of the previous frame's message.
@@ -451,8 +452,15 @@ pub struct WsDeframer {
     /// Nothing is consumed while it is set, so `buf[0]` stays the byte at
     /// `base` and the scan cursor below survives across calls.
     desync: Option<WsDesyncState>,
-    /// R311y612 — the recovery to hand to the next message decoded.
-    pending_resync: Option<WsResync>,
+    /// R311y612 — the recoveries to hand to the next message decoded.
+    ///
+    /// R311y613 (§4.5) made it a QUEUE. Once a structural desynchronisation
+    /// recovers WITHIN a single [`Self::next_message`] call, a second one can
+    /// follow before that call returns a message, and a single slot would let
+    /// the later recovery overwrite the earlier — the flow would report one
+    /// recovery where two happened, which is the accounting error the split
+    /// between `desyncs` and `recoveries` exists to make impossible.
+    pending_resync: VecDeque<WsResync>,
     /// R311y612 — cumulative, for a reader that wants this direction's health
     /// rather than one message's story.
     accounting: WsResyncAccounting,
@@ -473,7 +481,7 @@ impl Default for WsDeframer {
             partial: Vec::new(),
             partial_offset: None,
             desync: None,
-            pending_resync: None,
+            pending_resync: VecDeque::new(),
             accounting: WsResyncAccounting::default(),
             chain_depth: WS_CHAIN_DEPTH,
             skipped_frames: 0,
@@ -583,13 +591,17 @@ impl WsDeframer {
         self.desync.map(|d| d.reason)
     }
 
-    /// R311y612 — take the recovery owed to the message just returned.
+    /// R311y612 — take the oldest recovery owed to the message just returned.
     ///
     /// Drained by the caller immediately after [`Self::next_message`], so a
     /// recovery is attributed to the first message decoded after it and to no
     /// other.
+    ///
+    /// R311y613 (§4.5) — drain it in a `while let`, not an `if let`: one call
+    /// to [`Self::next_message`] can now recover more than once before it
+    /// returns a message, and each recovery is a separate record.
     pub fn take_resync(&mut self) -> Option<WsResync> {
-        self.pending_resync.take()
+        self.pending_resync.pop_front()
     }
 
     /// R311y612 — this direction's cumulative framing health.
@@ -689,19 +701,59 @@ impl WsDeframer {
 
     /// The next complete zenoh-carrying message, with the stream offset its
     /// first frame began at.
+    ///
+    /// # R311y613 (§4.5) — why a desynchronisation does not return here
+    ///
+    /// R311y612 made a desynchronised direction recoverable but left every
+    /// STRUCTURAL detection returning `None` on the spot, and the caller's
+    /// shape is `while let Some(msg) = next_message()`
+    /// (`Dissection::feed_websocket`). So a reserved opcode or a broken message
+    /// boundary ENDED THE CALLER'S LOOP: every remaining byte of that push went
+    /// undeframed, and the recovery only ran if more bytes happened to arrive
+    /// later in their own push. On the ordinary shape — one TCP segment
+    /// carrying the damage and the frames after it — the flow reported nothing
+    /// after the damage, which is precisely the silence §4.2 closed for the
+    /// ANNOUNCED half and left open for this one.
+    ///
+    /// Measured, not reasoned: `every_structural_desync_recovers_and_not_only_
+    /// the_announced_one` red with `0` of 6 messages recovered on all three
+    /// structural reasons before this loop existed.
+    ///
+    /// The scan therefore runs at the TOP of a loop rather than once on entry,
+    /// and a structural detection continues into it. `try_resync` returning
+    /// `None` is still the exit — that is "no boundary confirmed yet", the one
+    /// honest reason to hand nothing back.
     pub fn next_message(&mut self) -> Option<(usize, Vec<u8>)> {
-        // R311y612 — a desynchronised direction is no longer terminal: the
-        // detecting call recorded it, and every later one scans.
-        if self.desync.is_some() {
-            self.pending_resync = Some(self.try_resync()?);
+        loop {
+            // R311y612 — a desynchronised direction is no longer terminal: the
+            // detecting call recorded it, and every later one scans.
+            if self.desync.is_some() {
+                let resync = self.try_resync()?;
+                self.pending_resync.push_back(resync);
+            }
+            if !self.preamble_done && !self.step_over_preamble() {
+                return None;
+            }
+            if let Some(msg) = self.deframe_until_desync() {
+                return msg;
+            }
+            // Desynchronised inside the frame walk. Round the loop: the scan at
+            // the top is what decides whether this reader comes back.
         }
-        if !self.preamble_done && !self.step_over_preamble() {
-            return None;
-        }
+    }
+
+    /// Deframe until a message is ready, the buffer runs out, or the framing
+    /// stops making sense.
+    ///
+    /// `None` means "desynchronised — the caller should scan and retry", which
+    /// is a different answer from `Some(None)` ("nothing more in the buffer")
+    /// and is exactly the distinction [`Self::next_message`] lost before
+    /// R311y613.
+    fn deframe_until_desync(&mut self) -> Option<Option<(usize, Vec<u8>)>> {
         loop {
             let frame_start = self.base;
             let frame = match self.take_frame() {
-                Frame::Need => return None,
+                Frame::Need => return Some(None),
                 Frame::Bad(reason) => {
                     self.desynchronise(reason);
                     return None;
@@ -726,7 +778,7 @@ impl WsDeframer {
                     self.partial = frame.payload;
                     self.partial_offset = Some(frame_start);
                     if frame.fin {
-                        return self.take_partial();
+                        return Some(self.take_partial());
                     }
                 }
                 OP_CONTINUATION => {
@@ -740,7 +792,7 @@ impl WsDeframer {
                     }
                     self.partial.extend_from_slice(&frame.payload);
                     if frame.fin {
-                        return self.take_partial();
+                        return Some(self.take_partial());
                     }
                 }
                 opcode => {
@@ -886,11 +938,14 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Build one RFC6455 frame the way a real endpoint would.
-    fn frame(fin: bool, opcode: u8, payload: &[u8], mask: Option<[u8; 4]>) -> Vec<u8> {
+    /// R311y613 — `pub(crate)` so the FLOW-level tests build their damage with
+    /// the same helper the deframer's own tests do. A second frame builder is
+    /// how two fixtures come to disagree about the wire.
+    pub(crate) fn frame(fin: bool, opcode: u8, payload: &[u8], mask: Option<[u8; 4]>) -> Vec<u8> {
         let mut out = Vec::new();
         out.push(if fin { 0x80 | opcode } else { opcode });
         let masked_bit = if mask.is_some() { 0x80u8 } else { 0 };
@@ -1210,6 +1265,161 @@ mod tests {
                 "the two sides of the hole were joined into a message"
             );
         }
+    }
+
+    /// R311y613 (§4.5) — THE STRUCTURAL DESYNCS RECOVER, not only the announced
+    /// one.
+    ///
+    /// R311y612 built one recovery path and reached it from one direction. Every
+    /// [`WsDesyncReason`] routes through the same `desynchronise` → `try_resync`
+    /// pair, so the CODE was shared from the start — but a shared seam is a
+    /// claim until something drives both ends of it, and the three STRUCTURAL
+    /// reasons (a reserved opcode, a broken message boundary, an unusable
+    /// header) had only their DETECTION proven. Whether the reader then came
+    /// back was untested, and "it is the same function" is exactly the argument
+    /// that has been wrong here before.
+    ///
+    /// Each arm is a table row rather than three near-copies, and each carries
+    /// its own `chain_depth = 0` control: without it a green here would be
+    /// consistent with a deframer that never desynchronised on that input at
+    /// all, and the test would be measuring nothing.
+    #[test]
+    fn every_structural_desync_recovers_and_not_only_the_announced_one() {
+        // Six good frames after the damage: more than `WS_CHAIN_DEPTH`, so the
+        // scan has a chain to confirm AND messages left over to hand up.
+        let mut tail = Vec::new();
+        for i in 0..6u8 {
+            tail.extend_from_slice(&zenoh_frame(i));
+        }
+
+        // Each row: what to push before the tail, and the reason it must be
+        // reported as. The damage is built by the same `frame` helper the good
+        // frames are, so a row cannot be wrong about its own wire shape.
+        let rows: Vec<(&str, Vec<u8>, WsDesyncReason)> = alloc::vec![
+            (
+                // Opcode 0x3 is reserved: not a protocol this reader knows.
+                "reserved opcode",
+                frame(true, 0x3, b"\x01reserved", None),
+                WsDesyncReason::ReservedOpcode { opcode: 0x3 },
+            ),
+            (
+                // A CONTINUATION with no message open — the frame boundary is
+                // not where this reader believes it is.
+                "message boundary",
+                frame(true, OP_CONTINUATION, b"\x01orphan", None),
+                WsDesyncReason::MessageBoundary,
+            ),
+            (
+                // A non-final BINARY opens a message; a second BINARY starting
+                // while it is unfinished is the other half of the same fault.
+                "interrupted message",
+                {
+                    let mut v = frame(false, OP_BINARY, b"\x01first", None);
+                    v.extend_from_slice(&frame(true, OP_BINARY, b"\x01second", None));
+                    v
+                },
+                WsDesyncReason::MessageBoundary,
+            ),
+        ];
+
+        for (name, damage, reason) in rows {
+            // THE CONTROL. `chain_depth = 0` is the pre-R311y612 reader; if it
+            // produces messages after the damage, this row's damage never
+            // desynchronised anything and the live arm below proves nothing.
+            let mut dead = WsDeframer::new().with_chain_depth(0);
+            dead.push(UPGRADE);
+            dead.push(&damage);
+            dead.push(&tail);
+            let mut before_recovery = 0usize;
+            while dead.next_message().is_some() {
+                before_recovery += 1;
+            }
+            assert!(
+                dead.desynchronised(),
+                "{name}: the fixture did not desynchronise the reader at all"
+            );
+            assert_eq!(
+                dead.desync_reason(),
+                Some(reason),
+                "{name}: desynchronised for a different reason than the row claims"
+            );
+
+            let mut d = WsDeframer::new();
+            d.push(UPGRADE);
+            d.push(&damage);
+            d.push(&tail);
+            let mut recovered = 0usize;
+            while d.next_message().is_some() {
+                recovered += 1;
+            }
+            assert_eq!(
+                recovered,
+                before_recovery + 6,
+                "{name}: the six frames after the damage did not come back"
+            );
+            assert!(
+                !d.desynchronised(),
+                "{name}: still desynchronised at the end"
+            );
+
+            let acc = d.accounting();
+            assert_eq!(acc.desyncs, 1, "{name}: expected exactly one desync");
+            assert_eq!(acc.recoveries, 1, "{name}: the recovery was not counted");
+            // A STRUCTURAL desync skips nothing, and that is the honest number
+            // rather than a missing one: the damaged frame is CONSUMED by
+            // `take_frame` and only then judged, so `base` is already past it
+            // when the desynchronisation is recorded and the scan confirms the
+            // very next boundary. The announced (`CaptureGap`) arm is the
+            // opposite shape — it drops the buffered near side and reports what
+            // it dropped — which is why the two cannot share one expectation.
+            assert_eq!(
+                acc.skipped_bytes, 0,
+                "{name}: a structural recovery resumed somewhere other than the \
+                 boundary right after the damage"
+            );
+        }
+    }
+
+    /// R311y613 (§4.5) — and the recovery is REPORTED with the reason that
+    /// caused it, so a reader is never told the flow was clean.
+    ///
+    /// Separate from the sweep above because it asserts about the
+    /// [`WsResync`] RECORD rather than about message counts, and folding the
+    /// two would let a missing record hide behind a right count.
+    #[test]
+    fn a_structural_recovery_names_the_reason_it_recovered_from() {
+        let mut tail = Vec::new();
+        for i in 0..6u8 {
+            tail.extend_from_slice(&zenoh_frame(i));
+        }
+        let damage = frame(true, 0x3, b"\x01reserved", None);
+
+        let mut d = WsDeframer::new();
+        d.push(UPGRADE);
+        d.push(&damage);
+        d.push(&tail);
+
+        let (offset, first) = d.next_message().expect("the reader comes back");
+        let resync = d.take_resync().expect("and says so");
+        assert_eq!(
+            resync.reason,
+            WsDesyncReason::ReservedOpcode { opcode: 0x3 }
+        );
+        assert_eq!(
+            resync.resumed_offset, offset,
+            "the record names the offset the first message after it starts at"
+        );
+        assert_eq!(
+            resync.skipped,
+            offset - resync.desync_offset,
+            "skipped is measured off the desynchronisation point, not asserted"
+        );
+        assert_eq!(resync.confirmed, WS_CHAIN_DEPTH);
+        assert_eq!(
+            first[0],
+            wz_session_core::wire_const::T_MID_KEEP_ALIVE,
+            "the boundary resumed at is a real one"
+        );
     }
 
     /// R311y612 (§4.1) — a flow classified as WebSocket with its HTTP opening

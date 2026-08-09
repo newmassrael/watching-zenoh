@@ -5310,7 +5310,14 @@ layer_c1bt_capture_no_default_features() {
         ws_flow_tests::a_hole_in_the_opening_is_decided_on_the_far_side_rather_than_guessed \
         ws_flow_tests::the_other_directions_opening_settles_a_hole_in_this_one \
         ws_flow_tests::every_mid_on_a_websocket_link_is_named_rather_than_unknown \
-        datagram_tests::announcing_the_hole_stops_the_reader_swallowing_the_frames_after_it
+        datagram_tests::announcing_the_hole_stops_the_reader_swallowing_the_frames_after_it \
+        datagram_tests::every_network_mid_inside_a_frame_is_named_rather_than_unknown \
+        datagram_tests::every_network_mid_inside_a_frame_is_named_over_a_stream_too \
+        ws_flow_tests::every_network_mid_inside_a_frame_is_named_over_websocket_too \
+        agg::tests::the_mapping_bit_picks_the_space_and_the_observer_holds_both \
+        agg::tests::an_unbound_alias_is_reported_rather_than_guessed \
+        ws::tests::every_structural_desync_recovers_and_not_only_the_announced_one \
+        ws_flow_tests::a_structural_desync_mid_segment_does_not_end_the_flow
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the --no-default-features build"

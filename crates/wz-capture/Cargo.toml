@@ -66,18 +66,50 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     # assertion downstream not only held but held on a NAMED message.
     "codec-scout",
     "codec-hello",
+    # R311y613 — the NETWORK namespace: the pub/sub and query plane the capture
+    # front end exists to observe, and which it could not name AT ALL until this
+    # list said so. `codec-frame` gave it the envelope, and the envelope is what
+    # every census so far checked; the records INSIDE it are dispatched by a
+    # second, independent set of `#[cfg]` arms
+    # (`network_message::decode_one_record`) that had none of these.
+    #
+    # The failure was worse than silence, in the shape R311y607 named: an
+    # unfeatured MID does not merely go unnamed, it ABSORBS THE REST OF THE
+    # BATCH verbatim and halts the walk — so a single Push made every record
+    # behind it in the same frame invisible, while the transport census stayed
+    # green because the Frame around them was named perfectly.
+    #
+    # Measured, not argued: `every_network_mid_inside_a_frame_is_named_rather_
+    # than_unknown` red on `UnknownMid { mid: 29 }` (0x1D, PUSH) before this
+    # line existed.
+    "codec-push",
+    "codec-request",
+    "codec-response",
+    "codec-response-final",
+    "codec-declare",
 ] }
 
 # R311y605 — the JOIN test fixture is built by the CODEC's own encode rather
 # than by a hand-laid byte string, so a walker or a decode that disagrees with
 # the codec fails instead of agreeing with the fixture author's reading of the
-# layout. dev-only: nothing in the crate's own code reaches wz-codecs, which
-# stays reached through the session SSOT (`wz_session_core::wire_const`).
+# layout.
+#
+# R311y613 moved this from `[dev-dependencies]` to a real one. The note it used
+# to carry — "nothing in the crate's own code reaches wz-codecs" — stopped being
+# true with `agg`: the aggregation plane reads the keyexpr out of a decoded
+# `PushOwned` / `RequestOwned` / `ResponseOwned`, and those ARE `wz-codecs`
+# types in `NetworkMessage`'s public API. Reaching them through
+# `wz_session_core` was never available — it re-exports `wire_const` and
+# `WhatAmI`, not the codec modules — so the alternative to this line is not a
+# tidier import, it is a second copy of the wire layout.
+#
 # Features named explicitly rather than left to unification — a subset build
-# that happened not to unify `codec-join` on would otherwise fail here for a
-# reason that looks like the test's.
-[dev-dependencies]
-wz-codecs = { path = "../wz-codecs", default-features = false, features = [
+# that happened not to unify `codec-join` on would otherwise fail for a reason
+# that looks like the test's.
+[dependencies.wz-codecs]
+path = "../wz-codecs"
+default-features = false
+features = [
     "alloc",
     "codec-join",
     # R311y607 — the MID-census test builds one message per MID through that
@@ -91,4 +123,11 @@ wz-codecs = { path = "../wz-codecs", default-features = false, features = [
     # codec fails rather than agreeing with a hand-laid byte string.
     "codec-scout",
     "codec-hello",
-] }
+    # R311y613 — the NETWORK namespace, for `agg` and for the census that found
+    # it missing.
+    "codec-push",
+    "codec-request",
+    "codec-response",
+    "codec-response-final",
+    "codec-declare",
+]

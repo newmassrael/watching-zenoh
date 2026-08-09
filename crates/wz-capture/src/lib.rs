@@ -38,6 +38,11 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+/// R311y613 (§1.1f) — the first ANALYSIS plane over the decode: per-keyexpr
+/// throughput. Its own module because it is the first thing here that folds
+/// ACROSS messages rather than decoding one, and because keyexpr resolution
+/// needs both id spaces — something only an observer of both directions has.
+pub mod agg;
 /// R311y606 — IP fragment reassembly. Its own module rather than part of
 /// [`link`] because it holds STATE across packets and `link` is deliberately a
 /// pure decapsulator; the same division `passive`'s chain reassembly is under.
@@ -750,7 +755,11 @@ impl FlowDissection {
             // attributed to the message decoded right after it. A flow that
             // resynchronises twice in one push would otherwise report the
             // second recovery and lose the first.
-            if let Some(resync) = deframer.take_resync() {
+            //
+            // R311y613 (§4.5) — `while` and not `if`. A single `next_message`
+            // now recovers as many times as it has to before it can return a
+            // message, so one call can owe more than one record.
+            while let Some(resync) = deframer.take_resync() {
                 resyncs.push(resync);
             }
             ready.push(msg);
@@ -758,7 +767,7 @@ impl FlowDissection {
         // A scan that has not confirmed a boundary yet still HAPPENED, and a
         // recovery that lands with no message behind it in this push must not
         // be dropped on the floor.
-        if let Some(resync) = deframer.take_resync() {
+        while let Some(resync) = deframer.take_resync() {
             resyncs.push(resync);
         }
         for resync in resyncs {
@@ -1971,7 +1980,17 @@ mod datagram_tests {
 
     /// Ethernet + IPv4 + UDP carrying `payload`, padded to the 60-byte
     /// minimum a real NIC emits.
-    fn udp_packet(src: [u8; 4], sport: u16, dst: [u8; 4], dport: u16, payload: &[u8]) -> Vec<u8> {
+    ///
+    /// R311y613 — `pub(crate)` so `agg`'s tests drive the SAME entry point
+    /// rather than a second packet builder of their own. A plane whose tests
+    /// hand-feed frames is testing its fold and not its wiring.
+    pub(crate) fn udp_packet(
+        src: [u8; 4],
+        sport: u16,
+        dst: [u8; 4],
+        dport: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
         let mut udp = Vec::new();
         udp.extend_from_slice(&sport.to_be_bytes());
         udp.extend_from_slice(&dport.to_be_bytes());
@@ -1996,7 +2015,7 @@ mod datagram_tests {
     }
 
     /// Ethernet + IPv4 + TCP carrying `payload` at `seq`, from low to high.
-    fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
+    pub(crate) fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
         let mut tcp = Vec::new();
         tcp.extend_from_slice(&1111u16.to_be_bytes()); // sport (low)
         tcp.extend_from_slice(&7447u16.to_be_bytes()); // dport
@@ -3163,6 +3182,199 @@ mod datagram_tests {
         }
     }
 
+    /// R311y613 (§1.4b) — the NETWORK namespace's census list, built by each
+    /// record's own codec exactly as [`transport_census`] is.
+    ///
+    /// The transport census asks whether the FRAME is named. It cannot ask
+    /// anything about what the frame CARRIES, because a Frame whose batch
+    /// decoded to nothing at all is still `Ok(InboundFrame::Frame { .. })` —
+    /// which is why three rounds of transport censuses passed over a build that
+    /// could not name a single data-plane message.
+    pub(crate) fn network_census() -> Vec<(&'static str, Vec<u8>)> {
+        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+        use wz_codecs::wireexpr_local::WireexprLocal;
+
+        // Every record is `Codec::default()` — the generated `Default` bakes
+        // that codec's own wire MID into the header byte — with only the fields
+        // the census needs set. Nothing here is a hand-laid byte string.
+        let literal = |s: &'static str| Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len: Some(s.len() as u64),
+                suffix: Some(s),
+            }),
+        };
+
+        // `..Default::default()` on every one, and each named `header` derived
+        // from that same default rather than written as a literal. The generated
+        // `Default` bakes the codec's own wire MID into the header byte, and a
+        // hand-written `header: 0x1D | 0x20` would be a byte string again — the
+        // exact way a fixture has three times lost a flag `Default` was baking.
+        let push = wz_codecs::push::Push {
+            // N: the keyexpr carries a suffix.
+            header: wz_codecs::push::Push::default().header | 0x20,
+            keyexpr: literal("census/push"),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = wz_codecs::request::Request {
+            header: wz_codecs::request::Request::default().header | 0x20,
+            rid: 1,
+            keyexpr: literal("census/request"),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let response = wz_codecs::response::Response {
+            header: wz_codecs::response::Response::default().header | 0x20,
+            request_id: 1,
+            keyexpr: literal("census/response"),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let response_final = wz_codecs::response_final::ResponseFinal {
+            request_id: 1,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let declare = wz_codecs::declare::Declare {
+            body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
+                wz_codecs::decl_kexpr::DeclKexpr {
+                    header: wz_session_core::wire_const::D_MID_KEXPR
+                        | wz_session_core::wire_const::FLAG_D_N,
+                    id: 1,
+                    keyexpr: literal("census/declare"),
+                },
+            ),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let interest = wz_codecs::interest::Interest {
+            interest_id: 1,
+            body: None,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let oam = wz_codecs::oam::Oam::default().encode_to_vec();
+
+        alloc::vec![
+            ("Push", push),
+            ("Request", request),
+            ("Response", response),
+            ("ResponseFinal", response_final),
+            ("Declare", declare),
+            ("Interest", interest),
+            ("Oam", oam),
+        ]
+    }
+
+    /// Wrap one network record in the transport Frame that carries it on the
+    /// wire — the same envelope [`transport_census`]'s `Frame` entry uses,
+    /// with a real batch in place of its two filler bytes.
+    pub(crate) fn frame_carrying(record: &[u8]) -> Vec<u8> {
+        let mut w = alloc::vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
+        w.extend_from_slice(record);
+        w
+    }
+
+    /// R311y613 (§1.4b) — THE MISSING HALF: every MID zenoh puts INSIDE a
+    /// frame's batch is named by this build.
+    ///
+    /// # What this measures that no existing gate did
+    ///
+    /// `wz-capture` selects its `wz-session-core` features by hand, and the
+    /// R311y607 census gates that list against the TRANSPORT MID space only.
+    /// The network space is dispatched by a second, independent set of `#[cfg]`
+    /// arms (`network_message::decode_one_record`), and a MID missing an arm
+    /// there does not go merely unnamed: the walk absorbs the REST OF THE BATCH
+    /// verbatim and halts, so one unfeatured record makes every record behind
+    /// it in the same frame invisible too.
+    ///
+    /// That is the state this test was written to red on, and did: Push,
+    /// Request, Response, ResponseFinal and Declare — the whole pub/sub and
+    /// query plane — decoded as `Unknown { mid }` with `halt = UnknownMid`,
+    /// while every transport census stayed green because the FRAME around them
+    /// was named perfectly.
+    ///
+    /// `halt.is_none()` is therefore load-bearing beside the `Unknown` check:
+    /// a batch that halts has stopped reading, and a census that only looked at
+    /// `messages[0]` would pass on a build that reads exactly one record per
+    /// frame and drops the rest.
+    #[test]
+    fn every_network_mid_inside_a_frame_is_named_rather_than_unknown() {
+        use wz_session_core::network_message::NetworkMessage;
+        use wz_session_core::passive::Carried;
+
+        for (name, record) in network_census() {
+            let wire = frame_carrying(&record);
+            let pkt = udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire);
+            let mut d = Dissection::new();
+            d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
+            let flow = &d.datagram_flows()[0];
+            assert_eq!(flow.frames.len(), 1, "{name}: the frame never arrived");
+            match &flow.frames[0].carried {
+                Carried::Batch(batch) => {
+                    assert_eq!(
+                        batch.halt, None,
+                        "{name}: the batch walk halted — every record behind it \
+                         in this frame is invisible to the reader"
+                    );
+                    assert_eq!(
+                        batch.messages.len(),
+                        1,
+                        "{name}: expected exactly the one record the fixture put there"
+                    );
+                    if let NetworkMessage::Unknown { mid, .. } = &batch.messages[0] {
+                        panic!(
+                            "{name} (network MID {mid:#04x}) is on zenoh's wire \
+                             and this build cannot name it — a codec is missing \
+                             from wz-capture's wz-session-core feature list"
+                        );
+                    }
+                }
+                other => panic!("{name}: the frame carried {other:?}, not a batch"),
+            }
+        }
+    }
+
+    /// R311y613 — and the same census over a STREAM link, for the reason
+    /// R311y611 gave when it took the transport census to three framings: the
+    /// batch is reached through a different path on each, and a census that
+    /// covered one link kind is exactly how the network space went unchecked
+    /// for six rounds.
+    #[test]
+    fn every_network_mid_inside_a_frame_is_named_over_a_stream_too() {
+        use wz_session_core::network_message::NetworkMessage;
+        use wz_session_core::passive::Carried;
+
+        for (name, record) in network_census() {
+            let wire = frame_carrying(&record);
+            let mut framed = (wire.len() as u16).to_le_bytes().to_vec();
+            framed.extend_from_slice(&wire);
+            let mut d = Dissection::new();
+            d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1000, &framed));
+
+            let flow = &d.flows()[0];
+            assert_eq!(
+                flow.session.resync_accounting(Direction::A).desyncs,
+                0,
+                "{name} desynchronised a synchronised stream reader"
+            );
+            assert_eq!(flow.frames.len(), 1, "{name}: the frame never arrived");
+            match &flow.frames[0].carried {
+                Carried::Batch(batch) => {
+                    assert_eq!(batch.halt, None, "{name}: the batch walk halted");
+                    if let NetworkMessage::Unknown { mid, .. } = &batch.messages[0] {
+                        panic!(
+                            "{name} (network MID {mid:#04x}) is unnamed over a \
+                             STREAM link"
+                        );
+                    }
+                }
+                other => panic!("{name}: the frame carried {other:?}, not a batch"),
+            }
+        }
+    }
+
     /// R311y607 — the capture tool's drop count reaches the DISSECTION, not
     /// only the pcapng parser.
     ///
@@ -4004,6 +4216,124 @@ mod ws_flow_tests {
                 ),
                 Ok(_) => {}
                 Err(e) => panic!("{name} failed to decode over ws: {e:?}"),
+            }
+        }
+    }
+
+    /// R311y613 (§4.5) — THE DEFECT THIS ROUND FOUND, at the layer that had
+    /// it.
+    ///
+    /// `WsDeframer` could recover from a structural desynchronisation and
+    /// `feed_websocket` could not USE that: its loop is
+    /// `while let Some(msg) = next_message()`, and every structural detection
+    /// returned `None` on the spot, so the loop ended and the rest of the
+    /// segment was never deframed. A deframer-level test drives `next_message`
+    /// itself and calls it again after the `None`, which is exactly what the
+    /// production caller does not do — so the defect lived one layer above
+    /// where the recovery was built, and only a flow-level fixture reaches it.
+    ///
+    /// ONE packet carries the damage and the frames after it, which is the
+    /// ordinary shape: a TCP segment holds many ws frames. Before R311y613 this
+    /// flow reported the messages before the damage and nothing after it.
+    #[test]
+    fn a_structural_desync_mid_segment_does_not_end_the_flow() {
+        // Two good messages, a reserved-opcode frame, then six more.
+        let mut stream = Vec::new();
+        let mut expected_before = 0;
+        for i in 0..2u8 {
+            stream.extend_from_slice(&zenoh_ws_frame(i));
+            expected_before += 1;
+        }
+        stream.extend_from_slice(&crate::ws::tests::frame(true, 0x3, b"\x01reserved", None));
+        for i in 2..8u8 {
+            stream.extend_from_slice(&zenoh_ws_frame(i));
+        }
+
+        let mut d = Dissection::new();
+        let upgrade = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n";
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, upgrade));
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &tcp_packet(1111, 7447, 1000 + upgrade.len() as u32, &stream),
+        );
+
+        let flow = &d.flows()[0];
+        assert!(flow.framing().is_websocket());
+        assert_eq!(
+            flow.frames.len(),
+            expected_before + 6,
+            "the six messages AFTER the reserved opcode did not come back; \
+             before R311y613 this was {expected_before}"
+        );
+
+        // And the loss is REPORTED rather than papered over — a flow that
+        // recovered silently would be the other failure this crate exists to
+        // avoid.
+        let resyncs = flow.ws_resyncs();
+        assert_eq!(resyncs.len(), 1, "exactly one recovery, and it is recorded");
+        assert_eq!(
+            resyncs[0].1.reason,
+            ws::WsDesyncReason::ReservedOpcode { opcode: 0x3 }
+        );
+        assert_eq!(flow.ws_accounting().recoveries, 1);
+    }
+
+    /// One zenoh batch in one unmasked ws BINARY frame — the flow-level twin of
+    /// `ws::tests::zenoh_frame`, kept here because this module's `frame` helper
+    /// is the one these fixtures are built with.
+    fn zenoh_ws_frame(n: u8) -> Vec<u8> {
+        let mut payload = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        payload.extend_from_slice(&[n; 3]);
+        crate::ws::tests::frame(true, 0x2, &payload, None)
+    }
+
+    /// R311y613 (§1.4b) — the NETWORK census over the third framing, on the
+    /// same rule R311y611 set for the transport one: a census that covered one
+    /// link kind is how a space goes unchecked.
+    ///
+    /// The `is_websocket()` guard is the same one, and load-bearing for the
+    /// same reason — without it a flow that failed ws detection would run the
+    /// stream path and this test would silently re-measure the sibling.
+    #[test]
+    fn every_network_mid_inside_a_frame_is_named_over_websocket_too() {
+        use wz_session_core::network_message::NetworkMessage;
+        use wz_session_core::passive::Carried;
+
+        for (name, record) in crate::datagram_tests::network_census() {
+            let wire = crate::datagram_tests::frame_carrying(&record);
+            let mut d = Dissection::new();
+            let upgrade = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n";
+            d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, upgrade));
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                1,
+                &tcp_packet(
+                    1111,
+                    7447,
+                    1000 + upgrade.len() as u32,
+                    &binary_frame(&wire, Some([0x11, 0x22, 0x33, 0x44])),
+                ),
+            );
+
+            let flow = &d.flows()[0];
+            assert!(
+                flow.framing().is_websocket(),
+                "{name}: the flow was not recognised as WebSocket, so this \
+                 census would silently be measuring the stream path again"
+            );
+            assert_eq!(flow.frames.len(), 1, "{name}: the frame never arrived");
+            match &flow.frames[0].carried {
+                Carried::Batch(batch) => {
+                    assert_eq!(batch.halt, None, "{name}: the batch walk halted over ws");
+                    if let NetworkMessage::Unknown { mid, .. } = &batch.messages[0] {
+                        panic!(
+                            "{name} (network MID {mid:#04x}) is unnamed over a \
+                             WEBSOCKET link"
+                        );
+                    }
+                }
+                other => panic!("{name}: the frame carried {other:?}, not a batch"),
             }
         }
     }
