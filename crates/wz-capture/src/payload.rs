@@ -945,6 +945,59 @@ mod census_tests {
         assert_eq!(json_row.not_as_declared, 1);
     }
 
+    /// R311y621 (§1.4i) — a body this build cannot decompress is counted, and
+    /// is NOT a contradiction.
+    ///
+    /// The two are the sharpest pair on this plane and the reason it carries
+    /// both counters. A CONTRADICTION is a payload this census read perfectly
+    /// and found to disagree with its own declaration — a finding about the
+    /// SENDER. An undecompressible batch is a payload it never saw — a fact
+    /// about the READER. Folding the second into the first would let a build
+    /// missing a feature publish findings against a publisher that did nothing
+    /// wrong.
+    #[test]
+    fn a_batch_this_build_cannot_decompress_is_a_gap_and_not_a_finding() {
+        let c = payloads(&crate::datagram_tests::compressed_session_dissection());
+
+        let gaps = c.gaps();
+        assert_eq!(gaps.undecompressible_batches, 1);
+        assert_eq!(gaps.halted_batches, 0);
+        assert_eq!(gaps.unparsed_bytes, 0);
+        assert_eq!(gaps.unresolvable_fragments, 0);
+        assert!(!gaps.is_clean(), "the shortfall must be visible at all");
+        assert_eq!(c.payloads(), 0, "no payload was readable");
+        assert!(
+            c.contradictions().is_empty(),
+            "a payload this plane never read cannot disagree with anything: {:?}",
+            c.contradictions()
+        );
+    }
+
+    /// R311y621 (§1.4i) — the same plane, for a capture that began mid-session.
+    ///
+    /// `unknown_ids` is pinned at zero beside the counter and means what it
+    /// says: an encoding id this build cannot NAME is a different shortfall
+    /// from a payload it never received, and a capture that started mid-chain
+    /// must not be reported as one carrying unfamiliar encodings.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_fragment_with_no_resolution_is_a_gap_and_not_an_unknown_encoding() {
+        let c = payloads(&crate::datagram_tests::midsession_fragment_dissection());
+
+        let gaps = c.gaps();
+        assert_eq!(gaps.unresolvable_fragments, 1);
+        assert_eq!(gaps.undecompressible_batches, 0);
+        assert_eq!(gaps.halted_batches, 0);
+        assert_eq!(gaps.unparsed_bytes, 0);
+        assert!(!gaps.is_clean(), "the shortfall must be visible at all");
+        assert_eq!(c.payloads(), 0);
+        assert_eq!(
+            c.unknown_ids(),
+            0,
+            "an unnameable encoding is not the same shortfall as an unread one"
+        );
+    }
+
     /// Bytes declared as bytes are never a finding, however unreadable they
     /// are -- the plane reports contradictions, not opinions about content.
     #[test]

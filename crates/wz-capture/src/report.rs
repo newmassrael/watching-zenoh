@@ -754,6 +754,81 @@ mod tests {
         assert!(text.contains("1 unclosed"), "{text}");
     }
 
+    /// R311y621 (§1.4i) — an UNDECOMPRESSIBLE capture reaches the document, in
+    /// its own slot, in both renderings.
+    ///
+    /// The whole `UNREAD:` line is pinned rather than the one number, because
+    /// the four counters are rendered by ONE `format!` and a plane that
+    /// incremented the wrong field would still put a `1` on the page. Pinning
+    /// the line is what makes the SLOT part of the assertion.
+    ///
+    /// Ungated on purpose: the throughput plane and the compression fixture both
+    /// exist without `network-codecs`, so this is one of the few end-to-end
+    /// report pages a `--no-default-features` build can run.
+    #[test]
+    fn an_undecompressible_capture_reaches_the_document_in_its_own_slot() {
+        let d = crate::datagram_tests::compressed_session_dissection();
+        let throughput = crate::agg::aggregate(&d);
+        let r = CaptureReport::of(&d).with_throughput(&throughput);
+
+        assert!(
+            !r.is_complete(),
+            "a capture whose only frame was unreadable is not complete"
+        );
+        let json = r.to_json();
+        assert!(json.contains("\"complete\":false"), "{json}");
+        assert!(
+            json.contains(
+                "\"halted_batches\":0,\"unparsed_bytes\":0,\
+                 \"undecompressible_batches\":1,\"unresolvable_fragments\":0"
+            ),
+            "{json}"
+        );
+
+        let text = r.to_text();
+        assert!(text.starts_with("capture: INCOMPLETE"), "{text}");
+        assert!(
+            text.contains(
+                "  UNREAD: 0 halted batch(es) (0 bytes), 1 undecompressible, \
+                 0 unresolvable fragment(s)\n"
+            ),
+            "{text}"
+        );
+    }
+
+    /// R311y621 (§1.4i) — the same for a capture that began mid-session, and
+    /// the SECOND slot on the same line.
+    ///
+    /// Two pages rather than one for the reason the planes get two: a single
+    /// capture exercising both counters would pass on a renderer that printed
+    /// the same number twice.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn an_unresolvable_fragment_reaches_the_document_in_its_own_slot() {
+        let d = crate::datagram_tests::midsession_fragment_dissection();
+        let throughput = crate::agg::aggregate(&d);
+        let r = CaptureReport::of(&d).with_throughput(&throughput);
+
+        assert!(!r.is_complete());
+        let json = r.to_json();
+        assert!(
+            json.contains(
+                "\"halted_batches\":0,\"unparsed_bytes\":0,\
+                 \"undecompressible_batches\":0,\"unresolvable_fragments\":1"
+            ),
+            "{json}"
+        );
+
+        let text = r.to_text();
+        assert!(
+            text.contains(
+                "  UNREAD: 0 halted batch(es) (0 bytes), 0 undecompressible, \
+                 1 unresolvable fragment(s)\n"
+            ),
+            "{text}"
+        );
+    }
+
     /// R311y616 — a filtered report carries what the selector could NOT judge,
     /// and that shortfall reaches the completeness verdict.
     ///

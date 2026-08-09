@@ -1048,6 +1048,60 @@ pub(crate) mod tests {
         );
     }
 
+    /// R311y621 (§1.4i) — the correlation plane says what it could not READ,
+    /// and a body this build cannot decompress is exactly that.
+    ///
+    /// The distinction this page turns on: a capture with no exchanges and a
+    /// capture whose exchanges were unreadable produce the SAME rows. `unread`
+    /// is the only thing that tells them apart, so a reader who sees
+    /// `0 requests` has to be able to find out which one they are looking at.
+    /// `gaps()` is pinned clean beside it because the two are different
+    /// questions — an ORPHAN is a record this plane read and could not
+    /// correlate, and nothing here was read at all.
+    #[test]
+    fn a_batch_this_build_cannot_decompress_is_unread_rather_than_absent() {
+        let t = exchanges(&crate::datagram_tests::compressed_session_dissection());
+
+        let unread = t.unread();
+        assert_eq!(unread.undecompressible_batches, 1);
+        assert_eq!(unread.halted_batches, 0);
+        assert_eq!(unread.unparsed_bytes, 0);
+        assert_eq!(unread.unresolvable_fragments, 0);
+        assert!(!unread.is_clean(), "the shortfall must be visible at all");
+        assert_eq!(t.requests(), 0);
+        assert_eq!(
+            t.gaps().orphan_responses,
+            0,
+            "an orphan is a record this plane READ; nothing here was read"
+        );
+    }
+
+    /// R311y621 (§1.4i) — the same plane, for a capture that began mid-session:
+    /// fragments whose chain could never be resolved are counted.
+    ///
+    /// `unclosed` is pinned at zero and that is the load-bearing half. An
+    /// unresolvable fragment is traffic this plane never saw the inside of, so
+    /// it must not manufacture a query that never closed out of it — the same
+    /// rule R311y618 wrote for a rejected exchange, reached from the other side.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_fragment_with_no_resolution_is_unread_rather_than_an_unclosed_query() {
+        let t = exchanges(&crate::datagram_tests::midsession_fragment_dissection());
+
+        let unread = t.unread();
+        assert_eq!(unread.unresolvable_fragments, 1);
+        assert_eq!(unread.undecompressible_batches, 0);
+        assert_eq!(unread.halted_batches, 0);
+        assert_eq!(unread.unparsed_bytes, 0);
+        assert!(!unread.is_clean(), "the shortfall must be visible at all");
+        assert_eq!(t.requests(), 0);
+        assert_eq!(
+            t.unclosed(),
+            0,
+            "traffic never read cannot be an exchange that failed to close"
+        );
+    }
+
     /// A capture that starts mid-query carries replies whose request went past
     /// before the tap was listening. Reported, never invented.
     #[test]

@@ -1120,6 +1120,58 @@ mod tests {
         assert_eq!(table.total_payload_bytes(), 10);
     }
 
+    /// R311y621 (§1.4i) — a capture this build cannot DECOMPRESS is counted,
+    /// not reported as a capture with nothing in it.
+    ///
+    /// `wz-capture` does not carry `transport-compression`, so every frame of a
+    /// compression-negotiated session is a body it cannot open. The rows are
+    /// then EMPTY, and empty rows are the one shape that reads identically to a
+    /// silent session — which is the failure this whole counter exists to
+    /// refuse. `records() == 0` is asserted BESIDE the counter for exactly that
+    /// reason: it is the state a reader would otherwise misread.
+    ///
+    /// One field on the page: the other three gap counters are pinned at zero,
+    /// so a plane that incremented the wrong one fails here rather than
+    /// satisfying the assertion by accident.
+    #[test]
+    fn a_batch_this_build_cannot_decompress_is_counted_rather_than_missing() {
+        let table = aggregate(&crate::datagram_tests::compressed_session_dissection());
+
+        let gaps = table.gaps();
+        assert_eq!(gaps.undecompressible_batches, 1);
+        assert_eq!(gaps.halted_batches, 0);
+        assert_eq!(gaps.unparsed_bytes, 0);
+        assert_eq!(gaps.unresolvable_fragments, 0);
+        assert!(!gaps.is_clean(), "the shortfall must be visible at all");
+        assert_eq!(
+            table.records(),
+            0,
+            "no record was readable, which is why the counter has to say so"
+        );
+    }
+
+    /// R311y621 (§1.4i) — a capture that STARTED MID-SESSION reports the
+    /// fragments it could never resolve.
+    ///
+    /// The observer saw no InitAck, so it has no SN resolution and refuses to
+    /// pick a mask (one too wide reads a wraparound as a gap, one too narrow the
+    /// reverse). The chain never becomes a batch. What must not happen is the
+    /// table staying CLEAN: a reader summing rows from a capture that began in
+    /// the middle would otherwise be told the total is the whole of it.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_fragment_with_no_resolution_is_counted_rather_than_dropped() {
+        let table = aggregate(&crate::datagram_tests::midsession_fragment_dissection());
+
+        let gaps = table.gaps();
+        assert_eq!(gaps.unresolvable_fragments, 1);
+        assert_eq!(gaps.undecompressible_batches, 0);
+        assert_eq!(gaps.halted_batches, 0);
+        assert_eq!(gaps.unparsed_bytes, 0);
+        assert!(!gaps.is_clean(), "the shortfall must be visible at all");
+        assert_eq!(table.records(), 0);
+    }
+
     /// The rows a stream flow produces are the same ones a datagram flow does,
     /// which is what makes `aggregate` a plane rather than a datagram feature.
     #[test]

@@ -2161,6 +2161,229 @@ mod datagram_tests {
         }
     }
 
+    /// R311y621 (§1.4i) — the establishment ext chain that OFFERS COMPRESSION.
+    ///
+    /// The entry is built out of the ext codec's own types at the id
+    /// `wz-session-core` names, not spelled as a byte: a fixture that writes
+    /// `0x06` is a byte string wearing a struct (the R311y616 rule). The chain
+    /// SERIALISER is `pub(crate)` to `wz-session-core`, so the one-entry case
+    /// is written here instead of reached for — and a one-entry chain IS the
+    /// entry, because `ext_chain::encode_ext_chain` sets the continuation `Z`
+    /// bit on every entry BUT the last. `the_compression_offer_is_the_entry_
+    /// the_ext_codec_names` is what keeps that reading honest.
+    fn compression_offer() -> Vec<u8> {
+        let entry: wz_codecs::ext_entry::ExtEntryOwned = wz_codecs::ext_entry::ExtEntryOwned {
+            header: wz_session_core::ext_header::establishment_ext_id::COMPRESSION,
+            body: wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtUnit(
+                wz_codecs::ext_unit::ExtUnit::default(),
+            ),
+        };
+        entry.as_borrowed().encode_to_vec()
+    }
+
+    /// One `T_MID_INIT` datagram trailing `ext_bytes` as its chain, through the
+    /// InitBody codec's own encode.
+    fn init_datagram(is_ack: bool, ext_bytes: &[u8]) -> Vec<u8> {
+        let mut flags = 0u8;
+        if is_ack {
+            flags |= wz_codecs::wire_const::FLAG_T_INIT_A;
+        }
+        if !ext_bytes.is_empty() {
+            flags |= wz_codecs::wire_const::FLAG_T_Z;
+        }
+        let mut wire = alloc::vec![flags | wz_session_core::wire_const::T_MID_INIT];
+        let body = wz_codecs::init_body::InitBody {
+            version: 0x09,
+            // `whatami.to_wire() | ((zid_len - 1) << 4)`: Peer (0x01) with a
+            // 4-byte zid. Getting this wrong makes the decoder read the wrong
+            // zid width, so it is spelled out rather than guessed.
+            cbyte: 0x31,
+            zid: &[0xAA; 4],
+            sn_res: None,
+            batch_size: None,
+            // A-gated: the ACK carries the cookie field, the SYN does not.
+            cookie_len: if is_ack { Some(0) } else { None },
+            cookie: if is_ack { Some(&[]) } else { None },
+        };
+        // The S (resolution present) and A (is-ack) discriminators ride the
+        // parent header, so the codec takes them as arguments.
+        wire.extend_from_slice(&body.encode_to_vec(0, u8::from(is_ack)));
+        wire.extend_from_slice(ext_bytes);
+        wire
+    }
+
+    /// One `T_MID_OPEN` datagram. INVERTED against Init: the cookie rides the
+    /// SYN here, not the ACK.
+    fn open_datagram(is_ack: bool) -> Vec<u8> {
+        let mut flags = 0u8;
+        if is_ack {
+            flags |= wz_codecs::wire_const::FLAG_T_OPEN_A;
+        }
+        let mut wire = alloc::vec![flags | wz_session_core::wire_const::T_MID_OPEN];
+        wire.extend_from_slice(
+            &wz_codecs::open_body::OpenBody {
+                lease: 10_000,
+                initial_sn: 0,
+                cookie_len: if is_ack { None } else { Some(0) },
+                cookie: if is_ack { None } else { Some(&[]) },
+            }
+            .encode_to_vec(u8::from(is_ack)),
+        );
+        wire
+    }
+
+    /// One `T_MID_FRAME` datagram carrying `body` as its batch, at sn 0.
+    fn frame_datagram(body: &[u8]) -> Vec<u8> {
+        let mut wire = alloc::vec![
+            wz_session_core::wire_const::T_MID_FRAME | wz_codecs::wire_const::FLAG_T_FRAME_R,
+            // sn 0, the one-byte VLE arm `the_frame_fixture_decodes_as_the_
+            // frame_it_claims` pins against the real decoder.
+            0x00,
+        ];
+        wire.extend_from_slice(body);
+        wire
+    }
+
+    /// R311y621 (§1.4i) — a capture of a session that NEGOTIATED COMPRESSION,
+    /// ending in one data frame.
+    ///
+    /// `wz-capture` does not carry `wz-session-core/transport-compression`, so
+    /// that last frame's body is lz4 this build cannot open, and
+    /// `PassiveSession::batch_of` answers `Carried::Undecompressible` — the
+    /// honest answer rather than a batch parsed out of compressed bytes, which
+    /// would decode to confident nonsense. What the three analysis planes then
+    /// do with it is what §1.4i is about.
+    ///
+    /// `pub(crate)` for the reason [`frame_carrying`] is: the throughput,
+    /// exchange and payload planes must drive the SAME capture, and a second
+    /// handshake builder in each of their test modules is the copy that drifts.
+    pub(crate) fn compressed_session_dissection() -> Dissection {
+        let offer = compression_offer();
+        let mut d = Dissection::new();
+        for (i, (from_low, message)) in [
+            (true, init_datagram(false, &offer)),
+            (false, init_datagram(true, &offer)),
+            (true, open_datagram(false)),
+            (false, open_datagram(true)),
+            (true, frame_datagram(&[0xDE, 0xAD, 0xBE, 0xEF])),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let packet = if from_low {
+                udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &message)
+            } else {
+                udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 43210, &message)
+            };
+            d.push_packet(LINKTYPE_ETHERNET, i, &packet);
+        }
+        d
+    }
+
+    /// R311y621 (§1.4i) — a capture that STARTED MID-SESSION: a Fragment and no
+    /// InitAck before it.
+    ///
+    /// The observer has no SN resolution, so it cannot tell a wraparound from a
+    /// gap and refuses to pick a mask — `Carried::FragmentWithoutResolution`.
+    /// The chain that fragment belonged to never becomes a batch, and the
+    /// planes have to say so rather than report a capture with nothing in it.
+    #[cfg(feature = "reassembly")]
+    pub(crate) fn midsession_fragment_dissection() -> Dissection {
+        let mut wire = alloc::vec![
+            wz_session_core::wire_const::T_MID_FRAGMENT
+                | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
+                | wz_codecs::wire_const::FLAG_T_FRAGMENT_M,
+            0x00,
+        ];
+        wire.extend_from_slice(&[0xDE, 0xAD]);
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire),
+        );
+        d
+    }
+
+    /// The offer above is written by hand at the CHAIN level, so what it writes
+    /// is checked against the ext codec rather than trusted: one byte, whose
+    /// extension identity is COMPRESSION and whose continuation bit is CLEAR.
+    /// A chain that grew a Z bit would negotiate nothing and leave every
+    /// counter below at zero, which reads exactly like a plane that works.
+    #[test]
+    fn the_compression_offer_is_the_entry_the_ext_codec_names() {
+        let bytes = compression_offer();
+        assert_eq!(bytes.len(), 1, "a UNIT ext is one byte: {bytes:?}");
+        assert_eq!(
+            wz_session_core::ext_header::ext_eid(bytes[0]),
+            wz_session_core::ext_header::establishment_ext_id::COMPRESSION
+        );
+        assert_eq!(
+            bytes[0] & wz_codecs::wire_const::FLAG_T_Z,
+            0,
+            "the last entry of a chain terminates it"
+        );
+    }
+
+    /// THE ANCHOR the `Undecompressible` pages rest on, asserted instead of
+    /// assumed.
+    ///
+    /// Load-bearing in a way a reader should not have to infer: a fixture that
+    /// failed to negotiate, or stopped short of Established, would produce a
+    /// readable batch and leave every gap counter at zero — and a test asserting
+    /// "the counter is 1" would then fail for a reason that has nothing to do
+    /// with the plane it is about.
+    #[test]
+    fn the_compressed_fixture_negotiates_compression_and_establishes() {
+        let d = compressed_session_dissection();
+        let flow = &d.datagram_flows()[0];
+        let context = flow.session.context();
+        assert_eq!(
+            context.phase,
+            wz_session_core::passive::SessionPhase::Established,
+            "the handshake must complete: {context:?}"
+        );
+        assert!(
+            context.compression_active(),
+            "compression must be NEGOTIATED and in force: {context:?}"
+        );
+        assert!(
+            matches!(
+                flow.frames.last().map(|f| &f.carried),
+                Some(wz_session_core::passive::Carried::Undecompressible)
+            ),
+            "the frame after it is a body this build cannot open: {:?}",
+            flow.frames.last().map(|f| &f.carried)
+        );
+        assert_eq!(
+            d.health().packets_skipped,
+            0,
+            "no packet may be skipped, or the planes would have a second cause"
+        );
+    }
+
+    /// The same anchor for the mid-session capture: the observer must NAME the
+    /// unresolvable fragment rather than merely fail to reassemble it.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn the_midsession_fixture_yields_a_fragment_with_no_resolution() {
+        let d = midsession_fragment_dissection();
+        let flow = &d.datagram_flows()[0];
+        assert!(
+            flow.session.context().sn_mask().is_none(),
+            "no InitAck was observed, so there is no SN resolution"
+        );
+        assert!(
+            matches!(
+                flow.frames.first().map(|f| &f.carried),
+                Some(wz_session_core::passive::Carried::FragmentWithoutResolution)
+            ),
+            "got {:?}",
+            flow.frames.first().map(|f| &f.carried)
+        );
+        assert_eq!(d.health().packets_skipped, 0);
+    }
+
     /// THE INTERLOCK, and the reason R311y609 had to touch two layers.
     ///
     /// A capture that lost a TCP segment held every later segment of that

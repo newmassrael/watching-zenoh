@@ -5334,7 +5334,10 @@ layer_c1bt_capture_no_default_features() {
         payload::tests::an_id_outside_the_table_is_reported_rather_than_defaulted \
         payload::tests::a_payload_that_contradicts_its_declaration_is_a_finding_with_an_offset \
         payload::tests::the_json_scanner_follows_rfc_8259_rather_than_being_permissive \
-        payload::tests::the_json_adjacent_encodings_are_not_judged_as_strict_json
+        payload::tests::the_json_adjacent_encodings_are_not_judged_as_strict_json \
+        datagram_tests::the_compression_offer_is_the_entry_the_ext_codec_names \
+        datagram_tests::the_compressed_fixture_negotiates_compression_and_establishes \
+        report::tests::an_undecompressible_capture_reaches_the_document_in_its_own_slot
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the --no-default-features build"
@@ -5387,7 +5390,10 @@ layer_c1bt_capture_no_default_features() {
         payload::census_tests::a_selector_narrows_what_a_finding_can_be_about \
         payload::census_tests::a_payload_carried_by_a_response_answers_kind_reply \
         report::tests::one_selector_narrows_every_plane_of_the_report \
-        report::tests::one_undecided_plane_makes_the_page_a_floor_when_it_is_the_only_plane
+        report::tests::one_undecided_plane_makes_the_page_a_floor_when_it_is_the_only_plane \
+        agg::tests::a_batch_this_build_cannot_decompress_is_counted_rather_than_missing \
+        exchange::tests::a_batch_this_build_cannot_decompress_is_unread_rather_than_absent \
+        payload::census_tests::a_batch_this_build_cannot_decompress_is_a_gap_and_not_a_finding
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the network-codecs build"
