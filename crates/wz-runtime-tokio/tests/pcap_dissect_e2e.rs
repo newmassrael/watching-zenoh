@@ -475,3 +475,140 @@ async fn the_retransmitted_payload_is_counted_once_not_twice() {
         "and the difference is exactly the retransmitted chunk"
     );
 }
+
+/// One Ethernet + IPv4 frame carrying `payload` as a PIECE of a fragmented
+/// datagram, at `offset` bytes with the More-Fragments flag `more`.
+fn ipv4_fragment(
+    src: [u8; 4],
+    dst: [u8; 4],
+    ident: u16,
+    offset: usize,
+    more: bool,
+    payload: &[u8],
+) -> Vec<u8> {
+    assert_eq!(
+        offset % 8,
+        0,
+        "IP encodes the fragment offset in 8-byte units"
+    );
+    let flags_off = (offset as u16 / 8) | if more { 0x2000 } else { 0 };
+    let mut ip = vec![0x45u8, 0x00];
+    ip.extend_from_slice(&((20 + payload.len()) as u16).to_be_bytes());
+    ip.extend_from_slice(&ident.to_be_bytes());
+    ip.extend_from_slice(&flags_off.to_be_bytes());
+    ip.push(64);
+    ip.push(17); // UDP
+    ip.extend_from_slice(&0u16.to_be_bytes());
+    ip.extend_from_slice(&src);
+    ip.extend_from_slice(&dst);
+    ip.extend_from_slice(payload);
+
+    let mut eth = Vec::new();
+    eth.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x02]);
+    eth.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x01]);
+    eth.extend_from_slice(&0x0800u16.to_be_bytes());
+    eth.extend_from_slice(&ip);
+    eth
+}
+
+/// R311y607 — the FRAGMENT half of the capture path, over a real capture FILE.
+///
+/// R311y606 built IP fragment reassembly and proved it in `wz-capture`'s unit
+/// tests. What it did not do — and recorded as debt — is put a fragmented
+/// datagram in a capture the whole chain reads: no corpus file contained one,
+/// so outside those unit tests the reassembler never ran. `from_capture` ->
+/// pcap parse -> Ethernet -> IPv4 reassembly -> UDP -> passive decode is a
+/// longer path than `push_packet`, and the difference is exactly where a
+/// reassembled datagram could be handed to the wrong strip.
+///
+/// The message is not invented: it is the FIRST message two real wz nodes sent
+/// each other in `tapped_handshake`, lifted out of its stream envelope and put
+/// in a datagram, which is what the same message looks like on a `udp/...`
+/// link. So a decode that comes back wrong is wrong about traffic wz itself
+/// produced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fragmented_datagram_in_a_capture_file_decodes_end_to_end() {
+    let (a_bytes, _) = tapped_handshake().await;
+    assert!(a_bytes.len() > 2, "the tap recorded a handshake");
+
+    // Lift the first message out of the stream framing: zenoh's stream links
+    // prefix each message with a 2-byte little-endian length, and a datagram
+    // link carries the message with no prefix at all.
+    let len = u16::from_le_bytes([a_bytes[0], a_bytes[1]]) as usize;
+    assert!(
+        len > 0 && 2 + len <= a_bytes.len(),
+        "the first length prefix describes a message inside the tap"
+    );
+    let message = &a_bytes[2..2 + len];
+
+    // Wrap it in UDP. The header's length field covers the WHOLE datagram,
+    // which is precisely what a lone first fragment cannot satisfy — the
+    // property R311y606 found the defect in.
+    let mut udp = Vec::new();
+    udp.extend_from_slice(&CLIENT_PORT.to_be_bytes());
+    udp.extend_from_slice(&SERVER_PORT.to_be_bytes());
+    udp.extend_from_slice(&((8 + message.len()) as u16).to_be_bytes());
+    udp.extend_from_slice(&0u16.to_be_bytes());
+    udp.extend_from_slice(message);
+
+    // Split on an 8-byte boundary that leaves both pieces non-empty.
+    let cut = 8.max((udp.len() / 2) & !7);
+    assert!(cut < udp.len(), "the datagram is long enough to split");
+    let first = ipv4_fragment(CLIENT_IP, SERVER_IP, 0x1D07, 0, true, &udp[..cut]);
+    let rest = ipv4_fragment(CLIENT_IP, SERVER_IP, 0x1D07, cut, false, &udp[cut..]);
+
+    // ── The pieces arrive OUT OF ORDER, which a network is free to do and a
+    //    reassembler keyed on arrival rather than on offset would get wrong. ──
+    let records: Vec<(u32, u32, &[u8])> = vec![(0, 1, &rest), (0, 2, &first)];
+    let file = pcap::write(LINKTYPE_ETHERNET, &records);
+
+    // `from_capture` rather than `from_pcap`: the sniffing entry point is the
+    // one a consumer is meant to use, and it is a different code path.
+    let dissection = Dissection::from_capture(&file).expect("the capture parses");
+
+    assert_eq!(
+        dissection.datagram_flows().len(),
+        1,
+        "the two pieces are ONE datagram flow, not two"
+    );
+    let flow = &dissection.datagram_flows()[0];
+    assert_eq!(
+        flow.frames.len(),
+        1,
+        "one datagram in, one message out: {:?}",
+        flow.frames
+    );
+    assert!(
+        matches!(flow.frames[0].frame, Ok(InboundFrame::Init { .. })),
+        "the reassembled datagram decodes to the Init the nodes really sent: {:?}",
+        flow.frames[0].frame
+    );
+
+    // The reassembly must be VISIBLE, not inferred from the decode working:
+    // a build that quietly passed the last piece through alone could also
+    // produce one frame, and the counter is what separates the two.
+    let stats = dissection.fragment_stats();
+    assert_eq!(stats.completed, 1, "exactly one chain completed: {stats:?}");
+    assert_eq!(
+        stats.pieces, 2,
+        "both pieces went THROUGH the table rather than one bypassing it: {stats:?}"
+    );
+    assert_eq!(stats.malformed, 0, "nothing was refused: {stats:?}");
+
+    // The lone FIRST piece must not be mistaken for a whole datagram — the
+    // actual R311y606 defect, which had offset zero and so passed an
+    // offset-only test. Fed alone, it is named as pending rather than decoded.
+    let alone: Vec<(u32, u32, &[u8])> = vec![(0, 1, &first)];
+    let partial = Dissection::from_capture(&pcap::write(LINKTYPE_ETHERNET, &alone))
+        .expect("the capture parses");
+    assert!(
+        partial.datagram_flows().is_empty(),
+        "a first fragment alone is not a datagram"
+    );
+    let partial_stats = partial.fragment_stats();
+    assert_eq!(
+        (partial_stats.pieces, partial_stats.completed),
+        (1, 0),
+        "it is HELD as a piece, not completed and not silently dropped: {partial_stats:?}"
+    );
+}
