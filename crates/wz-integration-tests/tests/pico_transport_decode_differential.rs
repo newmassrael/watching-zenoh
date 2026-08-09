@@ -250,19 +250,20 @@ fn corpus() -> Vec<Vec<u8>> {
 /// are short enough to read against `zenoh-protocol-1.5.0/src/transport/*.rs`
 /// directly.
 fn minimal_body(mid: u8) -> Option<Vec<u8>> {
+    use wz_session_core::wire_const as w;
     Some(match mid {
         // version, cbyte (whatami=peer, zid_len-1 = 0), the 1-byte zid. No S, no
         // A, so no resolution pair and no cookie.
-        0x01 => vec![0x09, 0x01, 0xAA],
+        w::T_MID_INIT => vec![0x09, 0x01, 0xAA],
         // VLE lease, VLE initial_sn, then the cookie slice the A-clear form
         // carries (length-prefixed, one byte).
-        0x02 => vec![0x0A, 0x01, 0x01, 0xBB],
+        w::T_MID_OPEN => vec![0x0A, 0x01, 0x01, 0xBB],
         // reason.
-        0x03 => vec![0x00],
+        w::T_MID_CLOSE => vec![0x00],
         // empty.
-        0x04 => vec![],
+        w::T_MID_KEEP_ALIVE => vec![],
         // VLE sn. FRAME's payload is the tail, so nothing more is required.
-        0x05 | 0x06 => vec![0x01],
+        w::T_MID_FRAME | w::T_MID_FRAGMENT => vec![0x01],
         _ => return None,
     })
 }
@@ -294,6 +295,10 @@ fn vocabulary_corpus() -> Vec<Vec<u8>> {
     const UNIT: &[u8] = &[];
     const Z64: &[u8] = &[0x2A];
     const ZBUF: &[u8] = &[0x02, 0xC1, 0xC2];
+    /// `frame::ext::QoS` / `fragment::ext::QoS` — `zextz64!(0x1, true)`, so
+    /// `id 1 | FLAG_M | ENC_Z64`. Named because it is the case this generator
+    /// exists to reach.
+    const FRAME_QOS: u8 = 0x31;
 
     /// One extension: its identity (`id | M | enc`) and the body its encoding
     /// requires after the header byte.
@@ -303,9 +308,10 @@ fn vocabulary_corpus() -> Vec<Vec<u8>> {
 
     // Per-MID: every identity that message's own `mod ext` declares, in id
     // order, plus the two controls at the end.
+    use wz_session_core::wire_const as w;
     let spaces: &[Space] = &[
         (
-            0x01, // INIT: QoS unit, QoSLink z64, Shm zbuf, Auth zbuf, MultiLink
+            w::T_MID_INIT, // INIT: QoS unit, QoSLink z64, Shm zbuf, Auth zbuf, MultiLink
             // zbuf, LowLatency unit, Compression unit, Patch z64 — all
             // declared NON-mandatory.
             &[
@@ -320,7 +326,7 @@ fn vocabulary_corpus() -> Vec<Vec<u8>> {
             ],
         ),
         (
-            0x02, // OPEN: QoS unit, Shm z64, Auth zbuf, MultiLinkSyn zbuf,
+            w::T_MID_OPEN, // OPEN: QoS unit, Shm z64, Auth zbuf, MultiLinkSyn zbuf,
             // MultiLinkAck unit, LowLatency unit, Compression unit.
             &[
                 (0x01, UNIT),
@@ -334,14 +340,17 @@ fn vocabulary_corpus() -> Vec<Vec<u8>> {
         ),
         // CLOSE and KEEP_ALIVE declare no `mod ext` at all: their spaces are
         // EMPTY, so the controls below are the whole of what can be sent.
-        (0x03, &[]),
-        (0x04, &[]),
+        (w::T_MID_CLOSE, &[]),
+        (w::T_MID_KEEP_ALIVE, &[]),
         // FRAME: QoS z64, MANDATORY. The one mandatory extension the data
         // plane defines, and the reason this generator exists.
-        (0x05, &[(0x31, Z64)]),
+        (w::T_MID_FRAME, &[(FRAME_QOS, Z64)]),
         // FRAGMENT: the same mandatory QoS, plus First / Drop as non-mandatory
         // units.
-        (0x06, &[(0x31, Z64), (0x02, UNIT), (0x03, UNIT)]),
+        (
+            w::T_MID_FRAGMENT,
+            &[(FRAME_QOS, Z64), (0x02, UNIT), (0x03, UNIT)],
+        ),
     ];
 
     let mut out = Vec::new();
@@ -606,7 +615,11 @@ const NAMED_DIVERGENCES: &[(u8, u8, &str)] = &[
     // undefined by construction and both zenoh and wz refuse the message.
     // pico accepts it for the reason the sixteen sweep divergences are pinned
     // on: `_z_close_decode` never reads the chain at all.
-    (0x03, 0x1F, "pico never reads a CLOSE ext chain"),
+    (
+        wz_session_core::wire_const::T_MID_CLOSE,
+        0x1F,
+        "pico never reads a CLOSE ext chain",
+    ),
     // THE FINDING. `frame::ext::QoS` is `zextz64!(0x1, true)` — the ONE
     // mandatory extension the transport data plane defines
     // (`zenoh-protocol-1.5.0/src/transport/frame.rs`, `mod ext`) — and zenoh's
