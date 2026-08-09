@@ -4348,6 +4348,67 @@ mod datagram_tests {
         );
     }
 
+    /// R311y626 (§1.2b) — a datagram carrying MORE THAN ONE transport message
+    /// yields one frame and the rest is SILENT, and this pins the loss so it is
+    /// a named limit rather than a surprise.
+    ///
+    /// `parse_inbound` reads one message and does not report how many bytes it
+    /// consumed, so `next_datagram_on` has no way to walk to the next one: the
+    /// contract is one message per datagram. That is right for zenoh's own UDP
+    /// framing — a peer sends one transport message per datagram — and it is
+    /// NOT enforced by anything on the wire, so a foreign writer, a proxy that
+    /// coalesces, or a malformed sender produces a datagram this reader reads
+    /// the front of.
+    ///
+    /// The assertion is deliberately about the SHORTFALL and not about a fix.
+    /// A fix means teaching `parse_inbound` to report its consumed length,
+    /// which is a wz-session-core API change with every caller to re-read; what
+    /// this round owes is that the limit is measured and cannot regress into
+    /// something worse without a test noticing.
+    #[test]
+    fn a_datagram_carrying_two_messages_yields_one_frame_and_drops_the_rest() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let mut two = Vec::new();
+        two.extend_from_slice(&keepalive);
+        two.extend_from_slice(&keepalive);
+
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &two),
+        );
+
+        let flow = &d.datagram_flows()[0];
+        assert_eq!(
+            flow.frames.len(),
+            1,
+            "one datagram is one message to this reader, whatever it holds"
+        );
+        assert!(
+            matches!(
+                flow.frames[0].frame,
+                Ok(wz_session_core::inbound::InboundFrame::KeepAlive { .. })
+            ),
+            "the FIRST message is the one that survives: {:?}",
+            flow.frames[0].frame
+        );
+        // The half worth pinning: the second message is not reported ANYWHERE.
+        // It is not a skipped packet, because the packet was not skipped, and
+        // it is not a desync, because the framing was never in question.
+        assert_eq!(
+            d.health().packets_skipped,
+            0,
+            "the packet was read, so it is not skipped"
+        );
+        assert_eq!(
+            d.framing_health().desyncs,
+            0,
+            "and the framing was never lost -- which is exactly why the loss \
+             has no witness of its own"
+        );
+    }
+
     /// R311y623 (§1.1x) — THE MIXED CASE, which neither leg above reaches: the
     /// observer's clock is STICKY, so an unstamped packet BEHIND a stamped one
     /// on the same flow inherits the earlier instant rather than reporting
