@@ -5323,6 +5323,18 @@ layer_c1bn_passive_dissection_features() {
         --features codec-join --all-targets --quiet -- -D warnings) || return 1
     (cd crates && cargo clippy -p wz-session-core --no-default-features \
         --features alloc,codec-join --all-targets --quiet -- -D warnings) || return 1
+    # R311y607 — the SCOUTING pair, for exactly the reason the line above
+    # exists, and it found the same class of hole a second time: `FLAG_T_Z` and
+    # `decode_ext_chain` both listed every transport carrier and neither listed
+    # a scouting one, so `--features alloc,codec-scout` was the only shape that
+    # would not compile. Each codec gets its OWN arm rather than one arm naming
+    # both, because a build carrying only HELLO (a reader that names peers but
+    # not askers) is a real composition and unifying the two would stop testing
+    # it.
+    (cd crates && cargo clippy -p wz-session-core --no-default-features \
+        --features alloc,codec-scout --all-targets --quiet -- -D warnings) || return 1
+    (cd crates && cargo clippy -p wz-session-core --no-default-features \
+        --features alloc,codec-hello --all-targets --quiet -- -D warnings) || return 1
 }
 
 # ─── Layer C1bg — storage-backend-filesystem: durable fs Volume/Storage ─

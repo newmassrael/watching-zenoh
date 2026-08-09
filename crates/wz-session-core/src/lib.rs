@@ -425,7 +425,14 @@ pub mod ext_header;
         // send), so `codec-join` alone must bring this module in. Found by a
         // FEATURE SUBSET build, not by the workspace build: `--features
         // alloc,codec-join` is the only shape where no sibling codec pulls it.
-        feature = "codec-join"
+        feature = "codec-join",
+        // R311y607 — the SCOUTING envelope is Z-gated too: pico skips a
+        // non-mandatory chain after both SCOUT and HELLO
+        // (`_z_scouting_message_decode_na`, message.c:756). Same subset
+        // reasoning as codec-join above — `--features alloc,codec-scout` has
+        // no sibling to pull this in.
+        feature = "codec-scout",
+        feature = "codec-hello"
     )
 ))]
 mod ext_chain;
@@ -443,6 +450,23 @@ pub mod lease;
 /// module remains the JOIN wire SSOT for a participant reader.
 #[cfg(feature = "codec-join")]
 pub mod join_decode;
+
+/// R311y607 — the SCOUTING message namespace, which is NOT the transport one.
+///
+/// `S_MID_SCOUT` and `T_MID_INIT` are both `0x01`; `S_MID_HELLO` and
+/// `T_MID_OPEN` are both `0x02`. Only the link that carried the bytes settles
+/// which namespace applies, so a decoder handed the wrong one MISREADS rather
+/// than failing — the observer read every multicast SCOUT as a confident
+/// `InboundFrame::Init`. This module is the other dispatch, kept unreachable
+/// from [`inbound`]'s so neither can silently absorb the other's MIDs.
+///
+/// `alloc`-gated for the owned bodies + ext chain, like [`inbound`]; the two
+/// body codecs are gated individually so a HELLO-only reader carries one.
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "codec-scout", feature = "codec-hello")
+))]
+pub mod scouting;
 
 /// R311ky — deferred callback firing (the F-6 structural fix): the
 /// staging queue + per-listener take-call-restore cell that let

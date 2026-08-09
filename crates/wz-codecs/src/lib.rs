@@ -560,8 +560,14 @@ pub mod wire_const {
     #[cfg(feature = "codec-close")]
     pub const FLAG_T_CLOSE_S: u8 = 0x20;
 
-    /// Transport-message ext-chain presence bit shared across every
-    /// `T_MID_T_*` header (transport.h:44 `_Z_FLAG_T_Z = 0x80`).
+    /// Ext-chain presence bit, shared across every `T_MID_T_*` header
+    /// (transport.h:44 `_Z_FLAG_T_Z = 0x80`) AND the two SCOUTING headers.
+    ///
+    /// R311y607 — the name says `T` and the bit does not: pico spells it
+    /// `_Z_MSG_EXT_FLAG_Z` at the ext layer and tests it on a scouting header
+    /// with the same value (`_z_scouting_message_decode_na`, message.c:756).
+    /// The name is kept rather than split, because one bit with two names is
+    /// how a reader ends up believing there are two bits.
     #[cfg(any(
         feature = "codec-init-body",
         feature = "codec-open-body",
@@ -573,7 +579,13 @@ pub mod wire_const {
         // doc above says "shared across every `T_MID_T_*` header" while the
         // predicate listed five of six; a `--features codec-join` subset build
         // is what made the sixth visible.
-        feature = "codec-join"
+        feature = "codec-join",
+        // R311y607 — and the SCOUTING pair, the same way: `--features
+        // alloc,codec-scout` is the shape with no sibling to bring the bit in,
+        // and it is the third time this predicate has been short of the claim
+        // written above it.
+        feature = "codec-scout",
+        feature = "codec-hello"
     ))]
     pub const FLAG_T_Z: u8 = 0x80;
 

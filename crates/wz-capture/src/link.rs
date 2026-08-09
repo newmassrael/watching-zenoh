@@ -82,6 +82,29 @@ impl Endpoint {
         self.addr_len == 4
     }
 
+    /// R311y607 — is this an IP MULTICAST address?
+    ///
+    /// The one question that tells a passive observer which zenoh message
+    /// NAMESPACE a datagram belongs to. `S_MID_SCOUT` and `T_MID_INIT` are both
+    /// `0x01`, so the byte cannot settle it and the link must: a multicast
+    /// transport has no handshake at all — pico's own multicast receive path
+    /// drops INIT and OPEN with "multicast transports are not expected to
+    /// handle INIT messages" (`vendor/zenoh-pico/src/transport/multicast/rx.c`
+    /// :493-504) — so `0x01` toward a multicast group is a SCOUT, and toward a
+    /// unicast peer it is an Init.
+    ///
+    /// IPv4 `224.0.0.0/4` (RFC 1112 class D) and IPv6 `ff00::/8` (RFC 4291
+    /// §2.7). A vsock endpoint is neither: its 8-byte address is a context id,
+    /// and AF_VSOCK has no multicast, so it answers `false` by LENGTH rather
+    /// than by reading a cid as if it were an address.
+    pub fn is_ip_multicast(&self) -> bool {
+        match self.addr_len {
+            4 => self.addr[0] & 0xF0 == 0xE0,
+            16 => self.addr[0] == 0xFF,
+            _ => false,
+        }
+    }
+
     /// The context id of an AF_VSOCK endpoint, or `None` for an IP one.
     ///
     /// Distinguished by the address LENGTH rather than by a flag: a vsock
@@ -290,6 +313,23 @@ pub struct Datagram {
     pub packet_index: usize,
     /// What this packet's checksums said. Reported, never acted on.
     pub checksums: Checksums,
+}
+
+impl Datagram {
+    /// R311y607 — where this datagram was ADDRESSED.
+    ///
+    /// [`FlowKey`] stores its two endpoints sorted so both directions produce
+    /// one key, which means neither field is "the destination" on its own —
+    /// [`Self::from_low`] is what un-sorts them. A consumer asking whether a
+    /// datagram was multicast must combine the two, and combining them at each
+    /// call site is how one of them eventually gets it backwards.
+    pub fn destination(&self) -> Endpoint {
+        if self.from_low {
+            self.flow.high
+        } else {
+            self.flow.low
+        }
+    }
 }
 
 /// R311y603 — one AF_VSOCK record's payload, lifted out of a `vsockmon`

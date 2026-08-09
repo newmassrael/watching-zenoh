@@ -102,7 +102,13 @@ pub(crate) fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
     // the base body (the QoS-SN advertisement zenoh and pico both send). A
     // helper's cfg must contain the gate of every module that CALLS it, which
     // only an `--features alloc,codec-join` subset build can show.
-    feature = "codec-join"
+    feature = "codec-join",
+    // R311y607 — `parse_scouting` calls it for both SCOUT and HELLO: the
+    // scouting envelope is Z-gated exactly as the transport one is, and pico
+    // skips a non-mandatory chain after both (message.c:756). Same rule, found
+    // the same way — `--features alloc,codec-scout` alone.
+    feature = "codec-scout",
+    feature = "codec-hello"
 ))]
 pub(crate) fn decode_ext_chain(
     cursor: &mut sce_forge_runtime::codec::SceCursor<'_>,

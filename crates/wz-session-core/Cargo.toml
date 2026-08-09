@@ -344,6 +344,13 @@ codec-close = ["wz-codecs/codec-close"]
 # `session-multicast` (JoinBaseline) + `alloc` (owned Vec encode,
 # MulticastParams Vec zid).
 codec-join = ["wz-codecs/codec-join"]
+# R311y607 — the SCOUTING namespace body codecs, forwarded so the `scouting`
+# module (parse_scouting) can be built by a consumer that reads the pre-session
+# multicast link. Separate features rather than one `codec-scouting`, matching
+# the one-gate-per-body-codec rule above and wz-codecs' own split: a reader
+# that only names peers (HELLO) need not carry the asker's decode.
+codec-scout = ["wz-codecs/codec-scout"]
+codec-hello = ["wz-codecs/codec-hello"]
 
 # R311nt — SERIAL link upper protocol (the `Z_FEATURE_LINK_SERIAL`
 # framing + handshake + locator logic, `serial_link` module). Forwards

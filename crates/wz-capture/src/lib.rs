@@ -43,9 +43,11 @@ pub mod ws;
 
 use alloc::vec::Vec;
 
+use wz_session_core::parse_error::InboundParseError;
 use wz_session_core::passive::{
     Direction, FlowContext, PassiveFrame, PassiveSession, PassiveStall,
 };
+use wz_session_core::scouting::{parse_scouting, ScoutingFrame};
 
 use crate::link::{FlowKey, SkipReason, Transport};
 use crate::tcp::StreamAssembler;
@@ -82,6 +84,22 @@ pub struct DatagramDissection {
     /// index of the packet that carried it — there is no stream for it to be
     /// an offset into, so the field carries the only anchor that exists.
     pub frames: Vec<PassiveFrame>,
+    /// R311y607 — messages decoded in the SCOUTING namespace, in capture
+    /// order.
+    ///
+    /// A second list rather than more variants in `frames`, because they are
+    /// not the same kind of thing: a transport frame advances this flow's
+    /// session state and a scouting message has no session to advance — it is
+    /// what happens BEFORE one. Upstream draws the same line (pico's
+    /// `_z_scouting_message_t` vs `_z_transport_message_t`, decoded by
+    /// different functions), and folding them would put a `Scout` where
+    /// [`PassiveSession::fold`] could be handed one.
+    ///
+    /// Both lists carry the packet index, so a reader wanting one timeline
+    /// merges on it. This is deliberately not done here: the merge belongs to
+    /// whoever is presenting, and doing it eagerly would force an ordering on
+    /// a consumer that may want the two separated.
+    pub scouting: Vec<ScoutingDatagram>,
 }
 
 impl DatagramDissection {
@@ -90,8 +108,61 @@ impl DatagramDissection {
             flow,
             session: new_session(window_ms),
             frames: Vec::new(),
+            scouting: Vec::new(),
         }
     }
+}
+
+/// R311y607 — one datagram observed on the pre-session multicast link.
+///
+/// The scouting twin of [`PassiveFrame`], and separate for the same reason
+/// [`ScoutingFrame`] is separate from `InboundFrame`. It carries no session
+/// context and no batch-ceiling verdict: neither exists before a session does.
+#[derive(Debug)]
+pub struct ScoutingDatagram {
+    /// Which way it travelled, keyed exactly as a transport frame's is.
+    pub direction: Direction,
+    /// Index of the packet that carried it — the same anchor
+    /// [`PassiveFrame::stream_offset`] carries for a datagram, so the two
+    /// lists can be merged into one timeline by a consumer that wants it.
+    pub packet_index: usize,
+    /// What the bytes decoded to, or why they did not.
+    pub frame: Result<ScoutingFrame, InboundParseError>,
+}
+
+/// R311y607 — does this datagram belong to the SCOUTING namespace?
+///
+/// # Why the destination and the MID, and not either alone
+///
+/// zenoh's two message-ID namespaces collide numerically: `S_MID_SCOUT` and
+/// `T_MID_INIT` are both `0x01`, `S_MID_HELLO` and `T_MID_OPEN` are both
+/// `0x02`. A participant never has to care — it knows which socket the bytes
+/// arrived on. A capture has no such thing, and zenoh puts the scout group and
+/// the multicast SESSION group on the SAME locator (`224.0.0.224:7446`), so
+/// address and port cannot separate them either.
+///
+/// What does separate them is that a multicast transport has NO HANDSHAKE:
+/// pico's multicast receive path takes INIT and OPEN and deliberately does
+/// nothing with them — "multicast transports are not expected to handle INIT
+/// messages" (`vendor/zenoh-pico/src/transport/multicast/rx.c:493-504`). So on
+/// a multicast destination, `0x01` and `0x02` cannot be Init / Open, and the
+/// only namespace left in which they mean anything is the scouting one.
+///
+/// Both halves are load-bearing and each alone is wrong:
+///
+/// - MID alone would route a UNICAST Init — the ordinary start of every
+///   `udp/...` session — into the scouting decoder.
+/// - Destination alone would route the multicast JOIN (`0x07`), which really
+///   is a transport message on the multicast session group, out of the
+///   transport decoder that R311y605 built for it.
+fn is_scouting_datagram(d: &link::Datagram) -> bool {
+    let Some(&header) = d.payload.first() else {
+        return false;
+    };
+    let mid = header & 0x1F;
+    d.destination().is_ip_multicast()
+        && (mid == wz_session_core::wire_const::S_MID_SCOUT
+            || mid == wz_session_core::wire_const::S_MID_HELLO)
 }
 
 /// Index a per-direction array. `Direction` is the seam's vocabulary and has
@@ -986,6 +1057,9 @@ impl Dissection {
     /// R311y584 (A3) — one UDP datagram: one whole wire message, decoded on
     /// the spot.
     ///
+    /// R311y607 — "one wire message" is now "one wire message IN ONE OF TWO
+    /// NAMESPACES"; [`is_scouting_datagram`] is what decides which.
+    ///
     /// No buffering and no reassembly, because there is nothing to reassemble
     /// — which is exactly why this is four lines and the TCP path is not.
     fn push_datagram(&mut self, d: link::Datagram, ts_millis: Option<u64>) {
@@ -1010,10 +1084,22 @@ impl Dissection {
         } else {
             Direction::B
         };
+        let scouting = is_scouting_datagram(&d);
         let flow = &mut self.datagram_flows[idx];
         #[cfg(feature = "reassembly")]
         if let Some(ms) = ts_millis {
             self.expired_chains += flow.session.observe_at(ms);
+        }
+        if scouting {
+            // Decoded WITHOUT touching the session: a scouting message is not
+            // part of any session, so folding it would let a pre-session
+            // datagram move state that only a peer's handshake may move.
+            flow.scouting.push(ScoutingDatagram {
+                direction,
+                packet_index: d.packet_index,
+                frame: parse_scouting(&d.payload),
+            });
+            return;
         }
         let frame = flow
             .session
@@ -1230,6 +1316,347 @@ mod datagram_tests {
             eth.push(0);
         }
         eth
+    }
+
+    /// R311y607 — a SCOUT on the wire, built by the SCOUT codec's own encode
+    /// so a routing decision cannot agree with a hand-laid byte string.
+    fn scout_message() -> Vec<u8> {
+        let mut scout = wz_codecs::scout::Scout::new();
+        scout.version = 0x09;
+        scout.set_what(0x03);
+        scout.set_i(true);
+        scout.set_zid_len_m1(3);
+        scout.zid = Some(&[0x11, 0x22, 0x33, 0x44]);
+        let mut wire = alloc::vec![wz_session_core::wire_const::S_MID_SCOUT];
+        wire.extend_from_slice(&scout.encode_to_vec());
+        wire
+    }
+
+    /// zenoh's IPv4 scouting group and port
+    /// (`DEFAULT_MULTICAST_SCOUTING_ADDRESS`, `224.0.0.224:7446`).
+    const SCOUT_GROUP: [u8; 4] = [224, 0, 0, 224];
+
+    /// R311y607 — THE ONE THAT MATTERS: a multicast SCOUT is named a SCOUT.
+    ///
+    /// Before this round it was named an `Init`, and that is worse than being
+    /// named nothing: `S_MID_SCOUT` is `0x01` and so is `T_MID_INIT`, so the
+    /// transport decoder did not fail on it — it succeeded, produced a
+    /// structurally valid `Init` whose "version" was the scout's version byte
+    /// and whose flags were read off a header that has none, and handed the
+    /// observer a peer that had never opened a session. Every coarse assertion
+    /// downstream held, on a NAMED message.
+    #[test]
+    fn a_multicast_scout_is_named_a_scout_rather_than_misread_as_an_init() {
+        let pkt = udp_packet([192, 168, 1, 5], 43210, SCOUT_GROUP, 7446, &scout_message());
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
+
+        assert_eq!(d.datagram_flows().len(), 1);
+        let flow = &d.datagram_flows()[0];
+        assert!(
+            flow.frames.is_empty(),
+            "a scouting message must not enter the transport list at all: {:?}",
+            flow.frames
+        );
+        assert_eq!(flow.scouting.len(), 1, "it must be reported, not dropped");
+        match &flow.scouting[0].frame {
+            Ok(ScoutingFrame::Scout { body, .. }) => {
+                assert_eq!(body.version, 0x09);
+                assert_eq!(body.what(), 0x03, "the interest mask must survive");
+            }
+            other => panic!("a multicast SCOUT decoded as {other:?}"),
+        }
+        assert_eq!(flow.scouting[0].packet_index, 0);
+    }
+
+    /// The NEGATIVE arm on the MID half: the SAME byte `0x01` toward a
+    /// UNICAST peer is an ordinary Init and must stay one. A discriminator
+    /// that keyed on the MID alone would swallow the start of every `udp/...`
+    /// session, and the positive test above would still pass.
+    #[test]
+    fn a_unicast_init_is_still_an_init() {
+        // An Init body the transport decoder accepts: version, then the
+        // whatami/zid carrier byte, then the zid.
+        let mut wire = alloc::vec![wz_session_core::wire_const::T_MID_INIT, 0x09, 0x38];
+        wire.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let pkt = udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire);
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
+
+        let flow = &d.datagram_flows()[0];
+        assert!(
+            flow.scouting.is_empty(),
+            "a unicast destination must never reach the scouting decoder"
+        );
+        assert_eq!(flow.frames.len(), 1);
+        assert!(
+            matches!(
+                flow.frames[0].frame,
+                Ok(wz_session_core::inbound::InboundFrame::Init { .. })
+            ),
+            "a unicast 0x01 is an Init: {:?}",
+            flow.frames[0].frame
+        );
+    }
+
+    /// The NEGATIVE arm on the DESTINATION half: a multicast JOIN really is a
+    /// transport message on the multicast session group — zenoh puts that
+    /// group on the same locator as the scout group — so a discriminator that
+    /// keyed on the destination alone would tear R311y605's JOIN decode back
+    /// out. The two halves are each necessary; this test and the one above are
+    /// what say so.
+    #[test]
+    fn a_multicast_join_still_reaches_the_transport_decoder() {
+        let join = wz_codecs::join::Join {
+            version: 0x09,
+            // whatami/zid-len carrier: 4-byte zid, whatami router.
+            cbyte: (3 << 4) | 0x01,
+            zid: &[1, 2, 3, 4],
+            // S clear, so the size parameters are absent rather than
+            // defaulted — the shape a JOIN takes when it accepts the peer's.
+            sn_res: None,
+            batch_size: None,
+            lease: 10_000,
+            next_sn_reliable: 7,
+            next_sn_best_effort: 9,
+        };
+        let mut wire = alloc::vec![wz_session_core::wire_const::T_MID_JOIN];
+        wire.extend_from_slice(&join.encode_to_vec(0));
+
+        let pkt = udp_packet([192, 168, 1, 5], 43210, SCOUT_GROUP, 7446, &wire);
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
+
+        let flow = &d.datagram_flows()[0];
+        assert!(
+            flow.scouting.is_empty(),
+            "a JOIN is a TRANSPORT message that happens to be multicast"
+        );
+        assert_eq!(flow.frames.len(), 1);
+        assert!(
+            matches!(
+                flow.frames[0].frame,
+                Ok(wz_session_core::inbound::InboundFrame::Join { .. })
+            ),
+            "the multicast JOIN must still decode as a Join: {:?}",
+            flow.frames[0].frame
+        );
+    }
+
+    /// IPv6 multicast is `ff00::/8`, a different rule from IPv4's top four
+    /// bits, and a reader that only implemented the v4 half would leave every
+    /// IPv6 deployment on the old misread. Same message, same verdict.
+    #[test]
+    fn an_ipv6_multicast_scout_is_also_named_a_scout() {
+        let msg = scout_message();
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&43210u16.to_be_bytes());
+        udp.extend_from_slice(&7446u16.to_be_bytes());
+        udp.extend_from_slice(&((8 + msg.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(&msg);
+
+        let mut ip = alloc::vec![0x60u8, 0, 0, 0];
+        ip.extend_from_slice(&(udp.len() as u16).to_be_bytes());
+        ip.extend_from_slice(&[17, 64]);
+        ip.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        // ff02::224 — link-local scope, the shape zenoh's IPv6 scouting uses.
+        ip.extend_from_slice(&[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x24]);
+        ip.extend_from_slice(&udp);
+
+        let mut eth = alloc::vec![0u8; 12];
+        eth.extend_from_slice(&[0x86, 0xDD]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &eth);
+        let flow = &d.datagram_flows()[0];
+        assert!(flow.frames.is_empty());
+        assert_eq!(flow.scouting.len(), 1);
+        assert!(matches!(
+            flow.scouting[0].frame,
+            Ok(ScoutingFrame::Scout { .. })
+        ));
+    }
+
+    /// A scouting MID this build cannot name must be NAMED as unknown, not
+    /// silently rerouted into the transport namespace where `0x07` would come
+    /// back a confident Join.
+    #[test]
+    fn an_unknown_scouting_mid_is_named_rather_than_rerouted() {
+        let pkt = udp_packet(
+            [192, 168, 1, 5],
+            43210,
+            SCOUT_GROUP,
+            7446,
+            &[0x01u8, 0x09, 0x00],
+        );
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
+        // 0x01 IS scouting, and decodes; the point of this test is the flow
+        // below it, where the MID is outside the namespace.
+        assert_eq!(d.datagram_flows()[0].scouting.len(), 1);
+
+        // 0x03 is neither SCOUT nor HELLO. It goes to the transport decoder,
+        // because the discriminator claims only 0x01 / 0x02 — anything else on
+        // a multicast destination is a transport message by elimination.
+        let pkt = udp_packet(
+            [192, 168, 1, 5],
+            43210,
+            SCOUT_GROUP,
+            7446,
+            &[wz_session_core::wire_const::T_MID_CLOSE, 0x00],
+        );
+        d.push_packet(LINKTYPE_ETHERNET, 1, &pkt);
+        let flow = &d.datagram_flows()[0];
+        assert_eq!(flow.scouting.len(), 1, "no new scouting message");
+        assert_eq!(flow.frames.len(), 1, "the Close reached the transport side");
+    }
+
+    /// R311y607 — THE GATE THAT WAS MISSING: every MID zenoh puts on a
+    /// datagram link is NAMED by this build, and a codec dropped out of
+    /// `wz-capture`'s feature list reds this test instead of going quiet.
+    ///
+    /// Three rounds in a row found a codec this crate silently did not select
+    /// — scout/hello (R311y585), linkstate (R311y597), the multicast JOIN
+    /// (R311y605) — and each was found by ACCIDENT, because nothing here
+    /// asserted the coverage. `dissect_feature_census.py` does not close it:
+    /// it audits the `dissect` feature's forwards, and `wz-capture`'s own
+    /// dependency features are a different list that no gate reads.
+    ///
+    /// The assertion is deliberately over `Unknown` rather than over the exact
+    /// variant. What makes a capture front end wrong is not mis-typing a field
+    /// — it is handing the reader a message with NO NAME, or, worse, the wrong
+    /// one. Both are visible here: `Unknown { mid }` reds the transport half,
+    /// and a scouting message that reached the transport decoder at all reds
+    /// the scouting half by never appearing in `scouting`.
+    #[test]
+    fn every_mid_on_a_datagram_link_is_named_rather_than_unknown() {
+        use wz_session_core::inbound::InboundFrame;
+        use wz_session_core::wire_const as wc;
+
+        // Each message is built by ITS OWN codec where one exists, so this
+        // census is anchored to the codecs rather than to a byte string whose
+        // author is also the person asserting it is right.
+        let init = {
+            let body = wz_codecs::init_body::InitBody {
+                version: 0x09,
+                cbyte: (3 << 4) | 0x01,
+                zid: &[1, 2, 3, 4],
+                sn_res: None,
+                batch_size: None,
+                cookie_len: None,
+                cookie: None,
+            };
+            let mut w = alloc::vec![wc::T_MID_INIT];
+            w.extend_from_slice(&body.encode_to_vec(0, 0));
+            w
+        };
+        let open = {
+            let body = wz_codecs::open_body::OpenBody {
+                lease: 10_000,
+                initial_sn: 0,
+                cookie_len: Some(2),
+                cookie: Some(&[0xAB, 0xCD]),
+            };
+            let mut w = alloc::vec![wc::T_MID_OPEN];
+            w.extend_from_slice(&body.encode_to_vec(0));
+            w
+        };
+        let close = {
+            let body = wz_codecs::close::Close { reason: 0x01 };
+            let mut w = alloc::vec![wc::T_MID_CLOSE];
+            w.extend_from_slice(&body.encode_to_vec());
+            w
+        };
+        // FRAME and FRAGMENT are hand-walked by `parse_inbound` rather than
+        // routed through a body codec (a VLE sn then the tail), so there is no
+        // codec to anchor to and the bytes are the sn and the payload.
+        let frame = alloc::vec![wc::T_MID_FRAME, 0x00, 0xDE, 0xAD];
+        let fragment = alloc::vec![wc::T_MID_FRAGMENT, 0x00, 0xBE, 0xEF];
+        let join = {
+            let body = wz_codecs::join::Join {
+                version: 0x09,
+                cbyte: (3 << 4) | 0x01,
+                zid: &[1, 2, 3, 4],
+                sn_res: None,
+                batch_size: None,
+                lease: 10_000,
+                next_sn_reliable: 0,
+                next_sn_best_effort: 0,
+            };
+            let mut w = alloc::vec![wc::T_MID_JOIN];
+            w.extend_from_slice(&body.encode_to_vec(0));
+            w
+        };
+        let keep_alive = alloc::vec![wc::T_MID_KEEP_ALIVE];
+
+        // The transport namespace, on a UNICAST destination — the JOIN
+        // included, since a JOIN reaching a unicast peer is still a transport
+        // message and this census is about the DECODER, not the routing.
+        for (name, wire) in [
+            ("Init", init),
+            ("Open", open),
+            ("Close", close),
+            ("KeepAlive", keep_alive),
+            ("Frame", frame),
+            ("Fragment", fragment),
+            ("Join", join),
+        ] {
+            let pkt = udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire);
+            let mut d = Dissection::new();
+            d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
+            let flow = &d.datagram_flows()[0];
+            assert_eq!(flow.frames.len(), 1, "{name} produced no frame at all");
+            match &flow.frames[0].frame {
+                Ok(InboundFrame::Unknown { mid }) => panic!(
+                    "{name} (MID {mid:#04x}) is on zenoh's wire and this build \
+                     cannot name it — a codec is missing from wz-capture's \
+                     feature list"
+                ),
+                Ok(_) => {}
+                Err(e) => panic!("{name} failed to decode: {e:?}"),
+            }
+        }
+
+        // The scouting namespace, on a MULTICAST destination, which is the
+        // only place these two MIDs mean what they say.
+        for (name, wire) in [("Scout", scout_message()), ("Hello", hello_message())] {
+            let pkt = udp_packet([192, 168, 1, 5], 43210, SCOUT_GROUP, 7446, &wire);
+            let mut d = Dissection::new();
+            d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
+            let flow = &d.datagram_flows()[0];
+            assert_eq!(
+                flow.scouting.len(),
+                1,
+                "{name} never reached the scouting decoder"
+            );
+            match &flow.scouting[0].frame {
+                Ok(ScoutingFrame::Unknown { mid }) => panic!(
+                    "{name} (MID {mid:#04x}) is on zenoh's scouting wire and \
+                     this build cannot name it"
+                ),
+                Ok(_) => {}
+                Err(e) => panic!("{name} failed to decode: {e:?}"),
+            }
+        }
+    }
+
+    /// A HELLO carrying no locator list, built by the HELLO codec.
+    fn hello_message() -> Vec<u8> {
+        let hello = wz_codecs::hello::Hello {
+            version: 0x09,
+            cbyte: (3 << 4) | 0x01,
+            zid: &[0x55, 0x66, 0x77, 0x88],
+            num_locators: None,
+            locators: None,
+        };
+        let mut wire = alloc::vec![wz_session_core::wire_const::S_MID_HELLO];
+        wire.extend_from_slice(&hello.encode_to_vec(0));
+        wire
     }
 
     /// R311y606 — a zenoh datagram split across two IP fragments decodes, and

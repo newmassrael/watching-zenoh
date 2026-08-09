@@ -58,6 +58,14 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     # held while the announcement traffic on zenoh's multicast session group
     # (a peer's zid, lease and initial per-channel SNs) arrived unnamed.
     "codec-join",
+    # R311y607 — the SCOUTING namespace, and for a reason the two above do not
+    # have: without these the observer did not go quiet, it went WRONG. A
+    # SCOUT's MID is 0x01 and so is an Init's, so every scout on the pre-session
+    # multicast group decoded as a confident `InboundFrame::Init` — a misread,
+    # which is worse than the JOIN's `Unknown { mid: 7 }` because every coarse
+    # assertion downstream not only held but held on a NAMED message.
+    "codec-scout",
+    "codec-hello",
 ] }
 
 # R311y605 — the JOIN test fixture is built by the CODEC's own encode rather
@@ -72,4 +80,15 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 wz-codecs = { path = "../wz-codecs", default-features = false, features = [
     "alloc",
     "codec-join",
+    # R311y607 — the MID-census test builds one message per MID through that
+    # MID's own codec, so the census is anchored to the codecs rather than to
+    # nine hand-laid byte strings that would all have to be right.
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    # R311y607 — same rule for the scouting fixtures: a SCOUT under test is
+    # built by the SCOUT codec's own encode, so a walker that disagrees with the
+    # codec fails rather than agreeing with a hand-laid byte string.
+    "codec-scout",
+    "codec-hello",
 ] }
