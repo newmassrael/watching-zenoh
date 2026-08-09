@@ -52,6 +52,30 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# R311y619 — only the newest run per ref survives.
+#
+# Three full runs were live at once on 2026-08-09 (heads 500a52e4, 6eb2b15b,
+# 43dc4e16) because three pushes landed inside twenty minutes and each started
+# its own 15-job matrix. Two of them were already validating a tree the third
+# contained, and one was re-proving a defect the second had fixed: 45 job-runs
+# where 15 was the whole question.
+#
+# That was a one-off human mistake then, and it becomes the STANDING condition
+# once the headless round runner (scripts/round-runner.sh) pushes once per
+# round. A round waits for its own hosted verdict before continuing, so the
+# usual case never queues a second run — but any burst does, and a superseded
+# run is compute spent on a tree nobody will ship.
+#
+# Grouped by ref rather than globally: `push` to main and a `pull_request` carry
+# different `github.ref`, so a PR's run is never cancelled by a push to main.
+# The trade is explicit: an intermediate commit can end WITHOUT a completed run
+# of its own. That is the right trade here because main is the only pushed
+# branch and the question this gate answers is "is the tip shippable", never
+# "was each intermediate commit green".
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   # CI runners are EPHEMERAL (fresh checkout per run, no target-dir reuse),

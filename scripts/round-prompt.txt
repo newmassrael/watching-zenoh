@@ -42,6 +42,13 @@ LIVE 표시된 최신 것). 등록부의 「착수 순서」에서 **정확히 �
 - push 는 `git push origin main` (맨 `git push` 는 upstream 이 없어 실패한다).
   훅 4개가 전부 통과해야 나간다. **--no-verify / --force 는 금지다.**
 - push 했으면 **호스티드를 job 단위로 읽는다.** 끝날 때까지 기다린다.
+  ⛔ **`gh run list` 의 맨 위를 집지 마라.** 방금 민 커밋의 SHA 로 특정해라 —
+  `gh run list --json databaseId,headSha,status,conclusion` 에서 `headSha` 가
+  그 커밋인 것. 앞 라운드의 실행이나 남의 실행이 위에 있을 수 있다.
+  (ci.yml 의 concurrency 가 ref 당 최신 하나만 남기지만, 그건 낡은 실행을
+  «취소»하는 것이지 네가 옳은 것을 «고르는» 일을 대신해 주지 않는다.
+  cancelled 는 green 이 아니다 — 네 커밋의 실행이 cancelled 로 끝났다면
+  그 사이에 누가 또 밀었다는 뜻이니 STOP 이다.)
 
 # 라운드를 닫으면 `.round/status` 를 쓴다 — 러너의 정지 조건이다
 
