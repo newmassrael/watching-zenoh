@@ -61,6 +61,17 @@ const BT_PB: u32 = 0x0000_0002;
 /// Interface Statistics Block — what the CAPTURE TOOL counted, including the
 /// packets it never handed anyone.
 const BT_ISB: u32 = 0x0000_0005;
+/// Decryption Secrets Block — the KEYS, carried in the capture file itself.
+///
+/// R311y625 (§1.4d) — named because its silence was the costliest of the three
+/// this reader skips. §8.1 records that wz cannot read its own encrypted
+/// traffic; a file with a DSB in it is one where the material to do so is
+/// PRESENT and this build walked past it. Reporting "encrypted, unreadable"
+/// about such a file is a true statement about the reader and a false one about
+/// the capture.
+const BT_DSB: u32 = 0x0000_000A;
+/// Name Resolution Block — address-to-name records this reader does not use.
+const BT_NRB: u32 = 0x0000_0004;
 /// The byte-order magic inside an SHB body.
 const BOM: u32 = 0x1A2B_3C4D;
 /// `if_tsresol`.
@@ -188,10 +199,21 @@ pub struct Packet {
     /// The interface's link type, copied here so a consumer never has to hold
     /// both lists to decapsulate one packet.
     pub link_type: u32,
-    /// The 64-bit tick count the block carried, in the interface's own unit.
+    /// The 64-bit tick count the block carried, in the interface's own unit,
+    /// or `None` for a block that carried NO timestamp at all.
+    ///
     /// Kept RAW for the same reason [`crate::pcap::Packet::ts_frac`] is: a
     /// consumer that only orders packets should not pay for a conversion.
-    pub ts_ticks: u64,
+    ///
+    /// R311y625 (§1.4d) — an `Option`, and it used to be a `u64` that a Simple
+    /// Packet Block filled with `0` under a comment calling zero "the only
+    /// honest answer". It is the opposite: an SPB carries no time, and `0` is a
+    /// PLAUSIBLE one. It travelled — `from_pcapng` handed `Some(0)` to
+    /// `push_packet_at`, which SET the observer's clock, and R311y624 pinned
+    /// that clock as STICKY, so every later frame in an SPB capture reported an
+    /// instant nobody recorded. A reader asking `time > 0` got a confident No
+    /// and a latency came out as 0 ms.
+    pub ts_ticks: Option<u64>,
     /// Bytes actually stored.
     pub data: Vec<u8>,
     /// Length the packet had on the wire.
@@ -214,15 +236,16 @@ impl Packet {
     /// not the seconds/fraction pair classic pcap uses, so there is no
     /// `ts_secs` to expose — the split is a property of the old format rather
     /// than of the data.
-    pub fn ts_millis(&self, iface: &Interface) -> u64 {
+    pub fn ts_millis(&self, iface: &Interface) -> Option<u64> {
+        let ticks = self.ts_ticks?;
         let per_sec = iface.ticks_per_second();
-        if per_sec >= 1_000 {
+        Some(if per_sec >= 1_000 {
             // Finer than a millisecond (the usual case: micro or nano).
-            self.ts_ticks / (per_sec / 1_000)
+            ticks / (per_sec / 1_000)
         } else {
             // Coarser: milliseconds per tick, so multiply.
-            self.ts_ticks * (1_000 / per_sec.max(1))
-        }
+            ticks * (1_000 / per_sec.max(1))
+        })
     }
 }
 
@@ -243,16 +266,56 @@ pub struct PcapngFile {
     /// the writer emitted none, which is ordinary: an ISB is optional and its
     /// absence says nothing either way about whether packets were lost.
     pub interface_stats: Vec<InterfaceStats>,
+    /// R311y625 (§1.4d) — block types this reader walked past, with a count
+    /// each, in first-seen order.
+    ///
+    /// The format is self-describing precisely so an unknown block can be
+    /// stepped over, and stepping over one silently is a different thing from
+    /// stepping over one and saying so. [`Self::carries_decryption_secrets`] is
+    /// the case that motivated this.
+    pub skipped_blocks: Vec<SkippedBlock>,
+}
+
+/// R311y625 (§1.4d) — one block type this reader stepped over, and how often.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkippedBlock {
+    /// The pcapng block type word.
+    pub block_type: u32,
+    /// How many blocks of that type the file carried.
+    pub count: usize,
 }
 
 impl PcapngFile {
+    /// R311y625 (§1.4d) — how many Decryption Secrets Blocks the file carried
+    /// and this reader did not use.
+    ///
+    /// Its own accessor rather than a lookup a caller writes, because it is the
+    /// one skipped type whose presence CHANGES WHAT A REPORT MEANS: §8.1
+    /// records that wz cannot decrypt its own TLS traffic, and a file carrying
+    /// a DSB is one where the keys were in the capture. "Encrypted and
+    /// unreadable" is then true of this build and false of the file.
+    pub fn carries_decryption_secrets(&self) -> usize {
+        self.skipped_blocks
+            .iter()
+            .find(|s| s.block_type == BT_DSB)
+            .map_or(0, |s| s.count)
+    }
+
+    /// R311y625 — Name Resolution Blocks stepped over.
+    pub fn carries_name_resolution(&self) -> usize {
+        self.skipped_blocks
+            .iter()
+            .find(|s| s.block_type == BT_NRB)
+            .map_or(0, |s| s.count)
+    }
+
     /// `packet`'s capture time in milliseconds, resolved against its own
     /// interface. `None` when the id is out of range, which [`parse`] does not
     /// produce — it rejects such a packet — but which a hand-built value can.
     pub fn ts_millis(&self, packet: &Packet) -> Option<u64> {
         self.interfaces
             .get(packet.interface_id as usize)
-            .map(|i| packet.ts_millis(i))
+            .and_then(|i| packet.ts_millis(i))
     }
 }
 
@@ -390,6 +453,8 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
     let mut interfaces: Vec<Interface> = Vec::new();
     let mut packets: Vec<Packet> = Vec::new();
     let mut interface_stats: Vec<InterfaceStats> = Vec::new();
+    // R311y625 (§1.4d) — block types stepped over, counted rather than dropped.
+    let mut skipped: Vec<SkippedBlock> = Vec::new();
     // R311y607 — obsolete-Packet-Block drop counters, summed per interface.
     // A map rather than a Vec because the interface list is rebuilt at each
     // section boundary while these are accumulated across the whole file, and
@@ -510,7 +575,7 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
                     // The two halves are a single 64-bit count, high word
                     // first. Reading them as a seconds/fraction pair — which
                     // the classic layout invites — is wrong by construction.
-                    ts_ticks: (ts_high << 32) | ts_low,
+                    ts_ticks: Some((ts_high << 32) | ts_low),
                     data: body[20..20 + captured as usize].to_vec(),
                     orig_len,
                 });
@@ -534,10 +599,9 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
                     index,
                     interface_id: 0,
                     link_type: interfaces[0].link_type,
-                    // An SPB carries no timestamp at all. Zero is the only
-                    // honest answer, and it is why a capture of SPBs cannot
-                    // drive a reassembly deadline.
-                    ts_ticks: 0,
+                    // An SPB carries no timestamp at all, and the ABSENCE is
+                    // what travels rather than a plausible zero (R311y625).
+                    ts_ticks: None,
                     data: body[4..4 + stored].to_vec(),
                     orig_len,
                 });
@@ -589,7 +653,7 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
                     index,
                     interface_id,
                     link_type,
-                    ts_ticks: (ts_high << 32) | ts_low,
+                    ts_ticks: Some((ts_high << 32) | ts_low),
                     data: body[20..20 + captured as usize].to_vec(),
                     orig_len,
                 });
@@ -610,10 +674,23 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
                     dropped: scan_u64_option(opts, swapped, OPT_ISB_IFDROP),
                 });
             }
-            // Name resolution, decryption secrets, custom blocks: skipped by
-            // length, which is what the format's self-describing block
-            // structure is FOR.
-            _ => {}
+            // R311y625 (§1.4d) — skipped by length, which is what the format's
+            // self-describing block structure is FOR, and now COUNTED, which is
+            // what this crate's own rule requires of anything it drops. A
+            // reader that walks past a block silently reports the file it can
+            // read as if it were the file it was given.
+            other => {
+                let entry = skipped
+                    .iter_mut()
+                    .find(|s: &&mut SkippedBlock| s.block_type == other);
+                match entry {
+                    Some(e) => e.count += 1,
+                    None => skipped.push(SkippedBlock {
+                        block_type: other,
+                        count: 1,
+                    }),
+                }
+            }
         }
         off += total;
     }
@@ -644,6 +721,7 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
         packets,
         sections,
         interface_stats,
+        skipped_blocks: skipped,
     })
 }
 
@@ -895,10 +973,94 @@ mod tests {
         let ticks = (3u64 << 32) | 7;
         let file = write(&[(1, 6)], &[(0, ticks, &[0xAA])]);
         let parsed = parse(&file).expect("parse");
-        assert_eq!(parsed.packets[0].ts_ticks, ticks);
+        assert_eq!(parsed.packets[0].ts_ticks, Some(ticks));
         assert_ne!(
-            parsed.packets[0].ts_ticks, 3,
+            parsed.packets[0].ts_ticks,
+            Some(3),
             "reading the high word alone as seconds is the classic-format habit"
+        );
+    }
+
+    /// R311y625 (§1.4d) — a file carrying DECRYPTION SECRETS says so, and this
+    /// is the skipped block whose silence cost the most.
+    ///
+    /// §8.1 records that wz cannot read its own encrypted traffic. A capture
+    /// with a DSB in it is one where the material to do so was IN THE FILE, and
+    /// the reader walked past it without a word — so a report saying "encrypted
+    /// and unreadable" was true about this build and false about the capture.
+    /// The block is still skipped: implementing TLS decryption is not this
+    /// round's business. Being able to SAY it was there is.
+    #[test]
+    fn a_file_carrying_decryption_secrets_says_so_rather_than_walking_past() {
+        let mut file = write(&[(1, 6)], &[(0, 1_000_000, &[0xAA; 4])]);
+        // A DSB: type, total length, secrets type, secrets length, body, length.
+        let mut dsb = Vec::new();
+        dsb.extend_from_slice(&BT_DSB.to_le_bytes());
+        dsb.extend_from_slice(&24u32.to_le_bytes());
+        dsb.extend_from_slice(&0x544c_534bu32.to_le_bytes()); // "TLSK"
+        dsb.extend_from_slice(&4u32.to_le_bytes());
+        dsb.extend_from_slice(b"key!");
+        dsb.extend_from_slice(&24u32.to_le_bytes());
+        file.extend_from_slice(&dsb);
+
+        let parsed = parse(&file).expect("a DSB must not be fatal");
+        assert_eq!(parsed.packets.len(), 1, "the packet before it still reads");
+        assert_eq!(
+            parsed.carries_decryption_secrets(),
+            1,
+            "and the file's own keys are REPORTED, not walked past: {:?}",
+            parsed.skipped_blocks
+        );
+        assert_eq!(parsed.carries_name_resolution(), 0);
+    }
+
+    /// THE CONTROL: an ordinary capture reports nothing skipped. Without it a
+    /// census that counted every block would satisfy the page above.
+    #[test]
+    fn a_file_with_nothing_unusual_reports_no_skipped_block() {
+        let file = write(&[(1, 6)], &[(0, 1_000_000, &[0xAA; 4])]);
+        let parsed = parse(&file).expect("parse");
+        assert!(
+            parsed.skipped_blocks.is_empty(),
+            "{:?}",
+            parsed.skipped_blocks
+        );
+        assert_eq!(parsed.carries_decryption_secrets(), 0);
+    }
+
+    /// R311y625 (§1.4d) — an SPB capture leaves the observer's clock UNSET
+    /// rather than pinning it to zero, end to end through the dissection.
+    ///
+    /// The page that makes the `Option` worth the churn. Before it, `ts_ticks`
+    /// was `0`, `from_pcapng` handed `Some(0)` to `push_packet_at`, that SET
+    /// the clock, and R311y624 pinned the clock as STICKY — so every frame in
+    /// such a capture reported an instant nobody had recorded, a `time > 0`
+    /// term got a confident No, and any latency came out as 0 ms.
+    #[test]
+    fn a_simple_packet_capture_leaves_the_observers_clock_unset() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let payload =
+            crate::datagram_tests::udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &keepalive);
+        let mut file = write(&[(1, 6)], &[]);
+        let padded = (payload.len() + 3) & !3;
+        file.extend_from_slice(&BT_SPB.to_le_bytes());
+        file.extend_from_slice(&((16 + padded) as u32).to_le_bytes());
+        file.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        file.extend_from_slice(&payload);
+        file.extend_from_slice(&alloc::vec![0u8; padded - payload.len()]);
+        file.extend_from_slice(&((16 + padded) as u32).to_le_bytes());
+
+        let d = crate::Dissection::from_pcapng(&file).expect("the SPB capture must read");
+        let flow = &d.datagram_flows()[0];
+        assert_eq!(flow.frames.len(), 1, "the packet reached a flow");
+        assert_eq!(
+            flow.frames[0].observed_at_ms, None,
+            "a block with no timestamp must not produce one"
+        );
+        assert_eq!(
+            flow.session.observed_at(),
+            None,
+            "and the observer must still be able to say it was never told"
         );
     }
 
@@ -1097,7 +1259,17 @@ mod tests {
         assert_eq!(parsed.packets.len(), 1);
         assert_eq!(parsed.packets[0].interface_id, 0);
         assert_eq!(parsed.packets[0].link_type, 1);
-        assert_eq!(parsed.packets[0].ts_ticks, 0);
+        // R311y625 (§1.4d) — the ABSENCE, not a plausible zero. The old
+        // assertion read `0` and the field could not tell "no timestamp" from
+        // "timestamp zero"; `from_pcapng` then handed `Some(0)` to the
+        // observer's clock and every frame in an SPB capture reported an
+        // instant nobody recorded.
+        assert_eq!(parsed.packets[0].ts_ticks, None);
+        assert_eq!(
+            parsed.ts_millis(&parsed.packets[0]),
+            None,
+            "and the absence survives the resolution against an interface"
+        );
         assert_eq!(parsed.packets[0].data, alloc::vec![0xAA, 0xBB, 0xCC, 0xDD]);
     }
 
