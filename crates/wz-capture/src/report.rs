@@ -119,6 +119,13 @@ impl<'a> CaptureReport<'a> {
             if !e.gaps().is_clean() || !e.unread().is_clean() || e.unclosed() > 0 {
                 return false;
             }
+            // R311y618 — the same rule the throughput plane got in R311y616,
+            // reached one plane later: an exchange the selector could not judge
+            // is an exchange missing from the rows, and a reader summing them
+            // has to be told.
+            if !e.selection().is_decisive() {
+                return false;
+            }
         }
         // R311y617 — the payload plane's own unread counters. A CONTRADICTION
         // is deliberately NOT one of them: a payload that disagrees with its
@@ -128,6 +135,9 @@ impl<'a> CaptureReport<'a> {
         #[cfg(feature = "network-codecs")]
         if let Some(p) = self.payloads {
             if !p.gaps().is_clean() {
+                return false;
+            }
+            if !p.selection().is_decisive() {
                 return false;
             }
         }
@@ -272,6 +282,17 @@ impl<'a> CaptureReport<'a> {
                     g.orphan_responses, g.unstamped, g.non_monotonic, g.unattributed_requests
                 ));
             }
+            // R311y618 — exchanges, not records: the unit this plane judged is
+            // named on the line so the figure is not mistaken for the
+            // throughput plane's, which counts something else over the same
+            // capture.
+            let sel = e.selection();
+            if sel.rejected > 0 || sel.undecided > 0 {
+                s.push_str(&format!(
+                    "  selection: {} exchange(s) matched, {} rejected, {} UNDECIDED\n",
+                    sel.matched, sel.rejected, sel.undecided
+                ));
+            }
             for row in e.rows() {
                 s.push_str(&format!(
                     "  {:>8}  {:>4} req  {}\n",
@@ -290,6 +311,17 @@ impl<'a> CaptureReport<'a> {
                 p.contradictions().len(),
                 p.unknown_ids()
             ));
+            // Beside the finding count, and deliberately: a narrowed census
+            // reports findings about the payloads it kept and says nothing
+            // about the rest, so "0 contradicted" under a selector is not the
+            // same claim as "0 contradicted" over the capture.
+            let sel = p.selection();
+            if sel.rejected > 0 || sel.undecided > 0 {
+                s.push_str(&format!(
+                    "  selection: {} matched, {} rejected, {} UNDECIDED\n",
+                    sel.matched, sel.rejected, sel.undecided
+                ));
+            }
             for row in p.rows() {
                 s.push_str(&format!(
                     "  {:>6} msg  {:>10} B  {}{}\n",
@@ -467,6 +499,8 @@ fn exchanges_json(e: &crate::exchange::ExchangeTable, s: &mut String) {
     latency_json(&first, s);
     s.push_str(",\"completion\":");
     latency_json(&completion, s);
+    s.push_str(",\"selection\":");
+    selection_json(e.selection(), s);
     s.push_str(",\"gaps\":");
     exchange_gaps_json(g, s);
     s.push_str(",\"unread\":");
@@ -521,6 +555,8 @@ fn payloads_json(p: &crate::payload::PayloadCensus, s: &mut String) {
         p.contradictions().len(),
         p.unknown_ids()
     ));
+    s.push_str(",\"selection\":");
+    selection_json(p.selection(), s);
     s.push_str(",\"gaps\":");
     gaps_json(p.gaps(), s);
     s.push_str(",\"encodings\":[");
@@ -818,6 +854,186 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("is not JSON at byte 0"), "{text}");
+    }
+
+    /// R311y618 (§1.1q) — ONE selector, THREE planes, and each plane's document
+    /// says what that selector could not judge about IT.
+    ///
+    /// The failure this refuses is the one R311y616 shipped with: a reader
+    /// narrowed a report to a topic, the throughput table honestly reported its
+    /// undecided count, and the exchange and payload tables beside it silently
+    /// answered about the WHOLE capture. Two of the three numbers on the page
+    /// were about a different question than the one asked.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn one_selector_narrows_every_plane_of_the_report() {
+        use crate::exchange::tests as fx;
+
+        // A capture with an exchange and a payload on each of two topics, plus
+        // one record whose alias this capture never bound.
+        let d = fx::dissect(&[
+            (
+                true,
+                Some(10),
+                fx::request_query(1, fx::sender_space(0, Some("demo/keep"))),
+            ),
+            (
+                false,
+                Some(20),
+                fx::response_reply(1, fx::sender_space(0, Some("demo/keep")), b"kept"),
+            ),
+            (false, Some(40), fx::response_final(1)),
+            (
+                true,
+                Some(50),
+                fx::request_query(2, fx::sender_space(0, Some("other/drop"))),
+            ),
+            (
+                false,
+                Some(55),
+                fx::response_reply(2, fx::sender_space(0, Some("other/drop")), b"dropped!"),
+            ),
+            (false, Some(60), fx::response_final(2)),
+            (
+                true,
+                Some(90),
+                fx::request_query(3, fx::sender_space(42, None)),
+            ),
+        ]);
+
+        let filter = crate::filter::Filter::parse("key == demo/keep").expect("compiles");
+        let throughput = crate::agg::aggregate_where(&d, &filter);
+        let exchanges = crate::exchange::exchanges_where(&d, &filter);
+        let payloads = crate::payload::payloads_where(&d, &filter);
+
+        // The control FIRST: unfiltered, every plane answers about everything.
+        let all_throughput = crate::agg::aggregate(&d);
+        let all_exchanges = crate::exchange::exchanges(&d);
+        let all_payloads = crate::payload::payloads(&d);
+        let all = CaptureReport::of(&d)
+            .with_throughput(&all_throughput)
+            .with_exchanges(&all_exchanges)
+            .with_payloads(&all_payloads);
+        assert_eq!(all_exchanges.requests(), 3, "the fixture must be wide");
+        assert_eq!(all_exchanges.unclosed(), 1);
+        assert_eq!(all_payloads.payloads(), 2);
+        assert!(all.to_text().contains("other/drop"));
+
+        assert_eq!(exchanges.requests(), 1, "one exchange survived");
+        assert_eq!(payloads.payloads(), 1, "one payload survived");
+        assert_eq!(
+            exchanges.selection().undecided,
+            1,
+            "the unbound alias is undecidable for the exchange plane too"
+        );
+        assert_eq!(
+            exchanges.unclosed(),
+            0,
+            "the unclosed exchange was the undecided one, and a suppressed \
+             exchange is not reported as a loss of this table"
+        );
+
+        let r = CaptureReport::of(&d)
+            .with_throughput(&throughput)
+            .with_exchanges(&exchanges)
+            .with_payloads(&payloads);
+
+        let json = r.to_json();
+        // Three selection objects, structurally, one per plane.
+        assert_eq!(
+            json.matches("\"selection\":").count(),
+            3,
+            "every plane carries its own selection: {json}"
+        );
+        assert!(
+            json.contains("\"complete\":false"),
+            "an undecided exchange makes the page a floor: {json}"
+        );
+        assert!(
+            !json.contains("\"other/drop\""),
+            "a rejected topic must not appear in any plane's rows: {json}"
+        );
+
+        let text = r.to_text();
+        assert!(text.contains("1 exchange(s) matched"), "{text}");
+        assert!(text.contains("payloads: 1 judged"), "{text}");
+        assert!(
+            text.contains("selection: 1 matched, 1 rejected, 0 UNDECIDED"),
+            "the payload plane's own line, in records: {text}"
+        );
+    }
+
+    /// R311y618 — each plane's undecided count reaches the verdict ON ITS OWN.
+    ///
+    /// The test above cannot see this and a falsification proved it: its
+    /// throughput plane is undecided too, so deleting the exchange leg from
+    /// [`CaptureReport::is_complete`] changed nothing and the suite stayed
+    /// green. Here each plane is the ONLY one on the page, so the leg under
+    /// test is the only thing that can produce the verdict — the shape §7.14
+    /// names, reached by putting one plane on a page rather than by trusting a
+    /// page that has three.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn one_undecided_plane_makes_the_page_a_floor_when_it_is_the_only_plane() {
+        use crate::exchange::tests as fx;
+
+        // Every record travels under an alias this capture never bound, so a
+        // `key` term is undecidable for all of them — and NOTHING else about
+        // the capture is short.
+        let d = fx::dissect(&[
+            (
+                true,
+                Some(10),
+                fx::request_query(1, fx::sender_space(42, None)),
+            ),
+            (
+                false,
+                Some(20),
+                fx::response_reply(1, fx::sender_space(42, None), b"x"),
+            ),
+            (false, Some(30), fx::response_final(1)),
+        ]);
+        let filter = crate::filter::Filter::parse("key == demo/keep").expect("compiles");
+
+        let exchanges = crate::exchange::exchanges_where(&d, &filter);
+        assert_eq!(exchanges.selection().undecided, 1);
+        assert!(
+            exchanges.gaps().is_clean() && exchanges.unread().is_clean(),
+            "the selection must be the ONLY shortfall: {:?}",
+            exchanges.gaps()
+        );
+        assert_eq!(exchanges.unclosed(), 0);
+        assert!(
+            !CaptureReport::of(&d)
+                .with_exchanges(&exchanges)
+                .is_complete(),
+            "an exchange the selector could not judge is missing from the rows"
+        );
+
+        let payloads = crate::payload::payloads_where(&d, &filter);
+        assert_eq!(payloads.selection().undecided, 1);
+        assert!(payloads.gaps().is_clean());
+        assert!(
+            !CaptureReport::of(&d).with_payloads(&payloads).is_complete(),
+            "a payload the selector could not judge is missing from the census"
+        );
+
+        // The control: unfiltered, NOTHING is undecided on either plane — the
+        // identity filter has no question it cannot answer. The page is still
+        // not complete, and deliberately so: unfiltered, the unbound alias
+        // becomes an `unattributed_requests` gap instead. Asserting
+        // completeness here would have been asserting the wrong fact, which is
+        // what a falsification run surfaced.
+        let all_exchanges = crate::exchange::exchanges(&d);
+        let all_payloads = crate::payload::payloads(&d);
+        assert!(all_exchanges.selection().is_decisive());
+        assert!(all_payloads.selection().is_decisive());
+        assert_eq!(
+            all_exchanges.gaps().unattributed_requests,
+            1,
+            "unfiltered, the same shortfall is reported as a GAP rather than as \
+             an undecided selection"
+        );
     }
 
     /// A latency nobody could measure prints as `unmeasured` and serialises as

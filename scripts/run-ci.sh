@@ -5379,7 +5379,15 @@ layer_c1bt_capture_no_default_features() {
         payload::census_tests::the_fixture_puts_a_declared_encoding_on_the_wire \
         payload::census_tests::a_publisher_contradicting_its_own_encoding_is_named_with_its_keyexpr \
         payload::census_tests::binary_payloads_are_never_a_contradiction \
-        report::tests::a_payload_contradiction_is_a_finding_and_not_an_incompleteness
+        report::tests::a_payload_contradiction_is_a_finding_and_not_an_incompleteness \
+        exchange::tests::the_identity_filter_is_the_unfiltered_exchange_plane \
+        exchange::tests::the_responses_to_a_rejected_request_are_not_orphans \
+        exchange::tests::an_unresolvable_request_keyexpr_is_undecided_rather_than_rejected \
+        payload::census_tests::an_encoding_id_the_wire_carries_and_this_build_cannot_name_is_counted \
+        payload::census_tests::a_selector_narrows_what_a_finding_can_be_about \
+        payload::census_tests::a_payload_carried_by_a_response_answers_kind_reply \
+        report::tests::one_selector_narrows_every_plane_of_the_report \
+        report::tests::one_undecided_plane_makes_the_page_a_floor_when_it_is_the_only_plane
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the network-codecs build"

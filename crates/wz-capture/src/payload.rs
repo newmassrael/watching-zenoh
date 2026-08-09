@@ -553,6 +553,7 @@ pub struct PayloadCensus {
     payloads: usize,
     unknown_ids: usize,
     gaps: crate::agg::ThroughputGaps,
+    selection: crate::filter::Selection,
 }
 
 #[cfg(feature = "network-codecs")]
@@ -597,16 +598,45 @@ impl PayloadCensus {
         self.gaps
     }
 
+    /// R311y618 (§1.1q) — what the selector did to the PAYLOADS it was shown.
+    ///
+    /// One verdict per payload, so this is directly comparable with
+    /// [`Self::payloads`]: the unit here is the record, as in the throughput
+    /// plane, and NOT the exchange as in [`crate::exchange`]. A payload is
+    /// judged on its own because it is complete on its own — everything a
+    /// predicate can ask about it travels in the same record.
+    pub fn selection(&self) -> crate::filter::Selection {
+        self.selection
+    }
+
     /// Fold one flow's frames in.
     pub fn observe_flow(&mut self, frames: &[wz_session_core::passive::PassiveFrame]) {
+        self.observe_flow_where(frames, &crate::filter::Filter::any())
+    }
+
+    /// R311y618 (§1.1q) — the same census, over the payloads a selector picks.
+    ///
+    /// A rejected payload is not inspected, not counted and not a finding. That
+    /// last one is the consequence worth stating: a selector NARROWS what this
+    /// plane will report a contradiction about, so a reader who asks
+    /// `key == app/**` and sees no findings has learned nothing about the rest
+    /// of the capture. [`Self::selection`] is what makes that legible, and it is
+    /// why the report renders it beside the finding count rather than under it.
+    pub fn observe_flow_where(
+        &mut self,
+        frames: &[wz_session_core::passive::PassiveFrame],
+        filter: &crate::filter::Filter,
+    ) {
         use wz_session_core::passive::Carried;
 
         let mut spaces = crate::agg::KeyexprSpaces::new();
         for frame in frames {
             match &frame.carried {
-                Carried::Batch(batch) => self.observe_batch(&mut spaces, frame, batch),
+                Carried::Batch(batch) => self.observe_batch(&mut spaces, frame, batch, filter),
                 #[cfg(feature = "reassembly")]
-                Carried::Reassembled(batch) => self.observe_batch(&mut spaces, frame, batch),
+                Carried::Reassembled(batch) => {
+                    self.observe_batch(&mut spaces, frame, batch, filter)
+                }
                 // Matched by name for the reason R311y614 matched them by name
                 // in the throughput plane: a new `Carried` variant must fail to
                 // compile here rather than join the silent set.
@@ -625,13 +655,14 @@ impl PayloadCensus {
         spaces: &mut crate::agg::KeyexprSpaces,
         frame: &wz_session_core::passive::PassiveFrame,
         batch: &wz_session_core::network_message::BatchParse,
+        filter: &crate::filter::Filter,
     ) {
         if batch.halt.is_some() {
             self.gaps.halted_batches += 1;
             self.gaps.unparsed_bytes += batch.unparsed_bytes;
         }
         for message in &batch.messages {
-            self.observe_message(spaces, frame, message);
+            self.observe_message(spaces, frame, message, filter);
         }
     }
 
@@ -640,6 +671,7 @@ impl PayloadCensus {
         spaces: &mut crate::agg::KeyexprSpaces,
         frame: &wz_session_core::passive::PassiveFrame,
         message: &wz_session_core::network_message::NetworkMessage,
+        filter: &crate::filter::Filter,
     ) {
         use wz_session_core::network_message::NetworkMessage;
 
@@ -652,6 +684,26 @@ impl PayloadCensus {
             return;
         };
         let keyexpr = spaces.resolve(direction, keyexpr_body).ok();
+        // R311y618 — asked after resolution and before the bytes are inspected.
+        // The kind comes from the throughput plane's classifier, so a payload
+        // that arrived inside a `Response` answers `kind == reply` here exactly
+        // as it does there; deriving it locally is the second spelling that
+        // would let the two planes disagree about one record.
+        let (kind, payload_bytes) = match crate::agg::classify(message) {
+            Some((_, counts, kind)) => (kind, counts.payload_bytes),
+            None => (crate::filter::RecordKind::Put, 0),
+        };
+        let truth = filter.matches(&crate::filter::RecordView {
+            direction,
+            keyexpr: keyexpr.as_deref(),
+            kind,
+            payload_bytes,
+            observed_at_ms: frame.observed_at_ms,
+        });
+        self.selection.record(truth);
+        if truth != crate::filter::Truth::Yes {
+            return;
+        }
         let encoding = match &put.encoding {
             Some(e) => Encoding::from_packed(e.packed_id, e.schema.as_deref()),
             None => Encoding::Absent,
@@ -751,12 +803,26 @@ fn carried_put(
 /// against its own per-flow id spaces.
 #[cfg(feature = "network-codecs")]
 pub fn payloads(dissection: &crate::Dissection) -> PayloadCensus {
+    payloads_where(dissection, &crate::filter::Filter::any())
+}
+
+/// R311y618 (§1.1q) — the same census, over the payloads a selector picks.
+///
+/// The third and last plane to take a [`crate::filter::Filter`], which closes
+/// the gap R311y616 left: one compiled selector now narrows every plane of a
+/// report, and [`crate::filter::Selection`] rides on each so no plane's totals
+/// can be read without the count of what the selector could not judge.
+#[cfg(feature = "network-codecs")]
+pub fn payloads_where(
+    dissection: &crate::Dissection,
+    filter: &crate::filter::Filter,
+) -> PayloadCensus {
     let mut census = PayloadCensus::new();
     for flow in dissection.flows() {
-        census.observe_flow(&flow.frames);
+        census.observe_flow_where(&flow.frames, filter);
     }
     for flow in dissection.datagram_flows() {
-        census.observe_flow(&flow.frames);
+        census.observe_flow_where(&flow.frames, filter);
     }
     census
 }
@@ -923,6 +989,165 @@ mod census_tests {
             ..Default::default()
         }
         .encode_to_vec()
+    }
+
+    /// R311y618 (§1.4j) — an id NOT in this build's table, arriving off the
+    /// WIRE rather than through `Encoding::from_packed`.
+    ///
+    /// The unit tests above already build an unknown id by hand, which proves
+    /// the constructor and nothing about the census: until this test there was
+    /// no capture in the suite that DROVE `unknown_ids`, so the counter was a
+    /// claim -> [[feedback_negative_arm_makes_the_positive_a_claim]]. The id is
+    /// picked from ABOVE the table's 53 entries rather than from a gap inside
+    /// it, on the R311y605 rule that a fixture reaching for a small spare id
+    /// tends to collide with a real one later.
+    #[test]
+    fn an_encoding_id_the_wire_carries_and_this_build_cannot_name_is_counted() {
+        const ID_ABOVE_THE_TABLE: u16 = 200;
+        assert!(
+            ENCODING_ID_TO_STR.len() < ID_ABOVE_THE_TABLE as usize,
+            "the fixture's id must be outside the table for this test to mean anything"
+        );
+        let c = census(&[
+            (
+                true,
+                push_declaring("odd/topic", ID_ABOVE_THE_TABLE, b"\x01\x02"),
+            ),
+            (true, push_declaring("known/topic", ID_JSON, b"{}")),
+        ]);
+        assert_eq!(c.payloads(), 2);
+        assert_eq!(c.unknown_ids(), 1);
+        let unknown = c
+            .rows()
+            .into_iter()
+            .find(|r| r.declared.starts_with("id 200"))
+            .expect("the unknown id gets its own row rather than joining another");
+        assert_eq!(unknown.payloads, 1);
+        assert_eq!(unknown.bytes, 2);
+        assert_eq!(
+            unknown.not_as_declared, 0,
+            "a claim this build cannot read is not a claim it can refute"
+        );
+        assert!(
+            c.rows()
+                .iter()
+                .any(|r| r.declared == "application/json" && r.consistent == 1),
+            "the control: a known id in the same capture is still named"
+        );
+    }
+
+    // R311y618 (§1.1q) — the selector reaches the payload plane too.
+
+    fn census_where(records: &[(bool, Vec<u8>)], selector: &str) -> (PayloadCensus, PayloadCensus) {
+        let stamped: Vec<(bool, Option<u64>, Vec<u8>)> = records
+            .iter()
+            .map(|(d, r)| (*d, Some(1), r.clone()))
+            .collect();
+        let d = fx::dissect(&stamped);
+        let filter = crate::filter::Filter::parse(selector).expect("the selector must compile");
+        (payloads_where(&d, &filter), payloads(&d))
+    }
+
+    /// A capture with one good payload, one that contradicts itself, and one on
+    /// a different topic.
+    fn three_payloads() -> Vec<(bool, Vec<u8>)> {
+        alloc::vec![
+            (true, push_declaring("app/good", ID_JSON, b"{\"ok\":1}")),
+            (true, push_declaring("app/bad", ID_JSON, b"not json")),
+            (true, push_declaring("other/x", ID_TEXT, b"words")),
+        ]
+    }
+
+    /// ANTI-VACUITY: the identity filter IS the unfiltered census.
+    #[test]
+    fn the_identity_filter_is_the_unfiltered_census() {
+        let (filtered, plain) = census_where(&three_payloads(), "");
+        assert_eq!(filtered.payloads(), plain.payloads());
+        assert_eq!(
+            filtered.contradictions().len(),
+            plain.contradictions().len()
+        );
+        assert_eq!(filtered.rows().len(), plain.rows().len());
+        assert_eq!(filtered.selection().matched, 3);
+        assert!(filtered.selection().is_decisive());
+    }
+
+    /// The consequence worth naming: a selector narrows what this plane can
+    /// report a FINDING about. The contradiction is real and unfiltered it is
+    /// reported; under a selector that excludes its topic the census is silent
+    /// about it, and `selection` is the only thing that says so.
+    #[test]
+    fn a_selector_narrows_what_a_finding_can_be_about() {
+        let (t, plain) = census_where(&three_payloads(), "key == other/x");
+        assert_eq!(
+            plain.contradictions().len(),
+            1,
+            "the control: the capture really does contain one contradiction"
+        );
+        assert_eq!(t.payloads(), 1);
+        assert_eq!(t.rows().len(), 1);
+        assert_eq!(t.rows()[0].declared, "text/plain");
+        assert!(
+            t.contradictions().is_empty(),
+            "the finding is outside the selection and is not reported"
+        );
+        assert_eq!(
+            t.selection(),
+            crate::filter::Selection {
+                matched: 1,
+                rejected: 2,
+                undecided: 0
+            }
+        );
+    }
+
+    /// The `kind` a payload answers to comes from the THROUGHPUT plane's
+    /// classifier, so a payload carried by a `Response` is a `reply` here
+    /// exactly as it is there — one classification, asked from two planes.
+    #[test]
+    fn a_payload_carried_by_a_response_answers_kind_reply() {
+        let capture = alloc::vec![
+            (true, push_declaring("t/push", ID_TEXT, b"pushed")),
+            (
+                false,
+                fx::response_reply(1, fx::sender_space(0, Some("t/reply")), b"replied"),
+            ),
+        ];
+        let (replies, plain) = census_where(&capture, "kind == reply");
+        assert_eq!(plain.payloads(), 2, "the control: both carry a payload");
+        assert_eq!(replies.payloads(), 1);
+        assert_eq!(replies.rows()[0].bytes, 7);
+        let (puts, _) = census_where(&capture, "kind == put");
+        assert_eq!(puts.payloads(), 1);
+        assert_eq!(puts.rows()[0].bytes, 6);
+    }
+
+    /// A payload whose keyexpr the capture never bound leaves a `key` term
+    /// UNDECIDED, so the census under that selector is a floor and says so.
+    #[test]
+    fn an_unresolvable_payload_keyexpr_is_undecided() {
+        let unnamed = wz_codecs::push::Push {
+            keyexpr: fx::sender_space(77, None),
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                header: wz_codecs::msg_put::MsgPut::default().header
+                    | wz_codecs::wire_const::FLAG_Z_PUT_E,
+                encoding: Some(wz_codecs::encoding::Encoding {
+                    packed_id: (ID_TEXT as u32) << 1,
+                    schema_len: None,
+                    schema: None,
+                }),
+                payload_len: 2,
+                payload: b"hi",
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let (t, plain) = census_where(&alloc::vec![(true, unnamed)], "key == app/topic");
+        assert_eq!(plain.payloads(), 1, "the control: the record decoded");
+        assert_eq!(t.payloads(), 0);
+        assert_eq!(t.selection().undecided, 1);
+        assert!(!t.selection().is_decisive());
     }
 }
 

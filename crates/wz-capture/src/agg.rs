@@ -568,7 +568,15 @@ impl ThroughputTable {
 /// classification lives, and the two would disagree the first time a record
 /// moved two counters.
 #[allow(clippy::type_complexity)]
-fn classify(
+/// R311y618 (§1.1q) — `pub(crate)` so the exchange and payload planes ask THIS
+/// function what a record is instead of re-deriving the partition.
+///
+/// The kinds and the counters are one classification, and a second spelling of
+/// it in another module is the copy that drifts: a reader writing `kind ==
+/// reply` against the payload plane must get the same answer the throughput
+/// plane would give for the same bytes, and the only way that cannot break is
+/// for there to be one function.
+pub(crate) fn classify(
     message: &NetworkMessage,
 ) -> Option<(&WireexprOwnedVariant, KeyexprCounts, RecordKind)> {
     #[cfg(feature = "network-codecs")]

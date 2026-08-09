@@ -59,7 +59,11 @@ use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 /// `from_str -> to_string` round trip reads the same table in both directions,
 /// so it is invariant under ANY permutation, which a damage probe demonstrated
 /// by swapping two entries and staying green. See
-/// `tests/pico_pure_function_oracle.rs::encoding_ids_agree_with_the_real_pico_library`.
+/// `wz-integration-tests/tests/pico_pure_function_oracle.rs::encoding_ids_agree_with_the_real_pico_library`
+/// — R311y618 corrected the crate this path names: it said `tests/` of THIS
+/// crate, where the oracle has never lived, and a reader following it found
+/// nothing. The oracle needs the real `libzenohpico.so`, so it can only live
+/// where the interop harness does.
 pub use wz_capi_core::encoding_ids::ENCODING_ID_TO_STR;
 
 /// pico's `_Z_ENCODING_ID_DEFAULT` — `zenoh/bytes`, id 0. Re-exported from the

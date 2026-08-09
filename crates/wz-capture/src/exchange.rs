@@ -62,7 +62,7 @@
 //! per bounded window; that is a real limit and it is stated rather than
 //! papered over with a cap number nobody measured.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -70,6 +70,7 @@ use wz_session_core::network_message::{BatchParse, NetworkMessage};
 use wz_session_core::passive::{Carried, Direction, PassiveFrame};
 
 use crate::agg::{KeyexprSpaces, ThroughputGaps};
+use crate::filter::{Filter, RecordView, Selection, Truth};
 
 fn dir_index(d: Direction) -> usize {
     match d {
@@ -247,6 +248,7 @@ pub struct ExchangeTable {
     completion: LatencySamples,
     gaps: ExchangeGaps,
     unread: ThroughputGaps,
+    selection: Selection,
 }
 
 impl ExchangeTable {
@@ -262,15 +264,64 @@ impl ExchangeTable {
     /// keyexpr ids are both per-session spaces, and one map across two sessions
     /// would correlate a request with a stranger's reply.
     pub fn observe_flow(&mut self, frames: &[PassiveFrame]) {
+        self.observe_flow_where(frames, &Filter::any())
+    }
+
+    /// R311y618 (§1.1q) — the same correlation, over the exchanges a selector
+    /// picks.
+    ///
+    /// ## The unit judged is the EXCHANGE, and the REQUEST is what carries it
+    ///
+    /// A selector is asked ONCE PER EXCHANGE, at its `Request`, and the
+    /// responses follow whatever the request's verdict was. This is the rule
+    /// R311y616 left undecided, and the alternative — judging each `Response`
+    /// on its own — is not merely different, it is unsound here: a `Response`
+    /// identifies itself by `request_id` and its keyexpr field is the
+    /// responder's, so a `key ==` term could admit a request and reject its own
+    /// reply, leaving a completion latency measured against an exchange the
+    /// table says never happened.
+    ///
+    /// ## What a rejected exchange does NOT do
+    ///
+    /// It does not become an orphan. The responses to a suppressed request are
+    /// dropped WITHOUT touching [`ExchangeGaps::orphan_responses`], because
+    /// that counter means "this capture began mid-query" and a selector that
+    /// manufactured it out of its own choice would make the number unreadable
+    /// — the reader could no longer tell a truncated capture from a narrow
+    /// question. For the same reason a suppressed exchange is never
+    /// [`Self::unclosed`].
+    ///
+    /// ## Where the filter still does not reach
+    ///
+    /// Batch-level loss is unfiltered, exactly as in [`crate::agg`]: a halted
+    /// batch is traffic no predicate can be evaluated against, so it stays in
+    /// [`Self::unread`]. [`ExchangeGaps::unattributed_requests`] DOES follow
+    /// the selection, and the difference is principled — that record was read,
+    /// and a filter can judge it (to [`Truth::Unknown`] at worst, which
+    /// [`Self::selection`] counts).
+    pub fn observe_flow_where(&mut self, frames: &[PassiveFrame], filter: &Filter) {
         let mut spaces = KeyexprSpaces::new();
         let mut open: BTreeMap<(usize, u64), OpenExchange> = BTreeMap::new();
+        let mut suppressed: BTreeSet<(usize, u64)> = BTreeSet::new();
         for frame in frames {
             match &frame.carried {
-                Carried::Batch(batch) => self.observe_batch(&mut spaces, &mut open, frame, batch),
+                Carried::Batch(batch) => self.observe_batch(
+                    &mut spaces,
+                    &mut open,
+                    &mut suppressed,
+                    frame,
+                    batch,
+                    filter,
+                ),
                 #[cfg(feature = "reassembly")]
-                Carried::Reassembled(batch) => {
-                    self.observe_batch(&mut spaces, &mut open, frame, batch)
-                }
+                Carried::Reassembled(batch) => self.observe_batch(
+                    &mut spaces,
+                    &mut open,
+                    &mut suppressed,
+                    frame,
+                    batch,
+                    filter,
+                ),
                 // Matched by name for the reason R311y614 matched them by name
                 // in the throughput plane: a new `Carried` variant must fail to
                 // compile here rather than join the silent set.
@@ -289,35 +340,73 @@ impl ExchangeTable {
         self.unclosed += open.len();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn observe_batch(
         &mut self,
         spaces: &mut KeyexprSpaces,
         open: &mut BTreeMap<(usize, u64), OpenExchange>,
+        suppressed: &mut BTreeSet<(usize, u64)>,
         frame: &PassiveFrame,
         batch: &BatchParse,
+        filter: &Filter,
     ) {
         if batch.halt.is_some() {
             self.unread.halted_batches += 1;
             self.unread.unparsed_bytes += batch.unparsed_bytes;
         }
         for message in &batch.messages {
-            self.observe_message(spaces, open, frame, message);
+            self.observe_message(spaces, open, suppressed, frame, message, filter);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn observe_message(
         &mut self,
         spaces: &mut KeyexprSpaces,
         open: &mut BTreeMap<(usize, u64), OpenExchange>,
+        suppressed: &mut BTreeSet<(usize, u64)>,
         frame: &PassiveFrame,
         message: &NetworkMessage,
+        filter: &Filter,
     ) {
         let direction = frame.direction;
         let at = frame.observed_at_ms;
         match message {
             NetworkMessage::Declare(d) => spaces.absorb(direction, d),
             NetworkMessage::Request(r) => {
-                let keyexpr = match spaces.resolve(direction, &r.keyexpr.body) {
+                let key = (dir_index(direction), r.rid);
+                let resolved = spaces.resolve(direction, &r.keyexpr.body);
+                // The filter is asked AFTER resolution, because a `key` term
+                // needs the resolved name, and BEFORE any counter moves,
+                // because a rejected exchange must leave no trace in the
+                // totals. The record's kind and payload size come from the
+                // THROUGHPUT plane's classifier so `kind == query` means the
+                // same thing whichever plane a reader points it at.
+                let (kind, payload_bytes) = match crate::agg::classify(message) {
+                    Some((_, counts, kind)) => (kind, counts.payload_bytes),
+                    None => (crate::filter::RecordKind::Query, 0),
+                };
+                let view = RecordView {
+                    direction,
+                    keyexpr: resolved.as_ref().ok().map(|k| k.as_str()),
+                    kind,
+                    payload_bytes,
+                    observed_at_ms: at,
+                };
+                let truth = filter.matches(&view);
+                self.selection.record(truth);
+                if truth != Truth::Yes {
+                    // Remember the rid so this exchange's own responses are
+                    // dropped in silence rather than counted as orphans, and
+                    // drop any earlier exchange this rid reopened — an
+                    // un-admitted request cannot leave a predecessor behind to
+                    // be reported unclosed.
+                    suppressed.insert(key);
+                    open.remove(&key);
+                    return;
+                }
+                suppressed.remove(&key);
+                let keyexpr = match resolved {
                     Ok(k) => Some(k),
                     Err(_) => {
                         self.gaps.unattributed_requests += 1;
@@ -336,7 +425,7 @@ impl ExchangeTable {
                 // the flow, reached one query earlier.
                 if open
                     .insert(
-                        (dir_index(direction), r.rid),
+                        key,
                         OpenExchange {
                             keyexpr,
                             requested_at: at,
@@ -353,6 +442,13 @@ impl ExchangeTable {
             NetworkMessage::Response(r) => {
                 // The reply travels back, so the rid lives in the PEER's space.
                 let key = (dir_index(direction.peer()), r.request_id);
+                // R311y618 — a response to an exchange the selector did not
+                // admit is not an orphan. It is a response this reader chose
+                // not to look at, and saying otherwise would report the
+                // signature of a truncated capture.
+                if suppressed.contains(&key) {
+                    return;
+                }
                 let Some(entry) = open.get_mut(&key) else {
                     self.gaps.orphan_responses += 1;
                     return;
@@ -368,6 +464,12 @@ impl ExchangeTable {
             }
             NetworkMessage::ResponseFinal(f) => {
                 let key = (dir_index(direction.peer()), f.request_id);
+                // The close is where the suppression is FORGOTTEN as well as
+                // honoured: the rid is free again afterwards, so a later
+                // exchange reusing it is judged on its own request.
+                if suppressed.remove(&key) {
+                    return;
+                }
                 let Some(entry) = open.remove(&key) else {
                     self.gaps.orphan_responses += 1;
                     return;
@@ -516,6 +618,18 @@ impl ExchangeTable {
         self.unread
     }
 
+    /// R311y618 (§1.1q) — what the selector did to the EXCHANGES it was shown.
+    ///
+    /// One verdict per `Request`, never one per message, so
+    /// [`crate::filter::Selection::seen`] here is a count of exchanges and is
+    /// directly comparable with [`Self::requests`] — which the throughput
+    /// plane's identically-named figure is NOT, since that one counts records.
+    /// The two planes answer different questions about the same capture and
+    /// this accessor says which.
+    pub fn selection(&self) -> Selection {
+        self.selection
+    }
+
     /// Merge another table's rows and totals into this one.
     ///
     /// For a consumer aggregating across captures. Latency merges exactly —
@@ -549,18 +663,30 @@ impl ExchangeTable {
         self.unread.unparsed_bytes += other.unread.unparsed_bytes;
         self.unread.undecompressible_batches += other.unread.undecompressible_batches;
         self.unread.unresolvable_fragments += other.unread.unresolvable_fragments;
+        self.selection.matched += other.selection.matched;
+        self.selection.rejected += other.selection.rejected;
+        self.selection.undecided += other.selection.undecided;
     }
 }
 
 /// Correlate an entire [`crate::Dissection`] — every stream flow and every
 /// datagram flow, each correlated within its own request-id space.
 pub fn exchanges(dissection: &crate::Dissection) -> ExchangeTable {
+    exchanges_where(dissection, &Filter::any())
+}
+
+/// R311y618 (§1.1q) — the same correlation, over the exchanges a selector picks.
+///
+/// The second of the three planes to take a [`Filter`], and it takes the SAME
+/// one: a reader compiles one selector and points it at throughput, exchanges
+/// and payloads, rather than learning a second vocabulary per plane.
+pub fn exchanges_where(dissection: &crate::Dissection, filter: &Filter) -> ExchangeTable {
     let mut table = ExchangeTable::new();
     for flow in dissection.flows() {
-        table.observe_flow(&flow.frames);
+        table.observe_flow_where(&flow.frames, filter);
     }
     for flow in dissection.datagram_flows() {
-        table.observe_flow(&flow.frames);
+        table.observe_flow_where(&flow.frames, filter);
     }
     table
 }
@@ -1095,5 +1221,206 @@ pub(crate) mod tests {
             "the close was behind the halt and is not invented"
         );
         assert_eq!(t.unclosed(), 1);
+    }
+
+    // R311y618 (§1.1q) — the selector reaches this plane. The rule under test
+    // is that the REQUEST is judged and the exchange follows it.
+
+    fn correlate_where(
+        records: &[(bool, Option<u64>, Vec<u8>)],
+        selector: &str,
+    ) -> (ExchangeTable, ExchangeTable) {
+        let d = dissect(records);
+        let filter = crate::filter::Filter::parse(selector).expect("the selector must compile");
+        (exchanges_where(&d, &filter), exchanges(&d))
+    }
+
+    /// Two exchanges on two topics, one of them stamped slower.
+    fn two_topics() -> Vec<(bool, Option<u64>, Vec<u8>)> {
+        alloc::vec![
+            (
+                true,
+                Some(1_000),
+                request_query(1, sender_space(0, Some("demo/a")))
+            ),
+            (false, Some(1_010), response_final(1)),
+            (
+                true,
+                Some(2_000),
+                request_query(2, sender_space(0, Some("demo/b")))
+            ),
+            (false, Some(2_500), response_final(2)),
+        ]
+    }
+
+    /// ANTI-VACUITY, and the invariant the whole design rests on: the identity
+    /// filter is the unfiltered path. Every assertion below would be
+    /// uninteresting if the filtered walk were a different walk.
+    #[test]
+    fn the_identity_filter_is_the_unfiltered_exchange_plane() {
+        let (filtered, plain) = correlate_where(&two_topics(), "");
+        assert_eq!(filtered.requests(), plain.requests());
+        assert_eq!(filtered.completed(), plain.completed());
+        assert_eq!(filtered.totals().1.mean_ms(), plain.totals().1.mean_ms());
+        assert_eq!(filtered.rows().len(), plain.rows().len());
+        assert_eq!(
+            filtered.selection(),
+            crate::filter::Selection {
+                matched: 2,
+                rejected: 0,
+                undecided: 0
+            }
+        );
+    }
+
+    /// The narrowing itself: one topic's exchange survives, and the LATENCY
+    /// follows it — the mean is the surviving exchange's, not the average of
+    /// both, which is what proves the reply was admitted with its request.
+    #[test]
+    fn a_selector_narrows_the_plane_and_the_latency_follows_the_request() {
+        let (t, plain) = correlate_where(&two_topics(), "key == demo/b");
+        assert_eq!(plain.totals().1.mean_ms(), Some(255), "the control");
+        assert_eq!(t.requests(), 1);
+        assert_eq!(t.completed(), 1);
+        assert_eq!(
+            t.totals().1.mean_ms(),
+            Some(500),
+            "the slow exchange's own interval, not a blend"
+        );
+        assert_eq!(t.rows().len(), 1);
+        assert_eq!(t.rows()[0].keyexpr, "demo/b");
+        assert_eq!(
+            t.selection(),
+            crate::filter::Selection {
+                matched: 1,
+                rejected: 1,
+                undecided: 0
+            }
+        );
+    }
+
+    /// THE RULE, stated as a test: the responses to a request the selector did
+    /// not admit are dropped in SILENCE. They are not orphans — that counter
+    /// means the capture began mid-query — and the exchange is not unclosed.
+    ///
+    /// The control leg matters as much as the assertion: the same table still
+    /// reports a real orphan, so `orphan_responses == 0` here is a decision and
+    /// not a counter that stopped working.
+    #[test]
+    fn the_responses_to_a_rejected_request_are_not_orphans() {
+        // BOTH answering arms must be driven, and the first draft of this test
+        // drove only one: `two_topics` closes with a bare `ResponseFinal`, so
+        // deleting the suppression check from the `Response` arm changed
+        // nothing and the test still passed. The rejected exchange below
+        // carries a REPLY as well as its close.
+        let mut records = two_topics();
+        records.insert(
+            3,
+            (
+                false,
+                Some(2_100),
+                response_reply(2, sender_space(0, Some("demo/b")), b"answer"),
+            ),
+        );
+        // A genuine orphan: a close for a request this capture never saw.
+        records.push((false, Some(3_000), response_final(9)));
+        let (t, plain) = correlate_where(&records, "key == demo/a");
+        assert_eq!(
+            plain.gaps().orphan_responses,
+            1,
+            "the control: one real orphan is in this capture"
+        );
+        assert_eq!(t.requests(), 1);
+        assert_eq!(
+            t.gaps().orphan_responses,
+            1,
+            "the REAL orphan survives the selector, and the rejected exchange's \
+             own close did not join it"
+        );
+        assert_eq!(
+            t.unclosed(),
+            0,
+            "a rejected exchange is not an unclosed one"
+        );
+    }
+
+    /// A rejected request that never closes leaves nothing behind either — the
+    /// end-of-flow sweep counts only exchanges the selector admitted.
+    #[test]
+    fn a_rejected_request_that_never_closes_is_not_unclosed() {
+        let (t, plain) = correlate_where(
+            &alloc::vec![(
+                true,
+                Some(10),
+                request_query(3, sender_space(0, Some("noise/x")))
+            )],
+            "key == demo/a",
+        );
+        assert_eq!(
+            plain.unclosed(),
+            1,
+            "the control: unfiltered it is unclosed"
+        );
+        assert_eq!(t.unclosed(), 0);
+        assert_eq!(t.selection().rejected, 1);
+    }
+
+    /// An id no space bound makes a `key` term UNDECIDABLE, not false. The
+    /// exchange leaves the rows, and it leaves `unattributed_requests` too:
+    /// that gap qualifies the rows a reader is looking at, and a record the
+    /// reader is not being shown must not add to it.
+    #[test]
+    fn an_unresolvable_request_keyexpr_is_undecided_rather_than_rejected() {
+        let (t, plain) = correlate_where(
+            &alloc::vec![
+                (true, Some(10), request_query(6, sender_space(99, None))),
+                (false, Some(35), response_final(6)),
+            ],
+            "key == demo/a",
+        );
+        assert_eq!(
+            plain.gaps().unattributed_requests,
+            1,
+            "the control: unfiltered the request is counted and unattributed"
+        );
+        assert_eq!(
+            t.selection(),
+            crate::filter::Selection {
+                matched: 0,
+                rejected: 0,
+                undecided: 1
+            },
+            "undecided, which is not the same answer as rejected"
+        );
+        assert_eq!(t.requests(), 0);
+        assert_eq!(t.gaps().unattributed_requests, 0);
+    }
+
+    /// A term over something a `Request` carries that is NOT its keyexpr, to
+    /// show the view is the shared one: `kind == query` admits a query and the
+    /// direction term admits only the asker's side.
+    #[test]
+    fn the_exchange_view_answers_kind_and_direction_terms() {
+        let (kinds, _) = correlate_where(&two_topics(), "kind == query");
+        assert_eq!(kinds.requests(), 2, "both requests are queries");
+        let (dels, _) = correlate_where(&two_topics(), "kind == del");
+        assert_eq!(dels.requests(), 0);
+        assert_eq!(dels.selection().rejected, 2);
+        let (asker, _) = correlate_where(&two_topics(), "dir == a");
+        assert_eq!(asker.requests(), 2, "every request travelled A to B");
+        let (other, _) = correlate_where(&two_topics(), "dir == b");
+        assert_eq!(other.requests(), 0);
+    }
+
+    /// Merging carries the selection, so a consumer folding two captures under
+    /// one selector still sees how much of the pair went unjudged.
+    #[test]
+    fn merging_carries_the_selection() {
+        let (a, _) = correlate_where(&two_topics(), "key == demo/a");
+        let (b, _) = correlate_where(&two_topics(), "key == demo/a");
+        let mut merged = a.clone();
+        merged.merge(&b);
+        assert_eq!(merged.selection().matched, 2);
+        assert_eq!(merged.selection().rejected, 2);
     }
 }
