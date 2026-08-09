@@ -84,6 +84,11 @@ use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::sample::SourceInfo;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
+/// R311y608 — how many poll outcomes the failure report carries. Enough to
+/// show a handshake ending or a peer going quiet, small enough that the panic
+/// stays readable.
+const POLL_TRACE_DEPTH: usize = 16;
+
 const ITER_CAP: usize = 4096;
 const QUERY_KEYEXPR: &str = "demo/key";
 const QABL_KEYEXPR: &str = "demo/**";
@@ -192,6 +197,23 @@ async fn wz_reply_del_source_info_decoded_by_pico_z_get() {
 
     let timeouts = SessionTimeouts::spec_defaults();
     let session_for_dispatch = session.clone();
+    // R311y608 — RECORD what the drive loop saw, because the `tokio::select!`
+    // below used to throw it away.
+    //
+    // This test failed intermittently for three rounds with one line of
+    // evidence — "wz drive loop reached a terminal state" — which says THAT it
+    // ended and nothing about WHY. The loop's own return value
+    // (`DriverOutcome`) cannot answer either: with `max_iters = None` it has
+    // exactly one reachable variant. What names the reason is the last
+    // `DriverLoopOutcome` the poll produced, and that already flows through
+    // this closure on its way to the application. It was passed straight
+    // through and never looked at.
+    //
+    // Bounded on purpose: a healthy run produces thousands of these, and the
+    // question is always "what were the last few", so only the tail is kept.
+    let poll_trace: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let trace_for_dispatch = Arc::clone(&poll_trace);
     let drive = drive_session_until_terminal(
         &mut opened.inbound,
         &opened.actions,
@@ -199,7 +221,16 @@ async fn wz_reply_del_source_info_decoded_by_pico_z_get() {
         None,
         &opened.clock,
         &timeouts,
-        |event| session_for_dispatch.dispatch_iteration_event(event),
+        move |event| {
+            if let wz_session_core::driver_loop::IterationEvent::Poll(outcome) = &event {
+                let mut trace = trace_for_dispatch.lock().expect("poll trace");
+                if trace.len() == POLL_TRACE_DEPTH {
+                    trace.remove(0);
+                }
+                trace.push(format!("{outcome:?}"));
+            }
+            session_for_dispatch.dispatch_iteration_event(event)
+        },
     );
 
     // `>> Received DELETE` (the stock kind print) discriminates the DEL carrier
@@ -235,9 +266,21 @@ async fn wz_reply_del_source_info_decoded_by_pico_z_get() {
     };
 
     let result = tokio::select! {
-        _ = drive => panic!(
-            "wz drive loop reached a terminal state before pico decoded the reply-Del source_info"
-        ),
+        outcome = drive => {
+            let trace = poll_trace.lock().expect("poll trace");
+            panic!(
+                "wz drive loop reached a terminal state ({outcome:?}) before pico \
+                 decoded the reply-Del source_info.\n\
+                 The last {} poll outcome(s), oldest first — the LAST one is why \
+                 the loop ended:\n  {}",
+                trace.len(),
+                if trace.is_empty() {
+                    String::from("(none: the loop terminated before its first poll)")
+                } else {
+                    trace.join("\n  ")
+                },
+            )
+        }
         r = scenario => r,
     };
 
