@@ -223,6 +223,22 @@ pub enum Verdict<'a> {
         /// How many bytes.
         bytes: usize,
     },
+    /// R311y622 (§1.1o) — the payload slot holds an SHM DESCRIPTOR and the
+    /// data it stands for never traversed the network
+    /// (`body_ext_id::SHM`, `zextunit!(0x2, true)`).
+    ///
+    /// A NAMED ABSENCE, and the reason it must exist rather than the bytes
+    /// being judged: a descriptor is a handle into a segment on the sender's
+    /// host, so inspecting it against a declared `application/json` produces a
+    /// CONTRADICTION against a publisher that did nothing wrong. Reading an
+    /// observer's own reach limit as a sender's defect is the worst answer
+    /// available here -- worse than silence, because it is confident.
+    NotOnTheWire {
+        /// The name the sender declared for data this capture does not hold.
+        declared: &'static str,
+        /// Bytes of DESCRIPTOR in the payload slot -- not bytes of data.
+        descriptor_bytes: usize,
+    },
     /// The payload does not match its own declaration.
     ///
     /// The FINDING this plane exists to produce.
@@ -239,8 +255,15 @@ impl Verdict<'_> {
     ///
     /// An [`Verdict::Opaque`] payload counts as consistent: nothing was claimed
     /// beyond "bytes", so nothing can contradict it.
+    ///
+    /// R311y622 — [`Verdict::NotOnTheWire`] does NOT. A descriptor agreed with
+    /// nothing, and answering `true` here would let a caller checking "did
+    /// everything verify" get a yes for traffic it never saw.
     pub fn is_consistent(&self) -> bool {
-        !matches!(self, Verdict::NotAsDeclared { .. })
+        matches!(
+            self,
+            Verdict::Empty | Verdict::Text(_) | Verdict::Json(_) | Verdict::Opaque { .. }
+        )
     }
 }
 
@@ -524,6 +547,10 @@ pub struct EncodingRow {
     pub consistent: usize,
     /// Of those, how many CONTRADICTED the declaration.
     pub not_as_declared: usize,
+    /// R311y622 (§1.1o) — of those, how many carried an SHM DESCRIPTOR instead
+    /// of the data. Its own column because it is neither: nothing agreed and
+    /// nothing contradicted, because there was nothing here to read.
+    pub descriptors: usize,
     /// Payload bytes under this declaration.
     pub bytes: u64,
 }
@@ -552,6 +579,7 @@ pub struct PayloadCensus {
     contradictions: Vec<Contradiction>,
     payloads: usize,
     unknown_ids: usize,
+    descriptors: usize,
     gaps: crate::agg::ThroughputGaps,
     selection: crate::filter::Selection,
 }
@@ -590,6 +618,18 @@ impl PayloadCensus {
     /// Payloads whose declared id is not in this build's table.
     pub fn unknown_ids(&self) -> usize {
         self.unknown_ids
+    }
+
+    /// R311y622 (§1.1o) — payloads whose slot held an SHM DESCRIPTOR, so the
+    /// data never traversed the network and this plane could not judge it.
+    ///
+    /// A NAMED absence rather than a gap or a finding. Not a gap, because
+    /// nothing was lost in transit and no reader could ever have seen it from a
+    /// capture; not a finding, because the publisher did nothing wrong. It is
+    /// the honest third answer, and without it an SHM capture reads as either
+    /// clean or broken, both of which are false.
+    pub fn descriptors(&self) -> usize {
+        self.descriptors
     }
 
     /// Traffic this plane could not read at all — the same shape
@@ -680,7 +720,7 @@ impl PayloadCensus {
             spaces.absorb(direction, d);
             return;
         }
-        let Some((keyexpr_body, put)) = carried_put(message) else {
+        let Some((keyexpr_body, declared, bytes, shm)) = carried_payload(message) else {
             return;
         };
         let keyexpr = spaces.resolve(direction, keyexpr_body).ok();
@@ -704,12 +744,22 @@ impl PayloadCensus {
         if truth != crate::filter::Truth::Yes {
             return;
         }
-        let encoding = match &put.encoding {
+        let encoding = match declared {
             Some(e) => Encoding::from_packed(e.packed_id, e.schema.as_deref()),
             None => Encoding::Absent,
         };
-        let bytes = put.payload.as_slice();
-        let verdict = inspect(encoding, bytes);
+        // R311y622 (§1.1o) — the marker is read BEFORE the bytes are, because
+        // the bytes are not the data. `inspect` would judge a descriptor
+        // against the declaration and manufacture a finding against a publisher
+        // that did nothing wrong.
+        let verdict = if shm {
+            Verdict::NotOnTheWire {
+                declared: encoding.name().unwrap_or("zenoh/bytes"),
+                descriptor_bytes: bytes.len(),
+            }
+        } else {
+            inspect(encoding, bytes)
+        };
         self.record(encoding, keyexpr, bytes.len() as u64, verdict);
     }
 
@@ -740,31 +790,79 @@ impl PayloadCensus {
             });
         row.payloads += 1;
         row.bytes += bytes;
-        if let Verdict::NotAsDeclared { reason, .. } = verdict {
-            row.not_as_declared += 1;
-            self.contradictions.push(Contradiction {
-                keyexpr,
-                declared,
-                reason,
-            });
-        } else {
-            row.consistent += 1;
+        match verdict {
+            Verdict::NotAsDeclared { reason, .. } => {
+                row.not_as_declared += 1;
+                self.contradictions.push(Contradiction {
+                    keyexpr,
+                    declared,
+                    reason,
+                });
+            }
+            // R311y622 (§1.1o) — NOT `consistent`. A descriptor agreed with
+            // nothing: this plane never saw the data, and counting it as
+            // verified would let an SHM-heavy capture report a clean bill of
+            // health for traffic nobody inspected.
+            Verdict::NotOnTheWire { .. } => {
+                row.descriptors += 1;
+                self.descriptors += 1;
+            }
+            _ => row.consistent += 1,
         }
     }
 }
 
-/// The `MsgPut` a record carries, if it carries one, with its keyexpr.
+/// R311y622 (§1.1o) — whether a zenoh-body ext chain carries the SHM marker,
+/// meaning the payload slot holds a DESCRIPTOR and not the data.
 ///
-/// `Err` bodies are deliberately NOT folded in here: an error payload is an
-/// error string chosen by the responder, not application data under a declared
-/// encoding, and counting it would put a row on a topic that published nothing.
+/// Matched on the extension IDENTITY, mandatory bit included
+/// (`zextunit!(0x2, true)`), not on the 4-bit id field. The id space is four
+/// bits wide and zenoh reuses values across encodings deliberately, so an
+/// id-only match would read an unrelated `0x2` entry as an SHM descriptor and
+/// silence a payload this plane could have judged — the mirror of the defect
+/// R311y505 measured on the establishment space.
+///
+/// Read through `ext_header`, which is UNCONDITIONAL, rather than through
+/// `extshm`, which is gated on `transport-shm`. An observer must recognise ids
+/// whose capability its own build cannot perform; that asymmetry is why the
+/// id table lives where it does.
+#[cfg(feature = "network-codecs")]
+fn carries_shm_marker(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> bool {
+    use wz_session_core::ext_header::{body_ext_id, ext_eid, EXT_FLAG_M};
+
+    let want = ext_eid(body_ext_id::SHM | EXT_FLAG_M);
+    extensions
+        .unwrap_or(&[])
+        .iter()
+        .any(|e| ext_eid(e.header) == want)
+}
+
+/// The declared encoding and the bytes a record carries, with its keyexpr.
+///
+/// R311y622 (§1.1s) — `Err` bodies ARE folded in now, and the note that used to
+/// stand here justified excluding them by saying it "would put a row on a topic
+/// that published nothing". That reason does not describe this plane: its rows
+/// are keyed by the DECLARED ENCODING NAME, never by a keyexpr, so an error
+/// body adds to `text/plain` and puts a row on no topic at all. The exclusion
+/// rested on a description of a data structure this plane does not have.
+///
+/// What DOES describe it: an `Err` carries `encoding` and `payload` — the same
+/// two fields a `MsgPut` does (`out/wz-codecs/err.rs:34-40`) — so a responder
+/// can declare `application/json` on an error and send bytes that are not JSON,
+/// which is a contradiction of exactly the kind this plane exists to name. It
+/// was unreachable here, and so was the `err` term of the filter language: the
+/// vocabulary had [`RecordKind::Err`](crate::filter::RecordKind) all along and
+/// this plane could never produce one, so `kind == err` was a question with a
+/// permanent answer.
 #[cfg(feature = "network-codecs")]
 #[allow(clippy::type_complexity)]
-fn carried_put(
+fn carried_payload(
     message: &wz_session_core::network_message::NetworkMessage,
 ) -> Option<(
     &wz_codecs::wireexpr::WireexprOwnedVariant,
-    &wz_codecs::msg_put::MsgPutOwned,
+    Option<&wz_codecs::encoding::EncodingOwned>,
+    &[u8],
+    bool,
 )> {
     use wz_codecs::push::PushOwnedVariant;
     use wz_codecs::reply::ReplyOwnedVariant;
@@ -772,25 +870,49 @@ fn carried_put(
     use wz_codecs::response::ResponseOwnedVariant;
     use wz_session_core::network_message::NetworkMessage;
 
+    // A free fn rather than a closure: the two borrows must carry the CALLER's
+    // lifetime, and a closure's inferred one is tied to the call.
+    fn put<'a>(
+        k: &'a wz_codecs::wireexpr::WireexprOwnedVariant,
+        p: &'a wz_codecs::msg_put::MsgPutOwned,
+    ) -> (
+        &'a wz_codecs::wireexpr::WireexprOwnedVariant,
+        Option<&'a wz_codecs::encoding::EncodingOwned>,
+        &'a [u8],
+        bool,
+    ) {
+        (
+            k,
+            p.encoding.as_ref(),
+            p.payload.as_slice(),
+            carries_shm_marker(p.extensions.as_deref()),
+        )
+    }
     match message {
         NetworkMessage::Push(p) => match &p.body {
-            PushOwnedVariant::CodecZenohMsgPut(put)
-            | PushOwnedVariant::Default { body: put, .. } => Some((&p.keyexpr.body, put)),
+            PushOwnedVariant::CodecZenohMsgPut(m) | PushOwnedVariant::Default { body: m, .. } => {
+                Some(put(&p.keyexpr.body, m))
+            }
             PushOwnedVariant::CodecZenohMsgDel(_) => None,
         },
         NetworkMessage::Request(r) => match &r.body {
-            RequestOwnedVariant::CodecZenohMsgPut(put) => Some((&r.keyexpr.body, put)),
+            RequestOwnedVariant::CodecZenohMsgPut(m) => Some(put(&r.keyexpr.body, m)),
             _ => None,
         },
         NetworkMessage::Response(r) => match &r.body {
             ResponseOwnedVariant::CodecZenohReply(reply)
             | ResponseOwnedVariant::Default { body: reply, .. } => match &reply.body {
-                ReplyOwnedVariant::CodecZenohMsgPut(put)
-                | ReplyOwnedVariant::Default { body: put, .. } => Some((&r.keyexpr.body, put)),
+                ReplyOwnedVariant::CodecZenohMsgPut(m)
+                | ReplyOwnedVariant::Default { body: m, .. } => Some(put(&r.keyexpr.body, m)),
                 // A reply carrying a Del has no payload to judge.
                 ReplyOwnedVariant::CodecZenohMsgDel(_) => None,
             },
-            ResponseOwnedVariant::CodecZenohErr(_) => None,
+            ResponseOwnedVariant::CodecZenohErr(e) => Some((
+                &r.keyexpr.body,
+                e.encoding.as_ref(),
+                e.payload.as_slice(),
+                carries_shm_marker(e.extensions.as_deref()),
+            )),
         },
         _ => None,
     }
@@ -871,6 +993,121 @@ pub(crate) mod tests_support {
         .encode_to_vec()
     }
 
+    /// R311y622 (§1.1s) — a `Response` carrying an `Err` whose payload is
+    /// DECLARED as `encoding_id`.
+    ///
+    /// The sibling of [`push_declaring`] on the other half of the plane's
+    /// reach. `exchange::tests::response_err` exists and is deliberately not
+    /// reused: it carries no encoding, and an error body with no declaration is
+    /// the one shape this plane could never have a finding about.
+    pub(crate) fn err_declaring(
+        keyexpr: &'static str,
+        encoding_id: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        wz_codecs::response::Response {
+            header: wz_codecs::response::Response::default().header
+                | wz_codecs::wire_const::FLAG_N_N,
+            request_id: 7,
+            keyexpr: fx::sender_space(0, Some(keyexpr)),
+            body: wz_codecs::response::ResponseVariant::CodecZenohErr(wz_codecs::err::Err {
+                header: wz_codecs::err::Err::default().header | wz_codecs::wire_const::FLAG_Z_ERR_E,
+                encoding: Some(wz_codecs::encoding::Encoding {
+                    packed_id: (encoding_id as u32) << 1,
+                    schema_len: None,
+                    schema: None,
+                }),
+                payload_len: payload.len() as u64,
+                payload,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    /// R311y622 (§1.1o) — a `Push` whose payload slot holds an SHM DESCRIPTOR:
+    /// the body ext chain carries `zextunit!(0x2, true)`.
+    ///
+    /// The bytes handed in are deliberately NOT the declared type, because that
+    /// is the shape that made the plane dangerous: judged as data they
+    /// contradict the declaration, and the finding names a publisher that did
+    /// nothing wrong.
+    pub(crate) fn push_with_shm_descriptor(
+        keyexpr: &'static str,
+        encoding_id: u16,
+        descriptor: &[u8],
+    ) -> Vec<u8> {
+        // Borrowed form directly: the encoder takes `ExtEntry<'_>` and an
+        // owned local would not outlive the struct literal it is placed in.
+        let marker = wz_codecs::ext_entry::ExtEntry {
+            header: wz_session_core::ext_header::body_ext_id::SHM
+                | wz_session_core::ext_header::EXT_FLAG_M,
+            body: wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtUnit(
+                wz_codecs::ext_unit::ExtUnit::default(),
+            ),
+        };
+        push_with_body_ext(keyexpr, encoding_id, descriptor, marker)
+    }
+
+    /// R311y622 (§1.1o) — THE DISCRIMINATOR'S fixture: a body ext that shares
+    /// the SHM marker's 4-BIT ID FIELD and is a DIFFERENT extension, told apart
+    /// by its encoding bits exactly as zenoh tells `QoS` from `QoSLink`.
+    ///
+    /// A ZBuf at id `0x2` with no mandatory bit. Nothing in this fixture is an
+    /// SHM descriptor, and a matcher that read the id column alone would call
+    /// it one — silencing a payload this plane could have judged, which is the
+    /// R311y505 defect pointed the other way.
+    pub(crate) fn push_with_foreign_body_ext(
+        keyexpr: &'static str,
+        encoding_id: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let foreign = wz_codecs::ext_entry::ExtEntry {
+            header: wz_session_core::ext_header::body_ext_id::SHM
+                | wz_session_core::ext_header::EXT_ENC_ZBUF,
+            body: wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZbuf(
+                wz_codecs::ext_zbuf::ExtZbuf {
+                    value_len: 1,
+                    value: &[0xAB],
+                },
+            ),
+        };
+        push_with_body_ext(keyexpr, encoding_id, payload, foreign)
+    }
+
+    /// A `Push` carrying `payload` under a declared encoding, with one entry on
+    /// its zenoh-body ext chain. ONE builder for both fixtures above, so the two
+    /// captures the discriminator compares differ by that entry and nothing
+    /// else.
+    fn push_with_body_ext(
+        keyexpr: &'static str,
+        encoding_id: u16,
+        payload: &[u8],
+        entry: wz_codecs::ext_entry::ExtEntry<'_>,
+    ) -> Vec<u8> {
+        wz_codecs::push::Push {
+            header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+            keyexpr: fx::sender_space(0, Some(keyexpr)),
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                header: wz_codecs::msg_put::MsgPut::default().header
+                    | wz_codecs::wire_const::FLAG_Z_PUT_E
+                    | wz_codecs::wire_const::FLAG_Z_PUT_Z,
+                encoding: Some(wz_codecs::encoding::Encoding {
+                    packed_id: (encoding_id as u32) << 1,
+                    schema_len: None,
+                    schema: None,
+                }),
+                extensions: Some(core::iter::once(entry).collect()),
+                payload_len: payload.len() as u64,
+                payload,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
     /// A dissection carrying one A-to-B `Push` per entry.
     pub(crate) fn dissect_pushes(records: &[(&'static str, u16, Vec<u8>)]) -> crate::Dissection {
         let stamped: Vec<(bool, Option<u64>, Vec<u8>)> = records
@@ -886,7 +1123,7 @@ mod census_tests {
     use super::*;
     use crate::exchange::tests as fx;
 
-    use super::tests_support::push_declaring;
+    use super::tests_support::{err_declaring, push_declaring};
 
     fn census(records: &[(bool, Vec<u8>)]) -> PayloadCensus {
         let stamped: Vec<(bool, Option<u64>, Vec<u8>)> = records
@@ -943,6 +1180,186 @@ mod census_tests {
         assert_eq!(json_row.payloads, 2);
         assert_eq!(json_row.consistent, 1);
         assert_eq!(json_row.not_as_declared, 1);
+    }
+
+    /// R311y622 (§1.1o) — a payload the capture does not HOLD is named, not
+    /// judged. The failure this refuses is a FALSE FINDING against an innocent
+    /// publisher.
+    ///
+    /// With SHM negotiated, zenoh puts a DESCRIPTOR in the payload slot and
+    /// marks the body `zextunit!(0x2, true)`; the data stays in a segment on the
+    /// sender's host and never traverses the network. Judged as data, that
+    /// descriptor disagrees with whatever the record declared — so the one
+    /// plane built to catch a lying publisher would have accused a correct one,
+    /// on every SHM capture, confidently.
+    ///
+    /// `contradictions()` empty is therefore the load-bearing assertion, and
+    /// `descriptors()` is the answer that replaces it. The row's `consistent`
+    /// column is asserted at zero for the same reason from the other side:
+    /// nothing was verified either.
+    #[test]
+    fn a_payload_the_capture_does_not_hold_is_named_rather_than_judged() {
+        let c = census(&[(
+            true,
+            tests_support::push_with_shm_descriptor("shm/topic", ID_JSON, &[0x01, 0x00, 0x2A]),
+        )]);
+
+        assert_eq!(c.payloads(), 1, "the record was read");
+        assert_eq!(c.descriptors(), 1, "and its data was not on the wire");
+        assert!(
+            c.contradictions().is_empty(),
+            "a descriptor is not a publisher's mistake: {:?}",
+            c.contradictions()
+        );
+        let row = c.rows()[0];
+        assert_eq!(row.declared, "application/json");
+        assert_eq!(row.descriptors, 1);
+        assert_eq!(row.consistent, 0, "nothing was verified either");
+        assert_eq!(row.not_as_declared, 0);
+    }
+
+    /// THE SECOND DISCRIMINATOR, and it gates the half a probe found ungated:
+    /// an extension sharing the marker's 4-BIT ID FIELD but carrying a
+    /// DIFFERENT ENCODING is a DIFFERENT extension, and the payload under it is
+    /// still judged.
+    ///
+    /// The R311y505 defect pointed the other way. That round measured a real
+    /// `zenohd --features shared-memory` whose `Shm` ZBuf was read as wz's UNIT
+    /// offer because the match looked at the id column; here the same slip
+    /// would make an observer call an ordinary payload a descriptor and stop
+    /// judging it, which silences findings rather than fabricating them — the
+    /// quieter failure, and the harder one to notice.
+    ///
+    /// Written because a falsify probe replacing `ext_eid` with `ext_id`
+    /// left every test passing. The doc on `carries_shm_marker` claimed the
+    /// match was on identity; nothing was checking that it was.
+    #[test]
+    fn an_extension_sharing_the_id_field_is_not_the_shm_marker() {
+        let c = census(&[(
+            true,
+            tests_support::push_with_foreign_body_ext("shm/topic", ID_JSON, &[0x01, 0x00, 0x2A]),
+        )]);
+
+        assert_eq!(
+            c.descriptors(),
+            0,
+            "a ZBuf at id 0x2 is not the mandatory UNIT marker"
+        );
+        assert_eq!(
+            c.contradictions().len(),
+            1,
+            "so the payload under it is still judged, and it does contradict"
+        );
+    }
+
+    /// THE DISCRIMINATOR, and the reason the page above is about the MARKER and
+    /// not about SHM-looking bytes: the SAME payload with NO marker on it IS a
+    /// contradiction.
+    ///
+    /// Without this leg a plane that had simply stopped judging short binary
+    /// payloads would satisfy the assertions above. The two captures differ by
+    /// one extension entry and nothing else.
+    #[test]
+    fn the_same_bytes_without_the_marker_are_still_a_contradiction() {
+        let c = census(&[(
+            true,
+            push_declaring("shm/topic", ID_JSON, &[0x01, 0x00, 0x2A]),
+        )]);
+
+        assert_eq!(c.descriptors(), 0, "no marker, no descriptor");
+        assert_eq!(
+            c.contradictions().len(),
+            1,
+            "the same bytes, judged, do contradict `application/json`"
+        );
+    }
+
+    /// R311y622 (§1.1s) — an ERROR body that contradicts its own declared
+    /// encoding is a finding, with the keyexpr it answered for.
+    ///
+    /// Unreachable before this round. The plane read `Push`, `Request` and the
+    /// `Reply` half of `Response`, and skipped `Err` on the strength of a note
+    /// saying a row would land "on a topic that published nothing" — which the
+    /// rows cannot do, being keyed by the declared ENCODING NAME. So a
+    /// responder could declare `application/json` on an error and send bytes
+    /// that are not JSON, and the one plane built to catch that never looked.
+    ///
+    /// The keyexpr is asserted beside the reason because an error's keyexpr is
+    /// what makes the finding actionable: it names WHICH query the responder
+    /// answered badly.
+    #[test]
+    fn an_error_body_that_contradicts_its_declaration_is_a_finding() {
+        let d = fx::dissect(&[(
+            false,
+            Some(1),
+            err_declaring("q/answered/badly", ID_JSON, b"not json at all"),
+        )]);
+        let c = payloads(&d);
+
+        assert_eq!(c.payloads(), 1, "the error body IS a payload to judge");
+        let finding = match c.contradictions() {
+            [one] => one,
+            other => panic!("exactly one finding, got {other:?}"),
+        };
+        assert_eq!(finding.declared, "application/json");
+        assert_eq!(finding.keyexpr.as_deref(), Some("q/answered/badly"));
+    }
+
+    /// THE CONTROL, and the reason the page above is about the CLAIM rather
+    /// than about errors: an error body whose bytes match what it declared is
+    /// not a finding. Without this, a plane that reported every error as a
+    /// contradiction would satisfy the assertion above.
+    #[test]
+    fn an_error_body_that_keeps_its_declaration_is_not_a_finding() {
+        let d = fx::dissect(&[(
+            false,
+            Some(1),
+            err_declaring("q/answered/well", ID_JSON, b"{\"code\":404}"),
+        )]);
+        let c = payloads(&d);
+
+        assert_eq!(c.payloads(), 1);
+        assert!(
+            c.contradictions().is_empty(),
+            "the bytes ARE json: {:?}",
+            c.contradictions()
+        );
+    }
+
+    /// R311y622 (§1.1s) — `kind == err` was a question this plane could never
+    /// answer yes to, and now it can.
+    ///
+    /// The filter vocabulary carried [`crate::filter::RecordKind::Err`] all
+    /// along; the payload plane simply never produced a record of that kind, so
+    /// the term was permanently false here. A selector language with a word
+    /// that cannot match is worse than one without it — a reader who asks for
+    /// error payloads and gets none learns the wrong thing.
+    ///
+    /// One capture with BOTH kinds on it, because a selector that admitted
+    /// everything would satisfy a single-kind fixture just as well.
+    #[test]
+    fn the_err_term_selects_error_payloads_and_leaves_the_rest() {
+        let records = &[
+            (
+                true,
+                Some(1),
+                push_declaring("app/data", ID_JSON, b"{\"ok\":true}"),
+            ),
+            (
+                false,
+                Some(2),
+                err_declaring("app/data", ID_JSON, b"{\"code\":500}"),
+            ),
+        ];
+        let d = fx::dissect(records);
+
+        let errs = payloads_where(&d, &crate::filter::Filter::parse("kind == err").unwrap());
+        assert_eq!(errs.payloads(), 1, "the error body, and only it");
+        assert_eq!(errs.selection().rejected, 1, "the push was rejected");
+        assert_eq!(errs.selection().undecided, 0);
+
+        let rest = payloads_where(&d, &crate::filter::Filter::parse("kind == put").unwrap());
+        assert_eq!(rest.payloads(), 1, "and the put is still reachable");
     }
 
     /// R311y621 (§1.4i) — a body this build cannot decompress is counted, and

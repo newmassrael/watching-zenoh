@@ -5408,7 +5408,11 @@ layer_c1bt_capture_no_default_features() {
         report::tests::one_undecided_plane_makes_the_page_a_floor_when_it_is_the_only_plane \
         agg::tests::a_batch_this_build_cannot_decompress_is_counted_rather_than_missing \
         exchange::tests::a_batch_this_build_cannot_decompress_is_unread_rather_than_absent \
-        payload::census_tests::a_batch_this_build_cannot_decompress_is_a_gap_and_not_a_finding
+        payload::census_tests::a_batch_this_build_cannot_decompress_is_a_gap_and_not_a_finding \
+        payload::census_tests::the_err_term_selects_error_payloads_and_leaves_the_rest \
+        payload::census_tests::a_payload_the_capture_does_not_hold_is_named_rather_than_judged \
+        payload::census_tests::an_extension_sharing_the_id_field_is_not_the_shm_marker \
+        agg::tests::the_parts_account_for_every_record_walked
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the network-codecs build"

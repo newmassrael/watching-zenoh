@@ -265,6 +265,7 @@ pub struct ThroughputTable {
     declarations: usize,
     undeclarations: usize,
     records: usize,
+    unattributed: usize,
     gaps: ThroughputGaps,
     selection: Selection,
 }
@@ -422,6 +423,20 @@ impl ThroughputTable {
         }
 
         let Some((keyexpr_body, counts, kind)) = classify(message) else {
+            // R311y622 (§1.4h) — the SECOND DENOMINATOR. `classify` answers
+            // `None` for every record that is not traffic under a keyexpr — a
+            // `ResponseFinal` closing a query, an `Oam`, an `Interest`, and
+            // every record at all in a build without the network codecs — and
+            // until now each of those left this fold in silence. That made
+            // `records()` a numerator with no denominator: a reader could not
+            // tell a capture of 40 attributed records from one of 40 attributed
+            // and 4000 unattributed, and both report the same rows.
+            //
+            // NOT a gap: nothing was lost. The record was read, named and
+            // understood; it simply belongs in no row. `gaps()` is for traffic
+            // this plane could not READ, and conflating the two would make a
+            // healthy control-plane look like damage.
+            self.unattributed += 1;
             return;
         };
         let resolved = spaces.resolve(direction, keyexpr_body);
@@ -519,6 +534,33 @@ impl ThroughputTable {
     /// [`Self::selection`] holds the rest.
     pub fn records(&self) -> usize {
         self.records
+    }
+
+    /// R311y622 (§1.4h) — records this plane READ and does not attribute: a
+    /// `ResponseFinal`, an `Oam`, an `Interest`, and every record at all in a
+    /// build whose decoder cannot name the data plane.
+    ///
+    /// The companion denominator to [`Self::records`], and the reason it
+    /// exists: rows summed against `records()` alone answer "of the traffic I
+    /// attributed, how much did I attribute", which is a question that cannot
+    /// come out badly. [`Self::walked_records`] is the honest whole.
+    ///
+    /// NOT a member of [`Self::gaps`]. Nothing here was lost — each record was
+    /// read and understood and belongs in no row — and counting a healthy
+    /// control plane as damage would make `is_clean` useless on every real
+    /// capture.
+    pub fn unattributed_records(&self) -> usize {
+        self.unattributed
+    }
+
+    /// Every network record this plane walked: attributed, unattributed, and
+    /// the declarations it absorbed.
+    ///
+    /// The one figure a reader can put under a row total without having to know
+    /// which of four counters to add. `the_parts_account_for_every_record_
+    /// walked` is what keeps it equal to its parts.
+    pub fn walked_records(&self) -> usize {
+        self.records + self.unattributed + self.declarations + self.undeclarations
     }
 
     /// R311y616 — what the filter did to the keyexpr-carrying records this
@@ -684,10 +726,6 @@ pub fn aggregate_where(dissection: &crate::Dissection, filter: &Filter) -> Throu
     table
 }
 
-// R311y614 — the whole module is gated, on the same rule the `Fragment` census
-// entry follows for `reassembly`: these tests assert what a build WITH the
-// network codecs does, and a build without them cannot be asked. Gating the
-// module rather than each test keeps the two from drifting.
 /// R311y621 (§1.1k) — what this plane can still do when the DECODER cannot
 /// name the data plane.
 ///
@@ -779,6 +817,10 @@ mod no_codec_tests {
     }
 }
 
+// R311y614 — the whole module is gated, on the same rule the `Fragment` census
+// entry follows for `reassembly`: these tests assert what a build WITH the
+// network codecs does, and a build without them cannot be asked. Gating the
+// module rather than each test keeps the two from drifting.
 #[cfg(all(test, feature = "network-codecs"))]
 mod tests {
     use super::*;
@@ -1217,6 +1259,88 @@ mod tests {
         assert_eq!(gaps.unparsed_bytes, 0);
         assert!(!gaps.is_clean(), "the shortfall must be visible at all");
         assert_eq!(table.records(), 0);
+    }
+
+    /// R311y622 (§1.4h) — THE SECOND DENOMINATOR. A record this plane read and
+    /// does not attribute is COUNTED, so `records()` stops being a numerator
+    /// with nothing under it.
+    ///
+    /// The failure this refuses is not loss, it is proportion. A capture of 2
+    /// attributed records among 3 control-plane ones and a capture of 2 among
+    /// 2000 produce the SAME rows and the same totals, and a reader summing the
+    /// table has no way to tell which they are looking at.
+    ///
+    /// `gaps().is_clean()` is asserted here and it is the other half of the
+    /// claim: an unattributed record is not damage. It was read, named and
+    /// understood, and it belongs in no row — so folding it into the loss
+    /// counters would make `is_clean` false on every healthy capture and the
+    /// gap surface would stop meaning anything.
+    #[test]
+    fn a_record_that_belongs_in_no_row_is_counted_rather_than_dropped() {
+        let table = aggregate_datagrams(&[
+            (true, push(sender_space(0, Some("real/traffic")), &[0u8; 8])),
+            // Three records that carry no traffic under a keyexpr: a query's
+            // closing marker, a control envelope, and a discovery request.
+            (
+                false,
+                wz_codecs::response_final::ResponseFinal {
+                    request_id: 1,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            ),
+            (true, wz_codecs::oam::Oam::default().encode_to_vec()),
+            (
+                true,
+                wz_codecs::interest::Interest {
+                    interest_id: 1,
+                    body: None,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            ),
+        ]);
+
+        assert_eq!(table.records(), 1, "one record carried traffic");
+        assert_eq!(
+            table.unattributed_records(),
+            3,
+            "and three were read and belong in no row"
+        );
+        assert!(
+            table.gaps().is_clean(),
+            "none of that is LOSS: {:?}",
+            table.gaps()
+        );
+        assert_eq!(table.total_payload_bytes(), 8);
+    }
+
+    /// THE ACCOUNTING INVARIANT the denominator rests on: every record the plane
+    /// walked is in exactly one of its four counters.
+    ///
+    /// Without it `walked_records` is a fifth number a reader has to trust. The
+    /// fixture carries one of each category on purpose — attributed traffic, a
+    /// declaration, an undeclaration and a record that belongs in no row — so a
+    /// sum that forgot a term cannot come out right by accident.
+    #[test]
+    fn the_parts_account_for_every_record_walked() {
+        let table = aggregate_datagrams(&[
+            (true, declare_kexpr(1, "accounted/topic")),
+            (true, push(sender_space(1, None), &[0u8; 4])),
+            (true, undeclare_kexpr(1)),
+            (true, wz_codecs::oam::Oam::default().encode_to_vec()),
+        ]);
+
+        let (declared, undeclared) = table.declarations();
+        assert_eq!((declared, undeclared), (1, 1));
+        assert_eq!(table.records(), 1);
+        assert_eq!(table.unattributed_records(), 1);
+        assert_eq!(
+            table.walked_records(),
+            table.records() + table.unattributed_records() + declared + undeclared,
+            "the whole must be its parts"
+        );
+        assert_eq!(table.walked_records(), 4, "and the parts must be the wire");
     }
 
     /// The rows a stream flow produces are the same ones a datagram flow does,

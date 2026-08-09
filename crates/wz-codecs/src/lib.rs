@@ -661,6 +661,17 @@ pub mod wire_const {
     /// `Z` on a zenoh-message PUT header (`msg_put.scxml:106`): an extension
     /// chain follows. See [`FLAG_Z_PUT_T`].
     pub const FLAG_Z_PUT_Z: u8 = 0x80;
+    /// `E` on a zenoh-message ERR header (`out/wz-codecs/err.rs:94`): an
+    /// encoding follows.
+    ///
+    /// R311y622 (§1.1s) — its own name rather than a reuse of
+    /// [`FLAG_Z_PUT_E`], which happens to be the same byte. The two are flags
+    /// on DIFFERENT headers, and a fixture that reached for the PUT constant to
+    /// set a bit on an ERR would be asserting a coincidence: nothing in either
+    /// wire spec ties them, and the day one moves the reuse becomes a silent
+    /// misread rather than a compile error.
+    #[cfg(feature = "codec-response")]
+    pub const FLAG_Z_ERR_E: u8 = 0x40;
     /// DECLARE envelope MID (network.h:34). Gated on `codec-declare`.
     #[cfg(feature = "codec-declare")]
     pub const N_MID_DECLARE: u8 = 0x1E;

@@ -229,8 +229,10 @@ impl<'a> CaptureReport<'a> {
         if let Some(t) = self.throughput {
             let g = t.gaps();
             s.push_str(&format!(
-                "throughput: {} records, {} bytes, {} unresolved reference(s)\n",
+                "throughput: {} of {} record(s) attributed, {} bytes, \
+                 {} unresolved reference(s)\n",
                 t.records(),
+                t.walked_records(),
                 t.total_payload_bytes(),
                 t.unresolved_records()
             ));
@@ -306,10 +308,12 @@ impl<'a> CaptureReport<'a> {
         #[cfg(feature = "network-codecs")]
         if let Some(p) = self.payloads {
             s.push_str(&format!(
-                "payloads: {} judged, {} contradicted their declaration, {} unknown encoding id(s)\n",
+                "payloads: {} judged, {} contradicted their declaration, \
+                 {} unknown encoding id(s), {} not on the wire\n",
                 p.payloads(),
                 p.contradictions().len(),
-                p.unknown_ids()
+                p.unknown_ids(),
+                p.descriptors()
             ));
             // Beside the finding count, and deliberately: a narrowed census
             // reports findings about the payloads it kept and says nothing
@@ -372,8 +376,14 @@ fn throughput_json(t: &ThroughputTable, s: &mut String) {
     let (declared, undeclared) = t.declarations();
     s.push_str("\"throughput\":{");
     s.push_str(&format!(
-        "\"records\":{},\"unresolved_records\":{},\"total_payload_bytes\":{}",
+        "\"records\":{},\"unattributed_records\":{},\"walked_records\":{},\
+         \"unresolved_records\":{},\"total_payload_bytes\":{}",
         t.records(),
+        // R311y622 (§1.4h) — the denominator rides BESIDE the numerator rather
+        // than being left for the consumer to add up from four fields, which is
+        // the arithmetic nobody does.
+        t.unattributed_records(),
+        t.walked_records(),
         t.unresolved_records(),
         t.total_payload_bytes()
     ));
@@ -550,10 +560,15 @@ fn latency_json(l: &crate::exchange::LatencySamples, s: &mut String) {
 fn payloads_json(p: &crate::payload::PayloadCensus, s: &mut String) {
     s.push_str("\"payloads\":{");
     s.push_str(&format!(
-        "\"judged\":{},\"not_as_declared\":{},\"unknown_ids\":{}",
+        "\"judged\":{},\"not_as_declared\":{},\"unknown_ids\":{},\
+         \"descriptors_not_on_the_wire\":{}",
         p.payloads(),
         p.contradictions().len(),
-        p.unknown_ids()
+        p.unknown_ids(),
+        // R311y622 (§1.1o) — beside the finding count, never inside it: a
+        // descriptor is data this capture could never have held, not a
+        // publisher's mistake.
+        p.descriptors()
     ));
     s.push_str(",\"selection\":");
     selection_json(p.selection(), s);
@@ -567,8 +582,9 @@ fn payloads_json(p: &crate::payload::PayloadCensus, s: &mut String) {
         s.push_str("{\"declared\":");
         quote_into(&row.declared, s);
         s.push_str(&format!(
-            ",\"payloads\":{},\"consistent\":{},\"not_as_declared\":{},\"bytes\":{}}}",
-            row.payloads, row.consistent, row.not_as_declared, row.bytes
+            ",\"payloads\":{},\"consistent\":{},\"not_as_declared\":{},\
+             \"descriptors\":{},\"bytes\":{}}}",
+            row.payloads, row.consistent, row.not_as_declared, row.descriptors, row.bytes
         ));
     }
     s.push_str("],\"findings\":[");
