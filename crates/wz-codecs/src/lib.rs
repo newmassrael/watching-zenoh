@@ -753,6 +753,33 @@ pub mod wire_const {
             None => false,
         }
     }
+
+    /// R311y611 — the flag bits `header` sets that its own MID does not define,
+    /// or `None` when the MID is not a transport MID at all.
+    ///
+    /// THE WEAKER QUESTION, and a reader needs both. `is_credible_transport_header`
+    /// above answers "could a conforming sender have written this byte", which
+    /// is the right test for a SCAN over bytes whose framing is unknown:
+    /// strictness is free there, and it is what makes a chain of these
+    /// discriminating.
+    ///
+    /// It is the wrong test at a boundary the reader is already synchronised
+    /// to. Fourteen byte values — every known MID with a reserved bit set — are
+    /// refused by it and NAMED by `parse_inbound`, which dispatches on
+    /// `header & 0x1F` and ignores the reserved bits exactly as zenoh's own
+    /// decoder does. Treating one of those as loss of framing makes a reader
+    /// skip real data over a bit nobody has defined yet, which is the failure
+    /// this project ranks worst: confidently wrong beats silent.
+    ///
+    /// So: `None` is "this cannot be a transport message", and `Some(bits)`
+    /// with `bits != 0` is "a transport message from a sender whose wire-spec
+    /// vintage is not this one" — a divergence to REPORT, not to refuse.
+    pub const fn reserved_transport_flags(header: u8) -> Option<u8> {
+        match transport_flag_mask(header & 0x1F) {
+            Some(defined) => Some(header & 0xE0 & !defined),
+            None => None,
+        }
+    }
 }
 
 /// R311y609 — the ungated transport header space, checked against the gated

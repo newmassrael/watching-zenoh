@@ -361,6 +361,18 @@ pub struct PassiveFrame {
     /// other. `None` on a stream that never lost its framing, and always
     /// `None` on a datagram link, which has no framing to lose.
     pub resync: Option<StreamResync>,
+    /// R311y611 — flag bits this header set that its own MID does not define.
+    ///
+    /// Zero for every conforming sender, and that is the point: reserved bits
+    /// are reserved, so a non-zero value says the peer's wire-spec vintage is
+    /// not this reader's. A differential oracle must NAME that rather than
+    /// swallow it — and, before R311y611, the stream path did neither: it
+    /// called the frame a loss of framing and skipped past real data, while the
+    /// datagram path over the same bytes decoded it without comment.
+    ///
+    /// Always zero on the datagram path, which has no such gate to disagree
+    /// with.
+    pub reserved_header_bits: u8,
 }
 
 /// R311y609 (C12) — what the observer makes of ONE data frame's sequence
@@ -732,6 +744,13 @@ pub struct PassiveSession {
     /// R311y609 (C12) — cumulative, per direction.
     #[cfg(feature = "codec-frame")]
     sn_accounting: [SnAccounting; 2],
+    /// R311y611 (§1.4b) — messages decoded whose header set a flag bit its own
+    /// MID does not define, per direction.
+    ///
+    /// Reachable only on the datagram path: a stream link's credible-header
+    /// gate refuses such a byte and desynchronises instead, and says so. So
+    /// this is the counter for the path where nothing else was speaking.
+    reserved_headers: [u64; 2],
     /// R311y609 — how many chained candidate frames must agree before the
     /// resynchronisation scan accepts a boundary. `0` disables recovery.
     resync_depth: usize,
@@ -830,6 +849,7 @@ impl Default for PassiveSession {
             sn_last: [[None; SN_CONDUITS]; 2],
             #[cfg(feature = "codec-frame")]
             sn_accounting: [SnAccounting::default(); 2],
+            reserved_headers: [0; 2],
             resync_depth: DEFAULT_RESYNC_DEPTH,
         }
     }
@@ -1055,6 +1075,14 @@ impl PassiveSession {
             #[cfg(feature = "codec-frame")]
             sn_verdict,
             resync,
+            // R311y611 — unreachable as non-zero HERE, and that is the point.
+            // The credible-header gate above refuses every byte whose MID sets
+            // a reserved bit, so a stream reader never decodes one; it
+            // desynchronises and the recovery names the byte in
+            // `DesyncReason::ImplausibleHeader`. The stream path already SAYS
+            // so. The datagram path is where the same bytes decode with nobody
+            // saying anything, which is where this field is measured.
+            reserved_header_bits: 0,
         })
     }
 
@@ -1068,6 +1096,12 @@ impl PassiveSession {
     /// Always zero on a datagram link, which has no framing to lose.
     pub fn resync_accounting(&self, direction: Direction) -> ResyncAccounting {
         self.stream(direction).accounting
+    }
+
+    /// R311y611 (§1.4b) — messages this direction decoded whose header set a
+    /// bit its MID does not define. See [`PassiveFrame::reserved_header_bits`].
+    pub fn reserved_headers(&self, direction: Direction) -> u64 {
+        self.reserved_headers[usize::from(direction == Direction::B)]
     }
 
     /// R311y610 — bytes pushed into this direction and not yet consumed.
@@ -1243,6 +1277,16 @@ impl PassiveSession {
         handshake: LinkHandshake,
     ) -> PassiveFrame {
         let frame = parse_inbound(bytes);
+        // R311y611 (§1.4b) — counted BEFORE the admissibility branch below: a
+        // reserved bit is a fact about the SENDER's wire-spec vintage, and it
+        // is one whether or not this link was entitled to carry the message.
+        let reserved = bytes
+            .first()
+            .and_then(|h| wz_codecs::wire_const::reserved_transport_flags(*h))
+            .unwrap_or(0);
+        if reserved != 0 {
+            self.reserved_headers[usize::from(direction == Direction::B)] += 1;
+        }
         let inadmissible =
             handshake == LinkHandshake::Absent && frame.as_ref().is_ok_and(is_handshake_message);
         if let Ok(ref f) = frame {
@@ -1273,6 +1317,14 @@ impl PassiveSession {
             // A datagram link has no framing to lose: one datagram is one
             // whole message, so there is no boundary to be wrong about.
             resync: None,
+            // R311y611 — THE PATH WHERE NOBODY WAS SAYING ANYTHING. A datagram
+            // has no framing to lose, so it has no header gate either, and
+            // `parse_inbound` dispatches on `header & 0x1F` and ignores the
+            // reserved bits exactly as zenoh's own decoder does. A peer that
+            // set one therefore decoded as an ordinary message here, with
+            // nothing anywhere recording that its wire-spec vintage is not
+            // this reader's.
+            reserved_header_bits: reserved,
         }
     }
 
@@ -2505,6 +2557,101 @@ mod tests {
         assert_eq!(
             acc.recoveries, 1,
             "the boundary is still found byte by byte"
+        );
+    }
+
+    /// R311y611 (§1.4b) — THE TWO LISTS A STREAM READER CONSULTS, PINNED
+    /// AGAINST EACH OTHER.
+    ///
+    /// A stream reader asks two different questions of the same byte, and only
+    /// one of them exists on a datagram link: `parse_inbound` asks "what
+    /// message is this", and `is_credible_transport_header` asks "could a
+    /// conforming sender have written this at all". Nothing compared them, and
+    /// they disagree on FOURTEEN of the 256 values.
+    ///
+    /// Every one of the fourteen is a known MID with a RESERVED bit set — the
+    /// decoder dispatches on `header & 0x1F` and ignores those bits, exactly as
+    /// zenoh's own decoder does, while the gate refuses the byte. This test
+    /// exists to say that the asymmetry is DELIBERATE and to catch it moving:
+    /// the stream reader loses such a frame and NAMES the loss
+    /// (`DesyncReason::ImplausibleHeader` plus a `StreamResync` counting the
+    /// skip), which is the honest half; a datagram reader decodes it and
+    /// reports the bits in [`PassiveFrame::reserved_header_bits`], which is the
+    /// other half. Relaxing the gate to close the gap was TRIED and measured:
+    /// it costs recoveries on the unannounced path, because acceptance goes
+    /// from 42 of 256 to 56.
+    #[test]
+    #[cfg(all(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-frame",
+        feature = "codec-join"
+    ))]
+    fn the_header_gate_and_the_decoder_disagree_only_on_reserved_bits() {
+        use crate::inbound::InboundFrame;
+        use wz_codecs::wire_const::{is_credible_transport_header, reserved_transport_flags};
+
+        let mut refused_but_named = alloc::vec![];
+        let mut accepted_but_unnamed = alloc::vec![];
+        for header in 0u8..=255 {
+            // A bare header is enough: `parse_inbound` answers
+            // `Unknown { mid }` for a MID it does not dispatch, and anything
+            // else — a decode error included — means it RECOGNISED the MID.
+            let named = !matches!(parse_inbound(&[header]), Ok(InboundFrame::Unknown { .. }));
+            match (is_credible_transport_header(header), named) {
+                (false, true) => refused_but_named.push(header),
+                (true, false) => accepted_but_unnamed.push(header),
+                _ => {}
+            }
+        }
+        assert!(
+            accepted_but_unnamed.is_empty(),
+            "with every codec compiled, a byte the gate calls credible must be \
+             a byte this build can name: {accepted_but_unnamed:02X?}"
+        );
+        assert_eq!(
+            refused_but_named.len(),
+            14,
+            "4 CLOSE + 6 KEEP_ALIVE + 4 FRAME, each with a bit its MID does \
+             not define: {refused_but_named:02X?}"
+        );
+        for header in refused_but_named {
+            let reserved = reserved_transport_flags(header)
+                .expect("a named MID is a known MID, so the mask exists");
+            assert_ne!(
+                reserved, 0,
+                "{header:#04x} is refused for a reason other than a reserved \
+                 bit — the gate and the decoder have drifted on something this \
+                 test does not describe"
+            );
+        }
+    }
+
+    /// R311y611 (§1.4b) — and the datagram path REPORTS the bits it decodes
+    /// past, which before this round nothing did.
+    #[test]
+    fn a_datagram_reports_the_reserved_header_bits_it_decoded_past() {
+        let mut s = PassiveSession::new();
+        // KEEP_ALIVE defines no flag but Z, so 0x40 is reserved.
+        let clean = s.next_datagram(Direction::A, &[crate::wire_const::T_MID_KEEP_ALIVE], 0);
+        assert_eq!(clean.reserved_header_bits, 0, "the control arm");
+        assert!(clean.frame.is_ok());
+
+        let odd = s.next_datagram(
+            Direction::A,
+            &[crate::wire_const::T_MID_KEEP_ALIVE | 0x40],
+            0,
+        );
+        assert_eq!(
+            odd.reserved_header_bits, 0x40,
+            "the peer set a bit this wire-spec vintage does not define, and \
+             the frame decodes anyway — so the bit is the only evidence"
+        );
+        assert!(
+            odd.frame.is_ok(),
+            "reporting it must not turn a decodable message into an error: \
+             zenoh's own decoder ignores the bit"
         );
     }
 

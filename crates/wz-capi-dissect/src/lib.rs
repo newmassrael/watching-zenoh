@@ -260,7 +260,8 @@ fn health_json(d: &Dissection) -> String {
          \"transport_checksum_valid\":{},\"transport_checksum_invalid\":{},\
          \"transport_checksum_absent\":{}}},\
          \"framing\":{{\"gaps_forced\":{},\"gap_bytes_missing\":{},\
-         \"desyncs\":{},\"recoveries\":{},\"resync_skipped_bytes\":{}}},\
+         \"desyncs\":{},\"recoveries\":{},\"resync_skipped_bytes\":{},\
+         \"reserved_headers\":{}}},\
          \"sequence\":{{\"frames\":{},\"missing\":{},\"gaps\":{},\
          \"duplicates\":{},\"out_of_window\":{},\"without_resolution\":{}}}}}",
         drops.frames,
@@ -288,6 +289,7 @@ fn health_json(d: &Dissection) -> String {
         fr.desyncs,
         fr.recoveries,
         fr.resync_skipped_bytes,
+        fr.reserved_headers,
         fr.sn_frames,
         fr.sn_missing,
         fr.sn_gaps,
@@ -595,6 +597,49 @@ mod tests {
         for key in ["\"framing\"", "\"sequence\"", "\"without_resolution\""] {
             assert!(json.contains(key), "{key} missing: {json}");
         }
+    }
+
+    /// R311y611 (§1.4b) — a peer whose wire-spec vintage is not this reader's
+    /// crosses the boundary as a NUMBER, not as silence.
+    ///
+    /// A reserved flag bit decodes without complaint — zenoh's own decoder
+    /// ignores those bits and so does `parse_inbound` — so before R311y611 the
+    /// only trace of it anywhere was that the stream path desynchronised, which
+    /// a datagram capture never does. A differential oracle that swallows the
+    /// one signal saying "this peer is not speaking your version" is worse than
+    /// one that cannot read the message at all.
+    #[test]
+    fn a_reserved_header_bit_crosses_the_boundary_as_a_count() {
+        // KEEP_ALIVE defines no flag but Z, so 0x40 is reserved. Sent on a
+        // DATAGRAM, which is the path with no gate to refuse it.
+        let clean = udp_packet(
+            [10, 0, 0, 1],
+            43210,
+            [10, 0, 0, 2],
+            7447,
+            &[wz_session_core::wire_const::T_MID_KEEP_ALIVE],
+        );
+        let odd = udp_packet(
+            [10, 0, 0, 1],
+            43210,
+            [10, 0, 0, 2],
+            7447,
+            &[wz_session_core::wire_const::T_MID_KEEP_ALIVE | 0x40],
+        );
+
+        let control =
+            call_summary(&wz_capture::pcap::write(1, &[(0, 0, clean.as_slice())])).expect("reads");
+        assert!(
+            control.contains("\"reserved_headers\":0"),
+            "the control arm must be zero or the other arm proves nothing: {control}"
+        );
+
+        let json =
+            call_summary(&wz_capture::pcap::write(1, &[(0, 0, odd.as_slice())])).expect("reads");
+        assert!(
+            json.contains("\"reserved_headers\":1"),
+            "the bit the decoder ignored must still be counted: {json}"
+        );
     }
 
     /// R311y610 (§4.2) — a capture that STOPS with the hole still open.

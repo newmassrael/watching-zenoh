@@ -847,6 +847,16 @@ pub struct FramingHealth {
     /// Frames no ring resolution was observed for, so no verdict was possible.
     /// Without it `sn_missing = 0` is unreadable.
     pub sn_without_resolution: u64,
+    /// R311y611 (§1.4b) — messages decoded whose header set a flag bit its own
+    /// MID does not define.
+    ///
+    /// A FIFTH witness, and to a different question than the four above: those
+    /// count what is MISSING, this counts what arrived and should not have.
+    /// Non-zero says the peer's wire-spec vintage is not this reader's, which
+    /// is the one thing a differential oracle must never swallow. Always zero
+    /// on a stream link, whose credible-header gate refuses the byte and
+    /// reports the refusal as a desynchronisation instead.
+    pub reserved_headers: u64,
 }
 
 /// R311y609 — fold one direction's sequence-number accounting into the total.
@@ -985,6 +995,7 @@ impl Dissection {
                 h.desyncs += r.desyncs;
                 h.recoveries += r.recoveries;
                 h.resync_skipped_bytes += r.skipped_bytes;
+                h.reserved_headers += flow.session.reserved_headers(dir);
                 add_sn(&mut h, flow.session.sn_accounting(dir));
             }
         }
@@ -992,6 +1003,7 @@ impl Dissection {
         // it still counts: multicast loss is exactly what this measures.
         for flow in &self.datagram_flows {
             for dir in [Direction::A, Direction::B] {
+                h.reserved_headers += flow.session.reserved_headers(dir);
                 add_sn(&mut h, flow.session.sn_accounting(dir));
             }
         }
@@ -1476,6 +1488,7 @@ impl Dissection {
                 self.evicted_sessions.desyncs += r.desyncs;
                 self.evicted_sessions.recoveries += r.recoveries;
                 self.evicted_sessions.resync_skipped_bytes += r.skipped_bytes;
+                self.evicted_sessions.reserved_headers += gone.session.reserved_headers(dir);
                 add_sn(&mut self.evicted_sessions, gone.session.sn_accounting(dir));
             }
             self.drops.flows += 1;
@@ -2735,9 +2748,14 @@ mod datagram_tests {
     /// one. Both are visible here: `Unknown { mid }` reds the transport half,
     /// and a scouting message that reached the transport decoder at all reds
     /// the scouting half by never appearing in `scouting`.
-    #[test]
-    fn every_mid_on_a_datagram_link_is_named_rather_than_unknown() {
-        use wz_session_core::inbound::InboundFrame;
+    /// R311y611 (§1.4b) — the census's message list, shared by the three
+    /// framings that carry it.
+    ///
+    /// Extracted so the datagram, stream and WebSocket censuses cannot drift
+    /// apart: a MID added here is demanded of all three, and a census that
+    /// covered one link kind is exactly how the stream path went unchecked
+    /// from R311y607 to R311y611.
+    pub(crate) fn transport_census() -> Vec<(&'static str, Vec<u8>)> {
         use wz_session_core::wire_const as wc;
 
         // Each message is built by ITS OWN codec where one exists, so this
@@ -2821,8 +2839,15 @@ mod datagram_tests {
         census.push(("Fragment", fragment));
         #[cfg(not(feature = "reassembly"))]
         let _ = fragment;
+        census
+    }
 
-        for (name, wire) in census {
+    /// R311y607 — see [`transport_census`]. The DATAGRAM half.
+    #[test]
+    fn every_mid_on_a_datagram_link_is_named_rather_than_unknown() {
+        use wz_session_core::inbound::InboundFrame;
+
+        for (name, wire) in transport_census() {
             let pkt = udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire);
             let mut d = Dissection::new();
             d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
@@ -2858,6 +2883,57 @@ mod datagram_tests {
                 ),
                 Ok(_) => {}
                 Err(e) => panic!("{name} failed to decode: {e:?}"),
+            }
+        }
+    }
+
+    /// R311y611 (§1.4b) — THE STREAM HALF, which the R311y607 census did not
+    /// cover and which asks one question more.
+    ///
+    /// A datagram link hands `parse_inbound` a whole message and is done. A
+    /// stream link consults a SECOND list first — the credible-header gate
+    /// R311y609 added for resynchronisation — and a MID the decoder can name
+    /// but that gate refuses does not merely go unnamed here: the reader calls
+    /// it loss of framing and skips forward. The two lists are pinned against
+    /// each other in `wz-session-core`
+    /// (`the_header_gate_and_the_decoder_disagree_only_on_reserved_bits`);
+    /// this drives the wiring that consults them.
+    ///
+    /// `desyncs == 0` is therefore the assertion that is new here. A census
+    /// that only checked for `Unknown` would pass while every message in it
+    /// desynchronised the reader, because a desynchronised direction produces
+    /// no frame to be Unknown.
+    #[test]
+    fn every_mid_on_a_stream_link_is_named_rather_than_unknown() {
+        use wz_session_core::inbound::InboundFrame;
+
+        for (name, wire) in transport_census() {
+            let mut framed = (wire.len() as u16).to_le_bytes().to_vec();
+            framed.extend_from_slice(&wire);
+            let mut d = Dissection::new();
+            d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1000, &framed));
+
+            let flow = &d.flows()[0];
+            assert_eq!(
+                flow.session.resync_accounting(Direction::A).desyncs,
+                0,
+                "{name} desynchronised a synchronised reader — its header byte \
+                 is one the decoder names and the credible-header gate refuses"
+            );
+            assert_eq!(flow.frames.len(), 1, "{name} produced no frame at all");
+            let f = &flow.frames[0];
+            assert_eq!(f.prefix_width, 2, "{name} read the wrong framing");
+            assert_eq!(
+                f.reserved_header_bits, 0,
+                "{name}'s own fixture sets a reserved bit"
+            );
+            match &f.frame {
+                Ok(InboundFrame::Unknown { mid }) => panic!(
+                    "{name} (MID {mid:#04x}) is on zenoh's wire and this build \
+                     cannot name it over a STREAM link"
+                ),
+                Ok(_) => {}
+                Err(e) => panic!("{name} failed to decode on a stream: {e:?}"),
             }
         }
     }
@@ -3656,6 +3732,55 @@ mod ws_flow_tests {
     /// the framing.
     fn bare_keepalive() -> Vec<u8> {
         alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE]
+    }
+
+    /// R311y611 (§1.4b) — THE THIRD FRAMING, and the census had to reach it
+    /// separately because it reaches the decoder by a THIRD route.
+    ///
+    /// A ws flow is neither of the other two: the bytes arrive over TCP, but a
+    /// ws message boundary IS the framing, so `feed_websocket` calls
+    /// `next_datagram` and the length prefix the stream path reads is absent.
+    /// A codec missing from this crate's feature list, or a deframer that
+    /// dropped a message kind, shows here and in neither of the other
+    /// censuses.
+    #[test]
+    fn every_mid_on_a_websocket_link_is_named_rather_than_unknown() {
+        for (name, wire) in crate::datagram_tests::transport_census() {
+            let mut d = Dissection::new();
+            let upgrade = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n";
+            d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, upgrade));
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                1,
+                &tcp_packet(
+                    1111,
+                    7447,
+                    1000 + upgrade.len() as u32,
+                    &binary_frame(&wire, Some([0x11, 0x22, 0x33, 0x44])),
+                ),
+            );
+
+            let flow = &d.flows()[0];
+            assert!(
+                flow.framing().is_websocket(),
+                "{name}: the flow was not recognised as WebSocket, so this \
+                 census would silently be measuring the stream path again"
+            );
+            assert_eq!(flow.frames.len(), 1, "{name} produced no frame at all");
+            let f = &flow.frames[0];
+            assert_eq!(
+                f.prefix_width, 0,
+                "{name}: a ws message carries no length prefix"
+            );
+            match &f.frame {
+                Ok(InboundFrame::Unknown { mid }) => panic!(
+                    "{name} (MID {mid:#04x}) is on zenoh's wire and this build \
+                     cannot name it over a WEBSOCKET link"
+                ),
+                Ok(_) => {}
+                Err(e) => panic!("{name} failed to decode over ws: {e:?}"),
+            }
+        }
     }
 
     /// THE ONE THAT MATTERS. A zenoh session over `ws/...` is ordinary TCP, so
