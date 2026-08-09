@@ -11379,6 +11379,56 @@
         "A DIFFERENTIAL THAT FIRES ON ITS FIRST RUN IS MORE LIKELY A HARNESS BUG THAN A DISCOVERY, and this round paid that toll before it found anything real. The tell was the SHAPE of the result: hundreds of disagreements spread across every header was a contract mismatch, and 27 clustered on one flag bit was a finding. Cluster before believing."
       ]
     },
+    "Round 1650": {
+      "decision_summary": "R311y629 -- wiring an oracle that had only ever run by hand showed it does not pass, and the fix is verified under the hosted condition rather than the local one",
+      "changes_bullets": [
+        "scripts/run-ci.sh (Layer Epico) -- the lane now BUILDS `wz-capi-pico` before running its legs, and the reason is the finding: `pico_pure_function_oracle` and `pico_abi_symbol_census` dlopen wz's `libwz_capi_pico.so` BESIDE pico's library, and nothing in the cross-impl job produced it. Seven of eight legs panicked with \"run `cargo build -p wz-capi-pico` first\". Built rather than skipped, on this file's own rule: SKIP on a FOREIGN binary a machine may legitimately lack, never on a wz one we can produce.",
+        "crates/wz-integration-tests/tests/pico_transport_decode_differential.rs -- the `wz-proves:` claims Layer A4-4 demands. The anti-vacuity leg declares `none` with its reason, which is what that invariant's own message says the alternative to an invented claim is. The oracle leg claims five transport codecs as `codec-parity partial` -- `partial` on every line because the differential compares the ACCEPT/REJECT verdict and so adjudicates each codec's BOUNDARY, not its contents.",
+        "scripts/lib/crossimpl_corpus.py -- `codec-parity` accepts the `pico-lib` class, on the dict's OWN stated reasoning: \"linking or dlopening the real implementation is a STRONGER witness than spawning it, so a kind that accepts the spawned CLI must accept the library.\" That note is R311y536's, which added `pico-lib` to the two DIRECTIONAL pico kinds and never revisited this one -- `codec-parity`'s `{codec}` predates the class existing, so it was never a judgement about dlopen.",
+        "scripts/lib/crossimpl_audit.py -- the foreign-adjudicator ratchet moves 796 -> 801, in one step of five, and the step is a different SHAPE from every one above it: those added a witness for a behaviour someone had thought to check, this one added a GENERATED corpus."
+      ],
+      "verification_bullets": [
+        "THE LANE FOUND ITS FIRST DEFECT BEFORE IT FOUND A PROTOCOL ONE, and the defect was in the thing it was wiring. `pico_pure_function_oracle` has existed since R311y568 and had never run in CI; the register carried that as §11.9 and the previous round closed it by wiring the lane. Its first hosted run went RED -- 7 of 8 legs -- and not on a protocol disagreement: on a missing wz cdylib. The oracle had only ever passed on a developer box where the artifact happened to be lying around. A proof that runs only by hand is not merely un-run; it can be a proof that DOES NOT PASS, and nobody would know.",
+        "THE FIX IS VERIFIED UNDER THE HOSTED CONDITION, not under the local one. Running the lane with the cdylib present proves nothing -- it was present when the test passed by hand for sixty rounds. `libwz_capi_pico.so` was MOVED ASIDE to reproduce a fresh checkout, and the lane then built it and passed, 15s cold.",
+        "The new differential itself PASSED on the hosted runner and was never the cause -- it calls wz's Rust API in process and needs no cdylib. That asymmetry is what isolated the fault to the two legacy legs.",
+        "A4-7 WAS SATISFIED BY WIDENING A CLASS SET, so the widening was PROBED rather than argued: a `codec-parity` claim planted in a SPAWN-class file (`wz_e2e_declare_observer_to_zsub`) still fails A4-7 by name. Only the in-process library class was admitted, which is exactly what the entry exists to say.",
+        "Gates re-run alone and green: A4, C0, Epico. `shellcheck -S info scripts/run-ci.sh` is SC2317 3341 and nothing else; `python_floor_lint` 20 scripts 0 findings; `unwired_lane_lint` 130 lanes 0 absent; clippy `-D warnings` clean on the test crate."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions"
+      ],
+      "carry_forward_bullets": [
+        "The hosted run for this round's commits is not started. The run before it (31338534979) had TWO red jobs -- `validate + codegen` on A4's claim invariants and `cross-impl proof lanes` on the missing cdylib -- and both are addressed here. Read the next one per job.",
+        "A PIN MEASURED ON ONE MACHINE IS A CLAIM ABOUT THAT MACHINE. The 27 ext-chain divergences were measured against THIS box's `libzenohpico.so`, and the hosted build's feature configuration is not known to be identical. The hosted run has not yet exercised that test with the cdylib present, so the pin's portability is UNVERIFIED. If the next run reds on a divergence delta rather than on a crash, that is the reason and it is a finding about the pin, not about the protocol.",
+        "§14.1's triage is still the hottest item and is untouched by this round.",
+        "§11.4 IS THE SAME SHAPE AS WHAT THIS ROUND FIXED and is still open: a lane that does not build the wz-side artifact its own census needs. One instance was just repaired for `wz-capi-pico` in Layer Epico; the registered one is `wz-capi-c` in Layer E. The class is \"a lane provisions the FOREIGN side and forgets its own\"."
+      ],
+      "publishable_decision_summary": "R311y629 -- wiring an oracle that had only ever run by hand showed it does not pass, and the fix is verified under the hosted condition rather than the local one",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh (Layer Epico) -- the lane now BUILDS `wz-capi-pico` before running its legs, and the reason is the finding: `pico_pure_function_oracle` and `pico_abi_symbol_census` dlopen wz's `libwz_capi_pico.so` BESIDE pico's library, and nothing in the cross-impl job produced it. Seven of eight legs panicked with \"run `cargo build -p wz-capi-pico` first\". Built rather than skipped, on this file's own rule: SKIP on a FOREIGN binary a machine may legitimately lack, never on a wz one we can produce.",
+        "crates/wz-integration-tests/tests/pico_transport_decode_differential.rs -- the `wz-proves:` claims Layer A4-4 demands. The anti-vacuity leg declares `none` with its reason, which is what that invariant's own message says the alternative to an invented claim is. The oracle leg claims five transport codecs as `codec-parity partial` -- `partial` on every line because the differential compares the ACCEPT/REJECT verdict and so adjudicates each codec's BOUNDARY, not its contents.",
+        "scripts/lib/crossimpl_corpus.py -- `codec-parity` accepts the `pico-lib` class, on the dict's OWN stated reasoning: \"linking or dlopening the real implementation is a STRONGER witness than spawning it, so a kind that accepts the spawned CLI must accept the library.\" That note is R311y536's, which added `pico-lib` to the two DIRECTIONAL pico kinds and never revisited this one -- `codec-parity`'s `{codec}` predates the class existing, so it was never a judgement about dlopen.",
+        "scripts/lib/crossimpl_audit.py -- the foreign-adjudicator ratchet moves 796 -> 801, in one step of five, and the step is a different SHAPE from every one above it: those added a witness for a behaviour someone had thought to check, this one added a GENERATED corpus."
+      ],
+      "publishable_verification_bullets": [
+        "THE LANE FOUND ITS FIRST DEFECT BEFORE IT FOUND A PROTOCOL ONE, and the defect was in the thing it was wiring. `pico_pure_function_oracle` has existed since R311y568 and had never run in CI; the register carried that as §11.9 and the previous round closed it by wiring the lane. Its first hosted run went RED -- 7 of 8 legs -- and not on a protocol disagreement: on a missing wz cdylib. The oracle had only ever passed on a developer box where the artifact happened to be lying around. A proof that runs only by hand is not merely un-run; it can be a proof that DOES NOT PASS, and nobody would know.",
+        "THE FIX IS VERIFIED UNDER THE HOSTED CONDITION, not under the local one. Running the lane with the cdylib present proves nothing -- it was present when the test passed by hand for sixty rounds. `libwz_capi_pico.so` was MOVED ASIDE to reproduce a fresh checkout, and the lane then built it and passed, 15s cold.",
+        "The new differential itself PASSED on the hosted runner and was never the cause -- it calls wz's Rust API in process and needs no cdylib. That asymmetry is what isolated the fault to the two legacy legs.",
+        "A4-7 WAS SATISFIED BY WIDENING A CLASS SET, so the widening was PROBED rather than argued: a `codec-parity` claim planted in a SPAWN-class file (`wz_e2e_declare_observer_to_zsub`) still fails A4-7 by name. Only the in-process library class was admitted, which is exactly what the entry exists to say.",
+        "Gates re-run alone and green: A4, C0, Epico. `shellcheck -S info scripts/run-ci.sh` is SC2317 3341 and nothing else; `python_floor_lint` 20 scripts 0 findings; `unwired_lane_lint` 130 lanes 0 absent; clippy `-D warnings` clean on the test crate."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The hosted run for this round's commits is not started. The run before it (31338534979) had TWO red jobs -- `validate + codegen` on A4's claim invariants and `cross-impl proof lanes` on the missing cdylib -- and both are addressed here. Read the next one per job.",
+        "A PIN MEASURED ON ONE MACHINE IS A CLAIM ABOUT THAT MACHINE. The 27 ext-chain divergences were measured against THIS box's `libzenohpico.so`, and the hosted build's feature configuration is not known to be identical. The hosted run has not yet exercised that test with the cdylib present, so the pin's portability is UNVERIFIED. If the next run reds on a divergence delta rather than on a crash, that is the reason and it is a finding about the pin, not about the protocol.",
+        "§14.1's triage is still the hottest item and is untouched by this round.",
+        "§11.4 IS THE SAME SHAPE AS WHAT THIS ROUND FIXED and is still open: a lane that does not build the wz-side artifact its own census needs. One instance was just repaired for `wz-capi-pico` in Layer Epico; the registered one is `wz-capi-c` in Layer E. The class is \"a lane provisions the FOREIGN side and forgets its own\"."
+      ]
+    },
     "Round 17": {
       "decision_summary": "OQ-W24 full closure — RFC §5.I.0 'Tier definitions' subsection landed as atomic-store new section via R287/R289 add_section primitive (first watching-zenoh use of new section creation surface).",
       "changes_bullets": [
