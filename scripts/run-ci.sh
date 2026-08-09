@@ -5312,7 +5312,10 @@ layer_c1bt_capture_no_default_features() {
         ws_flow_tests::every_mid_on_a_websocket_link_is_named_rather_than_unknown \
         datagram_tests::announcing_the_hole_stops_the_reader_swallowing_the_frames_after_it \
         ws::tests::every_structural_desync_recovers_and_not_only_the_announced_one \
-        ws_flow_tests::a_structural_desync_mid_segment_does_not_end_the_flow
+        ws_flow_tests::a_structural_desync_mid_segment_does_not_end_the_flow \
+        datagram_tests::a_frame_carries_the_capture_instant_in_every_feature_arm \
+        report::tests::every_character_json_requires_escaping_is_escaped_as_the_rfc_names_it \
+        report::tests::a_keyexpr_cannot_end_the_field_it_is_printed_in
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the --no-default-features build"
@@ -5343,7 +5346,13 @@ layer_c1bt_capture_no_default_features() {
         agg::tests::the_mapping_bit_picks_the_space_and_the_observer_holds_both \
         agg::tests::an_unbound_alias_is_reported_rather_than_guessed \
         agg::tests::a_halted_batch_is_reported_rather_than_quietly_short \
-        agg::tests::an_intact_capture_reports_no_gap_at_all
+        agg::tests::an_intact_capture_reports_no_gap_at_all \
+        exchange::tests::the_fixture_puts_real_request_and_response_records_on_the_wire \
+        exchange::tests::a_query_exchange_reports_its_latency_at_the_tap \
+        exchange::tests::a_capture_without_timestamps_reports_no_latency_rather_than_zero \
+        exchange::tests::each_direction_owns_its_request_id_space \
+        report::tests::an_incomplete_capture_says_so_in_both_renderings \
+        report::tests::an_unmeasured_latency_is_null_in_json_and_named_in_text
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the network-codecs build"

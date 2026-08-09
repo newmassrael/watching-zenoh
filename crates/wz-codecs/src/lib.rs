@@ -623,6 +623,23 @@ pub mod wire_const {
     /// RESPONSE envelope MID (network.h:37). Gated on `codec-response`.
     #[cfg(feature = "codec-response")]
     pub const N_MID_RESPONSE: u8 = 0x1B;
+    /// R311y615 (§4.10) — `N` flag on a NETWORK envelope header
+    /// (network.h `_Z_FLAG_N_*_N`, bit 5): the message's wireexpr carries an
+    /// inline keyexpr suffix.
+    ///
+    /// Same bit value as [`FLAG_D_N`] and named separately for the same reason
+    /// that one is: the two live in different header namespaces, and a reader
+    /// who sees a declaration-body constant on a `Push` header has been told
+    /// something false about which table to consult. It exists at all because
+    /// every construction site was writing the literal `0x20` — the MID beside
+    /// it comes from the codec's generated `Default`, so the flag was the one
+    /// byte in the header that no name covered.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    ))]
+    pub const FLAG_N_N: u8 = 0x20;
     /// DECLARE envelope MID (network.h:34). Gated on `codec-declare`.
     #[cfg(feature = "codec-declare")]
     pub const N_MID_DECLARE: u8 = 0x1E;

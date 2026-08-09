@@ -43,6 +43,17 @@ extern crate std;
 /// ACROSS messages rather than decoding one, and because keyexpr resolution
 /// needs both id spaces — something only an observer of both directions has.
 pub mod agg;
+/// R311y615 (§1.1f) — the second ANALYSIS plane: Query/Reply exchanges and
+/// their latency at the tap.
+///
+/// Gated on `network-codecs` where [`agg`] is not, and the difference is not
+/// arbitrary. A throughput table without the network codecs still resolves
+/// `id == 0` literals and answers a smaller question correctly; an exchange
+/// table without `Request` / `Response` / `ResponseFinal` has no record it can
+/// correlate at all, so its every answer would be a structural zero. A plane
+/// that cannot be fed is absent rather than empty.
+#[cfg(feature = "network-codecs")]
+pub mod exchange;
 /// R311y606 — IP fragment reassembly. Its own module rather than part of
 /// [`link`] because it holds STATE across packets and `link` is deliberately a
 /// pure decapsulator; the same division `passive`'s chain reassembly is under.
@@ -50,6 +61,10 @@ pub mod frag;
 pub mod link;
 pub mod pcap;
 pub mod pcapng;
+/// R311y615 (§1.1f) — the EXPORT plane: the analysis tables rendered for
+/// something that is not a Rust caller, with their loss counters structurally
+/// attached.
+pub mod report;
 pub mod tcp;
 pub mod ws;
 
@@ -294,6 +309,18 @@ fn dir_index(direction: Direction) -> usize {
         Direction::A => 0,
         Direction::B => 1,
     }
+}
+
+/// R311y615 — which of a [`Dissection`]'s two flow vectors an index refers to.
+///
+/// Exists only so [`Dissection::advance_clock`] can be written once for both:
+/// the stream and datagram families keep separate vectors, and passing the
+/// session by reference instead would hold a borrow across the counter update
+/// the function also has to make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlowKind {
+    Stream,
+    Datagram,
 }
 
 /// R311y594 — one place that decides how a per-flow observer is built, so the
@@ -1620,14 +1647,6 @@ impl Dissection {
     /// alternative, and the duplicate would have been the copy that forgot the
     /// `retained_from` rebase below.
     fn push_segment(&mut self, segment: link::Segment, ts_millis: Option<u64>) {
-        // R311y609 — the capture's clock is read only to expire reassembly
-        // chains, and there are none without `reassembly`. Bound here rather
-        // than left unused because THIS CRATE DID NOT COMPILE AT ALL WITHOUT
-        // ITS DEFAULT FEATURE: `warnings = "deny"` turned the unused binding
-        // into an error, and no CI lane builds the combination, so nothing
-        // said so. Found by building it.
-        #[cfg(not(feature = "reassembly"))]
-        let _ = ts_millis;
         let packet_index = segment.packet_index;
         self.tally_checksums(&segment.checksums);
         let idx = match self.flows.iter().position(|f| f.flow == segment.flow) {
@@ -1641,11 +1660,13 @@ impl Dissection {
                 self.flows.len() - 1
             }
         };
+        // R311y615 (§1.1f) — UNGATED, and BEFORE the flow borrow. The clock's
+        // first consumer was chain expiry, which is what put it behind
+        // `reassembly`; its second is `PassiveFrame::observed_at_ms`, which
+        // every build has. A build without `reassembly` sweeps nothing and
+        // still stamps its frames.
+        self.advance_clock(idx, ts_millis, FlowKind::Stream);
         let flow = &mut self.flows[idx];
-        #[cfg(feature = "reassembly")]
-        if let Some(ms) = ts_millis {
-            self.expired_chains += flow.session.observe_at(ms);
-        }
         let direction = if segment.from_low {
             Direction::A
         } else {
@@ -1660,6 +1681,33 @@ impl Dissection {
         flow.last_activity = packet_index;
         self.enforce_flow_limits(idx);
         self.evict_flows_beyond_cap();
+    }
+
+    /// R311y615 (§1.1f) — advance one flow's observation clock, and account for
+    /// whatever that expired.
+    ///
+    /// One function for both flow families because the two differ only in which
+    /// vector holds the session, and the accounting rule below is the part that
+    /// must not be written twice: the clock advance is UNCONDITIONAL and the
+    /// expiry tally is not. A build without `reassembly` has no chains, so
+    /// `observe_at` answers `0` and there is no counter to fold it into — but
+    /// the frames it stamps are exactly as stamped as a full build's.
+    fn advance_clock(&mut self, idx: usize, ts_millis: Option<u64>, kind: FlowKind) {
+        let Some(ms) = ts_millis else {
+            return;
+        };
+        let expired = match kind {
+            FlowKind::Stream => self.flows[idx].session.observe_at(ms),
+            FlowKind::Datagram => self.datagram_flows[idx].session.observe_at(ms),
+        };
+        #[cfg(feature = "reassembly")]
+        {
+            self.expired_chains += expired;
+        }
+        #[cfg(not(feature = "reassembly"))]
+        {
+            let _ = expired;
+        }
     }
 
     /// R311y594b — bring one TCP flow back inside the per-flow bounds.
@@ -1765,13 +1813,8 @@ impl Dissection {
         } else {
             Direction::B
         };
+        self.advance_clock(idx, ts_millis, FlowKind::Stream);
         let flow = &mut self.flows[idx];
-        #[cfg(feature = "reassembly")]
-        if let Some(ms) = ts_millis {
-            self.expired_chains += flow.session.observe_at(ms);
-        }
-        #[cfg(not(feature = "reassembly"))]
-        let _ = ts_millis;
 
         let d = dir_index(direction);
         let seq = flow.vsock_seq[d];
@@ -1825,11 +1868,6 @@ impl Dissection {
     /// No buffering and no reassembly, because there is nothing to reassemble
     /// — which is exactly why this is four lines and the TCP path is not.
     fn push_datagram(&mut self, d: link::Datagram, ts_millis: Option<u64>, link: DatagramLink) {
-        // Without `reassembly` there is no chain to expire and so nothing to
-        // advance a clock FOR. Named here rather than silenced with an
-        // `#[allow]`, because the reason is the feature and not the lint.
-        #[cfg(not(feature = "reassembly"))]
-        let _ = ts_millis;
         self.tally_checksums(&d.checksums);
         let idx = match self.datagram_flows.iter().position(|f| f.flow == d.flow) {
             Some(i) => i,
@@ -1859,11 +1897,8 @@ impl Dissection {
                 .observed_scout_from(d.source(), self.limits.max_scout_askers);
             self.drops.scout_askers += evicted;
         }
+        self.advance_clock(idx, ts_millis, FlowKind::Datagram);
         let flow = &mut self.datagram_flows[idx];
-        #[cfg(feature = "reassembly")]
-        if let Some(ms) = ts_millis {
-            self.expired_chains += flow.session.observe_at(ms);
-        }
         if scouting.is_some() {
             // Decoded WITHOUT touching the session: a scouting message is not
             // part of any session, so folding it would let a pre-session
@@ -3973,6 +4008,42 @@ mod datagram_tests {
         let mut d = Dissection::new();
         d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
         assert_eq!(d.datagram_flows()[0].session.now_ms(), 0);
+    }
+
+    /// R311y615 (§1.1f) — the capture instant reaches the FRAME, and it does so
+    /// in EVERY feature arm.
+    ///
+    /// Deliberately ungated, and that is the whole assertion. The clock lived
+    /// behind `reassembly` from R311y594 to R311y615 because expiry was its
+    /// only consumer; a frame's timestamp is not a reassembly concept, and a
+    /// build that reads pcap and cannot say when a packet arrived can answer no
+    /// latency question at all. This test is pinned in Layer C1bt's
+    /// `--no-default-features` SET, so re-gating the clock removes it from that
+    /// build and the lane says so instead of the count quietly shrinking.
+    ///
+    /// The `None` leg is what keeps the `Some` leg from being free: a field
+    /// hardwired to `Some(0)` would satisfy the first assertion and fail the
+    /// second.
+    #[test]
+    fn a_frame_carries_the_capture_instant_in_every_feature_arm() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let pkt = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &keepalive);
+
+        let mut stamped = Dissection::new();
+        stamped.push_packet_at(LINKTYPE_ETHERNET, 0, Some(4_242), &pkt);
+        assert_eq!(
+            stamped.datagram_flows()[0].frames[0].observed_at_ms,
+            Some(4_242),
+            "the instant handed to push_packet_at must reach the frame"
+        );
+
+        let mut unstamped = Dissection::new();
+        unstamped.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
+        assert_eq!(
+            unstamped.datagram_flows()[0].frames[0].observed_at_ms,
+            None,
+            "a source with no clock must not produce a plausible one"
+        );
     }
 
     /// The sub-second field is microseconds or nanoseconds depending on the

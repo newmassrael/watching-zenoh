@@ -361,6 +361,27 @@ pub struct PassiveFrame {
     /// other. `None` on a stream that never lost its framing, and always
     /// `None` on a datagram link, which has no framing to lose.
     pub resync: Option<StreamResync>,
+    /// R311y615 (§1.1f) — the capture clock as of this frame, or `None` when
+    /// the byte source never supplied one.
+    ///
+    /// # Why it is here and not left to the caller
+    ///
+    /// The instant reached [`PassiveSession`] from R311y594 on and was spent
+    /// entirely on expiring reassembly chains; nothing handed it back. A
+    /// consumer therefore held decoded frames with no time attached to them and
+    /// could not answer any question of the form "how long between these two" —
+    /// which is every question an exchange plane asks. Re-deriving it outside
+    /// meant tracking, per direction, which packet produced which frame, and a
+    /// stream frame does not correspond to a packet at all.
+    ///
+    /// # What it measures, and what it does not
+    ///
+    /// The instant THIS OBSERVER saw the bytes. On a tap beside the querier
+    /// that is the querier's round trip to within the tap's own delay; on a tap
+    /// beside the responder it is not, and no arithmetic here can tell the two
+    /// apart. A latency computed from these is a latency AT THE VANTAGE POINT,
+    /// which is the honest claim and the only one a passive reader can make.
+    pub observed_at_ms: Option<u64>,
     /// R311y611 — flag bits this header set that its own MID does not define.
     ///
     /// Zero for every conforming sender, and that is the point: reserved bits
@@ -730,11 +751,26 @@ pub struct PassiveSession {
     /// which also makes a replayed file deterministic, and makes replaying it
     /// at 100x not expire chains that never expired in the original.
     ///
-    /// Stays `0` unless a caller advances it ([`Self::observe_at`]), which is
-    /// exactly the pre-R311y594 behaviour: a deadline armed at 0 against a
+    /// Stays `None` unless a caller advances it ([`Self::observe_at`]), which
+    /// is exactly the pre-R311y594 behaviour: a deadline armed at 0 against a
     /// `u64::MAX` window is one nothing can reach.
-    #[cfg(feature = "reassembly")]
-    now_ms: u64,
+    ///
+    /// R311y615 (§1.1f) — UNGATED, and `Option` rather than `u64`, for two
+    /// reasons that only appeared once a consumer wanted the instant for
+    /// something other than expiry.
+    ///
+    /// The gate was wrong because the clock is not a reassembly concept: it is
+    /// the capture's, and a build without `reassembly` still reads pcap
+    /// timestamps and still wants to know WHEN a frame went past. Expiry was
+    /// merely its first consumer.
+    ///
+    /// The `Option` is what keeps a LATENCY from being fabricated. A `0`
+    /// default is indistinguishable from a capture whose first packet is at
+    /// epoch, so two frames of an unstamped session would subtract to a
+    /// confident `0 ms` round trip. `None` makes "this observer was never told
+    /// the time" a fact a consumer has to handle rather than a plausible
+    /// measurement it cannot detect.
+    observed_at: Option<u64>,
     /// R311y609 (C12) — last SN seen per `[direction][conduit]`, where the
     /// conduit index is [`sn_conduit`]. `None` = nothing seen there yet, which
     /// is what makes the first frame a [`SnVerdict::Baseline`] rather than a
@@ -843,8 +879,7 @@ impl Default for PassiveSession {
                 // patch level.
                 ReassemblyDispatcher::new(ReassemblyConfig::new(PASSIVE_CHAIN_QUOTA, u64::MAX))
             }),
-            #[cfg(feature = "reassembly")]
-            now_ms: 0,
+            observed_at: None,
             #[cfg(feature = "codec-frame")]
             sn_last: [[None; SN_CONDUITS]; 2],
             #[cfg(feature = "codec-frame")]
@@ -939,16 +974,38 @@ impl PassiveSession {
     /// of order would otherwise walk the clock backwards. Going backwards is
     /// harmless here (nothing expires), which is the right failure for a
     /// timestamp that cannot be trusted.
-    #[cfg(feature = "reassembly")]
+    ///
+    /// R311y615 — UNGATED. Without `reassembly` there is nothing to sweep and
+    /// the answer is always `0`, but the clock still advances: the instant is
+    /// now carried on every frame ([`PassiveFrame::observed_at_ms`]) and a
+    /// consumer measuring latency needs it whether or not this build can
+    /// reassemble.
     pub fn observe_at(&mut self, now_ms: u64) -> usize {
-        self.now_ms = now_ms;
-        self.reasm[0].sweep(now_ms) + self.reasm[1].sweep(now_ms)
+        self.observed_at = Some(now_ms);
+        #[cfg(feature = "reassembly")]
+        {
+            self.reasm[0].sweep(now_ms) + self.reasm[1].sweep(now_ms)
+        }
+        #[cfg(not(feature = "reassembly"))]
+        {
+            0
+        }
     }
 
-    /// The observation instant last handed to [`Self::observe_at`].
-    #[cfg(feature = "reassembly")]
+    /// The observation instant last handed to [`Self::observe_at`], or `0` if
+    /// none ever was.
+    ///
+    /// Kept for the reassembly-deadline reading it was written for, where `0`
+    /// IS the pre-clock value. A consumer that must tell "never told" from
+    /// "told, at zero" reads [`Self::observed_at`] instead.
     pub fn now_ms(&self) -> u64 {
-        self.now_ms
+        self.observed_at.unwrap_or(0)
+    }
+
+    /// R311y615 (§1.1f) — the observation instant, or `None` when this observer
+    /// was never given one.
+    pub fn observed_at(&self) -> Option<u64> {
+        self.observed_at
     }
 
     /// The current inferred context. Read it BESIDE a frame rather than after
@@ -1075,6 +1132,7 @@ impl PassiveSession {
             #[cfg(feature = "codec-frame")]
             sn_verdict,
             resync,
+            observed_at_ms: self.observed_at,
             // R311y611 — unreachable as non-zero HERE, and that is the point.
             // The credible-header gate above refuses every byte whose MID sets
             // a reserved bit, so a stream reader never decodes one; it
@@ -1317,6 +1375,7 @@ impl PassiveSession {
             // A datagram link has no framing to lose: one datagram is one
             // whole message, so there is no boundary to be wrong about.
             resync: None,
+            observed_at_ms: self.observed_at,
             // R311y611 — THE PATH WHERE NOBODY WAS SAYING ANYTHING. A datagram
             // has no framing to lose, so it has no header gate either, and
             // `parse_inbound` dispatches on `header & 0x1F` and ignores the
@@ -1404,7 +1463,7 @@ impl PassiveSession {
                     // and a deadline armed at 0 against the default
                     // `u64::MAX` window is unreachable — so this is the
                     // previous behaviour until someone supplies a clock.
-                    self.now_ms,
+                    self.observed_at.unwrap_or(0),
                     |bytes| joined = Some(bytes.to_vec()),
                 );
                 match joined {
