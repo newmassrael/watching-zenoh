@@ -332,8 +332,52 @@ declare -A BASELINE_MC_TEXT=(
     # crate-metadata alignment jitter, carried as documented. The hosted figure is
     # recorded below because the hosted job is the gate that blocks main.
     # Old: 52064/51840 (R311y582).
-    ["thumbv7m-none-eabi"]=52068
-    ["thumbv7em-none-eabihf"]=52124
+    #
+    # R311y607 — REBASED for the multicast JOIN decode, and the bytes are
+    # attributed to ONE commit by measurement rather than to "the y605 arc".
+    #
+    # This gate was RED ON HOSTED CI FOR TWO ROUNDS before anyone read it.
+    # R311y605 pushed the growth and did not read its run; R311y606 DID read
+    # that run (31269002927), root-caused Layer C0's `import tomllib`, and
+    # stopped there — but C0 and Layer G+Q are SEPARATE JOBS, so G+Q was not
+    # among the 29 steps C0 hid. It was independently red and went unnamed.
+    # A red run's failures are counted PER JOB, not per hidden step.
+    #
+    # Bisected by building `deploy/mcu-multicast-e2e` at each commit of the
+    # y605 arc on one host, one toolchain, with the R311y267 path remap:
+    #
+    #   | commit                                   | thumbv7m | delta |
+    #   |------------------------------------------|----------|-------|
+    #   | 1f7d2f2f (at this baseline, y604 tip)    | 52064    |    +0 |
+    #   | 2d9d6918 the multicast JOIN decode       | 52584    |  +520 |
+    #   | 2c066f95 / 9417acc1 / 183a2e96 (y605)    | 52584    |    +0 |
+    #   | 30911aa2 .. 7f7de6c9 (the whole of y606) | 52580    |    -4 |
+    #
+    # So the entire overshoot is `2d9d6918`, and y606 — the SCE pin bump, the
+    # rx_ring ARM half, IP fragment reassembly — contributed NOTHING to it.
+    # Per-symbol ELF diff of `1f7d2f2f` vs `2d9d6918` (arm-none-eabi-nm -S):
+    #
+    #   +466  wz_session_core::join_decode::decode_join_body   (NEW)
+    #   +424  wz_session_core::inbound::parse_inbound          (the JOIN arm)
+    #   -442  __cortex_m_rt_main                               (re-inlining)
+    #   +258/-258  .Lanon .rodata (byte-neutral, hash renamed)
+    #
+    # INTENTIONAL: this artifact is the MULTICAST profile, and JOIN is the
+    # announcement message of zenoh's multicast session group. Before
+    # `2d9d6918` it parsed successfully as `Unknown { mid: 7 }` — the ROM was
+    # smaller because the binary could not read the one message its own
+    # transport mode exists to carry. Paying 520 B to stop misreading it is
+    # the trade this artifact exists to make.
+    #
+    # Hosted figures recorded (the hosted job is the gate that blocks main):
+    # 52588 on both axes. This host reads 52580 / 52552 — a -8 / -36 spread
+    # that is NOT the R311y268 metadata jitter but arm-none-eabi-gcc 13.2.1
+    # here against the pinned 10.3.1 there, which changes the newlib/libgcc
+    # objects the link pulls in. Both sit inside the +-256 band against the
+    # hosted figure, so one baseline still governs both machines; a local
+    # reading is a direction, not an authority. Old: 52068/52124 (R311y592).
+    ["thumbv7m-none-eabi"]=52588
+    ["thumbv7em-none-eabihf"]=52588
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
