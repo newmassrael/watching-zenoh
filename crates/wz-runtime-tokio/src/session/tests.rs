@@ -2456,14 +2456,38 @@ fn declare_adminspace_wildcard_get_fires_local_data_and_metrics() {
         .expect("query-get ON in this build");
 
     let keys = replies.lock().unwrap().clone();
-    assert_eq!(
-        keys.len(),
-        3,
-        "wildcard admin GET fires local_data + config + metrics"
+    assert!(keys.contains(&root), "local_data reply present: {keys:?}");
+    assert!(keys.contains(&config), "config reply present: {keys:?}");
+    assert!(keys.contains(&metrics), "metrics reply present: {keys:?}");
+
+    // R311y630 — the FAN-OUT is stated as a shape rather than as the literal
+    // `3` that stood here, because that literal was right for every feature
+    // combination CI runs and WRONG for `--all-features`, which no lane runs:
+    // `adminspace-plugins-handlers` registers one `@/<zid>/<whatami>/plugins/<id>`
+    // key per STARTED plugin, and a build with the storage manager compiled in
+    // starts one, so the wildcard intersects four keys there.
+    //
+    // Stronger than the literal rather than weaker: it still catches a handler
+    // that stopped firing (the three assertions above), it still catches a
+    // DUPLICATE reply, and it additionally catches a key nobody expected —
+    // which the literal count could only report as an unexplained number.
+    let plugin_prefix = format!("@/{zid_hex}/{whatami}/plugins/");
+    let unexpected: Vec<&String> = keys
+        .iter()
+        .filter(|k| ![&root, &config, &metrics].contains(k) && !k.starts_with(&plugin_prefix))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "the wildcard fired a handler this test does not describe: {unexpected:?}"
     );
-    assert!(keys.contains(&root), "local_data reply present");
-    assert!(keys.contains(&config), "config reply present");
-    assert!(keys.contains(&metrics), "metrics reply present");
+    let mut sorted = keys.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        keys.len(),
+        "every intersecting handler replies exactly once: {keys:?}"
+    );
 }
 
 #[cfg(all(feature = "query-get", feature = "adminspace-read"))]

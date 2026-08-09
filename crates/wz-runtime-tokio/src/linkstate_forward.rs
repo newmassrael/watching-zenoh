@@ -10308,9 +10308,33 @@ mod tests {
         // detail complement to the deny summary: one binding, both surfaces,
         // mutually consistent. The fixture params resolve to batch_size 0 ->
         // effective 65535, lease_ms 10000, whatami Peer -> "peer".
+        // R311y630 — the expected string is ASSEMBLED from the same `#[cfg]`s the
+        // renderer uses, in `to_admin_json`'s alphabetical key order, rather than
+        // written out as one literal. The literal that stood here was right for
+        // every feature combination CI runs and WRONG for `--all-features`, which
+        // no lane runs: four more introspection keys render there
+        // (`downsampling` / `low_pass` / `max_links` / `qos`), each behind the
+        // feature that OWNS the field it reports.
+        //
+        // This keeps what the literal was for — a concrete, falsifiable string
+        // that catches key-order, whatami-spelling and numeric-format drift — and
+        // drops only the assumption that one feature set is the only one.
+        let mut expected = String::from(
+            r#"{"acl_default":"allow","acl_deny":["demo/**"],"acl_rules":[{"flow":"ingress","key_exprs":["demo/**"],"messages":["put"],"permission":"deny","subject":"any"}],"batch_size":65535"#,
+        );
+        #[cfg(all(feature = "routing-peer", feature = "access-downsampling"))]
+        expected.push_str(r#","downsampling":[]"#);
+        expected.push_str(r#","lease_ms":10000"#);
+        #[cfg(all(feature = "routing-peer", feature = "access-quota"))]
+        expected.push_str(r#","low_pass":[]"#);
+        #[cfg(feature = "transport-multilink")]
+        expected.push_str(r#","max_links":1"#);
+        #[cfg(feature = "transport-qos")]
+        expected.push_str(r#","qos":false"#);
+        expected.push_str(r#","whatami":"peer"}"#);
         assert_eq!(
             config.to_admin_json(),
-            r#"{"acl_default":"allow","acl_deny":["demo/**"],"acl_rules":[{"flow":"ingress","key_exprs":["demo/**"],"messages":["put"],"permission":"deny","subject":"any"}],"batch_size":65535,"lease_ms":10000,"whatami":"peer"}"#,
+            expected,
             "one binding: the config that drove the forwarder's deny also SHOWS it \
              in the admin read view (acl_default + acl_deny summary + acl_rules detail)"
         );
