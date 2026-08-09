@@ -11237,6 +11237,50 @@
         "The scouting count is rendered but no page drives a non-zero one. `datagram_flows[].scouting` is populated by the R311y607 scouting fixtures and none of them build a report, so the field is structural and currently only ever asserted at zero."
       ]
     },
+    "Round 1647": {
+      "decision_summary": "R311y626 -- a capture block with no timestamp stops inventing one, and the keys a file carries stop being walked past in silence",
+      "changes_bullets": [
+        "crates/wz-capture/src/pcapng.rs (§1.4d) -- `Packet::ts_ticks` becomes `Option<u64>` and a Simple Packet Block carries `None`. It was a `u64` that an SPB filled with `0` under a comment calling zero \"the only honest answer\", and it is the opposite: an SPB carries no time and `0` is a PLAUSIBLE one. It travelled end to end -- `from_pcapng` handed `Some(0)` to `push_packet_at`, which SET the observer's clock, and R311y624 had just pinned that clock as STICKY, so every frame in such a capture reported an instant nobody recorded.",
+        "crates/wz-capture/src/pcapng.rs -- `PcapngFile::skipped_blocks`, a census of the block types this reader steps over, plus `carries_decryption_secrets` and `carries_name_resolution`. The format is self-describing so an unknown block CAN be stepped over; doing it silently is a different act. The DSB is the case that motivated it: §8.1 records that wz cannot read its own encrypted traffic, and a file with a DSB is one where the keys were IN THE CAPTURE -- so \"encrypted and unreadable\" was true of this build and false of the file."
+      ],
+      "verification_bullets": [
+        "§1.4d FALSIFIED FOUR WAYS. Restoring the fabricated `Some(0)` reds both SPB pages -- the unit one and the end-to-end one that drives a real dissection and asserts the observer was never told. Severing the skipped-block census reds the DSB page. Pointing the DSB accessor at the NRB type reds it too, which is the half that says the accessor answers about the block it names.",
+        "The SPB page is deliberately END TO END rather than a field assertion: the defect was not that a field held 0, it was that the 0 reached the observer's clock and stuck there. A unit test on `ts_ticks` alone would have passed on a build where `from_pcapng` substituted its own zero.",
+        "Feature arms, all green, all clippy-clean at `-D warnings`: 267 at default, 185 at `--no-default-features`, 259 with `network-codecs`, 260 with `network-codecs,filter-wildcards`.",
+        "THE PUBLIC SHAPE CHANGED and the blast radius was measured first: `ts_ticks` has no reader outside `pcapng.rs`, so the `Option` costs three call sites in this module and nothing else in the workspace."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config"
+      ],
+      "carry_forward_bullets": [
+        "The hosted run for `603c1f7a` (31323170372) is running and UNREAD. Nothing may be pushed past it until it is read per job. The run before it finished 14 of 15 with a macOS flake this session diagnosed and fixed.",
+        "§1.4d is CLOSED. The remaining half of its description -- \"DSB unimplemented\" -- is unchanged and deliberately so: this round makes the file's own keys VISIBLE, it does not decrypt anything. That is §8.1's territory and its own round.",
+        "THE PLAUSIBLE-ZERO CLASS HAS NOW BEEN FOUND TWICE IN TWO ROUNDS, in the same crate, moving in opposite directions. R311y624 pinned the observer's clock as STICKY on the grounds that an advancing clock is right; this round found the value that was priming it was fabricated. A sticky clock and a fabricated seed compose into a capture that reports one invented instant for every packet in it.",
+        "A COMMENT ASSERTING HONESTY IS NOT A GATE, and this one argued the wrong way for rounds: \"Zero is the only honest answer\" sat directly above the line that made it false. The workspace's own rule -- carry an absence as an `Option` and count it -- was written down elsewhere and not applied here."
+      ],
+      "publishable_decision_summary": "R311y626 -- a capture block with no timestamp stops inventing one, and the keys a file carries stop being walked past in silence",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/pcapng.rs (§1.4d) -- `Packet::ts_ticks` becomes `Option<u64>` and a Simple Packet Block carries `None`. It was a `u64` that an SPB filled with `0` under a comment calling zero \"the only honest answer\", and it is the opposite: an SPB carries no time and `0` is a PLAUSIBLE one. It travelled end to end -- `from_pcapng` handed `Some(0)` to `push_packet_at`, which SET the observer's clock, and R311y624 had just pinned that clock as STICKY, so every frame in such a capture reported an instant nobody recorded.",
+        "crates/wz-capture/src/pcapng.rs -- `PcapngFile::skipped_blocks`, a census of the block types this reader steps over, plus `carries_decryption_secrets` and `carries_name_resolution`. The format is self-describing so an unknown block CAN be stepped over; doing it silently is a different act. The DSB is the case that motivated it: §8.1 records that wz cannot read its own encrypted traffic, and a file with a DSB is one where the keys were IN THE CAPTURE -- so \"encrypted and unreadable\" was true of this build and false of the file."
+      ],
+      "publishable_verification_bullets": [
+        "§1.4d FALSIFIED FOUR WAYS. Restoring the fabricated `Some(0)` reds both SPB pages -- the unit one and the end-to-end one that drives a real dissection and asserts the observer was never told. Severing the skipped-block census reds the DSB page. Pointing the DSB accessor at the NRB type reds it too, which is the half that says the accessor answers about the block it names.",
+        "The SPB page is deliberately END TO END rather than a field assertion: the defect was not that a field held 0, it was that the 0 reached the observer's clock and stuck there. A unit test on `ts_ticks` alone would have passed on a build where `from_pcapng` substituted its own zero.",
+        "Feature arms, all green, all clippy-clean at `-D warnings`: 267 at default, 185 at `--no-default-features`, 259 with `network-codecs`, 260 with `network-codecs,filter-wildcards`.",
+        "THE PUBLIC SHAPE CHANGED and the blast radius was measured first: `ts_ticks` has no reader outside `pcapng.rs`, so the `Option` costs three call sites in this module and nothing else in the workspace."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The hosted run for `603c1f7a` (31323170372) is running and UNREAD. Nothing may be pushed past it until it is read per job. The run before it finished 14 of 15 with a macOS flake this session diagnosed and fixed.",
+        "§1.4d is CLOSED. The remaining half of its description -- \"DSB unimplemented\" -- is unchanged and deliberately so: this round makes the file's own keys VISIBLE, it does not decrypt anything. That is §8.1's territory and its own round.",
+        "THE PLAUSIBLE-ZERO CLASS HAS NOW BEEN FOUND TWICE IN TWO ROUNDS, in the same crate, moving in opposite directions. R311y624 pinned the observer's clock as STICKY on the grounds that an advancing clock is right; this round found the value that was priming it was fabricated. A sticky clock and a fabricated seed compose into a capture that reports one invented instant for every packet in it.",
+        "A COMMENT ASSERTING HONESTY IS NOT A GATE, and this one argued the wrong way for rounds: \"Zero is the only honest answer\" sat directly above the line that made it false. The workspace's own rule -- carry an absence as an `Option` and count it -- was written down elsewhere and not applied here."
+      ]
+    },
     "Round 17": {
       "decision_summary": "OQ-W24 full closure — RFC §5.I.0 'Tier definitions' subsection landed as atomic-store new section via R287/R289 add_section primitive (first watching-zenoh use of new section creation surface).",
       "changes_bullets": [
