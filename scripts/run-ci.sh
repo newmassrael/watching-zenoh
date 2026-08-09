@@ -5317,7 +5317,9 @@ layer_c1bt_capture_no_default_features() {
         agg::tests::the_mapping_bit_picks_the_space_and_the_observer_holds_both \
         agg::tests::an_unbound_alias_is_reported_rather_than_guessed \
         ws::tests::every_structural_desync_recovers_and_not_only_the_announced_one \
-        ws_flow_tests::a_structural_desync_mid_segment_does_not_end_the_flow
+        ws_flow_tests::a_structural_desync_mid_segment_does_not_end_the_flow \
+        agg::tests::a_halted_batch_is_reported_rather_than_quietly_short \
+        agg::tests::an_intact_capture_reports_no_gap_at_all
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the --no-default-features build"

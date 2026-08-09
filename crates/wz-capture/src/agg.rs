@@ -263,6 +263,54 @@ pub struct ThroughputTable {
     declarations: usize,
     undeclarations: usize,
     records: usize,
+    gaps: ThroughputGaps,
+}
+
+/// R311y614 (§1.4i) — traffic this table could not read AT ALL, as opposed to
+/// traffic it read and could not attribute ([`ThroughputTable::unresolved`]).
+///
+/// Every other layer of this crate reports what it lost — a
+/// [`SkipReason`](crate::link::SkipReason) per packet, a
+/// [`DesyncReason`](wz_session_core::passive::DesyncReason) per direction, a
+/// drop counter per dissection. The aggregation plane R311y613 added did not:
+/// it walked `Carried::Batch` and `Reassembled`, ignored `BatchParse::halt`
+/// entirely, and let every other `Carried` arm fall through a `_ => {}`. So a
+/// capture whose batches half-decoded produced a table that was quietly short
+/// and said nothing — the one failure mode this crate is built to refuse.
+///
+/// A NON-ZERO field here does not make [`ThroughputTable::rows`] wrong. It
+/// makes them INCOMPLETE, which is a different claim and one a reader summing
+/// them has to be able to see.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ThroughputGaps {
+    /// Batches whose record walk stopped early ([`BatchParse::halt`]).
+    ///
+    /// Everything behind the halt was on the wire and is in no row. HOW MANY
+    /// records that is cannot be known — the walk stopped because it could not
+    /// tell where the next one began — which is why the honest companion figure
+    /// is [`Self::unparsed_bytes`] rather than a record count.
+    pub halted_batches: usize,
+    /// Payload bytes inside halted batches that were never walked.
+    pub unparsed_bytes: usize,
+    /// Frames whose batch could not be produced at all: the session negotiated
+    /// compression and the body did not decompress
+    /// ([`Carried::Undecompressible`]).
+    ///
+    /// Counted separately from a halt because the loss is total rather than
+    /// partial — the bytes were there and are unreadable.
+    pub undecompressible_batches: usize,
+    /// Fragments that arrived before this observer saw an InitAck, so no chain
+    /// could be tracked and their eventual batch never existed
+    /// ([`Carried::FragmentWithoutResolution`]). The ordinary cause is a
+    /// capture that started mid-session.
+    pub unresolvable_fragments: usize,
+}
+
+impl ThroughputGaps {
+    /// `true` when this table's rows cover everything it was shown.
+    pub fn is_clean(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl ThroughputTable {
@@ -283,7 +331,19 @@ impl ThroughputTable {
                 Carried::Reassembled(batch) => {
                     self.observe_batch(&mut spaces, frame, anchor, batch)
                 }
-                _ => {}
+                // R311y614 (§1.4i) — the arms that carry traffic this table
+                // cannot read are COUNTED. Matched by name rather than left to a
+                // catch-all so a new `Carried` variant fails to compile here
+                // instead of joining the silent set.
+                Carried::Undecompressible => self.gaps.undecompressible_batches += 1,
+                #[cfg(feature = "reassembly")]
+                Carried::FragmentWithoutResolution => self.gaps.unresolvable_fragments += 1,
+                // `Nothing` is a handshake / keepalive / unfeatured frame and
+                // `Fragment` is a chain still in progress: neither is a batch
+                // this table lost, so neither is a gap.
+                Carried::Nothing => {}
+                #[cfg(feature = "reassembly")]
+                Carried::Fragment(_) => {}
             }
         }
     }
@@ -295,6 +355,10 @@ impl ThroughputTable {
         anchor: usize,
         batch: &BatchParse,
     ) {
+        if batch.halt.is_some() {
+            self.gaps.halted_batches += 1;
+            self.gaps.unparsed_bytes += batch.unparsed_bytes;
+        }
         for message in &batch.messages {
             self.observe_message(spaces, frame.direction, anchor, message);
         }
@@ -406,6 +470,16 @@ impl ThroughputTable {
     /// Application bytes across every resolved keyexpr.
     pub fn total_payload_bytes(&self) -> u64 {
         self.rows.values().map(|r| r.totals().payload_bytes).sum()
+    }
+
+    /// R311y614 (§1.4i) — traffic this table could not READ, and therefore
+    /// could not put in any row.
+    ///
+    /// Consult it before treating [`Self::total_payload_bytes`] as the
+    /// capture's total: a clean answer ([`ThroughputGaps::is_clean`]) is what
+    /// makes the rows a complete account, and anything else is a short one.
+    pub fn gaps(&self) -> ThroughputGaps {
+        self.gaps
     }
 }
 
@@ -819,6 +893,63 @@ mod tests {
         let row = table.row("parent/child").expect("the chain composed");
         assert_eq!(row.totals().payload_bytes, 6);
         assert_eq!(table.unresolved_records(), 0);
+    }
+
+    /// R311y614 (§1.4i) — a batch whose walk STOPPED is reported, not silently
+    /// short.
+    ///
+    /// The fixture puts a good Push in front of a network MID no build
+    /// dispatches, which is exactly the shape R311y613 measured on the whole
+    /// data plane: the walk keeps what decoded, absorbs the rest verbatim and
+    /// halts. The Push must still land in its row — a gap is not a reason to
+    /// discard what WAS read — and the shortfall must be visible.
+    #[test]
+    fn a_halted_batch_is_reported_rather_than_quietly_short() {
+        // `0x01` is outside the network MID space (0x19..=0x1F), so
+        // `decode_one_record` cannot name it and the walk halts on it.
+        let mut record = push(sender_space(0, Some("seen/before/the/halt")), &[0u8; 9]);
+        let tail = [0x01u8, 0xAA, 0xBB, 0xCC];
+        record.extend_from_slice(&tail);
+        let table = aggregate_datagrams(&[(true, record)]);
+
+        let row = table
+            .row("seen/before/the/halt")
+            .expect("what decoded before the halt is still attributed");
+        assert_eq!(row.totals().payload_bytes, 9);
+
+        let gaps = table.gaps();
+        assert!(!gaps.is_clean(), "the shortfall must be visible at all");
+        assert_eq!(gaps.halted_batches, 1);
+        assert_eq!(
+            gaps.unparsed_bytes,
+            tail.len(),
+            "the bytes the walk never read, measured off the halt offset"
+        );
+        assert_eq!(gaps.undecompressible_batches, 0);
+        assert_eq!(gaps.unresolvable_fragments, 0);
+    }
+
+    /// THE CONTROL for the test above: an intact capture reports NO gap.
+    ///
+    /// Without it a `gaps()` that counted every batch would satisfy the
+    /// assertions there and be useless — the same reason every recovery arm in
+    /// this crate carries a control.
+    #[test]
+    fn an_intact_capture_reports_no_gap_at_all() {
+        let table = aggregate_datagrams(&[
+            (true, declare_kexpr(1, "intact/topic")),
+            (true, push(sender_space(1, None), &[0u8; 5])),
+            (
+                false,
+                push(sender_space(0, Some("intact/other")), &[0u8; 5]),
+            ),
+        ]);
+        assert!(
+            table.gaps().is_clean(),
+            "a capture with nothing wrong reported {:?}",
+            table.gaps()
+        );
+        assert_eq!(table.total_payload_bytes(), 10);
     }
 
     /// The rows a stream flow produces are the same ones a datagram flow does,
