@@ -11281,6 +11281,50 @@
         "A COMMENT ASSERTING HONESTY IS NOT A GATE, and this one argued the wrong way for rounds: \"Zero is the only honest answer\" sat directly above the line that made it false. The workspace's own rule -- carry an absence as an `Option` and count it -- was written down elsewhere and not applied here."
       ]
     },
+    "Round 1648": {
+      "decision_summary": "R311y627 -- the one loss in this crate with no counter of its own is measured and named, and two more inherited descriptions are checked against the code",
+      "changes_bullets": [
+        "crates/wz-capture/src/lib.rs (§1.2b) -- the one-message-per-datagram contract limit is PINNED by a page that drives it end to end. A datagram carrying two transport messages yields one frame and the rest is dropped, and the page asserts the part that makes it dangerous: the loss has NO WITNESS. It is not a skipped packet, because the packet was read; it is not a desync, because the framing was never in question. Every other loss in this crate reaches a counter and this one reaches none.",
+        "The mechanism was READ rather than assumed: `parse_inbound` returns a frame and no consumed length, so `next_datagram_on` has nowhere to walk to. FRAME and FRAGMENT are terminal by construction -- their payload arm takes `cursor.remaining()` to the end of the buffer -- so the ambiguity can only arise behind a handshake or keepalive message, which is exactly what the fixture uses."
+      ],
+      "verification_bullets": [
+        "§1.2b MEASURED AND ITS DESCRIPTION HOLDS, which is not the usual outcome this session: three of the register's inherited items have been falsified by re-measurement and this one is accurate. Two keepalives in one datagram produce exactly one frame, `packets_skipped` stays 0 and `desyncs` stays 0.",
+        "NOT FIXED, and the reason is stated rather than left implicit. The fix is for `parse_inbound` to report its consumed length -- feasible, since the cursor already tracks it -- but that is a wz-session-core API surface with every caller to re-read, in a function whose arms are individually feature-gated. Starting it at the end of a long session, with a hosted run in flight that cannot be re-read until it finishes, is how a red gets pushed and left. The limit is now measured and cannot regress into something worse without a test noticing; the fix is a round with a clean start.",
+        "§1.1c RE-MEASURED and it is a DOCUMENTED DEFERRAL, not a silent gap. `multicast_dispatch.rs:1412` is production, carries `FragmentMarkers::NONE`, and states why in full: a multicast Join advertises no `0x7` ext and there is no per-peer Init to take a `min()` over, so the chain-boundary rules stay off. It cites upstream's own gate (`multicast/rx.rs:216`) and names what closing it needs -- a patch level for multicast to read, which is a participant feature and not analyzer reach.",
+        "Feature arms green and clippy-clean at `-D warnings`: 268 at default, 186 at `--no-default-features`, 260 with `network-codecs`. Lanes C0, C1bn and C1bt re-run ALONE and pass. `shellcheck -S info scripts/run-ci.sh` by finding code is SC2317 3325 and nothing else."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "The hosted run for `603c1f7a` (31323170372) was still in progress at 7 of 15 green with no failure when this round was written. It and the run for this round's commits are BOTH unread. Read them per job before trusting the branch.",
+        "§1.2b is PINNED, not closed. The register should carry it as measured-with-a-witness rather than as inherited, and the remedy is named: `parse_inbound` reporting its consumed length, plus a counter for the trailing bytes it leaves.",
+        "§1.4d, §1.1m, §1.1x, §1.1o, §1.1s, §1.4h, §1.1k and §1.4i are CLOSED across this session, and §7.14 now gates the one-plane-per-page discipline that made several of them provable.",
+        "FOUR OF THE REGISTER'S INHERITED DESCRIPTIONS WERE WRONG OR STALE this session -- §1.1k (unreachable in code), §1.1s (described a data structure the plane does not have), §1.4g (already gated), §1.1c (a documented deferral with an upstream citation). One was accurate (§1.2b). That ratio is the argument for re-measuring an item before working it, and it is now five data points rather than an intuition."
+      ],
+      "publishable_decision_summary": "R311y627 -- the one loss in this crate with no counter of its own is measured and named, and two more inherited descriptions are checked against the code",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/lib.rs (§1.2b) -- the one-message-per-datagram contract limit is PINNED by a page that drives it end to end. A datagram carrying two transport messages yields one frame and the rest is dropped, and the page asserts the part that makes it dangerous: the loss has NO WITNESS. It is not a skipped packet, because the packet was read; it is not a desync, because the framing was never in question. Every other loss in this crate reaches a counter and this one reaches none.",
+        "The mechanism was READ rather than assumed: `parse_inbound` returns a frame and no consumed length, so `next_datagram_on` has nowhere to walk to. FRAME and FRAGMENT are terminal by construction -- their payload arm takes `cursor.remaining()` to the end of the buffer -- so the ambiguity can only arise behind a handshake or keepalive message, which is exactly what the fixture uses."
+      ],
+      "publishable_verification_bullets": [
+        "§1.2b MEASURED AND ITS DESCRIPTION HOLDS, which is not the usual outcome this session: three of the register's inherited items have been falsified by re-measurement and this one is accurate. Two keepalives in one datagram produce exactly one frame, `packets_skipped` stays 0 and `desyncs` stays 0.",
+        "NOT FIXED, and the reason is stated rather than left implicit. The fix is for `parse_inbound` to report its consumed length -- feasible, since the cursor already tracks it -- but that is a wz-session-core API surface with every caller to re-read, in a function whose arms are individually feature-gated. Starting it at the end of a long session, with a hosted run in flight that cannot be re-read until it finishes, is how a red gets pushed and left. The limit is now measured and cannot regress into something worse without a test noticing; the fix is a round with a clean start.",
+        "§1.1c RE-MEASURED and it is a DOCUMENTED DEFERRAL, not a silent gap. `multicast_dispatch.rs:1412` is production, carries `FragmentMarkers::NONE`, and states why in full: a multicast Join advertises no `0x7` ext and there is no per-peer Init to take a `min()` over, so the chain-boundary rules stay off. It cites upstream's own gate (`multicast/rx.rs:216`) and names what closing it needs -- a patch level for multicast to read, which is a participant feature and not analyzer reach.",
+        "Feature arms green and clippy-clean at `-D warnings`: 268 at default, 186 at `--no-default-features`, 260 with `network-codecs`. Lanes C0, C1bn and C1bt re-run ALONE and pass. `shellcheck -S info scripts/run-ci.sh` by finding code is SC2317 3325 and nothing else."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The hosted run for `603c1f7a` (31323170372) was still in progress at 7 of 15 green with no failure when this round was written. It and the run for this round's commits are BOTH unread. Read them per job before trusting the branch.",
+        "§1.2b is PINNED, not closed. The register should carry it as measured-with-a-witness rather than as inherited, and the remedy is named: `parse_inbound` reporting its consumed length, plus a counter for the trailing bytes it leaves.",
+        "§1.4d, §1.1m, §1.1x, §1.1o, §1.1s, §1.4h, §1.1k and §1.4i are CLOSED across this session, and §7.14 now gates the one-plane-per-page discipline that made several of them provable.",
+        "FOUR OF THE REGISTER'S INHERITED DESCRIPTIONS WERE WRONG OR STALE this session -- §1.1k (unreachable in code), §1.1s (described a data structure the plane does not have), §1.4g (already gated), §1.1c (a documented deferral with an upstream citation). One was accurate (§1.2b). That ratio is the argument for re-measuring an item before working it, and it is now five data points rather than an intuition."
+      ]
+    },
     "Round 17": {
       "decision_summary": "OQ-W24 full closure — RFC §5.I.0 'Tier definitions' subsection landed as atomic-store new section via R287/R289 add_section primitive (first watching-zenoh use of new section creation surface).",
       "changes_bullets": [
