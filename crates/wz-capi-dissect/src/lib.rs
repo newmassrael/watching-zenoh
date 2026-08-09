@@ -242,6 +242,7 @@ fn summary_json(d: &Dissection) -> String {
 fn health_json(d: &Dissection) -> String {
     let h = d.health();
     let f = d.fragment_stats();
+    let fr = d.framing_health();
     let drops = h.drops;
     let reported = match d.capture_reported_drops() {
         Some(n) => n.to_string(),
@@ -257,7 +258,11 @@ fn health_json(d: &Dissection) -> String {
          \"streams\":{{\"retransmits\":{},\"out_of_order\":{},\"partial_overlaps\":{},\
          \"ip_checksum_valid\":{},\"ip_checksum_invalid\":{},\"ip_checksum_absent\":{},\
          \"transport_checksum_valid\":{},\"transport_checksum_invalid\":{},\
-         \"transport_checksum_absent\":{}}}}}",
+         \"transport_checksum_absent\":{}}},\
+         \"framing\":{{\"gaps_forced\":{},\"gap_bytes_missing\":{},\
+         \"desyncs\":{},\"recoveries\":{},\"resync_skipped_bytes\":{}}},\
+         \"sequence\":{{\"frames\":{},\"missing\":{},\"gaps\":{},\
+         \"duplicates\":{},\"out_of_window\":{},\"without_resolution\":{}}}}}",
         drops.frames,
         drops.stream_bytes,
         drops.skipped,
@@ -278,6 +283,17 @@ fn health_json(d: &Dissection) -> String {
         h.transport_checksum_valid,
         h.transport_checksum_invalid,
         h.transport_checksum_absent,
+        fr.gaps_forced,
+        fr.gap_bytes_missing,
+        fr.desyncs,
+        fr.recoveries,
+        fr.resync_skipped_bytes,
+        fr.sn_frames,
+        fr.sn_missing,
+        fr.sn_gaps,
+        fr.sn_duplicates,
+        fr.sn_out_of_window,
+        fr.sn_without_resolution,
     )
 }
 
@@ -516,6 +532,99 @@ mod tests {
             json.contains("\"scouting\":1"),
             "the scout must be counted: {json}"
         );
+    }
+
+    /// R311y609 — a capture with a HOLE crosses this boundary as a hole.
+    ///
+    /// The three numbers this adds are three different witnesses to "missing",
+    /// and none of them existed at this boundary before: the TCP sequence
+    /// space proving bytes were sent and are absent, the observer's own
+    /// admission that it lost and regained the framing, and what the sender
+    /// NUMBERED. A C consumer previously saw a capture with a dropped segment
+    /// as a flow that simply stopped — a dissector that looks broken instead
+    /// of a capture that is incomplete.
+    ///
+    /// Built here rather than shared with `wz-capture`'s fixture, for the
+    /// reason `isb_with_drops` is: a fixture the reader and writer share
+    /// proves they hold one belief between them.
+    #[test]
+    fn a_capture_with_a_hole_crosses_the_boundary_as_a_hole() {
+        // Small frames, chopped at a size that is not a multiple of the frame
+        // size, so the missing segment splices the stream MID-FRAME.
+        let mut stream = Vec::new();
+        for i in 0..400u16 {
+            let body = [
+                wz_session_core::wire_const::T_MID_FRAME
+                    | wz_session_core::wire_const::FLAG_T_FRAME_R,
+                (i % 0x80) as u8,
+                0x1F,
+                0x00,
+                0x00,
+                0x00,
+            ];
+            stream.extend_from_slice(&(body.len() as u16).to_le_bytes());
+            stream.extend_from_slice(&body);
+        }
+        const SEG: usize = 37;
+        let packets: Vec<Vec<u8>> = stream
+            .chunks(SEG)
+            .enumerate()
+            .filter(|(i, _)| *i != 7) // the segment the capture never recorded
+            .map(|(i, seg)| tcp_packet(1000 + (i * SEG) as u32, seg))
+            .collect();
+        let records: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u32, 0u32, p.as_slice()))
+            .collect();
+        let file = wz_capture::pcap::write(1, &records);
+
+        let json = call_summary(&file).expect("reads");
+        assert!(
+            json.contains("\"gaps_forced\":1"),
+            "the sequence space proves a byte range is absent: {json}"
+        );
+        assert!(
+            json.contains(&format!("\"gap_bytes_missing\":{SEG}")),
+            "and says how many: {json}"
+        );
+        assert!(
+            json.contains("\"desyncs\":1") && json.contains("\"recoveries\":1"),
+            "the observer lost the framing on the splice and found it again: {json}"
+        );
+        for key in ["\"framing\"", "\"sequence\"", "\"without_resolution\""] {
+            assert!(json.contains(key), "{key} missing: {json}");
+        }
+    }
+
+    /// Ethernet + IPv4 + TCP carrying `payload` at `seq`.
+    fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
+        let mut tcp = Vec::new();
+        tcp.extend_from_slice(&1111u16.to_be_bytes());
+        tcp.extend_from_slice(&7447u16.to_be_bytes());
+        tcp.extend_from_slice(&seq.to_be_bytes());
+        tcp.extend_from_slice(&0u32.to_be_bytes());
+        tcp.push(5 << 4);
+        tcp.push(0x10); // ACK
+        tcp.extend_from_slice(&64u16.to_be_bytes());
+        tcp.extend_from_slice(&0u16.to_be_bytes());
+        tcp.extend_from_slice(&0u16.to_be_bytes());
+        tcp.extend_from_slice(payload);
+
+        let mut ip = vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
+        ip.extend_from_slice(&[10, 0, 0, 1]);
+        ip.extend_from_slice(&[10, 0, 0, 2]);
+        ip.extend_from_slice(&tcp);
+
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
     }
 
     /// Ethernet + IPv4 + UDP carrying `payload`.

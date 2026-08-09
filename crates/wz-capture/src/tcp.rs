@@ -64,8 +64,24 @@ pub enum SegmentOutcome {
     NoPayload,
 }
 
+/// R311y609 — payload-carrying segments that may arrive with a gap still open
+/// before the assembler judges it permanent and steps over it.
+///
+/// Measured in SEGMENTS on this direction rather than in packets of the
+/// capture or in time: a retransmission is prompted by the peer's ACKs, so the
+/// natural unit is how much this sender got through while the missing bytes
+/// did not arrive. 64 is comfortably more than one congestion window's worth
+/// of 1460-byte segments at a 64 KiB window, so a fast retransmit and an
+/// ordinary RTO both land well inside it.
+///
+/// The cost of being wrong is bounded and reported either way: too patient
+/// delays recovery, too eager splices a gap that would have filled and counts
+/// the bytes as missing when they were merely late. Both are visible in
+/// [`StreamAssembler::bytes_missing`].
+pub const DEFAULT_GAP_PATIENCE: usize = 64;
+
 /// One DIRECTION of one TCP connection, reassembled.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct StreamAssembler {
     /// The sequence number of the next byte the stream expects.
     next_seq: Option<u32>,
@@ -87,7 +103,12 @@ pub struct StreamAssembler {
     discarded: usize,
     runs: Vec<OffsetRun>,
     /// Segments ahead of `next_seq`, kept until the gap before them fills.
-    pending: Vec<(u32, usize, Vec<u8>)>,
+    ///
+    /// The trailing `usize` is [`Self::segments_pushed`] AT THE MOMENT THE
+    /// SEGMENT WAS HELD — the clock the gap's patience is measured on
+    /// (R311y609). A wall clock would not do: a capture is replayed, not
+    /// lived, and a file read at 100x must reach the same verdict.
+    pending: Vec<(u32, usize, Vec<u8>, usize)>,
     fin_seen: bool,
     rst_seen: bool,
     /// R311y597 — segments carrying ONLY bytes already delivered.
@@ -106,12 +127,102 @@ pub struct StreamAssembler {
     /// events: one wasted a whole segment, the other made progress alongside a
     /// repeat, and a reader diagnosing a link wants to tell them apart.
     partial_overlaps: usize,
+    /// R311y609 — payload-carrying segments pushed at this assembler, the
+    /// clock an open gap's patience is measured against.
+    segments_pushed: usize,
+    /// R311y609 — gaps this assembler gave up on and stepped over.
+    gaps_forced: usize,
+    /// R311y609 — sequence-space bytes those gaps skipped: what the sender
+    /// sent and this capture does not contain.
+    ///
+    /// A DIFFERENT number from the reassembled stream length, which stays
+    /// contiguous across a forced gap. Splicing without counting is what makes
+    /// a hole indistinguishable from data.
+    bytes_missing: u64,
+    /// R311y609 — how many payload-carrying segments may arrive with a gap
+    /// still open before it is judged permanent. `None` disables forcing,
+    /// which is the pre-R311y609 behaviour exactly.
+    gap_patience: Option<usize>,
+}
+
+/// Hand-written for ONE field: `gap_patience` defaults to
+/// [`DEFAULT_GAP_PATIENCE`] rather than to `None`, and a derive would have
+/// silently shipped the disabled arm as the default.
+impl Default for StreamAssembler {
+    fn default() -> Self {
+        Self {
+            next_seq: None,
+            synced_from_syn: false,
+            stream: Vec::new(),
+            discarded: 0,
+            runs: Vec::new(),
+            pending: Vec::new(),
+            fin_seen: false,
+            rst_seen: false,
+            retransmits: 0,
+            out_of_order: 0,
+            partial_overlaps: 0,
+            segments_pushed: 0,
+            gaps_forced: 0,
+            bytes_missing: 0,
+            gap_patience: Some(DEFAULT_GAP_PATIENCE),
+        }
+    }
 }
 
 impl StreamAssembler {
     /// A fresh, unsynchronised assembler.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// R311y609 — how long this assembler waits on a gap before stepping over
+    /// it. `None` never steps over one, which is the pre-R311y609 behaviour
+    /// and the arm that proves the forcing is what acts.
+    pub fn with_gap_patience(mut self, patience: Option<usize>) -> Self {
+        self.gap_patience = patience;
+        self
+    }
+
+    /// R311y609 — gaps this assembler gave up on.
+    pub fn gaps_forced(&self) -> usize {
+        self.gaps_forced
+    }
+
+    /// R311y609 — sequence-space bytes those gaps skipped.
+    ///
+    /// The reassembled stream is CONTIGUOUS across a forced gap, so this is
+    /// the only place the discontinuity is stated. A consumer reading
+    /// [`Self::len`] alone cannot tell a spliced stream from an intact one.
+    pub fn bytes_missing(&self) -> u64 {
+        self.bytes_missing
+    }
+
+    /// R311y609 — give up on the oldest open gap NOW, whatever the patience.
+    ///
+    /// For the end of a capture, where no further segment will arrive to run
+    /// the patience down: a file that stops one segment after a hole would
+    /// otherwise hold the rest of the flow forever. Returns the bytes stepped
+    /// over, or `None` when no gap is open.
+    pub fn force_oldest_gap(&mut self) -> Option<u64> {
+        let next = self.next_seq?;
+        let target = self.lowest_pending(next)?;
+        let missing = target.wrapping_sub(next) as u64;
+        self.next_seq = Some(target);
+        self.gaps_forced += 1;
+        self.bytes_missing += missing;
+        self.drain_pending();
+        Some(missing)
+    }
+
+    /// The held segment nearest AHEAD of `next` in sequence space — the far
+    /// side of the oldest gap.
+    fn lowest_pending(&self, next: u32) -> Option<u32> {
+        self.pending
+            .iter()
+            .map(|(seq, ..)| *seq)
+            .filter(|seq| seq.wrapping_sub(next) as i32 > 0)
+            .min_by_key(|seq| seq.wrapping_sub(next))
     }
 
     /// The reassembled bytes still RETAINED. Starts at absolute offset
@@ -223,6 +334,7 @@ impl StreamAssembler {
         if seg.payload.is_empty() {
             return SegmentOutcome::NoPayload;
         }
+        self.segments_pushed += 1;
         let next = match self.next_seq {
             Some(n) => n,
             None => {
@@ -241,7 +353,39 @@ impl StreamAssembler {
         }
         // Absorbing may have completed the gap a held segment waited on.
         self.drain_pending();
+        // R311y609 — and if it did not, the gap may have been open long enough
+        // to call it permanent. WITHOUT THIS the zenoh layer's own
+        // resynchronisation is unreachable in the case that motivates it: a
+        // capture that lost a segment holds every later segment here forever,
+        // so no byte after the hole ever reaches `PassiveSession` to
+        // desynchronise it in the first place. Two layers, one defect.
+        self.force_stale_gap();
         outcome
+    }
+
+    /// R311y609 — step over a gap that has stayed open past its patience.
+    fn force_stale_gap(&mut self) {
+        let Some(patience) = self.gap_patience else {
+            return;
+        };
+        let Some(next) = self.next_seq else {
+            return;
+        };
+        // Only segments AHEAD of the stream are waiting on this gap; one
+        // behind it is a duplicate the drain will discard.
+        let oldest_wait = self
+            .pending
+            .iter()
+            .filter(|(seq, ..)| seq.wrapping_sub(next) as i32 > 0)
+            .map(|(.., held_at)| *held_at)
+            .min();
+        let Some(held_at) = oldest_wait else {
+            return;
+        };
+        if self.segments_pushed.saturating_sub(held_at) < patience {
+            return;
+        }
+        self.force_oldest_gap();
     }
 
     /// Segments that carried only bytes already delivered — pure
@@ -284,7 +428,8 @@ impl StreamAssembler {
         // segment 4 GiB ahead, which cannot occur on a real flow.
         let delta = seq.wrapping_sub(next) as i32;
         if delta > 0 {
-            self.pending.push((seq, packet_index, payload.to_vec()));
+            self.pending
+                .push((seq, packet_index, payload.to_vec(), self.segments_pushed));
             return SegmentOutcome::HeldOutOfOrder;
         }
         // delta <= 0: the segment starts at or before what we expect.
@@ -324,7 +469,7 @@ impl StreamAssembler {
                 Some(n) => n,
                 None => return,
             };
-            let found = self.pending.iter().position(|(seq, _, payload)| {
+            let found = self.pending.iter().position(|(seq, _, payload, _)| {
                 let delta = seq.wrapping_sub(next) as i32;
                 // Contiguous or overlapping-from-behind, and carrying at
                 // least one byte the stream has not seen.
@@ -332,7 +477,7 @@ impl StreamAssembler {
             });
             match found {
                 Some(i) => {
-                    let (seq, packet_index, payload) = self.pending.remove(i);
+                    let (seq, packet_index, payload, _) = self.pending.remove(i);
                     self.absorb(next, seq, &payload, packet_index);
                 }
                 None => return,
@@ -532,6 +677,84 @@ mod tests {
             "the hole is not closed by concatenation"
         );
         assert_eq!(s.held_segments(), 1);
+    }
+
+    /// R311y609 — a gap that stays open past its patience is STEPPED OVER,
+    /// and the bytes it skipped are counted.
+    ///
+    /// Before this, a capture that lost one segment held every later segment
+    /// of that direction forever. Nothing downstream ever saw those bytes, so
+    /// the zenoh layer's own resynchronisation could not have run: the frames
+    /// it would resynchronise on had not been delivered to it.
+    #[test]
+    fn a_gap_open_past_its_patience_is_stepped_over_and_counted() {
+        // Patience 3: the segment held at push 2 is given up on at push 5.
+        let mut s = StreamAssembler::new().with_gap_patience(Some(3));
+        s.push(&seg(100, 0x02, b"", 0));
+        s.push(&seg(101, 0x18, b"AAA", 1));
+        // Sequence 104..=199 never arrives. Segments beyond it keep coming.
+        for (i, seq) in [200u32, 203, 206].iter().enumerate() {
+            s.push(&seg(*seq, 0x18, b"ZZZ", 2 + i));
+            assert_eq!(s.stream(), b"AAA", "still waiting at push {}", i + 1);
+        }
+        s.push(&seg(209, 0x18, b"ZZZ", 5));
+        assert_eq!(
+            s.stream(),
+            b"AAAZZZZZZZZZZZZ",
+            "the far side of the gap is delivered once the gap is judged permanent"
+        );
+        assert_eq!(s.gaps_forced(), 1);
+        assert_eq!(
+            s.bytes_missing(),
+            96,
+            "sequence 104..200 is what the capture does not contain"
+        );
+        assert_eq!(s.held_segments(), 0);
+    }
+
+    /// The disabled arm, which is the pre-R311y609 behaviour exactly. Without
+    /// it the test above would pass on an assembler that simply concatenated
+    /// whatever it held.
+    #[test]
+    fn patience_none_holds_the_gap_however_long_it_stays_open() {
+        let mut s = StreamAssembler::new().with_gap_patience(None);
+        s.push(&seg(100, 0x02, b"", 0));
+        s.push(&seg(101, 0x18, b"AAA", 1));
+        for i in 0..64u32 {
+            s.push(&seg(200 + i * 3, 0x18, b"ZZZ", 2 + i as usize));
+        }
+        assert_eq!(s.stream(), b"AAA", "nothing is stepped over");
+        assert_eq!(s.gaps_forced(), 0);
+        assert_eq!(s.bytes_missing(), 0);
+        assert_eq!(s.held_segments(), 64);
+    }
+
+    /// A gap that FILLS is not forced, however many segments passed while it
+    /// was open — patience is spent on absence, not on delay.
+    #[test]
+    fn a_gap_that_fills_is_not_counted_as_missing() {
+        let mut s = StreamAssembler::new().with_gap_patience(Some(2));
+        s.push(&seg(100, 0x02, b"", 0));
+        s.push(&seg(101, 0x18, b"AAA", 1));
+        s.push(&seg(107, 0x18, b"CCC", 2)); // ahead: 104..=106 missing
+        s.push(&seg(104, 0x18, b"BBB", 3)); // it arrives, late
+        assert_eq!(s.stream(), b"AAABBBCCC");
+        assert_eq!(s.gaps_forced(), 0);
+        assert_eq!(s.bytes_missing(), 0);
+    }
+
+    /// The END-OF-CAPTURE arm: a file that stops right after a hole never
+    /// spends the patience, so the caller says when to give up.
+    #[test]
+    fn the_end_of_a_capture_can_force_the_last_gap_by_hand() {
+        let mut s = StreamAssembler::new();
+        s.push(&seg(100, 0x02, b"", 0));
+        s.push(&seg(101, 0x18, b"AAA", 1));
+        s.push(&seg(200, 0x18, b"ZZZ", 2));
+        assert_eq!(s.stream(), b"AAA", "the patience is nowhere near spent");
+        assert_eq!(s.force_oldest_gap(), Some(96));
+        assert_eq!(s.stream(), b"AAAZZZ");
+        assert_eq!(s.force_oldest_gap(), None, "no gap is open now");
     }
 
     /// The offset map attributes each byte to the packet that carried it —

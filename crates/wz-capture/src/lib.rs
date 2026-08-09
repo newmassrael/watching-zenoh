@@ -356,11 +356,11 @@ pub struct FlowDissection {
 }
 
 impl FlowDissection {
-    fn new(flow: FlowKey, window_ms: Option<u64>) -> Self {
+    fn new(flow: FlowKey, window_ms: Option<u64>, gap_patience: Option<usize>) -> Self {
         Self {
             flow,
-            low_to_high: StreamAssembler::new(),
-            high_to_low: StreamAssembler::new(),
+            low_to_high: StreamAssembler::new().with_gap_patience(gap_patience),
+            high_to_low: StreamAssembler::new().with_gap_patience(gap_patience),
             session: new_session(window_ms),
             frames: Vec::new(),
             last_activity: 0,
@@ -687,6 +687,11 @@ struct StreamTally {
     retransmits: usize,
     out_of_order: usize,
     partial_overlaps: usize,
+    /// R311y609 — carried here for the same reason the three above are: a
+    /// flow the cap EVICTS must not take its losses with it, or a live tap
+    /// reports a healthier capture the longer it runs.
+    gaps_forced: usize,
+    bytes_missing: u64,
 }
 
 impl StreamTally {
@@ -694,12 +699,71 @@ impl StreamTally {
         self.retransmits += a.retransmits();
         self.out_of_order += a.out_of_order();
         self.partial_overlaps += a.partial_overlaps();
+        self.gaps_forced += a.gaps_forced();
+        self.bytes_missing += a.bytes_missing();
     }
+}
+
+/// R311y609 — what the FRAMING lost, at both of the layers that can lose it.
+///
+/// Three independent measurements of "missing", and a reader that conflates
+/// them cannot tell which layer to blame:
+///
+/// - `gaps_forced` / `gap_bytes_missing` — the TCP SEQUENCE SPACE says these
+///   bytes were sent and the capture does not contain them. Proof, not
+///   inference: the sender numbered them.
+/// - `desyncs` / `recoveries` / `resync_skipped_bytes` — bytes THIS READER
+///   could not frame. A hole leaves the observer mid-frame, and what it skips
+///   getting back in step is its own loss, not the wire's.
+/// - `sn_*` — messages the sender NUMBERED and nobody saw
+///   ([`wz_session_core::passive::SnAccounting`]). The wire's own accounting,
+///   and the only one of the three that survives a capture with no holes at
+///   all — a peer whose frames are lost upstream shows here and nowhere else.
+///
+/// Beside [`Dissection::capture_reported_drops`] — the capture tool's own
+/// admission — that makes four answers to "what is missing", each from a
+/// different witness.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FramingHealth {
+    /// Gaps the assemblers gave up on, over every flow and both directions.
+    pub gaps_forced: usize,
+    /// Sequence-space bytes those gaps skipped.
+    pub gap_bytes_missing: u64,
+    /// Times a direction lost the zenoh framing.
+    pub desyncs: u64,
+    /// Times it found the framing again.
+    pub recoveries: u64,
+    /// Bytes skipped getting back in step.
+    pub resync_skipped_bytes: u64,
+    /// Data frames observed, the denominator for everything below.
+    pub sn_frames: u64,
+    /// Frames the sender numbered and this reader never saw.
+    pub sn_missing: u64,
+    /// How many gaps that total is spread across.
+    pub sn_gaps: u64,
+    /// Repeated sequence numbers.
+    pub sn_duplicates: u64,
+    /// Sequence numbers behind the window: reorder or a stale datagram, NOT
+    /// loss.
+    pub sn_out_of_window: u64,
+    /// Frames no ring resolution was observed for, so no verdict was possible.
+    /// Without it `sn_missing = 0` is unreadable.
+    pub sn_without_resolution: u64,
+}
+
+/// R311y609 — fold one direction's sequence-number accounting into the total.
+fn add_sn(h: &mut FramingHealth, a: wz_session_core::passive::SnAccounting) {
+    h.sn_frames += a.frames;
+    h.sn_missing += a.missing;
+    h.sn_gaps += a.gaps;
+    h.sn_duplicates += a.duplicates;
+    h.sn_out_of_window += a.out_of_window;
+    h.sn_without_resolution += a.without_resolution;
 }
 
 /// A whole capture, dissected: every TCP connection in it, read as a zenoh
 /// session.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Dissection {
     flows: Vec<FlowDissection>,
     datagram_flows: Vec<DatagramDissection>,
@@ -741,12 +805,90 @@ pub struct Dissection {
     /// Dissection-wide and not per-flow, because the exchange spans two flows:
     /// a SCOUT is keyed `(asker, group)` and its answer `(asker, responder)`.
     scouts: ScoutingCorrelation,
+    /// R311y609 — how long a flow's assembler waits on a gap before stepping
+    /// over it ([`crate::tcp::DEFAULT_GAP_PATIENCE`]). `None` waits forever,
+    /// which is the pre-R311y609 behaviour.
+    ///
+    /// NOT a [`DissectionLimits`] field, and the reason is that type's own
+    /// contract: every limit there is `None` by default because a file ends
+    /// and keeping all of it is bounded. This is the opposite shape — the
+    /// default must be ENABLED, since a capture with a hole is not a policy
+    /// choice a caller opts into.
+    gap_patience: Option<usize>,
+}
+
+/// Hand-written for ONE field: `gap_patience` defaults to
+/// [`crate::tcp::DEFAULT_GAP_PATIENCE`] rather than to `None`, and a derive
+/// would have shipped the waits-forever arm as the default.
+impl Default for Dissection {
+    fn default() -> Self {
+        Self {
+            flows: Vec::new(),
+            datagram_flows: Vec::new(),
+            skipped: Vec::new(),
+            limits: DissectionLimits::default(),
+            drops: DissectionDrops::default(),
+            checksums: [0; 6],
+            evicted_streams: StreamTally::default(),
+            fragments: frag::FragmentTable::default(),
+            #[cfg(feature = "reassembly")]
+            expired_chains: 0,
+            capture_reported_drops: None,
+            scouts: ScoutingCorrelation::default(),
+            gap_patience: Some(crate::tcp::DEFAULT_GAP_PATIENCE),
+        }
+    }
 }
 
 impl Dissection {
     /// An empty dissection whose chains never expire.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// R311y609 — how long each flow's assembler waits on a gap before
+    /// stepping over it. Applies to flows created AFTER the call.
+    ///
+    /// `None` restores the pre-R311y609 behaviour: a capture that lost a
+    /// segment holds every later segment of that direction forever, and
+    /// nothing downstream ever sees them.
+    pub fn set_gap_patience(&mut self, patience: Option<usize>) {
+        self.gap_patience = patience;
+    }
+
+    /// R311y609 — what the FRAMING lost, at both layers. See
+    /// [`FramingHealth`] for why the three groups are not one number.
+    ///
+    /// Evicted flows are INCLUDED for the assembler half (via the same tally
+    /// [`Self::health`] uses), so the figure does not improve as a live tap
+    /// recycles flows. The session half — resynchronisation and sequence
+    /// numbers — goes with the evicted flow, and that is stated rather than
+    /// silently rolled in: those counters live inside `PassiveSession`, which
+    /// the eviction drops whole.
+    pub fn framing_health(&self) -> FramingHealth {
+        let mut streams = self.evicted_streams;
+        let mut h = FramingHealth::default();
+        for flow in &self.flows {
+            streams.add_assembler(&flow.low_to_high);
+            streams.add_assembler(&flow.high_to_low);
+            for dir in [Direction::A, Direction::B] {
+                let r = flow.session.resync_accounting(dir);
+                h.desyncs += r.desyncs;
+                h.recoveries += r.recoveries;
+                h.resync_skipped_bytes += r.skipped_bytes;
+                add_sn(&mut h, flow.session.sn_accounting(dir));
+            }
+        }
+        // A datagram flow has no framing to lose, and every sequence number on
+        // it still counts: multicast loss is exactly what this measures.
+        for flow in &self.datagram_flows {
+            for dir in [Direction::A, Direction::B] {
+                add_sn(&mut h, flow.session.sn_accounting(dir));
+            }
+        }
+        h.gaps_forced = streams.gaps_forced;
+        h.gap_bytes_missing = streams.bytes_missing;
+        h
     }
 
     /// R311y594 — a dissection whose half-finished chains EXPIRE `window_ms`
@@ -1087,6 +1229,14 @@ impl Dissection {
     /// alternative, and the duplicate would have been the copy that forgot the
     /// `retained_from` rebase below.
     fn push_segment(&mut self, segment: link::Segment, ts_millis: Option<u64>) {
+        // R311y609 — the capture's clock is read only to expire reassembly
+        // chains, and there are none without `reassembly`. Bound here rather
+        // than left unused because THIS CRATE DID NOT COMPILE AT ALL WITHOUT
+        // ITS DEFAULT FEATURE: `warnings = "deny"` turned the unused binding
+        // into an error, and no CI lane builds the combination, so nothing
+        // said so. Found by building it.
+        #[cfg(not(feature = "reassembly"))]
+        let _ = ts_millis;
         let packet_index = segment.packet_index;
         self.tally_checksums(&segment.checksums);
         let idx = match self.flows.iter().position(|f| f.flow == segment.flow) {
@@ -1095,6 +1245,7 @@ impl Dissection {
                 self.flows.push(FlowDissection::new(
                     segment.flow,
                     self.limits.reassembly_window_ms,
+                    self.gap_patience,
                 ));
                 self.flows.len() - 1
             }
@@ -1210,6 +1361,7 @@ impl Dissection {
                 self.flows.push(FlowDissection::new(
                     record.flow,
                     self.limits.reassembly_window_ms,
+                    self.gap_patience,
                 ));
                 self.flows.len() - 1
             }
@@ -1488,6 +1640,133 @@ mod datagram_tests {
     /// One length-prefixed KeepAlive: the smallest complete framed message.
     fn framed_keepalive() -> Vec<u8> {
         alloc::vec![1, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE]
+    }
+
+    /// R311y609 — one length-prefixed `T_MID_FRAME` carrying `sn` and a
+    /// four-byte body, through the real VLE encoder.
+    ///
+    /// `codec-frame` is not optional for this crate — a capture front end
+    /// reads what is on the wire — so there is no cfg here.
+    fn framed_frame(sn: u8) -> Vec<u8> {
+        assert!(sn < 0x80, "the one-byte VLE arm");
+        let mut wire = alloc::vec![
+            wz_session_core::wire_const::T_MID_FRAME | wz_session_core::wire_const::FLAG_T_FRAME_R,
+            sn,
+        ];
+        wire.extend_from_slice(&[0x1F, 0x00, 0x00, 0x00]);
+        let mut out = (wire.len() as u16).to_le_bytes().to_vec();
+        out.extend_from_slice(&wire);
+        out
+    }
+
+    /// The fixture above writes a VLE by hand, which is the "author's idea of
+    /// the layout" the other fixtures in this module avoid. It is checked
+    /// against the REAL decoder instead of trusted: if a one-byte VLE ever
+    /// stops meaning what this assumes, this fails rather than the interlock
+    /// test failing for an unrelated-looking reason.
+    #[test]
+    fn the_frame_fixture_decodes_as_the_frame_it_claims() {
+        let wire = framed_frame(0x42);
+        assert_eq!(
+            u16::from_le_bytes([wire[0], wire[1]]) as usize,
+            wire.len() - 2
+        );
+        match wz_session_core::inbound::parse_inbound(&wire[2..]) {
+            Ok(wz_session_core::inbound::InboundFrame::Frame { sn, reliable, .. }) => {
+                assert_eq!((sn, reliable), (0x42, true));
+            }
+            other => panic!("the fixture is not a Frame: {other:?}"),
+        }
+    }
+
+    /// THE INTERLOCK, and the reason R311y609 had to touch two layers.
+    ///
+    /// A capture that lost a TCP segment held every later segment of that
+    /// direction FOREVER (`tcp.rs`), so the bytes after the hole never reached
+    /// `PassiveSession` at all. Fixing the zenoh framing's resynchronisation
+    /// alone would have been unreachable in exactly the case that motivates
+    /// it — the fix would have been provable only against a synthetic byte
+    /// stream, never against a capture.
+    ///
+    /// Here the hole is a dropped PACKET, the way a capture loses one, and the
+    /// assertion chain runs the whole way down: the assembler gives up on the
+    /// gap, the spliced bytes land mid-frame, the observer says so, and it
+    /// finds the framing again.
+    #[test]
+    fn a_dropped_packet_reaches_the_observer_and_it_resynchronises() {
+        // A byte stream of small frames, chopped into segments whose size is
+        // not a multiple of the frame size — so a lost segment splices the
+        // stream MID-FRAME rather than tidily on a boundary.
+        let stream: Vec<u8> = (0..600u32)
+            .map(|i| (i % 0x80) as u8)
+            .flat_map(framed_frame)
+            .collect();
+        const SEG: usize = 37;
+        assert_ne!(
+            SEG % framed_frame(0).len(),
+            0,
+            "a segment that held whole frames would splice on a boundary and              prove nothing"
+        );
+        let segments: Vec<&[u8]> = stream.chunks(SEG).collect();
+        const LOST: usize = 7;
+
+        let run = |patience: Option<usize>| {
+            let mut d = Dissection::new();
+            d.set_gap_patience(patience);
+            for (i, seg) in segments.iter().enumerate() {
+                if i == LOST {
+                    continue; // the packet the capture never recorded
+                }
+                let pkt = tcp_packet(1000 + (i * SEG) as u32, seg);
+                d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+            }
+            d
+        };
+
+        // The pre-R311y609 arm: the gap is never given up on, so nothing after
+        // it is ever handed to the observer.
+        let held = run(None);
+        let f = &held.flows()[0];
+        assert_eq!(held.framing_health().gaps_forced, 0);
+        assert_eq!(
+            f.assembler(Direction::A).held_segments(),
+            segments.len() - LOST - 1,
+            "every segment after the hole is still waiting on it"
+        );
+        let decoded_before = f.frames.len();
+
+        // And with the default patience: the assembler steps over the hole,
+        // the observer desynchronises on the splice, and it recovers.
+        let d = run(Some(4));
+        let f = &d.flows()[0];
+        let fh = d.framing_health();
+        assert_eq!(
+            (fh.gaps_forced, fh.gap_bytes_missing),
+            (1, SEG as u64),
+            "one gap, and it names the bytes the capture does not contain"
+        );
+        assert_eq!((fh.desyncs, fh.recoveries), (1, 1));
+        let resync = f.session.resync_accounting(Direction::A);
+        assert_eq!(resync.desyncs, 1, "the splice is DETECTED, not decoded");
+        assert_eq!(resync.recoveries, 1, "and the framing is found again");
+        assert!(
+            f.frames.len() > decoded_before * 4,
+            "frames decoded: {} with recovery vs {decoded_before} without",
+            f.frames.len()
+        );
+        // The recovery is reported ON a frame, so a reader sees the hole.
+        let carried = f
+            .frames
+            .iter()
+            .filter_map(|fr| fr.resync)
+            .collect::<Vec<_>>();
+        assert_eq!(carried.len(), 1);
+        assert!(
+            carried[0].skipped > 0
+                && carried[0].confirmed == wz_session_core::passive::DEFAULT_RESYNC_DEPTH,
+            "{:?}",
+            carried[0]
+        );
     }
 
     /// R311y594b — THE ONE THAT MATTERS: trimming the retained stream must not
@@ -2168,15 +2447,30 @@ mod datagram_tests {
         // The transport namespace, on a UNICAST destination — the JOIN
         // included, since a JOIN reaching a unicast peer is still a transport
         // message and this census is about the DECODER, not the routing.
-        for (name, wire) in [
+        #[allow(unused_mut)] // the `reassembly` arm below is what mutates it
+        let mut census = alloc::vec![
             ("Init", init),
             ("Open", open),
             ("Close", close),
             ("KeepAlive", keep_alive),
             ("Frame", frame),
-            ("Fragment", fragment),
             ("Join", join),
-        ] {
+        ];
+        // R311y609 — FRAGMENT is the one MID whose decoder is behind a
+        // wz-capture feature (`reassembly`, default-on), so a
+        // `--no-default-features` build genuinely cannot name it and the
+        // census must not demand it. Gated rather than dropped: without the
+        // arm, the default build would stop checking the MID this crate is
+        // most likely to lose.
+        //
+        // This surfaced only once the crate COMPILED without its default
+        // feature — before that the census never ran there at all.
+        #[cfg(feature = "reassembly")]
+        census.push(("Fragment", fragment));
+        #[cfg(not(feature = "reassembly"))]
+        let _ = fragment;
+
+        for (name, wire) in census {
             let pkt = udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire);
             let mut d = Dissection::new();
             d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);

@@ -699,6 +699,145 @@ pub mod wire_const {
     /// `codec-hello`.
     #[cfg(feature = "codec-hello")]
     pub const FLAG_S_HELLO_L: u8 = 0x20;
+
+    /// R311y609 — the TRANSPORT HEADER SPACE: which MIDs the transport wire
+    /// format defines, and which flag bits each of them may legally carry
+    /// (the shared `Z` bit included). `None` = no transport message has this
+    /// MID at all.
+    ///
+    /// # Why this one is UNGATED
+    ///
+    /// Same ground as [`T_MID_FRAME`] and [`T_MID_KEEP_ALIVE`]: it is
+    /// wire-spec ground truth. Its consumer — a passive observer asking "could
+    /// this byte have been produced by a zenoh transport header"
+    /// (`wz-session-core::passive`, stream resynchronisation) — is asking
+    /// about the WIRE, not about which codecs the reading build compiled. A
+    /// gated answer would call a message the build merely cannot DECODE "not a
+    /// transport header", which is the R311y605 Unknown-JOIN defect one layer
+    /// down: a feature-poor observer would resynchronise onto a different
+    /// boundary than a feature-rich one over the same bytes.
+    ///
+    /// The literals below are the same bytes the gated `T_MID_*` / `FLAG_T_*`
+    /// consts above spell. Two spellings on purpose, and
+    /// `transport_header_space_agrees_with_the_gated_consts` (an all-features
+    /// test) is what keeps them equal — the alternative, ungating eleven
+    /// consts, would move a feature boundary the codec census gates measure.
+    pub const fn transport_flag_mask(mid: u8) -> Option<u8> {
+        // The ext-chain bit rides every transport header (`FLAG_T_Z`).
+        const Z: u8 = 0x80;
+        match mid {
+            0x01 => Some(Z | 0x20 | 0x40), // INIT: A | S
+            0x02 => Some(Z | 0x20 | 0x40), // OPEN: A | T
+            0x03 => Some(Z | 0x20),        // CLOSE: S
+            0x04 => Some(Z),               // KEEP_ALIVE: no flags of its own
+            0x05 => Some(Z | 0x20),        // FRAME: R
+            0x06 => Some(Z | 0x20 | 0x40), // FRAGMENT: R | M
+            0x07 => Some(Z | 0x20 | 0x40), // JOIN: T | S
+            _ => None,
+        }
+    }
+
+    /// R311y609 — could `header` be the first byte of a transport message?
+    ///
+    /// True for 42 of the 256 byte values (`transport_header_space_is_42_of_256`
+    /// counts them), which is what makes a chain of these a usable
+    /// resynchronisation signal: the MID must be one of seven, AND every flag
+    /// bit it sets must be one that MID defines. A byte failing either test
+    /// cannot have been written by a conforming sender.
+    ///
+    /// Says nothing about the BODY — a credible header with a corrupt body is
+    /// still a decode error, reported as one.
+    pub const fn is_credible_transport_header(header: u8) -> bool {
+        match transport_flag_mask(header & 0x1F) {
+            Some(defined) => header & 0xE0 & !defined == 0,
+            None => false,
+        }
+    }
+}
+
+/// R311y609 — the ungated transport header space, checked against the gated
+/// consts that spell the same bytes. The whole point of the duplication is
+/// that a feature-poor build still knows the shape of the wire; the whole
+/// point of this test is that it knows the RIGHT shape.
+#[cfg(test)]
+mod transport_header_space {
+    use super::wire_const::*;
+
+    /// Every gated `T_MID_*` const, with the flag bits its own gated
+    /// `FLAG_T_*` consts define. Compiles only with the features on, which is
+    /// exactly the build that can state the claim.
+    #[test]
+    #[cfg(all(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-frame",
+        feature = "codec-join"
+    ))]
+    fn transport_header_space_agrees_with_the_gated_consts() {
+        let expect: [(u8, u8); 7] = [
+            (T_MID_INIT, FLAG_T_Z | FLAG_T_INIT_A | FLAG_T_INIT_S),
+            (T_MID_OPEN, FLAG_T_Z | FLAG_T_OPEN_A | FLAG_T_OPEN_T),
+            (T_MID_CLOSE, FLAG_T_Z | FLAG_T_CLOSE_S),
+            (T_MID_KEEP_ALIVE, FLAG_T_Z),
+            (T_MID_FRAME, FLAG_T_Z | FLAG_T_FRAME_R),
+            (
+                T_MID_FRAGMENT,
+                FLAG_T_Z | FLAG_T_FRAGMENT_R | FLAG_T_FRAGMENT_M,
+            ),
+            (T_MID_JOIN, FLAG_T_Z | FLAG_T_JOIN_T | FLAG_T_JOIN_S),
+        ];
+        for (mid, flags) in expect {
+            assert_eq!(
+                transport_flag_mask(mid),
+                Some(flags),
+                "MID {mid:#04x}: the ungated table and the gated consts disagree"
+            );
+        }
+        // ...and nothing ELSE is a transport MID. The 5-bit field holds 32
+        // values; the seven above are the whole space.
+        for mid in 0u8..32 {
+            let named = expect.iter().any(|(m, _)| *m == mid);
+            assert_eq!(
+                transport_flag_mask(mid).is_some(),
+                named,
+                "MID {mid:#04x}: membership of the transport space"
+            );
+        }
+    }
+
+    /// The discrimination this table is bought for, COUNTED rather than
+    /// asserted in prose: a resynchronisation scan that accepts any byte as a
+    /// header has no signal at all, and one that accepts 42/256 per frame has
+    /// `(42/256)^depth`. The number belongs in a test because the depth
+    /// default is chosen from it.
+    #[test]
+    fn transport_header_space_is_42_of_256() {
+        let credible = (0u8..=255)
+            .filter(|b| is_credible_transport_header(*b))
+            .count();
+        assert_eq!(
+            credible, 42,
+            "8 INIT + 8 OPEN + 4 CLOSE + 2 KEEP_ALIVE + 4 FRAME + 8 FRAGMENT + 8 JOIN"
+        );
+    }
+
+    /// A MID outside the space is rejected whatever its flags, and a MID
+    /// inside it is rejected when it sets a bit it does not define. Both arms
+    /// matter: dropping the second would accept 7/32 = 56 of 256 bytes.
+    #[test]
+    fn an_undefined_flag_bit_is_not_a_credible_header() {
+        // KEEP_ALIVE (0x04) defines no flag but Z.
+        assert!(is_credible_transport_header(0x04));
+        assert!(is_credible_transport_header(0x84));
+        assert!(!is_credible_transport_header(0x24));
+        assert!(!is_credible_transport_header(0x44));
+        // 0x00 and 0x08..=0x1F are not transport MIDs.
+        assert!(!is_credible_transport_header(0x00));
+        for mid in 0x08u8..=0x1F {
+            assert!(!is_credible_transport_header(mid), "MID {mid:#04x}");
+        }
+    }
 }
 
 #[cfg(test)]

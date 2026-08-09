@@ -352,6 +352,83 @@ pub struct PassiveFrame {
     /// makes them worth showing is precisely that they arrived where they
     /// cannot belong.
     pub inadmissible_on_link: bool,
+    /// R311y609 (C12) — what this frame's SEQUENCE NUMBER says about what the
+    /// reader did not see. `None` for every message that carries no SN
+    /// (handshake, keepalive, close, join).
+    #[cfg(feature = "codec-frame")]
+    pub sn_verdict: Option<SnVerdict>,
+    /// R311y609 — set on the first frame after a resynchronisation, and on no
+    /// other. `None` on a stream that never lost its framing, and always
+    /// `None` on a datagram link, which has no framing to lose.
+    pub resync: Option<StreamResync>,
+}
+
+/// R311y609 (C12) — what the observer makes of ONE data frame's sequence
+/// number, judged against the previous frame on the SAME conduit.
+///
+/// The conduit is `(priority, reliability)`, not the direction: zenoh mints
+/// one SN series per `(Priority, Reliability)` pair
+/// (`io/zenoh-transport/src/unicast/universal/rx.rs`, the shape
+/// [`crate::sn::RxSn`] mirrors on the participant side), so judging a
+/// direction's frames on one counter would read every interleave of two
+/// conduits as a gap and every return to the first as a rewind. A verdict
+/// like that looks decisive and is arbitrary.
+#[cfg(feature = "codec-frame")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnVerdict {
+    /// No InitAck (or JOIN) was observed, so the ring MASK is unknown.
+    ///
+    /// NOT a defaulted verdict, for the reason
+    /// [`Carried::FragmentWithoutResolution`] is not one: a mask too wide
+    /// reads a wraparound as a gap and one too narrow reads a gap as a
+    /// wraparound. The ordinary cause is a capture that started mid-session.
+    WithoutResolution,
+    /// The first frame seen on this conduit — a BASELINE, not a judgement.
+    /// A reader that started mid-session cannot know what came before it.
+    Baseline,
+    /// Exactly one step after the previous frame on this conduit.
+    Continuous,
+    /// `missing` frames the SENDER numbered between the previous frame on
+    /// this conduit and this one never reached this reader.
+    ///
+    /// The wire's own loss accounting, and a DIFFERENT question from
+    /// [`StreamResync::skipped`] (bytes this reader could not parse) or from
+    /// a capture engine's own drop counter (packets the kernel never handed
+    /// over). A capture whose three numbers disagree is telling you where the
+    /// loss happened.
+    Gap {
+        /// How many SNs the sender used and this reader never saw.
+        missing: u64,
+    },
+    /// The same SN as the previous frame on this conduit: a retransmission,
+    /// or a capture that recorded one packet twice.
+    Duplicate,
+    /// Behind the previous frame, or past the forward half-window — reorder,
+    /// or a stale datagram. Named apart from [`Self::Gap`] because a
+    /// participant DROPS these ([`crate::sn::RxSn::admit`]) and an observer
+    /// must not count them as loss.
+    OutOfWindow,
+}
+
+/// R311y609 (C12) — cumulative per-direction sequence-number accounting.
+#[cfg(feature = "codec-frame")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SnAccounting {
+    /// Data frames (Frame + Fragment) seen in this direction.
+    pub frames: u64,
+    /// Frames the sender numbered and this reader never saw, summed over
+    /// every [`SnVerdict::Gap`].
+    pub missing: u64,
+    /// How many gaps that total is spread across — one gap of 100 and a
+    /// hundred gaps of 1 are different captures.
+    pub gaps: u64,
+    /// [`SnVerdict::Duplicate`] count.
+    pub duplicates: u64,
+    /// [`SnVerdict::OutOfWindow`] count.
+    pub out_of_window: u64,
+    /// Frames judged [`SnVerdict::WithoutResolution`] — the size of the
+    /// UNJUDGED population, without which `missing = 0` is unreadable.
+    pub without_resolution: u64,
 }
 
 /// R311y608 — does the link a datagram arrived on have a HANDSHAKE?
@@ -433,17 +510,100 @@ pub enum Carried {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassiveStall {
     /// Not enough buffered bytes for the next prefix + payload. Push more.
+    ///
+    /// R311y609 — ALSO what a desynchronised direction answers while its
+    /// resynchronisation scan has not yet found a boundary it can confirm.
+    /// The two are the same fact from the reader's side: more bytes may
+    /// change the answer.
     NeedMoreBytes,
-    /// A length prefix asked for more than [`MAX_FRAME_PAYLOAD`]. The stream
-    /// is desynchronised — for a stream-oriented capture this usually means
-    /// the reader started mid-frame — and the direction is abandoned, because
-    /// nothing in the framing lets it resynchronise.
+    /// The framing is not where this reader thinks it is, announced ONCE at
+    /// the offset where the evidence appeared.
+    ///
+    /// R311y609 — the direction is no longer abandoned. Subsequent calls run
+    /// the resynchronisation scan ([`PassiveSession::with_resync_depth`]) and
+    /// the frame that resumes carries a [`StreamResync`] saying how much was
+    /// skipped. A reader that wants the old terminal behaviour asks for depth
+    /// 0.
     Desynchronised {
-        /// Offset of the offending prefix.
+        /// Offset of the length prefix the evidence appeared at.
         stream_offset: usize,
+        /// What the evidence was.
+        reason: DesyncReason,
+    },
+}
+
+/// R311y609 — WHY a direction is judged desynchronised.
+///
+/// Three arms rather than one, because a reader acts on them differently: an
+/// oversize length is a corrupt or mid-frame start, and a run of implausible
+/// headers on an otherwise healthy capture is more likely a MID this build's
+/// wire-spec vintage does not know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesyncReason {
+    /// A length prefix asked for more than [`MAX_FRAME_PAYLOAD`].
+    ///
+    /// Reachable ONLY on a lowlatency stream's 4-byte prefix: a `u16` prefix
+    /// cannot exceed the cap by construction, which is precisely why this was
+    /// never the common case and why [`Self::ImplausibleHeader`] exists.
+    OversizeLength {
         /// The length it asked for.
         claimed_len: usize,
     },
+    /// The framed body opened with a byte no transport header can be
+    /// (`wz_codecs::wire_const::is_credible_transport_header`).
+    ///
+    /// THE COMMON CASE, and before R311y609 it was invisible: a 2-byte prefix
+    /// read at the wrong boundary frames some arbitrary run of payload bytes,
+    /// `parse_inbound` answers `Unknown { mid }` for 25 of the 32 MID values,
+    /// and the reader walks the rest of the capture at a wrong boundary
+    /// reporting confident nonsense. Nothing above could tell.
+    ImplausibleHeader {
+        /// The byte that cannot be a transport header.
+        header: u8,
+    },
+    /// The length prefix framed an EMPTY body. Every transport message is at
+    /// least its own header byte, so a zero-length frame is a boundary error
+    /// rather than a message.
+    EmptyFrame,
+}
+
+/// R311y609 — a direction that desynchronised and found its framing again.
+///
+/// Carried on the FIRST frame decoded after the recovery, because that is the
+/// frame whose offset would otherwise be an unexplained jump. A dissector that
+/// resumed silently would report a hole as though the wire had none — the same
+/// objection [`PassiveSession::observe_at`] answers for expired chains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamResync {
+    /// Absolute offset where the direction desynchronised.
+    pub desync_offset: usize,
+    /// The evidence that desynchronised it.
+    pub reason: DesyncReason,
+    /// Absolute offset the reader resumed at.
+    pub resumed_offset: usize,
+    /// Bytes between the two: what this reader will never decode. The number
+    /// a loss-accounting view wants, and it is NOT the same as the wire's own
+    /// loss — see [`SnAccounting`], which counts what the SENDER numbered.
+    pub skipped: usize,
+    /// How many chained candidate frames confirmed the resumed boundary.
+    ///
+    /// Reported rather than assumed, because it IS the confidence: the scan
+    /// accepts an offset only when `depth` consecutive frames each carry a
+    /// credible header and an in-range length, and a reader weighing an
+    /// implausible-looking resync wants to know how much evidence stood
+    /// behind it.
+    pub confirmed: usize,
+}
+
+/// R311y609 — per-direction resynchronisation accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResyncAccounting {
+    /// Times this direction desynchronised.
+    pub desyncs: u64,
+    /// Times it found its framing again.
+    pub recoveries: u64,
+    /// Total bytes skipped across those recoveries.
+    pub skipped_bytes: u64,
 }
 
 /// Per-direction stream buffer + cursor.
@@ -453,7 +613,44 @@ struct DirectionStream {
     /// Bytes already consumed and drained from `buf`, so `stream_offset`
     /// stays absolute across compactions.
     consumed: usize,
-    desynchronised: bool,
+    /// R311y609 — `Some` while this direction is looking for its framing.
+    ///
+    /// Nothing is consumed while it is set, so `buf[0]` stays the byte at
+    /// `consumed` and the scan cursor below is an index into `buf` that
+    /// survives across calls.
+    desync: Option<DesyncState>,
+    /// R311y609 — the recovery to hand to the next frame decoded.
+    pending_resync: Option<StreamResync>,
+    /// R311y609 — cumulative, for a reader that wants the flow's health
+    /// rather than one frame's story.
+    accounting: ResyncAccounting,
+}
+
+/// R311y609 — the live state of one direction's resynchronisation scan.
+#[derive(Debug, Clone, Copy)]
+struct DesyncState {
+    /// Absolute offset the desynchronisation was judged at.
+    ///
+    /// The announcing [`PassiveStall::Desynchronised`] is returned by the call
+    /// that DETECTS it and by no later one: repeating the stall on every
+    /// subsequent call would drown the event that matters in the event that
+    /// does not, and a caller that polls would see the same desync a thousand
+    /// times.
+    at_offset: usize,
+    reason: DesyncReason,
+    /// Index into `buf` of the lowest candidate offset not yet REFUTED.
+    ///
+    /// A candidate that failed for lack of bytes is not refuted, and the
+    /// cursor does NOT follow past it — it advances only across a contiguous
+    /// run of refutations, so no offset is abandoned unexamined.
+    scan_cursor: usize,
+    /// Buffer length at which the scan can produce a different answer.
+    ///
+    /// When every offset examined was REFUTED there is no unresolved candidate
+    /// to wait on, and the next answer can only come from a longer buffer — so
+    /// the threshold becomes one byte past the current length rather than
+    /// "never". Getting that arm wrong freezes a scan that is working.
+    rescan_at: usize,
 }
 
 /// The passive observer for ONE session, both directions.
@@ -511,7 +708,62 @@ pub struct PassiveSession {
     /// `u64::MAX` window is one nothing can reach.
     #[cfg(feature = "reassembly")]
     now_ms: u64,
+    /// R311y609 (C12) — last SN seen per `[direction][conduit]`, where the
+    /// conduit index is [`sn_conduit`]. `None` = nothing seen there yet, which
+    /// is what makes the first frame a [`SnVerdict::Baseline`] rather than a
+    /// gap from zero.
+    #[cfg(feature = "codec-frame")]
+    sn_last: [[Option<u64>; SN_CONDUITS]; 2],
+    /// R311y609 (C12) — cumulative, per direction.
+    #[cfg(feature = "codec-frame")]
+    sn_accounting: [SnAccounting; 2],
+    /// R311y609 — how many chained candidate frames must agree before the
+    /// resynchronisation scan accepts a boundary. `0` disables recovery.
+    resync_depth: usize,
 }
+
+/// R311y609 (C12) — SN conduits per direction: one per
+/// `(Priority, Reliability)` pair, the same split zenoh mints on.
+#[cfg(feature = "codec-frame")]
+const SN_CONDUITS: usize = crate::qos::Priority::NUM * 2;
+
+/// R311y609 (C12) — index of one conduit within a direction.
+#[cfg(feature = "codec-frame")]
+fn sn_conduit(priority: crate::qos::Priority, reliable: bool) -> usize {
+    priority.wire_byte() as usize * 2 + usize::from(reliable)
+}
+
+/// R311y609 — how many chained candidate frames confirm a resynchronised
+/// boundary by default.
+///
+/// CHOSEN FROM A MEASUREMENT, not from taste, and the estimate it replaced was
+/// wrong in the interesting direction.
+///
+/// A credible transport header is 42 of 256 bytes
+/// (`wz_codecs::wire_const::is_credible_transport_header`), which suggests a
+/// chain of `d` costs `(42/256)^d` per candidate offset. That model says
+/// almost nothing false survives `d = 6`. What
+/// `the_resync_scan_lands_on_the_true_boundary_across_noise` actually measures
+/// is that a wrong resume needs only ONE lucky hop that lands on the true
+/// boundary, after which it inherits the real chain — so wrong resumes are far
+/// more common than the model predicts, and also far less harmful.
+///
+/// The swept numbers at 10 trials per cell, noise runs of 512 / 8192 / 65536
+/// bytes in front of 12000 real frames:
+///
+/// - every depth recovers in every trial, and after the final recovery NO
+///   frame is reported off a true boundary (drift 0),
+/// - `d = 4` resumes wrongly more often (14 recoveries where 6 and 8 need 10),
+/// - `d = 6` and `d = 8` are indistinguishable on every measure,
+/// - the worst lead-in — frames reported before the framing rejoins the truth
+///   — is 4.
+///
+/// So 6 is the SMALLEST depth that ties the deepest one swept, and depth costs
+/// latency: a direction resumes only once `d` more frames are buffered, and a
+/// capture that ends inside the scan never resumes at all. That is the honest
+/// failure; the alternative, resuming on thin evidence, reports a wrong
+/// boundary as confidently as a right one.
+pub const DEFAULT_RESYNC_DEPTH: usize = 6;
 
 /// Hand-written so a debug print never dumps buffered chain bytes: the chain
 /// routers hold every fragment staged so far, and a consumer that derives
@@ -559,6 +811,11 @@ impl Default for PassiveSession {
             }),
             #[cfg(feature = "reassembly")]
             now_ms: 0,
+            #[cfg(feature = "codec-frame")]
+            sn_last: [[None; SN_CONDUITS]; 2],
+            #[cfg(feature = "codec-frame")]
+            sn_accounting: [SnAccounting::default(); 2],
+            resync_depth: DEFAULT_RESYNC_DEPTH,
         }
     }
 }
@@ -608,6 +865,24 @@ impl PassiveSession {
     /// a quota is a bound on CONCURRENCY, not on DURATION: a peer that opens
     /// four chains and abandons them holds those slots for as long as the
     /// reader runs. Bounded for a file that ends; not for a live tap.
+    /// R311y609 — how much evidence this observer demands before it resumes a
+    /// desynchronised direction. See [`DEFAULT_RESYNC_DEPTH`].
+    ///
+    /// A BUILDER rather than a constructor, so it composes with
+    /// [`Self::with_reassembly_window`], and a setter is honest here where it
+    /// was not for the reassembly window: changing the depth mid-flight
+    /// affects only scans that have not yet accepted, and there is no armed
+    /// state to re-interpret.
+    ///
+    /// `0` restores the pre-R311y609 behaviour exactly: a desynchronised
+    /// direction is abandoned. Kept reachable because it is also the arm that
+    /// PROVES the recovery does something — a test that cannot turn a feature
+    /// off cannot show it was the feature that acted.
+    pub fn with_resync_depth(mut self, depth: usize) -> Self {
+        self.resync_depth = depth;
+        self
+    }
+
     #[cfg(feature = "reassembly")]
     pub fn with_reassembly_window(window_ms: u64) -> Self {
         Self {
@@ -662,27 +937,42 @@ impl PassiveSession {
     /// boundary without the caller doing anything.
     pub fn next_frame(&mut self, direction: Direction) -> Result<PassiveFrame, PassiveStall> {
         let width = self.context.prefix_width();
+        let depth = self.resync_depth;
         let stream = self.stream_mut(direction);
-        if stream.desynchronised {
-            return Err(PassiveStall::NeedMoreBytes);
+
+        // R311y609 — a desynchronised direction is no longer terminal: the
+        // detecting call announced it, and every later one scans.
+        if stream.desync.is_some() {
+            match stream.try_resync(width, depth) {
+                Some(resync) => stream.pending_resync = Some(resync),
+                None => return Err(PassiveStall::NeedMoreBytes),
+            }
         }
+
         if stream.buf.len() < width {
             return Err(PassiveStall::NeedMoreBytes);
         }
-        let payload_len = match width {
-            PREFIX_WIDTH_LOWLATENCY => {
-                u32::from_le_bytes([stream.buf[0], stream.buf[1], stream.buf[2], stream.buf[3]])
-                    as usize
-            }
-            _ => u16::from_le_bytes([stream.buf[0], stream.buf[1]]) as usize,
-        };
+        let payload_len = read_prefix(&stream.buf, 0, width);
         let stream_offset = stream.consumed;
         if payload_len > MAX_FRAME_PAYLOAD {
-            stream.desynchronised = true;
-            return Err(PassiveStall::Desynchronised {
-                stream_offset,
+            return Err(stream.desynchronise(DesyncReason::OversizeLength {
                 claimed_len: payload_len,
-            });
+            }));
+        }
+        if payload_len == 0 {
+            return Err(stream.desynchronise(DesyncReason::EmptyFrame));
+        }
+        // The header byte decides the boundary, and it arrives long before the
+        // rest of the body — so it is judged HERE rather than after the wait.
+        // A wrong 2-byte prefix routinely frames tens of kilobytes; waiting for
+        // them before noticing would hand the scan a starting point that is
+        // already past the boundary it is looking for.
+        if stream.buf.len() < width + 1 {
+            return Err(PassiveStall::NeedMoreBytes);
+        }
+        let header = stream.buf[width];
+        if !wz_codecs::wire_const::is_credible_transport_header(header) {
+            return Err(stream.desynchronise(DesyncReason::ImplausibleHeader { header }));
         }
         if stream.buf.len() < width + payload_len {
             return Err(PassiveStall::NeedMoreBytes);
@@ -690,11 +980,14 @@ impl PassiveSession {
         let body: Vec<u8> = stream.buf[width..width + payload_len].to_vec();
         stream.buf.drain(..width + payload_len);
         stream.consumed += width + payload_len;
+        let resync = stream.pending_resync.take();
 
         let frame = parse_inbound(&body);
         if let Ok(ref f) = frame {
             self.fold(direction, f);
         }
+        #[cfg(feature = "codec-frame")]
+        let sn_verdict = self.track_sn(direction, &frame);
         let carried = self.decode_carried(direction, &frame);
         Ok(PassiveFrame {
             direction,
@@ -708,7 +1001,92 @@ impl PassiveSession {
             // multicast stream transport — so the question this flag answers
             // cannot arise here.
             inadmissible_on_link: false,
+            #[cfg(feature = "codec-frame")]
+            sn_verdict,
+            resync,
         })
+    }
+
+    /// R311y609 (C12) — the SN accounting for one direction so far.
+    #[cfg(feature = "codec-frame")]
+    pub fn sn_accounting(&self, direction: Direction) -> SnAccounting {
+        self.sn_accounting[usize::from(direction == Direction::B)]
+    }
+
+    /// R311y609 — the resynchronisation accounting for one direction so far.
+    /// Always zero on a datagram link, which has no framing to lose.
+    pub fn resync_accounting(&self, direction: Direction) -> ResyncAccounting {
+        self.stream(direction).accounting
+    }
+
+    /// R311y609 (C12) — judge one decoded frame's sequence number against the
+    /// last one seen on its conduit, and fold the verdict into the direction's
+    /// accounting.
+    ///
+    /// Returns `None` for every message that carries no SN, which is what
+    /// keeps a keepalive-only stretch of a capture from looking like a gap.
+    #[cfg(feature = "codec-frame")]
+    fn track_sn(
+        &mut self,
+        direction: Direction,
+        frame: &Result<InboundFrame, InboundParseError>,
+    ) -> Option<SnVerdict> {
+        let (sn, reliable, priority) = match frame {
+            Ok(InboundFrame::Frame {
+                sn,
+                reliable,
+                priority,
+                ..
+            }) => (*sn, *reliable, *priority),
+            #[cfg(feature = "reassembly")]
+            Ok(InboundFrame::Fragment {
+                sn,
+                reliable,
+                priority,
+                ..
+            }) => (*sn, *reliable, *priority),
+            _ => return None,
+        };
+        let idx = usize::from(direction == Direction::B);
+        let acc = &mut self.sn_accounting[idx];
+        acc.frames += 1;
+        let Some(mask) = self.context.sn_mask() else {
+            acc.without_resolution += 1;
+            return Some(SnVerdict::WithoutResolution);
+        };
+        let conduit = sn_conduit(priority, reliable);
+        let slot = &mut self.sn_last[idx][conduit];
+        let verdict = match *slot {
+            None => SnVerdict::Baseline,
+            Some(last) if (sn & mask) == (last & mask) => SnVerdict::Duplicate,
+            Some(last) if !crate::sn::precedes(mask, last, sn) => SnVerdict::OutOfWindow,
+            Some(last) => {
+                // `precedes` held, so the modular distance is in `1..=half`.
+                let step = sn.wrapping_sub(last) & mask;
+                if step == 1 {
+                    SnVerdict::Continuous
+                } else {
+                    SnVerdict::Gap { missing: step - 1 }
+                }
+            }
+        };
+        match verdict {
+            SnVerdict::Duplicate => acc.duplicates += 1,
+            SnVerdict::OutOfWindow => acc.out_of_window += 1,
+            SnVerdict::Gap { missing } => {
+                acc.gaps += 1;
+                acc.missing += missing;
+            }
+            _ => {}
+        }
+        // A stale or duplicated SN does NOT move the baseline — the same rule
+        // `RxSn::admit` applies on the participant side, and for the same
+        // reason: letting a reordered datagram rewind the counter would turn
+        // the next in-order frame into a fabricated gap.
+        if !matches!(verdict, SnVerdict::Duplicate | SnVerdict::OutOfWindow) {
+            *slot = Some(sn);
+        }
+        Some(verdict)
     }
 
     /// R311y585 (A4) — the key-expression bindings observed so far.
@@ -810,6 +1188,11 @@ impl PassiveSession {
                 self.fold(direction, f);
             }
         }
+        // R311y609 (C12) — an inadmissible message is not folded, and it is
+        // not NUMBERED either: an INIT on a multicast link carries no SN, and
+        // a data frame that reaches here has one whatever the link is.
+        #[cfg(feature = "codec-frame")]
+        let sn_verdict = self.track_sn(direction, &frame);
         let carried = self.decode_carried(direction, &frame);
         PassiveFrame {
             direction,
@@ -823,6 +1206,11 @@ impl PassiveSession {
             exceeds_negotiated_batch: self.exceeds_batch(bytes.len()),
             carried,
             inadmissible_on_link: inadmissible,
+            #[cfg(feature = "codec-frame")]
+            sn_verdict,
+            // A datagram link has no framing to lose: one datagram is one
+            // whole message, so there is no boundary to be wrong about.
+            resync: None,
         }
     }
 
@@ -996,6 +1384,220 @@ impl PassiveSession {
             Direction::A => &mut self.a,
             Direction::B => &mut self.b,
         }
+    }
+
+    fn stream(&self, direction: Direction) -> &DirectionStream {
+        match direction {
+            Direction::A => &self.a,
+            Direction::B => &self.b,
+        }
+    }
+}
+
+/// R311y609 — read a length prefix of `width` bytes at `at`.
+///
+/// The caller has already checked that `buf` holds them; a shared reader
+/// because the resynchronisation scan must read prefixes exactly the way
+/// [`PassiveSession::next_frame`] does, and a second copy of the width match
+/// is a second place for the two to disagree.
+fn read_prefix(buf: &[u8], at: usize, width: usize) -> usize {
+    match width {
+        PREFIX_WIDTH_LOWLATENCY => {
+            u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]) as usize
+        }
+        _ => u16::from_le_bytes([buf[at], buf[at + 1]]) as usize,
+    }
+}
+
+/// R311y609 — how one candidate frame in a resynchronisation chain came out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Candidate {
+    /// The bytes at this offset cannot be a frame, whatever arrives later.
+    /// The scan may advance past this offset for good.
+    Refuted,
+    /// Consistent so far, and it ends at this absolute buffer index.
+    Framed(usize),
+    /// Not enough bytes to say, and `needed` is the buffer length at which it
+    /// could be judged again.
+    ///
+    /// The number is carried rather than discarded because it is what keeps
+    /// the scan affordable: no verdict anywhere in the buffer can change until
+    /// the buffer reaches the SMALLEST `needed` among the unresolved
+    /// candidates, so the whole walk is skipped until then.
+    Short { needed: usize },
+}
+
+/// R311y609 — test the bytes at `at` as one framed transport message.
+fn candidate_at(buf: &[u8], at: usize, width: usize) -> Candidate {
+    if buf.len() < at + width {
+        return Candidate::Short { needed: at + width };
+    }
+    let len = read_prefix(buf, at, width);
+    if len == 0 || len > MAX_FRAME_PAYLOAD {
+        return Candidate::Refuted;
+    }
+    if buf.len() < at + width + 1 {
+        return Candidate::Short {
+            needed: at + width + 1,
+        };
+    }
+    if !wz_codecs::wire_const::is_credible_transport_header(buf[at + width]) {
+        return Candidate::Refuted;
+    }
+    if buf.len() < at + width + len {
+        return Candidate::Short {
+            needed: at + width + len,
+        };
+    }
+    Candidate::Framed(at + width + len)
+}
+
+/// R311y609 — how far past a desynchronisation the true boundary can hide.
+///
+/// Every transport frame is at most [`MAX_FRAME_PAYLOAD`] plus its prefix, so
+/// ANY window of that many consecutive received bytes contains at least one
+/// real frame boundary. That makes the window a guarantee rather than a
+/// heuristic: a scan that crosses it without confirming anything has not been
+/// unlucky, it has been looking at bytes whose framing it cannot recover.
+pub const RESYNC_SCAN_WINDOW: usize = MAX_FRAME_PAYLOAD + PREFIX_WIDTH_LOWLATENCY;
+
+impl DirectionStream {
+    /// R311y609 — judge this direction desynchronised and start a scan.
+    ///
+    /// Consumes NOTHING. That is the load-bearing part: the scan begins at the
+    /// suspect boundary itself, so a boundary hiding one byte later is found,
+    /// and the frame offsets a consumer sees stay monotonic — a reader that
+    /// had swallowed the suspect frame first would either lose up to 64 KiB of
+    /// real bytes to a bogus length or have to report offsets that go
+    /// backwards.
+    fn desynchronise(&mut self, reason: DesyncReason) -> PassiveStall {
+        let at_offset = self.consumed;
+        if self.desync.is_none() {
+            self.accounting.desyncs += 1;
+            self.desync = Some(DesyncState {
+                at_offset,
+                reason,
+                scan_cursor: 0,
+                rescan_at: 0,
+            });
+        }
+        PassiveStall::Desynchronised {
+            stream_offset: at_offset,
+            reason,
+        }
+    }
+
+    /// R311y609 — look for a boundary `depth` chained frames agree on.
+    ///
+    /// Returns the recovery on success, having dropped the skipped bytes and
+    /// cleared the desynchronised state. `None` means "not yet" — either the
+    /// scan has no confirmable boundary in the bytes it holds, or `depth` is 0
+    /// and recovery is switched off.
+    ///
+    /// # Why it does not stop at the first unresolved candidate
+    ///
+    /// It did, in the first version of this function, and the measurement is
+    /// what caught it: `a_resync_scan_over_random_bytes` accepted a boundary
+    /// in 0 of 400 noise buffers AT EVERY DEPTH, which is not a scan
+    /// discriminating — it is a scan that never ran. A 2-byte prefix read off
+    /// arbitrary bytes claims ~32 KiB on average, so nearly every candidate is
+    /// short of data, and stopping on the first of them parked the cursor at
+    /// the desynchronisation point forever. Real payload bytes do the same
+    /// thing for the same reason.
+    ///
+    /// So an unresolved candidate no longer blocks the ones after it.
+    /// CONFIRMED EVIDENCE BEATS UNRESOLVED POSSIBILITY: the scan may accept a
+    /// later boundary while an earlier one is still unproven, and what makes
+    /// that honest rather than sloppy is that [`StreamResync::skipped`] says
+    /// how much it stepped over. The cursor still advances only across a
+    /// CONTIGUOUS refuted prefix, so no offset is abandoned unexamined.
+    fn try_resync(&mut self, width: usize, depth: usize) -> Option<StreamResync> {
+        let state = self.desync?;
+        if depth == 0 {
+            return None;
+        }
+        // Nothing anywhere in the buffer can change verdict until it reaches
+        // the smallest length some unresolved candidate was waiting for.
+        // Without this the whole buffer is re-walked on every pushed segment.
+        if self.buf.len() < state.rescan_at {
+            return None;
+        }
+        let mut cursor = state.scan_cursor;
+        let mut rescan_at = usize::MAX;
+        let mut accepted = None;
+        let mut candidate = cursor;
+        while candidate < self.buf.len() {
+            let mut at = candidate;
+            let mut confirmed = 0usize;
+            let verdict = loop {
+                if confirmed == depth {
+                    break Candidate::Framed(at);
+                }
+                match candidate_at(&self.buf, at, width) {
+                    Candidate::Framed(next) => {
+                        at = next;
+                        confirmed += 1;
+                    }
+                    other => break other,
+                }
+            };
+            match verdict {
+                Candidate::Framed(_) => {
+                    accepted = Some(candidate);
+                    break;
+                }
+                // Refuted for good — the bytes cannot change. The cursor
+                // follows only while the refutations are contiguous from it.
+                Candidate::Refuted => {
+                    if candidate == cursor {
+                        cursor += 1;
+                    }
+                }
+                // Unresolved. Remember when it could be judged again, and keep
+                // looking at the offsets after it.
+                Candidate::Short { needed } => rescan_at = rescan_at.min(needed),
+            }
+            candidate += 1;
+        }
+        let Some(offset) = accepted else {
+            let state = self.desync.as_mut().expect("state was Some");
+            state.scan_cursor = cursor;
+            // Nothing unresolved means nothing to wait FOR: only a longer
+            // buffer can change the answer.
+            state.rescan_at = if rescan_at == usize::MAX {
+                self.buf.len() + 1
+            } else {
+                rescan_at
+            };
+            // The window is a GUARANTEE, not a budget: any run of
+            // `RESYNC_SCAN_WINDOW` received bytes holds at least one true
+            // frame boundary. Having examined that many without confirming
+            // one, this reader cannot recover the framing of those bytes, so
+            // it drops them — bounded memory, and the skip stays visible in
+            // the accounting because `skipped` is measured off `consumed`.
+            if cursor > RESYNC_SCAN_WINDOW {
+                let drop = cursor - RESYNC_SCAN_WINDOW;
+                self.buf.drain(..drop);
+                self.consumed += drop;
+                let state = self.desync.as_mut().expect("state was Some");
+                state.scan_cursor -= drop;
+                state.rescan_at = state.rescan_at.saturating_sub(drop);
+            }
+            return None;
+        };
+        self.buf.drain(..offset);
+        self.consumed += offset;
+        self.desync = None;
+        self.accounting.recoveries += 1;
+        let skipped = self.consumed - state.at_offset;
+        self.accounting.skipped_bytes += skipped as u64;
+        Some(StreamResync {
+            desync_offset: state.at_offset,
+            reason: state.reason,
+            resumed_offset: self.consumed,
+            skipped,
+            confirmed: depth,
+        })
     }
 }
 
@@ -1265,13 +1867,14 @@ mod tests {
     /// Testing it on a `u16` stream would have asserted nothing while reading
     /// as though it had.
     ///
-    /// The direction is then ABANDONED, not retried: nothing in the framing
-    /// lets a reader that started mid-frame resynchronise, so the honest
-    /// answer is to say so once and stop.
+    /// R311y609 — the direction is announced ONCE and then scans. With
+    /// recovery switched off (`with_resync_depth(0)`) it is abandoned, which
+    /// is the pre-R311y609 behaviour this test asserted before, kept as the
+    /// arm that proves the recovery is what acts.
     #[test]
     fn an_oversize_prefix_desynchronises_instead_of_allocating() {
         let ll = || vec![unit_ext(est_ext::LOWLATENCY)];
-        let mut s = PassiveSession::new();
+        let mut s = PassiveSession::new().with_resync_depth(0);
         s.push(Direction::A, &framed(&init_wire(false, ll()), 2));
         s.push(Direction::B, &framed(&init_wire(true, ll()), 2));
         s.push(Direction::A, &framed(&open_wire(false), 2));
@@ -1288,11 +1891,13 @@ mod tests {
                 // The two frames already consumed on A: its Init and its Open.
                 stream_offset: framed(&init_wire(false, ll()), 2).len()
                     + framed(&open_wire(false), 2).len(),
-                claimed_len: 0x00FF_FFFF,
+                reason: DesyncReason::OversizeLength {
+                    claimed_len: 0x00FF_FFFF
+                },
             }),
             "the guard fires with the offending offset and the length it asked for"
         );
-        // Abandoned: more bytes do not revive the direction.
+        // Abandoned: more bytes do not revive the direction at depth 0.
         s.push(
             Direction::A,
             &framed(&[wz_codecs::wire_const::T_MID_KEEP_ALIVE], 4),
@@ -1300,7 +1905,19 @@ mod tests {
         assert_eq!(
             s.next_frame(Direction::A).err(),
             Some(PassiveStall::NeedMoreBytes),
-            "a desynchronised direction stays abandoned"
+            "a desynchronised direction stays abandoned when recovery is off"
+        );
+        // The announcement is not repeated: a caller that polls must not see
+        // the same desynchronisation a thousand times.
+        assert_eq!(
+            s.next_frame(Direction::A).err(),
+            Some(PassiveStall::NeedMoreBytes),
+            "the desynchronisation is announced once, not on every call"
+        );
+        assert_eq!(
+            s.resync_accounting(Direction::A).desyncs,
+            1,
+            "and it is counted once"
         );
         // ...and the OTHER direction is untouched: desync is per-stream.
         s.push(
@@ -1310,6 +1927,10 @@ mod tests {
         assert!(
             s.next_frame(Direction::B).is_ok(),
             "the peer direction still decodes"
+        );
+        assert_eq!(
+            s.resync_accounting(Direction::B),
+            ResyncAccounting::default()
         );
     }
 
@@ -1641,5 +2262,577 @@ mod tests {
         s.push(Direction::A, &framed(&init_wire(false, vec![]), 2));
         let f = s.next_frame(Direction::A).expect("init");
         assert!(!f.exceeds_negotiated_batch);
+    }
+
+    // ─── R311y609 — desynchronisation: detection, then recovery ───
+
+    /// A body that opens with a byte no transport header can be. All-zero
+    /// after the first byte, so every candidate offset INSIDE it reads a
+    /// zero-length prefix and is refuted for good — which makes the
+    /// resynchronisation scan below deterministic instead of data-dependent.
+    fn bogus_frame(header: u8) -> Vec<u8> {
+        let mut body = vec![header];
+        body.extend_from_slice(&[0u8; 20]);
+        framed(&body, 2)
+    }
+
+    /// THE DEFECT R311y609 CLOSES, stated as the thing that used to happen.
+    ///
+    /// A stream read at the wrong boundary frames arbitrary payload bytes, and
+    /// `parse_inbound` answers `Unknown { mid }` for 25 of the 32 MID values —
+    /// an `Ok`. Nothing above the framing could tell a wrong boundary from a
+    /// message this build cannot name, so the reader walked the whole capture
+    /// misframed, reporting confident nonsense. The first assertion is that
+    /// old behaviour, which still holds one layer down; the second is the
+    /// layer that now refuses it.
+    #[test]
+    fn a_body_that_cannot_be_a_transport_header_desynchronises_rather_than_decoding() {
+        // 0x1F is not a transport MID, and the decoder says so with an `Ok`.
+        assert!(matches!(
+            parse_inbound(&[0x1F, 0xAA, 0xBB]),
+            Ok(InboundFrame::Unknown { mid: 0x1F })
+        ));
+
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &bogus_frame(0x1F));
+        assert_eq!(
+            s.next_frame(Direction::A).err(),
+            Some(PassiveStall::Desynchronised {
+                stream_offset: 0,
+                reason: DesyncReason::ImplausibleHeader { header: 0x1F },
+            }),
+            "the boundary is judged before the body is trusted"
+        );
+        assert_eq!(s.resync_accounting(Direction::A).desyncs, 1);
+    }
+
+    /// The detector fires on the HEADER, which arrives with the prefix, not
+    /// after the body. A wrong 2-byte prefix routinely frames tens of
+    /// kilobytes; a reader that waited for them would begin its scan far past
+    /// the boundary it is looking for.
+    #[test]
+    fn the_boundary_is_judged_before_the_body_has_arrived() {
+        let mut s = PassiveSession::new();
+        // Prefix claims 60000 bytes; only the prefix and one header byte are
+        // pushed.
+        s.push(Direction::A, &[0x60, 0xEA, 0x1F]);
+        assert_eq!(
+            s.next_frame(Direction::A).err(),
+            Some(PassiveStall::Desynchronised {
+                stream_offset: 0,
+                reason: DesyncReason::ImplausibleHeader { header: 0x1F },
+            }),
+            "3 bytes are enough to refuse a 60002-byte frame"
+        );
+    }
+
+    /// A zero-length frame is a boundary error, not a message: every transport
+    /// message is at least its own header byte.
+    #[test]
+    fn a_zero_length_prefix_desynchronises() {
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &[0x00, 0x00, 0x04]);
+        assert_eq!(
+            s.next_frame(Direction::A).err(),
+            Some(PassiveStall::Desynchronised {
+                stream_offset: 0,
+                reason: DesyncReason::EmptyFrame,
+            })
+        );
+    }
+
+    /// THE RECOVERY. A capture with a hole desynchronises, scans, and resumes
+    /// at the true boundary — reporting how far it skipped and on how much
+    /// evidence, so the hole is visible rather than silently closed.
+    #[test]
+    fn a_desynchronised_stream_resumes_at_the_true_boundary() {
+        let good: Vec<Vec<u8>> = (0..DEFAULT_RESYNC_DEPTH as u64)
+            .map(|i| framed(&frame_wire(i, &oam_record(i)), 2))
+            .collect();
+        let bogus = bogus_frame(0x1F);
+
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &bogus);
+        assert!(s.next_frame(Direction::A).is_err(), "desynchronises");
+        for g in &good {
+            s.push(Direction::A, g);
+        }
+        let f = s
+            .next_frame(Direction::A)
+            .expect("the scan finds the boundary");
+        assert_eq!(
+            f.resync,
+            Some(StreamResync {
+                desync_offset: 0,
+                reason: DesyncReason::ImplausibleHeader { header: 0x1F },
+                resumed_offset: bogus.len(),
+                skipped: bogus.len(),
+                confirmed: DEFAULT_RESYNC_DEPTH,
+            }),
+            "the recovery names the hole it stepped over"
+        );
+        assert!(
+            matches!(f.frame, Ok(InboundFrame::Frame { sn: 0, .. })),
+            "and the frame it resumed on is the real one"
+        );
+        // The rest of the stream decodes normally, and carries no resync.
+        for expect in 1..DEFAULT_RESYNC_DEPTH as u64 {
+            let f = s.next_frame(Direction::A).expect("continues");
+            assert_eq!(f.resync, None, "the recovery is reported once");
+            assert!(matches!(f.frame, Ok(InboundFrame::Frame { sn, .. }) if sn == expect));
+        }
+        let acc = s.resync_accounting(Direction::A);
+        assert_eq!(
+            acc,
+            ResyncAccounting {
+                desyncs: 1,
+                recoveries: 1,
+                skipped_bytes: bogus.len() as u64,
+            }
+        );
+    }
+
+    /// The scan will not resume on THIN evidence: one frame short of the depth
+    /// is still a stall, and the frame that completes the chain is what
+    /// releases it. Without this the depth would be a decoration — a scan that
+    /// accepted whatever was buffered would pass the test above too.
+    #[test]
+    fn a_resync_needs_its_whole_chain_before_it_resumes() {
+        let good: Vec<Vec<u8>> = (0..DEFAULT_RESYNC_DEPTH as u64)
+            .map(|i| framed(&frame_wire(i, &oam_record(i)), 2))
+            .collect();
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &bogus_frame(0x1F));
+        assert!(s.next_frame(Direction::A).is_err());
+
+        for (i, g) in good.iter().enumerate() {
+            s.push(Direction::A, g);
+            if i + 1 < DEFAULT_RESYNC_DEPTH {
+                assert_eq!(
+                    s.next_frame(Direction::A).err(),
+                    Some(PassiveStall::NeedMoreBytes),
+                    "{} of {DEFAULT_RESYNC_DEPTH} frames is not a boundary",
+                    i + 1
+                );
+            }
+        }
+        assert!(
+            s.next_frame(Direction::A).is_ok(),
+            "the last frame of the chain releases the scan"
+        );
+    }
+
+    /// A candidate that failed for LACK OF BYTES is not refuted, and the scan
+    /// cursor must park on it rather than step past. The arm that shows it: a
+    /// boundary whose confirming chain arrives one byte at a time — a scan
+    /// that advanced past viable offsets would have walked off the true one
+    /// long before the bytes that prove it.
+    #[test]
+    fn the_scan_cursor_parks_on_a_viable_candidate_rather_than_stepping_past() {
+        let good: Vec<u8> = (0..DEFAULT_RESYNC_DEPTH as u64)
+            .flat_map(|i| framed(&frame_wire(i, &oam_record(i)), 2))
+            .collect();
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &bogus_frame(0x1F));
+        assert!(s.next_frame(Direction::A).is_err());
+        for byte in &good {
+            s.push(Direction::A, &[*byte]);
+            let _ = s.next_frame(Direction::A);
+        }
+        let acc = s.resync_accounting(Direction::A);
+        assert_eq!(
+            acc.recoveries, 1,
+            "the boundary is still found byte by byte"
+        );
+    }
+
+    /// THE MEASUREMENT THE DEFAULT DEPTH IS CHOSEN FROM.
+    ///
+    /// The question is not "does the scan accept noise" but "given `noise`
+    /// bytes between the desynchronisation and the true boundary, does it land
+    /// ON the boundary", so the corpus is noise FOLLOWED BY a real chain and
+    /// the verdict is compared against the offset the boundary is known to be
+    /// at.
+    ///
+    /// An earlier version measured pure noise in a 4096-byte buffer and got
+    /// 0/400 at every depth. That number was an artefact twice over: the scan
+    /// was parked (see [`DirectionStream::try_resync`]), and once unparked a
+    /// buffer that small refutes most candidates for free, because a 2-byte
+    /// prefix off arbitrary bytes claims ~32 KiB and there is nowhere to put
+    /// it. Both would have read as "the depth discriminates beautifully".
+    ///
+    /// A wrong boundary is also SELF-CORRECTING and visible: the chain is only
+    /// `d` frames long, so the reader desynchronises again within a few frames
+    /// and the accounting shows repeated recoveries. That is why a rate in the
+    /// low percent is a usable answer rather than a disqualifying one.
+    #[test]
+    fn the_resync_scan_lands_on_the_true_boundary_across_noise() {
+        // xorshift64*, so the corpus is deterministic across machines and
+        // across runs — a measurement nobody can reproduce is an anecdote.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        const TRIALS: usize = 10;
+        // The real region must be LONGER THAN ONE MAXIMUM FRAME, and finding
+        // that out is itself a result: a shorter one let the reader's very
+        // first read swallow a plausible-but-bogus 60 KB length, jump past
+        // every real frame, and stall on `NeedMoreBytes` having never
+        // desynchronised at all. That is not an artefact of the fixture — it
+        // is what a mid-frame attach does to a flow that then ENDS, and it is
+        // recorded in this round's carry rather than papered over here.
+        const REAL_FRAMES: u64 = 12_000;
+        let one = |i: u64| framed(&frame_wire(i, &oam_record(i)), 2);
+        let real: Vec<u8> = (0..REAL_FRAMES).flat_map(one).collect();
+        assert!(
+            real.len() > MAX_FRAME_PAYLOAD,
+            "the fixture must outlast one bogus maximum-length frame"
+        );
+
+        // The offsets a correctly-framed reader would report, for a given
+        // amount of noise in front of the real chain.
+        let boundaries = |noise_len: usize| -> alloc::collections::BTreeSet<usize> {
+            let mut at = noise_len;
+            (0..REAL_FRAMES)
+                .map(|i| {
+                    let here = at;
+                    at += one(i).len();
+                    here
+                })
+                .collect()
+        };
+
+        let mut worst_at_default = usize::MAX;
+        for noise_len in [512usize, 8192, 65536] {
+            // ONE corpus per noise length, reused across depths: an unpaired
+            // sweep made a deeper chain look WORSE than a shallower one, which
+            // a depth-`d+1` chain being a depth-`d` chain forbids, and that
+            // impossibility is how the flaw was spotted.
+            let corpus: Vec<Vec<u8>> = (0..TRIALS)
+                .map(|_| {
+                    let mut buf: Vec<u8> = (0..noise_len).map(|_| (next() >> 24) as u8).collect();
+                    buf.extend_from_slice(&real);
+                    buf
+                })
+                .collect();
+            let truth = boundaries(noise_len);
+            for depth in [4usize, 6, 8] {
+                let mut worst_recovered = usize::MAX;
+                let mut total_resyncs = 0usize;
+                let mut trials_without_recovery = 0usize;
+                let mut wrong_after_last_resync = 0usize;
+                let mut worst_lead_in = 0usize;
+                for buf in &corpus {
+                    // END TO END, through the real entry point: a scan that
+                    // resumes on a framing which steps over the boundary is
+                    // not stuck there — the next implausible header
+                    // desynchronises it again, and the rescan starts closer.
+                    // Judging the scan on ONE acceptance would have scored
+                    // that self-correction as a permanent failure.
+                    let mut s = PassiveSession::new().with_resync_depth(depth);
+                    s.push(Direction::A, buf);
+                    let mut recovered = 0usize;
+                    let mut resyncs_here = 0usize;
+                    // After the LAST recovery: how many frames the reader
+                    // reports before its framing rejoins the true boundaries
+                    // (`lead_in`), and how many it reports off them AFTERWARDS
+                    // (`drift`). The second must be zero — a framing that
+                    // rejoined the truth and then left it again is the
+                    // confident-nonsense failure this round exists to remove.
+                    let (mut lead_in, mut drift, mut rejoined) = (0usize, 0usize, false);
+                    loop {
+                        match s.next_frame(Direction::A) {
+                            Ok(f) => {
+                                if f.resync.is_some() {
+                                    total_resyncs += 1;
+                                    resyncs_here += 1;
+                                    lead_in = 0;
+                                    drift = 0;
+                                    rejoined = false;
+                                }
+                                if truth.contains(&f.stream_offset) {
+                                    recovered += 1;
+                                    rejoined = true;
+                                } else if rejoined {
+                                    drift += 1;
+                                } else {
+                                    lead_in += 1;
+                                }
+                            }
+                            Err(PassiveStall::Desynchronised { .. }) => {}
+                            Err(PassiveStall::NeedMoreBytes) => break,
+                        }
+                    }
+                    if resyncs_here == 0 {
+                        trials_without_recovery += 1;
+                    }
+                    wrong_after_last_resync += drift;
+                    worst_lead_in = worst_lead_in.max(lead_in);
+                    worst_recovered = worst_recovered.min(recovered);
+                }
+                let pct = worst_recovered * 100 / truth.len();
+                std::eprintln!(
+                    "noise {noise_len:>5}  depth {depth:>2}: worst trial kept \
+                     {worst_recovered:>5} of {} real frames ({pct}%), \
+                     {total_resyncs} resyncs, {trials_without_recovery} trials \
+                     never recovered, lead-in {worst_lead_in}, drift \
+                     {wrong_after_last_resync}, over {TRIALS} trials",
+                    truth.len()
+                );
+                if depth == DEFAULT_RESYNC_DEPTH {
+                    worst_at_default = worst_at_default.min(pct);
+                    // THE TWO CLAIMS THIS ROUND MAKES, and neither is "the
+                    // first accepted boundary is always right" — at long noise
+                    // runs it is not, and it does not need to be, because a
+                    // wrong resume is corrected by the next desynchronisation.
+                    //
+                    // (1) Recovery is REACHABLE: a hole no longer ends the
+                    //     direction. Today's number here is 0 of 10 trials.
+                    assert_eq!(
+                        trials_without_recovery, 0,
+                        "noise {noise_len}: a trial never recovered its framing"
+                    );
+                    // (2) Recovery STICKS: once the reader has resumed for the
+                    //     last time, every frame it reports sits on a real
+                    //     boundary. A recovery that drifted again would be the
+                    //     confident-nonsense failure this whole round exists
+                    //     to remove.
+                    assert_eq!(
+                        wrong_after_last_resync, 0,
+                        "noise {noise_len}: the framing rejoined the true \
+                         boundaries and then left them again"
+                    );
+                    // The lead-in is the cost of resuming a frame or two early
+                    // on a chain that runs INTO the boundary. Bounded, not
+                    // zero, and bounded is the honest claim.
+                    assert!(
+                        worst_lead_in <= 8,
+                        "noise {noise_len}: {worst_lead_in} frames before the \
+                         framing rejoined the truth"
+                    );
+                }
+            }
+        }
+        // The FRACTION kept is a weaker number and it is reported rather than
+        // pinned tight, because what limits it is not the scan: the loss is
+        // identical at every depth, and its cause is a read that happens
+        // BEFORE any desynchronisation — a 2-byte prefix off arbitrary bytes
+        // claims up to 65535, and a credible header behind it (42 of 256) is
+        // enough for the reader to swallow that much real data as one frame.
+        // Nothing in the framing refutes it. That is a SECOND defect, measured
+        // here and carried, not fixed by resynchronisation.
+        assert!(
+            worst_at_default >= 30,
+            "at depth {DEFAULT_RESYNC_DEPTH} the worst trial kept only \
+             {worst_at_default}% of the real frames after the hole"
+        );
+    }
+
+    /// Recovery OFF is a real setting, not a rhetorical one: at depth 0 the
+    /// scan never runs and the direction stays abandoned however many frames
+    /// arrive. The damage-probe arm for every test above.
+    #[test]
+    fn depth_zero_abandons_the_direction_exactly_as_before() {
+        let mut s = PassiveSession::new().with_resync_depth(0);
+        s.push(Direction::A, &bogus_frame(0x1F));
+        assert!(s.next_frame(Direction::A).is_err());
+        for i in 0..(DEFAULT_RESYNC_DEPTH as u64 * 4) {
+            s.push(Direction::A, &framed(&frame_wire(i, &oam_record(i)), 2));
+        }
+        assert_eq!(
+            s.next_frame(Direction::A).err(),
+            Some(PassiveStall::NeedMoreBytes),
+            "no amount of evidence revives a direction whose recovery is off"
+        );
+        assert_eq!(s.resync_accounting(Direction::A).recoveries, 0);
+    }
+
+    // ─── R311y609 (C12) — sequence-number loss accounting ───
+
+    /// The plane this closes: a reader that sees frames 0, 1, 5 must be able
+    /// to say THREE were lost, and say it per conduit.
+    #[test]
+    fn a_sequence_number_gap_counts_the_frames_the_reader_never_saw() {
+        let mut s = established(vec![]);
+        assert!(
+            s.context().sn_mask().is_some(),
+            "an InitAck was observed, so the ring is known"
+        );
+        for sn in [0u64, 1, 5, 6] {
+            s.push(Direction::A, &framed(&frame_wire(sn, &oam_record(sn)), 2));
+        }
+        let verdicts: Vec<Option<SnVerdict>> = (0..4)
+            .map(|_| s.next_frame(Direction::A).expect("frame").sn_verdict)
+            .collect();
+        assert_eq!(
+            verdicts,
+            vec![
+                Some(SnVerdict::Baseline),
+                Some(SnVerdict::Continuous),
+                Some(SnVerdict::Gap { missing: 3 }),
+                Some(SnVerdict::Continuous),
+            ]
+        );
+        let acc = s.sn_accounting(Direction::A);
+        assert_eq!(acc.frames, 4);
+        assert_eq!(acc.missing, 3);
+        assert_eq!(acc.gaps, 1);
+        assert_eq!(acc.duplicates, 0);
+        assert_eq!(acc.without_resolution, 0);
+        // The peer direction is a separate account.
+        assert_eq!(s.sn_accounting(Direction::B), SnAccounting::default());
+    }
+
+    /// A message that carries no sequence number gets no verdict — otherwise a
+    /// keepalive-only stretch of a capture would read as loss.
+    #[test]
+    fn a_message_without_a_sequence_number_gets_no_verdict() {
+        let mut s = established(vec![]);
+        s.push(
+            Direction::A,
+            &framed(&[wz_codecs::wire_const::T_MID_KEEP_ALIVE], 2),
+        );
+        assert_eq!(s.next_frame(Direction::A).expect("ka").sn_verdict, None);
+        assert_eq!(s.sn_accounting(Direction::A).frames, 0);
+    }
+
+    /// Without an InitAck there is no ring mask, and a gap verdict would be
+    /// arbitrary: too wide reads a wraparound as a gap, too narrow the
+    /// reverse. The population of unjudged frames is COUNTED, because
+    /// `missing = 0` is unreadable without it.
+    #[test]
+    fn an_unresolved_session_reports_absence_rather_than_a_gap() {
+        let mut s = PassiveSession::new();
+        assert_eq!(s.context().sn_mask(), None);
+        for sn in [0u64, 9] {
+            s.push(Direction::A, &framed(&frame_wire(sn, &oam_record(sn)), 2));
+        }
+        for _ in 0..2 {
+            assert_eq!(
+                s.next_frame(Direction::A).expect("frame").sn_verdict,
+                Some(SnVerdict::WithoutResolution)
+            );
+        }
+        let acc = s.sn_accounting(Direction::A);
+        assert_eq!(acc.without_resolution, 2);
+        assert_eq!((acc.missing, acc.gaps), (0, 0), "absence is not zero loss");
+    }
+
+    /// A duplicate and a reorder are NOT loss, and neither may move the
+    /// baseline — the rule `RxSn::admit` applies on the participant side. A
+    /// tracker that let a stale SN rewind the counter would fabricate a gap
+    /// out of the next in-order frame.
+    #[test]
+    fn a_duplicate_and_a_reorder_are_not_counted_as_loss() {
+        let mut s = established(vec![]);
+        for sn in [4u64, 5, 5, 3, 6] {
+            s.push(Direction::A, &framed(&frame_wire(sn, &oam_record(sn)), 2));
+        }
+        let verdicts: Vec<Option<SnVerdict>> = (0..5)
+            .map(|_| s.next_frame(Direction::A).expect("frame").sn_verdict)
+            .collect();
+        assert_eq!(
+            verdicts,
+            vec![
+                Some(SnVerdict::Baseline),
+                Some(SnVerdict::Continuous),
+                Some(SnVerdict::Duplicate),
+                Some(SnVerdict::OutOfWindow),
+                // 6 follows 5, NOT 3: the stale SNs did not move the baseline.
+                Some(SnVerdict::Continuous),
+            ]
+        );
+        let acc = s.sn_accounting(Direction::A);
+        assert_eq!((acc.missing, acc.gaps), (0, 0));
+        assert_eq!((acc.duplicates, acc.out_of_window), (1, 1));
+    }
+
+    /// The conduit split, which is the whole reason the tracker is not one
+    /// counter per direction: zenoh mints a separate SN series per
+    /// `(Priority, Reliability)`, so a reliable 0,1 interleaved with a
+    /// best-effort 0,1 is FOUR continuous frames, not a gap and a rewind.
+    #[test]
+    fn conduits_are_judged_separately_rather_than_as_one_series() {
+        let best_effort = |sn: u64| {
+            let mut wire = vec![wz_codecs::wire_const::T_MID_FRAME];
+            crate::vle::encode_vle_u64_into(&mut wire, sn);
+            wire.extend_from_slice(&oam_record(sn));
+            wire
+        };
+        let mut s = established(vec![]);
+        s.push(Direction::A, &framed(&frame_wire(0, &oam_record(0)), 2));
+        s.push(Direction::A, &framed(&best_effort(0), 2));
+        s.push(Direction::A, &framed(&frame_wire(1, &oam_record(1)), 2));
+        s.push(Direction::A, &framed(&best_effort(1), 2));
+        let verdicts: Vec<Option<SnVerdict>> = (0..4)
+            .map(|_| s.next_frame(Direction::A).expect("frame").sn_verdict)
+            .collect();
+        assert_eq!(
+            verdicts,
+            vec![
+                Some(SnVerdict::Baseline),
+                Some(SnVerdict::Baseline),
+                Some(SnVerdict::Continuous),
+                Some(SnVerdict::Continuous),
+            ],
+            "the reliable and best-effort series do not see each other"
+        );
+        assert_eq!(s.sn_accounting(Direction::A).missing, 0);
+    }
+
+    /// The ring seam: a wraparound is CONTINUOUS, not a gap of nearly the
+    /// whole ring. The modular arithmetic is `crate::sn`'s and this asserts
+    /// the tracker uses it rather than a plain subtraction.
+    #[test]
+    fn a_wraparound_is_continuous_rather_than_a_gap() {
+        let mut s = established(vec![]);
+        let mask = s.context().sn_mask().expect("negotiated");
+        for sn in [mask, 0] {
+            s.push(Direction::A, &framed(&frame_wire(sn, &oam_record(0)), 2));
+        }
+        assert_eq!(
+            s.next_frame(Direction::A).expect("frame").sn_verdict,
+            Some(SnVerdict::Baseline)
+        );
+        assert_eq!(
+            s.next_frame(Direction::A).expect("frame").sn_verdict,
+            Some(SnVerdict::Continuous),
+            "SN 0 follows SN {mask} on a ring of {mask}"
+        );
+        assert_eq!(s.sn_accounting(Direction::A).missing, 0);
+    }
+
+    /// The two loss numbers answer DIFFERENT questions and a capture with a
+    /// hole shows both: `skipped` is what this reader could not parse,
+    /// `missing` is what the sender numbered and nobody saw. Reporting one as
+    /// the other is how a dissector blames the wire for its own gap.
+    #[test]
+    fn skipped_bytes_and_missing_frames_are_different_numbers() {
+        let mut s = established(vec![]);
+        s.push(Direction::A, &framed(&frame_wire(0, &oam_record(0)), 2));
+        s.next_frame(Direction::A).expect("baseline");
+        // A hole in the capture: the bytes of frames 1..=3 never arrive, and
+        // what does arrive is misframed rubbish followed by frame 4 onward.
+        let bogus = bogus_frame(0x1F);
+        s.push(Direction::A, &bogus);
+        assert!(s.next_frame(Direction::A).is_err(), "desynchronises");
+        for sn in 4..(4 + DEFAULT_RESYNC_DEPTH as u64) {
+            s.push(Direction::A, &framed(&frame_wire(sn, &oam_record(sn)), 2));
+        }
+        let f = s.next_frame(Direction::A).expect("resumes");
+        assert_eq!(f.resync.expect("recovered").skipped, bogus.len());
+        assert_eq!(
+            f.sn_verdict,
+            Some(SnVerdict::Gap { missing: 3 }),
+            "the wire numbered three frames this reader never saw"
+        );
+        assert_eq!(s.sn_accounting(Direction::A).missing, 3);
+        assert_eq!(
+            s.resync_accounting(Direction::A).skipped_bytes,
+            bogus.len() as u64
+        );
     }
 }
