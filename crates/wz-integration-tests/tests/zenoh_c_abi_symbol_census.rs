@@ -133,6 +133,28 @@ const BASELINES: &[(&str, usize)] = &[
     // hosted CI provisions. 83 -> 65 at R311y573 (the zenoh-ext plane closed);
     // what remains is the SHM ALLOCATOR half and nothing else.
     ("unstable-shm", 65),
+    // R311y614 — the two arms that had NO oracle on any machine, and therefore
+    // no row: the gate hard-FAILED on them rather than guessing a ceiling from
+    // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so
+    // both were provisioned and MEASURED here.
+    //
+    // Both are ZERO, and the pair is what explains the 65 above rather than
+    // merely adding two rows. Public symbol counts, per arm:
+    //
+    //   nounstable      568   wz 568   missing 0
+    //   unstable        657   wz 657   missing 0
+    //   nounstable-shm  568   wz 568   missing 0
+    //   unstable-shm    758   wz 693   missing 65
+    //
+    // `nounstable-shm` DEFINES exactly what `nounstable` does, so
+    // `Z_FEATURE_SHARED_MEMORY` adds no public symbol on its own — upstream
+    // gates the SHM surface behind UNSTABLE as well. The whole 101-symbol
+    // difference between `unstable` and `unstable-shm` is therefore
+    // shared-memory-with-unstable, and the 65 wz is missing is the ALLOCATOR
+    // half of it and nothing else. That is a sharper statement of the same
+    // debt: the gap is not "SHM", it is one plane on one of four arms.
+    ("unstable", 0),
+    ("nounstable-shm", 0),
 ];
 
 /// The committed ceiling for `arm`, or a FAILURE naming what to measure.

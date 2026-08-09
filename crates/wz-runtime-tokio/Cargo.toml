@@ -1788,16 +1788,28 @@ libloading = { version = "0.8", optional = true }
 # R311y594 (B1) — the capture front end the live tap feeds. Optional and pulled
 # only by `live-capture`; it stays a dev-dependency as well, because the pcap
 # end-to-end test uses it without asking for a privileged socket.
+# R311y614 — `default-features = false` with `reassembly` named explicitly, and
+# NOT because the runtime dislikes the network codecs. Cargo unifies features
+# across the whole graph, so wz-capture's defaults become wz-session-core's
+# defaults HERE: R311y613 put five `codec-*` in wz-capture's dependency line and
+# Layer C1bi's negative arm (`send_request_query` must answer `FeatureDisabled`
+# with `codec-request` OFF) started getting `Ok(())` in a subset build that
+# never asked for the feature. `reassembly` is what this crate's use of
+# wz-capture actually needs, so it is what this crate asks for.
 [dependencies.wz-capture]
 path = "../wz-capture"
 optional = true
+default-features = false
+features = ["reassembly"]
 
 [dev-dependencies]
 # R311y578 (G1) — the capture-side front end, used by
 # `tests/pcap_dissect_e2e.rs` to prove a REAL wz handshake replays through
 # pcap -> decapsulation -> TCP reassembly -> the passive decoder. Dev-only:
 # nothing in the runtime reads a capture.
-wz-capture = { path = "../wz-capture" }
+wz-capture = { path = "../wz-capture", default-features = false, features = [
+    "reassembly",
+] }
 # R311y519 — `test-util` is NOT part of tokio's `full`, and the writer_queue
 # unit tests need it: the sealed-write bound is WRITER_STALL_MS, so asserting
 # that it fires under real time would cost that wall-clock in every run. Paused

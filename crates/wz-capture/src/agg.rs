@@ -374,6 +374,12 @@ impl ThroughputTable {
         // A DECLARE is absorbed and not counted: it declares a keyexpr, it does
         // not carry traffic under one, and counting it would put a row on every
         // topic a session merely named.
+        //
+        // R311y614 — gated, because `network-codecs` is switchable and the
+        // variant does not exist without it. A build with the feature off
+        // resolves only `id == 0` literals, which is the honest reach of a
+        // decoder that cannot read a DECLARE.
+        #[cfg(feature = "network-codecs")]
         if let NetworkMessage::Declare(d) = message {
             use wz_codecs::declare::DeclareOwnedVariant;
             match &d.body {
@@ -490,12 +496,21 @@ impl ThroughputTable {
 /// dropped: they never entered [`ThroughputTable::records`] either, so the
 /// unresolved fraction stays a fraction of records that HAVE a keyexpr.
 fn classify(message: &NetworkMessage) -> Option<(&WireexprOwnedVariant, KeyexprCounts)> {
+    #[cfg(feature = "network-codecs")]
     use wz_codecs::push::PushOwnedVariant;
+    #[cfg(feature = "network-codecs")]
     use wz_codecs::request::RequestOwnedVariant;
+    #[cfg(feature = "network-codecs")]
     use wz_codecs::response::ResponseOwnedVariant;
 
+    // `unused` rather than `unused_mut`: with `network-codecs` off there is no
+    // arm left that reads it, and the function correctly answers `None` for
+    // every record — a decoder that cannot name a Push has no keyexpr to
+    // attribute, which is a smaller reach and not a wrong one.
+    #[allow(unused_mut, unused_variables)]
     let mut counts = KeyexprCounts::default();
     match message {
+        #[cfg(feature = "network-codecs")]
         NetworkMessage::Push(p) => {
             match &p.body {
                 PushOwnedVariant::CodecZenohMsgPut(put)
@@ -507,6 +522,7 @@ fn classify(message: &NetworkMessage) -> Option<(&WireexprOwnedVariant, KeyexprC
             }
             Some((&p.keyexpr.body, counts))
         }
+        #[cfg(feature = "network-codecs")]
         NetworkMessage::Request(r) => {
             match &r.body {
                 RequestOwnedVariant::CodecZenohMsgPut(put) => {
@@ -520,6 +536,7 @@ fn classify(message: &NetworkMessage) -> Option<(&WireexprOwnedVariant, KeyexprC
             }
             Some((&r.keyexpr.body, counts))
         }
+        #[cfg(feature = "network-codecs")]
         NetworkMessage::Response(r) => {
             use wz_codecs::reply::ReplyOwnedVariant;
             match &r.body {
@@ -556,7 +573,11 @@ pub fn aggregate(dissection: &crate::Dissection) -> ThroughputTable {
     table
 }
 
-#[cfg(test)]
+// R311y614 — the whole module is gated, on the same rule the `Fragment` census
+// entry follows for `reassembly`: these tests assert what a build WITH the
+// network codecs does, and a build without them cannot be asked. Gating the
+// module rather than each test keeps the two from drifting.
+#[cfg(all(test, feature = "network-codecs"))]
 mod tests {
     use super::*;
     use crate::datagram_tests::udp_packet;

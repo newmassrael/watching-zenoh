@@ -3190,6 +3190,7 @@ mod datagram_tests {
     /// decoded to nothing at all is still `Ok(InboundFrame::Frame { .. })` —
     /// which is why three rounds of transport censuses passed over a build that
     /// could not name a single data-plane message.
+    #[cfg(feature = "network-codecs")]
     pub(crate) fn network_census() -> Vec<(&'static str, Vec<u8>)> {
         use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
         use wz_codecs::wireexpr_local::WireexprLocal;
@@ -3270,6 +3271,7 @@ mod datagram_tests {
     /// Wrap one network record in the transport Frame that carries it on the
     /// wire — the same envelope [`transport_census`]'s `Frame` entry uses,
     /// with a real batch in place of its two filler bytes.
+    #[cfg(feature = "network-codecs")]
     pub(crate) fn frame_carrying(record: &[u8]) -> Vec<u8> {
         let mut w = alloc::vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
         w.extend_from_slice(record);
@@ -3299,6 +3301,7 @@ mod datagram_tests {
     /// a batch that halts has stopped reading, and a census that only looked at
     /// `messages[0]` would pass on a build that reads exactly one record per
     /// frame and drops the rest.
+    #[cfg(feature = "network-codecs")]
     #[test]
     fn every_network_mid_inside_a_frame_is_named_rather_than_unknown() {
         use wz_session_core::network_message::NetworkMessage;
@@ -3341,6 +3344,7 @@ mod datagram_tests {
     /// batch is reached through a different path on each, and a census that
     /// covered one link kind is exactly how the network space went unchecked
     /// for six rounds.
+    #[cfg(feature = "network-codecs")]
     #[test]
     fn every_network_mid_inside_a_frame_is_named_over_a_stream_too() {
         use wz_session_core::network_message::NetworkMessage;
@@ -4295,6 +4299,7 @@ mod ws_flow_tests {
     /// The `is_websocket()` guard is the same one, and load-bearing for the
     /// same reason — without it a flow that failed ws detection would run the
     /// stream path and this test would silently re-measure the sibling.
+    #[cfg(feature = "network-codecs")]
     #[test]
     fn every_network_mid_inside_a_frame_is_named_over_websocket_too() {
         use wz_session_core::network_message::NetworkMessage;

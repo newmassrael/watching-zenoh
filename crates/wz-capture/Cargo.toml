@@ -32,8 +32,33 @@ workspace = true
 # alone is what shows it. Kept switchable for a consumer that genuinely wants
 # transport frames and nothing above them.
 [features]
-default = ["reassembly"]
+default = ["reassembly", "network-codecs"]
 reassembly = ["wz-session-core/reassembly"]
+
+# R311y614 — the network codec selection, and it is a FEATURE rather than an
+# unconditional dependency line for a reason that was measured the hard way.
+#
+# R311y613 added these five to the `wz-session-core` dependency directly. That
+# is correct for `-p wz-capture`, and it silently WIDENED every other crate's
+# build: `wz-runtime-tokio` carries `wz-capture` as a dev-dependency, cargo
+# unifies features across the graph, and so `wz-session-core/codec-request`
+# became ON in a subset build whose whole point was that it is OFF. Layer C1bi's
+# negative arm — `send_request_query` must answer `FeatureDisabled` — then got
+# `Ok(())`, because the reject lives on `wz-session-core`'s gate while the
+# test's own `#[cfg]` reads `wz-runtime-tokio`'s. Hosted red, local green: no
+# local lane builds that subset.
+#
+# DEFAULT-ON, so `wz-capture` alone still names the data plane and R311y613's
+# hole stays closed. Switchable, so a dependent that must not have these
+# features in its graph can say `default-features = false` — which is exactly
+# what `wz-runtime-tokio` now does.
+network-codecs = [
+    "wz-session-core/codec-push",
+    "wz-session-core/codec-request",
+    "wz-session-core/codec-response",
+    "wz-session-core/codec-response-final",
+    "wz-session-core/codec-declare",
+]
 
 [dependencies]
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
@@ -81,12 +106,12 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     #
     # Measured, not argued: `every_network_mid_inside_a_frame_is_named_rather_
     # than_unknown` red on `UnknownMid { mid: 29 }` (0x1D, PUSH) before this
-    # line existed.
-    "codec-push",
-    "codec-request",
-    "codec-response",
-    "codec-response-final",
-    "codec-declare",
+    # list existed.
+    #
+    # R311y614 moved the five OUT of this list and behind the default-on
+    # `network-codecs` feature above — see its comment: naming them here made
+    # them unconditional for every crate that carries wz-capture anywhere in its
+    # graph, including as a dev-dependency.
 ] }
 
 # R311y605 — the JOIN test fixture is built by the CODEC's own encode rather
