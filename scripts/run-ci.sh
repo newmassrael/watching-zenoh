@@ -1468,6 +1468,19 @@ PY
     # workspace-wide claim (that sweep is §3.3, its own round). Enforcement
     # MEASURED by restoring one literal, not by observing that the script runs.
     python3 scripts/lib/literal_wire_flag_lint.py || return 1
+    # R311y621 (§7.14) — the SOLO-PLANE-PAGE gate. R311y618 severed one leg of
+    # `CaptureReport::is_complete` and all 229 tests stayed green: the pages
+    # that should have caught it attached TWO planes, and the other plane
+    # already produced the verdict, so neither leg gated anything. The remedy —
+    # one plane on the page — has since been applied by hand six times across
+    # y618 / y620 / y621 with nothing requiring it, so a fourth plane could ship
+    # with only a multi-plane page behind it and every test would pass. The
+    # plane set is READ from `CaptureReport`'s own `with_*` builders rather than
+    # listed here, because a hand-kept list would be updated by the same person
+    # who forgot the page. Enforcement MEASURED three ways: a new plane with no
+    # page, a solo page that gains a second plane, and a builder set the scan
+    # cannot read — each reds, and the revert returns OK.
+    python3 scripts/lib/solo_plane_page_lint.py || return 1
     # R311y565 — the EXPIRED-BLOCKER lint. Eight times across y561-y563 a field
     # or a family sat unimplemented behind a comment naming its own reason, and
     # the reason had already dissolved -- twice in the round that wrote it. Each
@@ -5337,7 +5350,9 @@ layer_c1bt_capture_no_default_features() {
         payload::tests::the_json_adjacent_encodings_are_not_judged_as_strict_json \
         datagram_tests::the_compression_offer_is_the_entry_the_ext_codec_names \
         datagram_tests::the_compressed_fixture_negotiates_compression_and_establishes \
-        report::tests::an_undecompressible_capture_reaches_the_document_in_its_own_slot
+        report::tests::an_undecompressible_capture_reaches_the_document_in_its_own_slot \
+        agg::no_codec_tests::a_build_without_the_network_codecs_reports_the_traffic_as_unread \
+        agg::no_codec_tests::a_frame_carrying_nothing_is_not_reported_as_unread
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the --no-default-features build"

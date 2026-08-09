@@ -2161,6 +2161,59 @@ mod datagram_tests {
         }
     }
 
+    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+    use wz_codecs::wireexpr_local::WireexprLocal;
+
+    // R311y621 (§1.1k) — LIFTED here from `agg::tests`, which is gated on
+    // `network-codecs`. The plane's behaviour WITHOUT the network codecs needs
+    // the same Push on the wire, and a second builder in that module would be
+    // the copy that drifts -- the reason `frame_carrying` is `pub(crate)` too.
+    // Encoding a Push never needed the feature: `wz-capture` names `codec-push`
+    // on its `wz-codecs` line unconditionally, and `network-codecs` selects what
+    // the DECODER (`wz-session-core`) can name. That asymmetry IS the fixture.
+    /// `M=1` — the id lives in the SENDER's space.
+    pub(crate) fn sender_space(id: u64, suffix: Option<&'static str>) -> Wireexpr<'static> {
+        Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id,
+                suffix_len: suffix.map(|s| s.len() as u64),
+                suffix,
+            }),
+        }
+    }
+
+    /// A `Push` carrying `payload` under `keyexpr`, built by the Push codec.
+    ///
+    /// The header is `Push::default().header` plus the `N` bit rather than a
+    /// literal, so the MID the generated `Default` bakes cannot be lost here.
+    ///
+    /// R311y616 (§4.10) — and the `N` bit is now
+    /// [`FLAG_N_N`](wz_codecs::wire_const::FLAG_N_N) rather than the number
+    /// `0x20`, which is the other half of the same rule: a fixture that spells
+    /// a flag as a literal is a byte string wearing a struct.
+    pub(crate) fn push(keyexpr: Wireexpr<'static>, payload: &[u8]) -> Vec<u8> {
+        let has_suffix = match &keyexpr.body {
+            WireexprVariant::WireexprLocal(a) => a.suffix.is_some(),
+            WireexprVariant::WireexprNonlocal(a) => a.suffix.is_some(),
+        };
+        let n_flag = if has_suffix {
+            wz_codecs::wire_const::FLAG_N_N
+        } else {
+            0
+        };
+        wz_codecs::push::Push {
+            header: wz_codecs::push::Push::default().header | n_flag,
+            keyexpr,
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                payload_len: payload.len() as u64,
+                payload,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
     /// R311y621 (§1.4i) — the establishment ext chain that OFFERS COMPRESSION.
     ///
     /// The entry is built out of the ext codec's own types at the id
@@ -3551,7 +3604,11 @@ mod datagram_tests {
     /// Wrap one network record in the transport Frame that carries it on the
     /// wire — the same envelope [`transport_census`]'s `Frame` entry uses,
     /// with a real batch in place of its two filler bytes.
-    #[cfg(feature = "network-codecs")]
+    ///
+    /// R311y621 (§1.1k) — UNGATED. It composes a MID byte, a zero SN and a
+    /// slice, none of which needs a codec feature, and the build that cannot
+    /// DECODE the record inside is exactly the build whose reach §1.1k asks
+    /// about.
     pub(crate) fn frame_carrying(record: &[u8]) -> Vec<u8> {
         let mut w = alloc::vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
         w.extend_from_slice(record);

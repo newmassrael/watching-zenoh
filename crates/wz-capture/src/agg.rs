@@ -688,15 +688,105 @@ pub fn aggregate_where(dissection: &crate::Dissection, filter: &Filter) -> Throu
 // entry follows for `reassembly`: these tests assert what a build WITH the
 // network codecs does, and a build without them cannot be asked. Gating the
 // module rather than each test keeps the two from drifting.
+/// R311y621 (§1.1k) — what this plane can still do when the DECODER cannot
+/// name the data plane.
+///
+/// Its own module, and the `not(...)` is the point: the tests below cannot be
+/// asked of a build that HAS the network codecs, exactly as the module beside
+/// them cannot be asked of a build that lacks them. Between the two, the plane
+/// has an assertion in both worlds instead of only the one a default build
+/// happens to be in.
+#[cfg(all(test, not(feature = "network-codecs")))]
+mod no_codec_tests {
+    use super::*;
+    use crate::datagram_tests::{frame_carrying, push, sender_space, udp_packet};
+    use crate::link::LINKTYPE_ETHERNET;
+    use crate::Dissection;
+
+    /// THE ANSWER TO §1.1k, and it is not the one the register carried.
+    ///
+    /// The register said this build "resolves only `id == 0` literals". It
+    /// resolves NOTHING: `classify` answers `None` for every record here,
+    /// because the variants it matches do not exist without the codecs, so no
+    /// keyexpr is ever reached and no row is ever created. The comment beside
+    /// `observe_message` describing a literal-only reach is describing a path
+    /// the `classify` guard in front of it makes unreachable.
+    ///
+    /// What the plane DOES do is the half worth gating: it reports the traffic
+    /// as UNREAD. A record this build cannot name does not go quietly missing —
+    /// it halts the batch walk, and the halt plus its unparsed byte count reach
+    /// `gaps()`. So the degradation is a LOSS REPORT and not silence, which is
+    /// the difference between a total a reader may trust and one they may not.
+    #[test]
+    fn a_build_without_the_network_codecs_reports_the_traffic_as_unread() {
+        let record = push(sender_space(0, Some("demo/topic")), &[0u8; 12]);
+        let wire = frame_carrying(&record);
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire),
+        );
+
+        let table = aggregate(&d);
+        assert_eq!(
+            table.records(),
+            0,
+            "no record can be named, so none may be counted"
+        );
+        assert!(table.rows().is_empty(), "and no row may be invented");
+        assert_eq!(
+            table.unresolved_records(),
+            0,
+            "an unresolved ALIAS is a record read and not attributed; \
+             nothing here was read"
+        );
+
+        let gaps = table.gaps();
+        assert!(
+            !gaps.is_clean(),
+            "the whole point: the shortfall must be visible"
+        );
+        assert_eq!(gaps.halted_batches, 1);
+        assert!(
+            gaps.unparsed_bytes >= record.len(),
+            "the halt absorbs the record it could not name: {gaps:?}"
+        );
+        assert_eq!(gaps.undecompressible_batches, 0);
+    }
+
+    /// THE CONTROL: a build that cannot name the data plane still reads the
+    /// TRANSPORT around it, so an empty capture is distinguishable from an
+    /// unread one. Without this the assertion above would be satisfied by a
+    /// plane that reported a halt for every frame ever.
+    #[test]
+    fn a_frame_carrying_nothing_is_not_reported_as_unread() {
+        let wire = frame_carrying(&[]);
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire),
+        );
+
+        let table = aggregate(&d);
+        assert!(
+            table.gaps().is_clean(),
+            "an empty batch is not a batch that could not be read: {:?}",
+            table.gaps()
+        );
+        assert_eq!(table.records(), 0);
+    }
+}
+
 #[cfg(all(test, feature = "network-codecs"))]
 mod tests {
     use super::*;
-    use crate::datagram_tests::udp_packet;
+    use crate::datagram_tests::{push, sender_space, udp_packet};
     use crate::link::LINKTYPE_ETHERNET;
     use crate::Dissection;
 
     use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
     /// The two endpoints. `.1` sorts below `.2`, so `.1 -> .2` is
@@ -704,17 +794,6 @@ mod tests {
     /// [`the_directions_are_the_ones_this_module_thinks_they_are`].
     const LOW: [u8; 4] = [10, 0, 0, 1];
     const HIGH: [u8; 4] = [10, 0, 0, 2];
-
-    /// `M=1` — the id lives in the SENDER's space.
-    fn sender_space(id: u64, suffix: Option<&'static str>) -> Wireexpr<'static> {
-        Wireexpr {
-            body: WireexprVariant::WireexprLocal(WireexprLocal {
-                id,
-                suffix_len: suffix.map(|s| s.len() as u64),
-                suffix,
-            }),
-        }
-    }
 
     /// `M=0` — the id lives in the RECEIVER's space. zenoh emits this shape as
     /// soon as the far side has declared anything (`resource.rs:625`).
@@ -726,38 +805,6 @@ mod tests {
                 suffix,
             }),
         }
-    }
-
-    /// A `Push` carrying `payload` under `keyexpr`, built by the Push codec.
-    ///
-    /// The header is `Push::default().header` plus the `N` bit rather than a
-    /// literal, so the MID the generated `Default` bakes cannot be lost here.
-    ///
-    /// R311y616 (§4.10) — and the `N` bit is now
-    /// [`FLAG_N_N`](wz_codecs::wire_const::FLAG_N_N) rather than the number
-    /// `0x20`, which is the other half of the same rule: a fixture that spells
-    /// a flag as a literal is a byte string wearing a struct.
-    fn push(keyexpr: Wireexpr<'static>, payload: &[u8]) -> Vec<u8> {
-        let has_suffix = match &keyexpr.body {
-            WireexprVariant::WireexprLocal(a) => a.suffix.is_some(),
-            WireexprVariant::WireexprNonlocal(a) => a.suffix.is_some(),
-        };
-        let n_flag = if has_suffix {
-            wz_codecs::wire_const::FLAG_N_N
-        } else {
-            0
-        };
-        wz_codecs::push::Push {
-            header: wz_codecs::push::Push::default().header | n_flag,
-            keyexpr,
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                payload_len: payload.len() as u64,
-                payload,
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-        .encode_to_vec()
     }
 
     /// A `Push` carrying a `MsgDel` under `keyexpr`.
