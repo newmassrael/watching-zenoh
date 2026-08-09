@@ -1459,6 +1459,15 @@ PY
     # cfgs; the invariant does not depend on features, so it is checked by
     # reading the declarations. Enforcement MEASURED by restoring the collision.
     python3 scripts/lib/duplicate_module_lint.py || return 1
+    # R311y616 (§7.13) — the LITERAL-WIRE-FLAG lint, scoped to wz-capture.
+    # R311y615 named `wire_const::FLAG_N_N` for the network `N` bit and shipped
+    # it with ONE consumer while four fixtures beside it kept writing `0x20`;
+    # a constant with no gate is a naming exercise, and the value being
+    # identical means no test can ever tell the two apart. The scan reports the
+    # count OUTSIDE its scope on every run so the gate cannot be mistaken for a
+    # workspace-wide claim (that sweep is §3.3, its own round). Enforcement
+    # MEASURED by restoring one literal, not by observing that the script runs.
+    python3 scripts/lib/literal_wire_flag_lint.py || return 1
     # R311y565 — the EXPIRED-BLOCKER lint. Eight times across y561-y563 a field
     # or a family sat unimplemented behind a comment naming its own reason, and
     # the reason had already dissolved -- twice in the round that wrote it. Each
@@ -5315,7 +5324,12 @@ layer_c1bt_capture_no_default_features() {
         ws_flow_tests::a_structural_desync_mid_segment_does_not_end_the_flow \
         datagram_tests::a_frame_carries_the_capture_instant_in_every_feature_arm \
         report::tests::every_character_json_requires_escaping_is_escaped_as_the_rfc_names_it \
-        report::tests::a_keyexpr_cannot_end_the_field_it_is_printed_in
+        report::tests::a_keyexpr_cannot_end_the_field_it_is_printed_in \
+        filter::tests::a_record_whose_keyexpr_never_resolved_is_undecided_rather_than_rejected \
+        filter::tests::a_clockless_capture_cannot_decide_a_time_term \
+        filter::tests::the_three_valued_connectives_follow_kleene_rather_than_infecting \
+        filter::tests::a_malformed_selector_is_refused_by_name_rather_than_guessed \
+        filter::tests::a_wildcard_pattern_is_refused_where_the_matcher_cannot_honour_it
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the --no-default-features build"
@@ -5352,10 +5366,39 @@ layer_c1bt_capture_no_default_features() {
         exchange::tests::a_capture_without_timestamps_reports_no_latency_rather_than_zero \
         exchange::tests::each_direction_owns_its_request_id_space \
         report::tests::an_incomplete_capture_says_so_in_both_renderings \
-        report::tests::an_unmeasured_latency_is_null_in_json_and_named_in_text
+        report::tests::an_unmeasured_latency_is_null_in_json_and_named_in_text \
+        agg::tests::a_reference_the_capture_never_bound_is_undecided_rather_than_dropped \
+        agg::tests::a_declaration_is_absorbed_even_when_the_selector_would_not_pick_it \
+        agg::tests::a_filter_cannot_hide_a_gap \
+        report::tests::a_filtered_report_says_what_the_selector_could_not_judge
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the network-codecs build"
+            missing=1; }
+    done
+    (( missing == 0 )) || return 1
+
+    # R311y616 — a THIRD arm, for the same reason R311y614 added the second: the
+    # filter language's wildcard half exists only where `filter-wildcards` is
+    # on, and its end-to-end proof needs the network codecs to have records to
+    # judge. No other lane builds `network-codecs + filter-wildcards WITHOUT
+    # reassembly`, and that is precisely the shape a consumer who wants records
+    # and selectors but not chain tracking would ask for.
+    #
+    # The pin is one test on purpose: the arm exists to prove the two features
+    # COMPOSE, and the language's own semantics are pinned in the first arm
+    # where they run without any of this.
+    out="$(cd crates && cargo test -p wz-capture --no-default-features \
+        --features network-codecs,filter-wildcards --quiet 2>&1)" || { echo "$out"; return 1; }
+    listing="$(cd crates && cargo test -p wz-capture --no-default-features \
+        --features network-codecs,filter-wildcards -- --list 2>/dev/null)" \
+        || { echo "  C1bt FAIL: the filter-wildcards --list did not run"; return 1; }
+    for name in \
+        agg::tests::a_selector_narrows_the_table_and_says_what_it_left_out \
+        filter::tests::a_wildcard_pattern_matches_the_way_zenohs_own_matcher_does
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1bt FAIL: $name is absent from the filter-wildcards build"
             missing=1; }
     done
     (( missing == 0 )) || return 1

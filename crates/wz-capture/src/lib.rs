@@ -54,6 +54,14 @@ pub mod agg;
 /// that cannot be fed is absent rather than empty.
 #[cfg(feature = "network-codecs")]
 pub mod exchange;
+/// R311y616 (§1.1f) — the FILTER LANGUAGE: a selector a reader types, compiled
+/// into a three-valued predicate over records.
+///
+/// UNGATED, unlike [`exchange`]: the language is text and a tree walk, and its
+/// one external call is the keyexpr matcher, which `wz-session-core` ships
+/// unconditionally. A build without the network codecs has fewer records to
+/// judge and judges them by the same rules.
+pub mod filter;
 /// R311y606 — IP fragment reassembly. Its own module rather than part of
 /// [`link`] because it holds STATE across packets and `link` is deliberately a
 /// pure decapsulator; the same division `passive`'s chain reassembly is under.
@@ -3227,6 +3235,7 @@ mod datagram_tests {
     /// could not name a single data-plane message.
     #[cfg(feature = "network-codecs")]
     pub(crate) fn network_census() -> Vec<(&'static str, Vec<u8>)> {
+        use wz_codecs::wire_const::FLAG_N_N;
         use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
         use wz_codecs::wireexpr_local::WireexprLocal;
 
@@ -3246,22 +3255,28 @@ mod datagram_tests {
         // `Default` bakes the codec's own wire MID into the header byte, and a
         // hand-written `header: 0x1D | 0x20` would be a byte string again — the
         // exact way a fixture has three times lost a flag `Default` was baking.
+        //
+        // R311y616 (§4.10) — the flag half of that same rule, finally: the `N`
+        // bit is `wire_const::FLAG_N_N` and no longer the literal `0x20` these
+        // three lines had spelled since R311y613. R311y615 named the constant
+        // and left the fixtures writing the number; a constant with one
+        // consumer is a naming exercise, not a single source.
         let push = wz_codecs::push::Push {
             // N: the keyexpr carries a suffix.
-            header: wz_codecs::push::Push::default().header | 0x20,
+            header: wz_codecs::push::Push::default().header | FLAG_N_N,
             keyexpr: literal("census/push"),
             ..Default::default()
         }
         .encode_to_vec();
         let request = wz_codecs::request::Request {
-            header: wz_codecs::request::Request::default().header | 0x20,
+            header: wz_codecs::request::Request::default().header | FLAG_N_N,
             rid: 1,
             keyexpr: literal("census/request"),
             ..Default::default()
         }
         .encode_to_vec();
         let response = wz_codecs::response::Response {
-            header: wz_codecs::response::Response::default().header | 0x20,
+            header: wz_codecs::response::Response::default().header | FLAG_N_N,
             request_id: 1,
             keyexpr: literal("census/response"),
             ..Default::default()

@@ -32,8 +32,29 @@ workspace = true
 # alone is what shows it. Kept switchable for a consumer that genuinely wants
 # transport frames and nothing above them.
 [features]
-default = ["reassembly", "network-codecs"]
+default = ["reassembly", "network-codecs", "filter-wildcards"]
 reassembly = ["wz-session-core/reassembly"]
+
+# R311y616 (§1.1f) — the keyexpr WILDCARD arms the filter language's `key` term
+# needs, and a feature rather than three names on the dependency line for the
+# reason R311y614 measured: a feature named there is unified into every crate
+# that carries wz-capture anywhere in its graph, including as a dev-dependency,
+# so wz-capture's choice would silently become wz-session-core's everywhere.
+#
+# DEFAULT-ON, because a filter language whose `demo/**` does not wildcard is not
+# the language a reader expects. Switchable, so a dependent that composes its
+# own keyexpr capability set keeps it.
+#
+# The three toggles DEGRADE SILENTLY when off — `**` stops being a wildcard and
+# becomes a literal chunk to compare — which is right for an MCU client and
+# catastrophic for a selector a person typed. `filter::compile_pattern` turns
+# that degradation into a PARSE REFUSAL, so this feature being off is a
+# question the tool declines rather than a question it answers wrongly.
+filter-wildcards = [
+    "wz-session-core/keyexpr-wildcard-single",
+    "wz-session-core/keyexpr-wildcard-double",
+    "wz-session-core/keyexpr-dollar-star",
+]
 
 # R311y614 — the network codec selection, and it is a FEATURE rather than an
 # unconditional dependency line for a reason that was measured the hard way.

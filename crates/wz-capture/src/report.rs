@@ -93,6 +93,15 @@ impl<'a> CaptureReport<'a> {
             if !t.gaps().is_clean() || t.unresolved_records() > 0 {
                 return false;
             }
+            // R311y616 — a selector that could not judge part of the capture
+            // makes the rows under it a floor, exactly as an unread batch does.
+            // The two shortfalls have different causes and the same
+            // consequence for a reader summing the table, so they reach the
+            // same verdict. An unfiltered report is unaffected: the identity
+            // filter leaves nothing undecided.
+            if !t.selection().is_decisive() {
+                return false;
+            }
         }
         #[cfg(feature = "network-codecs")]
         if let Some(e) = self.exchanges {
@@ -194,6 +203,16 @@ impl<'a> CaptureReport<'a> {
                     g.halted_batches, g.unparsed_bytes, g.undecompressible_batches, g.unresolvable_fragments
                 ));
             }
+            // Only where a selector was actually applied: an unfiltered report
+            // would otherwise carry a line saying every record matched, which
+            // is true and tells the reader nothing.
+            let sel = t.selection();
+            if sel.rejected > 0 || sel.undecided > 0 {
+                s.push_str(&format!(
+                    "  selection: {} matched, {} rejected, {} UNDECIDED\n",
+                    sel.matched, sel.rejected, sel.undecided
+                ));
+            }
             for row in t.rows() {
                 let totals = row.totals();
                 s.push_str(&format!(
@@ -270,6 +289,8 @@ fn throughput_json(t: &ThroughputTable, s: &mut String) {
     ));
     s.push_str(",\"gaps\":");
     gaps_json(t.gaps(), s);
+    s.push_str(",\"selection\":");
+    selection_json(t.selection(), s);
     s.push_str(",\"rows\":[");
     for (i, row) in t.rows().iter().enumerate() {
         if i > 0 {
@@ -311,10 +332,59 @@ fn throughput_json(t: &ThroughputTable, s: &mut String) {
     s.push_str("]}");
 }
 
+/// R311y616 (§7.12) — the gap object, read by DESTRUCTURING.
+///
+/// The binding shape is the gate. The planes match `Carried` by name so a new
+/// variant fails to compile rather than joining the silent set (R311y614), and
+/// the serialiser had no equivalent: a field added to [`ThroughputGaps`] would
+/// have kept compiling here and this document would have kept omitting it —
+/// silently, in the one place whose whole purpose is that losses are never
+/// silent. A struct field can go unread; a destructuring pattern cannot.
+///
+/// So: do not replace this with `g.halted_batches` field access. The
+/// exhaustive pattern is load bearing.
 fn gaps_json(g: ThroughputGaps, s: &mut String) {
+    let ThroughputGaps {
+        halted_batches,
+        unparsed_bytes,
+        undecompressible_batches,
+        unresolvable_fragments,
+    } = g;
     s.push_str(&format!(
-        "{{\"halted_batches\":{},\"unparsed_bytes\":{},\"undecompressible_batches\":{},\"unresolvable_fragments\":{}}}",
-        g.halted_batches, g.unparsed_bytes, g.undecompressible_batches, g.unresolvable_fragments
+        "{{\"halted_batches\":{halted_batches},\"unparsed_bytes\":{unparsed_bytes},\"undecompressible_batches\":{undecompressible_batches},\"unresolvable_fragments\":{unresolvable_fragments}}}"
+    ));
+}
+
+/// The exchange plane's gap object, on the same rule as [`gaps_json`]: an
+/// exhaustive pattern, so a new [`ExchangeGaps`](crate::exchange::ExchangeGaps)
+/// field cannot be added without this document learning about it.
+#[cfg(feature = "network-codecs")]
+fn exchange_gaps_json(g: crate::exchange::ExchangeGaps, s: &mut String) {
+    let crate::exchange::ExchangeGaps {
+        orphan_responses,
+        unstamped,
+        non_monotonic,
+        unattributed_requests,
+    } = g;
+    s.push_str(&format!(
+        "{{\"orphan_responses\":{orphan_responses},\"unstamped\":{unstamped},\"non_monotonic\":{non_monotonic},\"unattributed_requests\":{unattributed_requests}}}"
+    ));
+}
+
+/// R311y616 (§1.1f) — what the selector did, as JSON.
+///
+/// Emitted whenever the table was built under a filter, and structurally
+/// (every field, whatever its value) for the reason the gap objects are
+/// structural: a consumer's field lookup must not depend on whether this
+/// capture happened to have that kind of shortfall.
+fn selection_json(sel: crate::filter::Selection, s: &mut String) {
+    let crate::filter::Selection {
+        matched,
+        rejected,
+        undecided,
+    } = sel;
+    s.push_str(&format!(
+        "{{\"matched\":{matched},\"rejected\":{rejected},\"undecided\":{undecided}}}"
     ));
 }
 
@@ -336,10 +406,8 @@ fn exchanges_json(e: &crate::exchange::ExchangeTable, s: &mut String) {
     latency_json(&first, s);
     s.push_str(",\"completion\":");
     latency_json(&completion, s);
-    s.push_str(&format!(
-        ",\"gaps\":{{\"orphan_responses\":{},\"unstamped\":{},\"non_monotonic\":{},\"unattributed_requests\":{}}}",
-        g.orphan_responses, g.unstamped, g.non_monotonic, g.unattributed_requests
-    ));
+    s.push_str(",\"gaps\":");
+    exchange_gaps_json(g, s);
     s.push_str(",\"unread\":");
     gaps_json(e.unread(), s);
     s.push_str(",\"rows\":[");
@@ -526,6 +594,67 @@ mod tests {
             "the verdict must lead: {text}"
         );
         assert!(text.contains("1 unclosed"), "{text}");
+    }
+
+    /// R311y616 — a filtered report carries what the selector could NOT judge,
+    /// and that shortfall reaches the completeness verdict.
+    ///
+    /// The failure this refuses: a reader narrows a capture to `demo/**`, gets
+    /// a total, and never learns that three records carried a keyexpr the
+    /// capture never bound. The rows would be right and the total would be a
+    /// floor, which is the difference `complete` exists to carry.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_filtered_report_says_what_the_selector_could_not_judge() {
+        use crate::exchange::tests as fx;
+
+        // Two records: one under a resolvable literal keyexpr, one referencing
+        // an alias whose declaration this capture never saw.
+        let d = fx::dissect(&[
+            (
+                true,
+                Some(10),
+                fx::request_query(1, fx::sender_space(0, Some("demo/known"))),
+            ),
+            (
+                true,
+                Some(20),
+                fx::request_query(2, fx::sender_space(9, None)),
+            ),
+        ]);
+
+        let filter = crate::filter::Filter::parse("key == demo/known").expect("compiles");
+        let throughput = crate::agg::aggregate_where(&d, &filter);
+        assert_eq!(throughput.selection().matched, 1);
+        assert_eq!(
+            throughput.selection().undecided,
+            1,
+            "the fixture must actually hold an unjudgeable record"
+        );
+
+        let r = CaptureReport::of(&d).with_throughput(&throughput);
+        let json = r.to_json();
+        assert!(
+            json.contains("\"selection\":{\"matched\":1,\"rejected\":0,\"undecided\":1}"),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"complete\":false"),
+            "an undecided record makes the total a floor: {json}"
+        );
+        let text = r.to_text();
+        assert!(text.starts_with("capture: INCOMPLETE"), "{text}");
+        assert!(text.contains("1 UNDECIDED"), "{text}");
+
+        // The control: the same capture unfiltered decides everything, so the
+        // selection line is absent from the text and the JSON says so.
+        let all = crate::agg::aggregate(&d);
+        assert!(all.selection().is_decisive());
+        let unfiltered = CaptureReport::of(&d).with_throughput(&all).to_text();
+        assert!(
+            !unfiltered.contains("selection:"),
+            "an unfiltered report must not carry a line that says nothing: {unfiltered}"
+        );
     }
 
     /// A latency nobody could measure prints as `unmeasured` and serialises as

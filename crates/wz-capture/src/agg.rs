@@ -60,6 +60,8 @@ use wz_session_core::passive::{Carried, Direction, PassiveFrame};
 
 use wz_codecs::wireexpr::WireexprOwnedVariant;
 
+use crate::filter::{Filter, RecordKind, RecordView, Selection, Truth};
+
 /// What one keyexpr carried, on one side of one flow.
 ///
 /// Counts and bytes are kept apart because they answer different questions: a
@@ -264,6 +266,7 @@ pub struct ThroughputTable {
     undeclarations: usize,
     records: usize,
     gaps: ThroughputGaps,
+    selection: Selection,
 }
 
 /// R311y614 (§1.4i) — traffic this table could not read AT ALL, as opposed to
@@ -322,14 +325,38 @@ impl ThroughputTable {
     /// Fold one flow's frames in, in capture order, resolving against id spaces
     /// private to this flow.
     pub fn observe_flow(&mut self, frames: &[PassiveFrame]) {
+        self.observe_flow_where(frames, &Filter::any())
+    }
+
+    /// R311y616 (§1.1f) — the same fold, over the records a selector picks.
+    ///
+    /// ONE fold rather than a filtered copy beside the unfiltered one:
+    /// [`Self::observe_flow`] passes [`Filter::any`], which is the identity, so
+    /// the filtered and unfiltered paths cannot drift apart.
+    ///
+    /// ## What the filter does NOT touch
+    ///
+    /// DECLARATIONS are absorbed whatever the filter says, and that is load
+    /// bearing rather than an oversight: a `DeclKexpr` binds the id every later
+    /// reference resolves through, so skipping the ones a selector rejects
+    /// would make the records it ACCEPTS unresolvable. The filter chooses what
+    /// is COUNTED, never what is READ.
+    ///
+    /// Gap counters are likewise unfiltered. A halted batch is traffic nobody
+    /// could read, so no predicate over its records can be evaluated — it stays
+    /// in [`Self::gaps`], where a reader looking for what is missing will find
+    /// it, rather than being quietly attributed to the selector.
+    pub fn observe_flow_where(&mut self, frames: &[PassiveFrame], filter: &Filter) {
         let mut spaces = KeyexprSpaces::new();
         for frame in frames {
             let anchor = frame.stream_offset;
             match &frame.carried {
-                Carried::Batch(batch) => self.observe_batch(&mut spaces, frame, anchor, batch),
+                Carried::Batch(batch) => {
+                    self.observe_batch(&mut spaces, frame, anchor, batch, filter)
+                }
                 #[cfg(feature = "reassembly")]
                 Carried::Reassembled(batch) => {
-                    self.observe_batch(&mut spaces, frame, anchor, batch)
+                    self.observe_batch(&mut spaces, frame, anchor, batch, filter)
                 }
                 // R311y614 (§1.4i) — the arms that carry traffic this table
                 // cannot read are COUNTED. Matched by name rather than left to a
@@ -354,23 +381,26 @@ impl ThroughputTable {
         frame: &PassiveFrame,
         anchor: usize,
         batch: &BatchParse,
+        filter: &Filter,
     ) {
         if batch.halt.is_some() {
             self.gaps.halted_batches += 1;
             self.gaps.unparsed_bytes += batch.unparsed_bytes;
         }
         for message in &batch.messages {
-            self.observe_message(spaces, frame.direction, anchor, message);
+            self.observe_message(spaces, frame, anchor, message, filter);
         }
     }
 
     fn observe_message(
         &mut self,
         spaces: &mut KeyexprSpaces,
-        direction: Direction,
+        frame: &PassiveFrame,
         anchor: usize,
         message: &NetworkMessage,
+        filter: &Filter,
     ) {
+        let direction = frame.direction;
         // A DECLARE is absorbed and not counted: it declares a keyexpr, it does
         // not carry traffic under one, and counting it would put a row on every
         // topic a session merely named.
@@ -391,11 +421,31 @@ impl ThroughputTable {
             return;
         }
 
-        let Some((keyexpr_body, counts)) = classify(message) else {
+        let Some((keyexpr_body, counts, kind)) = classify(message) else {
             return;
         };
+        let resolved = spaces.resolve(direction, keyexpr_body);
+
+        // R311y616 — the filter is asked AFTER resolution and BEFORE any
+        // counter moves, because the answer depends on the resolved keyexpr and
+        // because a record it rejects must leave no trace in the totals. An
+        // undecidable record leaves no trace either, except in the one counter
+        // whose whole job is to say the totals are not the whole answer.
+        let view = RecordView {
+            direction,
+            keyexpr: resolved.as_ref().ok().map(|k| k.as_str()),
+            kind,
+            payload_bytes: counts.payload_bytes,
+            observed_at_ms: frame.observed_at_ms,
+        };
+        let truth = filter.matches(&view);
+        self.selection.record(truth);
+        if truth != Truth::Yes {
+            return;
+        }
+
         self.records += 1;
-        match spaces.resolve(direction, keyexpr_body) {
+        match resolved {
             Ok(keyexpr) => {
                 let row = self.rows.entry(keyexpr.clone()).or_insert(KeyexprRow {
                     keyexpr,
@@ -464,8 +514,23 @@ impl ThroughputTable {
 
     /// Keyexpr-carrying records seen, attributed or not — the denominator
     /// [`Self::unresolved_records`] is a fraction of.
+    ///
+    /// Under a filter this counts the SELECTED records: the ones in the rows.
+    /// [`Self::selection`] holds the rest.
     pub fn records(&self) -> usize {
         self.records
+    }
+
+    /// R311y616 — what the filter did to the keyexpr-carrying records this
+    /// table was shown.
+    ///
+    /// All-zero on a table that was never given frames, and
+    /// `matched == records()` with nothing else on an unfiltered one — an
+    /// identity filter rejects nothing and leaves nothing undecided, so a
+    /// non-zero `undecided` always means a selector met a capture that could
+    /// not answer it.
+    pub fn selection(&self) -> Selection {
+        self.selection
     }
 
     /// `DeclKexpr` / `UndeclKexpr` absorbed — `(declared, undeclared)`.
@@ -489,13 +554,23 @@ impl ThroughputTable {
     }
 }
 
-/// Which counter a network record moves, and the keyexpr it moves it under.
+/// Which counter a network record moves, the keyexpr it moves it under, and
+/// what a filter should call it.
 ///
 /// `None` for every record that carries no keyexpr — `ResponseFinal` (a pure
 /// correlation marker), `Oam`, `Interest`, `Unknown`. They are not silently
 /// dropped: they never entered [`ThroughputTable::records`] either, so the
 /// unresolved fraction stays a fraction of records that HAVE a keyexpr.
-fn classify(message: &NetworkMessage) -> Option<(&WireexprOwnedVariant, KeyexprCounts)> {
+///
+/// R311y616 — the [`RecordKind`] is returned rather than re-derived from the
+/// counts by the caller. The counts have exactly one field set and a reader
+/// could infer the kind from that, but an inference is a second place the
+/// classification lives, and the two would disagree the first time a record
+/// moved two counters.
+#[allow(clippy::type_complexity)]
+fn classify(
+    message: &NetworkMessage,
+) -> Option<(&WireexprOwnedVariant, KeyexprCounts, RecordKind)> {
     #[cfg(feature = "network-codecs")]
     use wz_codecs::push::PushOwnedVariant;
     #[cfg(feature = "network-codecs")]
@@ -512,49 +587,67 @@ fn classify(message: &NetworkMessage) -> Option<(&WireexprOwnedVariant, KeyexprC
     match message {
         #[cfg(feature = "network-codecs")]
         NetworkMessage::Push(p) => {
-            match &p.body {
+            let kind = match &p.body {
                 PushOwnedVariant::CodecZenohMsgPut(put)
                 | PushOwnedVariant::Default { body: put, .. } => {
                     counts.puts = 1;
                     counts.payload_bytes = put.payload.as_slice().len() as u64;
+                    RecordKind::Put
                 }
-                PushOwnedVariant::CodecZenohMsgDel(_) => counts.dels = 1,
-            }
-            Some((&p.keyexpr.body, counts))
+                PushOwnedVariant::CodecZenohMsgDel(_) => {
+                    counts.dels = 1;
+                    RecordKind::Del
+                }
+            };
+            Some((&p.keyexpr.body, counts, kind))
         }
         #[cfg(feature = "network-codecs")]
         NetworkMessage::Request(r) => {
-            match &r.body {
+            let kind = match &r.body {
                 RequestOwnedVariant::CodecZenohMsgPut(put) => {
                     counts.puts = 1;
                     counts.payload_bytes = put.payload.as_slice().len() as u64;
+                    RecordKind::Put
                 }
-                RequestOwnedVariant::CodecZenohMsgDel(_) => counts.dels = 1,
+                RequestOwnedVariant::CodecZenohMsgDel(_) => {
+                    counts.dels = 1;
+                    RecordKind::Del
+                }
                 RequestOwnedVariant::CodecZenohQuery(_) | RequestOwnedVariant::Default { .. } => {
-                    counts.queries = 1
+                    counts.queries = 1;
+                    RecordKind::Query
                 }
-            }
-            Some((&r.keyexpr.body, counts))
+            };
+            Some((&r.keyexpr.body, counts, kind))
         }
         #[cfg(feature = "network-codecs")]
         NetworkMessage::Response(r) => {
             use wz_codecs::reply::ReplyOwnedVariant;
-            match &r.body {
+            let kind = match &r.body {
                 ResponseOwnedVariant::CodecZenohReply(reply)
                 | ResponseOwnedVariant::Default { body: reply, .. } => {
                     counts.replies = 1;
+                    // A reply carrying a `MsgPut` stays a REPLY here, and the
+                    // choice is deliberate: the kinds partition the records
+                    // exactly as the counters do, so `kind == reply` and
+                    // `KeyexprCounts::replies` can never disagree about the
+                    // same record. A reader after reply payloads writes
+                    // `kind == reply and bytes > 0`, which is one term longer
+                    // and never ambiguous.
                     if let ReplyOwnedVariant::CodecZenohMsgPut(put)
                     | ReplyOwnedVariant::Default { body: put, .. } = &reply.body
                     {
                         counts.payload_bytes = put.payload.as_slice().len() as u64;
                     }
+                    RecordKind::Reply
                 }
                 ResponseOwnedVariant::CodecZenohErr(err) => {
                     counts.errs = 1;
                     counts.payload_bytes = err.payload.as_slice().len() as u64;
+                    RecordKind::Err
                 }
-            }
-            Some((&r.keyexpr.body, counts))
+            };
+            Some((&r.keyexpr.body, counts, kind))
         }
         _ => None,
     }
@@ -563,12 +656,22 @@ fn classify(message: &NetworkMessage) -> Option<(&WireexprOwnedVariant, KeyexprC
 /// Aggregate an entire [`crate::Dissection`] — every stream flow and every
 /// datagram flow, each resolved against its own id spaces.
 pub fn aggregate(dissection: &crate::Dissection) -> ThroughputTable {
+    aggregate_where(dissection, &Filter::any())
+}
+
+/// R311y616 (§1.1f) — the same aggregation, over the records a selector picks.
+///
+/// The production entry point for [`crate::filter`]: a caller holding a
+/// selector string parses it once and hands the compiled filter here, and the
+/// table it gets back carries [`ThroughputTable::selection`] so the totals are
+/// never read without the count of records the selector could not judge.
+pub fn aggregate_where(dissection: &crate::Dissection, filter: &Filter) -> ThroughputTable {
     let mut table = ThroughputTable::new();
     for flow in dissection.flows() {
-        table.observe_flow(&flow.frames);
+        table.observe_flow_where(&flow.frames, filter);
     }
     for flow in dissection.datagram_flows() {
-        table.observe_flow(&flow.frames);
+        table.observe_flow_where(&flow.frames, filter);
     }
     table
 }
@@ -621,12 +724,21 @@ mod tests {
     ///
     /// The header is `Push::default().header` plus the `N` bit rather than a
     /// literal, so the MID the generated `Default` bakes cannot be lost here.
+    ///
+    /// R311y616 (§4.10) — and the `N` bit is now
+    /// [`FLAG_N_N`](wz_codecs::wire_const::FLAG_N_N) rather than the number
+    /// `0x20`, which is the other half of the same rule: a fixture that spells
+    /// a flag as a literal is a byte string wearing a struct.
     fn push(keyexpr: Wireexpr<'static>, payload: &[u8]) -> Vec<u8> {
         let has_suffix = match &keyexpr.body {
             WireexprVariant::WireexprLocal(a) => a.suffix.is_some(),
             WireexprVariant::WireexprNonlocal(a) => a.suffix.is_some(),
         };
-        let n_flag = if has_suffix { 0x20 } else { 0 };
+        let n_flag = if has_suffix {
+            wz_codecs::wire_const::FLAG_N_N
+        } else {
+            0
+        };
         wz_codecs::push::Push {
             header: wz_codecs::push::Push::default().header | n_flag,
             keyexpr,
@@ -997,5 +1109,158 @@ mod tests {
         let table = aggregate(&d);
         let row = table.row("stream/topic").expect("resolved over a stream");
         assert_eq!(row.totals().payload_bytes, 12);
+    }
+
+    /// Push a list through the whole pipeline under a selector — the same
+    /// packets-in / table-out path [`aggregate_datagrams`] drives, with the
+    /// production filtered entry point at the end of it.
+    fn aggregate_datagrams_where(records: &[(bool, Vec<u8>)], selector: &str) -> ThroughputTable {
+        let mut d = Dissection::new();
+        for (i, (from_low, record)) in records.iter().enumerate() {
+            let wire = crate::datagram_tests::frame_carrying(record);
+            let pkt = if *from_low {
+                udp_packet(LOW, 43210, HIGH, 7447, &wire)
+            } else {
+                udp_packet(HIGH, 7447, LOW, 43210, &wire)
+            };
+            d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+        }
+        let filter = crate::filter::Filter::parse(selector).expect("the selector must compile");
+        aggregate_where(&d, &filter)
+    }
+
+    /// R311y616 (§1.1f), the plane end to end: a selector narrows the table to
+    /// the traffic it names, and the records it left out are COUNTED rather
+    /// than merely absent.
+    ///
+    /// Driven through `aggregate_where` on real packets, not through
+    /// `Filter::matches` on a hand-built view: the filter unit tests already
+    /// prove the language, and what this proves is that the aggregation plane
+    /// asks it about the records the wire actually produced.
+    #[cfg(feature = "filter-wildcards")]
+    #[test]
+    fn a_selector_narrows_the_table_and_says_what_it_left_out() {
+        let records = alloc::vec![
+            (true, push(sender_space(0, Some("home/temp")), &[0u8; 10])),
+            (true, push(sender_space(0, Some("home/light")), &[0u8; 20])),
+            (true, push(sender_space(0, Some("office/temp")), &[0u8; 40])),
+        ];
+
+        let all = aggregate_datagrams_where(&records, "");
+        assert_eq!(all.rows().len(), 3, "the unfiltered baseline");
+        assert_eq!(all.total_payload_bytes(), 70);
+        assert_eq!(
+            all.selection(),
+            crate::filter::Selection {
+                matched: 3,
+                rejected: 0,
+                undecided: 0
+            },
+            "an identity filter rejects nothing and leaves nothing undecided"
+        );
+
+        let home = aggregate_datagrams_where(&records, "key == home/**");
+        assert_eq!(home.rows().len(), 2);
+        assert_eq!(home.total_payload_bytes(), 30);
+        assert_eq!(home.records(), 2, "records() counts the SELECTED records");
+        assert!(home.row("office/temp").is_none(), "excluded");
+        assert_eq!(
+            home.selection(),
+            crate::filter::Selection {
+                matched: 2,
+                rejected: 1,
+                undecided: 0
+            }
+        );
+        assert!(home.selection().is_decisive());
+
+        // A second axis, to show the language reaches past the keyexpr: the
+        // heavy records only.
+        let heavy = aggregate_datagrams_where(&records, "bytes > 15");
+        assert_eq!(heavy.rows().len(), 2);
+        assert_eq!(heavy.total_payload_bytes(), 60);
+        assert_eq!(heavy.selection().rejected, 1);
+    }
+
+    /// THE RULE, through the real pipeline: a record whose keyexpr this capture
+    /// never bound is UNDECIDED under a `key` selector — not silently dropped,
+    /// and not counted as a rejection either.
+    ///
+    /// The capture is the one a tap started mid-session produces: a reference
+    /// to alias 4 whose `DeclKexpr` went past before the observer arrived.
+    #[test]
+    fn a_reference_the_capture_never_bound_is_undecided_rather_than_dropped() {
+        let table = aggregate_datagrams_where(
+            &[
+                (true, declare_kexpr(1, "known/topic")),
+                (true, push(sender_space(1, None), &[0u8; 10])),
+                // Never declared: the capture began after its DeclKexpr.
+                (true, push(sender_space(4, None), &[0u8; 99])),
+            ],
+            "key == known/topic",
+        );
+
+        assert_eq!(table.rows().len(), 1);
+        assert_eq!(table.total_payload_bytes(), 10);
+        let selection = table.selection();
+        assert_eq!(selection.matched, 1);
+        assert_eq!(
+            selection.rejected, 0,
+            "it was never judged, so never rejected"
+        );
+        assert_eq!(selection.undecided, 1);
+        assert!(
+            !selection.is_decisive(),
+            "the reader must be able to see that the filter could not judge everything"
+        );
+
+        // And the undecided record is in NO other total either: it is not an
+        // unresolved row of the selection, because the selection never took it.
+        assert_eq!(table.records(), 1);
+        assert_eq!(table.unresolved_records(), 0);
+    }
+
+    /// A DECLARE is absorbed whatever the filter says. Without this the filter
+    /// would break the resolution the records it ACCEPTS depend on — a
+    /// selector for `aliased/topic` would find nothing, because the declaration
+    /// that binds the alias does not itself match by any wire keyexpr the
+    /// filter can see.
+    #[test]
+    fn a_declaration_is_absorbed_even_when_the_selector_would_not_pick_it() {
+        let table = aggregate_datagrams_where(
+            &[
+                (true, declare_kexpr(1, "aliased/topic")),
+                (true, push(sender_space(1, None), &[0u8; 7])),
+            ],
+            "key == aliased/topic",
+        );
+        assert_eq!(
+            table.row("aliased/topic").map(|r| r.totals().payload_bytes),
+            Some(7),
+            "the alias resolved, so the declaration was absorbed under the filter"
+        );
+        assert_eq!(table.declarations(), (1, 0), "and it was counted");
+    }
+
+    /// A gap belongs to the CAPTURE, not to the selection: a halted batch is
+    /// traffic nobody could read, so no selector can have an opinion about it
+    /// and it must stay visible however narrow the filter is.
+    #[test]
+    fn a_filter_cannot_hide_a_gap() {
+        let mut truncated = push(sender_space(0, Some("gap/topic")), &[0u8; 40]);
+        truncated.truncate(truncated.len() - 20);
+        let table = aggregate_datagrams_where(
+            &[
+                (true, push(sender_space(0, Some("kept/topic")), &[0u8; 4])),
+                (true, truncated),
+            ],
+            "key == kept/topic",
+        );
+        assert_eq!(table.rows().len(), 1, "the selector did narrow");
+        assert!(
+            table.gaps().halted_batches > 0,
+            "the unreadable batch is still reported: {:?}",
+            table.gaps()
+        );
     }
 }
