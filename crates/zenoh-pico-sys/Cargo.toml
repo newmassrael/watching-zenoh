@@ -48,6 +48,11 @@ path = "src/lib.rs"
 # lib + minimal-features flag set and returns the install prefix path
 # for the linker to consume.
 cmake = "0.1"
+# R311y608 — the compiler resolution the guard in build.rs compares
+# against a stale CMakeCache. Already in the graph as `cmake`'s only
+# dependency; declared explicitly because this crate now calls it
+# directly rather than relying on a transitive path.
+cc = "1"
 # bindgen parses zenoh-pico C headers and emits Rust FFI declarations.
 # The 0.71 series tracks the rustc edition cycle; pin compatible with
 # rust-version 1.75 (workspace package).

@@ -39,4 +39,13 @@
 // bindgen / clang-emit side, not on the consumer.
 #![allow(clippy::all)]
 
+/// R311y608 — when a CMake build directory must be discarded rather than
+/// reused, shared with `build.rs` (which `include!`s the same file).
+///
+/// A module of the crate and not build-script-only code, and that is the
+/// point: a build script's logic is never compiled by `cargo test`, so a
+/// decision that only lived there could not be tested at all. Here it is
+/// ordinary code with ordinary tests, and `build.rs` includes it.
+pub mod cmake_cache;
+
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));

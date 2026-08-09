@@ -34,7 +34,13 @@
 // see R42+ carry.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+// R311y608 — the stale-cache decision, shared with the crate so it is TESTED.
+// Included rather than imported because a build script is not a member of the
+// crate it builds; `src/lib.rs` carries the same file as a module, which is
+// what makes `cargo test -p zenoh-pico-sys` cover it.
+include!("src/cmake_cache.rs");
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -44,6 +50,11 @@ fn main() {
         .expect("canonicalize vendor/zenoh-pico");
     let include_dir = zenoh_src.join("include");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    // R311y608 — before anything else, throw away a build directory whose
+    // cache CMake is about to DELETE. See `src/cmake_cache.rs` for what that
+    // costs: every `-D` below evaporates and the install goes to /usr/local.
+    discard_stale_build_dir(&out_dir.join("build"));
 
     // Stage 1: CMake build → static libzenohpico.a.
     //
@@ -382,4 +393,79 @@ fn main() {
         "cargo:rerun-if-changed={}/CMakeLists.txt",
         zenoh_src.display()
     );
+}
+
+/// R311y608 — remove `build_dir` when CMake would wipe its cache anyway.
+///
+/// The compiler is asked of the `cc` crate exactly as the `cmake` crate asks
+/// it, so the string compared here is the string that will be handed to
+/// `-DCMAKE_C_COMPILER`. Anything short of that would compare a guess against
+/// the value CMake actually stored.
+///
+/// Every failure to answer is a decision to KEEP the directory: an unreadable
+/// cache, a compiler `cc` cannot resolve, a directory that is not there. The
+/// asymmetry is deliberate — discarding on uncertainty costs a full
+/// zenoh-pico rebuild on every invocation, while keeping on uncertainty costs
+/// nothing until the compiler really does change, which is the case this
+/// guard detects positively.
+fn discard_stale_build_dir(build_dir: &Path) {
+    let cache_path = build_dir.join("CMakeCache.txt");
+    let Ok(cache) = std::fs::read_to_string(&cache_path) else {
+        return;
+    };
+    let Ok(tool) = cc::Build::new()
+        .target(&env::var("TARGET").unwrap_or_default())
+        .host(&env::var("HOST").unwrap_or_default())
+        .opt_level(0)
+        .try_get_compiler()
+    else {
+        return;
+    };
+    let compiler = resolve_exe(tool.path()).display().to_string();
+    // The prefix the `cmake` crate will pass: it installs into `<out_dir>`,
+    // where `out_dir` defaults to cargo's `OUT_DIR`. Recomputed here rather
+    // than remembered, so the two cannot drift.
+    let install_prefix = build_dir
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    if !cache_is_stale(&cache, &compiler, &install_prefix) {
+        return;
+    }
+    // SAID OUT LOUD. A silently re-run build looks like a slow one; this is
+    // the only place that knows why the next few minutes are being spent, and
+    // the alternative outcome (an install into /usr/local) is one a reader
+    // must be able to connect back to a cause.
+    println!(
+        "cargo:warning=zenoh-pico-sys: discarding a cmake build directory that \
+         does not describe this build (cached compiler {} vs {compiler}; cached \
+         install prefix {} vs {install_prefix}). CMake deletes its cache when \
+         the compiler changes and re-configures with zenoh-pico's DEFAULTS -- \
+         shared libs, examples, tests, and an install into /usr/local",
+        cache_value(&cache, "CMAKE_C_COMPILER").unwrap_or("<unrecorded>"),
+        cache_value(&cache, "CMAKE_INSTALL_PREFIX").unwrap_or("<unrecorded>"),
+    );
+    if let Err(e) = std::fs::remove_dir_all(build_dir) {
+        println!("cargo:warning=zenoh-pico-sys: could not remove {build_dir:?}: {e}");
+    }
+}
+
+/// Resolve a compiler name against `PATH`, exactly as the `cmake` crate does
+/// before writing it into `CMAKE_C_COMPILER`.
+///
+/// This MIRRORS `cmake-0.1.58/src/lib.rs:1117 fn find_exe` deliberately, and
+/// the mirroring is the whole point: the value in the cache is whatever that
+/// function produced, so a comparison against anything else compares two
+/// different things. `cc` answers a bare `cc` on this host while the cache
+/// holds `/usr/lib/ccache/cc`, and a guard that compared those two would
+/// discard the build directory on EVERY invocation — a full zenoh-pico
+/// rebuild each time, which is a worse defect than the one being fixed.
+///
+/// An absolute path passes through untouched, because `Path::join` with an
+/// absolute argument returns the argument.
+fn resolve_exe(exe: &Path) -> PathBuf {
+    env::split_paths(&env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join(exe))
+        .find(|candidate| std::fs::metadata(candidate).is_ok())
+        .unwrap_or_else(|| exe.to_owned())
 }
