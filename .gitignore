@@ -6,6 +6,11 @@
 # vendored SCE submodule's build output (submodule itself is tracked
 # as a gitlink; only its target/ stays local).
 /target/
+
+# Headless round runner (scripts/round-runner.sh): verdict file, logs, lock.
+# NOT under .git/ -- the agent that writes the verdict is blocked from that
+# path by the permission layer, which a headless round cannot answer.
+/.round/
 crates/target/
 vendor/sce/target/
 # R311be — deploy/mcu-qemu-demo is a standalone workspace
