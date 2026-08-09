@@ -31,6 +31,13 @@
 
 extern crate alloc;
 
+// R311y612 — the measurement tests PRINT their corpora's accept rates, so the
+// number a constant is read off is in the run's output rather than only in a
+// comment. `std` under `cfg(test)` only: the crate itself stays `no_std`, and
+// the harness that runs these tests is hosted by construction.
+#[cfg(test)]
+extern crate std;
+
 /// R311y606 — IP fragment reassembly. Its own module rather than part of
 /// [`link`] because it holds STATE across packets and `link` is deliberately a
 /// pure decapsulator; the same division `passive`'s chain reassembly is under.
@@ -308,14 +315,31 @@ pub enum Framing {
     /// The opening is still consistent with an HTTP upgrade and shorter than
     /// one ([`ws::UpgradeVerdict::NeedMore`]); nothing is fed onward yet.
     Undecided,
+    /// R311y612 (§4.1) — a hole landed INSIDE the opening literal, so the
+    /// bytes that would have settled `Undecided` can never arrive.
+    ///
+    /// A state rather than the `Stream` default it used to collapse to, and
+    /// for exactly the reason [`Self::Undecided`] is a state: guessing was the
+    /// silent failure. Until R311y612 a hole in the first four bytes of a real
+    /// ws flow classified the whole connection as a length-prefixed stream,
+    /// which then reads RFC6455 frame headers as length prefixes — a confident
+    /// misread, and the worse half of the failure mode this module exists to
+    /// end. The question moves to the bytes AFTER the hole and is answered by
+    /// [`ws::carries_ws_frames`], which is a measurement.
+    OpeningLost,
     /// zenoh's length-prefixed byte stream, straight into the observer.
     Stream,
     /// RFC6455 frames wrapping one zenoh batch each, per direction.
+    ///
+    /// R311y612 — BOXED. The deframers grew a scan state and an accounting
+    /// block, and an unboxed pair made every `Framing` in the tree — including
+    /// the `Undecided` one every non-ws flow holds forever — carry their
+    /// footprint. The indirection is paid only by flows that are actually ws.
     WebSocket {
         /// [`Direction::A`]'s deframer (`low` -> `high`).
-        a: ws::WsDeframer,
+        a: alloc::boxed::Box<ws::WsDeframer>,
         /// [`Direction::B`]'s deframer.
-        b: ws::WsDeframer,
+        b: alloc::boxed::Box<ws::WsDeframer>,
     },
 }
 
@@ -353,7 +377,28 @@ pub struct FlowDissection {
     /// R311y603 — bytes delivered per direction on an AF_VSOCK flow, which is
     /// the sequence number vsockmon does not carry. Untouched on a tcp flow.
     vsock_seq: [u32; 2],
+    /// R311y612 (§4.1) — per direction, how many held bytes arrived BEFORE the
+    /// hole that lost the opening, and how many bytes that hole swallowed.
+    ///
+    /// The anchor every later decision needs: whichever framing wins,
+    /// `held[dir][..before_gap[dir]]` is the near side of the hole and the
+    /// rest is the far side, and the two must not be handed on as one run.
+    opening_gap: [Option<(usize, u64)>; 2],
+    /// R311y612 — resynchronisations the ws deframers reported, in order, with
+    /// the direction each belongs to.
+    ws_resyncs: Vec<(Direction, ws::WsResync)>,
 }
+
+/// R311y612 (§4.1) — post-hole bytes held per direction while deciding whether
+/// a flow whose opening was lost carries WebSocket.
+///
+/// Bounded, and the bound is what keeps the decision from being another silent
+/// hole: a flow that goes quiet after the gap must still be reported, so
+/// [`Dissection::finish`] flushes whatever is held. 8 KiB is above any
+/// plausible run of three zenoh ws frames on a session that is doing anything
+/// at all, and small enough that the deferral costs one packet's latency
+/// rather than a capture's.
+const WS_CLASSIFY_BUDGET: usize = 8 * 1024;
 
 impl FlowDissection {
     fn new(flow: FlowKey, window_ms: Option<u64>, gap_patience: Option<usize>) -> Self {
@@ -367,6 +412,30 @@ impl FlowDissection {
             framing: Framing::Undecided,
             held: [Vec::new(), Vec::new()],
             vsock_seq: [0, 0],
+            opening_gap: [None, None],
+            ws_resyncs: Vec::new(),
+        }
+    }
+
+    /// R311y612 — every ws resynchronisation this flow reported, in order.
+    ///
+    /// Exposed per flow and not only as a total because the number a reader
+    /// wants first is WHERE: a recovery names the offsets either side of what
+    /// it will never deframe, and `packet_for` turns those into packets.
+    pub fn ws_resyncs(&self) -> &[(Direction, ws::WsResync)] {
+        &self.ws_resyncs
+    }
+
+    /// R311y612 — the ws framing health of both directions, summed.
+    pub fn ws_accounting(&self) -> ws::WsResyncAccounting {
+        let Framing::WebSocket { a, b } = &self.framing else {
+            return ws::WsResyncAccounting::default();
+        };
+        let (x, y) = (a.accounting(), b.accounting());
+        ws::WsResyncAccounting {
+            desyncs: x.desyncs + y.desyncs,
+            recoveries: x.recoveries + y.recoveries,
+            skipped_bytes: x.skipped_bytes + y.skipped_bytes,
         }
     }
 
@@ -417,6 +486,11 @@ impl FlowDissection {
         if bytes.is_empty() {
             return;
         }
+        if matches!(self.framing, Framing::OpeningLost) {
+            self.held[dir_index(direction)].extend_from_slice(bytes);
+            self.decide_after_opening_lost(false);
+            return;
+        }
         if matches!(self.framing, Framing::Undecided) {
             self.held[dir_index(direction)].extend_from_slice(bytes);
             self.framing = match ws::http_upgrade_verdict(&self.held[dir_index(direction)]) {
@@ -426,20 +500,97 @@ impl FlowDissection {
                 // flow whose whole first message is shorter than it.
                 ws::UpgradeVerdict::NeedMore => return,
                 ws::UpgradeVerdict::Yes => Framing::WebSocket {
-                    a: ws::WsDeframer::new(),
-                    b: ws::WsDeframer::new(),
+                    a: alloc::boxed::Box::new(ws::WsDeframer::new()),
+                    b: alloc::boxed::Box::new(ws::WsDeframer::new()),
                 },
                 ws::UpgradeVerdict::No => Framing::Stream,
             };
+            self.replay_held();
+            return;
+        }
+        self.feed(direction, bytes);
+    }
+
+    /// Hand every held direction's bytes to the framing just decided.
+    ///
+    /// R311y612 — and CUT at the hole when there was one: `opening_gap` says
+    /// how much of a direction's held run is the near side, so the far side is
+    /// delivered as its own run with the gap announced between them. Handing
+    /// both halves on as one run is the swallow R311y610 closed one layer up,
+    /// and it would arrive here through the replay if the split were dropped.
+    fn replay_held(&mut self) {
+        for dir in [Direction::A, Direction::B] {
+            let held = core::mem::take(&mut self.held[dir_index(dir)]);
+            if held.is_empty() {
+                continue;
+            }
+            match self.opening_gap[dir_index(dir)] {
+                None => self.feed(dir, &held),
+                Some((before, missing)) => {
+                    if before > 0 {
+                        self.feed(dir, &held[..before]);
+                    }
+                    self.note_framing_gap(dir, missing);
+                    if before < held.len() {
+                        self.feed(dir, &held[before..]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// R311y612 (§4.1) — decide what a flow whose opening was lost turns out
+    /// to be, on the evidence of the bytes AFTER the hole.
+    ///
+    /// `flush` forces the fallback: a capture that ends while this flow is
+    /// still undecided must be reported, not held. Without it the state added
+    /// to end one silent hole would open a quieter one.
+    fn decide_after_opening_lost(&mut self, flush: bool) {
+        let mut evidence = false;
+        let mut examined = 0usize;
+        for dir in [Direction::A, Direction::B] {
+            let before = self.opening_gap[dir_index(dir)]
+                .map(|(b, _)| b)
+                .unwrap_or(0);
+            let held = &self.held[dir_index(dir)];
+            let post = &held[before.min(held.len())..];
+            examined = examined.max(post.len());
+            if ws::carries_ws_frames(post, ws::WS_CHAIN_DEPTH) {
+                evidence = true;
+            }
+        }
+        if evidence {
+            self.framing = Framing::WebSocket {
+                a: alloc::boxed::Box::new(ws::WsDeframer::after_lost_opening(
+                    self.opening_gap[0].map(|(b, _)| b).unwrap_or(0),
+                )),
+                b: alloc::boxed::Box::new(ws::WsDeframer::after_lost_opening(
+                    self.opening_gap[1].map(|(b, _)| b).unwrap_or(0),
+                )),
+            };
+            // The deframer starts AT the near side's end and scans, so the
+            // near-side bytes are already accounted for and only the far side
+            // is pushed. Replaying through `replay_held` would announce a gap
+            // to a deframer that was built knowing about it.
             for dir in [Direction::A, Direction::B] {
                 let held = core::mem::take(&mut self.held[dir_index(dir)]);
-                if !held.is_empty() {
-                    self.feed(dir, &held);
+                let before = self.opening_gap[dir_index(dir)]
+                    .map(|(b, _)| b)
+                    .unwrap_or(0);
+                if before < held.len() {
+                    self.feed(dir, &held[before..]);
                 }
             }
             return;
         }
-        self.feed(direction, bytes);
+        if !flush && examined <= WS_CLASSIFY_BUDGET {
+            return;
+        }
+        // Measured, not assumed: `WS_CLASSIFY_BUDGET` bytes of the far side
+        // held no chain of `WS_CHAIN_DEPTH` ws frames carrying zenoh. That is
+        // what makes the fallback a finding rather than the default it was.
+        self.framing = Framing::Stream;
+        self.replay_held();
     }
 
     /// Hand the observer exactly the bytes reassembly newly DELIVERED since
@@ -509,33 +660,57 @@ impl FlowDissection {
     /// is what stops that decision from being read as a confident one.
     fn note_gap(&mut self, direction: Direction, bytes_missing: u64) {
         if matches!(self.framing, Framing::Undecided) {
-            self.framing = match ws::http_upgrade_verdict(&self.held[dir_index(direction)]) {
-                ws::UpgradeVerdict::Yes => Framing::WebSocket {
-                    a: ws::WsDeframer::new(),
-                    b: ws::WsDeframer::new(),
-                },
-                ws::UpgradeVerdict::No | ws::UpgradeVerdict::NeedMore => Framing::Stream,
-            };
-            for dir in [Direction::A, Direction::B] {
-                let held = core::mem::take(&mut self.held[dir_index(dir)]);
-                if !held.is_empty() {
-                    self.feed(dir, &held);
+            // R311y612 (§4.1) — BOTH directions are consulted, not just the one
+            // the hole landed in. A hole in the client's `GET ` says nothing
+            // about the server's `HTTP/1.1 101`, and a flow that has already
+            // shown one of the two literals is settled by evidence; the
+            // pre-R311y612 read of one direction threw that away.
+            let verdicts = [
+                ws::http_upgrade_verdict(&self.held[0]),
+                ws::http_upgrade_verdict(&self.held[1]),
+            ];
+            self.opening_gap[dir_index(direction)] =
+                Some((self.held[dir_index(direction)].len(), bytes_missing));
+            self.framing = if verdicts.contains(&ws::UpgradeVerdict::Yes) {
+                Framing::WebSocket {
+                    a: alloc::boxed::Box::new(ws::WsDeframer::new()),
+                    b: alloc::boxed::Box::new(ws::WsDeframer::new()),
                 }
+            } else if verdicts.contains(&ws::UpgradeVerdict::No) {
+                Framing::Stream
+            } else {
+                // Every direction is still a PREFIX of an opening, so nothing
+                // seen so far can settle it and nothing later will: the bytes
+                // that would have are the ones the hole took. Decide on the far
+                // side instead of guessing.
+                Framing::OpeningLost
+            };
+            if matches!(self.framing, Framing::OpeningLost) {
+                return;
             }
+            self.replay_held();
+            return;
         }
+        self.note_framing_gap(direction, bytes_missing);
+    }
+
+    /// Tell an ALREADY-DECIDED framing that its bytes are discontinuous.
+    fn note_framing_gap(&mut self, direction: Direction, bytes_missing: u64) {
         match &mut self.framing {
-            Framing::Undecided => {}
+            // A hole while still holding the opening is recorded, not
+            // announced: `replay_held` is what cuts the held run at it.
+            Framing::Undecided | Framing::OpeningLost => {}
             Framing::Stream => {
                 self.session.note_gap(direction, bytes_missing);
             }
-            // A ws deframer's desynchronisation is terminal by design (every
-            // other cause of it is too), so this stops the flow rather than
-            // recovering it. Stopping and saying so is the point: the
-            // alternative is a length field read off spliced bytes, which is
-            // the same swallow one framing layer up.
+            // R311y612 (§4.2) — no longer terminal. The deframer discards its
+            // buffered near-side tail and scans for a boundary that
+            // `ws::WS_CHAIN_DEPTH` frames confirm, so a ws flow that loses one
+            // segment reports that loss and then keeps decoding, instead of
+            // reporting every later message on the flow as absent.
             Framing::WebSocket { a, b } => match direction {
-                Direction::A => a.note_gap(),
-                Direction::B => b.note_gap(),
+                Direction::A => a.note_gap(bytes_missing),
+                Direction::B => b.note_gap(bytes_missing),
             },
         }
     }
@@ -544,7 +719,7 @@ impl FlowDissection {
     fn feed(&mut self, direction: Direction, bytes: &[u8]) {
         match self.framing {
             // Unreachable by construction: `advance` decides before it feeds.
-            Framing::Undecided => {}
+            Framing::Undecided | Framing::OpeningLost => {}
             Framing::Stream => self.feed_stream(direction, bytes),
             Framing::WebSocket { .. } => self.feed_websocket(direction, bytes),
         }
@@ -569,8 +744,25 @@ impl FlowDissection {
         };
         deframer.push(bytes);
         let mut ready: Vec<(usize, Vec<u8>)> = Vec::new();
+        let mut resyncs: Vec<ws::WsResync> = Vec::new();
         while let Some(msg) = deframer.next_message() {
+            // R311y612 — drained HERE and not after the loop, so a recovery is
+            // attributed to the message decoded right after it. A flow that
+            // resynchronises twice in one push would otherwise report the
+            // second recovery and lose the first.
+            if let Some(resync) = deframer.take_resync() {
+                resyncs.push(resync);
+            }
             ready.push(msg);
+        }
+        // A scan that has not confirmed a boundary yet still HAPPENED, and a
+        // recovery that lands with no message behind it in this push must not
+        // be dropped on the floor.
+        if let Some(resync) = deframer.take_resync() {
+            resyncs.push(resync);
+        }
+        for resync in resyncs {
+            self.ws_resyncs.push((direction, resync));
         }
         for (offset, payload) in ready {
             let frame = self.session.next_datagram(direction, &payload, offset);
@@ -857,6 +1049,27 @@ pub struct FramingHealth {
     /// on a stream link, whose credible-header gate refuses the byte and
     /// reports the refusal as a desynchronisation instead.
     pub reserved_headers: u64,
+    /// R311y612 (§4.2) — times a WebSocket direction lost its RFC6455 frame
+    /// boundary.
+    ///
+    /// Its OWN counter and not folded into [`Self::desyncs`], because the two
+    /// are losses of different framings and a reader acting on them acts
+    /// differently: a zenoh-framing desync is inside a stream this reader still
+    /// has, while a ws-framing one means the message boundary itself is gone
+    /// and every zenoh message in the lost run is unrecoverable rather than
+    /// merely mis-bounded.
+    pub ws_desyncs: u64,
+    /// R311y612 — times a WebSocket direction found a boundary again.
+    pub ws_recoveries: u64,
+    /// R311y612 — bytes stepped over getting back in step, ws framing.
+    pub ws_resync_skipped_bytes: u64,
+}
+
+/// R311y612 — fold one flow's ws framing accounting into the total.
+fn add_ws(h: &mut FramingHealth, a: ws::WsResyncAccounting) {
+    h.ws_desyncs += a.desyncs;
+    h.ws_recoveries += a.recoveries;
+    h.ws_resync_skipped_bytes += a.skipped_bytes;
 }
 
 /// R311y609 — fold one direction's sequence-number accounting into the total.
@@ -990,6 +1203,7 @@ impl Dissection {
         for flow in &self.flows {
             streams.add_assembler(&flow.low_to_high);
             streams.add_assembler(&flow.high_to_low);
+            add_ws(&mut h, flow.ws_accounting());
             for dir in [Direction::A, Direction::B] {
                 let r = flow.session.resync_accounting(dir);
                 h.desyncs += r.desyncs;
@@ -1300,6 +1514,13 @@ impl Dissection {
                     flow.deliver_from(direction, before);
                 }
             }
+            // R311y612 (§4.1) — a flow still deciding what it is when the
+            // capture ends must be reported rather than held. The state that
+            // ended one silent hole would otherwise open a quieter one: bytes
+            // held for a verdict that never comes are bytes reported as absent.
+            if matches!(self.flows[idx].framing, Framing::OpeningLost) {
+                self.flows[idx].decide_after_opening_lost(true);
+            }
             self.enforce_flow_limits(idx);
         }
         forced
@@ -1478,6 +1699,10 @@ impl Dissection {
             // recycled a slot.
             self.evicted_streams.add_assembler(&gone.low_to_high);
             self.evicted_streams.add_assembler(&gone.high_to_low);
+            // R311y612 — and the ws framing counters, on the same argument the
+            // R311y610 carry below was added for: a counter that resets when a
+            // slot recycles is a loss counter that moves the wrong way.
+            add_ws(&mut self.evicted_sessions, gone.ws_accounting());
             // R311y610 (§4.4) — and the SESSION counters, which R311y609 left
             // behind. They live inside `PassiveSession` rather than on an
             // assembler, so the F5 carry above did not reach them and an
@@ -3781,6 +4006,162 @@ mod ws_flow_tests {
                 Err(e) => panic!("{name} failed to decode over ws: {e:?}"),
             }
         }
+    }
+
+    /// R311y612 (§4.1 + §4.2) — the WIRING of the hole path, both arms.
+    ///
+    /// Drive a real ws flow whose HTTP opening is cut by a hole two bytes in,
+    /// then the same shape carrying a real LENGTH-PREFIXED zenoh stream. One
+    /// discriminator answers both, and it must answer them DIFFERENTLY — a
+    /// classifier that always says WebSocket would pass the first arm alone,
+    /// which is why the negative arm is in the same test and not a sibling.
+    ///
+    /// Before R311y612 both arms answered `Stream`: a hole inside the opening
+    /// forced that verdict, so the ws arm's RFC6455 frame headers were then
+    /// read as zenoh length prefixes — a confident misread of every byte on
+    /// the connection, and one nothing reported.
+    #[test]
+    fn a_hole_in_the_opening_is_decided_on_the_far_side_rather_than_guessed() {
+        // Two bytes, a PREFIX of `GET ` — so `http_upgrade_verdict` answers
+        // `NeedMore`, and the bytes that would settle it are the hole's.
+        const HELD: usize = 2;
+        const LOST: usize = 24;
+
+        let drive = |stream: &[u8]| -> Dissection {
+            let mut d = Dissection::new();
+            d.set_gap_patience(Some(4));
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                0,
+                &tcp_packet(1111, 7447, 1000, &stream[..HELD]),
+            );
+            // Sequence space HELD..HELD+LOST is never captured.
+            for (i, chunk) in stream[HELD + LOST..].chunks(16).enumerate() {
+                let at = HELD + LOST + i * 16;
+                d.push_packet(
+                    LINKTYPE_ETHERNET,
+                    i + 1,
+                    &tcp_packet(1111, 7447, 1000 + at as u32, chunk),
+                );
+            }
+            d.finish();
+            d
+        };
+
+        let mut ws_stream = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n".to_vec();
+        for _ in 0..8 {
+            ws_stream.extend_from_slice(&binary_frame(
+                &bare_keepalive(),
+                Some([0x11, 0x22, 0x33, 0x44]),
+            ));
+        }
+        let d = drive(&ws_stream);
+        let flow = &d.flows()[0];
+        assert!(
+            flow.framing().is_websocket(),
+            "a hole in the opening must not turn a ws flow into a stream — \
+             that is the §4.1 defect, and it made every later byte a misread"
+        );
+        let named = flow
+            .frames
+            .iter()
+            .filter(|f| matches!(f.frame, Ok(InboundFrame::KeepAlive { .. })))
+            .count();
+        assert!(
+            named >= 4,
+            "the messages after the hole must decode; got {named} of 8 \
+             ({:?})",
+            flow.frames.iter().map(|f| &f.frame).collect::<Vec<_>>()
+        );
+        let acct = flow.ws_accounting();
+        assert_eq!(
+            (acct.desyncs, acct.recoveries),
+            (2, 1),
+            "the lost opening is REPORTED and then recovered from, not silently \
+             assumed away. TWO desynchronisations because the opening belongs to \
+             the CONNECTION: neither direction's frame boundary is known once it \
+             is gone, and B is left scanning because this fixture gives it no \
+             bytes to recover on. One recovery, on the direction that has any."
+        );
+        assert_eq!(flow.ws_resyncs().len(), 1);
+        assert_eq!(
+            flow.ws_resyncs()[0].1.reason,
+            ws::WsDesyncReason::OpeningLost
+        );
+
+        // THE NEGATIVE ARM, on the identical shape: a real length-prefixed
+        // zenoh stream, whose first byte is `H` so the verdict is `NeedMore`
+        // for the same reason and the same `OpeningLost` path is entered.
+        let mut tcp_stream: Vec<u8> = Vec::new();
+        // A first frame whose 2-byte little-endian length reads `H\0` = 72.
+        let filler = alloc::vec![0xA5u8; 71];
+        let mut first = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        first.extend_from_slice(&filler);
+        tcp_stream.extend_from_slice(&(first.len() as u16).to_le_bytes());
+        tcp_stream.extend_from_slice(&first);
+        assert_eq!(&tcp_stream[..1], b"H", "the fixture must reach NeedMore");
+        for _ in 0..8 {
+            tcp_stream.extend_from_slice(&[1, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE]);
+        }
+        let d = drive(&tcp_stream);
+        let flow = &d.flows()[0];
+        assert!(
+            !flow.framing().is_websocket(),
+            "a length-prefixed zenoh stream with a hole in its first bytes must \
+             NOT be taken for WebSocket; a discriminator that always answers ws \
+             passes the arm above and is worse than the defect it replaces"
+        );
+        assert!(
+            matches!(flow.framing(), Framing::Stream),
+            "and it must SETTLE — a flow left Undecided at `finish` reports \
+             nothing, which is the silent hole in a new place"
+        );
+    }
+
+    /// R311y612 (§4.1) — a hole in ONE direction's opening is settled by the
+    /// OTHER direction's, when that one already carries the literal.
+    ///
+    /// The pre-R311y612 read consulted only the direction the hole landed in.
+    /// A client `GET ` cut by a hole says nothing about a server that has
+    /// already sent `HTTP/1.1 101`, and throwing that evidence away is a
+    /// judgement where a measurement was available.
+    #[test]
+    fn the_other_directions_opening_settles_a_hole_in_this_one() {
+        let mut d = Dissection::new();
+        d.set_gap_patience(Some(4));
+        // B speaks first and completely: the server's status line.
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &tcp_packet(
+                7447,
+                1111,
+                2000,
+                b"HTTP/1.1 101 Switching Protocols\r\n\r\n",
+            ),
+        );
+        // A's opening is cut two bytes in.
+        d.push_packet(LINKTYPE_ETHERNET, 1, &tcp_packet(1111, 7447, 1000, b"GE"));
+        let msg = binary_frame(&bare_keepalive(), Some([1, 2, 3, 4]));
+        for i in 0..4usize {
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                2 + i,
+                &tcp_packet(1111, 7447, 1000 + 40 + (i * msg.len()) as u32, &msg),
+            );
+        }
+        d.finish();
+
+        let flow = &d.flows()[0];
+        assert!(
+            flow.framing().is_websocket(),
+            "the server's `HTTP/1.1 101` is evidence and it was already held"
+        );
+        assert_eq!(
+            flow.ws_accounting().desyncs,
+            1,
+            "exactly one direction lost its framing: A's, to the hole"
+        );
     }
 
     /// THE ONE THAT MATTERS. A zenoh session over `ws/...` is ordinary TCP, so

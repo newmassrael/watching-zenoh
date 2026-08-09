@@ -73,6 +73,298 @@ pub const MAX_WS_PAYLOAD: usize = 1 << 24;
 /// WebSocket after all. Real upgrade handshakes are a few hundred bytes.
 const MAX_PREAMBLE: usize = 64 * 1024;
 
+/// R311y612 — widest RFC6455 frame header: the two mandatory bytes, the
+/// 64-bit extended length, and a client mask key.
+const MAX_WS_HEADER: usize = 2 + 8 + 4;
+
+/// R311y612 — how far past a lost boundary the true one can hide.
+///
+/// A GUARANTEE and not a budget, on the same argument as
+/// [`wz_session_core::passive::RESYNC_SCAN_WINDOW`]: zenoh's ws `write` hands
+/// ONE batch to ONE `Message::Binary`, and a batch is bounded by
+/// [`MAX_FRAME_PAYLOAD`](wz_session_core::passive::MAX_FRAME_PAYLOAD), so any
+/// run of this many consecutive received bytes contains at least one real
+/// frame boundary. A scan that crosses it without confirming one has not been
+/// unlucky — it is looking at bytes whose framing it cannot recover.
+///
+/// ⚠ Deliberately NOT [`MAX_WS_PAYLOAD`]. The two answer different questions
+/// and the asymmetry is the point: the accept cap is generous because a
+/// capture is untrusted and a single oversize frame must be refused rather
+/// than allocated, while the window is derived from what a zenoh link can
+/// actually write. Keying the window off the accept cap would make it 16 MiB
+/// of buffered noise per desynchronised direction.
+pub const WS_RESYNC_SCAN_WINDOW: usize =
+    wz_session_core::passive::MAX_FRAME_PAYLOAD + MAX_WS_HEADER;
+
+/// R311y612 — chained frames a candidate boundary must confirm before this
+/// reader resumes on it.
+///
+/// Measured rather than picked, and the first guess was WRONG:
+/// `the_ws_chain_discriminator_refuses_noise` sweeps depths over pseudo-random
+/// corpora and over real length-prefixed zenoh streams — the two things a ws
+/// boundary must never be confused with — and reports the false-accept rate at
+/// each. Over 4 KiB buffers it reads
+/// `noise [40, 34, 2, 0, …] / zenoh-stream [40, 33, 2, 0, …]` out of 40, so 4
+/// is the SHALLOWEST depth that refuses both corpora outright and the test
+/// asserts exactly that rather than a number.
+///
+/// ⚠ The cost is named because it is real: a ws flow with fewer than four
+/// messages left after a hole is not recovered. That loss is REPORTED —
+/// [`WsDeframer::desynchronised`] stays set and the accounting counts the
+/// desynchronisation — which is the difference between this and the silence
+/// the round is closing.
+pub const WS_CHAIN_DEPTH: usize = 4;
+
+/// R311y612 — WHY a ws direction lost its frame boundary.
+///
+/// Separate arms because a reader acts on them differently, exactly as
+/// [`DesyncReason`](wz_session_core::passive::DesyncReason) does one framing
+/// layer down: [`Self::CaptureGap`] is the layer BELOW reporting a hole it
+/// measured, while every other arm is this reader concluding that bytes cannot
+/// mean what RFC6455 says they do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WsDesyncReason {
+    /// The byte source said it lost bytes here ([`WsDeframer::note_gap`]).
+    ///
+    /// The only arm that is not an inference, and the one §4.2 was about.
+    CaptureGap {
+        /// Bytes the source says are absent, or 0 when it knows the stream is
+        /// discontinuous but not by how much.
+        bytes_missing: u64,
+    },
+    /// A frame header this reader cannot honour: an RSV extension bit, or a
+    /// length above [`MAX_WS_PAYLOAD`].
+    UnusableHeader,
+    /// A reserved opcode — this is not the protocol the classifier decided it
+    /// was.
+    ReservedOpcode {
+        /// The opcode that is not one of the six RFC6455 defines.
+        opcode: u8,
+    },
+    /// A Binary frame opened while an earlier message was still unfinished, or
+    /// a Continuation arrived with no message to continue. Either way the
+    /// frame boundary is not where this reader thought.
+    MessageBoundary,
+    /// Detected as WebSocket on its opening literal, then the HTTP preamble
+    /// never terminated within [`MAX_PREAMBLE`].
+    PreambleNeverEnded,
+    /// R311y612 (§4.1) — the flow was classified as WebSocket with its opening
+    /// LOST to a hole, so there is no preamble to step over and no boundary
+    /// yet known. Not a failure: the deframer starts here and scans.
+    OpeningLost,
+}
+
+/// R311y612 — a ws direction that lost its framing and found it again.
+///
+/// Carried on the FIRST message decoded after the recovery, for the reason
+/// [`StreamResync`](wz_session_core::passive::StreamResync) is: that message's
+/// offset would otherwise be an unexplained jump, and a dissector that resumed
+/// silently reports a hole as though the wire had none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WsResync {
+    /// Absolute stream offset where the direction lost its framing.
+    pub desync_offset: usize,
+    /// The evidence that lost it.
+    pub reason: WsDesyncReason,
+    /// Absolute stream offset the reader resumed at.
+    pub resumed_offset: usize,
+    /// Bytes between the two: what this reader will never deframe.
+    pub skipped: usize,
+    /// Chained frames that confirmed the resumed boundary. Reported rather
+    /// than assumed because it IS the confidence.
+    pub confirmed: usize,
+}
+
+/// R311y612 — cumulative resynchronisation accounting for one direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WsResyncAccounting {
+    /// Times this direction lost its frame boundary.
+    pub desyncs: u64,
+    /// Times it found one again.
+    pub recoveries: u64,
+    /// Total bytes stepped over across those recoveries.
+    pub skipped_bytes: u64,
+}
+
+/// R311y612 — the scan's state while a direction is looking for its framing.
+#[derive(Debug, Clone, Copy)]
+struct WsDesyncState {
+    /// Absolute offset the direction desynchronised at.
+    at_offset: usize,
+    reason: WsDesyncReason,
+    /// Index into `buf` the contiguous refuted prefix has reached.
+    scan_cursor: usize,
+    /// Buffer length below which no verdict anywhere can change.
+    rescan_at: usize,
+}
+
+/// R311y612 — how one candidate boundary came out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WsCandidate {
+    /// These bytes cannot open a frame, whatever arrives later.
+    Refuted,
+    /// Consistent, and the frame ends at this index.
+    Framed(usize),
+    /// Undecidable on the bytes held; `needed` is the buffer length at which
+    /// it could be judged again.
+    Short {
+        /// Buffer length the verdict is waiting for.
+        needed: usize,
+    },
+}
+
+/// R311y612 — THE DISCRIMINATOR. Do the bytes at `at` open one RFC6455 frame
+/// carrying zenoh?
+///
+/// Every clause is a refusal the specification writes down, not a heuristic —
+/// which is what makes a chain of these evidence rather than a guess:
+///
+/// - RFC6455 §5.2: RSV1..3 are zero absent a negotiated extension, and zenoh
+///   negotiates none.
+/// - §5.2: six opcodes are defined; the other ten are reserved.
+/// - §5.5: a control frame is never fragmented and never exceeds 125 bytes.
+/// - §5.2: the length uses the MINIMAL encoding, so a 16-bit extended length
+///   below 126 and a 64-bit one below 65536 are both violations — the two
+///   clauses that do most of the refusing on arbitrary bytes.
+/// - §5.2: the 64-bit length's most significant bit is zero.
+///
+/// The last clause is this crate's rather than RFC6455's, and it is the one
+/// that makes the scan affordable: a non-empty Binary frame opens a zenoh
+/// BATCH, so its first payload byte must be a byte a zenoh transport header
+/// could be (`is_credible_transport_header`, 42 of 256). Without it the
+/// per-offset false-accept rate is a frame-shape rate; with it the question
+/// asked is the one this crate actually has — "is this ws carrying zenoh" —
+/// and `the_ws_chain_discriminator_refuses_noise` measures both.
+fn ws_candidate_at(buf: &[u8], at: usize, assembling: bool) -> WsCandidate {
+    if buf.len() < at + 2 {
+        return WsCandidate::Short { needed: at + 2 };
+    }
+    let b0 = buf[at];
+    let b1 = buf[at + 1];
+    if (b0 & 0x70) != 0 {
+        return WsCandidate::Refuted;
+    }
+    let opcode = b0 & 0x0F;
+    if !matches!(
+        opcode,
+        OP_CONTINUATION | OP_TEXT | OP_BINARY | OP_CLOSE | OP_PING | OP_PONG
+    ) {
+        return WsCandidate::Refuted;
+    }
+    // RFC6455 §5.4 — the sequencing rule, and MEASURED to be the clause that
+    // carries this discriminator. Without it a run of 0x00 bytes reads as an
+    // unbounded chain of unfragmented continuations, which is exactly what a
+    // zenoh stream's little-endian length prefix looks like: the high byte of a
+    // short length is 0x00, i.e. FIN clear + opcode CONTINUATION, and any
+    // second byte under 126 completes a "frame". The first sweep measured 28 of
+    // 40 REAL zenoh streams accepted at depth 3 for precisely that reason.
+    // A continuation with nothing to continue, or a data frame opening while a
+    // message is unfinished, is a protocol violation and not a boundary.
+    if (opcode == OP_CONTINUATION) != assembling && (opcode & 0x08) == 0 {
+        return WsCandidate::Refuted;
+    }
+    let fin = (b0 & 0x80) != 0;
+    let masked = (b1 & 0x80) != 0;
+    let len7 = (b1 & 0x7F) as usize;
+    if (opcode & 0x08) != 0 && (!fin || len7 > 125) {
+        return WsCandidate::Refuted;
+    }
+    let mut cursor = at + 2;
+    let payload_len = match len7 {
+        126 => {
+            if buf.len() < cursor + 2 {
+                return WsCandidate::Short { needed: cursor + 2 };
+            }
+            let n = u16::from_be_bytes([buf[cursor], buf[cursor + 1]]) as usize;
+            cursor += 2;
+            if n < 126 {
+                return WsCandidate::Refuted;
+            }
+            n
+        }
+        127 => {
+            if buf.len() < cursor + 8 {
+                return WsCandidate::Short { needed: cursor + 8 };
+            }
+            let mut raw = [0u8; 8];
+            raw.copy_from_slice(&buf[cursor..cursor + 8]);
+            cursor += 8;
+            let n = u64::from_be_bytes(raw);
+            if n > MAX_WS_PAYLOAD as u64 || n <= u16::MAX as u64 {
+                return WsCandidate::Refuted;
+            }
+            n as usize
+        }
+        n => n,
+    };
+    let mut key = [0u8; 4];
+    if masked {
+        if buf.len() < cursor + 4 {
+            return WsCandidate::Short { needed: cursor + 4 };
+        }
+        key.copy_from_slice(&buf[cursor..cursor + 4]);
+        cursor += 4;
+    }
+    if opcode == OP_BINARY && payload_len > 0 {
+        if buf.len() < cursor + 1 {
+            return WsCandidate::Short { needed: cursor + 1 };
+        }
+        let header = buf[cursor] ^ if masked { key[0] } else { 0 };
+        if !wz_session_core::wire_const::is_credible_transport_header(header) {
+            return WsCandidate::Refuted;
+        }
+    }
+    let end = cursor + payload_len;
+    if buf.len() < end {
+        return WsCandidate::Short { needed: end };
+    }
+    WsCandidate::Framed(end)
+}
+
+/// R311y612 — does a chain of `depth` frames confirm a boundary at `at`?
+///
+/// The classification half of the discriminator: [`FlowDissection`] asks it of
+/// a flow whose HTTP opening was lost to a hole, where the literal that would
+/// have settled the question can never arrive.
+///
+/// [`FlowDissection`]: crate::FlowDissection
+fn chain_confirms(buf: &[u8], at: usize, depth: usize) -> WsCandidate {
+    let mut at = at;
+    let mut confirmed = 0usize;
+    // A chain begins where a MESSAGE begins: after a hole the message that was
+    // being assembled is abandoned, so a resume point mid-fragmentation is not
+    // one this reader could use even if the bytes allowed it.
+    let mut assembling = false;
+    loop {
+        if confirmed == depth {
+            return WsCandidate::Framed(at);
+        }
+        match ws_candidate_at(buf, at, assembling) {
+            WsCandidate::Framed(next) => {
+                let b0 = buf[at];
+                let opcode = b0 & 0x0F;
+                if (opcode & 0x08) == 0 {
+                    assembling = (b0 & 0x80) == 0;
+                }
+                at = next;
+                confirmed += 1;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// R311y612 (§4.1) — do these bytes hold a WebSocket frame boundary that
+/// `depth` chained frames agree on?
+///
+/// The public face of [`chain_confirms`], for a caller deciding what a flow IS
+/// rather than where its next frame starts. `true` is evidence of WebSocket;
+/// `false` is "not on the bytes so far", never "definitely not" — which is why
+/// its caller keeps asking as more arrive.
+pub fn carries_ws_frames(bytes: &[u8], depth: usize) -> bool {
+    (0..bytes.len()).any(|at| matches!(chain_confirms(bytes, at, depth), WsCandidate::Framed(_)))
+}
+
 /// The two literals a WebSocket-carrying direction can open with: the client's
 /// request line and the server's status line. Either alone is enough, which is
 /// what lets a ONE-SIDED capture still be recognised — only the server's
@@ -138,7 +430,7 @@ pub fn http_upgrade_verdict(prefix: &[u8]) -> UpgradeVerdict {
 /// `FlowDissection::packet_for` still resolves a decoded message to the packet
 /// that carried it — the attribution this whole crate exists for survives the
 /// extra framing layer.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WsDeframer {
     /// Bytes not yet consumed. `buf[0]` sits at stream offset `base`.
     buf: Vec<u8>,
@@ -151,18 +443,81 @@ pub struct WsDeframer {
     /// Stream offset of the FIRST frame of `partial`, or `None` when no
     /// message is in progress.
     partial_offset: Option<usize>,
-    /// Set once the byte stream stops making sense as RFC6455. Terminal: a
-    /// deframer that has lost the frame boundary cannot find it again, and
-    /// guessing would manufacture messages that were never sent.
-    desynchronised: bool,
+    /// R311y612 — `Some` while this direction is looking for its framing.
+    ///
+    /// Was a terminal `bool` until R311y612 (§4.2): a deframer that had lost
+    /// the boundary reported every later byte of the flow as nothing, which is
+    /// the silent-hole failure this module exists to end, one framing layer up.
+    /// Nothing is consumed while it is set, so `buf[0]` stays the byte at
+    /// `base` and the scan cursor below survives across calls.
+    desync: Option<WsDesyncState>,
+    /// R311y612 — the recovery to hand to the next message decoded.
+    pending_resync: Option<WsResync>,
+    /// R311y612 — cumulative, for a reader that wants this direction's health
+    /// rather than one message's story.
+    accounting: WsResyncAccounting,
+    /// R311y612 — chained frames a candidate boundary must confirm. 0 switches
+    /// recovery off, which is what makes the pre-R311y612 behaviour a
+    /// measurable arm rather than a memory.
+    chain_depth: usize,
     /// Frames dropped because their opcode carries no zenoh.
     skipped_frames: usize,
+}
+
+impl Default for WsDeframer {
+    fn default() -> Self {
+        Self {
+            buf: Vec::new(),
+            base: 0,
+            preamble_done: false,
+            partial: Vec::new(),
+            partial_offset: None,
+            desync: None,
+            pending_resync: None,
+            accounting: WsResyncAccounting::default(),
+            chain_depth: WS_CHAIN_DEPTH,
+            skipped_frames: 0,
+        }
+    }
 }
 
 impl WsDeframer {
     /// A fresh deframer positioned at stream offset 0.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// R311y612 (§4.1) — a deframer for a flow classified as WebSocket with
+    /// its HTTP opening LOST to a hole.
+    ///
+    /// There is no preamble to step over and no boundary yet known, so it
+    /// starts in the scanning state at `base` rather than pretending offset 0
+    /// is a frame header. The alternative — the pre-R311y612 behaviour — was
+    /// to call such a flow a plain zenoh stream, which decodes its ws frame
+    /// headers as length prefixes and reports confident nonsense.
+    pub fn after_lost_opening(base: usize) -> Self {
+        Self {
+            base,
+            preamble_done: true,
+            desync: Some(WsDesyncState {
+                at_offset: base,
+                reason: WsDesyncReason::OpeningLost,
+                scan_cursor: 0,
+                rescan_at: 0,
+            }),
+            accounting: WsResyncAccounting {
+                desyncs: 1,
+                ..WsResyncAccounting::default()
+            },
+            ..Self::default()
+        }
+    }
+
+    /// R311y612 — how many chained frames must confirm a boundary before this
+    /// deframer resumes on it. `0` disables recovery entirely.
+    pub fn with_chain_depth(mut self, depth: usize) -> Self {
+        self.chain_depth = depth;
+        self
     }
 
     /// Append newly-reassembled bytes for this direction.
@@ -173,14 +528,43 @@ impl WsDeframer {
     /// R311y610 — the byte source lost bytes at the current write point, so
     /// this deframer's idea of where the next frame header sits is stale.
     ///
-    /// Terminal, like every other cause of desynchronisation here, and
-    /// deliberately so: an RFC6455 header read off spliced bytes carries a
-    /// length field of up to 63 bits, and a deframer that trusted it would
-    /// swallow the rest of the capture as one message — the same defect
-    /// R311y610 fixes one framing layer up, where there IS a recovery scan.
-    /// Stopping and reporting it is the honest floor until ws grows one.
-    pub fn note_gap(&mut self) {
-        self.desynchronised = true;
+    /// R311y612 (§4.2) — no longer terminal. It DISCARDS the buffered tail
+    /// first, and that is the part that matters: those bytes are the near side
+    /// of the hole, they can never complete a frame with what follows, and a
+    /// scan that started among them could confirm a boundary that predates the
+    /// gap and then read straight across it. Dropping them makes "no message
+    /// is fabricated across an announced hole" a STRUCTURAL property of this
+    /// function rather than a fixture that happened not to hold enough bytes.
+    /// This is deliberately stricter than the stream path one layer down,
+    /// which scans from the suspect boundary itself.
+    pub fn note_gap(&mut self, bytes_missing: u64) {
+        let dropped = self.buf.len();
+        self.buf.clear();
+        self.base += dropped;
+        self.desynchronise(WsDesyncReason::CaptureGap { bytes_missing });
+    }
+
+    /// R311y612 — judge this direction desynchronised and start a scan.
+    ///
+    /// Consumes nothing: the scan begins at the suspect boundary itself, so a
+    /// boundary hiding one byte later is found and the offsets a consumer sees
+    /// stay monotonic.
+    fn desynchronise(&mut self, reason: WsDesyncReason) {
+        // A message assembled across continuation frames is abandoned with the
+        // boundary that framed it. Keeping it would let a recovery graft the
+        // far side of a hole onto the near side — a fabricated message, which
+        // is the one outcome worse than reporting none.
+        self.partial = Vec::new();
+        self.partial_offset = None;
+        if self.desync.is_none() {
+            self.accounting.desyncs += 1;
+            self.desync = Some(WsDesyncState {
+                at_offset: self.base,
+                reason,
+                scan_cursor: 0,
+                rescan_at: 0,
+            });
+        }
     }
 
     /// Has this direction stopped making sense as RFC6455?
@@ -188,9 +572,29 @@ impl WsDeframer {
     /// Reported rather than silent for the same reason
     /// [`SkipReason`](crate::link::SkipReason) is: a consumer that sees no
     /// messages needs to know whether the wire was empty or the reader gave
-    /// up.
+    /// up. R311y612 — now a state a direction can LEAVE, so a consumer
+    /// polling it sees recovery as well as loss.
     pub fn desynchronised(&self) -> bool {
-        self.desynchronised
+        self.desync.is_some()
+    }
+
+    /// R311y612 — why this direction is currently desynchronised.
+    pub fn desync_reason(&self) -> Option<WsDesyncReason> {
+        self.desync.map(|d| d.reason)
+    }
+
+    /// R311y612 — take the recovery owed to the message just returned.
+    ///
+    /// Drained by the caller immediately after [`Self::next_message`], so a
+    /// recovery is attributed to the first message decoded after it and to no
+    /// other.
+    pub fn take_resync(&mut self) -> Option<WsResync> {
+        self.pending_resync.take()
+    }
+
+    /// R311y612 — this direction's cumulative framing health.
+    pub fn accounting(&self) -> WsResyncAccounting {
+        self.accounting
     }
 
     /// Frames dropped because they were Close / Ping / Pong / Text.
@@ -198,11 +602,98 @@ impl WsDeframer {
         self.skipped_frames
     }
 
+    /// R311y612 — bytes held and not yet deframed. The scan's memory, which
+    /// [`WS_RESYNC_SCAN_WINDOW`] is what bounds.
+    pub fn buffered(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// R311y612 — look for a boundary `chain_depth` frames agree on.
+    ///
+    /// The same shape as the stream path's
+    /// [`try_resync`](wz_session_core::passive) and for the same measured
+    /// reason: an UNRESOLVED candidate must not block the offsets after it.
+    /// A ws length field read off arbitrary bytes routinely claims more than
+    /// the buffer holds, so a scan that stopped at the first short candidate
+    /// would park at the desynchronisation point and never move — the defect
+    /// R311y609 measured one layer down as "0 of 400 at every depth", which
+    /// is not a scan discriminating but a scan that never ran.
+    fn try_resync(&mut self) -> Option<WsResync> {
+        let state = self.desync?;
+        if self.chain_depth == 0 {
+            return None;
+        }
+        if self.buf.len() < state.rescan_at {
+            return None;
+        }
+        let mut cursor = state.scan_cursor;
+        let mut rescan_at = usize::MAX;
+        let mut accepted = None;
+        let mut candidate = cursor;
+        while candidate < self.buf.len() {
+            match chain_confirms(&self.buf, candidate, self.chain_depth) {
+                WsCandidate::Framed(_) => {
+                    accepted = Some(candidate);
+                    break;
+                }
+                WsCandidate::Refuted => {
+                    if candidate == cursor {
+                        cursor += 1;
+                    }
+                }
+                WsCandidate::Short { needed } => rescan_at = rescan_at.min(needed),
+            }
+            candidate += 1;
+        }
+        let Some(offset) = accepted else {
+            let state = self.desync.as_mut().expect("state was Some");
+            state.scan_cursor = cursor;
+            state.rescan_at = if rescan_at == usize::MAX {
+                self.buf.len() + 1
+            } else {
+                rescan_at
+            };
+            // The window is a GUARANTEE (see `WS_RESYNC_SCAN_WINDOW`): having
+            // examined that many bytes without confirming a boundary, this
+            // reader cannot recover their framing, so it drops them. Bounded
+            // memory, and the skip stays visible because `skipped` is measured
+            // off the desynchronisation offset.
+            if cursor > WS_RESYNC_SCAN_WINDOW {
+                let drop = cursor - WS_RESYNC_SCAN_WINDOW;
+                self.buf.drain(..drop);
+                self.base += drop;
+                let state = self.desync.as_mut().expect("state was Some");
+                state.scan_cursor -= drop;
+                state.rescan_at = state.rescan_at.saturating_sub(drop);
+            }
+            return None;
+        };
+        self.buf.drain(..offset);
+        self.base += offset;
+        self.desync = None;
+        // A confirmed chain IS a frame boundary, so whatever preamble state
+        // this deframer was in is settled by evidence rather than by a search
+        // for `\r\n\r\n` that would now run over frame bytes.
+        self.preamble_done = true;
+        self.accounting.recoveries += 1;
+        let skipped = self.base - state.at_offset;
+        self.accounting.skipped_bytes += skipped as u64;
+        Some(WsResync {
+            desync_offset: state.at_offset,
+            reason: state.reason,
+            resumed_offset: self.base,
+            skipped,
+            confirmed: self.chain_depth,
+        })
+    }
+
     /// The next complete zenoh-carrying message, with the stream offset its
     /// first frame began at.
     pub fn next_message(&mut self) -> Option<(usize, Vec<u8>)> {
-        if self.desynchronised {
-            return None;
+        // R311y612 — a desynchronised direction is no longer terminal: the
+        // detecting call recorded it, and every later one scans.
+        if self.desync.is_some() {
+            self.pending_resync = Some(self.try_resync()?);
         }
         if !self.preamble_done && !self.step_over_preamble() {
             return None;
@@ -211,8 +702,8 @@ impl WsDeframer {
             let frame_start = self.base;
             let frame = match self.take_frame() {
                 Frame::Need => return None,
-                Frame::Bad => {
-                    self.desynchronised = true;
+                Frame::Bad(reason) => {
+                    self.desynchronise(reason);
                     return None;
                 }
                 Frame::Got(f) => f,
@@ -229,7 +720,7 @@ impl WsDeframer {
                     if self.partial_offset.is_some() {
                         // A new message starting while one is unfinished means
                         // the frame boundary is not where this reader thinks.
-                        self.desynchronised = true;
+                        self.desynchronise(WsDesyncReason::MessageBoundary);
                         return None;
                     }
                     self.partial = frame.payload;
@@ -240,11 +731,11 @@ impl WsDeframer {
                 }
                 OP_CONTINUATION => {
                     if self.partial_offset.is_none() {
-                        self.desynchronised = true;
+                        self.desynchronise(WsDesyncReason::MessageBoundary);
                         return None;
                     }
                     if self.partial.len() + frame.payload.len() > MAX_WS_PAYLOAD {
-                        self.desynchronised = true;
+                        self.desynchronise(WsDesyncReason::UnusableHeader);
                         return None;
                     }
                     self.partial.extend_from_slice(&frame.payload);
@@ -252,10 +743,10 @@ impl WsDeframer {
                         return self.take_partial();
                     }
                 }
-                _ => {
+                opcode => {
                     // A reserved opcode means this is not the protocol we
                     // think it is; guessing past it would invent messages.
-                    self.desynchronised = true;
+                    self.desynchronise(WsDesyncReason::ReservedOpcode { opcode });
                     return None;
                 }
             }
@@ -281,7 +772,7 @@ impl WsDeframer {
         if self.buf.len() > MAX_PREAMBLE {
             // Detected as WebSocket on four bytes and then never terminated:
             // whatever this stream is, it is not an upgrade handshake.
-            self.desynchronised = true;
+            self.desynchronise(WsDesyncReason::PreambleNeverEnded);
         }
         false
     }
@@ -299,7 +790,7 @@ impl WsDeframer {
         // undo — and a compressed payload handed on as if it were plain would
         // decode into confident nonsense.
         if (b0 & 0x70) != 0 {
-            return Frame::Bad;
+            return Frame::Bad(WsDesyncReason::UnusableHeader);
         }
         let opcode = b0 & 0x0F;
         let masked = (b1 & 0x80) != 0;
@@ -326,14 +817,14 @@ impl WsDeframer {
                 // On a 32-bit target the cast would wrap; refusing above the
                 // cap first makes the conversion total.
                 if n > MAX_WS_PAYLOAD as u64 {
-                    return Frame::Bad;
+                    return Frame::Bad(WsDesyncReason::UnusableHeader);
                 }
                 n as usize
             }
             n => n,
         };
         if payload_len > MAX_WS_PAYLOAD {
-            return Frame::Bad;
+            return Frame::Bad(WsDesyncReason::UnusableHeader);
         }
         let mut key = [0u8; 4];
         if masked {
@@ -381,8 +872,8 @@ enum Frame {
     Got(ParsedFrame),
     /// Not all here yet — wait for more bytes.
     Need,
-    /// This is not RFC6455.
-    Bad,
+    /// This is not RFC6455, and why.
+    Bad(WsDesyncReason),
 }
 
 /// First index of `needle` in `haystack`. `no_std` and no dependencies, so the
@@ -560,6 +1051,12 @@ mod tests {
     /// from two runs the sender never wrote adjacently, and nothing in RFC6455
     /// would object. So the assertion is not "it reports the gap"; it is that
     /// the message that would have been fabricated is not produced.
+    ///
+    /// R311y612 — and it now holds STRUCTURALLY rather than by arithmetic:
+    /// `note_gap` discards the near-side tail, so there are no pre-hole bytes
+    /// left for a scan to join to the post-hole ones. Before R311y612 the
+    /// deframer simply stopped forever, which passed this test and failed the
+    /// one below it.
     #[test]
     fn an_announced_gap_stops_the_deframer_fabricating_a_message() {
         let bytes = frame(true, OP_BINARY, b"zenoh", None);
@@ -575,13 +1072,310 @@ mod tests {
         let mut d = WsDeframer::new();
         d.push(UPGRADE);
         d.push(&bytes[..2]);
-        d.note_gap();
+        d.note_gap(9);
         d.push(&bytes[2..]);
         assert!(
             d.next_message().is_none(),
             "the same bytes must not become a message across an announced hole"
         );
         assert!(d.desynchronised());
+        assert_eq!(
+            d.desync_reason(),
+            Some(WsDesyncReason::CaptureGap { bytes_missing: 9 }),
+            "the size of the hole is the source's measurement, not an inference"
+        );
+    }
+
+    /// One zenoh batch inside one ws BINARY frame, unmasked. A bare KeepAlive
+    /// is the shortest thing zenoh puts on a ws link and its MID is a credible
+    /// transport header, which is what the chain discriminator anchors on.
+    fn zenoh_frame(n: u8) -> Vec<u8> {
+        let mut payload = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        payload.extend_from_slice(&[n; 3]);
+        frame(true, OP_BINARY, &payload, None)
+    }
+
+    /// R311y612 (§4.2) — THE ROUND'S DEFECT, with the arm that proves it was
+    /// one.
+    ///
+    /// A ws flow that loses one segment used to report every LATER message on
+    /// the flow as absent — the deframer's desynchronisation was terminal, so a
+    /// capture with one dropped packet came back saying the session went silent
+    /// at that byte. The control arm is the same corpus at `chain_depth = 0`,
+    /// which IS the pre-R311y612 behaviour: it must produce nothing after the
+    /// hole, or this test is measuring something that was never broken.
+    #[test]
+    fn an_announced_gap_no_longer_ends_the_flow() {
+        let mut after = Vec::new();
+        for i in 0..6u8 {
+            after.extend_from_slice(&zenoh_frame(i));
+        }
+
+        let mut dead = WsDeframer::new().with_chain_depth(0);
+        dead.push(UPGRADE);
+        dead.note_gap(40);
+        dead.push(&after);
+        assert!(
+            dead.next_message().is_none(),
+            "recovery off is the pre-R311y612 reader, and it must stay silent \
+             — an arm that recovers anyway would make the live arm vacuous"
+        );
+
+        let mut d = WsDeframer::new();
+        d.push(UPGRADE);
+        // A truncated frame header on the near side of the hole: the exact
+        // shape that would let a reader claim a 63-bit length across it.
+        d.push(&zenoh_frame(9)[..2]);
+        d.note_gap(40);
+        d.push(&after);
+
+        let (offset, first) = d.next_message().expect("the reader finds a boundary");
+        let resync = d.take_resync().expect("the recovery is REPORTED");
+        assert_eq!(
+            resync.reason,
+            WsDesyncReason::CaptureGap { bytes_missing: 40 }
+        );
+        assert_eq!(
+            resync.resumed_offset, offset,
+            "the recovery names the offset the first message after it starts at"
+        );
+        assert_eq!(
+            resync.skipped,
+            offset - resync.desync_offset,
+            "skipped is what this reader will never deframe, measured and not \
+             asserted"
+        );
+        assert_eq!(resync.confirmed, WS_CHAIN_DEPTH);
+        assert_eq!(
+            first[0],
+            wz_session_core::wire_const::T_MID_KEEP_ALIVE,
+            "the resumed boundary is a real one, not a plausible-looking offset"
+        );
+
+        let mut decoded = 1usize;
+        while d.next_message().is_some() {
+            decoded += 1;
+        }
+        assert_eq!(
+            decoded, 6,
+            "every message after the hole decodes; before R311y612 this was 0"
+        );
+        assert!(!d.desynchronised());
+        assert_eq!(
+            d.accounting(),
+            WsResyncAccounting {
+                desyncs: 1,
+                recoveries: 1,
+                skipped_bytes: resync.skipped as u64,
+            }
+        );
+    }
+
+    /// R311y612 — a recovery must not graft the far side of a hole onto the
+    /// near side, and the fixture makes that the ONLY way to succeed wrongly.
+    ///
+    /// The near side is the first half of a message whose second half is the
+    /// hole's far side. A deframer that kept its buffered tail and scanned
+    /// through it would confirm the boundary that predates the gap and hand up
+    /// `zenoh` — a message the sender never wrote as one run.
+    #[test]
+    fn a_recovery_never_joins_the_two_sides_of_a_hole() {
+        let straddling = frame(true, OP_BINARY, b"\x0fzenoh-payload", None);
+        let mut tail = Vec::new();
+        for i in 0..6u8 {
+            tail.extend_from_slice(&zenoh_frame(i));
+        }
+
+        let mut d = WsDeframer::new();
+        d.push(UPGRADE);
+        d.push(&straddling[..6]);
+        d.note_gap(4);
+        d.push(&straddling[6..]);
+        d.push(&tail);
+
+        let mut seen = Vec::new();
+        while let Some((_, msg)) = d.next_message() {
+            seen.push(msg);
+        }
+        assert_eq!(
+            seen.len(),
+            6,
+            "only the six intact frames after the hole; the straddling message \
+             must not be reassembled across it"
+        );
+        for msg in &seen {
+            assert_ne!(
+                &msg[..],
+                b"\x0fzenoh-payload",
+                "the two sides of the hole were joined into a message"
+            );
+        }
+    }
+
+    /// R311y612 (§4.1) — a flow classified as WebSocket with its HTTP opening
+    /// LOST finds its first frame boundary by scanning, and the preamble is
+    /// what it scans over.
+    ///
+    /// Load-bearing detail: HTTP is ASCII, and ASCII is refuted at essentially
+    /// every offset by the discriminator's own clauses (a letter sets bit 0x40
+    /// or 0x20, which are RSV bits; `\r` is a reserved opcode; `\n` is a
+    /// control opcode with FIN clear). So the scan walks the preamble it was
+    /// never told about and lands on the first real frame.
+    #[test]
+    fn a_deframer_with_no_opening_scans_to_the_first_boundary() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(UPGRADE);
+        for i in 0..6u8 {
+            bytes.extend_from_slice(&zenoh_frame(i));
+        }
+        let mut d = WsDeframer::after_lost_opening(0);
+        d.push(&bytes);
+        let (offset, first) = d.next_message().expect("the scan finds the frames");
+        assert_eq!(
+            offset,
+            UPGRADE.len(),
+            "the boundary found is the first real frame, past the preamble"
+        );
+        assert_eq!(first[0], wz_session_core::wire_const::T_MID_KEEP_ALIVE);
+        let resync = d.take_resync().expect("the lost opening is reported");
+        assert_eq!(resync.reason, WsDesyncReason::OpeningLost);
+        assert_eq!(resync.skipped, UPGRADE.len());
+    }
+
+    /// R311y612 — the scan's memory bound, on the same argument as the stream
+    /// path's: `WS_RESYNC_SCAN_WINDOW` is a GUARANTEE, so bytes past it that
+    /// confirmed nothing cannot be framed and are dropped rather than held.
+    ///
+    /// A run of 0x7F refuses at every offset by construction (`0x7F & 0x70`
+    /// sets RSV bits), which is what makes the branch reachable at all — every
+    /// corpus of plausible bytes recovers long before 64 KiB.
+    #[test]
+    fn a_ws_scan_that_confirms_nothing_drops_what_it_cannot_frame() {
+        let noise = alloc::vec![0x7Fu8; WS_RESYNC_SCAN_WINDOW + 4096];
+        let mut d = WsDeframer::after_lost_opening(0);
+        d.push(&noise);
+        assert!(d.next_message().is_none());
+        assert!(d.desynchronised());
+        assert!(
+            d.buffered() <= WS_RESYNC_SCAN_WINDOW + 1,
+            "unframeable bytes past the window are dropped, not retained; held \
+             {}",
+            d.buffered()
+        );
+
+        let mut good = Vec::new();
+        for i in 0..6u8 {
+            good.extend_from_slice(&zenoh_frame(i));
+        }
+        d.push(&good);
+        d.next_message().expect("the chain confirms");
+        let resync = d.take_resync().expect("the resumption is reported");
+        assert_eq!(
+            resync.skipped,
+            noise.len(),
+            "skipped counts the DROPPED bytes too, or the accounting loses \
+             exactly what memory did"
+        );
+    }
+
+    /// R311y612 — THE MEASUREMENT the default depth is read off.
+    ///
+    /// A chain discriminator is only worth having if it refuses the two things
+    /// a ws boundary must never be confused with: arbitrary bytes, and a REAL
+    /// length-prefixed zenoh stream (the other framing this crate carries, and
+    /// the one a misclassification actually swaps for). Both corpora are swept
+    /// at several depths and the accept rate is printed, so the number in
+    /// `WS_CHAIN_DEPTH` is a reading rather than a preference.
+    ///
+    /// The assertion is on the SET of depths that hold, not on one: a depth-`d`
+    /// chain is a prefix of a depth-`d+1` chain, so an accept rate that rises
+    /// with depth would be an impossibility, and checking for it is what
+    /// caught the same flaw one framing layer down.
+    #[test]
+    fn the_ws_chain_discriminator_refuses_noise() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        const TRIALS: usize = 40;
+        const LEN: usize = 4096;
+
+        // Corpus 1: arbitrary bytes.
+        let noise: Vec<Vec<u8>> = (0..TRIALS)
+            .map(|_| (0..LEN).map(|_| (next() >> 24) as u8).collect())
+            .collect();
+        // Corpus 2: a REAL zenoh stream — 2-byte little-endian length prefix
+        // then the message — which is precisely what a misclassified ws flow
+        // would be read as, and the other way round.
+        let streams: Vec<Vec<u8>> = (0..TRIALS)
+            .map(|_| {
+                let mut buf = Vec::new();
+                while buf.len() < LEN {
+                    let mut body = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+                    let n = 1 + ((next() >> 32) as usize % 40);
+                    body.extend((0..n).map(|_| (next() >> 24) as u8));
+                    buf.extend_from_slice(&(body.len() as u16).to_le_bytes());
+                    buf.extend_from_slice(&body);
+                }
+                buf
+            })
+            .collect();
+
+        let rate = |corpus: &[Vec<u8>], depth: usize| -> usize {
+            corpus
+                .iter()
+                .filter(|buf| carries_ws_frames(buf, depth))
+                .count()
+        };
+
+        let mut noise_rates = Vec::new();
+        let mut stream_rates = Vec::new();
+        for depth in 1..=8usize {
+            let n = rate(&noise, depth);
+            let s = rate(&streams, depth);
+            std::eprintln!(
+                "ws chain depth {depth}: noise {n}/{TRIALS} accepted, \
+                 zenoh-stream {s}/{TRIALS} accepted"
+            );
+            noise_rates.push(n);
+            stream_rates.push(s);
+        }
+        for w in noise_rates.windows(2) {
+            assert!(
+                w[1] <= w[0],
+                "a deeper chain cannot accept more often: {noise_rates:?}"
+            );
+        }
+        for w in stream_rates.windows(2) {
+            assert!(
+                w[1] <= w[0],
+                "a deeper chain cannot accept more often: {stream_rates:?}"
+            );
+        }
+        let at_default = WS_CHAIN_DEPTH - 1;
+        assert_eq!(
+            noise_rates[at_default], 0,
+            "at the shipped depth the discriminator must refuse every noise \
+             buffer; got {noise_rates:?}"
+        );
+        assert_eq!(
+            stream_rates[at_default], 0,
+            "and every REAL zenoh stream, which is the corpus a \
+             misclassification would actually swap for; got {stream_rates:?}"
+        );
+        // ...and it is the SHALLOWEST depth that does, so the constant is not
+        // quietly deeper than the evidence asks for. A recovery costs a whole
+        // extra message per unit of depth on a flow that has few left, so
+        // "deeper is always safer" is not free and is not assumed here.
+        assert!(
+            at_default == 0 || noise_rates[at_default - 1] > 0 || stream_rates[at_default - 1] > 0,
+            "one depth shallower already refuses everything, so WS_CHAIN_DEPTH \
+             is deeper than measured: noise {noise_rates:?} stream \
+             {stream_rates:?}"
+        );
     }
 
     #[test]

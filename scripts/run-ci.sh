@@ -5271,6 +5271,55 @@ layer_c1bo_dissect_c_abi() {
     return 0
 }
 
+# R311y612 (§5.11) — wz-capture at `--no-default-features`, which NO lane had.
+#
+# The gap was not hypothetical. R311y609 found that `wz-capture` did not
+# COMPILE without its default `reassembly` feature and fixed it; nothing was
+# added that would notice the next time, so the fix was one edit away from
+# silently regressing. C1bn above builds the crate at its DEFAULT features, and
+# a `--workspace` build unifies `reassembly` back on from wz-runtime-tokio, so
+# neither can see this.
+#
+# Two claims, and the second is the one a bare `cargo test` cannot make:
+#   1. it builds and its tests RUN (count floor, not `exit 0`);
+#   2. the tests that matter are PRESENT in this build. A `#[cfg]`-gated test
+#      that vanishes at no-default reports `ok. N passed` with N silently
+#      smaller — the shape R311y611 hit when three MID censuses had to be
+#      confirmed in the no-default `--list` one by one. The SET is pinned, not
+#      the count, so adding a test does not red the lane and losing one does.
+layer_c1bt_capture_no_default_features() {
+    local out listing missing name
+    (cd crates && cargo clippy -p wz-capture --no-default-features --all-targets \
+        --quiet -- -D warnings) || return 1
+
+    out="$(cd crates && cargo test -p wz-capture --no-default-features --quiet 2>&1)" \
+        || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1bt FAIL: wz-capture ran no tests at --no-default-features"
+        echo "$out"; return 1; }
+
+    listing="$(cd crates && cargo test -p wz-capture --no-default-features -- --list 2>/dev/null)" \
+        || { echo "  C1bt FAIL: --list did not run"; return 1; }
+    missing=0
+    for name in \
+        ws::tests::the_ws_chain_discriminator_refuses_noise \
+        ws::tests::an_announced_gap_no_longer_ends_the_flow \
+        ws::tests::a_recovery_never_joins_the_two_sides_of_a_hole \
+        ws::tests::a_deframer_with_no_opening_scans_to_the_first_boundary \
+        ws::tests::a_ws_scan_that_confirms_nothing_drops_what_it_cannot_frame \
+        ws_flow_tests::a_hole_in_the_opening_is_decided_on_the_far_side_rather_than_guessed \
+        ws_flow_tests::the_other_directions_opening_settles_a_hole_in_this_one \
+        ws_flow_tests::every_mid_on_a_websocket_link_is_named_rather_than_unknown \
+        datagram_tests::announcing_the_hole_stops_the_reader_swallowing_the_frames_after_it
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1bt FAIL: $name is absent from the --no-default-features build"
+            missing=1; }
+    done
+    (( missing == 0 )) || return 1
+    echo "  C1bt: wz-capture builds, tests and keeps its framing suite without default features"
+}
+
 layer_c1bn_passive_dissection_features() {
     local out
     (cd crates && cargo clippy -p wz-capture --all-targets --quiet -- -D warnings) || return 1
@@ -10360,6 +10409,7 @@ run_layer C1be layer_c1be_cargo_test_query_value || overall=1
 run_layer C1bf layer_c1bf_cargo_clippy_all_features || overall=1
 run_layer C1bn layer_c1bn_passive_dissection_features || overall=1
 run_layer C1bo layer_c1bo_dissect_c_abi || overall=1
+run_layer C1bt layer_c1bt_capture_no_default_features || overall=1
 run_layer C1bq layer_c1bq_zero_copy_arena || overall=1
 run_layer C1br layer_c1br_uring_fixed_buffers || overall=1
 run_layer C1bs layer_c1bs_live_capture || overall=1

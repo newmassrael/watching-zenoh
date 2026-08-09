@@ -261,7 +261,8 @@ fn health_json(d: &Dissection) -> String {
          \"transport_checksum_absent\":{}}},\
          \"framing\":{{\"gaps_forced\":{},\"gap_bytes_missing\":{},\
          \"desyncs\":{},\"recoveries\":{},\"resync_skipped_bytes\":{},\
-         \"reserved_headers\":{}}},\
+         \"reserved_headers\":{},\
+         \"ws_desyncs\":{},\"ws_recoveries\":{},\"ws_resync_skipped_bytes\":{}}},\
          \"sequence\":{{\"frames\":{},\"missing\":{},\"gaps\":{},\
          \"duplicates\":{},\"out_of_window\":{},\"without_resolution\":{}}}}}",
         drops.frames,
@@ -290,6 +291,9 @@ fn health_json(d: &Dissection) -> String {
         fr.recoveries,
         fr.resync_skipped_bytes,
         fr.reserved_headers,
+        fr.ws_desyncs,
+        fr.ws_recoveries,
+        fr.ws_resync_skipped_bytes,
         fr.sn_frames,
         fr.sn_missing,
         fr.sn_gaps,
@@ -639,6 +643,76 @@ mod tests {
         assert!(
             json.contains("\"reserved_headers\":1"),
             "the bit the decoder ignored must still be counted: {json}"
+        );
+    }
+
+    /// R311y612 (§4.2) — a WEBSOCKET direction that loses its frame boundary
+    /// and finds it again crosses the boundary as its OWN pair of numbers.
+    ///
+    /// Its own, and not folded into `desyncs` / `recoveries`, because the two
+    /// are losses of different framings: a zenoh-framing desync is inside a
+    /// stream this reader still holds, while a ws-framing one means the message
+    /// boundary itself is gone. A consumer that saw one number could not tell
+    /// which had happened.
+    ///
+    /// The control arm is the same capture with no hole in it. Without it a
+    /// `ws_desyncs` key that were hard-wired to 1 would pass.
+    #[test]
+    fn a_websocket_resynchronisation_crosses_the_boundary_as_a_count() {
+        let upgrade = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n";
+        // One RFC6455 BINARY frame per bare KeepAlive — a ws message boundary
+        // IS the framing, so there is no length prefix inside it.
+        let ws_msg = [0x82u8, 0x01, wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let mut stream = upgrade.to_vec();
+        for _ in 0..24 {
+            stream.extend_from_slice(&ws_msg);
+        }
+
+        // Segment it so a whole segment can be dropped MID-flow. The dropped
+        // index must have segments after it: dropping the last one is a
+        // truncated capture, not a hole, and the first version of this fixture
+        // did exactly that — `gaps_forced` came back 0 and nothing was proven.
+        const SEG: usize = 12;
+        const DROP: usize = 5;
+        let segs: Vec<&[u8]> = stream.chunks(SEG).collect();
+        assert!(
+            DROP + 1 < segs.len(),
+            "the hole needs bytes on its far side; {} segments",
+            segs.len()
+        );
+        let build = |drop_at: Option<usize>| -> Vec<u8> {
+            let mut pkts: Vec<Vec<u8>> = Vec::new();
+            for (i, seg) in segs.iter().enumerate() {
+                if Some(i) == drop_at {
+                    continue;
+                }
+                pkts.push(tcp_packet(1000 + (i * SEG) as u32, seg));
+            }
+            let refs: Vec<(u32, u32, &[u8])> =
+                pkts.iter().map(|p| (0u32, 0u32, p.as_slice())).collect();
+            wz_capture::pcap::write(1, &refs)
+        };
+
+        let control = call_summary(&build(None)).expect("reads");
+        assert!(
+            control.contains("\"ws_desyncs\":0") && control.contains("\"ws_recoveries\":0"),
+            "the intact arm must be zero or the other proves nothing: {control}"
+        );
+
+        let json = call_summary(&build(Some(DROP))).expect("reads");
+        assert!(
+            json.contains("\"ws_desyncs\":1"),
+            "the ws direction lost its frame boundary and must say so: {json}"
+        );
+        assert!(
+            json.contains("\"ws_recoveries\":1"),
+            "and found it again — before R311y612 the flow simply ended here \
+             and every later message was reported as absent: {json}"
+        );
+        assert!(
+            !json.contains("\"ws_resync_skipped_bytes\":0"),
+            "a recovery that stepped over nothing would mean the hole was not \
+             where the fixture put it: {json}"
         );
     }
 

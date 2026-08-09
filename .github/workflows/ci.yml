@@ -2397,6 +2397,17 @@ jobs:
       - name: Layer C1bf — wz-runtime-tokio --all-features clippy (R311y420)
         run: bash scripts/run-ci.sh --layer C1bf
 
+      # R311y612 (§5.11) — the same genre as C3 above and hosted for the same
+      # reason: `--workspace` unification re-enables `wz-capture/reassembly`
+      # from wz-runtime-tokio, so the crate's feature-poor build is a state NO
+      # other job in this file can reach. R311y609 found that build broken and
+      # fixed it with nothing left behind to notice a regression; this is that
+      # gate. ~3s locally, and it pins the SET of framing tests present rather
+      # than a count, so a `#[cfg]` that quietly drops one reds it (falsified
+      # by gating a test behind `reassembly`: red, named).
+      - name: Layer C1bt — wz-capture --no-default-features (R311y612)
+        run: bash scripts/run-ci.sh --layer C1bt
+
   capi-c-arms:
     name: §5.27 api-compat-c — the ABI arms and the SHM oracle (C1ce + arms gate)
     runs-on: ubuntu-22.04
