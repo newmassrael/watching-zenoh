@@ -258,6 +258,65 @@ pub enum InboundFrame {
     Unknown { mid: u8 },
 }
 
+impl InboundFrame {
+    /// R311y630 (§14.1) — what a conforming PARTICIPANT must do with this
+    /// frame's extension chain: [`ExtAdmission::UnknownMandatory`] means the
+    /// peer marked an extension mandatory that this message's space does not
+    /// define, and the whole message must be refused.
+    ///
+    /// A METHOD rather than a rejection inside [`parse_inbound`], because the
+    /// two consumers of a decode have opposite obligations. An analyzer must
+    /// still SEE the extension — "this frame carries a mandatory extension
+    /// nobody implements" is the most useful sentence it can produce about
+    /// such a frame — while a participant must refuse. The same separation
+    /// `Frame`'s `priority`, `Fragment`'s `markers` and a JOIN on a unicast
+    /// session already use: wz decodes whatever the peer sent, and whether the
+    /// message is ADMISSIBLE is decided one layer up.
+    ///
+    /// `Unknown { mid }` answers [`ExtAdmission::Unjudged`]: this build cannot
+    /// name the message, so it has no extension space to judge the chain
+    /// against, and a reach limit reported as admission is exactly how an
+    /// observer's blind spot becomes a participant's accepted message.
+    pub fn ext_admission(&self) -> crate::ext_admit::ExtAdmission {
+        use crate::ext_admit::ExtAdmission;
+        // Each arm names its own MID constant rather than deriving one from a
+        // stored header byte: the variants do not carry the header, and the
+        // MID is what SELECTED the variant, so the constant is the fact.
+        #[cfg(any(
+            feature = "codec-init-body",
+            feature = "codec-open-body",
+            feature = "codec-close",
+            feature = "codec-keep-alive",
+            feature = "codec-frame",
+            feature = "codec-join"
+        ))]
+        fn judge(mid: u8, entries: &[ExtEntryOwned]) -> ExtAdmission {
+            crate::ext_admit::judge_ext_chain(mid, entries.iter().map(|e| e.header))
+        }
+        match self {
+            #[cfg(feature = "codec-init-body")]
+            InboundFrame::Init { extensions, .. } => judge(wire_const::T_MID_INIT, extensions),
+            #[cfg(feature = "codec-open-body")]
+            InboundFrame::Open { extensions, .. } => judge(wire_const::T_MID_OPEN, extensions),
+            #[cfg(feature = "codec-close")]
+            InboundFrame::Close { extensions, .. } => judge(wire_const::T_MID_CLOSE, extensions),
+            #[cfg(feature = "codec-keep-alive")]
+            InboundFrame::KeepAlive { extensions, .. } => {
+                judge(wire_const::T_MID_KEEP_ALIVE, extensions)
+            }
+            #[cfg(feature = "codec-frame")]
+            InboundFrame::Frame { extensions, .. } => judge(wire_const::T_MID_FRAME, extensions),
+            #[cfg(feature = "reassembly")]
+            InboundFrame::Fragment { extensions, .. } => {
+                judge(wire_const::T_MID_FRAGMENT, extensions)
+            }
+            #[cfg(feature = "codec-join")]
+            InboundFrame::Join { extensions, .. } => judge(wire_const::T_MID_JOIN, extensions),
+            InboundFrame::Unknown { .. } => ExtAdmission::Unjudged,
+        }
+    }
+}
+
 /// R311y215 — project the QoS priority carried by a decoded Frame/Fragment ext
 /// chain: the z64 `ext_qos` extension (id `0x1`, `crate::extqos::QOS_EXT_ID`)
 /// packs the priority in the low 3 bits (zenoh transport `QoSType`,
@@ -520,6 +579,19 @@ pub fn inbound_to_fsm_event(
     frame: &InboundFrame,
 ) -> Option<crate::session_fsm_unicast::SessionFsmUnicastEvent> {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    // R311y630 (§14.1) — THE MANDATORY-EXTENSION RULE, ahead of every
+    // per-variant projection because it applies to all of them and because the
+    // variants that answer `None` below (Frame / Fragment / KeepAlive) would
+    // otherwise reach the drive loop's data path with a message no conforming
+    // participant may act on. `FramingError` is the same response an
+    // unimplemented MID gets, for the same reason: the peer sent something this
+    // side has provably not understood, and Close(generic) on the link is the
+    // wire-correct answer. Measured against the real `libzenohpico.so` — the
+    // driving oracle's first run disagreed with pico on eighteen generated
+    // strings and every one of them was this.
+    if let crate::ext_admit::ExtAdmission::UnknownMandatory { .. } = frame.ext_admission() {
+        return Some(E::FramingError);
+    }
     match frame {
         #[cfg(feature = "codec-init-body")]
         InboundFrame::Init { is_ack: false, .. } => Some(E::InitSynReceived),
@@ -602,6 +674,111 @@ mod debug_surface_tests {
         let a = parse_inbound(&[0x06 | 0x20, 0x01, b'x']).expect("decode a");
         let b = parse_inbound(&[0x06 | 0x20, 0x02, b'x']).expect("decode b");
         assert_ne!(format!("{a:?}"), format!("{b:?}"));
+    }
+}
+
+// ── R311y630 (§14.1) — the MANDATORY-extension rule at the PARTICIPANT seam.
+//    Measured against the real `libzenohpico.so`: eighteen generated strings
+//    were messages wz named and pico refused, and every one of them carried a
+//    mandatory extension nothing defines. ──
+#[cfg(all(test, feature = "session-unicast", feature = "codec-frame"))]
+mod mandatory_ext_tests {
+    use super::*;
+    use crate::ext_admit::ExtAdmission;
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+
+    /// A `T_MID_FRAME` with the Z flag, VLE sn, then the caller's ext chain and
+    /// a one-byte payload. Built here rather than taken from a fixture because
+    /// the ext HEADER is the whole variable under test.
+    fn frame_with_chain(chain: &[u8]) -> Vec<u8> {
+        let mut wire = alloc::vec![wire_const::T_MID_FRAME | wire_const::FLAG_T_Z, 0x07];
+        wire.extend_from_slice(chain);
+        wire.push(0xEE);
+        wire
+    }
+
+    /// THE GATE. A Frame is not a session-state trigger and answers `None`, so
+    /// a mandatory extension nobody defines would otherwise reach the drive
+    /// loop's DATA path — the frame would be delivered on a message this side
+    /// has provably not understood. It must be a framing error instead, which
+    /// is what both upstreams do with the whole message.
+    #[test]
+    fn a_frame_carrying_an_undefined_mandatory_extension_is_a_framing_error() {
+        // id 0x4, UNIT encoding, M set, chain terminator.
+        let frame = parse_inbound(&frame_with_chain(&[0x14])).expect("the frame still DECODES");
+        assert!(
+            matches!(
+                frame.ext_admission(),
+                ExtAdmission::UnknownMandatory { eid: 0x14 }
+            ),
+            "the decode must name the offending extension: {frame:?}"
+        );
+        assert!(matches!(
+            inbound_to_fsm_event(&frame),
+            Some(E::FramingError)
+        ));
+    }
+
+    /// The DISCRIMINATING negative arm, and it is two-sided because two
+    /// different mistakes would pass a one-sided one.
+    ///
+    /// A rule that refused every unrecognised extension would break the
+    /// non-mandatory chains zenoh and pico both SKIP, and a rule that never
+    /// consulted the per-message space would break the one mandatory extension
+    /// the data plane defines (`frame::ext::QoS`, `zextz64!(0x1, true)` =
+    /// `0x31`). Both must stay `None` — the Frame's own answer — and neither
+    /// can be shown by the positive leg above.
+    #[test]
+    fn a_non_mandatory_or_understood_extension_leaves_the_frame_deliverable() {
+        for chain in [
+            // id 0x4, UNIT, mandatory bit CLEAR.
+            &[0x04u8][..],
+            // `frame::ext::QoS` — mandatory, and understood.
+            &[0x31u8, 0x00][..],
+        ] {
+            let frame = parse_inbound(&frame_with_chain(chain)).expect("decode");
+            assert_eq!(
+                frame.ext_admission(),
+                ExtAdmission::Admissible,
+                "chain {chain:02X?} must be admissible"
+            );
+            assert!(
+                inbound_to_fsm_event(&frame).is_none(),
+                "chain {chain:02X?} must stay a data-plane frame"
+            );
+        }
+    }
+
+    /// The rule reaches the HANDSHAKE messages too, and there the effect is
+    /// visible as a CHANGED event rather than as `None` becoming `Some`: an
+    /// InitSyn that would have been `InitSynReceived` is a framing error when
+    /// it carries an extension it marks mandatory and nothing defines.
+    #[cfg(feature = "codec-init-body")]
+    #[test]
+    fn the_rule_overrides_the_handshake_projection_too() {
+        // version, cbyte (zid_len-1 = 0, whatami peer), the 1-byte zid, then
+        // the Z-gated chain. No S / A flags, so the base body ends there.
+        let admissible = alloc::vec![
+            wire_const::T_MID_INIT | wire_const::FLAG_T_Z,
+            0x09,
+            0x01,
+            0xAA,
+            0x04
+        ];
+        let frame = parse_inbound(&admissible).expect("decode the InitSyn");
+        assert!(matches!(
+            inbound_to_fsm_event(&frame),
+            Some(E::InitSynReceived)
+        ));
+
+        let mut inadmissible = admissible.clone();
+        // Same extension, mandatory marker set.
+        *inadmissible.last_mut().expect("chain byte") = 0x14;
+        let frame = parse_inbound(&inadmissible).expect("the InitSyn still DECODES");
+        assert!(matches!(
+            inbound_to_fsm_event(&frame),
+            Some(E::FramingError)
+        ));
     }
 }
 

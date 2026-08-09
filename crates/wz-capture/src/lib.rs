@@ -1100,6 +1100,26 @@ pub struct FramingHealth {
     /// on a stream link, whose credible-header gate refuses the byte and
     /// reports the refusal as a desynchronisation instead.
     pub reserved_headers: u64,
+    /// R311y630 (§14.1) — messages decoded that carry a mandatory extension
+    /// their message's extension space does not define.
+    ///
+    /// A SIXTH witness, and to the same question as `reserved_headers` beside
+    /// it rather than to the four above: what ARRIVED and should not have. Both
+    /// upstream implementations refuse such a message whole
+    /// (`zenoh-codec-1.5.0/src/common/extension.rs:33-36`, pico's
+    /// `_z_msg_ext_unknown_error`), so a non-zero value says the capture holds
+    /// traffic no conforming peer would have acted on. The analyzer's job is to
+    /// SAY that, which is the thing neither implementation's own logs do — they
+    /// drop the message and close the link.
+    ///
+    /// Reachable on BOTH link kinds, unlike `reserved_headers`: the transport
+    /// header's credible-header gate has nothing to say about the extension
+    /// chain that follows it.
+    ///
+    /// Deliberately NOT part of [`crate::report::CaptureReport::is_complete`],
+    /// for the reason `reserved_headers` is not: it is a fact about the SENDER,
+    /// not a shortfall in this reader's rows.
+    pub undefined_mandatory_exts: u64,
     /// R311y612 (§4.2) — times a WebSocket direction lost its RFC6455 frame
     /// boundary.
     ///
@@ -1261,6 +1281,7 @@ impl Dissection {
                 h.recoveries += r.recoveries;
                 h.resync_skipped_bytes += r.skipped_bytes;
                 h.reserved_headers += flow.session.reserved_headers(dir);
+                h.undefined_mandatory_exts += flow.session.undefined_mandatory_exts(dir);
                 add_sn(&mut h, flow.session.sn_accounting(dir));
             }
         }
@@ -1269,6 +1290,7 @@ impl Dissection {
         for flow in &self.datagram_flows {
             for dir in [Direction::A, Direction::B] {
                 h.reserved_headers += flow.session.reserved_headers(dir);
+                h.undefined_mandatory_exts += flow.session.undefined_mandatory_exts(dir);
                 add_sn(&mut h, flow.session.sn_accounting(dir));
             }
         }
@@ -1786,6 +1808,8 @@ impl Dissection {
                 self.evicted_sessions.recoveries += r.recoveries;
                 self.evicted_sessions.resync_skipped_bytes += r.skipped_bytes;
                 self.evicted_sessions.reserved_headers += gone.session.reserved_headers(dir);
+                self.evicted_sessions.undefined_mandatory_exts +=
+                    gone.session.undefined_mandatory_exts(dir);
                 add_sn(&mut self.evicted_sessions, gone.session.sn_accounting(dir));
             }
             self.drops.flows += 1;
@@ -3613,6 +3637,77 @@ mod datagram_tests {
         let mut w = alloc::vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
         w.extend_from_slice(record);
         w
+    }
+
+    /// R311y630 (§14.1) — the undefined-mandatory-extension count REACHES the
+    /// capture layer, on BOTH link kinds, and reaches the export.
+    ///
+    /// Both kinds because the module doc claims both, and the claim is exactly
+    /// the sort a single-path test leaves standing: `reserved_headers` beside
+    /// it IS datagram-only, because the credible-header gate refuses those
+    /// bytes on a stream, and it would be easy to assume the same asymmetry
+    /// here. It does not hold — the gate judges the transport header and says
+    /// nothing about the chain behind it — so a stream link decodes such a
+    /// frame exactly as a datagram link does, and this drives one of each to
+    /// say so rather than to assume it.
+    ///
+    /// The counter is deliberately absent from `is_complete`, and the last
+    /// assertion pins that: it is a fact about the SENDER, and a report that
+    /// called itself incomplete because a peer misbehaved would be measuring
+    /// the wrong thing.
+    #[test]
+    fn an_undefined_mandatory_extension_reaches_the_capture_layer_on_both_links() {
+        // KEEP_ALIVE + Z, then one ext: id 0x4, UNIT, mandatory, terminator.
+        let offender = alloc::vec![
+            wz_session_core::wire_const::T_MID_KEEP_ALIVE | wz_session_core::wire_const::FLAG_T_Z,
+            0x14
+        ];
+        // The same chain without the mandatory marker — the control.
+        let clean = alloc::vec![offender[0], 0x04];
+
+        for (name, wire, expected) in [("offender", &offender, 1u64), ("control", &clean, 0u64)] {
+            let mut datagram = Dissection::new();
+            datagram.push_packet(
+                LINKTYPE_ETHERNET,
+                0,
+                &udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, wire),
+            );
+            assert_eq!(
+                datagram.framing_health().undefined_mandatory_exts,
+                expected,
+                "{name}: datagram link"
+            );
+
+            let mut stream = Dissection::new();
+            let mut framed = alloc::vec![wire.len() as u8, 0];
+            framed.extend_from_slice(wire);
+            stream.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(0, &framed));
+            assert_eq!(
+                stream.framing_health().undefined_mandatory_exts,
+                expected,
+                "{name}: stream link — the credible-header gate judges the \
+                 header, not the chain behind it"
+            );
+
+            // The export carries it, in both renderings.
+            let report = crate::report::CaptureReport::of(&datagram);
+            assert!(
+                report
+                    .to_json()
+                    .contains(&alloc::format!("\"undefined_mandatory_exts\":{expected}")),
+                "{name}: the JSON must carry the field unconditionally"
+            );
+            assert_eq!(
+                report.to_text().contains("undefined-mandatory-extension"),
+                expected > 0,
+                "{name}: the text rendering prints it only when non-zero"
+            );
+            assert!(
+                report.is_complete(),
+                "{name}: a misbehaving SENDER does not make this reader's rows \
+                 short, and `is_complete` must not claim it does"
+            );
+        }
     }
 
     /// R311y613 (§1.4b) — THE MISSING HALF: every MID zenoh puts INSIDE a

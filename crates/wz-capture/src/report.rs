@@ -226,7 +226,7 @@ impl<'a> CaptureReport<'a> {
             ",\"framing\":{{\"gaps_forced\":{},\"gap_bytes_missing\":{},\
              \"desyncs\":{},\"recoveries\":{},\"resync_skipped_bytes\":{},\
              \"ws_desyncs\":{},\"ws_recoveries\":{},\"ws_resync_skipped_bytes\":{},\
-             \"reserved_headers\":{}}}",
+             \"reserved_headers\":{},\"undefined_mandatory_exts\":{}}}",
             f.gaps_forced,
             f.gap_bytes_missing,
             f.desyncs,
@@ -235,7 +235,8 @@ impl<'a> CaptureReport<'a> {
             f.ws_desyncs,
             f.ws_recoveries,
             f.ws_resync_skipped_bytes,
-            f.reserved_headers
+            f.reserved_headers,
+            f.undefined_mandatory_exts
         ));
         s.push_str(&format!(
             ",\"sequence\":{{\"frames\":{},\"missing\":{},\"gaps\":{},\
@@ -295,16 +296,22 @@ impl<'a> CaptureReport<'a> {
         // lines and a row of zeroes on every clean capture is noise that trains
         // the eye to skip the section.
         let f = d.framing_health();
-        if f.desyncs > 0 || f.gaps_forced > 0 || f.reserved_headers > 0 {
+        if f.desyncs > 0
+            || f.gaps_forced > 0
+            || f.reserved_headers > 0
+            || f.undefined_mandatory_exts > 0
+        {
             s.push_str(&format!(
                 "  framing: {} desync(s), {} recovered ({} bytes stepped over); \
-                 {} forced gap(s) ({} bytes); {} reserved-flag header(s)\n",
+                 {} forced gap(s) ({} bytes); {} reserved-flag header(s); \
+                 {} undefined-mandatory-extension frame(s)\n",
                 f.desyncs,
                 f.recoveries,
                 f.resync_skipped_bytes,
                 f.gaps_forced,
                 f.gap_bytes_missing,
-                f.reserved_headers
+                f.reserved_headers,
+                f.undefined_mandatory_exts
             ));
         }
         if f.ws_desyncs > 0 {

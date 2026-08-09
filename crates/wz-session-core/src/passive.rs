@@ -394,6 +394,31 @@ pub struct PassiveFrame {
     /// Always zero on the datagram path, which has no such gate to disagree
     /// with.
     pub reserved_header_bits: u8,
+    /// R311y630 (§14.1) — the extension identity that makes this frame
+    /// inadmissible to a conforming PARTICIPANT: the chain carries it with the
+    /// mandatory marker set and the message's extension space does not define
+    /// it, so both upstream implementations refuse the whole message
+    /// ([`crate::ext_admit`]).
+    ///
+    /// `None` for a conforming sender, and for a MID this build cannot name —
+    /// the two are told apart by [`PassiveFrame::frame`] itself, which is
+    /// `Unknown` in the second case.
+    ///
+    /// Reported rather than swallowed, and reported rather than turned into a
+    /// refusal, because those are the observer's two failure modes and this
+    /// field is what avoids both. Swallowing it makes the analyzer quieter
+    /// than either implementation about a frame neither would accept;
+    /// refusing it would delete the analyzer's ability to SAY what is wrong,
+    /// which is the one thing a capture reader can contribute that a
+    /// participant cannot. A participant reading the same decode gets its
+    /// refusal from [`crate::inbound::inbound_to_fsm_event`].
+    ///
+    /// Genre note: this is a fact about the SENDER, like
+    /// [`PassiveFrame::reserved_header_bits`] beside it, not a shortfall in
+    /// the reader's own rows — so it does not belong in a completeness
+    /// verdict, and the capture layer's `is_complete` deliberately does not
+    /// consult it.
+    pub undefined_mandatory_ext: Option<u8>,
 }
 
 /// R311y609 (C12) — what the observer makes of ONE data frame's sequence
@@ -787,6 +812,14 @@ pub struct PassiveSession {
     /// gate refuses such a byte and desynchronises instead, and says so. So
     /// this is the counter for the path where nothing else was speaking.
     reserved_headers: [u64; 2],
+    /// R311y630 (§14.1) — frames decoded that carry a mandatory extension
+    /// their message's space does not define, per direction.
+    ///
+    /// Reachable on BOTH ingestion paths, unlike `reserved_headers` above: the
+    /// credible-header gate judges the transport header byte and has nothing
+    /// to say about the extension chain that follows it, so a stream link
+    /// decodes such a frame exactly as a datagram link does.
+    undefined_mandatory_exts: [u64; 2],
     /// R311y609 — how many chained candidate frames must agree before the
     /// resynchronisation scan accepts a boundary. `0` disables recovery.
     resync_depth: usize,
@@ -885,6 +918,7 @@ impl Default for PassiveSession {
             #[cfg(feature = "codec-frame")]
             sn_accounting: [SnAccounting::default(); 2],
             reserved_headers: [0; 2],
+            undefined_mandatory_exts: [0; 2],
             resync_depth: DEFAULT_RESYNC_DEPTH,
         }
     }
@@ -1117,10 +1151,12 @@ impl PassiveSession {
         #[cfg(feature = "codec-frame")]
         let sn_verdict = self.track_sn(direction, &frame);
         let carried = self.decode_carried(direction, &frame);
+        let undefined_mandatory_ext = self.note_undefined_mandatory_ext(direction, &frame);
         Ok(PassiveFrame {
             direction,
             stream_offset,
             prefix_width: width,
+            undefined_mandatory_ext,
             frame,
             context: self.context,
             exceeds_negotiated_batch: self.exceeds_batch(payload_len),
@@ -1160,6 +1196,29 @@ impl PassiveSession {
     /// bit its MID does not define. See [`PassiveFrame::reserved_header_bits`].
     pub fn reserved_headers(&self, direction: Direction) -> u64 {
         self.reserved_headers[usize::from(direction == Direction::B)]
+    }
+
+    /// R311y630 (§14.1) — frames this direction decoded that carry a mandatory
+    /// extension their message's space does not define. See
+    /// [`PassiveFrame::undefined_mandatory_ext`].
+    pub fn undefined_mandatory_exts(&self, direction: Direction) -> u64 {
+        self.undefined_mandatory_exts[usize::from(direction == Direction::B)]
+    }
+
+    /// R311y630 — the per-frame verdict, and the counter bump that goes with
+    /// it, in ONE place because both ingestion paths need both and a fact
+    /// recorded at one site and counted at another is how the two drift.
+    fn note_undefined_mandatory_ext(
+        &mut self,
+        direction: Direction,
+        frame: &Result<InboundFrame, InboundParseError>,
+    ) -> Option<u8> {
+        let Ok(frame) = frame else { return None };
+        let crate::ext_admit::ExtAdmission::UnknownMandatory { eid } = frame.ext_admission() else {
+            return None;
+        };
+        self.undefined_mandatory_exts[usize::from(direction == Direction::B)] += 1;
+        Some(eid)
     }
 
     /// R311y610 — bytes pushed into this direction and not yet consumed.
@@ -1358,9 +1417,11 @@ impl PassiveSession {
         #[cfg(feature = "codec-frame")]
         let sn_verdict = self.track_sn(direction, &frame);
         let carried = self.decode_carried(direction, &frame);
+        let undefined_mandatory_ext = self.note_undefined_mandatory_ext(direction, &frame);
         PassiveFrame {
             direction,
             stream_offset: offset,
+            undefined_mandatory_ext,
             // Recorded as zero rather than as one of the two stream widths:
             // a datagram has no prefix, and reporting 2 here would be a
             // measurement of nothing.
@@ -2711,6 +2772,52 @@ mod tests {
             odd.frame.is_ok(),
             "reporting it must not turn a decodable message into an error: \
              zenoh's own decoder ignores the bit"
+        );
+    }
+
+    /// R311y630 (§14.1) — THE OBSERVER'S HALF of the mandatory-extension rule.
+    ///
+    /// A participant refuses such a frame and the link goes down; a capture
+    /// reader must still decode it AND say what is wrong with it, because
+    /// "this frame carries a mandatory extension nothing defines" is the whole
+    /// explanation for a session that keeps dying and is the one sentence
+    /// neither implementation's own logs will produce for the person holding
+    /// the capture.
+    ///
+    /// Two arms, and the control one is the discriminator: an analyzer that
+    /// simply refused every unrecognised extension would satisfy the first
+    /// assertion and would ALSO flag the non-mandatory chains zenoh and pico
+    /// both skip — which is most real traffic.
+    #[test]
+    #[cfg(feature = "codec-keep-alive")]
+    fn a_datagram_reports_the_undefined_mandatory_extension_it_decoded() {
+        let mut s = PassiveSession::new();
+        // KEEP_ALIVE + Z, then one ext: id 0x4, UNIT, chain terminator.
+        let header = crate::wire_const::T_MID_KEEP_ALIVE | crate::wire_const::FLAG_T_Z;
+
+        let clean = s.next_datagram(Direction::A, &[header, 0x04], 0);
+        assert_eq!(clean.undefined_mandatory_ext, None, "the control arm");
+        assert!(clean.frame.is_ok());
+        assert_eq!(s.undefined_mandatory_exts(Direction::A), 0);
+
+        // The same extension with the mandatory marker set.
+        let flagged = s.next_datagram(Direction::A, &[header, 0x14], 0);
+        assert_eq!(
+            flagged.undefined_mandatory_ext,
+            Some(0x14),
+            "the peer marked an extension mandatory that KEEP_ALIVE's space \
+             does not define — both upstreams refuse the message on that"
+        );
+        assert!(
+            flagged.frame.is_ok(),
+            "reporting it must not cost the analyzer the DECODE: the observer's \
+             contribution is naming the fault, not repeating the refusal"
+        );
+        assert_eq!(s.undefined_mandatory_exts(Direction::A), 1);
+        assert_eq!(
+            s.undefined_mandatory_exts(Direction::B),
+            0,
+            "the counter is per direction"
         );
     }
 

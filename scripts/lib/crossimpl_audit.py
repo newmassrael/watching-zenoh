@@ -216,7 +216,15 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # codecs it drives through both decoders. Every claim is `partial` on purpose:
 # the differential compares the ACCEPT/REJECT verdict, so it adjudicates each
 # codec's BOUNDARY and not its contents.
-FOREIGN_ADJUDICATOR_LINKS = 801
+# R311y630 took it to 802, in ONE step, and the step's shape is a MECHANISM
+# WITNESS rather than a new plane. The previous round's generated corpus found
+# 27 disagreements and could not say whose they were; the triage split them
+# into a wz defect (18, now fixed) and a pico one (16, now pinned with an owner)
+# -- and the pico half needed a test that MEASURES the mechanism instead of
+# citing it, because "pico never reads the CLOSE ext chain" read off a source
+# file is a claim about one build, while four chains no reader could rate alike
+# getting one verdict from the linked library is the fact.
+FOREIGN_ADJUDICATOR_LINKS = 802
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

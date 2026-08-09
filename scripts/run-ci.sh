@@ -6351,7 +6351,10 @@ layer_epico_library_oracles() {
     # A lane that skipped here would go green having compared nothing, and
     # Layer A4 reads "this lane is in ci.yml" as evidence its proofs executed.
     (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
-    _runci_guarded_test "Epico transport-decode differential" 2 \
+    # R311y630 — 2 -> 3: the triage of the 27 divergences added the MECHANISM
+    # WITNESS for the surviving sixteen (pico's CLOSE verdict is independent of
+    # the extension chain, measured rather than read off transport.c).
+    _runci_guarded_test "Epico transport-decode differential" 3 \
         cargo test -p wz-integration-tests \
         --test pico_transport_decode_differential -- --ignored --quiet --test-threads=1 \
         || return 1

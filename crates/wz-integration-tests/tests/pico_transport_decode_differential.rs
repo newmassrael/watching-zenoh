@@ -151,7 +151,7 @@ unsafe fn pico_accepts(lib: &Library, bytes: &[u8]) -> bool {
     }
 }
 
-/// What wz made of the same bytes — THREE answers, not two.
+/// What wz made of the same bytes — FOUR answers, not two.
 ///
 /// R311y628 — the first cut of this file compared `parse_inbound(..).is_ok()`
 /// against pico's result code and reported hundreds of disagreements, ALL of
@@ -162,13 +162,31 @@ unsafe fn pico_accepts(lib: &Library, bytes: &[u8]) -> bool {
 /// different contracts, and lumping them made the oracle report a design
 /// decision as a protocol finding.
 ///
-/// The comparison that means something is NAMED against ACCEPTED. `Unnamed` is
-/// reported separately, because it is a census of this build's reach rather
-/// than a disagreement about the wire.
+/// R311y630 — the SAME shape a second time, and this time the resolution was a
+/// missing implementation rather than a missing distinction. Eighteen of the
+/// twenty-seven pinned divergences were chains carrying an extension with the
+/// MANDATORY bit set and an identity the message's extension space does not
+/// define; both upstreams refuse the whole message on that
+/// (`zenoh-codec-1.5.0/src/common/extension.rs:33-36`, pico
+/// `_z_msg_ext_unknown_error`) and wz had no such rule anywhere. It has one now
+/// ([`wz_session_core::ext_admit`]), and a decode wz can read but a participant
+/// must refuse is its own answer here rather than being folded into either
+/// neighbour: folding it into `Named` reports agreement wz has not earned, and
+/// folding it into `Refused` erases the fact that the analyzer CAN read the
+/// frame and say what is wrong with it.
+///
+/// The comparison that means something is ADMISSIBLE against ACCEPTED.
+/// `Unnamed` is reported separately, because it is a census of this build's
+/// reach rather than a disagreement about the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WzVerdict {
-    /// wz decoded it as a specific transport message.
+    /// wz decoded it as a specific transport message AND a participant may act
+    /// on it.
     Named,
+    /// wz decoded it as a specific transport message and a conforming
+    /// PARTICIPANT must refuse it — the chain carries a mandatory extension
+    /// this message's space does not define.
+    Inadmissible,
     /// wz read a message and could not name its MID.
     Unnamed,
     /// wz refused the bytes.
@@ -176,9 +194,18 @@ enum WzVerdict {
 }
 
 fn wz_verdict(bytes: &[u8]) -> WzVerdict {
-    match wz_session_core::inbound::parse_inbound(bytes) {
-        Ok(wz_session_core::inbound::InboundFrame::Unknown { .. }) => WzVerdict::Unnamed,
-        Ok(_) => WzVerdict::Named,
+    use wz_session_core::ext_admit::ExtAdmission;
+    use wz_session_core::inbound::{parse_inbound, InboundFrame};
+    match parse_inbound(bytes) {
+        Ok(InboundFrame::Unknown { .. }) => WzVerdict::Unnamed,
+        Ok(frame) => match frame.ext_admission() {
+            ExtAdmission::UnknownMandatory { .. } => WzVerdict::Inadmissible,
+            // `Unjudged` cannot occur on a named frame — every variant
+            // `parse_inbound` produces other than `Unknown` has an extension
+            // space — and treating it as admissible here would be the exact
+            // reach-limit-as-agreement error the enum above exists to prevent.
+            ExtAdmission::Admissible | ExtAdmission::Unjudged => WzVerdict::Named,
+        },
         Err(_) => WzVerdict::Refused,
     }
 }
@@ -216,25 +243,47 @@ fn corpus() -> Vec<Vec<u8>> {
 /// silencer.
 ///
 /// The first honest run of this oracle found 27 disagreements in 1536 generated
-/// strings, and they are ONE family: every single one has the `Z` bit set, so
-/// every one is about where the EXT CHAIN's boundary lies. Two directions, which
-/// is what makes it a real finding rather than a contract mismatch —
-/// `T_MID_CLOSE` is a message pico accepts and wz refuses, while INIT, OPEN,
-/// KEEP_ALIVE, FRAME and FRAGMENT are messages wz names and pico refuses.
+/// strings, and they were ONE family by symptom: every single one had the `Z`
+/// bit set, so every one was about where the EXT CHAIN's boundary lies.
+///
+/// R311y630 TRIAGED them, which is the step the pin existed to make possible,
+/// and by mechanism they were TWO families with two different owners:
+///
+/// - **Eighteen were a wz defect** and are gone from this list. The chain
+///   carried an extension with the MANDATORY bit set and an identity the
+///   message's space does not define; both upstreams refuse the message on that
+///   and wz had no such rule. [`wz_session_core::ext_admit`] is the rule, the
+///   participant seam consults it, and the oracle now compares ADMISSIBLE
+///   against ACCEPTED.
+/// - **Nine were a pico defect** and are the whole of what remains — plus SEVEN
+///   MORE the wz defect had been hiding. Every one is `T_MID_CLOSE` with `Z`
+///   set. `_z_close_decode` (`src/protocol/codec/transport.c:345-353`) opens
+///   with `(void)(header);` and reads only the reason byte — it never looks at
+///   the extension chain the header announced. zenoh's own Close codec does
+///   (`zenoh-codec-1.5.0/src/transport/close.rs:80-83`,
+///   `extension::skip_all(reader, "Close")?`), and wz agrees with zenoh. pico
+///   is not being lenient about a chain it read; it is accepting bytes it never
+///   read, which is why `close_acceptance_by_pico_does_not_depend_on_the_chain`
+///   below can witness the mechanism directly rather than infer it.
+///
+/// TWO DEFECTS CAN CANCEL INTO APPARENT AGREEMENT, and that is the finding this
+/// round would not have made by reading either implementation. Seven CLOSE
+/// strings carried a mandatory-unknown extension over a chain that DID
+/// terminate: pico accepted them because it never read the chain, wz accepted
+/// them because it had no mandatory rule, and the oracle saw two decoders
+/// agreeing. Fixing wz's side made pico's side visible — which is the shape to
+/// expect whenever a differential is quiet in a region where both sides are
+/// weak, and the reason the pin GREW while a defect was being closed.
 ///
 /// Pinned as a SET with the drift check running BOTH WAYS, which is the pattern
 /// this workspace ratified for Mnemosyne's orphan ledger: a NEW divergence fails
 /// because the boundary moved somewhere nobody looked, and a pinned entry that
 /// no longer diverges ALSO fails, because a set that can quietly shrink is a set
 /// nobody has to justify shrinking. Neither direction can be absorbed silently.
-///
-/// What this is NOT is a verdict on who is right. Deciding that per case is the
-/// triage this file makes possible and does not itself perform: each one is a wz
-/// defect, a pico defect, or a wire spec that does not decide, and three
-/// different remedies follow. Recording the set is what turns "somebody should
-/// fuzz this someday" into a bounded list with an owner.
+/// The eighteen left this list by that second rule, deliberately and with a fix
+/// under them, rather than by being deleted.
 const KNOWN_DIVERGENCES: &[(u8, usize)] = &[
-    // T_MID_CLOSE with Z: pico accepts, wz refuses.
+    // T_MID_CLOSE with Z, chain TRUNCATED: pico accepts, wz refuses the bytes.
     (0x83, 1),
     (0x83, 2),
     (0x83, 4),
@@ -244,28 +293,18 @@ const KNOWN_DIVERGENCES: &[(u8, usize)] = &[
     (0xA3, 2),
     (0xC3, 1),
     (0xE3, 1),
-    // T_MID_INIT / OPEN with Z: wz names, pico refuses.
-    (0x81, 32),
-    (0x82, 32),
-    // T_MID_KEEP_ALIVE with Z: wz names, pico refuses.
-    (0x84, 4),
-    (0x84, 9),
-    (0x84, 32),
-    (0xE4, 2),
-    (0xE4, 4),
-    (0xE4, 9),
-    (0xE4, 32),
-    // T_MID_FRAME with Z: wz names, pico refuses.
-    (0xA5, 4),
-    (0xA5, 9),
-    (0xA5, 32),
-    (0xC5, 2),
-    (0xC5, 4),
-    (0xC5, 9),
-    (0xC5, 32),
-    // T_MID_FRAGMENT with Z: wz names, pico refuses.
-    (0xC6, 9),
-    (0xC6, 32),
+    // T_MID_CLOSE with Z, chain TERMINATES but carries a mandatory extension
+    // CLOSE's (empty) space does not define: pico accepts, wz reads the frame
+    // and rules it inadmissible. R311y630 — these seven were invisible until
+    // wz gained the mandatory rule, because until then both sides accepted
+    // them for two different wrong reasons.
+    (0xA3, 4),
+    (0xA3, 9),
+    (0xA3, 32),
+    (0xE3, 2),
+    (0xE3, 4),
+    (0xE3, 9),
+    (0xE3, 32),
 ];
 
 /// ANTI-VACUITY, and it comes first because every other assertion in this file
@@ -291,12 +330,14 @@ fn both_decoders_run_and_the_corpus_reaches_both_verdicts() {
     );
 
     let mut named = 0usize;
+    let mut inadmissible = 0usize;
     let mut unnamed = 0usize;
     let mut refused = 0usize;
     let mut pico_yes = 0usize;
     for bytes in &cases {
         match wz_verdict(bytes) {
             WzVerdict::Named => named += 1,
+            WzVerdict::Inadmissible => inadmissible += 1,
             WzVerdict::Unnamed => unnamed += 1,
             WzVerdict::Refused => refused += 1,
         }
@@ -304,12 +345,17 @@ fn both_decoders_run_and_the_corpus_reaches_both_verdicts() {
             pico_yes += 1;
         }
     }
-    // All THREE of wz's answers must occur, or the classifier is not
+    // All FOUR of wz's answers must occur, or the classifier is not
     // classifying and the oracle below is comparing against a constant.
+    // R311y630 — `inadmissible` joined this conjunction the round the answer
+    // was added, and it is the one that keeps the new rule from becoming
+    // decorative: a `judge_ext_chain` that returned `Admissible` for
+    // everything would leave the oracle green (the eighteen would simply be
+    // NEW divergences again) but would fail HERE, naming the cause.
     assert!(
-        named > 0 && unnamed > 0 && refused > 0,
-        "wz answered named={named} unnamed={unnamed} refused={refused} over {} \
-         cases, which is not a classification",
+        named > 0 && inadmissible > 0 && unnamed > 0 && refused > 0,
+        "wz answered named={named} inadmissible={inadmissible} unnamed={unnamed} \
+         refused={refused} over {} cases, which is not a classification",
         cases.len()
     );
     assert!(
@@ -318,10 +364,106 @@ fn both_decoders_run_and_the_corpus_reaches_both_verdicts() {
         cases.len()
     );
     println!(
-        "corpus {}: wz named={named} unnamed={unnamed} refused={refused}; \
-         pico accepted={pico_yes}",
+        "corpus {}: wz named={named} inadmissible={inadmissible} unnamed={unnamed} \
+         refused={refused}; pico accepted={pico_yes}",
         cases.len()
     );
+}
+
+/// R311y630 (§14.1) — THE MECHANISM WITNESS for the sixteen surviving
+/// divergences: pico's verdict on a `T_MID_CLOSE` does not depend on the
+/// extension chain at all.
+///
+/// The triage read `_z_close_decode` and found `(void)(header);` with no
+/// `_z_msg_ext_*` call in the body, which is an explanation. This is the
+/// measurement of it, and the two are not the same thing — a source reading
+/// says what one build of one file does, while this says what the linked
+/// library in front of us actually decides. Four chains that a decoder reading
+/// them could not possibly rate alike — a well-formed non-mandatory extension,
+/// a mandatory extension nothing defines, a chain that claims a successor and
+/// has none, and a chain truncated inside a length-prefixed body — all get the
+/// same answer after a CLOSE header.
+///
+/// The control leg is what makes that a measurement rather than a tautology:
+/// the SAME four chains after a `T_MID_KEEP_ALIVE` header, which pico DOES
+/// read, must NOT all get the same answer. Without it, a harness that always
+/// returned `accept` would pass the first leg perfectly.
+// wz-proves: codec-close codec-parity partial
+#[test]
+#[ignore = "needs libzenohpico.so (CMake build product); Layer E runs via --ignored"]
+fn close_acceptance_by_pico_does_not_depend_on_the_chain() {
+    let pico = unsafe { open(&zenoh_pico_shared_library()) };
+
+    // Four extension chains, deliberately spanning what a reader can tell
+    // apart. Each is the ext-chain tail on its own; the caller prepends the
+    // transport header and (for CLOSE) the reason byte.
+    let chains: [(&str, &[u8]); 4] = [
+        // id 0x4, UNIT, not mandatory, terminates the chain.
+        ("well-formed non-mandatory", &[0x04]),
+        // The same, with the mandatory marker set: a participant must refuse.
+        ("mandatory and undefined", &[0x14]),
+        // Claims a successor that is not there.
+        ("continues past the end", &[0x84]),
+        // ZBUF encoding announcing 9 body bytes, with 2 present.
+        ("truncated inside a body", &[0x44, 0x09, 0xAA, 0xBB]),
+    ];
+
+    let close = |chain: &[u8]| {
+        // Z | CLOSE, reason byte, then the chain.
+        let mut wire = alloc_wire(0x80 | 0x03, &[0x00]);
+        wire.extend_from_slice(chain);
+        wire
+    };
+    let keep_alive = |chain: &[u8]| {
+        // Z | KEEP_ALIVE — no body at all, the chain follows the header.
+        let mut wire = alloc_wire(0x80 | 0x04, &[]);
+        wire.extend_from_slice(chain);
+        wire
+    };
+
+    let close_verdicts: Vec<(&str, bool)> = chains
+        .iter()
+        .map(|(name, chain)| (*name, unsafe { pico_accepts(&pico, &close(chain)) }))
+        .collect();
+    let keep_alive_verdicts: Vec<(&str, bool)> = chains
+        .iter()
+        .map(|(name, chain)| (*name, unsafe { pico_accepts(&pico, &keep_alive(chain)) }))
+        .collect();
+
+    // The control FIRST: if pico cannot be seen distinguishing these chains
+    // anywhere, the leg below says nothing about CLOSE.
+    assert!(
+        keep_alive_verdicts.iter().any(|(_, v)| *v) && keep_alive_verdicts.iter().any(|(_, v)| !*v),
+        "pico must be seen READING a chain somewhere or this test proves \
+         nothing: KEEP_ALIVE verdicts {keep_alive_verdicts:?}"
+    );
+
+    // The finding: after a CLOSE header, every one of them is accepted.
+    assert!(
+        close_verdicts.iter().all(|(_, v)| *v),
+        "pico's CLOSE verdict is supposed to be chain-INDEPENDENT (it never \
+         reads the chain); got {close_verdicts:?}"
+    );
+
+    // And wz, which does read it, tells them apart — the other half of the
+    // disagreement, asserted here so the divergence is not one-sided hearsay.
+    let wz: Vec<(&str, WzVerdict)> = chains
+        .iter()
+        .map(|(name, chain)| (*name, wz_verdict(&close(chain))))
+        .collect();
+    assert!(
+        wz.iter().filter(|(_, v)| *v == WzVerdict::Named).count() == 1,
+        "exactly the well-formed chain may be admissible to wz: {wz:?}"
+    );
+    println!("pico CLOSE {close_verdicts:?}; KEEP_ALIVE {keep_alive_verdicts:?}; wz {wz:?}");
+}
+
+/// Header byte + body prefix, as a fresh buffer the caller appends to.
+fn alloc_wire(header: u8, body: &[u8]) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(1 + body.len() + 8);
+    wire.push(header);
+    wire.extend_from_slice(body);
+    wire
 }
 
 /// THE ORACLE. The two implementations must agree on WHETHER each generated
@@ -355,8 +497,14 @@ fn wz_and_pico_agree_on_what_is_a_transport_message() {
         let mine = wz_verdict(&bytes);
         let theirs = unsafe { pico_accepts(&pico, &bytes) };
         match (mine, theirs) {
-            // The comparison that means something.
-            (WzVerdict::Named, false) | (WzVerdict::Refused, true) => divergences.push((
+            // The comparison that means something. `Inadmissible` sits on the
+            // REFUSAL side of it: wz can read the frame, but it has said no
+            // conforming participant may act on it, so pico accepting it is a
+            // disagreement about the protocol's boundary exactly as a refusal
+            // would be.
+            (WzVerdict::Named, false)
+            | (WzVerdict::Refused, true)
+            | (WzVerdict::Inadmissible, true) => divergences.push((
                 (bytes[0], bytes.len() - 1),
                 format!(
                     "header 0x{:02X}, {} body byte(s): wz={mine:?} pico={}",

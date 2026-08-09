@@ -407,6 +407,16 @@ pub mod parse_error;
 /// not dead-code-flagged in feature configs that use only a subset.
 pub mod ext_header;
 
+/// R311y630 (§14.1) — the MANDATORY-extension admission rule: which decoded
+/// extension chains a conforming PARTICIPANT must refuse, as distinct from
+/// which ones a decoder can read.
+///
+/// UNCONDITIONAL for the same reason [`ext_header`] is, and one more: the rule
+/// reads only extension HEADER bytes, so it needs neither a codec feature nor
+/// the `alloc` storage profile, and every consumer — the participant seam, the
+/// passive analyzer, the driving oracle — reaches one copy of it.
+pub mod ext_admit;
+
 /// SSOT for the transport-message extension CHAIN codec (the Z-flag-gated
 /// `ExtEntry` list). Shared by `handshake_encode` (outbound), `inbound`
 /// (inbound), and `auth_dispatch` (the Z_EXT_AUTH inner method chain). Gated on
