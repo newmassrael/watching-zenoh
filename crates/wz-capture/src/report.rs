@@ -100,6 +100,26 @@ impl<'a> CaptureReport<'a> {
         if self.dissection.health().packets_skipped > 0 || self.dissection.drops().any() {
             return false;
         }
+        // R311y624 (§1.1m) — the FRAMING witnesses reach the verdict, and until
+        // now none of them did. A capture whose assembler gave up on a gap, or
+        // whose direction lost the zenoh or WebSocket framing, or whose peer
+        // numbered frames this reader never saw, is a capture whose totals are
+        // a floor — by exactly the definition the halt counters already answer
+        // to. `sn_missing` is the sharpest of the four: it is the only witness
+        // that survives a capture with no holes of its own, because it is the
+        // WIRE's own accounting of what the sender sent.
+        //
+        // `reserved_headers` is deliberately NOT here. It counts what ARRIVED
+        // and should not have — a peer on a different wire-spec vintage — which
+        // is a fact about the sender, not a shortfall in the rows.
+        let framing = self.dissection.framing_health();
+        if framing.gaps_forced > 0
+            || framing.desyncs > 0
+            || framing.ws_desyncs > 0
+            || framing.sn_missing > 0
+        {
+            return false;
+        }
         if let Some(t) = self.throughput {
             if !t.gaps().is_clean() || t.unresolved_records() > 0 {
                 return false;
@@ -193,6 +213,50 @@ impl<'a> CaptureReport<'a> {
             ",\"ip_checksum_invalid\":{},\"transport_checksum_invalid\":{}",
             health.ip_checksum_invalid, health.transport_checksum_invalid
         ));
+        // R311y624 (§1.1m) — the FRAMING witnesses. Every figure below was
+        // already computed by the dissection and none of it reached the
+        // document, so a reader of the export could not see that a peer had
+        // numbered frames this capture never received, that a direction had
+        // lost the zenoh framing, or that a WebSocket boundary had gone. The
+        // object is STRUCTURAL like `gaps`: present with zeroes on a clean
+        // capture, so a consumer's field lookup never depends on whether this
+        // particular file happened to have that kind of damage.
+        let f = d.framing_health();
+        s.push_str(&format!(
+            ",\"framing\":{{\"gaps_forced\":{},\"gap_bytes_missing\":{},\
+             \"desyncs\":{},\"recoveries\":{},\"resync_skipped_bytes\":{},\
+             \"ws_desyncs\":{},\"ws_recoveries\":{},\"ws_resync_skipped_bytes\":{},\
+             \"reserved_headers\":{}}}",
+            f.gaps_forced,
+            f.gap_bytes_missing,
+            f.desyncs,
+            f.recoveries,
+            f.resync_skipped_bytes,
+            f.ws_desyncs,
+            f.ws_recoveries,
+            f.ws_resync_skipped_bytes,
+            f.reserved_headers
+        ));
+        s.push_str(&format!(
+            ",\"sequence\":{{\"frames\":{},\"missing\":{},\"gaps\":{},\
+             \"duplicates\":{},\"out_of_window\":{},\"without_resolution\":{}}}",
+            f.sn_frames,
+            f.sn_missing,
+            f.sn_gaps,
+            f.sn_duplicates,
+            f.sn_out_of_window,
+            f.sn_without_resolution
+        ));
+        // R311y624 — the pre-session namespace. Counted rather than listed: a
+        // scouting message advances no session, so it belongs beside the flow
+        // counts and not in any plane.
+        s.push_str(&format!(
+            ",\"scouting_messages\":{}",
+            d.datagram_flows()
+                .iter()
+                .map(|fl| fl.scouting.len())
+                .sum::<usize>()
+        ));
         s.push_str(&format!(
             ",\"drops\":{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\"flows\":{},\"scout_askers\":{}}}",
             drops.frames, drops.stream_bytes, drops.skipped, drops.flows, drops.scout_askers
@@ -225,6 +289,46 @@ impl<'a> CaptureReport<'a> {
             d.datagram_flows().len(),
             health.packets_skipped
         ));
+        // R311y624 (§1.1m) — printed ONLY when non-zero, unlike the JSON object
+        // beside it. The two formats answer different readers: a consumer
+        // parses fields and needs them present unconditionally, a person reads
+        // lines and a row of zeroes on every clean capture is noise that trains
+        // the eye to skip the section.
+        let f = d.framing_health();
+        if f.desyncs > 0 || f.gaps_forced > 0 || f.reserved_headers > 0 {
+            s.push_str(&format!(
+                "  framing: {} desync(s), {} recovered ({} bytes stepped over); \
+                 {} forced gap(s) ({} bytes); {} reserved-flag header(s)\n",
+                f.desyncs,
+                f.recoveries,
+                f.resync_skipped_bytes,
+                f.gaps_forced,
+                f.gap_bytes_missing,
+                f.reserved_headers
+            ));
+        }
+        if f.ws_desyncs > 0 {
+            s.push_str(&format!(
+                "  websocket framing: {} desync(s), {} recovered ({} bytes)\n",
+                f.ws_desyncs, f.ws_recoveries, f.ws_resync_skipped_bytes
+            ));
+        }
+        if f.sn_missing > 0 || f.sn_duplicates > 0 || f.sn_out_of_window > 0 {
+            s.push_str(&format!(
+                "  sequence: {} of {} frame(s) never seen across {} gap(s); \
+                 {} duplicate(s), {} out of window, {} unjudgeable\n",
+                f.sn_missing,
+                f.sn_frames,
+                f.sn_gaps,
+                f.sn_duplicates,
+                f.sn_out_of_window,
+                f.sn_without_resolution
+            ));
+        }
+        let scouting: usize = d.datagram_flows().iter().map(|fl| fl.scouting.len()).sum();
+        if scouting > 0 {
+            s.push_str(&format!("  scouting: {scouting} message(s)\n"));
+        }
 
         if let Some(t) = self.throughput {
             let g = t.gaps();
@@ -768,6 +872,115 @@ mod tests {
             "the verdict must lead: {text}"
         );
         assert!(text.contains("1 unclosed"), "{text}");
+    }
+
+    /// R311y624 (§1.1m) — a capture whose framing broke SAYS SO in the
+    /// document, and the verdict follows.
+    ///
+    /// The dissection has counted desyncs, recoveries and skipped bytes since
+    /// R311y609 and the report rendered none of it, so an export could show a
+    /// clean bill of health for a stream this reader had demonstrably lost and
+    /// re-found. The rows under it are a floor whenever that happens, which is
+    /// the same claim the halt counters make and had the same right to reach
+    /// `complete`.
+    ///
+    /// Only the framing plane is on this page. No analysis plane is attached at
+    /// all, so `complete: false` here can only have come from the framing
+    /// witnesses — the rule R311y618 measured and R311y621 reused.
+    #[test]
+    fn a_capture_that_lost_its_framing_says_so_and_is_not_complete() {
+        let mut d = crate::Dissection::new();
+        // A byte stream of small frames with one segment missing, which is how
+        // a capture loses one: the splice lands mid-frame and the observer has
+        // to find the framing again.
+        let stream: alloc::vec::Vec<u8> = (0..600u32)
+            .map(|i| (i % 0x80) as u8)
+            .flat_map(crate::datagram_tests::framed_frame)
+            .collect();
+        const SEG: usize = 37;
+        for (i, seg) in stream.chunks(SEG).enumerate() {
+            if i == 5 {
+                continue;
+            }
+            d.push_packet(
+                crate::link::LINKTYPE_ETHERNET,
+                i,
+                &crate::datagram_tests::tcp_packet(1000 + (i * SEG) as u32, seg),
+            );
+        }
+        let framing = d.framing_health();
+        assert!(
+            framing.desyncs > 0 && framing.recoveries > 0,
+            "the fixture must actually lose and regain the framing: {framing:?}"
+        );
+
+        let r = CaptureReport::of(&d);
+        assert!(
+            !r.is_complete(),
+            "a stream this reader lost is not a complete capture"
+        );
+
+        let json = r.to_json();
+        assert!(json.contains("\"complete\":false"), "{json}");
+        // The OBJECT KEY is pinned beside the numbers, on the rule R311y621
+        // wrote for the `UNREAD:` line: a probe that renamed the wrapper left
+        // every field-name assertion passing, so the numbers alone do not say
+        // where a consumer must look for them.
+        assert!(
+            json.contains(&alloc::format!(
+                "\"framing\":{{\"gaps_forced\":{},\"gap_bytes_missing\":{},\"desyncs\":{},\"recoveries\":{},\"resync_skipped_bytes\":{}",
+                framing.gaps_forced,
+                framing.gap_bytes_missing,
+                framing.desyncs,
+                framing.recoveries,
+                framing.resync_skipped_bytes
+            )),
+            "{json}"
+        );
+
+        let text = r.to_text();
+        assert!(text.starts_with("capture: INCOMPLETE"), "{text}");
+        assert!(text.contains("  framing: "), "{text}");
+    }
+
+    /// THE CONTROL, and the reason the framing object is STRUCTURAL in JSON but
+    /// CONDITIONAL in text: an intact capture carries the fields with zeroes
+    /// and prints no framing line at all.
+    ///
+    /// A consumer parsing `framing.desyncs` must never have to ask whether this
+    /// particular file had damage; a person reading lines must never be shown a
+    /// row of zeroes on every clean capture, which trains the eye to skip the
+    /// section that matters.
+    #[test]
+    fn an_intact_capture_carries_the_framing_fields_and_prints_no_line() {
+        let mut d = crate::Dissection::new();
+        let stream: alloc::vec::Vec<u8> = (0..8u32)
+            .map(|i| (i % 0x80) as u8)
+            .flat_map(crate::datagram_tests::framed_frame)
+            .collect();
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &crate::datagram_tests::tcp_packet(1000, &stream),
+        );
+
+        let r = CaptureReport::of(&d);
+        assert!(r.is_complete(), "{}", r.to_text());
+        let json = r.to_json();
+        assert!(
+            json.contains("\"framing\":{\"gaps_forced\":0,\"gap_bytes_missing\":0,\"desyncs\":0"),
+            "the object is STRUCTURAL: present with zeroes on a clean capture: {json}"
+        );
+        assert!(
+            json.contains("\"sequence\":{\"frames\":"),
+            "and so is the wire's own accounting: {json}"
+        );
+        assert!(json.contains("\"scouting_messages\":0"), "{json}");
+        assert!(
+            !r.to_text().contains("  framing: "),
+            "no damage, no line: {}",
+            r.to_text()
+        );
     }
 
     /// R311y621 (§1.4i) — an UNDECOMPRESSIBLE capture reaches the document, in

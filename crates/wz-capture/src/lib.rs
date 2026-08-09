@@ -2104,7 +2104,7 @@ mod datagram_tests {
     ///
     /// `codec-frame` is not optional for this crate — a capture front end
     /// reads what is on the wire — so there is no cfg here.
-    fn framed_frame(sn: u8) -> Vec<u8> {
+    pub(crate) fn framed_frame(sn: u8) -> Vec<u8> {
         assert!(sn < 0x80, "the one-byte VLE arm");
         let mut wire = alloc::vec![
             wz_session_core::wire_const::T_MID_FRAME | wz_session_core::wire_const::FLAG_T_FRAME_R,

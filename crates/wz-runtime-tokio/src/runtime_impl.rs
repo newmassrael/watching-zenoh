@@ -840,12 +840,43 @@ mod tests {
         let clock = TokioTime::new();
         let rt2 = rt;
         let clock2 = clock;
+
+        // R311y624 — SANDWICHED, and the previous shape is why. It read the
+        // inner timestamp first and compared it against an outer reading taken
+        // AFTER the await, allowing one millisecond of slack
+        // (`ts >= clock.now_monotonic_ms().saturating_sub(1)`). That is a race
+        // with the scheduler rather than a property of the clock: any pause
+        // longer than 1 ms between the two samples fails it, whatever the
+        // epochs are. It survived ten consecutive hosted runs and then reddened
+        // the macOS leg of run 31321720683 on a commit that touched neither
+        // crate — which is exactly how a latent flake presents, and it cost a
+        // round's worth of hunting for a portability defect that was not there.
+        //
+        // The property actually wanted is that BOTH handles read the SAME
+        // epoch, and monotonic ordering states it without any tolerance: a
+        // reading taken between two others must lie between them. It is also
+        // STRICTER than what it replaces — a clock2 with a later epoch fails
+        // the lower bound and one with an earlier epoch fails the upper, where
+        // the old form could only ever catch the first.
+        // The clock is walked forward BEFORE the samples are taken, and that is
+        // what gives the sandwich any discriminating power at all. Without it
+        // every reading in this test is 0 — the original epoch, a copied one
+        // and a freshly constructed one alike — so the assertion holds for any
+        // epoch whatsoever. Measured: a probe replacing `clock2` with a brand
+        // new `TokioTime::new()` inside the task PASSED until this line existed.
+        tokio::time::sleep(TokioDuration::from_millis(5)).await;
+
+        let before = clock.now_monotonic_ms();
         let h = rt2.spawn(async move { clock2.now_monotonic_ms() });
         let ts = h.await.expect("spawn returns Ok");
-        // The captured timestamp must not be earlier than the
-        // outer clock's epoch — same TokioTime epoch is being
-        // sampled from both.
-        assert!(ts >= clock.now_monotonic_ms().saturating_sub(1));
+        let after = clock.now_monotonic_ms();
+
+        assert!(
+            before <= ts && ts <= after,
+            "a reading from the moved handle must sit inside two from the \
+             original, or the two are not sampling one epoch: \
+             {before} <= {ts} <= {after}"
+        );
     }
 
     #[tokio::test]
