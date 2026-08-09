@@ -4348,6 +4348,83 @@ mod datagram_tests {
         );
     }
 
+    /// R311y623 (§1.1x) — THE MIXED CASE, which neither leg above reaches: the
+    /// observer's clock is STICKY, so an unstamped packet BEHIND a stamped one
+    /// on the same flow inherits the earlier instant rather than reporting
+    /// none.
+    ///
+    /// Correct for an advancing clock and required by the reassembly deadline —
+    /// a sweep cannot run on a time that keeps vanishing — and it means a
+    /// MIXED-STAMP SOURCE reports instants nobody told this observer. The
+    /// consequence is load-bearing rather than academic: R311y620's three
+    /// `time`-is-undecided pages depend on their captures being unstamped
+    /// THROUGHOUT, and a single stamped packet in front would have made every
+    /// later record answer a `time` term with an inherited number.
+    ///
+    /// Pinned rather than fixed. The two alternatives are both worse — a clock
+    /// that resets to `None` breaks expiry, and one that refuses mixed sources
+    /// rejects a real pcap — so what this round owes is a witness, not a
+    /// change. Before it, nothing in the workspace said the behaviour was
+    /// chosen.
+    #[test]
+    fn the_capture_clock_is_sticky_and_an_unstamped_packet_inherits_it() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let pkt = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &keepalive);
+
+        let mut d = Dissection::new();
+        d.push_packet_at(LINKTYPE_ETHERNET, 0, Some(1_000), &pkt);
+        d.push_packet_at(LINKTYPE_ETHERNET, 1, None, &pkt);
+        d.push_packet_at(LINKTYPE_ETHERNET, 2, Some(3_000), &pkt);
+
+        let frames = &d.datagram_flows()[0].frames;
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].observed_at_ms, Some(1_000));
+        assert_eq!(
+            frames[1].observed_at_ms,
+            Some(1_000),
+            "the unstamped packet reports a time it was never given"
+        );
+        assert_eq!(
+            frames[2].observed_at_ms,
+            Some(3_000),
+            "and a later stamp moves the clock on"
+        );
+    }
+
+    /// THE OTHER HALF, and the one R311y620's undecided pages rest on: a
+    /// capture with NO stamp anywhere leaves every frame's instant absent.
+    ///
+    /// Its own page rather than a fourth assertion above, because it is a
+    /// different claim: the first says the clock STICKS once set, this says it
+    /// is never set by accident. A `now_ms()` of 0 read as a time is exactly
+    /// how an unmeasured capture starts answering time questions.
+    #[test]
+    fn a_capture_with_no_stamp_anywhere_leaves_every_frame_timeless() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let pkt = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &keepalive);
+
+        let mut d = Dissection::new();
+        for i in 0..3 {
+            d.push_packet_at(LINKTYPE_ETHERNET, i, None, &pkt);
+        }
+
+        let flow = &d.datagram_flows()[0];
+        assert!(
+            flow.frames.iter().all(|f| f.observed_at_ms.is_none()),
+            "no frame may carry an instant: {:?}",
+            flow.frames
+                .iter()
+                .map(|f| f.observed_at_ms)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            flow.session.observed_at(),
+            None,
+            "and the observer must be able to say it was never told, \
+             which `now_ms()` reporting 0 cannot"
+        );
+    }
+
     /// The sub-second field is microseconds or nanoseconds depending on the
     /// file's MAGIC, and the same raw number means a THOUSANDFOLD different
     /// time under the two. The fixture is deliberately larger than one second's
