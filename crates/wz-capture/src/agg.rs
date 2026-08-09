@@ -760,6 +760,33 @@ mod tests {
         .encode_to_vec()
     }
 
+    /// A `Push` carrying a `MsgDel` under `keyexpr`.
+    ///
+    /// The second KIND on this plane, and it exists so a `kind` term has two
+    /// answers to tell apart: a fixture of nothing but Puts cannot distinguish
+    /// a view that reads the record's kind from one that hardwires it, because
+    /// the hardwired guess would be right every time.
+    fn push_del(keyexpr: Wireexpr<'static>) -> Vec<u8> {
+        let has_suffix = match &keyexpr.body {
+            WireexprVariant::WireexprLocal(a) => a.suffix.is_some(),
+            WireexprVariant::WireexprNonlocal(a) => a.suffix.is_some(),
+        };
+        let n_flag = if has_suffix {
+            wz_codecs::wire_const::FLAG_N_N
+        } else {
+            0
+        };
+        wz_codecs::push::Push {
+            header: wz_codecs::push::Push::default().header | n_flag,
+            keyexpr,
+            body: wz_codecs::push::PushVariant::CodecZenohMsgDel(
+                wz_codecs::msg_del::MsgDel::default(),
+            ),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
     /// `DeclKexpr`: bind `id` to the literal `suffix` in the SENDER's space.
     fn declare_kexpr(id: u64, suffix: &'static str) -> Vec<u8> {
         wz_codecs::declare::Declare {
@@ -1137,6 +1164,35 @@ mod tests {
         aggregate_where(&d, &filter)
     }
 
+    /// The same pipeline, with the instant each record was CAPTURED at.
+    ///
+    /// Deliberately through [`Dissection::push_packet_at`] rather than through
+    /// hand-built frames: the clock a `time` term reads is one the packet
+    /// source supplies, and a test that stamped `PassiveFrame`s itself would
+    /// prove nothing about whether the stamp survives the walk to the filter.
+    ///
+    /// `None` does NOT mean "this record has no time" — the observer's clock is
+    /// sticky, so an unstamped packet behind a stamped one inherits the stamp
+    /// (`passive.rs:984`). A capture that must reach the filter with no time at
+    /// all is therefore unstamped THROUGHOUT.
+    fn aggregate_datagrams_at_where(
+        records: &[(bool, Option<u64>, Vec<u8>)],
+        selector: &str,
+    ) -> ThroughputTable {
+        let mut d = Dissection::new();
+        for (i, (from_low, ts, record)) in records.iter().enumerate() {
+            let wire = crate::datagram_tests::frame_carrying(record);
+            let pkt = if *from_low {
+                udp_packet(LOW, 43210, HIGH, 7447, &wire)
+            } else {
+                udp_packet(HIGH, 7447, LOW, 43210, &wire)
+            };
+            d.push_packet_at(LINKTYPE_ETHERNET, i, *ts, &pkt);
+        }
+        let filter = crate::filter::Filter::parse(selector).expect("the selector must compile");
+        aggregate_where(&d, &filter)
+    }
+
     /// R311y616 (§1.1f), the plane end to end: a selector narrows the table to
     /// the traffic it names, and the records it left out are COUNTED rather
     /// than merely absent.
@@ -1270,5 +1326,161 @@ mod tests {
             "the unreadable batch is still reported: {:?}",
             table.gaps()
         );
+    }
+
+    // R311y620 (§1.4k) — the fields a selector can name, each DRIVEN FROM THE
+    // WIRE on this plane and each on its own page.
+    //
+    // The four below share one rule and it is why they are four tests and not
+    // one: a page carrying several terms at once is satisfied by any of them,
+    // so it gates none of them. R311y618 measured exactly that — a leg of
+    // `is_complete` was deleted and 229 tests still passed — and the remedy is
+    // to put ONE field on the stage at a time.
+    //
+    // They also do not restate the filter language: `filter.rs` already proves
+    // what `kind == del` means against a hand-built `RecordView`. What is
+    // unproven until here is that THIS plane hands the language a view built
+    // out of the bytes that actually went past.
+
+    /// A `kind` term, against a capture carrying both kinds on one keyexpr.
+    ///
+    /// One keyexpr deliberately: with the two kinds on different topics a
+    /// narrowing by `kind` and a narrowing by `key` produce the same rows, and
+    /// the test could not say which one the plane performed.
+    #[test]
+    fn the_throughput_view_answers_a_kind_term_off_the_wire() {
+        let records = alloc::vec![
+            (true, push(sender_space(0, Some("mixed/topic")), &[0u8; 30])),
+            (true, push_del(sender_space(0, Some("mixed/topic")))),
+        ];
+
+        let dels = aggregate_datagrams_where(&records, "kind == del");
+        let row = dels
+            .row("mixed/topic")
+            .expect("the Del is still attributed");
+        assert_eq!(row.totals().dels, 1);
+        assert_eq!(row.totals().puts, 0, "the Put was not admitted");
+        assert_eq!(
+            dels.total_payload_bytes(),
+            0,
+            "and its 30 bytes came with it"
+        );
+        assert_eq!(dels.selection().rejected, 1);
+
+        // The complementary term, so a view that answered `Del` to everything
+        // cannot satisfy the assertions above.
+        let puts = aggregate_datagrams_where(&records, "kind == put");
+        assert_eq!(
+            puts.row("mixed/topic").expect("attributed").totals().puts,
+            1
+        );
+        assert_eq!(puts.total_payload_bytes(), 30);
+        assert_eq!(puts.selection().rejected, 1);
+    }
+
+    /// A `dir` term, against traffic on ONE keyexpr flowing both ways.
+    ///
+    /// The per-direction split is what makes this checkable without a second
+    /// field: the surviving row must carry its bytes in the arm the term named
+    /// and nothing in the other.
+    #[test]
+    fn the_throughput_view_answers_a_direction_term_off_the_wire() {
+        let records = alloc::vec![
+            (true, push(sender_space(0, Some("both/ways")), &[0u8; 11])),
+            (false, push(sender_space(0, Some("both/ways")), &[0u8; 22])),
+        ];
+
+        let from_b = aggregate_datagrams_where(&records, "dir == b");
+        let row = from_b.row("both/ways").expect("B's record survived");
+        assert_eq!(row.per_direction[1].payload_bytes, 22, "B->A kept");
+        assert_eq!(row.per_direction[0].payload_bytes, 0, "A->B dropped");
+        assert_eq!(from_b.selection().rejected, 1);
+
+        let from_a = aggregate_datagrams_where(&records, "dir == a");
+        let row = from_a.row("both/ways").expect("A's record survived");
+        assert_eq!(row.per_direction[0].payload_bytes, 11);
+        assert_eq!(row.per_direction[1].payload_bytes, 0);
+    }
+
+    /// A `time` term, against a capture whose packets carry capture instants.
+    ///
+    /// The payload sizes are 1 / 2 / 4 so the surviving TOTAL names the
+    /// surviving SUBSET uniquely — with three equal payloads a total of two
+    /// records would not say WHICH two, and an off-by-one in the comparison
+    /// would read as a pass.
+    #[test]
+    fn the_throughput_view_answers_a_time_term_off_the_wire() {
+        let records = alloc::vec![
+            (
+                true,
+                Some(1_000),
+                push(sender_space(0, Some("clocked/topic")), &[0u8; 1])
+            ),
+            (
+                true,
+                Some(2_000),
+                push(sender_space(0, Some("clocked/topic")), &[0u8; 2])
+            ),
+            (
+                true,
+                Some(3_000),
+                push(sender_space(0, Some("clocked/topic")), &[0u8; 4])
+            ),
+        ];
+
+        let late = aggregate_datagrams_at_where(&records, "time >= 2000");
+        assert_eq!(late.total_payload_bytes(), 6, "the 2 and the 4, not the 1");
+        assert_eq!(late.selection().matched, 2);
+        assert_eq!(late.selection().rejected, 1);
+        assert_eq!(
+            late.selection().undecided,
+            0,
+            "the capture carried the fact"
+        );
+
+        let early = aggregate_datagrams_at_where(&records, "time < 2000");
+        assert_eq!(early.total_payload_bytes(), 1, "and only the 1");
+    }
+
+    /// A capture with NO clock leaves a `time` term undecided — not false.
+    ///
+    /// This is the arm that keeps the one above from being free. A plane that
+    /// substituted a plausible instant (the flow's `now_ms`, which is `0` until
+    /// something advances it) would answer `time > 0` with a confident `No` for
+    /// every record, and the reader would read "no traffic after time zero"
+    /// off a capture that simply never said when anything happened.
+    #[test]
+    fn an_unclocked_capture_leaves_a_time_term_undecided() {
+        let records = alloc::vec![
+            (
+                true,
+                None,
+                push(sender_space(0, Some("dark/topic")), &[0u8; 5])
+            ),
+            (
+                true,
+                None,
+                push(sender_space(0, Some("dark/topic")), &[0u8; 6])
+            ),
+        ];
+
+        // ANTI-VACUITY: the fixture does produce records, so an empty answer
+        // below is the filter's doing and not the fixture's.
+        let all = aggregate_datagrams_at_where(&records, "");
+        assert_eq!(all.records(), 2);
+        assert_eq!(all.total_payload_bytes(), 11);
+
+        let asked = aggregate_datagrams_at_where(&records, "time > 0");
+        assert_eq!(
+            asked.selection(),
+            crate::filter::Selection {
+                matched: 0,
+                rejected: 0,
+                undecided: 2
+            },
+            "a question the capture cannot answer is not a No"
+        );
+        assert!(!asked.selection().is_decisive());
+        assert_eq!(asked.rows().len(), 0, "and no row was invented");
     }
 }

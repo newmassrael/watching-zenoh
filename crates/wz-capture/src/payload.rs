@@ -1048,6 +1048,21 @@ mod census_tests {
         (payloads_where(&d, &filter), payloads(&d))
     }
 
+    /// The same, with the instant each record was CAPTURED at.
+    ///
+    /// [`census_where`] stamps everything `Some(1)`, which is enough for a
+    /// plane that never asks the time and useless for one that does. The
+    /// observer's clock is sticky (`passive.rs:984`), so a capture that must
+    /// reach the filter with no time at all is unstamped THROUGHOUT.
+    fn census_where_at(
+        records: &[(bool, Option<u64>, Vec<u8>)],
+        selector: &str,
+    ) -> (PayloadCensus, PayloadCensus) {
+        let d = fx::dissect(records);
+        let filter = crate::filter::Filter::parse(selector).expect("the selector must compile");
+        (payloads_where(&d, &filter), payloads(&d))
+    }
+
     /// A capture with one good payload, one that contradicts itself, and one on
     /// a different topic.
     fn three_payloads() -> Vec<(bool, Vec<u8>)> {
@@ -1148,6 +1163,107 @@ mod census_tests {
         assert_eq!(t.payloads(), 0);
         assert_eq!(t.selection().undecided, 1);
         assert!(!t.selection().is_decisive());
+    }
+
+    // R311y620 (§1.4k) — the three fields R311y618 left undriven on this
+    // plane. One field per page, for the reason the other two planes now spell
+    // out: a page carrying several terms is satisfied by any one of them.
+
+    /// A `dir` term, against one topic and one encoding flowing both ways.
+    ///
+    /// Same key, same encoding, same size on each side is deliberate — the
+    /// only thing left that can separate them is the direction.
+    #[test]
+    fn the_payload_view_answers_a_direction_term_off_the_wire() {
+        let records = alloc::vec![
+            (true, push_declaring("both/ways", ID_TEXT, b"aaaa")),
+            (false, push_declaring("both/ways", ID_TEXT, b"bbbb")),
+        ];
+
+        let (from_b, plain) = census_where(&records, "dir == b");
+        assert_eq!(plain.payloads(), 2, "the control: both were seen");
+        assert_eq!(from_b.payloads(), 1);
+        assert_eq!(from_b.selection().rejected, 1);
+
+        let (from_a, _) = census_where(&records, "dir == a");
+        assert_eq!(from_a.payloads(), 1);
+        assert_eq!(from_a.selection().rejected, 1);
+    }
+
+    /// A `bytes` term, against payloads of different sizes under one encoding.
+    ///
+    /// The surviving row's `bytes` names which record survived, so a term that
+    /// admitted the wrong one cannot read as a pass on the count alone.
+    #[test]
+    fn the_payload_view_answers_a_bytes_term_off_the_wire() {
+        let records = alloc::vec![
+            (true, push_declaring("sized/topic", ID_TEXT, b"ab")),
+            (true, push_declaring("sized/topic", ID_TEXT, b"abcdefghij")),
+        ];
+
+        let (heavy, plain) = census_where(&records, "bytes > 5");
+        assert_eq!(plain.payloads(), 2, "the control: both were seen");
+        assert_eq!(heavy.payloads(), 1);
+        assert_eq!(heavy.rows()[0].bytes, 10, "the ten-byte one, not the two");
+        assert_eq!(heavy.selection().rejected, 1);
+
+        let (light, _) = census_where(&records, "bytes <= 5");
+        assert_eq!(light.rows()[0].bytes, 2);
+    }
+
+    /// A `time` term, against payloads carrying capture instants.
+    #[test]
+    fn the_payload_view_answers_a_time_term_off_the_wire() {
+        let records = alloc::vec![
+            (
+                true,
+                Some(1_000),
+                push_declaring("clocked/topic", ID_TEXT, b"early")
+            ),
+            (
+                true,
+                Some(3_000),
+                push_declaring("clocked/topic", ID_TEXT, b"late!!!!")
+            ),
+        ];
+
+        let (late, plain) = census_where_at(&records, "time >= 2000");
+        assert_eq!(plain.payloads(), 2, "the control: both were seen");
+        assert_eq!(late.payloads(), 1);
+        assert_eq!(late.rows()[0].bytes, 8, "the one stamped 3000");
+        assert_eq!(late.selection().rejected, 1);
+        assert_eq!(late.selection().undecided, 0);
+
+        let (early, _) = census_where_at(&records, "time < 2000");
+        assert_eq!(early.rows()[0].bytes, 5);
+    }
+
+    /// A capture with no clock leaves a `time` term undecided here too.
+    ///
+    /// The arm that keeps the one above from being free: a plane substituting a
+    /// plausible instant would answer `time > 0` with a confident No for every
+    /// payload, and a reader would take "nothing was published" off a capture
+    /// that merely never said when.
+    #[test]
+    fn an_unclocked_payload_leaves_a_time_term_undecided() {
+        let records = alloc::vec![
+            (true, None, push_declaring("dark/topic", ID_TEXT, b"one")),
+            (true, None, push_declaring("dark/topic", ID_TEXT, b"two")),
+        ];
+
+        let (asked, plain) = census_where_at(&records, "time > 0");
+        assert_eq!(plain.payloads(), 2, "the control: the records decoded");
+        assert_eq!(
+            asked.selection(),
+            crate::filter::Selection {
+                matched: 0,
+                rejected: 0,
+                undecided: 2
+            },
+            "a question the capture cannot answer is not a No"
+        );
+        assert_eq!(asked.payloads(), 0);
+        assert!(asked.rows().is_empty(), "and no row was invented");
     }
 }
 

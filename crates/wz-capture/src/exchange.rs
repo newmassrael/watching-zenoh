@@ -760,6 +760,33 @@ pub(crate) mod tests {
         .encode_to_vec()
     }
 
+    /// A `Request` carrying a `MsgPut` of `payload` — a put that expects an
+    /// answer, and the only request shape on this plane that carries BYTES.
+    ///
+    /// A `Query` request has a payload too, but zenoh carries it as an ext-chain
+    /// entry rather than a decoded field (`out/wz-codecs/query.rs:33-38`), so
+    /// [`crate::agg::classify`] cannot size it and reports `0`. That limit is a
+    /// property of the codec's reach, not of this fixture; a `bytes` term over
+    /// this plane is therefore driven with the shape whose size the decoder
+    /// actually knows.
+    pub(crate) fn request_put(rid: u64, keyexpr: Wireexpr<'static>, payload: &[u8]) -> Vec<u8> {
+        let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
+        wz_codecs::request::Request {
+            header: wz_codecs::request::Request::default().header | n,
+            rid,
+            keyexpr,
+            body: wz_codecs::request::RequestVariant::CodecZenohMsgPut(
+                wz_codecs::msg_put::MsgPut {
+                    payload_len: payload.len() as u64,
+                    payload,
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
     /// A `Response` carrying a `Reply` with `payload`, echoing `request_id`.
     pub(crate) fn response_reply(
         request_id: u64,
@@ -1410,6 +1437,97 @@ pub(crate) mod tests {
         assert_eq!(asker.requests(), 2, "every request travelled A to B");
         let (other, _) = correlate_where(&two_topics(), "dir == b");
         assert_eq!(other.requests(), 0);
+    }
+
+    // R311y620 (§1.4k) — the two fields the R311y618 selector work left
+    // undriven on this plane, each on its own page for the reason the
+    // throughput plane's four are separate: a page carrying several terms is
+    // satisfied by any one of them and gates none.
+
+    /// A `bytes` term, against requests whose payloads differ.
+    ///
+    /// Both requests are on ONE keyexpr and are the same kind, so nothing but
+    /// the size can be doing the narrowing.
+    #[test]
+    fn the_exchange_view_answers_a_bytes_term_off_the_wire() {
+        let records = alloc::vec![
+            (
+                true,
+                Some(1_000),
+                request_put(1, sender_space(0, Some("sized/topic")), &[0u8; 10])
+            ),
+            (false, Some(1_010), response_final(1)),
+            (
+                true,
+                Some(2_000),
+                request_put(2, sender_space(0, Some("sized/topic")), &[0u8; 100])
+            ),
+            (false, Some(2_010), response_final(2)),
+        ];
+
+        let (heavy, plain) = correlate_where(&records, "bytes > 50");
+        assert_eq!(plain.requests(), 2, "the control: unfiltered both are seen");
+        assert_eq!(heavy.requests(), 1, "only the 100-byte put");
+        assert_eq!(heavy.selection().rejected, 1);
+        assert_eq!(heavy.unclosed(), 0, "and the admitted one still closed");
+
+        // The complementary term, so a view reporting a constant size cannot
+        // satisfy the assertions above.
+        let (light, _) = correlate_where(&records, "bytes < 50");
+        assert_eq!(light.requests(), 1);
+        assert_eq!(light.selection().rejected, 1);
+    }
+
+    /// A `time` term, judged on the REQUEST — which is this plane's rule from
+    /// R311y618, and the reason the term needs its own page here rather than
+    /// inheriting the throughput plane's.
+    ///
+    /// The responses are stamped LATER than the window deliberately: an
+    /// exchange follows the request that opened it, so a plane that judged the
+    /// response instead would admit the pair the term excludes.
+    #[test]
+    fn the_exchange_view_answers_a_time_term_off_the_wire() {
+        let (early, plain) = correlate_where(&two_topics(), "time < 1500");
+        assert_eq!(plain.requests(), 2, "the control: two exchanges in all");
+        assert_eq!(early.requests(), 1, "the one asked at 1000");
+        assert_eq!(early.selection().rejected, 1);
+        assert_eq!(early.selection().undecided, 0, "both stamps were carried");
+
+        let (late, _) = correlate_where(&two_topics(), "time >= 1500");
+        assert_eq!(late.requests(), 1, "and the one asked at 2000");
+        assert_eq!(late.selection().rejected, 1);
+    }
+
+    /// A request the capture could not time leaves a `time` term undecided.
+    ///
+    /// Without this the test above is free: a plane that read `0` for a missing
+    /// instant would answer every `time <` term with a confident yes, and a
+    /// reader would take "the whole capture happened before 1500" off a source
+    /// that never said when anything happened.
+    #[test]
+    fn an_unclocked_request_leaves_a_time_term_undecided() {
+        let records = alloc::vec![
+            (
+                true,
+                None,
+                request_query(1, sender_space(0, Some("dark/topic")))
+            ),
+            (false, None, response_final(1)),
+        ];
+
+        let (asked, plain) = correlate_where(&records, "time < 1500");
+        assert_eq!(plain.requests(), 1, "the control: the exchange is there");
+        assert_eq!(
+            asked.selection(),
+            crate::filter::Selection {
+                matched: 0,
+                rejected: 0,
+                undecided: 1
+            },
+            "a question the capture cannot answer is not a Yes either"
+        );
+        assert_eq!(asked.requests(), 0);
+        assert_eq!(asked.unclosed(), 0, "an unjudged exchange is not unclosed");
     }
 
     /// Merging carries the selection, so a consumer folding two captures under
