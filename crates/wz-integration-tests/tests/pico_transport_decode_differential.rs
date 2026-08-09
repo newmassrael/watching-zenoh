@@ -239,6 +239,133 @@ fn corpus() -> Vec<Vec<u8>> {
     out
 }
 
+/// A minimal WELL-FORMED body for each transport MID, so a generated extension
+/// chain is actually reached instead of being shadowed by a body both decoders
+/// already refuse.
+///
+/// Hand-laid from the wire spec rather than produced by wz's own encoders, and
+/// that is the anchor rule rather than fastidiousness: an input this workspace
+/// generated from its own encoder is an input it has already agreed with, and a
+/// differential fed such inputs goes quiet exactly where wz is wrong. These six
+/// are short enough to read against `zenoh-protocol-1.5.0/src/transport/*.rs`
+/// directly.
+fn minimal_body(mid: u8) -> Option<Vec<u8>> {
+    Some(match mid {
+        // version, cbyte (whatami=peer, zid_len-1 = 0), the 1-byte zid. No S, no
+        // A, so no resolution pair and no cookie.
+        0x01 => vec![0x09, 0x01, 0xAA],
+        // VLE lease, VLE initial_sn, then the cookie slice the A-clear form
+        // carries (length-prefixed, one byte).
+        0x02 => vec![0x0A, 0x01, 0x01, 0xBB],
+        // reason.
+        0x03 => vec![0x00],
+        // empty.
+        0x04 => vec![],
+        // VLE sn. FRAME's payload is the tail, so nothing more is required.
+        0x05 | 0x06 => vec![0x01],
+        _ => return None,
+    })
+}
+
+/// R311y630 (§14.9) — THE SECOND GENERATOR: chains built from the extension
+/// vocabulary the wire spec actually DEFINES, one message at a time.
+///
+/// ## Why the blind sweep above is not enough, measured rather than assumed
+///
+/// The 8-bit header walk produces extension chains out of pseudo-random bytes,
+/// and over 1536 strings it produced TEN distinct mandatory extension
+/// identities — every one of them a value neither implementation defines. So
+/// the whole POSITIVE half of the admission rule (`frame::ext::QoS` at `0x31`,
+/// JOIN's `0x51` / `0x52`) was never once driven through both decoders. A
+/// generator that walks a space uniformly is exactly the generator that misses
+/// the handful of points the protocol gives meaning to: they are seven bytes in
+/// a space of 128.
+///
+/// ## What this adds
+///
+/// For each transport MID, a well-formed body followed by ONE extension, over
+/// the identities zenoh declares for that message plus two controls. Every ext
+/// body matches its own encoding, so the chain terminates cleanly and the only
+/// thing either decoder can disagree about is whether that EXTENSION is
+/// acceptable there — which is the question, isolated.
+fn vocabulary_corpus() -> Vec<Vec<u8>> {
+    // (identity, what its encoding requires after the header byte). Identities
+    // are `id | M | enc`, read off `zenoh-protocol-1.5.0/src/transport/*.rs`.
+    const UNIT: &[u8] = &[];
+    const Z64: &[u8] = &[0x2A];
+    const ZBUF: &[u8] = &[0x02, 0xC1, 0xC2];
+
+    /// One extension: its identity (`id | M | enc`) and the body its encoding
+    /// requires after the header byte.
+    type Ext = (u8, &'static [u8]);
+    /// One transport message's declared extension space.
+    type Space = (u8, &'static [Ext]);
+
+    // Per-MID: every identity that message's own `mod ext` declares, in id
+    // order, plus the two controls at the end.
+    let spaces: &[Space] = &[
+        (
+            0x01, // INIT: QoS unit, QoSLink z64, Shm zbuf, Auth zbuf, MultiLink
+            // zbuf, LowLatency unit, Compression unit, Patch z64 — all
+            // declared NON-mandatory.
+            &[
+                (0x01, UNIT),
+                (0x21, Z64),
+                (0x42, ZBUF),
+                (0x43, ZBUF),
+                (0x44, ZBUF),
+                (0x05, UNIT),
+                (0x06, UNIT),
+                (0x27, Z64),
+            ],
+        ),
+        (
+            0x02, // OPEN: QoS unit, Shm z64, Auth zbuf, MultiLinkSyn zbuf,
+            // MultiLinkAck unit, LowLatency unit, Compression unit.
+            &[
+                (0x01, UNIT),
+                (0x22, Z64),
+                (0x43, ZBUF),
+                (0x44, ZBUF),
+                (0x04, UNIT),
+                (0x05, UNIT),
+                (0x06, UNIT),
+            ],
+        ),
+        // CLOSE and KEEP_ALIVE declare no `mod ext` at all: their spaces are
+        // EMPTY, so the controls below are the whole of what can be sent.
+        (0x03, &[]),
+        (0x04, &[]),
+        // FRAME: QoS z64, MANDATORY. The one mandatory extension the data
+        // plane defines, and the reason this generator exists.
+        (0x05, &[(0x31, Z64)]),
+        // FRAGMENT: the same mandatory QoS, plus First / Drop as non-mandatory
+        // units.
+        (0x06, &[(0x31, Z64), (0x02, UNIT), (0x03, UNIT)]),
+    ];
+
+    let mut out = Vec::new();
+    for (mid, space) in spaces {
+        let Some(body) = minimal_body(*mid) else {
+            continue;
+        };
+        // The controls, on every message: one extension nothing defines with
+        // the mandatory marker CLEAR (both sides must skip it) and the same
+        // with it SET (both sides must refuse). Without them a message whose
+        // space is empty would contribute nothing.
+        let controls: [(u8, &[u8]); 2] = [(0x0F, UNIT), (0x1F, UNIT)];
+        for (eid, ext_body) in space.iter().chain(controls.iter()) {
+            let mut wire = vec![mid | 0x80];
+            wire.extend_from_slice(&body);
+            // Z clear on the entry: it terminates the chain.
+            wire.push(*eid);
+            wire.extend_from_slice(ext_body);
+            out.push(wire);
+        }
+    }
+    out
+}
+
 /// R311y628 (§1.1g) — THE DIVERGENCE LEDGER, and it is a PIN rather than a
 /// silencer.
 ///
@@ -464,6 +591,147 @@ fn alloc_wire(header: u8, body: &[u8]) -> Vec<u8> {
     wire.push(header);
     wire.extend_from_slice(body);
     wire
+}
+
+/// R311y630 (§14.9) — the three vocabulary cases the two implementations do
+/// NOT agree on, each with the reason that makes it a finding rather than a
+/// mystery.
+///
+/// Every one is pico's, and the middle two are the ones this generator was
+/// built to reach: they are about the extension the wire spec gives the data
+/// plane, and the blind sweep produced ten mandatory identities over 1536
+/// strings without once producing this one.
+const NAMED_DIVERGENCES: &[(u8, u8, &str)] = &[
+    // CLOSE has no extension space, so a mandatory extension on one is
+    // undefined by construction and both zenoh and wz refuse the message.
+    // pico accepts it for the reason the sixteen sweep divergences are pinned
+    // on: `_z_close_decode` never reads the chain at all.
+    (0x03, 0x1F, "pico never reads a CLOSE ext chain"),
+    // THE FINDING. `frame::ext::QoS` is `zextz64!(0x1, true)` — the ONE
+    // mandatory extension the transport data plane defines
+    // (`zenoh-protocol-1.5.0/src/transport/frame.rs`, `mod ext`) — and zenoh's
+    // own Frame codec READS it (`zenoh-codec-1.5.0/src/transport/frame.rs:102-107`
+    // dispatches `ext::QoS::ID` before falling through to `extension::skip`).
+    // pico's Frame path is `_z_msg_ext_skip_non_mandatories`
+    // (`src/protocol/codec/transport.c:400`), which refuses EVERY mandatory
+    // extension without exception, so it refuses the one its peer is entitled
+    // to send. It does not fire in practice only because pico never offers QoS
+    // at INIT, so zenoh disables the conduit and never emits the extension —
+    // an interop gap held shut by a negotiation default rather than by
+    // agreement.
+    (
+        0x05,
+        0x31,
+        "pico refuses frame::ext::QoS, which zenoh reads",
+    ),
+    // The same extension on FRAGMENT, refused by the same call
+    // (`_z_fragment_decode_ext` knows only First / Drop), and zenoh puts it on
+    // every fragment of a non-DEFAULT-priority chain.
+    (
+        0x06,
+        0x31,
+        "pico refuses fragment::ext::QoS, which zenoh reads",
+    ),
+];
+
+fn named_divergence(mid: u8, eid: u8) -> Option<&'static str> {
+    NAMED_DIVERGENCES
+        .iter()
+        .find(|(m, e, _)| *m == mid && *e == eid)
+        .map(|(_, _, why)| *why)
+}
+
+/// R311y630 (§14.9) — THE VOCABULARY ORACLE, kept separate from the sweep
+/// below rather than folded into its corpus.
+///
+/// Two reasons, and the second is the one that matters. The shallow one: the
+/// sweep's pin is keyed by `(header, body length)` and a vocabulary string
+/// collides with it — a CLOSE carrying one one-byte extension is `(0x83, 2)`,
+/// which is already a pinned sweep case about something else entirely. The
+/// deeper one: these are different questions. The sweep asks "is there a
+/// boundary disagreement anywhere in the header space", and its answer is a set
+/// nobody chose. This asks "do the two implementations agree about the
+/// extensions the spec actually NAMES", and every string in it is a point the
+/// protocol gives meaning to. Folding them would let a regression in the second
+/// hide inside the first's pinned set.
+///
+/// The expectation is stated per case rather than pinned as a blob, because
+/// with a vocabulary this small every case has a REASON, and a reason is what a
+/// pin cannot carry.
+// wz-proves: codec-init-body codec-parity partial
+// wz-proves: codec-open-body codec-parity partial
+// wz-proves: codec-keep-alive codec-parity partial
+// wz-proves: codec-frame codec-parity partial
+#[test]
+#[ignore = "needs libzenohpico.so (CMake build product); Layer E runs via --ignored"]
+fn the_two_agree_on_the_extensions_the_spec_names() {
+    let pico = unsafe { open(&zenoh_pico_shared_library()) };
+    let cases = vocabulary_corpus();
+    assert!(
+        cases.len() >= 25,
+        "the vocabulary must be walked, not sampled: {}",
+        cases.len()
+    );
+
+    let mut disagreements = Vec::new();
+    let mut explained: Vec<(u8, u8)> = Vec::new();
+    let mut both_accept = 0usize;
+    let mut both_refuse = 0usize;
+    for bytes in &cases {
+        let mid = bytes[0] & 0x1F;
+        let mine = wz_verdict(bytes);
+        let theirs = unsafe { pico_accepts(&pico, bytes) };
+        // The extension header is the byte right after the body: every case in
+        // this corpus is header + minimal body + exactly one extension.
+        let eid = bytes[1 + minimal_body(mid).expect("a generated MID").len()];
+        match (mine, theirs) {
+            (WzVerdict::Named, true) => both_accept += 1,
+            (WzVerdict::Inadmissible | WzVerdict::Refused, false) => both_refuse += 1,
+            _ if named_divergence(mid, eid).is_some() => explained.push((mid, eid)),
+            _ => disagreements.push(format!(
+                "MID {mid:#04X} ext {eid:#04X}: wz={mine:?} pico={}",
+                if theirs { "accept" } else { "reject" }
+            )),
+        }
+    }
+
+    // The pinned three must STILL diverge, the same both-ways rule the sweep's
+    // pin follows: an entry that quietly stopped diverging is an entry nobody
+    // had to justify removing.
+    let healed: Vec<&(u8, u8, &str)> = NAMED_DIVERGENCES
+        .iter()
+        .filter(|(m, e, _)| !explained.contains(&(*m, *e)))
+        .collect();
+    assert!(
+        healed.is_empty(),
+        "{} named divergence(s) no longer diverge and must be removed \
+         deliberately: {healed:?}",
+        healed.len()
+    );
+
+    // ANTI-VACUITY, and it is sharper here than a count: this corpus is built so
+    // that BOTH outcomes must occur — the declared extensions are acceptable and
+    // the mandatory control is not — so a harness stuck on either answer fails.
+    assert!(
+        both_accept > 0 && both_refuse > 0,
+        "the vocabulary must reach both verdicts: accept={both_accept} \
+         refuse={both_refuse} of {}",
+        cases.len()
+    );
+
+    assert!(
+        disagreements.is_empty(),
+        "{} disagreement(s) about extensions the wire spec NAMES — each is a \
+         defect in one implementation, not an unexplored corner:\n  {}",
+        disagreements.len(),
+        disagreements.join("\n  ")
+    );
+    println!(
+        "vocabulary {}: both-accept={both_accept} both-refuse={both_refuse}; \
+         {} named divergence(s) hold",
+        cases.len(),
+        NAMED_DIVERGENCES.len()
+    );
 }
 
 /// THE ORACLE. The two implementations must agree on WHETHER each generated

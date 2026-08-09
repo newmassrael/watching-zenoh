@@ -224,7 +224,16 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # citing it, because "pico never reads the CLOSE ext chain" read off a source
 # file is a claim about one build, while four chains no reader could rate alike
 # getting one verdict from the linked library is the fact.
-FOREIGN_ADJUDICATOR_LINKS = 802
+# R311y630b took it to 806, in one step of four, from the VOCABULARY oracle --
+# the generator that walks the extension identities the wire spec NAMES rather
+# than the header space uniformly. The measurement that justified it: over 1536
+# blind-sweep strings the corpus produced ten distinct mandatory extension
+# identities and not one of them was an identity either implementation defines,
+# so the positive half of the admission rule had never been driven. Driving it
+# found three disagreements, all pico's, including the one that matters --
+# `frame::ext::QoS`, the single mandatory extension the data plane defines,
+# which zenoh's Frame codec reads and pico's refuses.
+FOREIGN_ADJUDICATOR_LINKS = 806
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

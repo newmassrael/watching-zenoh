@@ -477,16 +477,23 @@ codec_group!(
 pub mod encoding_ids;
 
 pub mod wire_const {
-    /// Transport-message INIT (transport.h:20). Gated on
-    /// `codec-init-body`.
-    #[cfg(feature = "codec-init-body")]
+    /// Transport-message INIT (transport.h:20).
+    ///
+    /// R311y630 — UNGATED, on R311kx's reasoning for `T_MID_KEEP_ALIVE` below
+    /// rather than a new one: the bare MID is wire-spec ground truth, an unused
+    /// `pub const` is warning-free, and a SECOND independent axis now consumes
+    /// it. That axis is `wz_session_core::ext_admit`, which judges which
+    /// extension chains a participant of each transport message may accept —
+    /// a question about the wire that does not depend on whether THIS build
+    /// can decode that message's body, and a module that must therefore be
+    /// unconditional. Gating the id made an unconditional consumer impossible
+    /// and was caught by the isolated-crate lanes, not by any workspace build.
     pub const T_MID_INIT: u8 = 0x01;
-    /// Transport-message OPEN (transport.h:21). Gated on
-    /// `codec-open-body`.
-    #[cfg(feature = "codec-open-body")]
+    /// Transport-message OPEN (transport.h:21). Ungated with `T_MID_INIT`
+    /// above and for the same reason.
     pub const T_MID_OPEN: u8 = 0x02;
-    /// Transport-message CLOSE (transport.h:22). Gated on `codec-close`.
-    #[cfg(feature = "codec-close")]
+    /// Transport-message CLOSE (transport.h:22). Ungated with `T_MID_INIT`
+    /// above and for the same reason.
     pub const T_MID_CLOSE: u8 = 0x03;
     /// Per-session liveness ping (transport.h:24 MID 0x04). Lease-timer
     /// reset on receive. Ungated since R311kx (was `codec-keep-alive`):
