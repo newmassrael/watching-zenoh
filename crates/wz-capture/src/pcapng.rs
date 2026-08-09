@@ -58,10 +58,17 @@ const BT_SPB: u32 = 0x0000_0003;
 const BT_EPB: u32 = 0x0000_0006;
 /// The obsolete Packet Block, still present in old files.
 const BT_PB: u32 = 0x0000_0002;
+/// Interface Statistics Block — what the CAPTURE TOOL counted, including the
+/// packets it never handed anyone.
+const BT_ISB: u32 = 0x0000_0005;
 /// The byte-order magic inside an SHB body.
 const BOM: u32 = 0x1A2B_3C4D;
 /// `if_tsresol`.
 const OPT_IF_TSRESOL: u16 = 9;
+/// `isb_ifrecv` — packets the interface RECEIVED over the capture.
+const OPT_ISB_IFRECV: u16 = 4;
+/// `isb_ifdrop` — packets the capture tool DROPPED and nobody ever saw.
+const OPT_ISB_IFDROP: u16 = 5;
 /// Smallest legal block: type + length + trailing length.
 const MIN_BLOCK_LEN: usize = 12;
 
@@ -232,6 +239,10 @@ pub struct PcapngFile {
     /// through; surfaced because it is a fact about the capture a consumer may
     /// want to report, not because this reader needs it.
     pub sections: usize,
+    /// R311y607 — every Interface Statistics Block, in file order. Empty when
+    /// the writer emitted none, which is ordinary: an ISB is optional and its
+    /// absence says nothing either way about whether packets were lost.
+    pub interface_stats: Vec<InterfaceStats>,
 }
 
 impl PcapngFile {
@@ -301,6 +312,62 @@ fn scan_tsresol(body: &[u8], swapped: bool) -> Option<u8> {
     None
 }
 
+/// R311y607 — read one u64 option out of an option list.
+///
+/// Separate from [`scan_tsresol`] rather than generalised over it, because the
+/// two disagree on width for a reason: `if_tsresol` is ONE byte and the ISB
+/// counters are eight, and a shared helper would have to guess. Length is
+/// checked exactly: a writer that emitted a 4-byte counter is not silently
+/// zero-extended into a number a reader would then quote.
+fn scan_u64_option(body: &[u8], swapped: bool, want: u16) -> Option<u64> {
+    let mut off = 0usize;
+    while off + 4 <= body.len() {
+        let code = u16_at(body, off, swapped);
+        let len = u16_at(body, off + 2, swapped) as usize;
+        off += 4;
+        if code == 0 {
+            return None;
+        }
+        if off + len > body.len() {
+            return None;
+        }
+        if code == want && len == 8 {
+            let mut raw = [0u8; 8];
+            raw.copy_from_slice(&body[off..off + 8]);
+            return Some(if swapped {
+                u64::from_be_bytes(raw)
+            } else {
+                u64::from_le_bytes(raw)
+            });
+        }
+        off += (len + 3) & !3;
+    }
+    None
+}
+
+/// R311y607 — what the CAPTURE TOOL said about one interface, as opposed to
+/// what this reader observed.
+///
+/// The distinction is the whole point. `wz-capture` counts what IT drops (its
+/// own caps, its own expiries) and reports that in [`crate::DissectionDrops`].
+/// It has no way to count what never reached the file: a `dumpcap` whose
+/// kernel ring overflowed writes an `isb_ifdrop` and hands over a capture with
+/// a HOLE in it. Read from a stream, that hole desynchronises the assembler
+/// and every message after it is lost — and until this block was read, the
+/// only available explanation was "the dissector is broken".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterfaceStats {
+    /// Which interface these counters describe, indexing
+    /// [`PcapngFile::interfaces`].
+    pub interface_id: u32,
+    /// `isb_ifrecv`: packets the interface saw. `None` when unstated — which
+    /// is different from zero, and a reader that conflated them would report a
+    /// dead interface for a writer that simply omits the option.
+    pub received: Option<u64>,
+    /// `isb_ifdrop`: packets the capture tool dropped. `None` when unstated.
+    pub dropped: Option<u64>,
+}
+
 /// Parse a whole pcapng file from memory.
 ///
 /// Reads it up front for the same reason [`crate::pcap::parse`] does: flow
@@ -322,6 +389,13 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
 
     let mut interfaces: Vec<Interface> = Vec::new();
     let mut packets: Vec<Packet> = Vec::new();
+    let mut interface_stats: Vec<InterfaceStats> = Vec::new();
+    // R311y607 — obsolete-Packet-Block drop counters, summed per interface.
+    // A map rather than a Vec because the interface list is rebuilt at each
+    // section boundary while these are accumulated across the whole file, and
+    // an index into a list that is cleared underneath would attribute one
+    // section's losses to another's interface.
+    let mut pb_drops: alloc::collections::BTreeMap<u32, u64> = alloc::collections::BTreeMap::new();
     let mut sections = 0usize;
     // The byte order of the section currently being read. Set by each SHB;
     // the SHB's own type field is byte-order agnostic (it is a palindrome
@@ -478,6 +552,20 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
                     return Err(PcapngError::Truncated { offset: off });
                 }
                 let interface_id = u32::from(u16_at(body, 0, swapped));
+                // R311y607 — the PB's own drop counter, which this reader used
+                // to step over. It counts packets lost BETWEEN this packet and
+                // the previous one on the same interface, so it is a per-block
+                // increment rather than a total: accumulated into the same
+                // place an ISB's `isb_ifdrop` lands, because a consumer asking
+                // "did the capture tool lose anything" must not have to know
+                // which block type the writer chose.
+                let block_drops = u64::from(u16_at(body, 2, swapped));
+                if block_drops > 0 {
+                    pb_drops
+                        .entry(interface_id)
+                        .and_modify(|d| *d += block_drops)
+                        .or_insert(block_drops);
+                }
                 let ts_high = u64::from(u32_at(body, 4, swapped));
                 let ts_low = u64::from(u32_at(body, 8, swapped));
                 let captured = u32_at(body, 12, swapped);
@@ -507,18 +595,55 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
                 });
                 index += 1;
             }
-            // Name resolution, interface statistics, decryption secrets,
-            // custom blocks: skipped by length, which is what the format's
-            // self-describing block structure is FOR.
+            BT_ISB => {
+                // interface_id u32, ts_high u32, ts_low u32, then options.
+                // The counters live ONLY in the options; the fixed part
+                // carries no drop figure at all.
+                if body.len() < 12 {
+                    return Err(PcapngError::Truncated { offset: off });
+                }
+                let interface_id = u32_at(body, 0, swapped);
+                let opts = &body[12..];
+                interface_stats.push(InterfaceStats {
+                    interface_id,
+                    received: scan_u64_option(opts, swapped, OPT_ISB_IFRECV),
+                    dropped: scan_u64_option(opts, swapped, OPT_ISB_IFDROP),
+                });
+            }
+            // Name resolution, decryption secrets, custom blocks: skipped by
+            // length, which is what the format's self-describing block
+            // structure is FOR.
             _ => {}
         }
         off += total;
+    }
+
+    // A Packet Block's per-block drop count is folded in as if it had been an
+    // ISB, so `interface_stats` is the ONE place a consumer asks the question
+    // regardless of which block type the writer chose. `received` stays `None`
+    // because a PB carries no such figure — reporting 0 would be a claim the
+    // file never made.
+    for (interface_id, dropped) in pb_drops {
+        match interface_stats
+            .iter_mut()
+            .find(|s| s.interface_id == interface_id)
+        {
+            Some(existing) => {
+                existing.dropped = Some(existing.dropped.unwrap_or(0) + dropped);
+            }
+            None => interface_stats.push(InterfaceStats {
+                interface_id,
+                received: None,
+                dropped: Some(dropped),
+            }),
+        }
     }
 
     Ok(PcapngFile {
         interfaces,
         packets,
         sections,
+        interface_stats,
     })
 }
 
@@ -578,6 +703,112 @@ pub fn write(interfaces: &[(u32, u8)], packets: &[(u32, u64, &[u8])]) -> Vec<u8>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One Interface Statistics Block, laid out per the pcapng spec §4.6:
+    /// block type, total length, interface id, ts_high, ts_low, then options,
+    /// then the trailing length. Each option is code u16 / length u16 / value
+    /// padded to 4.
+    ///
+    /// Hand-laid because [`write`] emits no ISB, and it is asserted at the
+    /// BYTE level below rather than only round-tripped — a fixture the reader
+    /// and the writer agree on proves only that they share a belief.
+    fn isb(interface_id: u32, recv: Option<u64>, drop: Option<u64>) -> Vec<u8> {
+        let mut opts = Vec::new();
+        for (code, value) in [(OPT_ISB_IFRECV, recv), (OPT_ISB_IFDROP, drop)] {
+            if let Some(v) = value {
+                opts.extend_from_slice(&code.to_le_bytes());
+                opts.extend_from_slice(&8u16.to_le_bytes());
+                opts.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        // opt_endofopt terminates the list.
+        opts.extend_from_slice(&0u16.to_le_bytes());
+        opts.extend_from_slice(&0u16.to_le_bytes());
+
+        // type(4) + length(4) + interface_id(4) + ts_high(4) + ts_low(4)
+        // + options + trailing length(4).
+        let total = (24 + opts.len()) as u32;
+        let mut out = Vec::new();
+        out.extend_from_slice(&BT_ISB.to_le_bytes());
+        out.extend_from_slice(&total.to_le_bytes());
+        out.extend_from_slice(&interface_id.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // ts_high
+        out.extend_from_slice(&0u32.to_le_bytes()); // ts_low
+        out.extend_from_slice(&opts);
+        out.extend_from_slice(&total.to_le_bytes());
+        out
+    }
+
+    /// R311y607 — THE ONE THAT MATTERS: what the CAPTURE TOOL lost is read,
+    /// not skipped.
+    ///
+    /// `wz-capture` counts what it discards itself and reported that as though
+    /// it were the whole story. It is not: a capture tool whose kernel ring
+    /// overflows writes an `isb_ifdrop` and hands over a file with a hole. Read
+    /// from a TCP stream that hole desynchronises the assembler, which has no
+    /// resynchronise path — so the visible symptom is "the dissector stopped
+    /// decoding", and the cause was in the file all along, in a block this
+    /// reader stepped over by length.
+    #[test]
+    fn the_capture_tools_own_drop_count_is_read_rather_than_skipped() {
+        let mut file = write(&[(1, 6)], &[(0, 1_000_000, &[0u8; 4])]);
+        file.extend_from_slice(&isb(0, Some(1_000), Some(17)));
+        let parsed = parse(&file).expect("an ISB must not disturb the parse");
+
+        assert_eq!(parsed.packets.len(), 1, "the packet still reads");
+        assert_eq!(parsed.interface_stats.len(), 1);
+        assert_eq!(parsed.interface_stats[0].interface_id, 0);
+        assert_eq!(parsed.interface_stats[0].received, Some(1_000));
+        assert_eq!(
+            parsed.interface_stats[0].dropped,
+            Some(17),
+            "17 packets never reached this file and the file says so"
+        );
+    }
+
+    /// An absent option is NOT zero. A writer that emits an ISB with only
+    /// `isb_ifrecv` has said nothing about drops, and answering 0 would be
+    /// inventing a claim the file never made — the difference between "nothing
+    /// was lost" and "nobody counted".
+    #[test]
+    fn an_unstated_counter_is_none_rather_than_zero() {
+        let mut file = write(&[(1, 6)], &[]);
+        file.extend_from_slice(&isb(0, Some(42), None));
+        let parsed = parse(&file).expect("parse");
+        assert_eq!(parsed.interface_stats[0].received, Some(42));
+        assert_eq!(parsed.interface_stats[0].dropped, None);
+    }
+
+    /// A counter of the wrong WIDTH is refused rather than zero-extended: an
+    /// 8-byte option read as 4 (or the reverse) would produce a number the
+    /// reader would then quote as the capture's own.
+    #[test]
+    fn a_wrong_width_counter_is_refused_rather_than_guessed() {
+        let mut file = write(&[(1, 6)], &[]);
+        let mut block = Vec::new();
+        let mut opts = Vec::new();
+        opts.extend_from_slice(&OPT_ISB_IFDROP.to_le_bytes());
+        opts.extend_from_slice(&4u16.to_le_bytes()); // four bytes, not eight
+        opts.extend_from_slice(&9u32.to_le_bytes());
+        opts.extend_from_slice(&0u32.to_le_bytes()); // opt_endofopt
+                                                     // type(4) + length(4) + interface_id(4) + ts_high(4) + ts_low(4)
+                                                     // + options + trailing length(4).
+        let total = (24 + opts.len()) as u32;
+        block.extend_from_slice(&BT_ISB.to_le_bytes());
+        block.extend_from_slice(&total.to_le_bytes());
+        block.extend_from_slice(&0u32.to_le_bytes());
+        block.extend_from_slice(&0u32.to_le_bytes());
+        block.extend_from_slice(&0u32.to_le_bytes());
+        block.extend_from_slice(&opts);
+        block.extend_from_slice(&total.to_le_bytes());
+        file.extend_from_slice(&block);
+
+        let parsed = parse(&file).expect("a malformed option is not a fatal file");
+        assert_eq!(
+            parsed.interface_stats[0].dropped, None,
+            "a 4-byte isb_ifdrop is not a 64-bit count"
+        );
+    }
 
     #[test]
     fn a_written_file_reads_back_with_its_interface_and_timestamp() {
@@ -890,6 +1121,43 @@ mod tests {
         assert_eq!(parsed.packets.len(), 1);
         assert_eq!(parsed.packets[0].data, alloc::vec![0xAA, 0xBB]);
         assert_eq!(parsed.ts_millis(&parsed.packets[0]), Some(5));
+    }
+
+    /// R311y607 — the Packet Block's own drop counter is ACCUMULATED, not
+    /// stepped over.
+    ///
+    /// A PB states losses per block (packets missed since the previous one on
+    /// that interface), where an ISB states a total, so the two need different
+    /// arithmetic to reach the same answer. They land in one place regardless,
+    /// because a consumer asking "did the capture tool lose anything" must not
+    /// have to know which block type a 2010-era writer chose.
+    #[test]
+    fn the_obsolete_blocks_drop_counter_is_summed_rather_than_stepped_over() {
+        let mut file = write(&[(1, 6)], &[]);
+        for drops in [3u16, 4u16] {
+            file.extend_from_slice(&BT_PB.to_le_bytes());
+            file.extend_from_slice(&36u32.to_le_bytes());
+            file.extend_from_slice(&0u16.to_le_bytes()); // interface_id
+            file.extend_from_slice(&drops.to_le_bytes());
+            file.extend_from_slice(&0u32.to_le_bytes()); // ts high
+            file.extend_from_slice(&1_000u32.to_le_bytes()); // ts low
+            file.extend_from_slice(&2u32.to_le_bytes());
+            file.extend_from_slice(&2u32.to_le_bytes());
+            file.extend_from_slice(&[0xAA, 0xBB, 0, 0]);
+            file.extend_from_slice(&36u32.to_le_bytes());
+        }
+        let parsed = parse(&file).expect("parse");
+        assert_eq!(parsed.packets.len(), 2, "both packets still read");
+        assert_eq!(parsed.interface_stats.len(), 1);
+        assert_eq!(
+            parsed.interface_stats[0].dropped,
+            Some(7),
+            "3 + 4, summed across the blocks rather than last-write-wins"
+        );
+        assert_eq!(
+            parsed.interface_stats[0].received, None,
+            "a PB states no received count, and inventing 0 would be a claim"
+        );
     }
 
     /// A block length that is not a multiple of 4, or smaller than a block can

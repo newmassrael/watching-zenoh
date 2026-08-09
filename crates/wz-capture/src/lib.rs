@@ -596,6 +596,12 @@ pub struct Dissection {
     /// will never see completed, and a dissection that drops it without saying
     /// so reports its own bound as if it were the wire's.
     expired_chains: usize,
+    /// R311y607 — packets the CAPTURE TOOL reported dropping, summed over every
+    /// interface. `None` when the file stated nothing.
+    ///
+    /// Distinct from every other counter on this struct, all of which are what
+    /// THIS reader did. See [`Self::capture_reported_drops`].
+    capture_reported_drops: Option<u64>,
 }
 
 impl Dissection {
@@ -736,6 +742,28 @@ impl Dissection {
     /// What IP fragment reassembly has cost and seen.
     pub fn fragment_stats(&self) -> frag::FragmentStats {
         self.fragments.stats()
+    }
+
+    /// R311y607 — packets the CAPTURE TOOL said it lost, or `None` if the file
+    /// made no such statement.
+    ///
+    /// Every other counter this type exposes answers "what did the DISSECTOR
+    /// discard", which is a question about wz's own caps. This one answers
+    /// "what never reached the file at all", and only the writer can answer it
+    /// — a `dumpcap` whose kernel ring overflowed records an `isb_ifdrop` and
+    /// then hands over a capture with a hole where those packets were.
+    ///
+    /// It matters because the hole is not inert. A TCP stream missing a run of
+    /// bytes desynchronises, and this crate's assembler has no resynchronise
+    /// path (`tcp.rs`), so every message after the gap is lost. Without this
+    /// figure the only available reading of that outcome is "the dissector is
+    /// broken"; with it, the capture indicts itself.
+    ///
+    /// `None` and `Some(0)` are deliberately different: no ISB at all is not a
+    /// claim that nothing was dropped. A classic pcap always answers `None` —
+    /// the format has nowhere to put the figure.
+    pub fn capture_reported_drops(&self) -> Option<u64> {
+        self.capture_reported_drops
     }
 
     /// Keep [`Self::skipped`] inside its bound, counting what that costs.
@@ -1138,6 +1166,13 @@ impl Dissection {
     pub fn from_pcapng(bytes: &[u8]) -> Result<Self, pcapng::PcapngError> {
         let file = pcapng::parse(bytes)?;
         let mut out = Self::new();
+        // R311y607 — carried BEFORE the packets, so a caller that stops early
+        // still learns the capture was incomplete.
+        out.capture_reported_drops = file
+            .interface_stats
+            .iter()
+            .filter_map(|s| s.dropped)
+            .try_fold(0u64, |acc, d| acc.checked_add(d));
         for packet in &file.packets {
             out.push_packet_at(
                 packet.link_type,
@@ -1643,6 +1678,59 @@ mod datagram_tests {
                 Err(e) => panic!("{name} failed to decode: {e:?}"),
             }
         }
+    }
+
+    /// R311y607 — the capture tool's drop count reaches the DISSECTION, not
+    /// only the pcapng parser.
+    ///
+    /// A figure read out of a block and left in the parser's return value has
+    /// no consumer, and this crate has that pattern already
+    /// (`DissectionHealth`). The assertion is therefore over the surface a
+    /// reader actually holds.
+    #[test]
+    fn a_dissection_carries_what_the_capture_tool_admitted_losing() {
+        // Two interfaces, so the sum is a sum rather than a copy of one.
+        let mut file = pcapng::write(&[(1, 6), (1, 6)], &[(0, 1_000_000, &[0u8; 4])]);
+        file.extend_from_slice(&isb_block(0, Some(9)));
+        file.extend_from_slice(&isb_block(1, Some(8)));
+
+        let d = Dissection::from_capture(&file).expect("the capture parses");
+        assert_eq!(
+            d.capture_reported_drops(),
+            Some(17),
+            "both interfaces' losses, summed"
+        );
+        assert!(
+            !d.drops().any(),
+            "and NOT confused with what this dissector itself discarded"
+        );
+
+        // A file that says nothing answers None, which is not Some(0): a
+        // classic pcap has nowhere to put the figure at all.
+        let plain = Dissection::from_capture(&pcap::write(LINKTYPE_ETHERNET, &[])).expect("parse");
+        assert_eq!(plain.capture_reported_drops(), None);
+    }
+
+    /// One ISB carrying only `isb_ifdrop`. Kept beside its user rather than
+    /// shared with `pcapng`'s own tests: that module asserts the LAYOUT, and
+    /// this one asserts the figure reaches a consumer.
+    fn isb_block(interface_id: u32, dropped: Option<u64>) -> Vec<u8> {
+        let mut opts = Vec::new();
+        if let Some(v) = dropped {
+            opts.extend_from_slice(&5u16.to_le_bytes()); // isb_ifdrop
+            opts.extend_from_slice(&8u16.to_le_bytes());
+            opts.extend_from_slice(&v.to_le_bytes());
+        }
+        opts.extend_from_slice(&0u32.to_le_bytes()); // opt_endofopt
+        let total = (24 + opts.len()) as u32;
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x0000_0005u32.to_le_bytes());
+        out.extend_from_slice(&total.to_le_bytes());
+        out.extend_from_slice(&interface_id.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes()); // ts_high, ts_low
+        out.extend_from_slice(&opts);
+        out.extend_from_slice(&total.to_le_bytes());
+        out
     }
 
     /// A HELLO carrying no locator list, built by the HELLO codec.
