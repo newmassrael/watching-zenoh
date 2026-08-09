@@ -11139,6 +11139,52 @@
         "The report's completeness verdict deliberately does NOT go false for descriptors. A descriptor is data no capture could ever have held, so calling the capture incomplete would be asking for a better capture that cannot exist. It is rendered instead, in both formats, beside the finding count."
       ]
     },
+    "Round 1645": {
+      "decision_summary": "R311y624 -- the capture clock's stickiness gets the witness it never had, and a register item turns out to have been gated all along",
+      "changes_bullets": [
+        "crates/wz-capture/src/lib.rs (§1.1x) -- two pages pinning the capture clock's STICKINESS, which was a measured property with no witness anywhere in the workspace. `push_packet_at(None)` leaves the observer's clock where it is, so an unstamped packet BEHIND a stamped one on the same flow reports the earlier instant rather than none. The existing R311y615 page tests the stamped and unstamped cases as SEPARATE captures and never reaches the mixed one.",
+        "The second page is the other half and a different claim: a capture with no stamp anywhere leaves every frame timeless AND lets the observer say it was never told. `now_ms()` answering 0 cannot make that distinction, which is exactly how an unmeasured capture starts answering time questions.",
+        "scripts/run-ci.sh -- both pinned in Layer C1bt's `--no-default-features` SET, because the clock is ungated by feature and a re-gating would otherwise shrink that build's count in silence."
+      ],
+      "verification_bullets": [
+        "§1.1x FALSIFIED TWO WAYS. Making the clock reset on an unstamped packet reds the sticky page AND two of R311y620's `time`-off-the-wire pages, which is the coupling stated rather than assumed: those pages depend on captures being unstamped THROUGHOUT, and a single stamped packet in front would have made every later record answer a `time` term with an inherited number. Turning the absence into a plausible zero reds the timeless page alone.",
+        "PINNED RATHER THAN FIXED, and the reason is stated in the page: both alternatives are worse. A clock that resets to `None` breaks the reassembly sweep, and one that refuses mixed-stamp sources rejects a real pcap. What the round owed was a witness that the behaviour was CHOSEN, not a change.",
+        "§1.4g RE-MEASURED AND IS NOT OPEN DEBT. The register carries \"the walker reports a JOIN lease in wire units\" as an inherited item; `dissect::tests::a_t_flagged_join_dissects_its_lease_in_the_wire_unit` was run and passes, and it pins the divergence as a DECISION with its rationale: a field tree shows what is on the wire at the offset it occupies, `decode_join` projects the same bytes to milliseconds, and the T flag is surfaced so the unit is knowable from the tree. Two of wz's own readers disagree on purpose.",
+        "Feature arms, all green, all clippy-clean at `-D warnings`: 262 at default, 180 at `--no-default-features`, 254 with `network-codecs`, 255 with `network-codecs,filter-wildcards`. Layer C1bt re-run alone and passes with the two new SET pins."
+      ],
+      "impact_refs": [
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "The hosted run for this round's commits is not started, and the run for `bade8ac1` STILL HAS AN UNREAD RED: `portability (macos-latest)`, failing where the same job passed on the ten runs before it, with 13 of 15 jobs green and one lane still running. Its log is unavailable until the run completes. All four of that job's steps were reproduced locally and pass. Do not push past this without reading it.",
+        "§1.1x is CLOSED and §1.4g is NOT DEBT -- it is a ratified decision with a live witness, and the register should stop carrying it as open.",
+        "THE REGISTER'S OPEN-ITEM COUNT IS AN OVERCOUNT, measured twice now. §1.1k's description was unreachable in the code and §1.4g is already gated. An inherited item is worth re-measuring before it is worth working.",
+        "A COUPLING WORTH REMEMBERING: three of R311y620's pages depend on a property of the DISSECTION rather than of the plane they test. The falsify probe found it -- severing the clock's stickiness reddened them -- but nothing in their own text says so. A page whose fixture depends on an unstated global property is a page that can silently change meaning."
+      ],
+      "publishable_decision_summary": "R311y624 -- the capture clock's stickiness gets the witness it never had, and a register item turns out to have been gated all along",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/lib.rs (§1.1x) -- two pages pinning the capture clock's STICKINESS, which was a measured property with no witness anywhere in the workspace. `push_packet_at(None)` leaves the observer's clock where it is, so an unstamped packet BEHIND a stamped one on the same flow reports the earlier instant rather than none. The existing R311y615 page tests the stamped and unstamped cases as SEPARATE captures and never reaches the mixed one.",
+        "The second page is the other half and a different claim: a capture with no stamp anywhere leaves every frame timeless AND lets the observer say it was never told. `now_ms()` answering 0 cannot make that distinction, which is exactly how an unmeasured capture starts answering time questions.",
+        "scripts/run-ci.sh -- both pinned in Layer C1bt's `--no-default-features` SET, because the clock is ungated by feature and a re-gating would otherwise shrink that build's count in silence."
+      ],
+      "publishable_verification_bullets": [
+        "§1.1x FALSIFIED TWO WAYS. Making the clock reset on an unstamped packet reds the sticky page AND two of R311y620's `time`-off-the-wire pages, which is the coupling stated rather than assumed: those pages depend on captures being unstamped THROUGHOUT, and a single stamped packet in front would have made every later record answer a `time` term with an inherited number. Turning the absence into a plausible zero reds the timeless page alone.",
+        "PINNED RATHER THAN FIXED, and the reason is stated in the page: both alternatives are worse. A clock that resets to `None` breaks the reassembly sweep, and one that refuses mixed-stamp sources rejects a real pcap. What the round owed was a witness that the behaviour was CHOSEN, not a change.",
+        "§1.4g RE-MEASURED AND IS NOT OPEN DEBT. The register carries \"the walker reports a JOIN lease in wire units\" as an inherited item; `dissect::tests::a_t_flagged_join_dissects_its_lease_in_the_wire_unit` was run and passes, and it pins the divergence as a DECISION with its rationale: a field tree shows what is on the wire at the offset it occupies, `decode_join` projects the same bytes to milliseconds, and the T flag is surfaced so the unit is knowable from the tree. Two of wz's own readers disagree on purpose.",
+        "Feature arms, all green, all clippy-clean at `-D warnings`: 262 at default, 180 at `--no-default-features`, 254 with `network-codecs`, 255 with `network-codecs,filter-wildcards`. Layer C1bt re-run alone and passes with the two new SET pins."
+      ],
+      "publishable_impact_refs": [
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The hosted run for this round's commits is not started, and the run for `bade8ac1` STILL HAS AN UNREAD RED: `portability (macos-latest)`, failing where the same job passed on the ten runs before it, with 13 of 15 jobs green and one lane still running. Its log is unavailable until the run completes. All four of that job's steps were reproduced locally and pass. Do not push past this without reading it.",
+        "§1.1x is CLOSED and §1.4g is NOT DEBT -- it is a ratified decision with a live witness, and the register should stop carrying it as open.",
+        "THE REGISTER'S OPEN-ITEM COUNT IS AN OVERCOUNT, measured twice now. §1.1k's description was unreachable in the code and §1.4g is already gated. An inherited item is worth re-measuring before it is worth working.",
+        "A COUPLING WORTH REMEMBERING: three of R311y620's pages depend on a property of the DISSECTION rather than of the plane they test. The falsify probe found it -- severing the clock's stickiness reddened them -- but nothing in their own text says so. A page whose fixture depends on an unstated global property is a page that can silently change meaning."
+      ]
+    },
     "Round 17": {
       "decision_summary": "OQ-W24 full closure — RFC §5.I.0 'Tier definitions' subsection landed as atomic-store new section via R287/R289 add_section primitive (first watching-zenoh use of new section creation surface).",
       "changes_bullets": [
