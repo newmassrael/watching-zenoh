@@ -52,6 +52,7 @@ max_rounds=10
 permission_mode="acceptEdits"
 round_timeout=$(( 4 * 60 * 60 ))
 dry_run=0
+stream=1
 
 usage() {
     cat <<'USAGE'
@@ -62,12 +63,30 @@ usage: scripts/round-runner.sh [options]
   --permission-mode M   claude --permission-mode (default acceptEdits)
   --prompt FILE         round prompt (default scripts/round-prompt.txt); a
                         smoke prompt here exercises the loop without doing work
+  --no-stream           final answer only, instead of a live JSONL transcript.
+                        Streaming is the DEFAULT because plain -p writes the log
+                        in ONE go at the end: a round that dies mid-way leaves an
+                        EMPTY log, which is exactly when you want to read it.
   --dry-run             print the command that would run, then exit
   -h, --help            this
 
 Each round is a fresh `claude -p` session fed scripts/round-prompt.txt.
-Transcripts land in .round/logs/ (gitignored). Ctrl-C between rounds is
-safe: the loop only ever starts a round from a clean verdict.
+Transcripts land in .round/logs/ (gitignored), live and one JSON object per
+line. Watch one with:
+  tail -f .round/logs/round-001.log | grep -o '"name":"[^"]*"'
+Ctrl-C between rounds is safe: the loop only ever starts a round from a clean
+verdict.
+
+WATCHING A ROUND: use the PID, never a pattern. `pgrep -f round-runner` and
+`pkill -f ...` match the ROUND ITSELF and any shell quoting the same string,
+because the whole prompt rides on the command line and the prompt names this
+file. That misfire killed the wrong process once. Take the pid the runner
+prints, or read it off `ps --forest`, and drive everything off that:
+  ps -p <pid>            # still alive?
+  ps --ppid <pid>        # what is it running RIGHT NOW (cargo? gh? nothing?)
+To stop AFTER the current round, SIGTERM this runner's own pid: the round is a
+child that outlives it, finishes its work, and writes its verdict -- but no
+next round starts. Nothing prints the verdict then, so read .round/status.
 
 bypassPermissions is deliberately NOT the default. This repo pushes to a
 public main; a mode that answers every prompt yes covers `rm -rf` too. If a
@@ -82,11 +101,19 @@ while [[ $# -gt 0 ]]; do
         --timeout)         round_timeout="$2"; shift 2 ;;
         --permission-mode) permission_mode="$2"; shift 2 ;;
         --prompt)          prompt_file="$2"; shift 2 ;;
+        --no-stream)       stream=0; shift ;;
         --dry-run)         dry_run=1; shift ;;
         -h|--help)         usage; exit 0 ;;
         *) echo "round-runner: unknown option $1" >&2; usage >&2; exit 2 ;;
     esac
 done
+
+# stream-json needs --verbose in print mode; the pair is what makes the log
+# land line by line instead of all at once when the round ends.
+output_args=()
+if [[ $stream -eq 1 ]]; then
+    output_args=(--output-format stream-json --verbose)
+fi
 
 if [[ ! -r "$prompt_file" ]]; then
     echo "round-runner: $prompt_file missing or unreadable" >&2
@@ -99,7 +126,7 @@ fi
 
 if [[ $dry_run -eq 1 ]]; then
     echo "round-runner: would run, once per round, from $repo_root:"
-    echo "  claude -p \"\$(cat $prompt_file)\" --permission-mode $permission_mode"
+    echo "  claude -p \"\$(cat $prompt_file)\" --permission-mode $permission_mode ${output_args[*]}"
     echo "  verdict file: $status_file"
     echo "  logs:         $log_dir/round-NNN.log"
     echo "  ceiling:      $max_rounds round(s), ${round_timeout}s each"
@@ -134,6 +161,7 @@ while (( round < max_rounds )); do
     timeout "$round_timeout" \
         claude -p "$(cat "$prompt_file")" \
             --permission-mode "$permission_mode" \
+            "${output_args[@]}" \
         >"$log" 2>&1 </dev/null
     rc=$?
     set -e
