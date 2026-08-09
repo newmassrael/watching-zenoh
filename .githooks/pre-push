@@ -63,6 +63,43 @@ if [[ $has_work -eq 0 ]]; then
     exit 0
 fi
 
+# ─── gate 0 — confidential vocabulary (R311y619) ────────────────────
+# FIRST, because it is the only failure here that a revert does not undo:
+# origin is public, so material that reaches it is published even if the commit
+# is removed afterwards. This repo has leaked a client document once already and
+# needed filter-repo plus a force push to clean up, after the fact.
+#
+# Placed ahead of the schema and SSOT gates deliberately — those protect a store
+# that can be fixed in the next commit; this one protects something that cannot.
+# It is also the cheapest gate in the file.
+#
+# The term list lives in .git/ and is therefore unpushable; an absent or empty
+# list FAILS rather than skipping, on the same rule the schema pin follows.
+# shellcheck disable=SC1091  # constant path, resolved at run time
+if ! source scripts/lib/nda-scan.sh; then
+    echo "pre-push: scripts/lib/nda-scan.sh missing or unreadable." >&2
+    exit 1
+fi
+nda_base="${remote_sha:-}"
+if [[ -z "$nda_base" || "$nda_base" == "$zero_sha" ]]; then
+    if git rev-parse --verify --quiet origin/main >/dev/null; then
+        nda_base="origin/main"
+    fi
+fi
+if [[ -n "$nda_base" ]]; then
+    if ! wz_nda_scan "$nda_base..$local_sha"; then
+        echo "" >&2
+        echo "pre-push: confidential-vocabulary gate FAILED — push refused." >&2
+        exit 1
+    fi
+else
+    # No base to diff against means the whole history is the range, and a
+    # first push of an entire repo is not a case this gate can usefully
+    # narrow. Say so rather than printing a green line for work not done.
+    echo "pre-push: nda-scan has no diff base (new ref, no origin/main);" >&2
+    echo "          the range is unbounded and this gate did NOT run." >&2
+fi
+
 # ─── gate 1 — schema pin, on the COMMITS BEING PUSHED (R311y418) ────
 # pre-commit grades the index, which covers `git commit` and nothing else:
 # cherry-pick, rebase, merge and --no-verify all reach origin without ever
