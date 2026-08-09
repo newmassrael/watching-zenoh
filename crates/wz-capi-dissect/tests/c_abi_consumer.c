@@ -67,12 +67,45 @@ int main(void) {
     rc = wz_dissect_transport_message(keepalive, 1, 0, NULL);
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out rc=%d", rc);
 
-    /* pcapng is diagnosed, not crashed on and not silently empty. */
-    unsigned char pcapng[8] = {0x0A, 0x0D, 0x0D, 0x0A, 0, 0, 0, 0};
+    /* A DAMAGED capture is diagnosed, not crashed on and not silently empty.
+     * R311y608 -- the fixture is a TRUNCATED pcapng: the magic and nothing
+     * after it. It used to stand for "pcapng", which the reader refused
+     * wholesale; it now dispatches on the magic and reads both formats, so what
+     * is left here is the claim that actually matters at a C boundary -- a
+     * malformed file comes back as a CODE rather than unwinding through it. */
+    unsigned char truncated[8] = {0x0A, 0x0D, 0x0D, 0x0A, 0, 0, 0, 0};
     char *summary = NULL;
-    rc = wz_dissect_pcap_summary(pcapng, sizeof pcapng, &summary);
-    CHECK(rc == WZ_DISSECT_ERR_BAD_CAPTURE, "pcapng rc=%d", rc);
+    rc = wz_dissect_pcap_summary(truncated, sizeof truncated, &summary);
+    CHECK(rc == WZ_DISSECT_ERR_BAD_CAPTURE, "truncated pcapng rc=%d", rc);
     CHECK(summary == NULL, "a bad capture handed back a string");
+
+    /* R311y608 -- and a WHOLE capture comes back with its health report. The
+     * three counters this reads (`health`, `fragment_stats`,
+     * `capture_reported_drops`) had no consumer outside wz-capture's own tests
+     * for three rounds; this is the C side of the reader that closed them.
+     *
+     * The file is a classic pcap laid out by hand -- 24-byte global header
+     * (magic, 2.4, zone, sigfigs, snaplen, linktype=1) then one record header
+     * (ts_sec, ts_usec, caplen, origlen) and four bytes too short to be a
+     * frame. What is under test is the SUMMARY's shape, so the packet only has
+     * to reach the walker, not decode. */
+    unsigned char pcap[24 + 16 + 4] = {
+        0xD4, 0xC3, 0xB2, 0xA1, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00,
+        /* record: ts_sec=0, ts_usec=0, caplen=4, origlen=4 */
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+        0x04, 0x00, 0x00, 0x00,
+        /* the four packet bytes */
+        0x00, 0x00, 0x00, 0x00};
+    rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &summary);
+    CHECK(rc == WZ_DISSECT_OK, "whole pcap rc=%d", rc);
+    CHECK(summary != NULL, "OK came back with no string");
+    CHECK(strstr(summary, "\"health\"") != NULL, "no health report: %s", summary);
+    /* null and 0 are different answers: the classic format has nowhere to
+     * record a drop count, so silence must not read as a clean bill. */
+    CHECK(strstr(summary, "\"capture_reported_drops\":null") != NULL,
+          "silence reported as a figure: %s", summary);
+    wz_dissect_string_free(summary);
 
     printf("  C1bo: C consumer linked the cdylib and read the tree\n");
     return 0;

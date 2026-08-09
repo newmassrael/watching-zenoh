@@ -54,7 +54,9 @@ use wz_session_core::dissect::{dissect_transport_message, to_json};
 pub const WZ_DISSECT_OK: c_int = 0;
 /// A null pointer, or a length that cannot be a buffer.
 pub const WZ_DISSECT_ERR_INVALID_ARG: c_int = -1;
-/// The capture file could not be read (bad magic, truncated, pcapng).
+/// The capture file could not be read: bad magic, or a truncated / malformed
+/// file in either format. R311y608 — pcapng was in this list and is not any
+/// more; [`wz_dissect_pcap_summary`] dispatches on the magic and reads both.
 pub const WZ_DISSECT_ERR_BAD_CAPTURE: c_int = -2;
 /// The bytes were not a decodable transport message.
 pub const WZ_DISSECT_ERR_DECODE: c_int = -3;
@@ -120,14 +122,31 @@ pub unsafe extern "C" fn wz_dissect_transport_message(
     }
 }
 
-/// Dissect a whole classic pcap FILE held in memory, returning a JSON
-/// summary of every flow it found.
+/// Dissect a whole capture FILE held in memory, returning a JSON summary of
+/// every flow it found.
 ///
 /// The summary is deliberately a summary and not the full field tree: a
 /// capture holds an unbounded number of messages, and a single string
 /// carrying all of them is a shape that works for a test and fails for a
 /// session. A consumer walks the flows here, then calls
 /// [`wz_dissect_transport_message`] per message it wants expanded.
+///
+/// # R311y608 — EITHER format, and that is not a convenience
+///
+/// This used to call `Dissection::from_pcap`, so a pcapng file — what every
+/// current `dumpcap` / `tshark -w` writes by default — came back
+/// [`WZ_DISSECT_ERR_BAD_CAPTURE`], indistinguishable from a corrupt one. It now
+/// dispatches on the magic through `Dissection::from_capture`.
+///
+/// The widening is load-bearing for the health report below rather than
+/// cosmetic: `capture_reported_drops` reads the Interface Statistics Block,
+/// which the classic format HAS NOWHERE TO PUT. Over `from_pcap` alone that
+/// figure is `null` for every file that could ever reach it, and a counter that
+/// is structurally always absent is not a counter.
+///
+/// It is a widening only — every input that used to succeed still does, with
+/// the same shape plus siblings — which is the compatibility the module doc
+/// promises and the reason [`wz_dissect_abi_version`] does not move.
 ///
 /// # Safety
 /// `bytes` must point to at least `len` readable bytes and `out` must be a
@@ -143,7 +162,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary(
     }
     // SAFETY: caller contract above.
     let input = unsafe { core::slice::from_raw_parts(bytes, len) };
-    let dissection = match Dissection::from_pcap(input) {
+    let dissection = match Dissection::from_capture(input) {
         Ok(d) => d,
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
@@ -166,13 +185,100 @@ fn summary_json(d: &Dissection) -> String {
         if i > 0 {
             s.push(',');
         }
-        s.push_str(&format!("{{\"frames\":{}}}", f.frames.len()));
+        // R311y608 — the scouting count too. A datagram flow reported by its
+        // frame count alone shows a scout group as an EMPTY flow, which reads
+        // as "nothing was on it" for the one exchange that is always there.
+        s.push_str(&format!(
+            "{{\"frames\":{},\"scouting\":{}}}",
+            f.frames.len(),
+            f.scouting.len()
+        ));
     }
     // The skipped packets are part of the summary on purpose: a consumer that
     // cannot see them reads a dissection with holes as a dissection that was
     // complete.
-    s.push_str(&format!("],\"skipped\":{}}}", d.skipped().len()));
+    s.push_str(&format!("],\"skipped\":{},", d.skipped().len()));
+    s.push_str(&health_json(d));
+    s.push('}');
     s
+}
+
+/// R311y608 — what the dissection LOST, and who lost it.
+///
+/// The three counters this reports had, between them, ZERO consumers outside
+/// `wz-capture`'s own tests: `health()` (R311y605), `fragment_stats()`
+/// (R311y606) and `capture_reported_drops()` (R311y607) were each built, each
+/// tested, and each read by nothing that ships. A measurement nobody reads is
+/// indistinguishable from one that is wrong, so they are closed together here
+/// rather than each growing a fourth test.
+///
+/// They are grouped by WHO lost the packet, because that is the only thing a
+/// consumer can act on, and the three answers are genuinely different:
+///
+/// - `capture_reported_drops` — the CAPTURE TOOL's own admission. Its ring
+///   overflowed and the file has a hole. Nothing wz does can recover it, and
+///   the correct response is to re-capture with a bigger buffer.
+/// - `dropped_by_limits` — THIS DISSECTION's caps biting. The data was
+///   present; raise [`wz_capture::DissectionLimits`] and it comes back.
+/// - `fragments` / `streams` — what the WIRE did: reordering, retransmission,
+///   fragment chains that never completed.
+///
+/// `capture_reported_drops` is `null` and not `0` when the file made no
+/// statement, and the difference is the whole value of the field: a classic
+/// pcap has nowhere to record the figure, so "no ISB" is silence and not a
+/// clean bill of health.
+///
+/// # One honest limitation, stated rather than left to be discovered
+///
+/// `dropped_by_limits` is all zeros through [`wz_dissect_pcap_summary`], and
+/// STRUCTURALLY so: that entry point builds an UNBOUNDED dissection
+/// (`Dissection::from_capture` takes no [`wz_capture::DissectionLimits`]), so
+/// no cap exists to bite. The zeros are true, and they are not evidence that a
+/// bounded dissection would report none. Making them reachable means letting a
+/// C caller state its caps, which is a second entry point and an ABI decision
+/// of its own — registered rather than improvised here. The group is reported
+/// anyway because the alternative is a consumer that cannot tell "no caps" from
+/// "caps that did not bite" at all.
+fn health_json(d: &Dissection) -> String {
+    let h = d.health();
+    let f = d.fragment_stats();
+    let drops = h.drops;
+    let reported = match d.capture_reported_drops() {
+        Some(n) => n.to_string(),
+        None => String::from("null"),
+    };
+    format!(
+        "\"health\":{{\
+         \"capture_reported_drops\":{reported},\
+         \"dropped_by_limits\":{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\
+         \"flows\":{},\"scout_askers\":{}}},\
+         \"fragments\":{{\"pieces\":{},\"completed\":{},\"expired\":{},\"evicted\":{},\
+         \"malformed\":{},\"overlapping\":{}}},\
+         \"streams\":{{\"retransmits\":{},\"out_of_order\":{},\"partial_overlaps\":{},\
+         \"ip_checksum_valid\":{},\"ip_checksum_invalid\":{},\"ip_checksum_absent\":{},\
+         \"transport_checksum_valid\":{},\"transport_checksum_invalid\":{},\
+         \"transport_checksum_absent\":{}}}}}",
+        drops.frames,
+        drops.stream_bytes,
+        drops.skipped,
+        drops.flows,
+        drops.scout_askers,
+        f.pieces,
+        f.completed,
+        f.expired,
+        f.evicted,
+        f.malformed,
+        f.overlapping,
+        h.retransmits,
+        h.out_of_order,
+        h.partial_overlaps,
+        h.ip_checksum_valid,
+        h.ip_checksum_invalid,
+        h.ip_checksum_absent,
+        h.transport_checksum_valid,
+        h.transport_checksum_invalid,
+        h.transport_checksum_absent,
+    )
 }
 
 /// Hand an owned string across the boundary.
@@ -261,18 +367,180 @@ mod tests {
         unsafe { wz_dissect_string_free(core::ptr::null_mut()) };
     }
 
-    /// A capture this reader does not parse is a NAMED error, not a crash and
-    /// not an empty success. pcapng is the case that matters: it is the
-    /// commonest modern format and `wz-capture` diagnoses it by name.
+    /// A capture this reader cannot parse is a NAMED error, not a crash and
+    /// not an empty success.
+    ///
+    /// R311y608 — the fixture is a TRUNCATED pcapng: the right magic and then
+    /// nothing. Before this round the same assertion held for a perfectly good
+    /// pcapng too, and the test doc said so; the reader now dispatches on the
+    /// magic, so what is left here is the honest claim — a DAMAGED file still
+    /// fails, and fails by code rather than by unwinding across the boundary.
     #[test]
     fn a_capture_that_cannot_be_read_is_an_error_code() {
         let mut out: *mut c_char = core::ptr::null_mut();
-        let pcapng = [0x0Au8, 0x0D, 0x0D, 0x0A, 0, 0, 0, 0];
+        let truncated = [0x0Au8, 0x0D, 0x0D, 0x0A, 0, 0, 0, 0];
         assert_eq!(
-            unsafe { wz_dissect_pcap_summary(pcapng.as_ptr(), pcapng.len(), &mut out) },
+            unsafe { wz_dissect_pcap_summary(truncated.as_ptr(), truncated.len(), &mut out) },
             WZ_DISSECT_ERR_BAD_CAPTURE
         );
         assert!(out.is_null(), "an error must not hand back a string");
+    }
+
+    /// Drive the summary the way C does.
+    fn call_summary(bytes: &[u8]) -> Result<String, c_int> {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_pcap_summary(bytes.as_ptr(), bytes.len(), &mut out) };
+        if rc != WZ_DISSECT_OK {
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// One Interface Statistics Block, per pcapng §4.6: block type, total
+    /// length, interface id, ts_high, ts_low, options, trailing length.
+    ///
+    /// Hand-laid HERE rather than shared with `wz-capture`'s own fixture on
+    /// purpose — a fixture the reader and the writer share proves only that
+    /// they hold one belief between them, and this file's claim is that the
+    /// figure survives the C boundary, which needs the figure to be real.
+    fn isb_with_drops(interface_id: u32, dropped: u64) -> Vec<u8> {
+        let mut opts = Vec::new();
+        opts.extend_from_slice(&5u16.to_le_bytes()); // opt_isb_ifdrop
+        opts.extend_from_slice(&8u16.to_le_bytes());
+        opts.extend_from_slice(&dropped.to_le_bytes());
+        opts.extend_from_slice(&0u16.to_le_bytes()); // opt_endofopt
+        opts.extend_from_slice(&0u16.to_le_bytes());
+
+        let total = (24 + opts.len()) as u32;
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x0000_0005u32.to_le_bytes()); // BT_ISB
+        out.extend_from_slice(&total.to_le_bytes());
+        out.extend_from_slice(&interface_id.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // ts_high
+        out.extend_from_slice(&0u32.to_le_bytes()); // ts_low
+        out.extend_from_slice(&opts);
+        out.extend_from_slice(&total.to_le_bytes());
+        out
+    }
+
+    /// R311y608 — THE ONE THAT MATTERS: a pcapng REACHES this ABI at all, and
+    /// what the capture tool admitted losing crosses it as a number.
+    ///
+    /// Two defects in one assertion. The reader used to call `from_pcap`, so
+    /// every pcapng — what `dumpcap` and `tshark -w` write by DEFAULT — came
+    /// back `WZ_DISSECT_ERR_BAD_CAPTURE`, indistinguishable from corruption.
+    /// And `capture_reported_drops` reads the ISB, which only pcapng has, so
+    /// over the old entry point that counter could never be anything but
+    /// absent: a C consumer had no way to learn its capture had a hole in it.
+    #[test]
+    fn a_pcapng_reaches_the_boundary_and_carries_its_own_drop_count() {
+        let mut file = wz_capture::pcapng::write(&[(1, 6)], &[(0, 1_000_000, &[0u8; 4])]);
+        file.extend_from_slice(&isb_with_drops(0, 17));
+
+        let json = call_summary(&file).expect("a pcapng must now be readable");
+        assert!(
+            json.contains("\"capture_reported_drops\":17"),
+            "the capture tool's own admission must cross the boundary: {json}"
+        );
+    }
+
+    /// `null` and `0` are DIFFERENT answers, and the difference is the point.
+    ///
+    /// A classic pcap has nowhere in the format to record a drop count, so the
+    /// honest report is "the file said nothing" — not "the file said none".
+    /// Emitting `0` here would tell a consumer its capture was complete on the
+    /// evidence of a field that cannot exist.
+    #[test]
+    fn a_classic_pcap_reports_no_statement_rather_than_zero_drops() {
+        let file = wz_capture::pcap::write(1, &[(0, 0, &[0u8; 4])]);
+        let json = call_summary(&file).expect("a classic pcap still reads");
+        assert!(
+            json.contains("\"capture_reported_drops\":null"),
+            "silence must not be reported as a clean bill of health: {json}"
+        );
+        assert!(
+            !json.contains("\"capture_reported_drops\":0"),
+            "0 is a claim the format cannot support: {json}"
+        );
+    }
+
+    /// The other two counters cross too, and a scouting datagram is COUNTED
+    /// rather than leaving its flow looking empty.
+    ///
+    /// R311y605's `health()`, R311y606's `fragment_stats()` and R311y607's
+    /// `capture_reported_drops()` had zero readers between them outside
+    /// `wz-capture`'s own tests. This is the reader, and this is the assertion
+    /// that it stays one — the three are named together because a measurement
+    /// nobody reads cannot be told from one that is wrong.
+    #[test]
+    fn the_health_counters_all_cross_the_boundary() {
+        let file = wz_capture::pcap::write(1, &[(0, 0, &[0u8; 4])]);
+        let json = call_summary(&file).expect("reads");
+        for key in [
+            "\"health\"",
+            "\"dropped_by_limits\"",
+            "\"scout_askers\"",
+            "\"fragments\"",
+            "\"completed\"",
+            "\"streams\"",
+            "\"retransmits\"",
+            "\"transport_checksum_absent\"",
+        ] {
+            assert!(json.contains(key), "{key} missing from the summary: {json}");
+        }
+    }
+
+    /// A scouting exchange must not read as an empty flow.
+    ///
+    /// R311y607 gave a datagram flow a second list and the summary reported
+    /// only the first, so a capture of a scout group — the one exchange every
+    /// zenoh network has — crossed this boundary as a flow with zero messages
+    /// on it.
+    #[test]
+    fn a_scouting_datagram_is_counted_rather_than_invisible() {
+        // A SCOUT toward zenoh's group: the destination is what routes it into
+        // the scouting namespace, so the packet has to be built whole.
+        let mut scout = vec![wz_session_core::wire_const::S_MID_SCOUT, 0x09, 0x38];
+        scout.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        let pkt = udp_packet([192, 168, 1, 5], 43210, [224, 0, 0, 224], 7446, &scout);
+        let file = wz_capture::pcap::write(1, &[(0, 0, pkt.as_slice())]);
+
+        let json = call_summary(&file).expect("reads");
+        assert!(
+            json.contains("\"scouting\":1"),
+            "the scout must be counted: {json}"
+        );
+    }
+
+    /// Ethernet + IPv4 + UDP carrying `payload`.
+    fn udp_packet(src: [u8; 4], sport: u16, dst: [u8; 4], dport: u16, payload: &[u8]) -> Vec<u8> {
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&sport.to_be_bytes());
+        udp.extend_from_slice(&dport.to_be_bytes());
+        udp.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(payload);
+
+        let mut ip = vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+        ip.extend_from_slice(&src);
+        ip.extend_from_slice(&dst);
+        ip.extend_from_slice(&udp);
+
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
     }
 
     /// The version is a SYMBOL contract, not a JSON one: it exists so a
