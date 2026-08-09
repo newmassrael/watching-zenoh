@@ -1040,6 +1040,20 @@ jobs:
           WZ_C1CD_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C1cd
 
+      - name: Layer Epico — the pico LIBRARY oracles (differential decode + parity)
+        # R311y628 (§1.1g) — the legs whose counterparty is `libzenohpico.so`
+        # itself rather than a pico process on a socket, and the first place in
+        # this tree where the INPUT is generated rather than imagined: the whole
+        # 8-bit transport header space against a body ladder, adjudicated by
+        # upstream's own compiled decoder. Wired HERE because this job is what
+        # builds the pico artifacts the oracles open.
+        #
+        # It also brings `pico_pure_function_oracle` and `pico_abi_symbol_census`
+        # into a lane for the first time. Both have existed since R311y568 and
+        # ran only when someone remembered to type `--ignored` — the register
+        # carried that as §11.9 and nothing changed it until now.
+        run: bash scripts/run-ci.sh --layer Epico
+
       - name: Layer E2 — facade-subset e2e vs zenoh-pico CLIs
         # The six wz-e2e-* SUBSET binaries: each pins an explicit atom list and
         # interoperates with a real pico CLI, which is what makes their proofs

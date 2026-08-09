@@ -6312,6 +6312,47 @@ _pico_cli_unavailable() {
     return 0
 }
 
+# R311y628 (§1.1g) — the pico LIBRARY oracles: the legs whose counterparty is
+# `libzenohpico.so` itself rather than a pico process on a socket.
+#
+# Two things land here at once and the second is why the lane exists.
+#
+# THE DRIVING ORACLE. `pico_transport_decode_differential` is the first test in
+# this tree whose INPUT is generated rather than imagined. Every analyzer round
+# so far reached its defect through a fixture someone thought of first, and the
+# register carries the cost of that as §1.4a — "a fixture can make a defect
+# unreachable" — with seven recorded instances. This walks the whole 8-bit
+# transport header space against a body ladder and asks upstream's compiled
+# decoder whether it agrees. Its first honest run found 27 disagreements in 1536
+# strings, every one of them with the ext-chain `Z` bit set and in BOTH
+# directions. They are PINNED with the drift check running both ways, on the
+# same rule Mnemosyne's orphan ledger follows: a new divergence fails, and a
+# pinned one that stops diverging fails too.
+#
+# AND THE TWO THAT WERE NEVER WIRED. `pico_pure_function_oracle` and
+# `pico_abi_symbol_census` have run by hand since R311y568 and appear in NO
+# lane — the register recorded that as §11.9 and it stayed true. A proof that
+# only ever runs when someone remembers is a proof the tree cannot depend on.
+layer_epico_library_oracles() {
+    if [[ ! -f target/zenoh-pico-build/lib/libzenohpico.so ]]; then
+        _pico_cli_unavailable "Layer Epico" || return 1
+        return 0
+    fi
+    _runci_guarded_test "Epico transport-decode differential" 2 \
+        cargo test -p wz-integration-tests \
+        --test pico_transport_decode_differential -- --ignored --quiet --test-threads=1 \
+        || return 1
+    _runci_guarded_test "Epico pure-function oracle" 8 \
+        cargo test -p wz-integration-tests \
+        --test pico_pure_function_oracle -- --ignored --quiet --test-threads=1 \
+        || return 1
+    _runci_guarded_test "Epico ABI symbol census" 4 \
+        cargo test -p wz-integration-tests \
+        --test pico_abi_symbol_census -- --ignored --quiet --test-threads=1 \
+        || return 1
+    echo "  Epico: wz and the real libzenohpico agree where they are pinned to"
+}
+
 layer_e_ap_demo_round_trip() {
     # R311y478 — z_pong joins the guarded set. It is the counterparty for the
     # §5.27 drop-in round-trip leg, and it arrived AFTER the other four, so a
@@ -10583,6 +10624,7 @@ run_layer C1bv layer_c1bv_dynamic_volume_loading || overall=1
 run_layer C1cc layer_c1cc_api_compat_c || overall=1
 run_layer C1ce layer_c1ce_api_compat_c_shm_oracle || overall=1
 run_layer C1cd layer_c1cd_api_compat_c_attachment || overall=1
+run_layer Epico layer_epico_library_oracles || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1
 run_layer E3 layer_e3_router_multi_peer || overall=1
