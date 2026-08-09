@@ -1,7 +1,13 @@
+#!/usr/bin/env bash
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # R311y619 — confidential-vocabulary gate for the push path.
+#
+# The shebang is for SHELLCHECK, not for execution: this file is sourced, never
+# run, and `scripts/lib/schema-pin-gate.sh` beside it carries one for the same
+# reason. Without it shellcheck cannot know the dialect and raises SC2148 — which
+# is exactly how this file first reached origin red.
 #
 # WHY THIS IS A HOOK AND NOT A RULE
 #
