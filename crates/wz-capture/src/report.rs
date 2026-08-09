@@ -52,6 +52,8 @@ pub struct CaptureReport<'a> {
     throughput: Option<&'a ThroughputTable>,
     #[cfg(feature = "network-codecs")]
     exchanges: Option<&'a crate::exchange::ExchangeTable>,
+    #[cfg(feature = "network-codecs")]
+    payloads: Option<&'a crate::payload::PayloadCensus>,
 }
 
 impl<'a> CaptureReport<'a> {
@@ -62,6 +64,8 @@ impl<'a> CaptureReport<'a> {
             throughput: None,
             #[cfg(feature = "network-codecs")]
             exchanges: None,
+            #[cfg(feature = "network-codecs")]
+            payloads: None,
         }
     }
 
@@ -75,6 +79,13 @@ impl<'a> CaptureReport<'a> {
     #[cfg(feature = "network-codecs")]
     pub fn with_exchanges(mut self, table: &'a crate::exchange::ExchangeTable) -> Self {
         self.exchanges = Some(table);
+        self
+    }
+
+    /// R311y617 — include a payload census.
+    #[cfg(feature = "network-codecs")]
+    pub fn with_payloads(mut self, census: &'a crate::payload::PayloadCensus) -> Self {
+        self.payloads = Some(census);
         self
     }
 
@@ -109,6 +120,17 @@ impl<'a> CaptureReport<'a> {
                 return false;
             }
         }
+        // R311y617 — the payload plane's own unread counters. A CONTRADICTION
+        // is deliberately NOT one of them: a payload that disagrees with its
+        // declaration was read perfectly, and calling the capture incomplete
+        // because it contains a finding would conflate "I could not see" with
+        // "I saw something wrong".
+        #[cfg(feature = "network-codecs")]
+        if let Some(p) = self.payloads {
+            if !p.gaps().is_clean() {
+                return false;
+            }
+        }
         true
     }
 
@@ -130,6 +152,11 @@ impl<'a> CaptureReport<'a> {
         if let Some(e) = self.exchanges {
             s.push(',');
             exchanges_json(e, &mut s);
+        }
+        #[cfg(feature = "network-codecs")]
+        if let Some(p) = self.payloads {
+            s.push(',');
+            payloads_json(p, &mut s);
         }
         s.push_str(",\"complete\":");
         s.push_str(if self.is_complete() { "true" } else { "false" });
@@ -251,6 +278,40 @@ impl<'a> CaptureReport<'a> {
                     describe(&row.completion),
                     row.requests,
                     row.keyexpr
+                ));
+            }
+        }
+
+        #[cfg(feature = "network-codecs")]
+        if let Some(p) = self.payloads {
+            s.push_str(&format!(
+                "payloads: {} judged, {} contradicted their declaration, {} unknown encoding id(s)\n",
+                p.payloads(),
+                p.contradictions().len(),
+                p.unknown_ids()
+            ));
+            for row in p.rows() {
+                s.push_str(&format!(
+                    "  {:>6} msg  {:>10} B  {}{}\n",
+                    row.payloads,
+                    row.bytes,
+                    row.declared,
+                    if row.not_as_declared > 0 {
+                        format!("  [{} NOT AS DECLARED]", row.not_as_declared)
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
+            // The findings themselves, named with where they broke -- the
+            // reason this plane exists, so it leads rather than being a footnote
+            // under the totals.
+            for c in p.contradictions() {
+                s.push_str(&format!(
+                    "  FINDING: {} declared {} and {}\n",
+                    c.keyexpr.as_deref().unwrap_or("<unresolved keyexpr>"),
+                    c.declared,
+                    describe_mismatch(&c.reason)
                 ));
             }
         }
@@ -448,6 +509,67 @@ fn latency_json(l: &crate::exchange::LatencySamples, s: &mut String) {
         opt_u64(l.mean_ms()),
         l.total_ms()
     ));
+}
+
+/// R311y617 — the payload census as JSON, gap object structural like the rest.
+#[cfg(feature = "network-codecs")]
+fn payloads_json(p: &crate::payload::PayloadCensus, s: &mut String) {
+    s.push_str("\"payloads\":{");
+    s.push_str(&format!(
+        "\"judged\":{},\"not_as_declared\":{},\"unknown_ids\":{}",
+        p.payloads(),
+        p.contradictions().len(),
+        p.unknown_ids()
+    ));
+    s.push_str(",\"gaps\":");
+    gaps_json(p.gaps(), s);
+    s.push_str(",\"encodings\":[");
+    for (i, row) in p.rows().iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str("{\"declared\":");
+        quote_into(&row.declared, s);
+        s.push_str(&format!(
+            ",\"payloads\":{},\"consistent\":{},\"not_as_declared\":{},\"bytes\":{}}}",
+            row.payloads, row.consistent, row.not_as_declared, row.bytes
+        ));
+    }
+    s.push_str("],\"findings\":[");
+    for (i, c) in p.contradictions().iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str("{\"keyexpr\":");
+        match &c.keyexpr {
+            Some(k) => quote_into(k, s),
+            None => s.push_str("null"),
+        }
+        s.push_str(",\"declared\":");
+        quote_into(&c.declared, s);
+        s.push_str(",\"reason\":");
+        quote_into(&describe_mismatch(&c.reason), s);
+        s.push_str(&format!(",\"at\":{}}}", mismatch_offset(&c.reason)));
+    }
+    s.push_str("]}");
+}
+
+/// One mismatch in a phrase a person can read.
+#[cfg(feature = "network-codecs")]
+fn describe_mismatch(m: &crate::payload::Mismatch) -> String {
+    use crate::payload::Mismatch;
+    match m {
+        Mismatch::NotUtf8 { at } => format!("is not valid UTF-8 at byte {at}"),
+        Mismatch::NotJson { at, reason } => format!("is not JSON at byte {at}: {reason}"),
+    }
+}
+
+#[cfg(feature = "network-codecs")]
+fn mismatch_offset(m: &crate::payload::Mismatch) -> usize {
+    use crate::payload::Mismatch;
+    match m {
+        Mismatch::NotUtf8 { at } | Mismatch::NotJson { at, .. } => *at,
+    }
 }
 
 fn opt_u64(v: Option<u64>) -> String {
@@ -655,6 +777,47 @@ mod tests {
             !unfiltered.contains("selection:"),
             "an unfiltered report must not carry a line that says nothing: {unfiltered}"
         );
+    }
+
+    /// R311y617 — the payload plane reaches the document, and a FINDING leads
+    /// with its keyexpr and its offset in both renderings.
+    ///
+    /// Also pins the distinction the verdict rests on: a contradiction does
+    /// NOT make the capture incomplete. The bytes were read perfectly; what is
+    /// wrong is the publisher's claim about them.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_payload_contradiction_is_a_finding_and_not_an_incompleteness() {
+        use crate::payload::tests_support as fx;
+
+        let d = fx::dissect_pushes(&[
+            ("app/good", 5, b"{\"ok\":1}".to_vec()),
+            ("app/bad", 5, b"nope".to_vec()),
+        ]);
+        let census = crate::payload::payloads(&d);
+        assert_eq!(
+            census.contradictions().len(),
+            1,
+            "the fixture must be short"
+        );
+
+        let r = CaptureReport::of(&d).with_payloads(&census);
+        assert!(r.is_complete(), "a finding is not a hole: {}", r.to_json());
+
+        let json = r.to_json();
+        assert!(json.contains("\"not_as_declared\":1"), "{json}");
+        assert!(json.contains("\"app/bad\""), "{json}");
+        assert!(
+            json.contains("\"gaps\":{\"halted_batches\":0"),
+            "structural: {json}"
+        );
+
+        let text = r.to_text();
+        assert!(
+            text.contains("FINDING: app/bad declared application/json"),
+            "{text}"
+        );
+        assert!(text.contains("is not JSON at byte 0"), "{text}");
     }
 
     /// A latency nobody could measure prints as `unmeasured` and serialises as

@@ -470,6 +470,12 @@ codec_group!(
 /// Both consumer modules now `pub use wz_codecs::wire_const::*;` and
 /// keep their local `wire_const` shim purely as a re-export so callsite
 /// references (`wire_const::N_MID_PUSH` etc.) stay untouched.
+/// R311y617 — the zenoh ENCODING id table, hoisted from `wz-capi-core` so a
+/// `no_std` consumer can name the encoding a Put declares. See the module's own
+/// header for why a second transcription was not an option.
+#[path = "encoding_ids.rs"]
+pub mod encoding_ids;
+
 pub mod wire_const {
     /// Transport-message INIT (transport.h:20). Gated on
     /// `codec-init-body`.
@@ -640,6 +646,21 @@ pub mod wire_const {
         feature = "codec-response"
     ))]
     pub const FLAG_N_N: u8 = 0x20;
+    /// `T` on a zenoh-message PUT header (`sources/codecs/msg_put.scxml:104`):
+    /// a timestamp follows. R311y617 — named for the same reason
+    /// [`FLAG_N_N`] was: the three PUT body flags were every fixture's
+    /// literals, and a fixture that spells `0x40` when it means "an encoding
+    /// follows" is a byte string wearing a struct. The R311y617 payload
+    /// sub-decoder's own first fixture set the WRONG one of these three and
+    /// the record stopped decoding — which is exactly the failure a name
+    /// prevents and a literal invites.
+    pub const FLAG_Z_PUT_T: u8 = 0x20;
+    /// `E` on a zenoh-message PUT header (`msg_put.scxml:105`): an encoding
+    /// follows. See [`FLAG_Z_PUT_T`].
+    pub const FLAG_Z_PUT_E: u8 = 0x40;
+    /// `Z` on a zenoh-message PUT header (`msg_put.scxml:106`): an extension
+    /// chain follows. See [`FLAG_Z_PUT_T`].
+    pub const FLAG_Z_PUT_Z: u8 = 0x80;
     /// DECLARE envelope MID (network.h:34). Gated on `codec-declare`.
     #[cfg(feature = "codec-declare")]
     pub const N_MID_DECLARE: u8 = 0x1E;

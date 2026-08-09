@@ -5329,7 +5329,12 @@ layer_c1bt_capture_no_default_features() {
         filter::tests::a_clockless_capture_cannot_decide_a_time_term \
         filter::tests::the_three_valued_connectives_follow_kleene_rather_than_infecting \
         filter::tests::a_malformed_selector_is_refused_by_name_rather_than_guessed \
-        filter::tests::a_wildcard_pattern_is_refused_where_the_matcher_cannot_honour_it
+        filter::tests::a_wildcard_pattern_is_refused_where_the_matcher_cannot_honour_it \
+        payload::tests::the_encoding_table_is_the_wire_table_and_the_index_is_the_id \
+        payload::tests::an_id_outside_the_table_is_reported_rather_than_defaulted \
+        payload::tests::a_payload_that_contradicts_its_declaration_is_a_finding_with_an_offset \
+        payload::tests::the_json_scanner_follows_rfc_8259_rather_than_being_permissive \
+        payload::tests::the_json_adjacent_encodings_are_not_judged_as_strict_json
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the --no-default-features build"
@@ -5370,7 +5375,11 @@ layer_c1bt_capture_no_default_features() {
         agg::tests::a_reference_the_capture_never_bound_is_undecided_rather_than_dropped \
         agg::tests::a_declaration_is_absorbed_even_when_the_selector_would_not_pick_it \
         agg::tests::a_filter_cannot_hide_a_gap \
-        report::tests::a_filtered_report_says_what_the_selector_could_not_judge
+        report::tests::a_filtered_report_says_what_the_selector_could_not_judge \
+        payload::census_tests::the_fixture_puts_a_declared_encoding_on_the_wire \
+        payload::census_tests::a_publisher_contradicting_its_own_encoding_is_named_with_its_keyexpr \
+        payload::census_tests::binary_payloads_are_never_a_contradiction \
+        report::tests::a_payload_contradiction_is_a_finding_and_not_an_incompleteness
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the network-codecs build"

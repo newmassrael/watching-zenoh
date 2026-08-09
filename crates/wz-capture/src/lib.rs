@@ -67,6 +67,13 @@ pub mod filter;
 /// pure decapsulator; the same division `passive`'s chain reassembly is under.
 pub mod frag;
 pub mod link;
+/// R311y617 (§1.1f) — the PAYLOAD sub-decoder: what is INSIDE a Put, judged
+/// against the encoding the sender declared rather than rendered on its word.
+///
+/// The decision half is UNGATED (naming an encoding and validating bytes needs
+/// no codec); the census plane over a whole capture is gated on
+/// `network-codecs`, which is where `Push` / `Request` / `Response` come from.
+pub mod payload;
 pub mod pcap;
 pub mod pcapng;
 /// R311y615 (§1.1f) — the EXPORT plane: the analysis tables rendered for

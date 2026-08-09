@@ -293,26 +293,48 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    static CALLS: AtomicU32 = AtomicU32::new(0);
-    static DROPS: AtomicU32 = AtomicU32::new(0);
+    // R311y617 -- ONE COUNTER PAIR PER TEST, and that is the fix for a hosted
+    // flake rather than a tidiness preference.
+    //
+    // Both tests below used to share a single `CALLS` / `DROPS` pair and each
+    // opened by resetting it to zero. cargo runs tests in the same binary
+    // CONCURRENTLY, so the other test's `store(0)` could land between this
+    // one's drop and its assertion: the drop had run, the counter read 0, and
+    // the assertion failed on a product that was correct. It reds on the hosted
+    // runner and passed five consecutive local runs -- a rate difference, not a
+    // behaviour difference, which is exactly the shape that gets mistaken for
+    // an environment problem.
+    //
+    // A serialising mutex would also have hidden it. It is not used, because
+    // the coupling is the defect: a C callback cannot capture, so per-test
+    // state means per-test statics, and then no ordering between tests exists
+    // to get wrong.
+    static CLOSURE_CALLS: AtomicU32 = AtomicU32::new(0);
+    static CLOSURE_DROPS: AtomicU32 = AtomicU32::new(0);
+    static INSTALL_DROPS: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "C" fn on_log(
         _severity: zc_log_severity_t,
         _msg: *const z_loaned_string_t,
         _context: *mut c_void,
     ) {
-        CALLS.fetch_add(1, Ordering::SeqCst);
+        CLOSURE_CALLS.fetch_add(1, Ordering::SeqCst);
     }
 
     unsafe extern "C" fn on_drop(_context: *mut c_void) {
-        DROPS.fetch_add(1, Ordering::SeqCst);
+        CLOSURE_DROPS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The install test's own drop counter — see the note on the statics.
+    unsafe extern "C" fn on_install_drop(_context: *mut c_void) {
+        INSTALL_DROPS.fetch_add(1, Ordering::SeqCst);
     }
 
     /// The closure round trip: construct, check, loan, call, drop.
     #[test]
     fn a_log_closure_calls_then_drops_exactly_once() {
-        CALLS.store(0, Ordering::SeqCst);
-        DROPS.store(0, Ordering::SeqCst);
+        // No reset: these counters belong to this test alone, so their
+        // starting value is zero and nothing else can move them.
         let mut closure = zc_owned_closure_log_t::null_value();
         // SAFETY: `closure` is a live stack slot.
         unsafe {
@@ -332,15 +354,15 @@ mod tests {
                 ZC_LOG_SEVERITY_WARN,
                 std::ptr::null(),
             );
-            assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+            assert_eq!(CLOSURE_CALLS.load(Ordering::SeqCst), 1);
 
             let mut moved = zc_moved_closure_log_t { _this: closure };
             zc_closure_log_drop(&mut moved);
-            assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+            assert_eq!(CLOSURE_DROPS.load(Ordering::SeqCst), 1);
             // Gravestoned, so a defensive second drop does NOT run the C drop
             // again — the double-free shape.
             zc_closure_log_drop(&mut moved);
-            assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+            assert_eq!(CLOSURE_DROPS.load(Ordering::SeqCst), 1);
         }
     }
 
@@ -351,20 +373,19 @@ mod tests {
     /// weaker test while leaking the caller's context.
     #[test]
     fn installing_a_callback_consumes_it() {
-        DROPS.store(0, Ordering::SeqCst);
         let mut closure = zc_owned_closure_log_t::null_value();
         // SAFETY: as above.
         unsafe {
             zc_closure_log(
                 &mut closure,
                 Some(on_log),
-                Some(on_drop),
+                Some(on_install_drop),
                 std::ptr::null_mut(),
             );
             let mut moved = zc_moved_closure_log_t { _this: closure };
             zc_init_log_with_callback(ZC_LOG_SEVERITY_INFO, &mut moved);
             assert_eq!(
-                DROPS.load(Ordering::SeqCst),
+                INSTALL_DROPS.load(Ordering::SeqCst),
                 1,
                 "the moved closure was not consumed, so its context leaks"
             );

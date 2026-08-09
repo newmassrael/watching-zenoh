@@ -111,6 +111,11 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
 # method needs the trait in scope, and depending on it implicitly through
 # another crate's re-export would break the moment that re-export moved.
 wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
+# R311y617 -- the ENCODING id table moved to `wz-codecs` so a no_std consumer
+# can reach it, and this crate re-exports it rather than holding a copy. NO
+# features named: the table and its lookup are ungated, and naming a feature
+# here would make it every dependent's (R311y614).
+wz-codecs = { path = "../wz-codecs", default-features = false }
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
 
 [lints]

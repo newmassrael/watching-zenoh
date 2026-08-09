@@ -28,84 +28,23 @@
 
 use wz_runtime_tokio::sample::EncodingHint;
 
-/// zenoh-pico's `ENCODING_VALUES_ID_TO_STR` (`src/api/encoding.c:89`), 53
-/// entries, index = encoding id.
+/// The zenoh ENCODING id table and its lookup, RE-EXPORTED from
+/// [`wz_codecs::encoding_ids`] rather than held here.
 ///
-/// Order IS the contract — the index is what goes on the wire — so it is
-/// pinned entry-for-entry against `libzenohpico.so` rather than eyeballed. A
-/// `from_str -> to_string` round trip reads this table in BOTH directions and
-/// is therefore invariant under any permutation, which a damage probe
-/// demonstrated by swapping two entries and staying green; the oracle test
-/// feeds entry `i` to the REAL pico and asserts pico assigns it id `i`, which
-/// is the only non-circular check.
-pub const ENCODING_ID_TO_STR: [&str; 53] = [
-    "zenoh/bytes",
-    "zenoh/string",
-    "zenoh/serialized",
-    "application/octet-stream",
-    "text/plain",
-    "application/json",
-    "text/json",
-    "application/cdr",
-    "application/cbor",
-    "application/yaml",
-    "text/yaml",
-    "text/json5",
-    "application/python-serialized-object",
-    "application/protobuf",
-    "application/java-serialized-object",
-    "application/openmetrics-text",
-    "image/png",
-    "image/jpeg",
-    "image/gif",
-    "image/bmp",
-    "image/webp",
-    "application/xml",
-    "application/x-www-form-urlencoded",
-    "text/html",
-    "text/xml",
-    "text/css",
-    "text/javascript",
-    "text/markdown",
-    "text/csv",
-    "application/sql",
-    "application/coap-payload",
-    "application/json-patch+json",
-    "application/json-seq",
-    "application/jsonpath",
-    "application/jwt",
-    "application/mp4",
-    "application/soap+xml",
-    "application/yang",
-    "audio/aac",
-    "audio/flac",
-    "audio/mp4",
-    "audio/ogg",
-    "audio/vorbis",
-    "video/h261",
-    "video/h263",
-    "video/h264",
-    "video/h265",
-    "video/h266",
-    "video/mp4",
-    "video/ogg",
-    "video/raw",
-    "video/vp8",
-    "video/vp9",
-];
-
-/// zenoh-pico's `ENCODING_SCHEMA_SEPARATOR` (`src/api/encoding.c:25`).
-pub const SCHEMA_SEPARATOR: char = ';';
-
-/// zenoh-pico's `_Z_ENCODING_ID_DEFAULT` — `zenoh/bytes`, id 0.
-pub const ENCODING_ID_DEFAULT: u16 = 0;
-
-/// zenoh-c's sentinel for a label that names no table entry.
+/// R311y617 moved the definition down to `wz-codecs`, the crate that already
+/// owns [`wire_const`](wz_codecs::wire_const), so a `no_std` consumer can reach
+/// it -- `wz-capture`'s payload sub-decoder has to name the encoding a Put
+/// DECLARES before it can judge whether the bytes match the declaration, and it
+/// cannot depend on this crate.
 ///
-/// MEASURED, not assumed: `zc_internal_encoding_get_data` on the real
-/// `libzenohc.so` reports `id=65535` for `wz/unknown` and for `text/pla`,
-/// against `id=4` for `text/plain`.
-pub const ENCODING_ID_UNKNOWN: u16 = 65535;
+/// This is a re-export and NOT a copy, deliberately: the pico oracle
+/// (`wz-capi-pico/tests/pico_pure_function_oracle.rs`) walks every entry
+/// through the real `libzenohpico.so`, and it must keep pinning the constant
+/// every consumer actually reads. Two transcriptions of one wire table is the
+/// failure this module was written to prevent.
+pub use wz_codecs::encoding_ids::{
+    lookup_id, ENCODING_ID_DEFAULT, ENCODING_ID_TO_STR, ENCODING_ID_UNKNOWN, SCHEMA_SEPARATOR,
+};
 
 /// Which upstream's encoding string rules to apply.
 ///
@@ -132,21 +71,6 @@ pub enum EncodingDialect {
     Pico,
     /// zenoh-c's rules, for the `wz-capi-c` drop-in.
     ZenohC,
-}
-
-/// The table index for `prefix`, or `None`.
-///
-/// zenoh-pico compares with `strncmp(schema, TABLE[i], len)` — a PREFIX compare
-/// of exactly `len` bytes — so a candidate shorter than the table entry can
-/// match it (`"text/j"` matches `"text/json"`). That is upstream's behaviour and
-/// it is reproduced rather than corrected: a lookup that disagreed with pico
-/// about which id a string means would put a different byte on the wire, which
-/// is the one thing this module exists to prevent.
-pub fn lookup_id(candidate: &str) -> Option<u16> {
-    ENCODING_ID_TO_STR
-        .iter()
-        .position(|entry| entry.as_bytes().starts_with(candidate.as_bytes()))
-        .map(|i| i as u16)
 }
 
 /// Pack an `(id, schema)` pair into the wire word.
