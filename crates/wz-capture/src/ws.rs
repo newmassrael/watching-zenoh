@@ -170,6 +170,19 @@ impl WsDeframer {
         self.buf.extend_from_slice(bytes);
     }
 
+    /// R311y610 — the byte source lost bytes at the current write point, so
+    /// this deframer's idea of where the next frame header sits is stale.
+    ///
+    /// Terminal, like every other cause of desynchronisation here, and
+    /// deliberately so: an RFC6455 header read off spliced bytes carries a
+    /// length field of up to 63 bits, and a deframer that trusted it would
+    /// swallow the rest of the capture as one message — the same defect
+    /// R311y610 fixes one framing layer up, where there IS a recovery scan.
+    /// Stopping and reporting it is the honest floor until ws grows one.
+    pub fn note_gap(&mut self) {
+        self.desynchronised = true;
+    }
+
     /// Has this direction stopped making sense as RFC6455?
     ///
     /// Reported rather than silent for the same reason
@@ -537,6 +550,38 @@ mod tests {
             d.desynchronised(),
             "a length nothing could satisfy must stop the reader, not size a Vec"
         );
+    }
+
+    /// R311y610 — an announced hole stops this deframer, and the arm that
+    /// matters is what it stops it from DOING.
+    ///
+    /// The spliced bytes below are a complete, well-formed ws frame — a
+    /// deframer that read across the hole would hand up a message assembled
+    /// from two runs the sender never wrote adjacently, and nothing in RFC6455
+    /// would object. So the assertion is not "it reports the gap"; it is that
+    /// the message that would have been fabricated is not produced.
+    #[test]
+    fn an_announced_gap_stops_the_deframer_fabricating_a_message() {
+        let bytes = frame(true, OP_BINARY, b"zenoh", None);
+        let mut intact = WsDeframer::new();
+        intact.push(UPGRADE);
+        intact.push(&bytes);
+        assert_eq!(
+            &intact.next_message().expect("the control arm decodes").1[..],
+            b"zenoh",
+            "these bytes ARE a message, which is what makes the other arm a test"
+        );
+
+        let mut d = WsDeframer::new();
+        d.push(UPGRADE);
+        d.push(&bytes[..2]);
+        d.note_gap();
+        d.push(&bytes[2..]);
+        assert!(
+            d.next_message().is_none(),
+            "the same bytes must not become a message across an announced hole"
+        );
+        assert!(d.desynchronised());
     }
 
     #[test]

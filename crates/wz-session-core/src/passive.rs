@@ -565,6 +565,21 @@ pub enum DesyncReason {
     /// least its own header byte, so a zero-length frame is a boundary error
     /// rather than a message.
     EmptyFrame,
+    /// R311y610 — the SOURCE of the bytes said it lost some, before this reader
+    /// looked at them ([`PassiveSession::note_gap`]).
+    ///
+    /// The only arm that is not an inference. The three above are this reader
+    /// noticing that bytes cannot mean what the framing claims; this one is the
+    /// layer below reporting a hole it measured — a forced TCP gap, a capture
+    /// that started mid-stream. It matters that they are distinguishable,
+    /// because it is the one case where a boundary error is KNOWN rather than
+    /// suspected, and the reader must not spend evidence deciding it.
+    CaptureGap {
+        /// Bytes the source says are absent from the stream at this point.
+        /// Zero when the source knows the framing is unknown but not by how
+        /// much — a capture that began without a SYN.
+        bytes_missing: u64,
+    },
 }
 
 /// R311y609 — a direction that desynchronised and found its framing again.
@@ -930,6 +945,42 @@ impl PassiveSession {
         self.stream_mut(direction).buf.extend_from_slice(bytes);
     }
 
+    /// R311y610 — the byte source declares a DISCONTINUITY at the current write
+    /// point: everything pushed after this call belongs to a different, unknown
+    /// framing offset than everything pushed before it.
+    ///
+    /// Call it BEFORE pushing the bytes on the far side of the hole, and after
+    /// draining what the near side yielded — anything still buffered is on the
+    /// wrong side of a boundary this reader can no longer place, and the scan
+    /// will step over it and count it in [`StreamResync::skipped`]. Returns
+    /// `true` when this call is what desynchronised the direction, `false` when
+    /// it was already looking for its framing (a second hole inside a scan
+    /// changes nothing — the scan is already running and its `desync_offset`
+    /// must keep naming the FIRST loss).
+    ///
+    /// # Why the source has to say so, and R311y609 could not
+    ///
+    /// R311y609 gave the reader a detector — a length prefix and the header
+    /// byte behind it — and measured what it costs to rely on it: 45-68% of the
+    /// frames after a hole, AT EVERY SCAN DEPTH, because the loss happens
+    /// before the scan starts. A 2-byte prefix read off spliced bytes claims up
+    /// to [`MAX_FRAME_PAYLOAD`], 42 of 256 byte values pass as a credible
+    /// header, and when both happen the reader consumes that many REAL bytes as
+    /// one body and never suspects a thing. No deeper scan helps, because
+    /// nothing has told the scan to run.
+    ///
+    /// The evidence that settles it is not on the wire at all — it is the fact
+    /// that the layer below LOST bytes, which that layer measured and this one
+    /// cannot see. So it is handed across rather than inferred, and the reader
+    /// then spends its depth-`N` corroboration on finding the boundary instead
+    /// of on discovering that it needs to.
+    pub fn note_gap(&mut self, direction: Direction, bytes_missing: u64) -> bool {
+        let stream = self.stream_mut(direction);
+        let fresh = stream.desync.is_none();
+        let _ = stream.desynchronise(DesyncReason::CaptureGap { bytes_missing });
+        fresh
+    }
+
     /// Decode the next complete frame in `direction`, or say why not.
     ///
     /// Each call re-reads [`FlowContext::prefix_width`], so a session that
@@ -1017,6 +1068,17 @@ impl PassiveSession {
     /// Always zero on a datagram link, which has no framing to lose.
     pub fn resync_accounting(&self, direction: Direction) -> ResyncAccounting {
         self.stream(direction).accounting
+    }
+
+    /// R311y610 — bytes pushed into this direction and not yet consumed.
+    ///
+    /// The one accumulation this type owns, and therefore the one a live tap
+    /// has to be able to watch: a direction looking for its framing consumes
+    /// NOTHING while it scans, so [`RESYNC_SCAN_WINDOW`] is what keeps that
+    /// from being unbounded. A number that can only be inferred from the
+    /// caller's own bookkeeping is a bound nobody can check.
+    pub fn buffered(&self, direction: Direction) -> usize {
+        self.stream(direction).buf.len()
     }
 
     /// R311y609 (C12) — judge one decoded frame's sequence number against the
@@ -2443,6 +2505,104 @@ mod tests {
         assert_eq!(
             acc.recoveries, 1,
             "the boundary is still found byte by byte"
+        );
+    }
+
+    /// R311y610 (§4.1) — the SOURCE says it lost bytes, and that is evidence
+    /// this reader could never have derived from the bytes themselves.
+    ///
+    /// Announced at a boundary that is in fact intact, so the scan confirms
+    /// offset 0 and skips nothing: the point is that the reason survives to the
+    /// frame that resumes, because a consumer told "the framing restarted here"
+    /// acts differently depending on whether the capture lost bytes or this
+    /// reader mis-read them.
+    #[test]
+    fn a_gap_the_source_reports_desynchronises_the_direction_it_names() {
+        let good: Vec<u8> = (0..DEFAULT_RESYNC_DEPTH as u64)
+            .flat_map(|i| framed(&frame_wire(i, &oam_record(i)), 2))
+            .collect();
+        let mut s = PassiveSession::new();
+        assert!(
+            s.note_gap(Direction::A, 37),
+            "the first announcement is what desynchronises"
+        );
+        assert!(
+            !s.note_gap(Direction::A, 11),
+            "a second hole inside the same scan must not restate the offset"
+        );
+        assert_eq!(
+            s.resync_accounting(Direction::A).desyncs,
+            1,
+            "one scan, not one per hole"
+        );
+        // The OTHER direction is untouched: a hole is a property of one
+        // half-connection, and both share this session's context.
+        assert_eq!(s.resync_accounting(Direction::B).desyncs, 0);
+        assert!(matches!(
+            s.next_frame(Direction::B),
+            Err(PassiveStall::NeedMoreBytes)
+        ));
+
+        s.push(Direction::A, &good);
+        let frame = s.next_frame(Direction::A).expect("the chain confirms 0");
+        let resync = frame.resync.expect("the resumption is reported");
+        assert_eq!(
+            (resync.desync_offset, resync.resumed_offset, resync.skipped),
+            (0, 0, 0),
+            "the announced boundary was intact, so nothing is stepped over"
+        );
+        assert_eq!(
+            resync.reason,
+            DesyncReason::CaptureGap { bytes_missing: 37 },
+            "the FIRST hole's size, and it is not an inference"
+        );
+    }
+
+    /// R311y610 (§4.3) — the scan's memory bound, which had no test.
+    ///
+    /// [`RESYNC_SCAN_WINDOW`] is a GUARANTEE: any run of that many received
+    /// bytes contains a real frame boundary, so a scan that crosses it without
+    /// confirming one cannot recover those bytes and drops them. Reaching the
+    /// branch needs a scan that refutes 64 KiB, and every corpus built from
+    /// plausible bytes recovers long before that — so this one refuses at every
+    /// offset by construction: a zero length prefix is refuted whatever follows
+    /// it, so a run of zeros has no viable candidate anywhere in it.
+    #[test]
+    fn a_scan_that_confirms_nothing_drops_the_bytes_it_cannot_frame() {
+        let noise = alloc::vec![0u8; RESYNC_SCAN_WINDOW + 4096];
+        let mut s = PassiveSession::new();
+        assert!(s.note_gap(Direction::A, 0));
+        s.push(Direction::A, &noise);
+        assert!(matches!(
+            s.next_frame(Direction::A),
+            Err(PassiveStall::NeedMoreBytes)
+        ));
+        assert_eq!(
+            s.buffered(Direction::A),
+            RESYNC_SCAN_WINDOW + 1,
+            "the unframeable bytes past the window are dropped, not retained \
+             — and the ONE extra is the last byte, which is short of a length \
+             prefix and so unresolved rather than refuted, which is exactly \
+             the distinction the cursor is not allowed to blur"
+        );
+
+        // And the drop is VISIBLE: the recovery names every byte it stepped
+        // over, including the ones no longer held.
+        let good: Vec<u8> = (0..DEFAULT_RESYNC_DEPTH as u64)
+            .flat_map(|i| framed(&frame_wire(i, &oam_record(i)), 2))
+            .collect();
+        s.push(Direction::A, &good);
+        let frame = s.next_frame(Direction::A).expect("the chain confirms");
+        let resync = frame.resync.expect("the resumption is reported");
+        assert_eq!(
+            resync.skipped,
+            noise.len(),
+            "skipped counts the dropped bytes too, or the accounting would \
+             lose exactly what memory did"
+        );
+        assert_eq!(
+            s.resync_accounting(Direction::A).skipped_bytes,
+            noise.len() as u64
         );
     }
 

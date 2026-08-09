@@ -597,6 +597,64 @@ mod tests {
         }
     }
 
+    /// R311y610 (§4.2) — a capture that STOPS with the hole still open.
+    ///
+    /// The test above loses a segment early and has 90-odd later ones to spend
+    /// the patience on. A file that ends within the patience of its hole spends
+    /// nothing, and before R311y610 every byte behind that hole stayed held
+    /// forever — a C consumer saw a flow that simply stopped short, with
+    /// `gaps_forced` at zero saying nothing was wrong.
+    ///
+    /// Four segments, one lost, so the default patience is never remotely
+    /// reached; only "the file ended" can release the tail.
+    #[test]
+    fn a_capture_that_ends_on_its_hole_still_reports_one() {
+        let mut stream = Vec::new();
+        for i in 0..64u16 {
+            let body = [
+                wz_session_core::wire_const::T_MID_FRAME
+                    | wz_session_core::wire_const::FLAG_T_FRAME_R,
+                (i % 0x80) as u8,
+                0x1F,
+                0x00,
+                0x00,
+                0x00,
+            ];
+            stream.extend_from_slice(&(body.len() as u16).to_le_bytes());
+            stream.extend_from_slice(&body);
+        }
+        const SEG: usize = 129;
+        let packets: Vec<Vec<u8>> = stream
+            .chunks(SEG)
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(i, seg)| tcp_packet(1000 + (i * SEG) as u32, seg))
+            .collect();
+        assert!(
+            packets.len() < wz_capture::tcp::DEFAULT_GAP_PATIENCE,
+            "the whole point is a capture SHORTER than the patience: {} \
+             segments",
+            packets.len()
+        );
+        let records: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u32, 0u32, p.as_slice()))
+            .collect();
+        let file = wz_capture::pcap::write(1, &records);
+
+        let json = call_summary(&file).expect("reads");
+        assert!(
+            json.contains("\"gaps_forced\":1")
+                && json.contains(&format!("\"gap_bytes_missing\":{SEG}")),
+            "the end of the file is what gives up on the gap: {json}"
+        );
+        assert!(
+            json.contains("\"desyncs\":1") && json.contains("\"recoveries\":1"),
+            "and the bytes behind it are decoded, as a discontinuity: {json}"
+        );
+    }
+
     /// Ethernet + IPv4 + TCP carrying `payload` at `seq`.
     fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
         let mut tcp = Vec::new();

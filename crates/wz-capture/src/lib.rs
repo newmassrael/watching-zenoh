@@ -442,6 +442,104 @@ impl FlowDissection {
         self.feed(direction, bytes);
     }
 
+    /// Hand the observer exactly the bytes reassembly newly DELIVERED since
+    /// absolute offset `before` — not the segment payload: a retransmission
+    /// delivers none, and a held out-of-order segment can deliver a whole chain
+    /// at once.
+    ///
+    /// ⚠ `before` is an ABSOLUTE offset and [`StreamAssembler::stream`] is the
+    /// RETAINED tail, so the two are only the same index while nothing has been
+    /// trimmed. Rebasing here is what keeps trimming from silently handing the
+    /// observer the wrong bytes — the defect this arithmetic invites.
+    ///
+    /// R311y610 — and the run is cut at every discontinuity the push recorded,
+    /// which is why this is one function both link layers call rather than the
+    /// four lines each of them used to inline.
+    fn deliver_from(&mut self, direction: Direction, before: usize) {
+        let splices = match direction {
+            Direction::A => self.low_to_high.take_splices(),
+            Direction::B => self.high_to_low.take_splices(),
+        };
+        let base = self.assembler(direction).retained_from();
+        debug_assert!(
+            before >= base,
+            "trimming must not outrun delivery: base {base} > before {before}"
+        );
+        let delivered: Vec<u8> = self.assembler(direction).stream()[before - base..].to_vec();
+        self.advance_spliced(direction, before, &delivered, &splices);
+    }
+
+    /// R311y610 — hand the observer bytes that CONTAIN discontinuities, telling
+    /// it where each one is instead of letting it read across them.
+    ///
+    /// `from` is the absolute stream offset `bytes` begins at, and every splice
+    /// names the absolute offset of the first byte on its far side, so the
+    /// delivered run is cut at each of them. Without the cut this function
+    /// would be `advance` and the reader below would frame the far side of a
+    /// hole against the near side of it — the §4.1 defect R311y609 measured at
+    /// 45-68% of the frames after a hole.
+    fn advance_spliced(
+        &mut self,
+        direction: Direction,
+        from: usize,
+        bytes: &[u8],
+        splices: &[crate::tcp::Splice],
+    ) {
+        let mut cut = 0usize;
+        for splice in splices {
+            // A splice recorded by THIS push cannot precede the run it split.
+            let at = splice.at_offset.saturating_sub(from).min(bytes.len());
+            if at > cut {
+                self.advance(direction, &bytes[cut..at]);
+            }
+            self.note_gap(direction, splice.bytes_missing);
+            cut = at;
+        }
+        self.advance(direction, &bytes[cut..]);
+    }
+
+    /// R311y610 — tell whichever framing this flow uses that the bytes it is
+    /// about to receive are not the continuation of the ones it has.
+    ///
+    /// While `Undecided` the verdict is forced from what is held: a hole inside
+    /// the opening cannot later complete a `GET / HTTP/1.1`, and
+    /// [`ws::UpgradeVerdict::NeedMore`] means precisely "still consistent with
+    /// one, and not finished". Resolving it to a stream rather than guessing ws
+    /// keeps the decision on evidence — and the gap announced immediately after
+    /// is what stops that decision from being read as a confident one.
+    fn note_gap(&mut self, direction: Direction, bytes_missing: u64) {
+        if matches!(self.framing, Framing::Undecided) {
+            self.framing = match ws::http_upgrade_verdict(&self.held[dir_index(direction)]) {
+                ws::UpgradeVerdict::Yes => Framing::WebSocket {
+                    a: ws::WsDeframer::new(),
+                    b: ws::WsDeframer::new(),
+                },
+                ws::UpgradeVerdict::No | ws::UpgradeVerdict::NeedMore => Framing::Stream,
+            };
+            for dir in [Direction::A, Direction::B] {
+                let held = core::mem::take(&mut self.held[dir_index(dir)]);
+                if !held.is_empty() {
+                    self.feed(dir, &held);
+                }
+            }
+        }
+        match &mut self.framing {
+            Framing::Undecided => {}
+            Framing::Stream => {
+                self.session.note_gap(direction, bytes_missing);
+            }
+            // A ws deframer's desynchronisation is terminal by design (every
+            // other cause of it is too), so this stops the flow rather than
+            // recovering it. Stopping and saying so is the point: the
+            // alternative is a length field read off spliced bytes, which is
+            // the same swallow one framing layer up.
+            Framing::WebSocket { a, b } => match direction {
+                Direction::A => a.note_gap(),
+                Direction::B => b.note_gap(),
+            },
+        }
+    }
+
     /// Route already-classified bytes into the framing this flow uses.
     fn feed(&mut self, direction: Direction, bytes: &[u8]) {
         match self.framing {
@@ -780,6 +878,13 @@ pub struct Dissection {
     /// `health()` adds this to the live flows' own, so a total survives
     /// eviction; a flow is either live or counted here, never both.
     evicted_streams: StreamTally,
+    /// R311y610 (§4.4) — the same carry for the counters that live inside
+    /// `PassiveSession`: resynchronisation and sequence-number accounting.
+    ///
+    /// Its `gaps_forced` / `gap_bytes_missing` are never written — those belong
+    /// to [`Self::evicted_streams`] — and [`Self::framing_health`] overwrites
+    /// them, so the shared type is a reuse rather than a conflation.
+    evicted_sessions: FramingHealth,
     /// R311y606 — half-assembled IP datagrams. Bounded by
     /// [`DissectionLimits::max_pending_fragments`] and by the same
     /// `reassembly_window_ms` deadline the message chains use, because the two
@@ -830,6 +935,7 @@ impl Default for Dissection {
             drops: DissectionDrops::default(),
             checksums: [0; 6],
             evicted_streams: StreamTally::default(),
+            evicted_sessions: FramingHealth::default(),
             fragments: frag::FragmentTable::default(),
             #[cfg(feature = "reassembly")]
             expired_chains: 0,
@@ -867,7 +973,10 @@ impl Dissection {
     /// the eviction drops whole.
     pub fn framing_health(&self) -> FramingHealth {
         let mut streams = self.evicted_streams;
-        let mut h = FramingHealth::default();
+        // R311y610 (§4.4) — the session half of what eviction took with it. Its
+        // gap fields are always zero and are OVERWRITTEN from `streams` below,
+        // which is why one type can carry both halves without double-counting.
+        let mut h = self.evicted_sessions;
         for flow in &self.flows {
             streams.add_assembler(&flow.low_to_high);
             streams.add_assembler(&flow.high_to_low);
@@ -1144,6 +1253,46 @@ impl Dissection {
         self.flows.iter().find(|f| &f.flow == key)
     }
 
+    /// R311y610 — no further packet is coming. Give up on every gap still open
+    /// and decode what was waiting behind it.
+    ///
+    /// # Why this cannot be folded into the last `push_packet`
+    ///
+    /// An open gap is stepped over on PATIENCE — a count of later segments on
+    /// the same direction ([`crate::tcp::DEFAULT_GAP_PATIENCE`]) — and a
+    /// capture that stops within that many segments of a hole never spends it.
+    /// The tail then stays held forever: `force_oldest_gap` existed from
+    /// R311y609 with NO caller for exactly this reason, because "the capture
+    /// ended" is a fact only the caller has. A live tap never ends, and calling
+    /// this on one would step over a gap that was still going to fill, which is
+    /// why it is a separate verb rather than a destructor.
+    ///
+    /// Idempotent, and safe to interleave with more packets — it forces the
+    /// gaps that are open NOW, and a flow with none is untouched. Returns the
+    /// number of gaps it forced.
+    pub fn finish(&mut self) -> usize {
+        let mut forced = 0usize;
+        for idx in 0..self.flows.len() {
+            for direction in [Direction::A, Direction::B] {
+                loop {
+                    let flow = &mut self.flows[idx];
+                    let before = flow.assembler(direction).len();
+                    let asm = match direction {
+                        Direction::A => &mut flow.low_to_high,
+                        Direction::B => &mut flow.high_to_low,
+                    };
+                    if asm.force_oldest_gap().is_none() {
+                        break;
+                    }
+                    forced += 1;
+                    flow.deliver_from(direction, before);
+                }
+            }
+            self.enforce_flow_limits(idx);
+        }
+        forced
+    }
+
     /// Feed one captured packet.
     ///
     /// A packet that is not TCP, is an IP fragment, or rides an unhandled
@@ -1265,21 +1414,7 @@ impl Dissection {
             Direction::A => flow.low_to_high.push(&segment),
             Direction::B => flow.high_to_low.push(&segment),
         };
-        // Hand the observer exactly the bytes reassembly newly DELIVERED, not
-        // the segment payload: a retransmission delivers none, and a held
-        // out-of-order segment can deliver a whole chain at once.
-        //
-        // ⚠ `before` is an ABSOLUTE offset and `stream()` is the RETAINED tail,
-        // so the two are only the same index while nothing has been trimmed.
-        // Rebasing here is what keeps trimming from silently handing the
-        // observer the wrong bytes — the defect this arithmetic invites.
-        let base = flow.assembler(direction).retained_from();
-        debug_assert!(
-            before >= base,
-            "trimming must not outrun delivery: base {base} > before {before}"
-        );
-        let delivered: Vec<u8> = flow.assembler(direction).stream()[before - base..].to_vec();
-        flow.advance(direction, &delivered);
+        flow.deliver_from(direction, before);
         flow.last_activity = packet_index;
         self.enforce_flow_limits(idx);
         self.evict_flows_beyond_cap();
@@ -1331,6 +1466,18 @@ impl Dissection {
             // recycled a slot.
             self.evicted_streams.add_assembler(&gone.low_to_high);
             self.evicted_streams.add_assembler(&gone.high_to_low);
+            // R311y610 (§4.4) — and the SESSION counters, which R311y609 left
+            // behind. They live inside `PassiveSession` rather than on an
+            // assembler, so the F5 carry above did not reach them and an
+            // evicted flow's losses vanished with it — the one direction a
+            // loss counter must never move.
+            for dir in [Direction::A, Direction::B] {
+                let r = gone.session.resync_accounting(dir);
+                self.evicted_sessions.desyncs += r.desyncs;
+                self.evicted_sessions.recoveries += r.recoveries;
+                self.evicted_sessions.resync_skipped_bytes += r.skipped_bytes;
+                add_sn(&mut self.evicted_sessions, gone.session.sn_accounting(dir));
+            }
             self.drops.flows += 1;
         }
     }
@@ -1407,9 +1554,7 @@ impl Dissection {
             Direction::A => flow.low_to_high.push(&segment),
             Direction::B => flow.high_to_low.push(&segment),
         };
-        let base = flow.assembler(direction).retained_from();
-        let delivered: Vec<u8> = flow.assembler(direction).stream()[before - base..].to_vec();
-        flow.advance(direction, &delivered);
+        flow.deliver_from(direction, before);
         flow.last_activity = record.packet_index;
         // Counted on this path too, even though both verdicts are `None` here:
         // a path that skipped the tally would make the six buckets disagree
@@ -1511,6 +1656,9 @@ impl Dissection {
                 &packet.data,
             );
         }
+        // R311y610 — a FILE has a last packet, so the patience an open gap is
+        // waiting on will never be spent. This is the caller that knows it.
+        out.finish();
         Ok(out)
     }
 
@@ -1538,6 +1686,8 @@ impl Dissection {
                 &packet.data,
             );
         }
+        // R311y610 — see `from_pcap`.
+        out.finish();
         Ok(out)
     }
 
@@ -1659,6 +1809,31 @@ mod datagram_tests {
         out
     }
 
+    /// R311y610 — the same, carrying `len` bytes of pseudo-random payload.
+    ///
+    /// [`framed_frame`] carries four fixed low-valued bytes, and a stream of
+    /// those can never exercise the defect §4.1 names: a two-byte prefix read
+    /// off `1F 00` claims 31, not 40000. A capture of real traffic carries USER
+    /// BYTES, and a length prefix read off user bytes claims 32 KiB on average.
+    /// The payload is an opaque tail to `parse_inbound`, so the frame still
+    /// decodes as the frame it is — the entropy is in the part the transport
+    /// layer does not read, exactly as it is on the wire.
+    fn framed_frame_with_payload(sn: u8, len: usize, seed: u32) -> Vec<u8> {
+        assert!(sn < 0x80, "the one-byte VLE arm");
+        let mut wire = alloc::vec![
+            wz_session_core::wire_const::T_MID_FRAME | wz_session_core::wire_const::FLAG_T_FRAME_R,
+            sn,
+        ];
+        let mut x = seed;
+        for _ in 0..len {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            wire.push((x >> 16) as u8);
+        }
+        let mut out = (wire.len() as u16).to_le_bytes().to_vec();
+        out.extend_from_slice(&wire);
+        out
+    }
+
     /// The fixture above writes a VLE by hand, which is the "author's idea of
     /// the layout" the other fixtures in this module avoid. It is checked
     /// against the REAL decoder instead of trusted: if a one-byte VLE ever
@@ -1767,6 +1942,183 @@ mod datagram_tests {
             "{:?}",
             carried[0]
         );
+    }
+
+    /// R311y610 (§4.1) — THE HOLE IS ANNOUNCED, so the reader never frames the
+    /// far side of it against the near side.
+    ///
+    /// The interlock above proves recovery at ONE splice offset. Moving the
+    /// lost packet moves the splice through every phase of the frame, and that
+    /// is where R311y609's measured 45-68% loss lived: at a phase whose two
+    /// spliced bytes claim a large length and whose third byte is one of the 42
+    /// credible ones, the reader consumed thousands of REAL bytes as a single
+    /// body and never desynchronised at all. No scan depth changes that,
+    /// because nothing has told the scan to run.
+    ///
+    /// BOTH ARMS READ THE SAME SPLICED BYTES. The only difference is whether
+    /// the layer that lost them said so, which is what makes this a measurement
+    /// of the announcement rather than of the fixture.
+    #[test]
+    fn announcing_the_hole_stops_the_reader_swallowing_the_frames_after_it() {
+        use wz_session_core::inbound::InboundFrame;
+        const N: u8 = 100;
+        const SEG: usize = 37;
+        const PAYLOAD: usize = 24;
+        let stream: Vec<u8> = (0..N)
+            .flat_map(|sn| framed_frame_with_payload(sn, PAYLOAD, u32::from(sn) + 1))
+            .collect();
+        let unit = framed_frame_with_payload(0, PAYLOAD, 1).len();
+        assert_ne!(
+            SEG % unit,
+            0,
+            "a segment holding whole frames would splice on a boundary and \
+             sweep one phase over and over"
+        );
+        let segments: Vec<&[u8]> = stream.chunks(SEG).collect();
+
+        // What the assembler delivers once it steps over the hole: the two
+        // runs, adjacent, with nothing in the bytes to say they were not.
+        let spliced = |lost: usize| -> Vec<u8> {
+            let mut out = stream[..lost * SEG].to_vec();
+            out.extend_from_slice(&stream[((lost + 1) * SEG).min(stream.len())..]);
+            out
+        };
+
+        // ARM 1 — through the real front end, which announces the splice.
+        let announced = |lost: usize| -> Vec<u64> {
+            let mut d = Dissection::new();
+            d.set_gap_patience(Some(4));
+            for (i, seg) in segments.iter().enumerate() {
+                if i == lost {
+                    continue;
+                }
+                let pkt = tcp_packet(1000 + (i * SEG) as u32, seg);
+                d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+            }
+            d.finish();
+            d.flows()[0]
+                .frames
+                .iter()
+                .filter_map(|f| match &f.frame {
+                    Ok(InboundFrame::Frame { sn, .. }) => Some(*sn),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // ARM 2 — the same bytes handed over as one contiguous run, which is
+        // what every caller did before R311y610.
+        let unannounced = |lost: usize| -> Vec<u64> {
+            let mut s = wz_session_core::passive::PassiveSession::new();
+            s.push(Direction::A, &spliced(lost));
+            let mut out = Vec::new();
+            loop {
+                match s.next_frame(Direction::A) {
+                    Ok(f) => {
+                        if let Ok(InboundFrame::Frame { sn, .. }) = &f.frame {
+                            out.push(*sn);
+                        }
+                    }
+                    Err(PassiveStall::NeedMoreBytes) => break,
+                    // Announced once, at detection; the calls after it scan.
+                    Err(PassiveStall::Desynchronised { .. }) => {}
+                }
+            }
+            out
+        };
+
+        let mut worst_announced = usize::MAX;
+        let mut worst_unannounced = usize::MAX;
+        let mut worst_at = 0usize;
+        for lost in 1..30 {
+            let a = announced(lost);
+            assert!(
+                a.windows(2).all(|w| w[0] < w[1]) && a.iter().all(|sn| *sn < u64::from(N)),
+                "lost packet {lost} produced a fabricated or out-of-order \
+                 sequence, which is the mis-framing this test exists to catch: \
+                 {a:?}"
+            );
+            assert!(
+                a.len() + 8 >= usize::from(N),
+                "lost packet {lost}: only {} of {N} frames survived a {SEG}-byte \
+                 hole; sns {a:?}",
+                a.len()
+            );
+            worst_announced = worst_announced.min(a.len());
+            let u = unannounced(lost).len();
+            if u < worst_unannounced {
+                worst_unannounced = u;
+                worst_at = lost;
+            }
+        }
+        // THE NEGATIVE ARM. Without it the assertion above is a claim about
+        // this fixture rather than about the announcement. Measured on the
+        // first run: 3 frames of 100 survive unannounced against 97 announced,
+        // and the collapse is total rather than partial because a prefix read
+        // off payload bytes claims 32 KiB on average — more than this whole
+        // capture holds, so the reader waits for bytes that never come.
+        assert!(
+            worst_unannounced * 4 < worst_announced,
+            "the same bytes unannounced kept {worst_unannounced} frames at \
+             worst (lost packet {worst_at}) against {worst_announced} \
+             announced — if these are close the fixture never reaches the \
+             phase where the swallow happens, and it is proving nothing"
+        );
+    }
+
+    /// R311y610 (§4.2) — a capture that ENDS with a gap open.
+    ///
+    /// The patience is a count of LATER segments, so a file that stops within
+    /// one of a hole never spends it and the tail stays held forever.
+    /// `force_oldest_gap` shipped in R311y609 with no caller for exactly this
+    /// reason: "no more packets are coming" is a fact only the caller has.
+    #[test]
+    fn a_capture_that_ends_on_an_open_gap_is_finished_by_the_caller() {
+        let stream: Vec<u8> = (0..40u8).flat_map(framed_frame).collect();
+        const SEG: usize = 37;
+        let segments: Vec<&[u8]> = stream.chunks(SEG).collect();
+        const LOST: usize = 5;
+
+        let mut d = Dissection::new();
+        for (i, seg) in segments.iter().enumerate() {
+            if i == LOST {
+                continue;
+            }
+            let pkt = tcp_packet(1000 + (i * SEG) as u32, seg);
+            d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+        }
+        // The default patience is far longer than this capture, so the hole is
+        // still open and everything behind it is still held.
+        let held = d.flows()[0].assembler(Direction::A).held_segments();
+        assert_eq!(
+            held,
+            segments.len() - LOST - 1,
+            "the whole tail should still be waiting on the gap"
+        );
+        let before = d.flows()[0].frames.len();
+        assert_eq!(d.framing_health().gaps_forced, 0);
+
+        assert_eq!(d.finish(), 1, "one gap was open, so one gap is forced");
+        let fh = d.framing_health();
+        assert_eq!((fh.gaps_forced, fh.gap_bytes_missing), (1, SEG as u64));
+        assert_eq!(
+            d.flows()[0].assembler(Direction::A).held_segments(),
+            0,
+            "nothing is left waiting on a gap that was given up on"
+        );
+        assert_eq!(
+            (fh.desyncs, fh.recoveries),
+            (1, 1),
+            "the tail is not merely delivered, it is delivered as a DISCONTINUITY"
+        );
+        assert!(
+            d.flows()[0].frames.len() > before + held,
+            "frames after finish: {} vs {before} before, over {held} released \
+             segments",
+            d.flows()[0].frames.len()
+        );
+        // Idempotent: a second call has no gap left to force.
+        assert_eq!(d.finish(), 0);
     }
 
     /// R311y594b — THE ONE THAT MATTERS: trimming the retained stream must not
@@ -2822,6 +3174,64 @@ mod datagram_tests {
             d.health().retransmits,
             1,
             "the evicted flow's retransmission must survive its flow"
+        );
+    }
+
+    /// R311y610 (§4.4) — the SESSION half of the same carry, which R311y605
+    /// could not have covered and R311y609 left open.
+    ///
+    /// `retransmits` above lives on a [`StreamAssembler`], and the F5 carry
+    /// reaches it. Desynchronisations and sequence-number losses live inside
+    /// `PassiveSession`, which the assembler carry never touched, so a live tap
+    /// recycling a flow slot dropped exactly the numbers that say traffic was
+    /// LOST — and it dropped them downward, toward a healthier-looking capture.
+    #[test]
+    fn an_evicted_flows_losses_stay_in_the_total() {
+        let stream: Vec<u8> = (0..40u8).flat_map(framed_frame).collect();
+        const SEG: usize = 37;
+        let segments: Vec<&[u8]> = stream.chunks(SEG).collect();
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows: Some(1),
+            ..DissectionLimits::default()
+        });
+        d.set_gap_patience(Some(2));
+        for (i, seg) in segments.iter().enumerate() {
+            if i == 3 {
+                continue;
+            }
+            let pkt = tcp_packet(1000 + (i * SEG) as u32, seg);
+            d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+        }
+        let before = d.framing_health();
+        assert!(
+            before.desyncs == 1 && before.recoveries == 1 && before.resync_skipped_bytes > 0,
+            "the fixture must actually lose and regain the framing: {before:?}"
+        );
+        assert!(before.sn_frames > 0, "and number some frames: {before:?}");
+
+        // A second 5-tuple evicts it.
+        let mut other = tcp_packet(2000, &framed_keepalive());
+        other[26] = 99;
+        d.push_packet(LINKTYPE_ETHERNET, segments.len(), &other);
+        assert_eq!(d.flows().len(), 1, "the cap must have evicted");
+
+        let after = d.framing_health();
+        assert_eq!(
+            (
+                after.desyncs,
+                after.recoveries,
+                after.resync_skipped_bytes,
+                after.sn_frames,
+                after.gaps_forced
+            ),
+            (
+                before.desyncs,
+                before.recoveries,
+                before.resync_skipped_bytes,
+                before.sn_frames,
+                before.gaps_forced
+            ),
+            "no loss counter may move when a flow is evicted: {before:?} -> {after:?}"
         );
     }
 

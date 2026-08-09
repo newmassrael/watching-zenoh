@@ -143,6 +143,26 @@ pub struct StreamAssembler {
     /// still open before it is judged permanent. `None` disables forcing,
     /// which is the pre-R311y609 behaviour exactly.
     gap_patience: Option<usize>,
+    /// R311y610 — splices not yet reported to the consumer of [`Self::stream`],
+    /// in stream order. Drained by [`Self::take_splices`].
+    ///
+    /// [`Self::bytes_missing`] says a hole exists somewhere; this says WHERE,
+    /// and the difference is the whole of R311y610. A consumer handed a
+    /// contiguous byte slice cannot place the discontinuity inside it, so it
+    /// reads across the splice as if the sender had written those two runs
+    /// adjacently — which is exactly what it did NOT do.
+    splices: Vec<Splice>,
+}
+
+/// R311y610 — one discontinuity in the reassembled stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Splice {
+    /// Absolute stream offset of the first byte AFTER the hole — the same
+    /// offset space [`StreamAssembler::len`] and `PassiveFrame::stream_offset`
+    /// live in, so a consumer can split a delivered slice at it.
+    pub at_offset: usize,
+    /// Sequence-space bytes the hole swallowed.
+    pub bytes_missing: u64,
 }
 
 /// Hand-written for ONE field: `gap_patience` defaults to
@@ -166,6 +186,7 @@ impl Default for StreamAssembler {
             gaps_forced: 0,
             bytes_missing: 0,
             gap_patience: Some(DEFAULT_GAP_PATIENCE),
+            splices: Vec::new(),
         }
     }
 }
@@ -211,8 +232,26 @@ impl StreamAssembler {
         self.next_seq = Some(target);
         self.gaps_forced += 1;
         self.bytes_missing += missing;
+        // R311y610 — recorded BEFORE the drain, because `len()` is the far side
+        // of the hole only until the held segments land on it.
+        self.splices.push(Splice {
+            at_offset: self.len(),
+            bytes_missing: missing,
+        });
         self.drain_pending();
         Some(missing)
+    }
+
+    /// R311y610 — take the splices recorded since the last call, in stream
+    /// order.
+    ///
+    /// Draining rather than accumulating: the consumer's obligation is to
+    /// announce each discontinuity to whatever reads the bytes across it, and
+    /// an obligation that has been met should not be met twice.
+    /// [`Self::gaps_forced`] and [`Self::bytes_missing`] remain the cumulative
+    /// record for a health view.
+    pub fn take_splices(&mut self) -> Vec<Splice> {
+        core::mem::take(&mut self.splices)
     }
 
     /// The held segment nearest AHEAD of `next` in sequence space — the far
