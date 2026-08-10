@@ -420,10 +420,21 @@ impl<'a> CaptureReport<'a> {
             // qualifier in this rendering: a reader of an ordinary capture is
             // not told about a hazard it does not have.
             if t.unsized_payloads() > 0 {
+                // R311y646 (§4.28 / §4.34) — the two reasons are named
+                // separately and the ceiling is stated in BYTES, because they
+                // are what a reader does something different about: bytes that
+                // went through shared memory are not in this file at any
+                // resolution, while unseparated ones are here and bounded.
+                let u = t.unmeasured_payloads();
                 s.push_str(&format!(
                     "  UNSIZED: {} record(s) carry a payload this build cannot \
-                     measure; the byte total above is a floor\n",
-                    t.unsized_payloads()
+                     measure ({} elsewhere, {} unresolved); application bytes \
+                     are between {} and {}\n",
+                    t.unsized_payloads(),
+                    u.elsewhere,
+                    u.unresolved,
+                    t.total_payload_bytes(),
+                    t.payload_bytes_ceiling()
                 ));
             }
             if !g.is_clean() {
@@ -644,6 +655,20 @@ fn throughput_json(t: &ThroughputTable, s: &mut String) {
         // beside it.
         t.unsized_payloads()
     ));
+    // R311y646 (§4.28 / §4.34) — the breakdown and the CEILING, unconditional
+    // for the reason the count above is: a consumer reading `total_payload_bytes`
+    // holds a floor, and the number that says how far from whole it might be
+    // must not be something they have to test for.
+    {
+        let u = t.unmeasured_payloads();
+        s.push_str(&format!(
+            ",\"payloads_elsewhere\":{},\"payloads_unresolved\":{},\
+             \"payload_bytes_ceiling\":{}",
+            u.elsewhere,
+            u.unresolved,
+            t.payload_bytes_ceiling()
+        ));
+    }
     // R311y644 (§1.1p) — UNCONDITIONAL, like `unsized_payloads` above and for
     // the same reason: it is the field that qualifies every `delay` figure in
     // the capture, and a consumer that must test for a key's presence to learn
@@ -1293,6 +1318,87 @@ mod tests {
         assert!(br.is_complete(), "{}", br.to_text());
         assert!(br.to_json().contains("\"unsized_payloads\":0"));
         assert!(!br.to_text().contains("UNSIZED"));
+    }
+
+    /// R311y646 (§4.28 / §4.34) — the document says WHY a payload went
+    /// unmeasured and states the answer as a RANGE.
+    ///
+    /// A reader of the previous document got a floor and a count of records
+    /// standing between it and any ceiling at all — a count in records, which is
+    /// not the unit the answer is in. Two records here, one of each reason, so
+    /// the rendering has to carry both rather than one number that could be
+    /// either.
+    ///
+    /// The control is a capture with nothing unmeasured: no text line, the JSON
+    /// fields still present at zero, and a ceiling that equals the floor.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_two_reasons_a_payload_is_unmeasured_reach_both_renderings() {
+        use crate::exchange::tests as fx;
+
+        let d = fx::dissect(&[
+            (
+                true,
+                Some(10),
+                crate::agg::tests::request_query_truncated(1, fx::sender_space(0, Some("demo/q"))),
+            ),
+            (
+                true,
+                Some(11),
+                crate::agg::tests::record_with_body_ext(
+                    crate::agg::tests::Carrier::Push,
+                    "demo/shm",
+                    b"descriptor",
+                    crate::agg::tests::BodyExt::ShmMarker,
+                ),
+            ),
+        ]);
+        let t = crate::agg::aggregate(&d);
+        // ANTI-VACUITY: one record of each reason really did reach the table.
+        assert_eq!(t.unsized_payloads(), 2);
+        assert_eq!(t.unmeasured_payloads().elsewhere, 1);
+        assert_eq!(t.unmeasured_payloads().unresolved, 1);
+
+        let r = CaptureReport::of(&d).with_throughput(&t);
+        let text = r.to_text();
+        assert!(
+            text.contains("1 elsewhere, 1 unresolved"),
+            "the text must name both reasons: {text}"
+        );
+        assert!(
+            text.contains("application bytes are between 0 and 3"),
+            "and state the answer as a range, in bytes: {text}"
+        );
+        let json = r.to_json();
+        assert!(
+            json.contains("\"payloads_elsewhere\":1")
+                && json.contains("\"payloads_unresolved\":1")
+                && json.contains("\"payload_bytes_ceiling\":3"),
+            "the export must carry the breakdown and the ceiling: {json}"
+        );
+
+        // THE CONTROL. A measured capture prints no line, and its ceiling is
+        // its floor rather than an absent key.
+        let plain = fx::dissect(&[(
+            true,
+            Some(10),
+            crate::agg::tests::record_with_body_ext(
+                crate::agg::tests::Carrier::Push,
+                "demo/plain",
+                b"descriptor",
+                crate::agg::tests::BodyExt::None,
+            ),
+        )]);
+        let pt = crate::agg::aggregate(&plain);
+        let pr = CaptureReport::of(&plain).with_throughput(&pt);
+        assert!(!pr.to_text().contains("UNSIZED"), "{}", pr.to_text());
+        let pj = pr.to_json();
+        assert!(
+            pj.contains("\"payloads_elsewhere\":0")
+                && pj.contains("\"payloads_unresolved\":0")
+                && pj.contains("\"payload_bytes_ceiling\":10"),
+            "the fields are structural, and the ceiling is the measured total: {pj}"
+        );
     }
 
     /// R311y616 — a filtered report carries what the selector could NOT judge,

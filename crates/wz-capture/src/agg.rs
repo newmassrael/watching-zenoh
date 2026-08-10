@@ -122,7 +122,62 @@ pub struct KeyexprCounts {
     /// carries, its number is a measurement, and conflating the two would make
     /// the honest zero unreadable — which is the whole defect this field exists
     /// to end.
+    ///
+    /// R311y646 (§4.34) — the SUM of the two fields below, kept because
+    /// `payload_is_complete` and every existing reader ask exactly this
+    /// question. Which of the two it was is the new answer, not a replacement.
     pub unsized_payloads: usize,
+    /// R311y646 (§4.34) — records whose payload bytes are NOT IN THIS CAPTURE.
+    ///
+    /// The SHM case: the payload slot holds a descriptor and the data went
+    /// through shared memory, so no number on this wire is the application's and
+    /// none ever will be. A reader wanting those bytes needs a different capture
+    /// point, not a better decoder.
+    pub payloads_elsewhere: usize,
+    /// R311y646 (§4.34) — records whose payload bytes ARE in this capture and
+    /// could not be separated from what precedes them.
+    ///
+    /// The unresolvable-`Query`-body case: the ext holds `encoding` then the
+    /// payload, and a body whose length prefix disagrees with the bytes behind
+    /// it is not measured from its own claim. The distinction from
+    /// [`Self::payloads_elsewhere`] is what a reader can DO about it — these
+    /// bytes are in the file, and [`Self::unresolved_at_most_bytes`] bounds them.
+    pub payloads_unresolved: usize,
+    /// R311y646 (§4.28) — an UPPER BOUND on the application bytes the
+    /// [`Self::payloads_unresolved`] records hold, read off the wire.
+    ///
+    /// NOT a measurement and never folded into [`Self::payload_bytes`]: it is
+    /// what the enclosing ext could hold at most, so the true figure is this or
+    /// less. Zero when there are no such records — and also the honest answer
+    /// for a record whose enclosing bytes bound it at zero.
+    ///
+    /// The two totals answer different halves of one question: `payload_bytes`
+    /// is a FLOOR on the application bytes this capture carried and
+    /// `payload_bytes + unresolved_at_most_bytes` is a CEILING. Before this the
+    /// reader had the floor and a count of records standing between it and any
+    /// ceiling at all.
+    pub unresolved_at_most_bytes: u64,
+}
+
+/// R311y646 (§4.28 / §4.34) — what one record's application payload amounts to,
+/// as [`KeyexprCounts::record_payload`] is told it.
+///
+/// Three arms and not an `Option`, because "unknown" was two facts wearing one
+/// name. R311y639 introduced the `Option` to stop a carrier reporting a
+/// confident number for bytes it could not size; what it could not express is
+/// that one of those carriers has NOTHING to measure here at any resolution
+/// (the bytes went through shared memory) while the other has bytes present in
+/// this very capture and merely no separation — and the wire says how many they
+/// are at most.
+#[cfg(feature = "network-codecs")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PayloadSize {
+    /// `n` application bytes, measured.
+    Measured(u64),
+    /// The bytes did not traverse this network at all.
+    Elsewhere,
+    /// The bytes are here and unseparated; they number `at_most` or fewer.
+    Unresolved { at_most: u64 },
 }
 
 impl KeyexprCounts {
@@ -162,11 +217,23 @@ impl KeyexprCounts {
     /// off there is no arm left that can name a payload, so the door leads
     /// nowhere and an ungated one would be dead code the no-default lane fails
     /// on rather than a wider reach.
+    /// R311y646 (§4.34) — the parameter is a [`PayloadSize`] and no longer an
+    /// `Option`, so a carrier that cannot measure its payload must still say
+    /// WHICH of the two unmeasurable states it is in and, where the bytes are
+    /// present, what bounds them.
     #[cfg(feature = "network-codecs")]
-    fn record_payload(&mut self, bytes: Option<u64>) {
-        match bytes {
-            Some(n) => self.payload_bytes += n,
-            None => self.unsized_payloads += 1,
+    fn record_payload(&mut self, size: PayloadSize) {
+        match size {
+            PayloadSize::Measured(n) => self.payload_bytes += n,
+            PayloadSize::Elsewhere => {
+                self.unsized_payloads += 1;
+                self.payloads_elsewhere += 1;
+            }
+            PayloadSize::Unresolved { at_most } => {
+                self.unsized_payloads += 1;
+                self.payloads_unresolved += 1;
+                self.unresolved_at_most_bytes += at_most;
+            }
         }
     }
 
@@ -178,6 +245,9 @@ impl KeyexprCounts {
         self.errs += other.errs;
         self.payload_bytes += other.payload_bytes;
         self.unsized_payloads += other.unsized_payloads;
+        self.payloads_elsewhere += other.payloads_elsewhere;
+        self.payloads_unresolved += other.payloads_unresolved;
+        self.unresolved_at_most_bytes += other.unresolved_at_most_bytes;
     }
 }
 
@@ -329,6 +399,31 @@ impl KeyexprRow {
         let mut t = self.per_direction[0];
         t.add(&self.per_direction[1]);
         t
+    }
+}
+
+/// R311y646 (§4.28 / §4.34) — the two reasons a payload went unmeasured, and
+/// the bound on the half that is still in the capture.
+///
+/// One struct rather than three accessors, because the three numbers are only
+/// meaningful together: `at_most_bytes` bounds `unresolved` records and says
+/// nothing whatever about `elsewhere` ones, and a reader handed the bound alone
+/// would have no way to know which population it covered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UnmeasuredPayloads {
+    /// Records whose payload bytes never traversed this network (SHM).
+    pub elsewhere: usize,
+    /// Records whose payload bytes are in the capture and unseparated.
+    pub unresolved: usize,
+    /// Upper bound on the application bytes those `unresolved` records hold.
+    pub at_most_bytes: u64,
+}
+
+impl UnmeasuredPayloads {
+    /// `true` when every payload was measured, so the totals beside this are
+    /// the whole answer rather than a floor.
+    pub fn is_empty(&self) -> bool {
+        self.elsewhere == 0 && self.unresolved == 0
     }
 }
 
@@ -486,6 +581,9 @@ pub struct ThroughputTable {
     records: usize,
     unattributed: usize,
     unsized_payloads: usize,
+    payloads_elsewhere: usize,
+    payloads_unresolved: usize,
+    unresolved_at_most_bytes: u64,
     /// R311y644 (§1.1p) — records whose SOURCE stamped them later than this
     /// observer saw them.
     ///
@@ -743,6 +841,12 @@ impl ThroughputTable {
         // it and its unmeasured bytes are exactly as absent from
         // `total_payload_bytes` as an attributed one's.
         self.unsized_payloads += counts.unsized_payloads;
+        // R311y646 (§4.28 / §4.34) — the same rule for the breakdown and the
+        // ceiling: an unattributed record's unmeasured bytes are unmeasured
+        // whatever row they failed to reach.
+        self.payloads_elsewhere += counts.payloads_elsewhere;
+        self.payloads_unresolved += counts.payloads_unresolved;
+        self.unresolved_at_most_bytes += counts.unresolved_at_most_bytes;
         match resolved {
             Ok(keyexpr) => {
                 let row = self.rows.entry(keyexpr.clone()).or_insert(KeyexprRow {
@@ -903,6 +1007,36 @@ impl ThroughputTable {
     /// qualifier on ONE total rather than on the rows.
     pub fn unsized_payloads(&self) -> usize {
         self.unsized_payloads
+    }
+
+    /// R311y646 (§4.28 / §4.34) — WHY those payloads went unmeasured, and how
+    /// many bytes the ones that are still in the capture come to at most.
+    ///
+    /// [`Self::unsized_payloads`] is the sum of the two counts, so a reader who
+    /// only wants "is the total whole" keeps asking that. This answers the
+    /// question a reader asks NEXT, and until now the report could not: whether
+    /// the missing bytes are absent from the file (nothing will recover them
+    /// here) or merely unseparated in it (a better decoder, or the bound below).
+    pub fn unmeasured_payloads(&self) -> UnmeasuredPayloads {
+        UnmeasuredPayloads {
+            elsewhere: self.payloads_elsewhere,
+            unresolved: self.payloads_unresolved,
+            at_most_bytes: self.unresolved_at_most_bytes,
+        }
+    }
+
+    /// R311y646 (§4.28) — the CEILING on the application bytes this capture
+    /// carried, against [`Self::total_payload_bytes`]'s floor.
+    ///
+    /// Equal to the floor exactly when every payload was measured. The gap
+    /// between them is what this reader admits it does not know, expressed in
+    /// the same unit as the answer — which a count of records is not.
+    ///
+    /// Bounded only over the records whose bytes ARE here: an SHM descriptor's
+    /// application bytes are on another machine and no ceiling read off this
+    /// wire says anything about them, so `elsewhere` records widen neither end.
+    pub fn payload_bytes_ceiling(&self) -> u64 {
+        self.total_payload_bytes() + self.unresolved_at_most_bytes
     }
 
     /// R311y644 (§1.1p) — records whose source clock ran ahead of this
@@ -1082,11 +1216,15 @@ pub(crate) struct SourceAhead;
 fn measured_payload(
     payload: &[u8],
     extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>,
-) -> Option<u64> {
+) -> PayloadSize {
     if carries_shm_marker(extensions) {
-        None
+        // R311y646 (§4.34) — ELSEWHERE and not "unresolved with a bound": the
+        // slot's own length bounds nothing about the application's bytes, which
+        // never crossed this network. Offering the descriptor's width as a
+        // ceiling would be the R311y639 defect in a politer form.
+        PayloadSize::Elsewhere
     } else {
-        Some(payload.len() as u64)
+        PayloadSize::Measured(payload.len() as u64)
     }
 }
 
@@ -1106,16 +1244,41 @@ fn measured_payload(
 /// more (or fewer) bytes than follow it is lying or truncated, and a total must
 /// not be inflated by a number no bytes back. Unmeasurable is the honest answer
 /// there, not the declared figure.
+/// R311y646 (§4.28) — every failing arm now carries a BOUND rather than a bare
+/// absence. The bytes are in the capture whatever went wrong reading them, and
+/// the enclosing structure says how many there are at most: the ext body itself
+/// when the encoding will not decode, and what remains after the encoding when
+/// the length prefix will not read or disagrees with the bytes behind it. Each
+/// arm bounds with what it has actually reached, so the ceiling tightens as the
+/// decode gets further rather than being one loose number for all three.
 #[cfg(feature = "network-codecs")]
-fn query_value_bytes(body: &[u8]) -> Option<u64> {
+fn query_value_bytes(body: &[u8]) -> PayloadSize {
     let mut cursor = wz_codecs::SceCursor::new(body);
     // The encoding prefix is CONSUMED rather than inspected: its only job here
     // is to move the cursor to the length prefix. Reading it through the codec
     // instead of skipping a guessed width is what makes a schema-carrying
     // encoding (`packed_id & 1`, a name of its own length) come out right.
-    let _encoding = wz_codecs::encoding::Encoding::decode(&mut cursor).ok()?;
-    let declared = cursor.read_vle_u64().ok()?;
-    (declared == cursor.remaining() as u64).then_some(declared)
+    if wz_codecs::encoding::Encoding::decode(&mut cursor).is_err() {
+        return PayloadSize::Unresolved {
+            at_most: body.len() as u64,
+        };
+    }
+    // Snapshotted BEFORE the read: a VLE that runs out of bytes may leave the
+    // cursor part-way through its own prefix, and a bound read off a cursor a
+    // failed decode moved is a number about this reader's progress rather than
+    // about the wire.
+    let after_encoding = cursor.remaining() as u64;
+    let Ok(declared) = cursor.read_vle_u64() else {
+        return PayloadSize::Unresolved {
+            at_most: after_encoding,
+        };
+    };
+    let present = cursor.remaining() as u64;
+    if declared == present {
+        PayloadSize::Measured(declared)
+    } else {
+        PayloadSize::Unresolved { at_most: present }
+    }
 }
 
 /// R311y637 (§1.1w) — does this `Query`'s ext chain carry a VALUE?
@@ -1862,7 +2025,7 @@ pub(crate) mod tests {
     /// R311y639 (§4.30) — which body ext, if any, a fixture hangs on its
     /// carrier.
     #[derive(Clone, Copy, PartialEq, Eq)]
-    enum BodyExt {
+    pub(crate) enum BodyExt {
         /// No chain at all.
         None,
         /// `zextunit!(0x2, true)` — the SHM marker. The payload slot is a
@@ -1906,7 +2069,7 @@ pub(crate) mod tests {
     /// equally unable to say "unknown". A per-carrier fixture would have let
     /// three of them stay wrong while the fourth was fixed.
     #[derive(Clone, Copy)]
-    enum Carrier {
+    pub(crate) enum Carrier {
         Push,
         Request,
         Reply,
@@ -1915,7 +2078,7 @@ pub(crate) mod tests {
 
     /// A record carrying `payload` under `keyexpr`, in `carrier`, with `ext` on
     /// its zenoh-body chain.
-    fn record_with_body_ext(
+    pub(crate) fn record_with_body_ext(
         carrier: Carrier,
         keyexpr: &'static str,
         payload: &'static [u8],
@@ -2077,6 +2240,97 @@ pub(crate) mod tests {
                 .totals()
                 .payload_is_complete());
         }
+    }
+
+    /// R311y646 (§4.28 / §4.34) — THE DEFECT: "unmeasured" was two facts under
+    /// one name, and one of them has a number.
+    ///
+    /// An SHM descriptor and an unresolvable `Query` body both landed in
+    /// `unsized_payloads`, and a reader could not tell them apart although what
+    /// they should do about each is opposite. The descriptor's application bytes
+    /// went through shared memory and are NOT IN THIS FILE at any resolution —
+    /// a better decoder recovers nothing. The query's bytes are here, inside the
+    /// ext, merely unseparated from the encoding ahead of them — and the ext's
+    /// own extent bounds them, so the capture can state a ceiling.
+    ///
+    /// Both fixtures report ONE unsized payload, which is what makes them
+    /// indistinguishable before the split and what this test pins first.
+    #[test]
+    fn an_absent_payload_and_an_unseparated_one_are_different_facts() {
+        let shm = aggregate_datagrams(&[(
+            true,
+            record_with_body_ext(Carrier::Push, "demo/shm", b"descriptor", BodyExt::ShmMarker),
+        )]);
+        let unresolved = aggregate_datagrams(&[(
+            true,
+            request_query_truncated(2, sender_space(0, Some("demo/q"))),
+        )]);
+
+        // ANTI-VACUITY, and the shape of the old answer: the count both reports
+        // is the same count.
+        assert_eq!(shm.unsized_payloads(), 1);
+        assert_eq!(unresolved.unsized_payloads(), 1);
+
+        assert_eq!(
+            shm.unmeasured_payloads(),
+            UnmeasuredPayloads {
+                elsewhere: 1,
+                unresolved: 0,
+                at_most_bytes: 0
+            },
+            "a descriptor's slot bounds NOTHING about the application's bytes"
+        );
+        assert_eq!(
+            shm.payload_bytes_ceiling(),
+            0,
+            "so the ceiling is the floor: this capture says nothing about them"
+        );
+
+        let u = unresolved.unmeasured_payloads();
+        assert_eq!((u.elsewhere, u.unresolved), (0, 1));
+        // THE BOUND IS READ OFF THE WIRE, not invented: the fixture's ext body
+        // is a one-byte encoding, a length prefix claiming 99, and three bytes
+        // behind it. Three is what is present, and three is the ceiling.
+        assert_eq!(
+            u.at_most_bytes, 3,
+            "the bytes behind the prefix, not the 99 the prefix claims"
+        );
+        assert_eq!(unresolved.total_payload_bytes(), 0, "the floor");
+        assert_eq!(unresolved.payload_bytes_ceiling(), 3);
+
+        // AND THE BOUND IS NOT A MEASUREMENT. `bytes == 3` would select this
+        // record if the ceiling had been folded into the total; the axis is
+        // still undecidable for it.
+        let selected = aggregate_datagrams_where(
+            &[(
+                true,
+                request_query_truncated(2, sender_space(0, Some("demo/q"))),
+            )],
+            "bytes == 3",
+        );
+        assert_eq!(
+            selected.selection(),
+            Selection {
+                matched: 0,
+                rejected: 0,
+                undecided: 1
+            },
+            "a ceiling that answered a `bytes` term would be a measurement"
+        );
+
+        // THE CONTROL: a capture with nothing unmeasured reports the empty
+        // census, and its ceiling IS its floor.
+        let plain = aggregate_datagrams(&[(
+            true,
+            record_with_body_ext(Carrier::Push, "demo/plain", b"descriptor", BodyExt::None),
+        )]);
+        assert!(plain.unmeasured_payloads().is_empty());
+        assert_eq!(
+            plain.payload_bytes_ceiling(),
+            plain.total_payload_bytes(),
+            "a whole answer has no gap between its two ends"
+        );
+        assert_eq!(plain.total_payload_bytes(), b"descriptor".len() as u64);
     }
 
     /// THE DISCRIMINATOR. A body ext sharing the marker's 4-BIT ID FIELD and

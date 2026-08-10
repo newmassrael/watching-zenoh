@@ -5482,7 +5482,9 @@ layer_c1bt_capture_no_default_features() {
         agg::tests::a_body_ext_sharing_the_markers_id_field_leaves_the_payload_measured \
         agg::tests::a_bytes_term_over_a_descriptor_slot_is_undecided_rather_than_its_length \
         agg::tests::a_records_offset_is_measured_from_the_front_of_the_unit \
-        agg::tests::the_three_planes_place_one_record_at_one_byte
+        agg::tests::the_three_planes_place_one_record_at_one_byte \
+        agg::tests::an_absent_payload_and_an_unseparated_one_are_different_facts \
+        report::tests::the_two_reasons_a_payload_is_unmeasured_reach_both_renderings
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the network-codecs build"
