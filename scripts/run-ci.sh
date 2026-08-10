@@ -6378,7 +6378,7 @@ layer_epico_library_oracles() {
     # VOCABULARY oracle added the half the blind sweep cannot reach (the seven
     # extension identities the wire spec actually names); and the SCOUTING leg
     # added the second namespace, where the id `0x01` is not `T_MID_INIT`.
-    _runci_guarded_test "Epico transport-decode differential" 5 \
+    _runci_guarded_test "Epico transport-decode differential" 6 \
         cargo test -p wz-integration-tests \
         --test pico_transport_decode_differential -- --ignored --quiet --test-threads=1 \
         || return 1

@@ -151,6 +151,63 @@ unsafe fn pico_accepts(lib: &Library, bytes: &[u8]) -> bool {
     }
 }
 
+/// R311y634 (§14.11) — how many bytes pico CONSUMED for the message at the
+/// front of `bytes`, when it accepted one.
+///
+/// The read position pico leaves behind IS the message boundary — it is what
+/// its own multicast receive path advances by before decoding the next message
+/// out of the same datagram (`vendor/zenoh-pico/src/transport/multicast/rx.c:99`).
+/// So this is the one number a batch walk depends on, and until now no oracle
+/// compared it: two decoders can agree that a string is a valid message and
+/// still disagree about where it ENDS, and that disagreement is invisible until
+/// something is batched behind it.
+///
+/// # Safety
+///
+/// As [`pico_accepts`]: `lib` must be `libzenohpico.so`, and the slots are
+/// opaque here.
+unsafe fn pico_consumed(lib: &Library, bytes: &[u8]) -> Option<usize> {
+    unsafe {
+        let zbuf_make: Symbol<unsafe extern "C" fn(*mut u8, usize)> = lib
+            .get(b"_z_zbuf_make\0")
+            .expect("_z_zbuf_make is exported");
+        let zbuf_clear: Symbol<unsafe extern "C" fn(*mut u8)> = lib
+            .get(b"_z_zbuf_clear\0")
+            .expect("_z_zbuf_clear is exported");
+        let decode: Symbol<unsafe extern "C" fn(*mut u8, *mut u8) -> i8> = lib
+            .get(b"_z_transport_message_decode\0")
+            .expect("_z_transport_message_decode is exported");
+        let msg_clear: Symbol<unsafe extern "C" fn(*mut u8)> = lib
+            .get(b"_z_t_msg_clear\0")
+            .expect("_z_t_msg_clear is exported");
+
+        let mut zbuf = Slot::<SLOT>::zeroed();
+        zbuf_make(zbuf.as_mut_ptr(), bytes.len().max(1));
+        let base = zbuf.as_mut_ptr();
+        let buf = base.add(IOS_BUF).cast::<*mut u8>().read();
+        let capacity = base.add(IOS_CAPACITY).cast::<usize>().read();
+        assert!(
+            !buf.is_null() && capacity >= bytes.len(),
+            "pico gave a {capacity}-byte buffer for {} bytes",
+            bytes.len()
+        );
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+        base.add(IOS_R_POS).cast::<usize>().write(0);
+        base.add(IOS_W_POS).cast::<usize>().write(bytes.len());
+
+        let mut msg = Slot::<SLOT>::zeroed();
+        let rc = decode(msg.as_mut_ptr(), base);
+        let consumed = base.add(IOS_R_POS).cast::<usize>().read();
+        msg_clear(msg.as_mut_ptr());
+        zbuf_clear(base);
+        if rc == 0 {
+            Some(consumed)
+        } else {
+            None
+        }
+    }
+}
+
 /// What wz made of the same bytes — FOUR answers, not two.
 ///
 /// R311y628 — the first cut of this file compared `parse_inbound(..).is_ok()`
@@ -992,3 +1049,179 @@ fn wz_and_pico_agree_on_what_is_a_transport_message() {
         KNOWN_DIVERGENCES.len()
     );
 }
+
+/// R311y634 (§14.11) — THE BOUNDARY ORACLE: where does the message END?
+///
+/// # Why this axis was missing
+///
+/// Every assertion in this file until now asked whether the two decoders AGREE
+/// THAT a string is a message. None asked where they think it stops, because
+/// nothing in wz walked past the front of a framing unit — so the answer could
+/// not matter. R311y631 / y632 / y633 made all three wz paths walk a batch, and
+/// a walk is exactly a chain of boundary claims: one wrong length and every
+/// message behind it is read out of the middle of something.
+///
+/// Both reference implementations walk too (zenoh's
+/// `while !batch.is_empty()`, pico decoding the residue of its own buffer), so
+/// this is not a wz-specific question — it is the one thing two peers must
+/// agree on to batch at all.
+///
+/// The comparison is restricted to strings BOTH accept. A boundary is only
+/// meaningful where both read a message: where one refuses, there is no second
+/// opinion to have.
+// wz-proves: codec-frame codec-parity partial
+// wz-proves: codec-close codec-parity partial
+// wz-proves: codec-keep-alive codec-parity partial
+#[test]
+#[ignore = "needs libzenohpico.so (CMake build product); Layer E runs via --ignored"]
+fn the_two_agree_on_where_a_message_ends() {
+    use wz_session_core::inbound::{parse_inbound_consuming, InboundFrame};
+
+    let pico = unsafe { open(&zenoh_pico_shared_library()) };
+    let mut compared = 0usize;
+    let mut frame_family = 0usize;
+    let mut disagreements: Vec<(Vec<u8>, usize, usize)> = Vec::new();
+
+    for bytes in corpus().into_iter().chain(vocabulary_corpus()) {
+        if !matches!(wz_verdict(&bytes), WzVerdict::Named) {
+            continue;
+        }
+        let Some(theirs) = (unsafe { pico_consumed(&pico, &bytes) }) else {
+            continue;
+        };
+        let Ok((frame, ours)) = parse_inbound_consuming(&bytes) else {
+            continue;
+        };
+        compared += 1;
+
+        // THE FRAME FAMILY IS NOT A DISAGREEMENT, and saying so cost a read of
+        // pico's own source rather than a guess: `_z_frame_decode` ends with
+        // `msg->_payload = zbf` (`vendor/zenoh-pico/src/protocol/codec/transport.c:404`)
+        // — it HANDS THE BUFFER OVER instead of consuming it, and the payload is
+        // drained by a second stage that walks the network messages inside
+        // (`src/transport/multicast/rx.c:225`). So pico's read position after a
+        // Frame decode is the START of the payload, not the end of the message.
+        //
+        // Asserted as an EQUALITY rather than carved out: pico stops exactly
+        // where wz's decoded payload begins, which is a stronger statement than
+        // "these two are allowed to differ here" and would catch either side
+        // moving. It is also the reason a Frame ends a batch on both sides.
+        // THE FRAME FAMILY IS TWO RULES, NOT ONE, and that is pico's own
+        // asymmetry rather than a wz observation:
+        //
+        // - `_z_frame_decode` ends with `msg->_payload = zbf`
+        //   (`vendor/zenoh-pico/src/protocol/codec/transport.c:404`) — it HANDS
+        //   THE BUFFER OVER without consuming it, and a second stage walks the
+        //   network messages inside (`src/transport/multicast/rx.c:225`). Its
+        //   read position therefore lands on the START of the payload.
+        // - `_z_fragment_decode` aliases the payload and then explicitly drains
+        //   the buffer, `zbf->_ios._r_pos = zbf->_ios._w_pos` (`transport.c:463`).
+        //   Its read position lands on the END.
+        //
+        // Both are asserted as EQUALITIES rather than carved out: each is a
+        // statement about where pico stopped that would fail if either side
+        // moved, and together they are why a Frame or a Fragment ends a batch on
+        // both implementations.
+        let expected = match &frame {
+            InboundFrame::Frame { payload, .. } => Some(ours - payload.len()),
+            InboundFrame::Fragment { .. } => Some(ours),
+            _ => None,
+        };
+        if let Some(expected) = expected {
+            frame_family += 1;
+            assert_eq!(
+                ours,
+                bytes.len(),
+                "wz reads a frame to the end of its unit: header {:#04x}",
+                bytes[0]
+            );
+            assert_eq!(
+                theirs, expected,
+                "pico stopped somewhere this file does not describe: header \
+                 {:#04x}, wz {ours}",
+                bytes[0]
+            );
+            continue;
+        }
+
+        if ours != theirs {
+            disagreements.push((bytes, ours, theirs));
+        }
+    }
+
+    assert!(
+        compared > 100,
+        "the boundary oracle must actually compare boundaries: {compared}"
+    );
+    assert!(
+        frame_family > 0,
+        "the frame family must be REACHED, or its equality above is a rule \
+         nothing drives"
+    );
+    let sample: Vec<String> = disagreements
+        .iter()
+        .take(12)
+        .map(|(b, ours, theirs)| {
+            format!(
+                "header {:#04x} len {} -> wz {ours} / pico {theirs}",
+                b[0],
+                b.len()
+            )
+        })
+        .collect();
+
+    // THE SET, not the count: every survivor must be the SAME known pico
+    // defect, spelled out so a NEW kind of boundary disagreement fails here
+    // instead of hiding inside a number that still adds up.
+    //
+    // R311y630 found it on the acceptance axis — `_z_close_decode` opens with
+    // `(void)(header);` and reads the reason only, never the extension chain
+    // (zenoh skips it, `zenoh-codec-1.5.0/src/transport/close.rs:80-83`). Here
+    // it surfaces as a BOUNDARY: pico stops after the reason, so the chain byte
+    // it never read is where it would start decoding the next message of a
+    // batch. Same defect, second axis, and the second axis is the one that
+    // corrupts everything behind it rather than only the message itself.
+    for (bytes, ours, theirs) in &disagreements {
+        assert_eq!(
+            bytes[0] & 0x1f,
+            wz_session_core::wire_const::T_MID_CLOSE,
+            "a boundary disagreement outside the Close family: header {:#04x}, \
+             wz {ours} / pico {theirs}",
+            bytes[0]
+        );
+        assert_ne!(
+            bytes[0] & wz_codecs::wire_const::FLAG_T_Z,
+            0,
+            "a Close with NO chain has nothing to disagree about: header {:#04x}",
+            bytes[0]
+        );
+        assert_eq!(
+            *theirs, 2,
+            "pico reads the header and the reason and stops: header {:#04x}",
+            bytes[0]
+        );
+        assert!(
+            ours > theirs,
+            "wz reads the chain pico skipped: header {:#04x}, wz {ours} / pico {theirs}",
+            bytes[0]
+        );
+    }
+    assert_eq!(
+        disagreements.len(),
+        BOUNDARY_DIVERGENCES,
+        "compared {compared} message(s), {frame_family} of them frame-family; \
+         boundary disagreements: {sample:#?}"
+    );
+}
+
+/// R311y634 — the pinned count for [`the_two_agree_on_where_a_message_ends`].
+///
+/// FIVE, every one of them the Close-ignores-its-chain defect R311y630 already
+/// found on the acceptance axis — and the loop above pins that SHAPE, so this
+/// number is only the population size. The first measurement reported twenty
+/// MORE, all of them the frame family, and reading pico's own decoder turned
+/// those into the two equalities above rather than into a carve-out.
+///
+/// If this moves, read the sample the assertion prints: a new kind of
+/// disagreement fails the shape loop first and never reaches this line.
+const BOUNDARY_DIVERGENCES: usize = 5;
