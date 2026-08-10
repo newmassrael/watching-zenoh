@@ -273,17 +273,50 @@ impl<'a> CaptureReport<'a> {
         // made these four numbers walk backwards when the flow cap recycled a
         // slot, which is the one direction a census of what a reader COULD NOT
         // see must never move.
+        //
+        // R311y661 (§1.2a) — `decrypted` and `reason` are now FACTS. Both were
+        // constants: `false` was written into the format string, and the reason
+        // resolved to `no_keys_supplied` for every flow including one whose keys
+        // the capture file itself carried. A decryption pass having run is the
+        // only thing that moves either.
+        //
+        // The census is capture-wide and a reason belongs to a FLOW, so the two
+        // are reconciled explicitly rather than by reading the first flow and
+        // presenting its reason as the capture's — which is what this did, and
+        // is wrong the moment two flows differ. `flows_decrypted` counts, and
+        // `reason` is reported only where every undecrypted flow agrees on one.
         let enc = d.encrypted_census();
+        let flows = d.encrypted_flows();
+        let decrypted = flows.iter().filter(|e| e.not_decrypted.is_none()).count();
+        let reasons: alloc::collections::BTreeSet<&'static str> = flows
+            .iter()
+            .filter_map(|e| e.not_decrypted.map(decryption_reason))
+            .collect();
+        let reason = match reasons.len() {
+            0 => "none",
+            1 => reasons.iter().next().copied().unwrap_or("none"),
+            // Genuinely differing reasons across flows. A single string here
+            // would name one flow's problem as the capture's.
+            _ => "mixed",
+        };
         s.push_str(&format!(
             ",\"encrypted\":{{\"flows\":{},\"records\":{},\"application_records\":{},\
-             \"application_bytes\":{},\"decrypted\":false,\"reason\":\"{}\"}}",
+             \"application_bytes\":{},\"decrypted\":{},\"flows_decrypted\":{},\
+             \"records_decrypted\":{},\"reason\":\"{}\"}}",
             enc.flows,
             enc.census.records,
             enc.census.application_records,
             enc.census.application_bytes,
-            match d.encrypted_flows().first().map(|e| e.not_decrypted) {
-                None | Some(crate::tls::NotDecrypted::NoKeysSupplied) => "no_keys_supplied",
-            }
+            // The capture-wide claim, and it is deliberately the STRONG one:
+            // "this capture was decrypted" must not be true while part of it
+            // was not. `flows_decrypted` beside it carries the partial state.
+            decrypted > 0 && decrypted == flows.len(),
+            decrypted,
+            flows
+                .iter()
+                .map(|e| e.decrypted_records[0] + e.decrypted_records[1])
+                .sum::<usize>(),
+            reason
         ));
         // R311y643 (§1.1e) — the skip count above is a number; this is what it
         // MEANS. Structural like `gaps`: present with zeroes on a clean capture,
@@ -708,6 +741,25 @@ impl<'a> CaptureReport<'a> {
             }
         }
         s
+    }
+}
+
+/// R311y661 (§1.2a) — the wire name of one undecrypted-flow reason.
+///
+/// A total match and not a `_ =>` fallback: a variant added later must be given
+/// a name here rather than silently reported as whichever string happened to be
+/// the default, which is the shape of the constant this round replaced.
+///
+/// UNCONDITIONAL, because its caller is: the `encrypted` block of the report is
+/// structural and present with zeroes on a plaintext capture, so a reason
+/// function behind a feature would leave that block unbuildable in exactly the
+/// configurations the dissector ships to smallest.
+fn decryption_reason(reason: crate::tls::NotDecrypted) -> &'static str {
+    match reason {
+        crate::tls::NotDecrypted::NoKeysSupplied => "no_keys_supplied",
+        crate::tls::NotDecrypted::NoSessionIdentity => "no_session_identity",
+        crate::tls::NotDecrypted::NoKeyForSession => "no_key_for_session",
+        crate::tls::NotDecrypted::RecordRefusedKeys { .. } => "record_refused_keys",
     }
 }
 

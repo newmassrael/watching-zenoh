@@ -5419,7 +5419,18 @@ layer_c1bt_capture_no_default_features() {
         datagram_tests::a_capture_that_abandoned_nothing_carries_the_field_at_zero \
         tls_flow_tests::the_client_hello_random_reaches_the_report \
         tls_flow_tests::a_flow_recognised_by_its_chain_has_no_random_to_offer \
-        tls_flow_tests::the_kept_records_are_numbered_by_what_is_protected
+        tls_flow_tests::the_kept_records_are_numbered_by_what_is_protected \
+        tls_flow_tests::a_flow_whose_records_open_yields_zenoh_frames_and_says_it_was_decrypted \
+        tls_flow_tests::a_decrypted_frames_offset_resolves_to_the_packet_that_carried_it \
+        tls_flow_tests::a_post_handshake_message_is_opened_and_not_fed_to_the_zenoh_reader \
+        tls_flow_tests::a_record_that_refuses_the_keys_stops_its_direction_and_is_named \
+        tls_flow_tests::a_declined_flow_reports_the_openers_reason_and_opens_nothing \
+        tls_flow_tests::a_mid_session_flow_is_announced_with_no_identity \
+        tls_flow_tests::a_second_decryption_pass_does_not_decode_the_same_records_twice \
+        tls_flow_tests::the_report_states_what_the_decryption_pass_actually_found \
+        tls_flow_tests::a_record_after_a_hole_carries_the_offset_the_hole_put_it_at \
+        tls_flow_tests::a_capture_is_not_decrypted_while_one_of_its_flows_is_not \
+        tls_flow_tests::a_capture_files_own_decryption_secrets_reach_the_dissection
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the --no-default-features build"

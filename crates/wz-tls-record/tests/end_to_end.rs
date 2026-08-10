@@ -16,6 +16,7 @@
 //! secret, and this crate opens what the capture kept.
 
 use rustls::crypto::cipher::{AeadKey, Iv, OutboundPlainMessage};
+use wz_tls_record::capture::CaptureOpener;
 use wz_tls_record::keylog::{KeyLog, SecretLabel, SECRETS_TYPE_TLS_KEY_LOG};
 use wz_tls_record::{expand_label, Suite, TrafficKeys};
 
@@ -270,4 +271,227 @@ fn a_mid_session_flow_keeps_its_records_and_cannot_be_matched_to_a_log() {
     let mut bytes = flows[0].kept_records[0][1].bytes.clone();
     let opened = keys.open(1, &mut bytes).expect("record 1");
     assert_eq!(opened.plaintext, b"zenoh");
+}
+
+/// R311y661 (§1.2a) — THE PRODUCTION PATH. A capture FILE goes in, and the
+/// zenoh session inside its TLS comes out.
+///
+/// R311y660's test above proves the chain by holding every piece itself: it
+/// builds the dissection in memory, reaches into `kept_records`, parses the key
+/// log by hand and calls `open` per record. That is a proof about the PARTS.
+/// What it does not touch is the path a caller actually has — a `.pcapng` on
+/// disk — and along that path the keys were being thrown away: `from_pcapng`
+/// parsed the Decryption Secrets Block and dropped it, so the reader reported
+/// `no_keys_supplied` about a file whose keys it had read.
+///
+/// Here nothing is reached into. The file is parsed by `from_pcapng`, the
+/// opener is built from what that parse carried, and the frames are read off
+/// the flow like any other flow's.
+#[test]
+fn a_pcapng_carrying_its_own_key_log_decrypts_through_the_public_path() {
+    let secret = traffic_secret();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(5).wrapping_add(9));
+
+    let payloads: Vec<Vec<u8>> = (0..3u8)
+        .map(|i| {
+            // A framed zenoh KeepAlive, which is what the reader must decode.
+            let unit = vec![0x04u8, i];
+            let mut framed = (unit.len() as u16).to_le_bytes().to_vec();
+            framed.extend_from_slice(&unit);
+            framed
+        })
+        .collect();
+
+    let mut key = [0u8; 32];
+    expand_label(SUITE, &secret, b"key", &[], &mut key);
+    let mut iv = [0u8; 12];
+    expand_label(SUITE, &secret, b"iv", &[], &mut iv);
+    let t13 = rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384
+        .tls13()
+        .expect("a TLS 1.3 suite");
+    let mut enc = t13.aead_alg.encrypter(AeadKey::from(key), Iv::from(iv));
+
+    let mut stream = client_hello(&random);
+    for (seq, payload) in payloads.iter().enumerate() {
+        let sealed = enc
+            .encrypt(
+                OutboundPlainMessage {
+                    typ: rustls::ContentType::ApplicationData,
+                    version: rustls::ProtocolVersion::TLSv1_2,
+                    payload: rustls::crypto::cipher::OutboundChunks::Single(payload),
+                },
+                seq as u64,
+            )
+            .expect("seal");
+        stream.extend_from_slice(&sealed.encode());
+    }
+
+    // THE FILE: one Ethernet interface, one packet, and the key log in the
+    // block the format defines for it.
+    let packet = tcp_packet(1000, &stream);
+    let mut file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &packet)],
+    );
+    let log_text = format!(
+        "CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+        hex(&random),
+        hex(&secret)
+    );
+    file.extend_from_slice(&decryption_secrets_block(
+        SECRETS_TYPE_TLS_KEY_LOG,
+        log_text.as_bytes(),
+    ));
+
+    // THE PUBLIC PATH, and every step of it is a call a caller can make.
+    let mut d = wz_capture::Dissection::from_pcapng(&file).expect("the file parses");
+    assert_eq!(
+        d.encrypted_flows().len(),
+        1,
+        "the flow must be recognised as encrypted"
+    );
+    assert_eq!(
+        d.flows()[0].frames.len(),
+        0,
+        "and decode nothing until the keys are applied"
+    );
+
+    let (mut opener, skipped) = CaptureOpener::from_secrets_blocks(d.decryption_secrets());
+    assert_eq!(skipped, 0, "the file's only secrets block IS a TLS key log");
+    assert_eq!(
+        opener.log().len(),
+        1,
+        "the capture's own key log reached the opener"
+    );
+
+    let summary = d.decrypt_with(&mut opener);
+
+    assert_eq!(summary.flows, 1);
+    assert_eq!(summary.decrypted, 1, "summary={summary:?}");
+    assert_eq!(summary.records, 3);
+    assert_eq!(
+        summary.frames, 3,
+        "THE POINT: three zenoh messages out of a file that reported none"
+    );
+
+    // AND THE FRAMES ARE ZENOH, read off the flow exactly as a cleartext
+    // capture's would be.
+    let frames = &d.flows()[0].frames;
+    assert_eq!(frames.len(), 3);
+    for frame in frames {
+        assert!(
+            frame.frame.is_ok(),
+            "a decrypted frame must PARSE, not merely appear: {:?}",
+            frame.frame
+        );
+    }
+    // Each frame attributes to the packet that carried its record -- there is
+    // one packet here, so the claim under test is that the offset resolves at
+    // all rather than falling outside the stream.
+    for frame in frames {
+        assert_eq!(
+            d.flows()[0].packet_for(frame.direction, frame.stream_offset),
+            Some(0),
+            "offset {} resolved to no packet",
+            frame.stream_offset
+        );
+    }
+
+    // AND THE REPORT SAYS SO. This is the statement that was false: a capture
+    // carrying its own keys reported `"decrypted":false` and
+    // `"reason":"no_keys_supplied"`.
+    let json = wz_capture::report::CaptureReport::of(&d).to_json();
+    assert!(
+        json.contains("\"decrypted\":true"),
+        "the report must claim the decryption it performed: {json}"
+    );
+    assert!(
+        json.contains("\"records_decrypted\":3"),
+        "with the record count: {json}"
+    );
+}
+
+/// R311y661 — and a file whose key log is for ANOTHER connection is refused by
+/// name rather than reported as keyless.
+///
+/// The discriminator for the reason strings: this capture and one with no
+/// secrets block at all are the same to a reader who is told only
+/// `no_keys_supplied`, and they need different things done about them.
+#[test]
+fn a_pcapng_whose_key_log_is_for_another_connection_says_which_refusal_it_is() {
+    let secret = traffic_secret();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(5).wrapping_add(9));
+
+    let mut key = [0u8; 32];
+    expand_label(SUITE, &secret, b"key", &[], &mut key);
+    let mut iv = [0u8; 12];
+    expand_label(SUITE, &secret, b"iv", &[], &mut iv);
+    let t13 = rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384
+        .tls13()
+        .expect("a TLS 1.3 suite");
+    let mut enc = t13.aead_alg.encrypter(AeadKey::from(key), Iv::from(iv));
+
+    let mut stream = client_hello(&random);
+    for seq in 0..2u64 {
+        let sealed = enc
+            .encrypt(
+                OutboundPlainMessage {
+                    typ: rustls::ContentType::ApplicationData,
+                    version: rustls::ProtocolVersion::TLSv1_2,
+                    payload: rustls::crypto::cipher::OutboundChunks::Single(b"\x02\x00\x04\x01"),
+                },
+                seq,
+            )
+            .expect("seal");
+        stream.extend_from_slice(&sealed.encode());
+    }
+
+    let packet = tcp_packet(1000, &stream);
+    let mut file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &packet)],
+    );
+    // A REAL key log, for a connection that is not this one.
+    let other: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_add(200));
+    let log_text = format!("CLIENT_TRAFFIC_SECRET_0 {} {}\n", hex(&other), hex(&secret));
+    file.extend_from_slice(&decryption_secrets_block(
+        SECRETS_TYPE_TLS_KEY_LOG,
+        log_text.as_bytes(),
+    ));
+
+    let mut d = wz_capture::Dissection::from_pcapng(&file).expect("the file parses");
+    let (mut opener, _) = CaptureOpener::from_secrets_blocks(d.decryption_secrets());
+    assert_eq!(opener.log().len(), 1, "the log itself is fine");
+
+    let summary = d.decrypt_with(&mut opener);
+    assert_eq!(summary.refused, 1);
+    assert_eq!(summary.frames, 0);
+    assert_eq!(
+        d.encrypted_flows()[0].not_decrypted,
+        Some(wz_capture::tls::NotDecrypted::NoKeyForSession),
+        "keys were supplied and are for another session -- that is not the \
+         same finding as no keys at all"
+    );
+
+    let json = wz_capture::report::CaptureReport::of(&d).to_json();
+    assert!(
+        json.contains("\"reason\":\"no_key_for_session\""),
+        "and the report must carry the distinction: {json}"
+    );
+}
+
+/// A pcapng Decryption Secrets Block wrapping `secrets`.
+fn decryption_secrets_block(secrets_type: u32, secrets: &[u8]) -> Vec<u8> {
+    let mut body = secrets_type.to_le_bytes().to_vec();
+    body.extend_from_slice(&(secrets.len() as u32).to_le_bytes());
+    body.extend_from_slice(secrets);
+    while !body.len().is_multiple_of(4) {
+        body.push(0);
+    }
+    let total = (12 + body.len()) as u32;
+    let mut out = 0x0000_000Au32.to_le_bytes().to_vec();
+    out.extend_from_slice(&total.to_le_bytes());
+    out.extend_from_slice(&body);
+    out.extend_from_slice(&total.to_le_bytes());
+    out
 }

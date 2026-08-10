@@ -52,6 +52,11 @@
 
 use alloc::vec::Vec;
 
+/// R311y661 (§1.2a) — re-exported because [`RecordOpener`] is implemented
+/// OUTSIDE this crate, and an implementor should not have to depend on a third
+/// crate to name a parameter of the trait it is implementing.
+pub use wz_session_core::passive::Direction;
+
 /// TLS content types (RFC 8446 §5.1, RFC 5246 §6.2.1).
 pub const CT_CHANGE_CIPHER_SPEC: u8 = 20;
 pub const CT_ALERT: u8 = 21;
@@ -281,16 +286,51 @@ impl RecordCensus {
 
 /// Why a flow this reader recognised as encrypted was not read.
 ///
-/// One variant today and an enum rather than a bool on purpose: the whole point
-/// of R311y648 is that "not decrypted" is a statement with a REASON, and the
-/// reasons a decryption layer will add — keys for the wrong session, one
-/// direction only, a capture that began mid-handshake — are facts a reader acts
-/// on differently. A `bool` here would have to be widened by whoever adds them,
+/// An enum rather than a bool on purpose: the whole point of R311y648 is that
+/// "not decrypted" is a statement with a REASON, and the reasons a decryption
+/// layer adds — keys for the wrong session, a capture that began mid-handshake,
+/// a record that refused the keys it was given — are facts a reader acts on
+/// differently. A `bool` here would have to be widened by whoever adds them,
 /// which is how the reason gets dropped.
+///
+/// R311y661 (§1.2a) — the four reasons are now DISTINGUISHED rather than
+/// collapsed. Until this round every flow reported [`Self::NoKeysSupplied`]
+/// unconditionally, including for a capture file that carried a key log in its
+/// own Decryption Secrets Block: the report said "no keys supplied" about a file
+/// whose keys this reader had parsed and thrown away. Each variant below sends a
+/// reader somewhere different — find the keys, recapture from the handshake,
+/// find the RIGHT keys, or look at the epoch — and one string for all four sends
+/// them to the first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotDecrypted {
     /// No key material was supplied to this dissection at all.
     NoKeysSupplied,
+    /// R311y661 — keys were supplied and this flow has no identity to select
+    /// them by: it was recognised by its record CHAIN, so there is no
+    /// ClientHello in the capture and hence no `Random` for a key log to be
+    /// indexed by. The mid-session and server-half shapes R311y649 added.
+    ///
+    /// Distinct from [`Self::NoKeyForSession`] because the remedies differ: this
+    /// one is fixed by capturing from the handshake, that one by finding the
+    /// right key log.
+    NoSessionIdentity,
+    /// R311y661 — keys were supplied, this flow has a `Random`, and nothing in
+    /// the supplied material is for that session.
+    NoKeyForSession,
+    /// R311y661 — keys for this session were found and a record did not open
+    /// under them, naming the first index that refused.
+    ///
+    /// The known cause is the epoch: TLS 1.3 restarts the AEAD sequence at zero
+    /// on every key change, so a record numbered by its position in the
+    /// direction is opened at the wrong sequence once the keys have rotated.
+    /// Reporting the index a reader can act on is the honest form; claiming the
+    /// keys were wrong would not be.
+    RecordRefusedKeys {
+        /// The direction the refusing record travelled.
+        direction: Direction,
+        /// Its [`EncryptedRecord::index`].
+        index: u64,
+    },
 }
 
 /// An encrypted flow, as the report shows it.
@@ -298,8 +338,30 @@ pub enum NotDecrypted {
 pub struct EncryptedFlow {
     /// Per-direction record census, `[A, B]`.
     pub per_direction: [RecordCensus; 2],
-    /// Why its plaintext is absent from this report.
-    pub not_decrypted: NotDecrypted,
+    /// Why its plaintext is absent from this report, or `None` where it is
+    /// PRESENT — every kept record opened and its zenoh frames are in
+    /// [`crate::FlowDissection::frames`] like any other flow's.
+    ///
+    /// R311y661 — an `Option` and not a bare reason, because until this round
+    /// the type could not say "decrypted" at all: the field was infallible, so
+    /// the report's `"decrypted"` was a hard-coded `false` that no amount of key
+    /// material could move.
+    pub not_decrypted: Option<NotDecrypted>,
+    /// R311y661 — records opened per direction, `[A, B]`.
+    ///
+    /// Carried beside the reason rather than implied by it: a flow whose keys
+    /// rotate opens the records of its first epoch and refuses the rest, so
+    /// "some plaintext" is a real state and a reader that inferred zero from a
+    /// non-`None` reason would be short by exactly what it did get.
+    pub decrypted_records: [usize; 2],
+    /// R311y661 — which direction carried the ClientHello, where one did.
+    ///
+    /// A decryptor needs it and cannot derive it: the client's records open
+    /// under `CLIENT_TRAFFIC_SECRET` and the server's under `SERVER_`, so a
+    /// consumer without this field is choosing between two secrets by a coin
+    /// flip that fails half the time with an authentication error indisting-
+    /// uishable from a wrong key log.
+    pub client_direction: Option<Direction>,
     /// R311y660 (§1.2a) — the encrypted records this flow kept, `[A, B]`, each
     /// numbered within its direction. What a decryptor opens.
     pub kept_records: [Vec<EncryptedRecord>; 2],
@@ -479,9 +541,94 @@ pub struct EncryptedRecord {
     /// is over `application_data` records and not over all of them: CCS is
     /// plaintext middlebox compatibility (RFC 8446 §5) and is not protected.
     pub index: u64,
+    /// R311y661 (§1.2a) — where this record's first byte sits in its
+    /// direction's REASSEMBLED BYTE STREAM, counted from the first byte the
+    /// flow was given.
+    ///
+    /// ## Why a decryptor needs a second coordinate
+    ///
+    /// Opening a record produces plaintext, and the zenoh frames decoded out of
+    /// that plaintext are offset within the PLAINTEXT stream — a different space
+    /// from the TCP one, shorter by every record header and AEAD tag along the
+    /// way. [`crate::FlowDissection::packet_for`] resolves an offset against the
+    /// TCP-space run map, so a decrypted frame carrying its plaintext offset
+    /// would resolve to a packet that is merely nearby, and would do it
+    /// silently.
+    ///
+    /// That is R311y645's defect exactly — a coordinate named for one space and
+    /// measured in another — and it is avoided by carrying the record's own
+    /// stream offset here, so a frame can be attributed to the record that
+    /// carried it and through it to a real packet.
+    pub stream_offset: usize,
     /// The record, header included, exactly as the wire carried it. The header
     /// is the AEAD's additional data.
     pub bytes: Vec<u8>,
+}
+
+/// R311y661 (§1.2a) — the plaintext of one opened record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedRecord {
+    /// The record's INNER content type (RFC 8446 §5.2), recovered from the end
+    /// of the protected payload.
+    ///
+    /// Load bearing and not informational. A TLS 1.3 record's outer type reads
+    /// `application_data` for everything after the ServerHello, so a
+    /// post-handshake `NewSessionTicket` — which servers send routinely, on the
+    /// same connection, at any time — is indistinguishable from session traffic
+    /// until it is opened. Feeding its bytes to the zenoh reader would inject a
+    /// handshake message into the middle of a length-prefixed stream and desync
+    /// everything after it. [`crate::Dissection::decrypt_with`] therefore feeds
+    /// only [`CT_APPLICATION_DATA`] onward.
+    pub content_type: u8,
+    /// The plaintext, with the content type and any padding removed.
+    pub plaintext: Vec<u8>,
+}
+
+/// R311y661 (§1.2a) — the seam a decryptor is plugged into.
+///
+/// ## Why this is a trait and not a dependency
+///
+/// `wz-capture` has zero third-party dependencies by design — its decode path
+/// builds for a Cortex-M — and an AEAD is not something this crate will grow or
+/// hand-roll. The alternative to inverting the dependency is for this crate to
+/// call a cipher crate, which would put ring in every build of the dissector.
+///
+/// So the flow of control inverts instead: this crate finds the records,
+/// numbers them and knows which direction is the client's; the caller supplies
+/// something that can open one. `wz-tls-record` implements it over `ring`, and
+/// a consumer with a hardware keystore or a different record layer implements
+/// the same two methods without this crate learning anything about either.
+pub trait RecordOpener {
+    /// Announce the flow about to be opened, and answer whether it CAN be.
+    ///
+    /// Asked once per flow rather than once per record, so a caller holding no
+    /// key for the session pays a lookup and not a decryption attempt per
+    /// record — and, more importantly, so the reason is stated ONCE and as a
+    /// property of the flow, which is what it is.
+    ///
+    /// `client_direction` is `None` for a flow recognised by its record chain;
+    /// an implementation that needs to pick between the client's and the
+    /// server's traffic secret cannot serve such a flow and should say so with
+    /// [`NotDecrypted::NoSessionIdentity`].
+    fn begin_flow(
+        &mut self,
+        client_random: Option<&[u8; 32]>,
+        client_direction: Option<Direction>,
+    ) -> Result<(), NotDecrypted>;
+
+    /// Open one record of the flow most recently announced.
+    ///
+    /// `record` is the WHOLE record, header included, because the header is the
+    /// AEAD's additional data. `index` is [`EncryptedRecord::index`] — the
+    /// record's position among the protected records of its direction, which is
+    /// the AEAD sequence number for as long as the keys have not rotated.
+    ///
+    /// `None` means this record did not open. It is not "no more records": the
+    /// caller stops the direction and reports
+    /// [`NotDecrypted::RecordRefusedKeys`] naming this index, because a gap in
+    /// the middle of a byte stream cannot be skipped over — the bytes after it
+    /// no longer begin where the reader thinks they do.
+    fn open(&mut self, direction: Direction, index: u64, record: &[u8]) -> Option<OpenedRecord>;
 }
 
 impl core::fmt::Debug for EncryptedRecord {
@@ -531,6 +678,35 @@ pub struct TlsFlowState {
     /// key log can be matched to, and carrying `Option` rather than a sentinel
     /// is what makes a caller say so instead of matching on 32 zero bytes.
     pub(crate) client_random: Option<[u8; 32]>,
+    /// R311y661 (§1.2a) — which direction the ClientHello arrived on, recorded
+    /// at the same instant [`Self::client_random`] is.
+    ///
+    /// The client's records open under a different traffic secret from the
+    /// server's, so a decryptor that does not know which side is which has a
+    /// coin flip's chance of an authentication failure that looks exactly like
+    /// a wrong key log. The flow is the only layer that knows which direction
+    /// the hello came in on, and it knew all along — it simply was not writing
+    /// it down.
+    pub(crate) client_direction: Option<usize>,
+    /// R311y661 — where the NEXT byte handed to [`Self::push`] sits in its
+    /// direction's reassembled stream, so each kept record can carry its own
+    /// [`EncryptedRecord::stream_offset`].
+    ///
+    /// Advanced by what the walk CONSUMED and by what a hole swallowed, which
+    /// is the only way it stays true across one: the bytes after a lost segment
+    /// begin further along the stream than the bytes before it ended.
+    pub(crate) stream_at: [usize; 2],
+    /// R311y661 — what [`crate::Dissection::decrypt_with`] found, or `None`
+    /// where no decryption pass has run over this flow.
+    ///
+    /// `Some(None)` is the fully-opened state and is deliberately distinct from
+    /// the outer `None`: "a pass ran and everything opened" and "no pass ran"
+    /// are the two findings a report must not merge, because merging them is
+    /// how a dissection with no keys at all comes to claim plaintext.
+    #[allow(clippy::option_option)]
+    pub(crate) outcome: Option<Option<NotDecrypted>>,
+    /// R311y661 — records opened per direction by that pass.
+    pub(crate) opened: [usize; 2],
 }
 
 impl TlsFlowState {
@@ -544,25 +720,39 @@ impl TlsFlowState {
     pub(crate) fn push(&mut self, index: usize, bytes: &[u8]) {
         let mut run = core::mem::take(&mut self.pending[index]);
         run.extend_from_slice(bytes);
+        // R311y661 — the run begins where the HELD TAIL began, not where this
+        // push's bytes did: a record split across two segments starts in the
+        // earlier one, and that is the offset it must carry. `stream_at` is
+        // maintained as exactly that — the offset of `pending`'s first byte,
+        // which is this run's first byte.
+        let run_base = self.stream_at[index];
         let mut kept = Vec::new();
+        let mut walked = 0usize;
         let Some(census) = walk_records(&run, &mut |record, content_type| {
             // Only the protected ones. A `ChangeCipherSpec` is plaintext and
             // consumes no sequence number, so keeping it would put every later
             // record one place too far along.
             if content_type == CT_APPLICATION_DATA {
-                kept.push(record.to_vec());
+                kept.push((run_base + walked, record.to_vec()));
             }
+            walked += record.len();
         }) else {
             // The chain broke. Nothing is counted for this run, and the state
             // keeps no tail -- a direction that stopped being TLS is not a
             // direction whose next bytes continue a record.
+            //
+            // R311y661 — the stream position still moves. These bytes were
+            // delivered, so the next ones sit after them, and a coordinate that
+            // stopped advancing here would put every later record earlier in
+            // the stream than it is.
+            self.stream_at[index] = run_base + run.len();
             return;
         };
         let consumed = run.len() - census.trailing_bytes;
         let mut counted = census;
         counted.trailing_bytes = 0;
         self.per_direction[index].add(&counted);
-        for bytes in kept {
+        for (stream_offset, bytes) in kept {
             // The bound is made room for FIRST, and that ordering is what makes
             // the numbering testable rather than merely stated: with the drop
             // taken afterwards, `next_index` and `kept.len()` agree in every
@@ -578,11 +768,30 @@ impl TlsFlowState {
             }
             self.kept[index].push(EncryptedRecord {
                 index: self.next_index[index],
+                stream_offset,
                 bytes,
             });
             self.next_index[index] += 1;
         }
         self.pending[index] = run[consumed..].to_vec();
+        // The tail that did not complete a record begins `consumed` bytes into
+        // this run, and that is where the NEXT run begins.
+        self.stream_at[index] = run_base + consumed;
+    }
+
+    /// R311y661 (§1.2a) — a hole was announced for one direction: drop the held
+    /// tail and step the stream coordinate over what was lost.
+    ///
+    /// The drop is R311y648's rule (a record is not joined across a gap). The
+    /// STEP is this round's: the bytes after a lost segment sit further along
+    /// the stream than the bytes before it, so a coordinate that ignored the
+    /// hole would name, for every later record, a position occupied by
+    /// something else — and `packet_for` would resolve it without complaint.
+    pub(crate) fn note_gap(&mut self, index: usize, bytes_missing: u64) {
+        let held = core::mem::take(&mut self.pending[index]).len();
+        self.stream_at[index] = self.stream_at[index]
+            .saturating_add(held)
+            .saturating_add(bytes_missing as usize);
     }
 
     /// The per-direction census, `[A, B]`, with each direction's unwalked tail

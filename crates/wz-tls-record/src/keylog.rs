@@ -262,6 +262,39 @@ impl KeyLog {
         out
     }
 
+    /// R311y661 (§1.2a) — fold another log's contents into this one.
+    ///
+    /// A capture file may carry more than one Decryption Secrets Block: a
+    /// pcapng written in sections has one per section, and a file merged from
+    /// two captures has both. Keeping only the last would lose every connection
+    /// but the final block's, and would do it silently — the log would simply
+    /// report fewer connections than the file described.
+    ///
+    /// The merge rule is `parse`'s own, applied one layer up: a repeated label
+    /// for a connection REPLACES, so the later block wins, and the refused and
+    /// unparsed tallies ADD, because they count lines and the lines are all
+    /// still there.
+    pub fn absorb(&mut self, other: Self) {
+        for (random, secrets) in other.connections {
+            let slot = match self.connections.iter_mut().find(|(r, _)| *r == random) {
+                Some((_, s)) => s,
+                None => {
+                    self.connections
+                        .push((random, ConnectionSecrets::default()));
+                    &mut self.connections.last_mut().expect("just pushed").1
+                }
+            };
+            for (label, secret) in secrets.entries {
+                match slot.entries.iter_mut().find(|(l, _)| *l == label) {
+                    Some((_, existing)) => *existing = secret,
+                    None => slot.entries.push((label, secret)),
+                }
+            }
+        }
+        self.refused.extend(other.refused);
+        self.unparsed += other.unparsed;
+    }
+
     /// The secrets for one connection, selected by its ClientHello random.
     pub fn get(&self, random: &ClientRandom) -> Option<&ConnectionSecrets> {
         self.connections

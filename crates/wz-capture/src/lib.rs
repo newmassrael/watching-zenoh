@@ -432,6 +432,69 @@ fn dir_index(direction: Direction) -> usize {
     }
 }
 
+/// R311y661 — the inverse of [`dir_index`].
+fn idx_direction(index: usize) -> Direction {
+    if index == 0 {
+        Direction::A
+    } else {
+        Direction::B
+    }
+}
+
+/// R311y661 (§1.2a) — rewrite decrypted frames' offsets from PLAINTEXT space
+/// into the flow's TCP stream space.
+///
+/// `spans` is `(plaintext_offset, stream_offset)` for each opened record, in
+/// order: the record starting at plaintext offset `p` began at stream offset
+/// `s`. A frame at plaintext offset `f` belongs to the LAST span whose `p <= f`,
+/// and takes that span's `s`.
+///
+/// The frame's position INSIDE the record is deliberately not added to `s`.
+/// Those are two different measures — plaintext bytes and ciphertext bytes — and
+/// adding one to the other would produce a number in neither space, which is a
+/// worse answer than the record's own start. What the offset must support is
+/// `packet_for`, and every byte of a record arrives in the packet that completes
+/// it or earlier, so the record's start resolves to a packet that genuinely
+/// carried this frame's bytes.
+fn remap_decrypted_offsets(frames: &mut [PassiveFrame], spans: &[(usize, usize)]) {
+    for frame in frames {
+        let span = spans
+            .iter()
+            .rev()
+            .find(|(plain_at, _)| *plain_at <= frame.stream_offset);
+        if let Some((_, stream_offset)) = span {
+            frame.stream_offset = *stream_offset;
+        }
+    }
+}
+
+/// R311y661 (§1.2a) — what one [`Dissection::decrypt_with`] pass did.
+///
+/// Returned rather than only recorded per flow, because the caller's question
+/// is usually capture-wide ("did supplying these keys accomplish anything") and
+/// answering it by folding [`Dissection::encrypted_flows`] means a caller
+/// reimplementing this loop.
+///
+/// `flows - decrypted - refused` is not a fourth category: a flow the opener
+/// accepted and whose records then refused the keys is counted in `flows` and in
+/// neither of the other two, which is exactly the partial state
+/// [`tls::NotDecrypted::RecordRefusedKeys`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DecryptionSummary {
+    /// Encrypted flows this pass considered.
+    pub flows: usize,
+    /// Flows every kept record of which opened.
+    pub decrypted: usize,
+    /// Flows the opener declined before any record was tried.
+    pub refused: usize,
+    /// Records opened, over every flow and direction.
+    pub records: usize,
+    /// zenoh transport messages decoded out of the plaintext.
+    ///
+    /// The number the whole track exists to move off zero.
+    pub frames: usize,
+}
+
 /// R311y615 — which of a [`Dissection`]'s two flow vectors an index refers to.
 ///
 /// Exists only so [`Dissection::advance_clock`] can be written once for both:
@@ -630,7 +693,23 @@ impl FlowDissection {
         match &self.framing {
             Framing::Encrypted(state) => Some(tls::EncryptedFlow {
                 per_direction: state.census(),
-                not_decrypted: tls::NotDecrypted::NoKeysSupplied,
+                // R311y661 — what a decryption pass FOUND, and only where one
+                // ran. The unconditional `NoKeysSupplied` this replaced was a
+                // false statement about every capture that carried its own key
+                // log: the reader had parsed those keys out of the file's
+                // Decryption Secrets Block and dropped them on the floor.
+                not_decrypted: match state.outcome {
+                    Some(outcome) => outcome,
+                    None => Some(tls::NotDecrypted::NoKeysSupplied),
+                },
+                decrypted_records: state.opened,
+                client_direction: state.client_direction.map(|d| {
+                    if d == 0 {
+                        Direction::A
+                    } else {
+                        Direction::B
+                    }
+                }),
                 client_random: state.client_random,
                 kept_records: state.kept.clone(),
                 records_dropped: state.dropped,
@@ -718,6 +797,13 @@ impl FlowDissection {
                             let mut state = alloc::boxed::Box::<tls::TlsFlowState>::default();
                             state.client_random =
                                 tls::client_hello_random(&self.held[dir_index(direction)]);
+                            // R311y661 — and WHICH SIDE sent it, recorded here
+                            // for the same reason the random is: this is the
+                            // one place the hello has been positively
+                            // identified, and the direction it arrived on is
+                            // known only here. A decryptor picks between the
+                            // client's and the server's traffic secret with it.
+                            state.client_direction = Some(dir_index(direction));
                             Framing::Encrypted(state)
                         }
                         // R311y649 (§1.2a) — and where the ClientHello question
@@ -1072,8 +1158,11 @@ impl FlowDissection {
             // Counting stops for that direction, which is why the census is a
             // FLOOR after a gap and the report says so through the same
             // `gaps_forced` counter every other framing feeds.
+            // R311y661 — and the direction's STREAM COORDINATE steps over the
+            // hole, which the bare `clear()` did not do. See
+            // `TlsFlowState::note_gap`.
             Framing::Encrypted(state) => {
-                state.pending[dir_index(direction)].clear();
+                state.note_gap(dir_index(direction), bytes_missing);
             }
         }
     }
@@ -1631,6 +1720,23 @@ pub struct Dissection {
     /// nothing, and this one asks for a larger `max_flows` — advice about the
     /// wrong knob is worse than none, which is why they are not one field.
     evicted_chains: usize,
+    /// R311y661 (§1.2a) — the Decryption Secrets Blocks the capture FILE
+    /// carried, kept so a caller can build an opener out of the capture's own
+    /// key material.
+    ///
+    /// Empty for a live tap, for a classic pcap (the format has no such block),
+    /// and for a pcapng that simply carried none.
+    ///
+    /// ## Why this had to be carried rather than looked up again
+    ///
+    /// `pcapng::parse` has read these blocks since R311y658 and `from_pcapng`
+    /// threw them away — it copied the packets into the dissection and dropped
+    /// everything else the file said. So the keys were in the file, were parsed,
+    /// and were unreachable from the object the report is made of; the report
+    /// then said `no_keys_supplied` about exactly that file. A consumer could
+    /// only have fixed it by parsing the file a second time itself, which is a
+    /// second reader of the same bytes and the drift this crate keeps closing.
+    decryption_secrets: Vec<pcapng::DecryptionSecrets>,
 }
 
 /// Hand-written for ONE field: `gap_patience` defaults to
@@ -1658,6 +1764,7 @@ impl Default for Dissection {
             capture_origin_ms: None,
             abandoned_chains: 0,
             evicted_chains: 0,
+            decryption_secrets: Vec::new(),
         }
     }
 }
@@ -2008,6 +2115,118 @@ impl Dissection {
     /// verdict.
     pub fn encrypted_flows(&self) -> Vec<tls::EncryptedFlow> {
         self.flows.iter().filter_map(|f| f.encrypted()).collect()
+    }
+
+    /// R311y661 (§1.2a) — the Decryption Secrets Blocks the capture file
+    /// carried, in file order.
+    ///
+    /// What a caller builds a [`tls::RecordOpener`] out of. Handed on UNPARSED,
+    /// exactly as `pcapng` read them: their `secrets_type` says which protocol's
+    /// secrets they are, and a reader that guessed would parse another
+    /// protocol's block as a TLS key log and report it as an empty one.
+    pub fn decryption_secrets(&self) -> &[pcapng::DecryptionSecrets] {
+        &self.decryption_secrets
+    }
+
+    /// R311y661 (§1.2a) — open every encrypted flow's kept records with
+    /// `opener`, and feed the plaintext to the zenoh reader.
+    ///
+    /// This is the round that made the whole TLS track reach a report. Before
+    /// it the chain was proven end to end in a test and had NO production
+    /// caller: a capture carrying its own keys still reported zero frames and
+    /// `no_keys_supplied`, which is a false statement about a file this reader
+    /// could open.
+    ///
+    /// ## What it does, and the three things it refuses to do
+    ///
+    /// For each flow recognised as encrypted, the opener is asked once whether
+    /// the flow can be served at all, and then given each kept record of each
+    /// direction in index order. The plaintext of the `application_data` ones is
+    /// pushed through the SAME `feed_stream` path a cleartext `tcp/...` flow
+    /// uses — the zenoh session inside TLS is an ordinary length-prefixed byte
+    /// stream, so a second reader for it would be a second implementation of
+    /// what this crate already does.
+    ///
+    /// 1. It does not feed non-`application_data` plaintext onward. A
+    ///    post-handshake `NewSessionTicket` is `handshake` INSIDE a record whose
+    ///    outer type reads `application_data`, and injecting it into a
+    ///    length-prefixed stream desynchronises everything after it.
+    /// 2. It does not skip a record that refused the keys. The direction stops
+    ///    at that index and says so: a byte stream with a hole punched in it
+    ///    does not resume, it decodes garbage that looks like data.
+    /// 3. It does not run twice over a flow. A second pass would push the same
+    ///    plaintext into a reader that has already consumed it.
+    ///
+    /// ## The coordinate
+    ///
+    /// Frames decoded here are offset within the PLAINTEXT stream, which is a
+    /// different space from the TCP one — shorter by every record header and
+    /// AEAD tag. Reporting that number as `stream_offset` would make
+    /// [`FlowDissection::packet_for`] resolve it against the TCP-space run map
+    /// and silently name the wrong packet, which is R311y645's defect exactly.
+    /// Each frame is therefore mapped back to the stream offset of the RECORD
+    /// its bytes came out of, via [`tls::EncryptedRecord::stream_offset`].
+    pub fn decrypt_with(&mut self, opener: &mut impl tls::RecordOpener) -> DecryptionSummary {
+        let mut summary = DecryptionSummary::default();
+        for flow in &mut self.flows {
+            let Framing::Encrypted(state) = &mut flow.framing else {
+                continue;
+            };
+            // (3) above. A pass that already ran owns this flow's frames.
+            if state.outcome.is_some() {
+                continue;
+            }
+            summary.flows += 1;
+            let client_direction = state.client_direction.map(idx_direction);
+            if let Err(reason) = opener.begin_flow(state.client_random.as_ref(), client_direction) {
+                state.outcome = Some(Some(reason));
+                summary.refused += 1;
+                continue;
+            }
+            let mut refusal = None;
+            // Per direction: the opened plaintext, and the map from a byte
+            // offset within it back to the record that produced it.
+            let mut plaintext: [Vec<u8>; 2] = [Vec::new(), Vec::new()];
+            let mut spans: [Vec<(usize, usize)>; 2] = [Vec::new(), Vec::new()];
+            for index in 0..2usize {
+                let direction = idx_direction(index);
+                for record in &state.kept[index] {
+                    match opener.open(direction, record.index, &record.bytes) {
+                        Some(opened) => {
+                            state.opened[index] += 1;
+                            summary.records += 1;
+                            // (1) above.
+                            if opened.content_type == tls::CT_APPLICATION_DATA {
+                                spans[index].push((plaintext[index].len(), record.stream_offset));
+                                plaintext[index].extend_from_slice(&opened.plaintext);
+                            }
+                        }
+                        None => {
+                            // (2) above — this direction stops here.
+                            refusal.get_or_insert(tls::NotDecrypted::RecordRefusedKeys {
+                                direction,
+                                index: record.index,
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+            state.outcome = Some(refusal);
+            if refusal.is_none() {
+                summary.decrypted += 1;
+            }
+            for index in 0..2usize {
+                if plaintext[index].is_empty() {
+                    continue;
+                }
+                let before = flow.frames.len();
+                flow.feed_stream(idx_direction(index), &plaintext[index]);
+                remap_decrypted_offsets(&mut flow.frames[before..], &spans[index]);
+                summary.frames += flow.frames.len() - before;
+            }
+        }
+        summary
     }
 
     /// R311y650 (§1.2a) — how much of this capture was encrypted, over every
@@ -2610,6 +2829,9 @@ impl Dissection {
     pub fn from_pcapng(bytes: &[u8]) -> Result<Self, pcapng::PcapngError> {
         let file = pcapng::parse(bytes)?;
         let mut out = Self::new();
+        // R311y661 (§1.2a) — the file's own key material, carried instead of
+        // discarded. See `Dissection::decryption_secrets`.
+        out.decryption_secrets = file.decryption_secrets.clone();
         // R311y607 — carried BEFORE the packets, so a caller that stops early
         // still learns the capture was incomplete.
         out.capture_reported_drops = file
@@ -7294,9 +7516,11 @@ mod tls_flow_tests {
             0,
             "ciphertext must never reach the zenoh decoder"
         );
+        // R311y661 — with NO decryption pass run over this dissection, which is
+        // now the thing that makes the statement true rather than a constant.
         assert_eq!(
             enc[0].not_decrypted,
-            crate::tls::NotDecrypted::NoKeysSupplied
+            Some(crate::tls::NotDecrypted::NoKeysSupplied)
         );
         // Both directions are counted, not just the one that settled the
         // question: a census of the client alone would report half a session.
@@ -8107,5 +8331,629 @@ mod tls_flow_tests {
             !crate::report::CaptureReport::of(&d).is_complete(),
             "and the verdict must carry the shortfall"
         );
+    }
+
+    // ── R311y661 (§1.2a) — the PRODUCTION path. R311y657..660 proved a capture
+    //    can be decrypted, in a test that built its own everything; nothing
+    //    called any of it from the reader, so a capture carrying its own keys
+    //    still reported `no_keys_supplied` and zero frames.
+    //
+    //    The opener here is a FAKE and carries no cryptography, which is the
+    //    point: what these tests gate is the WIRING — that records reach an
+    //    opener, that plaintext reaches the zenoh reader, that a refusal stops a
+    //    direction, that offsets come back in the right space. wz-capture has no
+    //    third-party dependency and these lanes run everywhere it does. The real
+    //    cipher is gated against rustls in `wz-tls-record`. ──
+
+    /// An opener that "decrypts" by stripping the 5-byte record header.
+    ///
+    /// Records are built by the fixtures below as `header || content_type ||
+    /// plaintext`, so opening one is a slice — the same shape a real AEAD
+    /// produces (inner content type at the end, here at the front for legibility)
+    /// with none of its machinery.
+    struct FakeOpener {
+        /// Indices this opener refuses, per direction.
+        refuse: [alloc::collections::BTreeSet<u64>; 2],
+        /// Flows it declines outright, and with what reason.
+        decline: Option<crate::tls::NotDecrypted>,
+        /// What `begin_flow` was told, in call order.
+        seen: Vec<(Option<[u8; 32]>, Option<Direction>)>,
+        /// Every `(direction, index)` it was asked to open.
+        asked: Vec<(Direction, u64)>,
+    }
+
+    impl FakeOpener {
+        fn new() -> Self {
+            Self {
+                refuse: [
+                    alloc::collections::BTreeSet::new(),
+                    alloc::collections::BTreeSet::new(),
+                ],
+                decline: None,
+                seen: Vec::new(),
+                asked: Vec::new(),
+            }
+        }
+    }
+
+    impl crate::tls::RecordOpener for FakeOpener {
+        fn begin_flow(
+            &mut self,
+            client_random: Option<&[u8; 32]>,
+            client_direction: Option<Direction>,
+        ) -> Result<(), crate::tls::NotDecrypted> {
+            self.seen.push((client_random.copied(), client_direction));
+            match self.decline {
+                Some(reason) => Err(reason),
+                None => Ok(()),
+            }
+        }
+
+        fn open(
+            &mut self,
+            direction: Direction,
+            index: u64,
+            record: &[u8],
+        ) -> Option<crate::tls::OpenedRecord> {
+            self.asked.push((direction, index));
+            if self.refuse[dir_index(direction)].contains(&index) {
+                return None;
+            }
+            let body = record.get(5..)?;
+            Some(crate::tls::OpenedRecord {
+                content_type: *body.first()?,
+                plaintext: body[1..].to_vec(),
+            })
+        }
+    }
+
+    /// A TLS record whose "plaintext" is `content_type || payload`, which is
+    /// what [`FakeOpener`] opens.
+    fn protected(content_type: u8, payload: &[u8]) -> Vec<u8> {
+        let mut body = alloc::vec![content_type];
+        body.extend_from_slice(payload);
+        record(0x17, [0x03, 0x03], &body)
+    }
+
+    /// One framed zenoh KeepAlive — the unit a decrypted record must yield.
+    fn framed_unit(id: u8) -> Vec<u8> {
+        let unit = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE, id];
+        let mut out = (unit.len() as u16).to_le_bytes().to_vec();
+        out.extend_from_slice(&unit);
+        out
+    }
+
+    /// A ClientHello carrying `random`, well-formed enough for the recogniser.
+    fn hello_with_random(random: &[u8; 32]) -> Vec<u8> {
+        let mut body = alloc::vec![0x03u8, 0x03];
+        body.extend_from_slice(random);
+        body.resize(0x30, 0);
+        let mut handshake = alloc::vec![0x01u8, 0x00, 0x00, body.len() as u8];
+        handshake.extend_from_slice(&body);
+        record(0x16, [0x03, 0x01], &handshake)
+    }
+
+    /// A client-side TLS flow: a ClientHello then `records`, one packet each.
+    fn decryptable_flow(random: &[u8; 32], records: &[Vec<u8>]) -> Dissection {
+        let mut d = Dissection::new();
+        let mut seq = 1000u32;
+        let mut i = 0usize;
+        let mut push = |d: &mut Dissection, bytes: &[u8], seq: &mut u32| {
+            d.push_packet(LINKTYPE_ETHERNET, i, &tcp_packet(1111, 7447, *seq, bytes));
+            *seq += bytes.len() as u32;
+            i += 1;
+        };
+        push(&mut d, &hello_with_random(random), &mut seq);
+        for r in records {
+            push(&mut d, r, &mut seq);
+        }
+        d.finish();
+        d
+    }
+
+    /// R311y661 — THE ROUND. A capture whose keys are available decodes zenoh
+    /// frames, and the flow stops saying its plaintext is absent.
+    #[test]
+    fn a_flow_whose_records_open_yields_zenoh_frames_and_says_it_was_decrypted() {
+        let random = [7u8; 32];
+        let records: Vec<Vec<u8>> = (0..3u8)
+            .map(|i| protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(i)))
+            .collect();
+        let mut d = decryptable_flow(&random, &records);
+
+        // BEFORE: the pre-R311y661 state, asserted so the test cannot pass by
+        // the frames having been there all along.
+        assert_eq!(d.flows()[0].frames.len(), 0, "ciphertext decodes nothing");
+        assert_eq!(
+            d.encrypted_flows()[0].not_decrypted,
+            Some(crate::tls::NotDecrypted::NoKeysSupplied)
+        );
+
+        let mut opener = FakeOpener::new();
+        let summary = d.decrypt_with(&mut opener);
+
+        assert_eq!(
+            opener.seen,
+            alloc::vec![(Some(random), Some(Direction::A))],
+            "the opener is told the flow's identity AND which side is the client \
+             -- without the second it picks a traffic secret by coin flip"
+        );
+        assert_eq!(summary.flows, 1);
+        assert_eq!(summary.decrypted, 1);
+        assert_eq!(summary.records, 3);
+        assert_eq!(summary.frames, 3, "summary={summary:?}");
+        assert_eq!(
+            d.flows()[0].frames.len(),
+            3,
+            "THE POINT: the zenoh session inside TLS is now decoded"
+        );
+        let enc = d.encrypted_flows();
+        assert_eq!(enc[0].not_decrypted, None, "and the flow says so");
+        assert_eq!(enc[0].decrypted_records, [3, 0]);
+    }
+
+    /// R311y661 — and the offsets those frames carry are in the flow's TCP
+    /// stream space, not the plaintext's.
+    ///
+    /// THE DISCRIMINATOR for R311y645's defect class. Plaintext space is shorter
+    /// than TCP space by every record header, so the two agree only for the
+    /// first record and diverge by a growing amount after it. A frame carrying
+    /// its plaintext offset resolves, through `packet_for`, to a packet that is
+    /// merely NEARBY — and resolves silently, because both numbers are valid
+    /// offsets into a stream that exists.
+    #[test]
+    fn a_decrypted_frames_offset_resolves_to_the_packet_that_carried_it() {
+        let random = [7u8; 32];
+        let records: Vec<Vec<u8>> = (0..3u8)
+            .map(|i| protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(i)))
+            .collect();
+        let mut d = decryptable_flow(&random, &records);
+        d.decrypt_with(&mut FakeOpener::new());
+
+        let frames: Vec<usize> = d.flows()[0]
+            .frames
+            .iter()
+            .map(|f| f.stream_offset)
+            .collect();
+        // The hello is 5 (record header) + 4 (handshake header) + 48 (body) =
+        // 57 bytes; each protected record is 5 header + 1 inner type + 4 unit =
+        // 10. So the records begin at 57, 67 and 77 of the TCP stream, while
+        // their plaintext begins at 0, 4 and 8.
+        assert_eq!(
+            frames,
+            alloc::vec![57, 67, 77],
+            "offsets must be TCP-space; plaintext space would read [0, 4, 8]"
+        );
+
+        // AND THE COORDINATE IS USED, not merely stored: each frame resolves to
+        // the packet its record actually arrived in. Packet 0 is the hello, so
+        // the three records are packets 1, 2 and 3.
+        let resolved: Vec<Option<usize>> = d.flows()[0]
+            .frames
+            .iter()
+            .map(|f| d.flows()[0].packet_for(f.direction, f.stream_offset))
+            .collect();
+        assert_eq!(
+            resolved,
+            alloc::vec![Some(1), Some(2), Some(3)],
+            "a decrypted frame must attribute to the packet that carried it"
+        );
+    }
+
+    /// R311y661 — a record whose INNER type is not `application_data` must not
+    /// reach the zenoh reader.
+    ///
+    /// The failure this closes is invisible without it: TLS 1.3 puts the real
+    /// content type INSIDE the protected payload and leaves the outer one
+    /// reading `application_data` for everything after the ServerHello, so a
+    /// post-handshake `NewSessionTicket` — which servers send routinely, mid
+    /// session, with no warning — is indistinguishable from traffic until it is
+    /// opened. Feeding its bytes into a length-prefixed stream desynchronises
+    /// every message after it.
+    #[test]
+    fn a_post_handshake_message_is_opened_and_not_fed_to_the_zenoh_reader() {
+        let random = [7u8; 32];
+        // A NewSessionTicket between two data records. Its body is deliberately
+        // framed-unit-shaped, so a build that fed it onward would decode it as a
+        // zenoh message rather than merely stumbling.
+        let records = alloc::vec![
+            protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(0)),
+            protected(crate::tls::CT_HANDSHAKE, &framed_unit(1)),
+            protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(2)),
+        ];
+        let mut d = decryptable_flow(&random, &records);
+        let summary = d.decrypt_with(&mut FakeOpener::new());
+
+        assert_eq!(
+            summary.records, 3,
+            "all three OPEN -- that is not the question"
+        );
+        assert_eq!(
+            summary.frames, 2,
+            "only the two application-data ones are zenoh"
+        );
+        // WHICH two, and not merely how many: the offsets name the records the
+        // frames came out of. The ticket sits at 67, between them, so a build
+        // that fed it onward reads [57, 67, 77] here.
+        let offsets: Vec<usize> = d.flows()[0]
+            .frames
+            .iter()
+            .map(|f| f.stream_offset)
+            .collect();
+        assert_eq!(
+            offsets,
+            alloc::vec![57, 77],
+            "the handshake record's payload must not appear as a frame"
+        );
+        assert_eq!(
+            d.encrypted_flows()[0].not_decrypted,
+            None,
+            "and the flow is still fully decrypted -- a ticket is not a failure"
+        );
+    }
+
+    /// R311y661 — a record that refuses the keys stops its direction and is
+    /// named.
+    ///
+    /// Skipping it and carrying on is the tempting shape and the wrong one: the
+    /// bytes after a hole in a length-prefixed stream do not begin where the
+    /// reader thinks they do, so a skip converts one unreadable record into
+    /// arbitrary garbage decoded confidently. The epoch makes this the ORDINARY
+    /// case — TLS 1.3 restarts the AEAD sequence on every key change — so the
+    /// state is reached by real captures, not just by this test.
+    #[test]
+    fn a_record_that_refuses_the_keys_stops_its_direction_and_is_named() {
+        let random = [7u8; 32];
+        let records: Vec<Vec<u8>> = (0..4u8)
+            .map(|i| protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(i)))
+            .collect();
+        let mut d = decryptable_flow(&random, &records);
+
+        let mut opener = FakeOpener::new();
+        opener.refuse[0].insert(2);
+        let summary = d.decrypt_with(&mut opener);
+
+        assert_eq!(
+            opener.asked,
+            alloc::vec![(Direction::A, 0), (Direction::A, 1), (Direction::A, 2),],
+            "record 3 must never be asked for: the direction stopped at 2"
+        );
+        assert_eq!(summary.records, 2);
+        assert_eq!(
+            summary.decrypted, 0,
+            "a partially-opened flow is not decrypted"
+        );
+        assert_eq!(summary.frames, 2, "and the two that DID open are kept");
+        let enc = d.encrypted_flows();
+        assert_eq!(
+            enc[0].not_decrypted,
+            Some(crate::tls::NotDecrypted::RecordRefusedKeys {
+                direction: Direction::A,
+                index: 2,
+            }),
+            "the index a reader needs in order to find the epoch boundary"
+        );
+        assert_eq!(
+            enc[0].decrypted_records,
+            [2, 0],
+            "partial is a real state and the count must show it"
+        );
+    }
+
+    /// R311y661 — an opener that declines the flow reports ITS reason, and no
+    /// record is tried.
+    #[test]
+    fn a_declined_flow_reports_the_openers_reason_and_opens_nothing() {
+        let random = [7u8; 32];
+        let records = alloc::vec![protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(0))];
+        let mut d = decryptable_flow(&random, &records);
+
+        let mut opener = FakeOpener::new();
+        opener.decline = Some(crate::tls::NotDecrypted::NoKeyForSession);
+        let summary = d.decrypt_with(&mut opener);
+
+        assert!(opener.asked.is_empty(), "a declined flow costs no attempts");
+        assert_eq!(summary.refused, 1);
+        assert_eq!(summary.frames, 0);
+        assert_eq!(
+            d.encrypted_flows()[0].not_decrypted,
+            Some(crate::tls::NotDecrypted::NoKeyForSession),
+            "and NOT `no_keys_supplied` -- keys were supplied, they were the \
+             wrong ones, and the two send a reader to different places"
+        );
+    }
+
+    /// R311y661 — a mid-session flow has no identity to be selected by, and the
+    /// opener is the layer that says so.
+    ///
+    /// The reason must survive as its own variant rather than collapsing into
+    /// `no_keys_supplied`: this capture cannot be fixed by finding a key log,
+    /// only by capturing from the handshake.
+    #[test]
+    fn a_mid_session_flow_is_announced_with_no_identity() {
+        let mut d = Dissection::new();
+        let records: Vec<Vec<u8>> = (0..2u8)
+            .map(|i| protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(i)))
+            .collect();
+        let mut stream = Vec::new();
+        for r in &records {
+            stream.extend_from_slice(r);
+        }
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &stream));
+        d.finish();
+
+        let mut opener = FakeOpener::new();
+        opener.decline = Some(crate::tls::NotDecrypted::NoSessionIdentity);
+        d.decrypt_with(&mut opener);
+
+        assert_eq!(
+            opener.seen,
+            alloc::vec![(None, None)],
+            "no ClientHello means no random AND no client direction"
+        );
+        assert_eq!(
+            d.encrypted_flows()[0].not_decrypted,
+            Some(crate::tls::NotDecrypted::NoSessionIdentity)
+        );
+    }
+
+    /// R311y661 — a second pass must not push the same plaintext through a
+    /// reader that has already consumed it.
+    ///
+    /// A `Dissection` is a long-lived object with public mutators; nothing stops
+    /// a caller running the pass twice, and a stream reader handed the same
+    /// bytes again decodes them again. The frames would double and the second
+    /// set would be as real-looking as the first.
+    #[test]
+    fn a_second_decryption_pass_does_not_decode_the_same_records_twice() {
+        let random = [7u8; 32];
+        let records: Vec<Vec<u8>> = (0..2u8)
+            .map(|i| protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(i)))
+            .collect();
+        let mut d = decryptable_flow(&random, &records);
+        d.decrypt_with(&mut FakeOpener::new());
+        assert_eq!(d.flows()[0].frames.len(), 2);
+
+        let mut again = FakeOpener::new();
+        let summary = d.decrypt_with(&mut again);
+        assert!(
+            again.seen.is_empty(),
+            "the flow is already settled; it must not be offered again"
+        );
+        assert_eq!(summary.flows, 0);
+        assert_eq!(d.flows()[0].frames.len(), 2, "and no frame is duplicated");
+    }
+
+    /// R311y661 — the report's `decrypted` and `reason` are facts now.
+    ///
+    /// Both were constants: `false` was in the format string and the reason
+    /// resolved to `no_keys_supplied` whatever had happened.
+    #[test]
+    fn the_report_states_what_the_decryption_pass_actually_found() {
+        let random = [7u8; 32];
+        let records = alloc::vec![protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(0))];
+        let mut d = decryptable_flow(&random, &records);
+
+        let before = crate::report::CaptureReport::of(&d).to_json();
+        assert!(
+            before.contains("\"decrypted\":false")
+                && before.contains("\"reason\":\"no_keys_supplied\""),
+            "the no-keys state must still read as it did: {before}"
+        );
+
+        d.decrypt_with(&mut FakeOpener::new());
+        let after = crate::report::CaptureReport::of(&d).to_json();
+        assert!(
+            after.contains("\"decrypted\":true"),
+            "a decrypted capture must say so: {after}"
+        );
+        assert!(
+            after.contains("\"reason\":\"none\""),
+            "and carry no reason for an absence that is not there: {after}"
+        );
+        assert!(
+            after.contains("\"records_decrypted\":1") && after.contains("\"flows_decrypted\":1"),
+            "with the counts a reader checks it against: {after}"
+        );
+    }
+
+    /// R311y661 — a record after a HOLE carries the offset the hole put it at.
+    ///
+    /// The claim under test is arithmetic that no other test can see: a
+    /// direction that lost a segment resumes further along its stream than the
+    /// bytes before it ended, and a coordinate that ignored the loss would name,
+    /// for every later record, a position occupied by something else. `packet_for`
+    /// resolves such a number without complaint — it is a valid offset into a
+    /// stream that exists — so the wrong answer arrives as a confident one.
+    ///
+    /// Before this round the encrypted arm's gap handler only cleared the held
+    /// tail; there was no coordinate to keep, so there was nothing to notice.
+    #[test]
+    fn a_record_after_a_hole_carries_the_offset_the_hole_put_it_at() {
+        let random = [7u8; 32];
+        let hello = hello_with_random(&random);
+        let first = protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(0));
+        let after = protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(1));
+
+        let mut d = Dissection::new();
+        d.set_gap_patience(Some(4));
+        let mut opening = hello.clone();
+        opening.extend_from_slice(&first);
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &tcp_packet(1111, 7447, 1000, &opening),
+        );
+        // A 50-byte hole, then a record that begins exactly on a boundary.
+        const HOLE: u32 = 50;
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &tcp_packet(1111, 7447, 1000 + opening.len() as u32 + HOLE, &after),
+        );
+        d.finish();
+
+        let enc = d.encrypted_flows();
+        let offsets: Vec<usize> = enc[0].kept_records[0]
+            .iter()
+            .map(|r| r.stream_offset)
+            .collect();
+        // The hello is 57 and the first record 10, so it sits at 57. The second
+        // begins 50 bytes of hole later: 57 + 10 + 50 = 117.
+        assert_eq!(
+            offsets,
+            alloc::vec![57, 117],
+            "a coordinate blind to the hole would read [57, 67] -- and 67 is a \
+             real offset in this stream, so nothing downstream would object"
+        );
+    }
+
+    /// R311y661 — the capture-wide `decrypted` claim is false while ANY flow is
+    /// not, and the reason says `mixed` rather than naming one flow's problem as
+    /// the capture's.
+    ///
+    /// The single-flow tests cannot see either half: with one flow, "all flows
+    /// decrypted" and "this flow decrypted" are the same statement, and the
+    /// reason has nothing to disagree with. The pre-R311y661 code read
+    /// `encrypted_flows().first()` and presented that flow's reason as the
+    /// capture's, which is wrong the moment two flows differ.
+    #[test]
+    fn a_capture_is_not_decrypted_while_one_of_its_flows_is_not() {
+        let random = [7u8; 32];
+        let records = alloc::vec![protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(0))];
+        let mut d = decryptable_flow(&random, &records);
+        // A SECOND encrypted flow, on its own 5-tuple, with no ClientHello --
+        // so it is recognised by its chain and has no identity to be keyed by.
+        let mut chain = Vec::new();
+        for i in 0..2u8 {
+            chain.extend_from_slice(&protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(i)));
+        }
+        d.push_packet(LINKTYPE_ETHERNET, 9, &tcp_packet(2222, 7447, 1000, &chain));
+        d.finish();
+        assert_eq!(d.encrypted_flows().len(), 2, "the fixture needs two flows");
+
+        /// Serves the flow that has an identity and declines the one that does
+        /// not — which is what a real key log does.
+        struct ByIdentity;
+        impl crate::tls::RecordOpener for ByIdentity {
+            fn begin_flow(
+                &mut self,
+                client_random: Option<&[u8; 32]>,
+                _client_direction: Option<Direction>,
+            ) -> Result<(), crate::tls::NotDecrypted> {
+                match client_random {
+                    Some(_) => Ok(()),
+                    None => Err(crate::tls::NotDecrypted::NoSessionIdentity),
+                }
+            }
+            fn open(
+                &mut self,
+                _direction: Direction,
+                _index: u64,
+                record: &[u8],
+            ) -> Option<crate::tls::OpenedRecord> {
+                let body = record.get(5..)?;
+                Some(crate::tls::OpenedRecord {
+                    content_type: *body.first()?,
+                    plaintext: body[1..].to_vec(),
+                })
+            }
+        }
+
+        let summary = d.decrypt_with(&mut ByIdentity);
+        assert_eq!(summary.flows, 2);
+        assert_eq!(summary.decrypted, 1);
+        assert_eq!(summary.refused, 1);
+
+        let json = crate::report::CaptureReport::of(&d).to_json();
+        assert!(
+            json.contains("\"decrypted\":false"),
+            "one flow of two is not a decrypted capture: {json}"
+        );
+        assert!(
+            json.contains("\"flows_decrypted\":1"),
+            "and the partial state must be readable: {json}"
+        );
+        assert!(
+            json.contains("\"reason\":\"no_session_identity\""),
+            "one undecrypted flow, so its reason IS the capture's: {json}"
+        );
+
+        // AND WITH TWO DIFFERENT REFUSALS the reason must stop naming one of
+        // them. A third flow, declined for another cause.
+        let mut third = Vec::new();
+        for i in 0..2u8 {
+            third.extend_from_slice(&protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(i)));
+        }
+        let mut hello_flow = hello_with_random(&[9u8; 32]);
+        hello_flow.extend_from_slice(&third);
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            10,
+            &tcp_packet(3333, 7447, 1000, &hello_flow),
+        );
+        d.finish();
+
+        struct AlwaysNoKey;
+        impl crate::tls::RecordOpener for AlwaysNoKey {
+            fn begin_flow(
+                &mut self,
+                _client_random: Option<&[u8; 32]>,
+                _client_direction: Option<Direction>,
+            ) -> Result<(), crate::tls::NotDecrypted> {
+                Err(crate::tls::NotDecrypted::NoKeyForSession)
+            }
+            fn open(
+                &mut self,
+                _direction: Direction,
+                _index: u64,
+                _record: &[u8],
+            ) -> Option<crate::tls::OpenedRecord> {
+                None
+            }
+        }
+        d.decrypt_with(&mut AlwaysNoKey);
+        let json = crate::report::CaptureReport::of(&d).to_json();
+        assert!(
+            json.contains("\"reason\":\"mixed\""),
+            "two flows refused for DIFFERENT causes: naming either one as the \
+             capture's reason sends a reader to the wrong remedy: {json}"
+        );
+    }
+
+    /// R311y661 — a capture FILE's own key material reaches the dissection.
+    ///
+    /// `from_pcapng` parsed the Decryption Secrets Blocks since R311y658 and
+    /// dropped them: the keys were in the file, were read, and were unreachable
+    /// from the object the report is made of. A consumer could only recover them
+    /// by parsing the file a second time.
+    #[test]
+    fn a_capture_files_own_decryption_secrets_reach_the_dissection() {
+        const TLSK: u32 = 0x544c_534b;
+        let log = b"CLIENT_TRAFFIC_SECRET_0 0011 2233\n";
+        let mut file = crate::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &[(0, 0, &[0u8; 60])]);
+
+        let mut body = TLSK.to_le_bytes().to_vec();
+        body.extend_from_slice(&(log.len() as u32).to_le_bytes());
+        body.extend_from_slice(log);
+        while !body.len().is_multiple_of(4) {
+            body.push(0);
+        }
+        let total = (12 + body.len()) as u32;
+        let mut dsb = 0x0000_000Au32.to_le_bytes().to_vec();
+        dsb.extend_from_slice(&total.to_le_bytes());
+        dsb.extend_from_slice(&body);
+        dsb.extend_from_slice(&total.to_le_bytes());
+        file.extend_from_slice(&dsb);
+
+        let d = Dissection::from_pcapng(&file).expect("the file parses");
+        assert_eq!(
+            d.decryption_secrets().len(),
+            1,
+            "the file said it carried keys and the dissection must be able to \
+             hand them to an opener"
+        );
+        assert_eq!(d.decryption_secrets()[0].secrets_type, TLSK);
+        assert_eq!(d.decryption_secrets()[0].secrets, log);
     }
 }

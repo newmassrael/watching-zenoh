@@ -29,17 +29,23 @@ publish = false
 # already present because `transport-link-tls` pulls it through tokio-rustls --
 # this crate adds no new third-party name to the tree.
 ring = "0.17"
+# R311y661 (§1.2a) — the capture side, PROMOTED from a dev-dependency.
+#
+# R311y660 made it a dev-dependency because the whole chain existed only in a
+# test, and the constraint that decided the edge's DIRECTION still holds:
+# `wz-capture` may not gain a third-party dependency (its decode path builds for
+# the MCU profiles), so the edge cannot point the other way.
+#
+# What changed is that the join is now a shipped type rather than a test.
+# `capture::CaptureOpener` implements `wz_capture::tls::RecordOpener`, a trait
+# declared over there so the dependency INVERTS: the dissector defines what it
+# needs from a decryptor and never learns what an AEAD is, and this crate --
+# which already has ring -- supplies it. A production caller can therefore
+# decrypt a capture without writing the record loop itself, which is the thing
+# R311y660 left undone.
+wz-capture = { path = "../wz-capture" }
 
 [dev-dependencies]
-# R311y660 (§1.2a) — the capture side, for the END-TO-END test and nothing else.
-#
-# A DEV-dependency, which the constraint decides rather than a preference:
-# `wz-capture` may not gain a third-party dependency (its decode path builds for
-# the MCU profiles), so the edge cannot point that way. A dev-dependency creates
-# no runtime edge at all, and it is the only place the whole chain can be
-# exercised: a capture's records, a capture's key log, and this crate's key
-# schedule opening one with the other.
-wz-capture = { path = "../wz-capture" }
 # THE ORACLE, and never a dependency: rustls seals what this crate opens, and
 # derives what this crate derives. Two independent implementations agreeing is
 # the claim; one implementation agreeing with itself is not.
