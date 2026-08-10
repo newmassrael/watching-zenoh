@@ -113,10 +113,18 @@ impl<'a> CaptureReport<'a> {
         // and should not have — a peer on a different wire-spec vintage — which
         // is a fact about the sender, not a shortfall in the rows.
         let framing = self.dissection.framing_health();
+        //
+        // R311y631 (§1.2b) — `unaccounted_batch_bytes` DOES reach the verdict,
+        // on the same rule that keeps `reserved_headers` out of it: it counts
+        // bytes of a framing unit this reader could not attribute to any
+        // message, which is a shortfall in the rows and not a fact about the
+        // sender. A capture whose batches were walked only part way is a
+        // capture whose totals are a floor.
         if framing.gaps_forced > 0
             || framing.desyncs > 0
             || framing.ws_desyncs > 0
             || framing.sn_missing > 0
+            || framing.unaccounted_batch_bytes > 0
         {
             return false;
         }
@@ -226,7 +234,8 @@ impl<'a> CaptureReport<'a> {
             ",\"framing\":{{\"gaps_forced\":{},\"gap_bytes_missing\":{},\
              \"desyncs\":{},\"recoveries\":{},\"resync_skipped_bytes\":{},\
              \"ws_desyncs\":{},\"ws_recoveries\":{},\"ws_resync_skipped_bytes\":{},\
-             \"reserved_headers\":{},\"undefined_mandatory_exts\":{}}}",
+             \"reserved_headers\":{},\"undefined_mandatory_exts\":{},\
+             \"unaccounted_batch_bytes\":{}}}",
             f.gaps_forced,
             f.gap_bytes_missing,
             f.desyncs,
@@ -236,7 +245,8 @@ impl<'a> CaptureReport<'a> {
             f.ws_recoveries,
             f.ws_resync_skipped_bytes,
             f.reserved_headers,
-            f.undefined_mandatory_exts
+            f.undefined_mandatory_exts,
+            f.unaccounted_batch_bytes
         ));
         s.push_str(&format!(
             ",\"sequence\":{{\"frames\":{},\"missing\":{},\"gaps\":{},\
@@ -300,18 +310,21 @@ impl<'a> CaptureReport<'a> {
             || f.gaps_forced > 0
             || f.reserved_headers > 0
             || f.undefined_mandatory_exts > 0
+            || f.unaccounted_batch_bytes > 0
         {
             s.push_str(&format!(
                 "  framing: {} desync(s), {} recovered ({} bytes stepped over); \
                  {} forced gap(s) ({} bytes); {} reserved-flag header(s); \
-                 {} undefined-mandatory-extension frame(s)\n",
+                 {} undefined-mandatory-extension frame(s); \
+                 {} byte(s) of a batch left unaccounted for\n",
                 f.desyncs,
                 f.recoveries,
                 f.resync_skipped_bytes,
                 f.gaps_forced,
                 f.gap_bytes_missing,
                 f.reserved_headers,
-                f.undefined_mandatory_exts
+                f.undefined_mandatory_exts,
+                f.unaccounted_batch_bytes
             ));
         }
         if f.ws_desyncs > 0 {

@@ -50,7 +50,7 @@
 use alloc::vec::Vec;
 
 use crate::ext_header::{establishment_ext_id as est_ext, ext_eid};
-use crate::inbound::{parse_inbound, InboundFrame};
+use crate::inbound::{parse_inbound_consuming, InboundFrame};
 #[cfg(feature = "codec-frame")]
 use crate::network_message::{parse_frame_payload_best_effort, BatchParse};
 use crate::parse_error::InboundParseError;
@@ -308,9 +308,31 @@ pub struct PassiveFrame {
     /// stream, counted from the first byte the observer was given. The anchor
     /// a capture-side layer (G1) maps back to a packet.
     pub stream_offset: usize,
+    /// R311y631 (§1.2b) — position of this message WITHIN its framing unit,
+    /// counted from zero.
+    ///
+    /// [`Self::stream_offset`] names the framing unit and stops there: on a
+    /// datagram link it is a packet index, so every message batched into one
+    /// packet carries the same value. That was unambiguous only while a framing
+    /// unit held exactly one message, which is not what either reference
+    /// implementation does — both walk the unit to its end
+    /// (`zenoh-transport-1.5.0/src/multicast/rx.rs:287`,
+    /// `vendor/zenoh-pico/src/transport/multicast/rx.c:68-77`). This is the
+    /// second coordinate that keeps two messages of one batch distinguishable.
+    ///
+    /// A separate field rather than a finer `stream_offset`, because the two
+    /// answer different questions and one of them is already load-bearing: a
+    /// capture-side layer maps `stream_offset` back to a packet
+    /// (`wz-capture`'s run map), and moving it to name a byte inside the unit
+    /// would silently change what every existing consumer of that anchor
+    /// resolves.
+    pub batch_index: usize,
     /// Width of the length prefix that framed it — recorded rather than
     /// recomputed, since the width can change between frames on the same
     /// stream.
+    ///
+    /// Recorded on every message of a batch, not only the first: the prefix
+    /// framed the whole unit, so it is the width this message arrived under.
     pub prefix_width: usize,
     /// The decoded transport message, or the decode error.
     pub frame: Result<InboundFrame, InboundParseError>,
@@ -820,6 +842,29 @@ pub struct PassiveSession {
     /// to say about the extension chain that follows it, so a stream link
     /// decodes such a frame exactly as a datagram link does.
     undefined_mandatory_exts: [u64; 2],
+    /// R311y631 (§1.2b) — bytes inside a framing unit that no decoded message
+    /// accounts for, per direction.
+    ///
+    /// Non-zero when the batch walk stopped before the unit was exhausted: a
+    /// message that failed to decode, or one whose MID this build does not know
+    /// and therefore cannot measure the length of. Both leave a tail whose
+    /// contents are unknown, and the walk refuses to guess a boundary inside it.
+    ///
+    /// This is the counter §1.2b was opened for. Before it, a batch's second
+    /// message was not reported ANYWHERE — not as a skipped packet, because the
+    /// packet was not skipped, and not as a desynchronisation, because the
+    /// framing was never in question. Now the messages are decoded, and what
+    /// remains genuinely unreadable is counted here instead of being silent.
+    unaccounted_batch_bytes: [u64; 2],
+    /// R311y631 (§1.2b) — messages already decoded out of a framing unit and
+    /// not yet handed to the caller, per direction.
+    ///
+    /// [`PassiveSession::next_frame`] yields ONE message per call, which is the
+    /// shape every caller loops on. A framing unit yields N, so the surplus
+    /// waits here rather than being returned in a `Vec` the caller would have
+    /// to remember to drain — a caller that forgot is exactly the silence this
+    /// round is closing.
+    pending: [alloc::collections::VecDeque<PassiveFrame>; 2],
     /// R311y609 — how many chained candidate frames must agree before the
     /// resynchronisation scan accepts a boundary. `0` disables recovery.
     resync_depth: usize,
@@ -919,6 +964,8 @@ impl Default for PassiveSession {
             sn_accounting: [SnAccounting::default(); 2],
             reserved_headers: [0; 2],
             undefined_mandatory_exts: [0; 2],
+            unaccounted_batch_bytes: [0; 2],
+            pending: core::array::from_fn(|_| alloc::collections::VecDeque::new()),
             resync_depth: DEFAULT_RESYNC_DEPTH,
         }
     }
@@ -1097,7 +1144,16 @@ impl PassiveSession {
     /// Each call re-reads [`FlowContext::prefix_width`], so a session that
     /// reframes to the 4-byte prefix at Established is followed across the
     /// boundary without the caller doing anything.
+    ///
+    /// R311y631 (§1.2b) — ONE framing unit can hold several messages, so a
+    /// call that reads an envelope decodes all of them and returns the first;
+    /// the rest are handed out by the following calls, before any new bytes are
+    /// read. Every caller already loops until [`PassiveStall`], so this widens
+    /// what those loops see without any of them changing.
     pub fn next_frame(&mut self, direction: Direction) -> Result<PassiveFrame, PassiveStall> {
+        if let Some(frame) = self.pending[usize::from(direction == Direction::B)].pop_front() {
+            return Ok(frame);
+        }
         let width = self.context.prefix_width();
         let depth = self.resync_depth;
         let stream = self.stream_mut(direction);
@@ -1144,40 +1200,176 @@ impl PassiveSession {
         stream.consumed += width + payload_len;
         let resync = stream.pending_resync.take();
 
-        let frame = parse_inbound(&body);
-        if let Ok(ref f) = frame {
-            self.fold(direction, f);
+        // A byte STREAM is a unicast link by construction — zenoh has no
+        // multicast stream transport — so `inadmissible_on_link` cannot arise
+        // here, which is what `LinkHandshake::Present` says.
+        let mut walked = self
+            .decode_framing_unit(
+                direction,
+                &body,
+                stream_offset,
+                width,
+                LinkHandshake::Present,
+                resync,
+            )
+            .into_iter();
+        match walked.next() {
+            Some(first) => {
+                self.pending[usize::from(direction == Direction::B)].extend(walked);
+                Ok(first)
+            }
+            // Structurally unreachable: `payload_len == 0` desynchronised
+            // above, so the unit handed to the walk is non-empty and the walk
+            // yields at least one message for it. `NeedMoreBytes` is the answer
+            // that loses nothing if that ever stops holding.
+            None => Err(PassiveStall::NeedMoreBytes),
         }
-        #[cfg(feature = "codec-frame")]
-        let sn_verdict = self.track_sn(direction, &frame);
-        let carried = self.decode_carried(direction, &frame);
-        let undefined_mandatory_ext = self.note_undefined_mandatory_ext(direction, &frame);
-        Ok(PassiveFrame {
-            direction,
-            stream_offset,
-            prefix_width: width,
-            undefined_mandatory_ext,
-            frame,
-            context: self.context,
-            exceeds_negotiated_batch: self.exceeds_batch(payload_len),
-            carried,
-            // A byte STREAM is a unicast link by construction — zenoh has no
-            // multicast stream transport — so the question this flag answers
-            // cannot arise here.
-            inadmissible_on_link: false,
+    }
+
+    /// R311y631 (§1.2b) — decode EVERY transport message in one framing unit.
+    ///
+    /// # Why a unit is not a message
+    ///
+    /// It was read as one until this round, on both ingestion paths, and the
+    /// claim that justified it — "zenoh puts exactly one wire message in each
+    /// datagram" — cited this workspace's own sender rather than either
+    /// reference implementation. Both of those batch. zenoh loops
+    /// `while !batch.is_empty()` over a received unit on the datagram path
+    /// (`zenoh-transport-1.5.0/src/multicast/rx.rs:287`) and on the stream path
+    /// (`.../unicast/universal/rx.rs:220`); pico does not even re-read the link
+    /// while its buffer still holds bytes, decoding the next message straight
+    /// out of the residue (`vendor/zenoh-pico/src/transport/multicast/rx.c:68-77`)
+    /// after advancing by exactly one message's length (`:99`). Batching is on
+    /// by default in zenoh's transmission pipeline, so this is the ordinary
+    /// case and not a corner of the protocol.
+    ///
+    /// A `Frame` or `Fragment` consumes the remainder by construction
+    /// (`zenoh-codec-1.5.0/src/transport/frame.rs:173`), which is why a real
+    /// batch looks like `[KeepAlive][Frame]` and never `[Frame][KeepAlive]` —
+    /// and why the message that used to be dropped here is so often the DATA
+    /// one.
+    ///
+    /// # What is per-unit and what is per-message
+    ///
+    /// The negotiated batch ceiling and the resynchronisation record belong to
+    /// the UNIT: the InitAck agreed a size for the whole batch, and a recovery
+    /// happened once, at its boundary. So `exceeds_negotiated_batch` is
+    /// computed on the unit and carried by every message in it, and `resync` is
+    /// attached to the first message only. Everything else — the fold, the SN
+    /// verdict, the carried payload, the reserved header bits, the mandatory
+    /// extension check — is a property of one message and is computed per
+    /// message.
+    fn decode_framing_unit(
+        &mut self,
+        direction: Direction,
+        bytes: &[u8],
+        offset: usize,
+        prefix_width: usize,
+        handshake: LinkHandshake,
+        mut resync: Option<StreamResync>,
+    ) -> Vec<PassiveFrame> {
+        let exceeds_negotiated_batch = self.exceeds_batch(bytes.len());
+        let mut out = Vec::new();
+        let mut pos = 0usize;
+        let mut batch_index = 0usize;
+        while pos < bytes.len() {
+            let rest = &bytes[pos..];
+            // R311y611 (§1.4b) — counted BEFORE the admissibility branch below:
+            // a reserved bit is a fact about the SENDER's wire-spec vintage,
+            // and it is one whether or not this link was entitled to carry the
+            // message. Read off THIS message's header, so a batch's second
+            // message is judged as well as its first — the stream path's
+            // credible-header gate gets to see only the first.
+            let reserved = rest
+                .first()
+                .and_then(|h| wz_codecs::wire_const::reserved_transport_flags(*h))
+                .unwrap_or(0);
+            if reserved != 0 {
+                self.reserved_headers[usize::from(direction == Direction::B)] += 1;
+            }
+            let (frame, consumed) = match parse_inbound_consuming(rest) {
+                Ok((f, n)) => (Ok(f), n),
+                Err(e) => (Err(e), 0),
+            };
+            // R311y631 — A MESSAGE THAT CANNOT BE MEASURED CANNOT BE LOCATED,
+            // and a record whose position is unknown is not evidence.
+            //
+            // Past the front of the unit, `consumed == 0` says the walk does
+            // not know where this candidate starts or ends: either the decode
+            // failed, or the MID carries no length this build can skip. The
+            // bytes are counted as unaccounted-for and the walk stops. It does
+            // NOT emit a record for them, because the only reason the walk is
+            // standing here is that the PREVIOUS message claimed to end here —
+            // and if that claim was wrong, everything read from this offset is
+            // manufactured. A scouting HELLO read on a transport flow is the
+            // fixture that proves it: `S_MID_HELLO` and `T_MID_OPEN` are both
+            // `0x02`, the Open body decodes off the front of a Hello, and the
+            // locator list behind it would otherwise be reported as a second
+            // transport message that nobody sent.
+            //
+            // At the FRONT of the unit the record IS emitted, error and all:
+            // there the offset is not in question — the caller handed these
+            // bytes over as one framing unit — so an undecodable datagram
+            // still reports the decode error rather than vanishing.
+            if consumed == 0 && pos > 0 {
+                self.unaccounted_batch_bytes[usize::from(direction == Direction::B)] +=
+                    (bytes.len() - pos) as u64;
+                break;
+            }
+            let inadmissible = handshake == LinkHandshake::Absent
+                && frame.as_ref().is_ok_and(is_handshake_message);
+            if let Ok(ref f) = frame {
+                if !inadmissible {
+                    self.fold(direction, f);
+                }
+            }
+            // R311y609 (C12) — an inadmissible message is not folded, and it is
+            // not NUMBERED either: an INIT on a multicast link carries no SN,
+            // and a data frame that reaches here has one whatever the link is.
             #[cfg(feature = "codec-frame")]
-            sn_verdict,
-            resync,
-            observed_at_ms: self.observed_at,
-            // R311y611 — unreachable as non-zero HERE, and that is the point.
-            // The credible-header gate above refuses every byte whose MID sets
-            // a reserved bit, so a stream reader never decodes one; it
-            // desynchronises and the recovery names the byte in
-            // `DesyncReason::ImplausibleHeader`. The stream path already SAYS
-            // so. The datagram path is where the same bytes decode with nobody
-            // saying anything, which is where this field is measured.
-            reserved_header_bits: 0,
-        })
+            let sn_verdict = self.track_sn(direction, &frame);
+            let carried = self.decode_carried(direction, &frame);
+            let undefined_mandatory_ext = self.note_undefined_mandatory_ext(direction, &frame);
+            out.push(PassiveFrame {
+                direction,
+                stream_offset: offset,
+                batch_index,
+                undefined_mandatory_ext,
+                prefix_width,
+                frame,
+                context: self.context,
+                exceeds_negotiated_batch,
+                carried,
+                inadmissible_on_link: inadmissible,
+                #[cfg(feature = "codec-frame")]
+                sn_verdict,
+                resync: resync.take(),
+                observed_at_ms: self.observed_at,
+                reserved_header_bits: reserved,
+            });
+            batch_index += 1;
+            if consumed == 0 {
+                // Front of the unit, and unmeasurable: the record above is the
+                // verdict on the whole unit, and the bytes behind it are still
+                // unaccounted for. Counting them is what makes an undecodable
+                // datagram say how much it could not explain.
+                self.unaccounted_batch_bytes[usize::from(direction == Direction::B)] +=
+                    (bytes.len() - pos) as u64;
+                break;
+            }
+            pos += consumed;
+        }
+        out
+    }
+
+    /// R311y631 (§1.2b) — bytes of a framing unit no decoded message accounts
+    /// for, cumulative, in `direction`.
+    ///
+    /// See [`PassiveSession::decode_framing_unit`] for when it moves. Zero is
+    /// the ordinary reading: every message of every batch was decoded and its
+    /// length was known.
+    pub fn unaccounted_batch_bytes(&self, direction: Direction) -> u64 {
+        self.unaccounted_batch_bytes[usize::from(direction == Direction::B)]
     }
 
     /// R311y609 (C12) — the SN accounting for one direction so far.
@@ -1323,32 +1515,41 @@ impl PassiveSession {
         }
     }
 
-    /// R311y584 (A3) — decode ONE datagram, which is one whole wire message.
+    /// R311y584 (A3) — decode ONE datagram, which is one whole BATCH.
     ///
     /// The datagram sibling of [`Self::next_frame`], and a separate entry
     /// point rather than a flag on that one, because the FRAMING differs and
     /// nothing else does. A datagram link carries no length prefix at all —
-    /// UDP preserves message boundaries, so one datagram is exactly one wire
-    /// message (`wz-runtime-tokio/src/udp_pipeline.rs:34-36`) — which means
-    /// there is no buffer to append to, no boundary to search for, and no
-    /// desynchronisation to recover from. Everything ABOVE the framing is
-    /// shared: the same fold, the same negotiated context, the same
-    /// [`Carried`] decode.
+    /// UDP preserves the boundary of the unit, so the datagram itself delimits
+    /// the batch — which means there is no buffer to append to, no boundary to
+    /// search for, and no desynchronisation to recover from. Everything ABOVE
+    /// the framing is shared: the same fold, the same negotiated context, the
+    /// same [`Carried`] decode.
     ///
-    /// `offset` is whatever coordinate the caller wants the frame reported
+    /// R311y631 (§1.2b) — it returns the messages the datagram held, which is
+    /// not always one. The `Vec` is the point: a caller cannot read the first
+    /// element and be silently correct, which is what the previous signature
+    /// let every caller do. See [`Self::decode_framing_unit`] for the upstream
+    /// evidence that a datagram batches.
+    ///
+    /// `offset` is whatever coordinate the caller wants the frames reported
     /// against — a packet index, a byte offset into a file. This layer never
     /// interprets it, because for a datagram there is no stream for it to be
-    /// an offset INTO.
+    /// an offset INTO; [`PassiveFrame::batch_index`] separates messages that
+    /// share one.
     ///
     /// Infallible in the [`PassiveStall`] sense: a datagram is either
     /// decodable or not, and "not" arrives as an `Err` inside
     /// [`PassiveFrame::frame`] rather than as a reason to wait for more bytes.
+    /// An EMPTY datagram yields an empty `Vec` — there is no message in it to
+    /// report, and inventing an `Err` for one would be a decode failure this
+    /// reader made up.
     pub fn next_datagram(
         &mut self,
         direction: Direction,
         bytes: &[u8],
         offset: usize,
-    ) -> PassiveFrame {
+    ) -> Vec<PassiveFrame> {
         self.next_datagram_on(direction, bytes, offset, LinkHandshake::Present)
     }
 
@@ -1392,60 +1593,18 @@ impl PassiveSession {
         bytes: &[u8],
         offset: usize,
         handshake: LinkHandshake,
-    ) -> PassiveFrame {
-        let frame = parse_inbound(bytes);
-        // R311y611 (§1.4b) — counted BEFORE the admissibility branch below: a
-        // reserved bit is a fact about the SENDER's wire-spec vintage, and it
-        // is one whether or not this link was entitled to carry the message.
-        let reserved = bytes
-            .first()
-            .and_then(|h| wz_codecs::wire_const::reserved_transport_flags(*h))
-            .unwrap_or(0);
-        if reserved != 0 {
-            self.reserved_headers[usize::from(direction == Direction::B)] += 1;
-        }
-        let inadmissible =
-            handshake == LinkHandshake::Absent && frame.as_ref().is_ok_and(is_handshake_message);
-        if let Ok(ref f) = frame {
-            if !inadmissible {
-                self.fold(direction, f);
-            }
-        }
-        // R311y609 (C12) — an inadmissible message is not folded, and it is
-        // not NUMBERED either: an INIT on a multicast link carries no SN, and
-        // a data frame that reaches here has one whatever the link is.
-        #[cfg(feature = "codec-frame")]
-        let sn_verdict = self.track_sn(direction, &frame);
-        let carried = self.decode_carried(direction, &frame);
-        let undefined_mandatory_ext = self.note_undefined_mandatory_ext(direction, &frame);
-        PassiveFrame {
-            direction,
-            stream_offset: offset,
-            undefined_mandatory_ext,
-            // Recorded as zero rather than as one of the two stream widths:
-            // a datagram has no prefix, and reporting 2 here would be a
-            // measurement of nothing.
-            prefix_width: 0,
-            frame,
-            context: self.context,
-            exceeds_negotiated_batch: self.exceeds_batch(bytes.len()),
-            carried,
-            inadmissible_on_link: inadmissible,
-            #[cfg(feature = "codec-frame")]
-            sn_verdict,
-            // A datagram link has no framing to lose: one datagram is one
-            // whole message, so there is no boundary to be wrong about.
-            resync: None,
-            observed_at_ms: self.observed_at,
-            // R311y611 — THE PATH WHERE NOBODY WAS SAYING ANYTHING. A datagram
-            // has no framing to lose, so it has no header gate either, and
-            // `parse_inbound` dispatches on `header & 0x1F` and ignores the
-            // reserved bits exactly as zenoh's own decoder does. A peer that
-            // set one therefore decoded as an ordinary message here, with
-            // nothing anywhere recording that its wire-spec vintage is not
-            // this reader's.
-            reserved_header_bits: reserved,
-        }
+    ) -> Vec<PassiveFrame> {
+        // `prefix_width` 0 rather than one of the two stream widths: a datagram
+        // has no prefix, and reporting 2 here would be a measurement of
+        // nothing. `resync` `None`: a datagram link has no framing to lose, so
+        // there is no boundary to be wrong about.
+        //
+        // R311y611 — AND THIS IS THE PATH WHERE NOBODY WAS SAYING ANYTHING
+        // about reserved header bits: a datagram has no header gate, and
+        // `parse_inbound` dispatches on `header & 0x1F` and ignores the
+        // reserved bits exactly as zenoh's own decoder does. The walk reads
+        // them per message.
+        self.decode_framing_unit(direction, bytes, offset, 0, handshake, None)
     }
 
     /// R311y585 (A5) — did this frame's wire length break the negotiated
@@ -1838,7 +1997,24 @@ impl DirectionStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inbound::parse_inbound;
     use alloc::vec;
+
+    /// R311y631 (§1.2b) — the ONE message a unit was expected to hold.
+    ///
+    /// Asserting the length here rather than indexing `[0]` is what keeps a
+    /// single-message expectation honest: a walk that started reporting extra
+    /// records would otherwise be invisible to every caller of this helper.
+    fn sole(frames: Vec<PassiveFrame>) -> PassiveFrame {
+        assert_eq!(
+            frames.len(),
+            1,
+            "expected one message in this framing unit, got {}: {:?}",
+            frames.len(),
+            frames.iter().map(|f| &f.frame).collect::<Vec<_>>()
+        );
+        frames.into_iter().next().expect("length asserted above")
+    }
 
     /// Frame `body` the way a stream link would, at `width` bytes of LE
     /// length prefix.
@@ -2701,12 +2877,21 @@ mod tests {
     /// it costs recoveries on the unannounced path, because acceptance goes
     /// from 42 of 256 to 56.
     #[test]
+    // R311y631 (§7.10) — `reassembly` joined the list because the ASSERTION
+    // reads it. `is_credible_transport_header` accepts `T_MID_FRAGMENT`
+    // (`0x06`) unconditionally, and the arm of `parse_inbound` that names it is
+    // gated on `reassembly`; without the feature the byte is credible and
+    // `Unknown`, and this test fails on eight values for a reason that has
+    // nothing to do with what it is about. Its guard has to select every
+    // feature its claim depends on, not most of them — the same rule this
+    // workspace applies to a negative arm's `#[cfg]`.
     #[cfg(all(
         feature = "codec-init-body",
         feature = "codec-open-body",
         feature = "codec-close",
         feature = "codec-frame",
-        feature = "codec-join"
+        feature = "codec-join",
+        feature = "reassembly"
     ))]
     fn the_header_gate_and_the_decoder_disagree_only_on_reserved_bits() {
         use crate::inbound::InboundFrame;
@@ -2754,15 +2939,15 @@ mod tests {
     fn a_datagram_reports_the_reserved_header_bits_it_decoded_past() {
         let mut s = PassiveSession::new();
         // KEEP_ALIVE defines no flag but Z, so 0x40 is reserved.
-        let clean = s.next_datagram(Direction::A, &[crate::wire_const::T_MID_KEEP_ALIVE], 0);
+        let clean = sole(s.next_datagram(Direction::A, &[crate::wire_const::T_MID_KEEP_ALIVE], 0));
         assert_eq!(clean.reserved_header_bits, 0, "the control arm");
         assert!(clean.frame.is_ok());
 
-        let odd = s.next_datagram(
+        let odd = sole(s.next_datagram(
             Direction::A,
             &[crate::wire_const::T_MID_KEEP_ALIVE | 0x40],
             0,
-        );
+        ));
         assert_eq!(
             odd.reserved_header_bits, 0x40,
             "the peer set a bit this wire-spec vintage does not define, and \
@@ -2795,13 +2980,13 @@ mod tests {
         // KEEP_ALIVE + Z, then one ext: id 0x4, UNIT, chain terminator.
         let header = crate::wire_const::T_MID_KEEP_ALIVE | crate::wire_const::FLAG_T_Z;
 
-        let clean = s.next_datagram(Direction::A, &[header, 0x04], 0);
+        let clean = sole(s.next_datagram(Direction::A, &[header, 0x04], 0));
         assert_eq!(clean.undefined_mandatory_ext, None, "the control arm");
         assert!(clean.frame.is_ok());
         assert_eq!(s.undefined_mandatory_exts(Direction::A), 0);
 
         // The same extension with the mandatory marker set.
-        let flagged = s.next_datagram(Direction::A, &[header, 0x14], 0);
+        let flagged = sole(s.next_datagram(Direction::A, &[header, 0x14], 0));
         assert_eq!(
             flagged.undefined_mandatory_ext,
             Some(0x14),
@@ -3306,6 +3491,222 @@ mod tests {
         assert_eq!(
             s.resync_accounting(Direction::A).skipped_bytes,
             bogus.len() as u64
+        );
+    }
+
+    /// R311y631 (§1.2b) — THE CONSUMED LENGTH IS ASSERTED BY LANDING ON A
+    /// SENTINEL, never by writing a number down.
+    ///
+    /// Every case is one real message, built by the production encoders, with a
+    /// one-byte KeepAlive appended. If `parse_inbound_consuming` reports a
+    /// length that is even one byte off, the walk starts the next decode inside
+    /// or past the sentinel and the second message is not a KeepAlive — so the
+    /// assertion is on the DECODER's own arithmetic and not on this test
+    /// author's idea of each body's layout. That distinction is the whole
+    /// reason the number is trustworthy: a hand-written expected length would
+    /// agree with a hand-written encoder and prove nothing about the wire.
+    #[test]
+    fn every_measurable_message_reports_the_length_that_lands_on_the_next_one() {
+        let sentinel = crate::wire_const::T_MID_KEEP_ALIVE;
+        let mut cases: Vec<(&str, Vec<u8>)> = vec![
+            ("InitSyn", init_wire(false, Vec::new())),
+            ("InitAck", init_wire(true, Vec::new())),
+            (
+                "InitSyn with an extension chain",
+                init_wire(false, vec![unit_ext(est_ext::COMPRESSION)]),
+            ),
+            ("OpenSyn", open_wire(false)),
+            ("OpenAck", open_wire(true)),
+            ("KeepAlive", vec![sentinel]),
+            ("Close", {
+                let mut w = vec![wz_codecs::wire_const::T_MID_CLOSE];
+                w.extend_from_slice(&wz_codecs::close::Close { reason: 0 }.encode_to_vec());
+                w
+            }),
+        ];
+        cases.push(("KeepAlive with the Z bit and one extension", {
+            let mut w = vec![sentinel | wz_codecs::wire_const::FLAG_T_Z];
+            w.extend_from_slice(&crate::ext_chain::encode_ext_chain(&[unit_ext(
+                est_ext::COMPRESSION,
+            )]));
+            w
+        }));
+
+        for (name, message) in cases {
+            let mut unit = message.clone();
+            unit.push(sentinel);
+
+            let (_, consumed) =
+                crate::inbound::parse_inbound_consuming(&unit).unwrap_or_else(|e| {
+                    panic!(
+                        "{name}: the fixture must decode before its length means anything: {e:?}"
+                    )
+                });
+            assert_eq!(
+                consumed,
+                message.len(),
+                "{name}: the decoder claims to have eaten {consumed} of the \
+                 {} bytes its own encoder wrote",
+                message.len()
+            );
+
+            let mut s = PassiveSession::new();
+            let frames = s.next_datagram(Direction::A, &unit, 0);
+            assert_eq!(
+                frames.len(),
+                2,
+                "{name}: the walk must reach the sentinel behind it, got {:?}",
+                frames.iter().map(|f| &f.frame).collect::<Vec<_>>()
+            );
+            assert!(
+                matches!(frames[1].frame, Ok(InboundFrame::KeepAlive { .. })),
+                "{name}: the walk landed somewhere other than the sentinel: {:?}",
+                frames[1].frame
+            );
+            assert_eq!(
+                s.unaccounted_batch_bytes(Direction::A),
+                0,
+                "{name}: every byte of the unit was attributed"
+            );
+            assert_eq!(frames[0].batch_index, 0, "{name}");
+            assert_eq!(frames[1].batch_index, 1, "{name}");
+        }
+    }
+
+    /// R311y631 (§1.2b) — and the COUNTER-CASE that says why a batch ends with
+    /// a data frame: a `Frame` eats the remainder, sentinel and all.
+    ///
+    /// Not a defect and not a shortfall — it is what the wire says. zenoh's own
+    /// decoder reads a Frame's payload as `reader.remaining()`
+    /// (`zenoh-codec-1.5.0/src/transport/frame.rs:173`), so a sender that put
+    /// anything behind a Frame in one unit would have written a message no
+    /// conforming peer can retrieve. Asserted here so that the walk's stopping
+    /// point is a MEASURED property of the codec rather than a coincidence
+    /// nobody would notice changing.
+    #[test]
+    fn a_frame_eats_the_rest_of_its_unit_which_is_why_it_ends_a_batch() {
+        let sentinel = crate::wire_const::T_MID_KEEP_ALIVE;
+        let mut unit = frame_wire(3, &oam_record(1));
+        let frame_len = unit.len();
+        unit.push(sentinel);
+
+        let (_, consumed) =
+            crate::inbound::parse_inbound_consuming(&unit).expect("the frame decodes");
+        assert_eq!(
+            consumed,
+            frame_len + 1,
+            "a Frame consumes to the end of its unit, so the sentinel is part \
+             of its payload rather than a message behind it"
+        );
+
+        let mut s = PassiveSession::new();
+        let frames = s.next_datagram(Direction::A, &unit, 0);
+        assert_eq!(frames.len(), 1, "one Frame, and nothing after it");
+        assert_eq!(s.unaccounted_batch_bytes(Direction::A), 0);
+    }
+
+    /// R311y631 (§1.2b) — THE STREAM HALF, which R311y626's pin never reached.
+    ///
+    /// A length prefix delimits a BATCH exactly as a datagram boundary does —
+    /// zenoh runs the same `while !batch.is_empty()` loop on its unicast stream
+    /// path (`zenoh-transport-1.5.0/src/unicast/universal/rx.rs:220`) — so the
+    /// message behind a KeepAlive inside one envelope was being dropped here
+    /// too. `next_frame` keeps its one-message-per-call shape, which is what
+    /// lets every existing caller's `while let Ok(..)` loop pick up the second
+    /// message without being rewritten.
+    #[test]
+    fn a_stream_envelope_holding_two_messages_yields_both() {
+        let mut body = vec![crate::wire_const::T_MID_KEEP_ALIVE];
+        body.extend_from_slice(&frame_wire(7, &oam_record(9)));
+
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &framed(&body, PREFIX_WIDTH_UNIVERSAL));
+
+        let first = s.next_frame(Direction::A).expect("the KeepAlive in front");
+        let second = s.next_frame(Direction::A).expect("the Frame behind it");
+        assert!(
+            matches!(first.frame, Ok(InboundFrame::KeepAlive { .. })),
+            "{:?}",
+            first.frame
+        );
+        match &second.frame {
+            Ok(InboundFrame::Frame { sn, .. }) => assert_eq!(*sn, 7, "the Frame's own sn"),
+            other => panic!("the second message of the envelope is a Frame: {other:?}"),
+        }
+        assert_eq!(
+            first.stream_offset, second.stream_offset,
+            "ONE envelope, so one anchor -- which is why the batch index exists"
+        );
+        assert_eq!(first.batch_index, 0);
+        assert_eq!(second.batch_index, 1);
+        assert_eq!(
+            first.prefix_width, PREFIX_WIDTH_UNIVERSAL,
+            "the prefix framed the whole unit, so it is every message's width"
+        );
+        assert_eq!(second.prefix_width, PREFIX_WIDTH_UNIVERSAL);
+        assert!(
+            matches!(s.next_frame(Direction::A), Err(PassiveStall::NeedMoreBytes)),
+            "and the envelope is then exhausted rather than replayed"
+        );
+        assert_eq!(s.unaccounted_batch_bytes(Direction::A), 0);
+    }
+
+    /// R311y631 (§1.2b) — a tail the walk cannot MEASURE is counted, and is not
+    /// reported as a message.
+    ///
+    /// `0x00` is no MID zenoh defines, so nothing can say where that candidate
+    /// ends. Emitting a record for it would place a message at an offset this
+    /// reader guessed; the bytes are counted instead. That is the difference
+    /// between this round and the silence §1.2b named: the loss now has a
+    /// number, and the number is in the direction it arrived on.
+    #[test]
+    fn a_batch_tail_that_cannot_be_measured_is_counted_rather_than_silent() {
+        let mut unit = vec![crate::wire_const::T_MID_KEEP_ALIVE];
+        unit.extend_from_slice(&[0x00, 0x11, 0x22]);
+
+        let mut s = PassiveSession::new();
+        let frames = s.next_datagram(Direction::A, &unit, 0);
+        assert_eq!(
+            frames.len(),
+            1,
+            "the KeepAlive is reported and the unmeasurable tail is NOT: {:?}",
+            frames.iter().map(|f| &f.frame).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            s.unaccounted_batch_bytes(Direction::A),
+            3,
+            "three bytes the walk could not attribute to any message"
+        );
+        assert_eq!(
+            s.unaccounted_batch_bytes(Direction::B),
+            0,
+            "and they are charged to the direction they arrived on"
+        );
+    }
+
+    /// R311y631 (§1.2b) — at the FRONT of a unit the same byte still reports
+    /// itself, because there the offset is not in question.
+    ///
+    /// The asymmetry is deliberate and is the whole of the rule: past the front
+    /// the walk only stands where the previous message SAID the next one began,
+    /// and a record read from a guessed offset is manufactured. At offset zero
+    /// the caller handed these bytes over as one unit, so an undecodable
+    /// datagram still says what it could not read instead of vanishing.
+    #[test]
+    fn an_unmeasurable_message_at_the_front_of_a_unit_still_reports_itself() {
+        let mut s = PassiveSession::new();
+        let frames = s.next_datagram(Direction::A, &[0x00, 0x11], 0);
+        assert_eq!(frames.len(), 1);
+        assert!(
+            matches!(frames[0].frame, Ok(InboundFrame::Unknown { mid: 0 })),
+            "{:?}",
+            frames[0].frame
+        );
+        assert_eq!(
+            s.unaccounted_batch_bytes(Direction::A),
+            2,
+            "and the whole unit is unaccounted for, because its extent is what \
+             is unknown"
         );
     }
 }

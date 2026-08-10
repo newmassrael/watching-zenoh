@@ -816,8 +816,12 @@ impl FlowDissection {
             self.ws_resyncs.push((direction, resync));
         }
         for (offset, payload) in ready {
-            let frame = self.session.next_datagram(direction, &payload, offset);
-            self.frames.push(frame);
+            // R311y631 (§1.2b) — a ws message delimits a BATCH, not a message.
+            // zenoh's ws link reports `is_streamed() == false`, which is why
+            // this side calls the datagram entry point at all; the same call
+            // now yields every transport message the frame carried.
+            let batch = self.session.next_datagram(direction, &payload, offset);
+            self.frames.extend(batch);
         }
     }
 
@@ -1120,6 +1124,25 @@ pub struct FramingHealth {
     /// for the reason `reserved_headers` is not: it is a fact about the SENDER,
     /// not a shortfall in this reader's rows.
     pub undefined_mandatory_exts: u64,
+    /// R311y631 (§1.2b) — bytes inside a framing unit that no decoded message
+    /// accounts for.
+    ///
+    /// A SEVENTH witness, and back on the side of the four that count what is
+    /// MISSING. A framing unit holds a batch, and the walk over it stops at the
+    /// first message it cannot measure — a decode failure, or a MID whose
+    /// length this build cannot skip. What is left is unreadable rather than
+    /// merely unread, and this is the number that says how much.
+    ///
+    /// Non-zero is the ordinary reading for a capture that started mid-batch or
+    /// carries a foreign dialect; zero says every byte of every unit was
+    /// attributed to a message that decoded. Before R311y631 there was no
+    /// number here at all and the tail of a batch was silent: not a skipped
+    /// packet, because the packet was read, and not a desynchronisation,
+    /// because the framing was never in question.
+    ///
+    /// Reachable on BOTH link kinds — every ingestion path walks its unit
+    /// through the same [`wz_session_core::passive::PassiveSession`] entry.
+    pub unaccounted_batch_bytes: u64,
     /// R311y612 (§4.2) — times a WebSocket direction lost its RFC6455 frame
     /// boundary.
     ///
@@ -1282,6 +1305,7 @@ impl Dissection {
                 h.resync_skipped_bytes += r.skipped_bytes;
                 h.reserved_headers += flow.session.reserved_headers(dir);
                 h.undefined_mandatory_exts += flow.session.undefined_mandatory_exts(dir);
+                h.unaccounted_batch_bytes += flow.session.unaccounted_batch_bytes(dir);
                 add_sn(&mut h, flow.session.sn_accounting(dir));
             }
         }
@@ -1291,6 +1315,7 @@ impl Dissection {
             for dir in [Direction::A, Direction::B] {
                 h.reserved_headers += flow.session.reserved_headers(dir);
                 h.undefined_mandatory_exts += flow.session.undefined_mandatory_exts(dir);
+                h.unaccounted_batch_bytes += flow.session.unaccounted_batch_bytes(dir);
                 add_sn(&mut h, flow.session.sn_accounting(dir));
             }
         }
@@ -1810,6 +1835,8 @@ impl Dissection {
                 self.evicted_sessions.reserved_headers += gone.session.reserved_headers(dir);
                 self.evicted_sessions.undefined_mandatory_exts +=
                     gone.session.undefined_mandatory_exts(dir);
+                self.evicted_sessions.unaccounted_batch_bytes +=
+                    gone.session.unaccounted_batch_bytes(dir);
                 add_sn(&mut self.evicted_sessions, gone.session.sn_accounting(dir));
             }
             self.drops.flows += 1;
@@ -1949,13 +1976,14 @@ impl Dissection {
             });
             return;
         }
-        let frame = flow.session.next_datagram_on(
+        // R311y631 (§1.2b) — one datagram, every message it batched.
+        let batch = flow.session.next_datagram_on(
             direction,
             &d.payload,
             d.packet_index,
             link.handshake(&d),
         );
-        flow.frames.push(frame);
+        flow.frames.extend(batch);
         if let Some(cap) = self.limits.frames_per_flow {
             if flow.frames.len() > cap {
                 let cut = flow.frames.len() - cap;
@@ -3710,6 +3738,93 @@ mod datagram_tests {
         }
     }
 
+    /// R311y631 (§1.2b) — the UNACCOUNTED-BYTES counter reaches the capture
+    /// layer on both link kinds, and both renderings of the document.
+    ///
+    /// The half R311y631's own probe found missing: zeroing the session-level
+    /// increment reddened two `wz-session-core` tests and left every
+    /// `wz-capture` test green, which is the signature of a counter that is
+    /// wired but not witnessed.
+    ///
+    /// The offender is the smallest batch whose tail cannot be measured — a
+    /// KeepAlive, then a byte no MID names. `0x00` is not a transport MID
+    /// (`wz-codecs`'s space starts at `T_MID_INIT` = `0x01`), so nothing can
+    /// say where that candidate ends and the two bytes behind the KeepAlive are
+    /// unreadable rather than merely unread.
+    ///
+    /// Both link kinds, because the two ingestion paths reach the walk by
+    /// different routes and a counter proved on one is a counter proved on
+    /// half: the stream side's credible-header gate judges the FIRST header
+    /// byte of an envelope and has nothing to say about what follows the first
+    /// message.
+    #[test]
+    fn an_unwalkable_batch_tail_reaches_the_capture_layer_on_both_links() {
+        let offender = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE, 0x00, 0x11];
+        // The same KeepAlive with a MEASURABLE message behind it — the control,
+        // and the arm that would stay at zero if the walk simply gave up.
+        let clean = alloc::vec![
+            wz_session_core::wire_const::T_MID_KEEP_ALIVE,
+            wz_session_core::wire_const::T_MID_KEEP_ALIVE
+        ];
+
+        for (name, wire, expected, frames) in [
+            ("offender", &offender, 2u64, 1usize),
+            ("control", &clean, 0u64, 2usize),
+        ] {
+            let mut datagram = Dissection::new();
+            datagram.push_packet(
+                LINKTYPE_ETHERNET,
+                0,
+                &udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, wire),
+            );
+            assert_eq!(
+                datagram.framing_health().unaccounted_batch_bytes,
+                expected,
+                "{name}: datagram link"
+            );
+            assert_eq!(
+                datagram.datagram_flows()[0].frames.len(),
+                frames,
+                "{name}: and only the messages it could place are reported"
+            );
+
+            let mut stream = Dissection::new();
+            let mut framed = alloc::vec![wire.len() as u8, 0];
+            framed.extend_from_slice(wire);
+            stream.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(0, &framed));
+            assert_eq!(
+                stream.framing_health().unaccounted_batch_bytes,
+                expected,
+                "{name}: stream link — a length prefix delimits a BATCH, and \
+                 the credible-header gate reads only its first header byte"
+            );
+            assert_eq!(
+                stream.flows()[0].frames.len(),
+                frames,
+                "{name}: the stream half reports the same set"
+            );
+
+            let report = crate::report::CaptureReport::of(&datagram);
+            assert!(
+                report
+                    .to_json()
+                    .contains(&alloc::format!("\"unaccounted_batch_bytes\":{expected}")),
+                "{name}: the JSON must carry the field unconditionally"
+            );
+            assert_eq!(
+                report.to_text().contains("left unaccounted for"),
+                expected > 0,
+                "{name}: the text rendering prints it only when non-zero"
+            );
+            assert_eq!(
+                report.is_complete(),
+                expected == 0,
+                "{name}: unlike `reserved_headers`, this one IS a shortfall in \
+                 this reader's rows -- bytes it could not read at all"
+            );
+        }
+    }
+
     /// R311y613 (§1.4b) — THE MISSING HALF: every MID zenoh puts INSIDE a
     /// frame's batch is named by this build.
     ///
@@ -4443,25 +4558,30 @@ mod datagram_tests {
         );
     }
 
-    /// R311y626 (§1.2b) — a datagram carrying MORE THAN ONE transport message
-    /// yields one frame and the rest is SILENT, and this pins the loss so it is
-    /// a named limit rather than a surprise.
+    /// R311y631 (§1.2b) — a datagram carrying MORE THAN ONE transport message
+    /// now yields ALL of them. R311y626 pinned the loss here; this is the same
+    /// fixture with the answer changed.
     ///
-    /// `parse_inbound` reads one message and does not report how many bytes it
-    /// consumed, so `next_datagram_on` has no way to walk to the next one: the
-    /// contract is one message per datagram. That is right for zenoh's own UDP
-    /// framing — a peer sends one transport message per datagram — and it is
-    /// NOT enforced by anything on the wire, so a foreign writer, a proxy that
-    /// coalesces, or a malformed sender produces a datagram this reader reads
-    /// the front of.
+    /// # What R311y626 got wrong
     ///
-    /// The assertion is deliberately about the SHORTFALL and not about a fix.
-    /// A fix means teaching `parse_inbound` to report its consumed length,
-    /// which is a wz-session-core API change with every caller to re-read; what
-    /// this round owes is that the limit is measured and cannot regress into
-    /// something worse without a test noticing.
+    /// Its rationale said one message per datagram "is right for zenoh's own
+    /// UDP framing", citing this workspace's own sender. Neither reference
+    /// implementation reads it that way. zenoh loops `while !batch.is_empty()`
+    /// over a received unit (`zenoh-transport-1.5.0/src/multicast/rx.rs:287`),
+    /// and pico does not even re-read the link while its buffer still holds
+    /// bytes (`vendor/zenoh-pico/src/transport/multicast/rx.c:68-77`). So the
+    /// silence was not a strict reading of a lax wire — it was messages both
+    /// peers process and this observer dropped.
+    ///
+    /// # Why the second message is a KEEPALIVE and not a FRAME
+    ///
+    /// A `Frame` consumes the remainder of its unit by construction, so a real
+    /// batch ends with one and a fixture that put a Frame first could never
+    /// have a second message at all. Two KeepAlives is the smallest batch that
+    /// can exist, which is what makes it the discriminator: one byte each, no
+    /// body to get wrong, and the count is the whole assertion.
     #[test]
-    fn a_datagram_carrying_two_messages_yields_one_frame_and_drops_the_rest() {
+    fn a_datagram_carrying_two_messages_yields_both() {
         let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
         let mut two = Vec::new();
         two.extend_from_slice(&keepalive);
@@ -4477,31 +4597,39 @@ mod datagram_tests {
         let flow = &d.datagram_flows()[0];
         assert_eq!(
             flow.frames.len(),
-            1,
-            "one datagram is one message to this reader, whatever it holds"
+            2,
+            "both messages of the batch are reported: {:?}",
+            flow.frames.iter().map(|f| &f.frame).collect::<Vec<_>>()
         );
-        assert!(
-            matches!(
-                flow.frames[0].frame,
-                Ok(wz_session_core::inbound::InboundFrame::KeepAlive { .. })
-            ),
-            "the FIRST message is the one that survives: {:?}",
-            flow.frames[0].frame
-        );
-        // The half worth pinning: the second message is not reported ANYWHERE.
-        // It is not a skipped packet, because the packet was not skipped, and
-        // it is not a desync, because the framing was never in question.
+        for (i, f) in flow.frames.iter().enumerate() {
+            assert!(
+                matches!(
+                    f.frame,
+                    Ok(wz_session_core::inbound::InboundFrame::KeepAlive { .. })
+                ),
+                "message {i} decodes as the KeepAlive it is: {:?}",
+                f.frame
+            );
+            assert_eq!(
+                f.stream_offset, 0,
+                "both rode packet 0, and that is what the anchor names"
+            );
+            assert_eq!(
+                f.batch_index, i,
+                "and the batch index is what separates them"
+            );
+        }
+        // Nothing was lost, so nothing is unaccounted for. The counter is the
+        // OTHER half of this round: it is what speaks when the walk cannot
+        // finish, and a silent zero here is what proves it is not just always
+        // reporting something.
         assert_eq!(
-            d.health().packets_skipped,
+            d.framing_health().unaccounted_batch_bytes,
             0,
-            "the packet was read, so it is not skipped"
+            "every byte of the datagram was attributed to a decoded message"
         );
-        assert_eq!(
-            d.framing_health().desyncs,
-            0,
-            "and the framing was never lost -- which is exactly why the loss \
-             has no witness of its own"
-        );
+        assert_eq!(d.health().packets_skipped, 0);
+        assert_eq!(d.framing_health().desyncs, 0);
     }
 
     /// R311y623 (§1.1x) — THE MIXED CASE, which neither leg above reaches: the
@@ -4893,8 +5021,21 @@ mod ws_flow_tests {
     /// `ws::tests::zenoh_frame`, kept here because this module's `frame` helper
     /// is the one these fixtures are built with.
     fn zenoh_ws_frame(n: u8) -> Vec<u8> {
-        let mut payload = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
-        payload.extend_from_slice(&[n; 3]);
+        // R311y631 (§1.2b / §1.4a) — ONE transport message per ws message, with
+        // `n` riding INSIDE it as the sequence number.
+        //
+        // It was a KeepAlive followed by three copies of `n` as filler, and
+        // filler is exactly what a batch walk reads as further messages —
+        // `n == 1` is `T_MID_INIT`. A `Frame` consumes the remainder of its
+        // framing unit by construction
+        // (`zenoh-codec-1.5.0/src/transport/frame.rs:173`), so this shape holds
+        // one message whatever the body is, which keeps this test about ws
+        // RECOVERY instead of quietly becoming a test about batching.
+        let mut payload = alloc::vec![
+            wz_session_core::wire_const::T_MID_FRAME | wz_codecs::wire_const::FLAG_T_FRAME_R,
+            n, // sn, the one-byte VLE arm
+        ];
+        payload.extend_from_slice(&[0x1F, 0x00, 0x00, 0x00]);
         crate::ws::tests::frame(true, 0x2, &payload, None)
     }
 

@@ -357,6 +357,39 @@ fn ext_qos_priority(extensions: &[ExtEntryOwned]) -> crate::qos::Priority {
 /// every codec feature off elides both bindings entirely, leaving
 /// only the Unknown fall-through arm.
 pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
+    parse_inbound_consuming(bytes).map(|(frame, _)| frame)
+}
+
+/// R311y631 (§1.2b) — the same decode, told how many bytes it ATE.
+///
+/// # Why the length has to come out
+///
+/// One framing unit is not one transport message. Both reference
+/// implementations decode a *batch*: zenoh reads `while !batch.is_empty()`
+/// on the multicast datagram path
+/// (`zenoh-transport-1.5.0/src/multicast/rx.rs:287`) and on the unicast
+/// stream path (`.../unicast/universal/rx.rs:220`), and pico keeps the
+/// residue of a datagram in its own buffer and decodes the NEXT message out
+/// of it without reading a new datagram at all
+/// (`vendor/zenoh-pico/src/transport/multicast/rx.c:68-77`, advancing the read
+/// position by exactly what one message consumed at `:99`). A reader that
+/// decodes the front of a framing unit and stops is therefore not reading a
+/// stricter dialect — it is dropping messages both peers would have processed.
+///
+/// The consumed length is the only thing a caller needs to walk to the next
+/// message, and it is knowable only here: it is where the cursor stopped, and
+/// the cursor is this function's local.
+///
+/// # What `0` means
+///
+/// `Ok((InboundFrame::Unknown { .. }, 0))` is NOT "an empty message". It is
+/// *this decoder cannot say where that message ends* — an unrecognised MID has
+/// no length this build knows how to skip — so a caller walking a batch must
+/// stop and report the rest as unaccounted rather than guess a boundary.
+/// [`InboundFrame::Frame`] and `Fragment` legitimately return `bytes.len()`:
+/// they consume the remainder by construction, which is why upstream puts them
+/// last in a batch (`zenoh-codec-1.5.0/src/transport/frame.rs:173`).
+pub fn parse_inbound_consuming(bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> {
     let header = *bytes.first().ok_or(InboundParseError::Empty)?;
     let mid = header & 0x1F;
     // R311g1 — `flags` extraction is gated on the same predicate as
@@ -397,12 +430,15 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
             } else {
                 Vec::new()
             };
-            Ok(InboundFrame::Init {
-                is_ack: (flags & wire_const::FLAG_T_INIT_A) != 0,
-                has_ext,
-                body,
-                extensions,
-            })
+            Ok((
+                InboundFrame::Init {
+                    is_ack: (flags & wire_const::FLAG_T_INIT_A) != 0,
+                    has_ext,
+                    body,
+                    extensions,
+                },
+                bytes.len() - cursor.remaining(),
+            ))
         }
         #[cfg(feature = "codec-open-body")]
         wire_const::T_MID_OPEN => {
@@ -419,12 +455,15 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
             } else {
                 Vec::new()
             };
-            Ok(InboundFrame::Open {
-                is_ack: (flags & wire_const::FLAG_T_OPEN_A) != 0,
-                has_ext,
-                body,
-                extensions,
-            })
+            Ok((
+                InboundFrame::Open {
+                    is_ack: (flags & wire_const::FLAG_T_OPEN_A) != 0,
+                    has_ext,
+                    body,
+                    extensions,
+                },
+                bytes.len() - cursor.remaining(),
+            ))
         }
         #[cfg(feature = "codec-close")]
         wire_const::T_MID_CLOSE => {
@@ -434,11 +473,14 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
             } else {
                 Vec::new()
             };
-            Ok(InboundFrame::Close {
-                reason: body.reason,
-                has_ext,
-                extensions,
-            })
+            Ok((
+                InboundFrame::Close {
+                    reason: body.reason,
+                    has_ext,
+                    extensions,
+                },
+                bytes.len() - cursor.remaining(),
+            ))
         }
         #[cfg(feature = "codec-frame")]
         wire_const::T_MID_FRAME => {
@@ -459,14 +501,17 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
                 .advance(remaining)
                 .map_err(InboundParseError::Codec)?;
             let priority = ext_qos_priority(&extensions);
-            Ok(InboundFrame::Frame {
-                reliable: (flags & wire_const::FLAG_T_FRAME_R) != 0,
-                sn,
-                payload,
-                has_ext,
-                extensions,
-                priority,
-            })
+            Ok((
+                InboundFrame::Frame {
+                    reliable: (flags & wire_const::FLAG_T_FRAME_R) != 0,
+                    sn,
+                    payload,
+                    has_ext,
+                    extensions,
+                    priority,
+                },
+                bytes.len() - cursor.remaining(),
+            ))
         }
         #[cfg(feature = "reassembly")]
         wire_const::T_MID_FRAGMENT => {
@@ -495,16 +540,19 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
             // matches on extension identity, so the z64 `ext_qos` at 0x1
             // above is never mistaken for one.
             let markers = crate::extfragment::project_markers(&extensions);
-            Ok(InboundFrame::Fragment {
-                reliable: (flags & wire_const::FLAG_T_FRAGMENT_R) != 0,
-                sn,
-                more: (flags & wire_const::FLAG_T_FRAGMENT_M) != 0,
-                payload,
-                has_ext,
-                extensions,
-                priority,
-                markers,
-            })
+            Ok((
+                InboundFrame::Fragment {
+                    reliable: (flags & wire_const::FLAG_T_FRAGMENT_R) != 0,
+                    sn,
+                    more: (flags & wire_const::FLAG_T_FRAGMENT_M) != 0,
+                    payload,
+                    has_ext,
+                    extensions,
+                    priority,
+                    markers,
+                },
+                bytes.len() - cursor.remaining(),
+            ))
         }
         #[cfg(feature = "codec-keep-alive")]
         wire_const::T_MID_KEEP_ALIVE => {
@@ -518,10 +566,13 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
             } else {
                 Vec::new()
             };
-            Ok(InboundFrame::KeepAlive {
-                has_ext,
-                extensions,
-            })
+            Ok((
+                InboundFrame::KeepAlive {
+                    has_ext,
+                    extensions,
+                },
+                bytes.len() - cursor.remaining(),
+            ))
         }
         // R311y605 — the MULTICAST peer announcement. Self-contained rather
         // than riding the shared `cursor`: the generated `Join` codec has no
@@ -535,19 +586,28 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
             let (join, consumed) = crate::join_decode::decode_join_body(header, &bytes[1..])?;
             let body = join.try_into_owned()?;
             let join_has_ext = (header & wire_const::FLAG_T_Z) != 0;
+            // R311y631 — hoisted out of the `if` so the consumed length can be
+            // read off it in BOTH arms. With no chain it has advanced nothing,
+            // which makes the subtraction below say `1 + consumed` — the base
+            // body and nothing else — without a second expression to keep in
+            // step with this one.
+            let mut ext_cursor = SceCursor::new(&bytes[1 + consumed..]);
             let extensions = if join_has_ext {
-                let mut ext_cursor = SceCursor::new(&bytes[1 + consumed..]);
                 decode_ext_chain(&mut ext_cursor)?
             } else {
                 Vec::new()
             };
-            Ok(InboundFrame::Join {
-                has_ext: join_has_ext,
-                body,
-                extensions,
-            })
+            Ok((
+                InboundFrame::Join {
+                    has_ext: join_has_ext,
+                    body,
+                    extensions,
+                },
+                bytes.len() - ext_cursor.remaining(),
+            ))
         }
-        other => Ok(InboundFrame::Unknown { mid: other }),
+        // Zero: see the `# What `0` means` section on this function.
+        other => Ok((InboundFrame::Unknown { mid: other }, 0)),
     }
 }
 
