@@ -29,7 +29,14 @@ wz-capture = { path = "../wz-capture" }
 wz-tls-record = { path = "../wz-tls-record" }
 # R311y667 — for `PassiveFrame`, which is the type `wz-capture` hands the
 # decoded messages back in. Naming one in a listing means naming its type.
-wz-session-core = { path = "../wz-session-core" }
+#
+# R311y675 — and `dissect`, the FIELD layer, selected HERE rather than in
+# `wz-capture`. The feature pulls in `alloc` and twelve `codec-*` arms, and
+# `wz-capture` is the crate that has to keep building for the MCU profiles with
+# no third-party dependency; widening it would charge every embedded consumer
+# for a walker only a desktop reader runs. This crate is the composition root
+# (see the header above), which makes it the one place that can afford it.
+wz-session-core = { path = "../wz-session-core", features = ["dissect"] }
 
 [dev-dependencies]
 # R311y673 — the three census planes report on Request / Response records, and
@@ -39,6 +46,14 @@ wz-session-core = { path = "../wz-session-core" }
 # more than once -- so the fixture builds real zenoh messages, which means
 # encoding them with the codec that owns their wire form.
 wz-codecs = { path = "../wz-codecs" }
+# R311y675 — A REAL JSON PARSER, as an ORACLE for the one-document claim.
+#
+# `assert_one_document` counted brackets, which answers "is this ONE value" and
+# CANNOT answer "is it valid": a missing comma inside an array leaves the
+# nesting perfectly balanced. Measured, not reasoned -- this round shipped
+# exactly that defect (`...}}{"from":...`), the check passed on it, and it was
+# caught by reading the output. Twelve tests lean on that helper.
+serde_json = "1"
 # THE ORACLE, and never a dependency -- the same role it plays for
 # `wz-tls-record`. The binary's own test needs a capture that genuinely
 # decrypts, which means records genuinely sealed by an implementation that is

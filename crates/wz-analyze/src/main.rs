@@ -60,6 +60,7 @@ fn main() -> ExitCode {
         messages_per_flow: options.max_messages,
         quic_ports: &options.quic_ports,
         census: options.census,
+        per_field: options.per_field,
         select: options.select.as_ref(),
     }) {
         Ok(out) => out,

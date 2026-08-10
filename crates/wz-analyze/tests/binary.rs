@@ -523,6 +523,21 @@ fn the_json_rendering_is_a_single_document_even_with_flows() {
 /// R311y668 — extracted, because a second flag combination now needs it and a
 /// second hand-copied depth walker would be a second thing to get wrong.
 fn assert_one_document(json: &str) {
+    // R311y675 — VALIDITY first, and by a real parser rather than by this
+    // function's own arithmetic.
+    //
+    // The bracket walk below answers "is this ONE value" -- which `serde_json`
+    // cannot, since it stops at the end of the first one and never sees a second
+    // document appended after it. It does NOT answer "is this valid", and the
+    // difference is not hypothetical: R311y675 emitted a field array whose rows
+    // were concatenated with no comma (`...}}{"from":...`), which is invalid
+    // JSON and PERFECTLY BALANCED, so every assertion below passed on it. The
+    // defect was caught by reading the output, which is not a gate.
+    //
+    // Both checks stay. Neither implies the other.
+    if let Err(err) = serde_json::from_str::<serde_json::Value>(json) {
+        panic!("the rendering must be valid JSON -- {err}: {json}");
+    }
     let mut depth = 0i32;
     let mut in_string = false;
     let mut escaped = false;
@@ -1852,5 +1867,152 @@ fn a_selector_with_no_plane_to_narrow_is_refused_rather_than_ignored() {
     assert!(
         err.contains("--census"),
         "and the message says what would make it mean something: {err}"
+    );
+}
+
+/// R311y675 (§1.1n) — THE FIELD LAYER: the reader can name which BYTES are the
+/// keyexpr.
+///
+/// ## The requirement, in the store's own words
+///
+/// R311y645's carry: "The analyzer's finest coordinate is a RECORD -- it can now
+/// point at the bytes a record begins at and cannot say which of them are the
+/// keyexpr's length prefix." R311y641's: "A reader can now locate a record and
+/// still not locate the keyexpr inside it." `wz-session-core::dissect` walks
+/// every message into per-field spans and nothing in the reader called a single
+/// `walk_*`.
+///
+/// ## Why the spans are the assertion and the names are not
+///
+/// A rendering that printed the field NAMES and got the byte ranges wrong would
+/// look right and be useless, which is the whole failure this layer exists to
+/// prevent. So the assertions are on the RANGES, and specifically on ranges that
+/// pin the coordinate base: the frame begins at 2, not 0, because
+/// `stream_offset` names the length PREFIX and the message starts
+/// `prefix_width` bytes later. A walk handed the wrong base produces a tree that
+/// is internally consistent and points at the wrong bytes.
+#[test]
+fn the_field_layer_names_which_bytes_are_the_keyexpr() {
+    let scratch = Scratch::new("fields");
+    let capture = scratch.write("fields.pcapng", &exchange_capture());
+
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--fields")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+
+    // THE CLAIM: the keyexpr's length prefix and its text are separately
+    // located, to the byte. This is the sentence R311y645 said could not be
+    // produced.
+    assert!(
+        text.contains("[7..8] suffix_len = Uint(7)"),
+        "the keyexpr's LENGTH PREFIX is one byte at offset 7: {text}"
+    );
+    assert!(
+        text.contains("[8..15] suffix = Text(\"demo/**\")"),
+        "and the seven bytes after it are the keyexpr itself: {text}"
+    );
+    // The coordinate BASE: the frame starts at 2 because `stream_offset` names
+    // the two-byte length prefix. Handed base 0, every span above would be two
+    // too low and every name would still be right.
+    assert!(
+        text.contains("[2..16] Frame"),
+        "the message begins after its length prefix, not at it: {text}"
+    );
+    assert!(
+        text.contains("[3..4] sn = Uint(0)"),
+        "and the transport sequence number is the byte after the header: {text}"
+    );
+    // The DIRECTION is the other half of a coordinate: B travels the other way,
+    // and printing the endpoints in table order for both would say every
+    // message went the same direction.
+    assert!(
+        text.contains("10.0.0.1:1111 -> 10.0.0.2:7447 A"),
+        "the query travels client to server: {text}"
+    );
+    assert!(
+        text.contains("10.0.0.2:7447 -> 10.0.0.1:1111 B"),
+        "and the reply travels back: {text}"
+    );
+
+    // Without the flag, none of it. The walk is a REQUEST -- it re-reads the
+    // retained bytes rather than keeping a copy, and a reader who did not ask
+    // for it should not pay for it.
+    let bare = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        !bare.contains("suffix_len") && !bare.contains("fields:"),
+        "no field layer without --fields: {bare}"
+    );
+}
+
+/// R311y675 (§1.1n) — the field layer reaches JSON as ONE document.
+#[test]
+fn the_field_layer_reaches_the_json_as_one_document() {
+    let scratch = Scratch::new("fields-json");
+    let capture = scratch.write("fields.pcapng", &exchange_capture());
+    let json = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--fields")
+            .arg("--json")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(json.contains("\"fields\":["), "structural key: {json}");
+    assert!(
+        json.contains("\"direction\":\"B\"") && json.contains("\"from\":\"10.0.0.2:7447\""),
+        "the reply's row names where it came FROM, not the flow table's order: \
+         {json}"
+    );
+    assert!(
+        json.contains("\"suffix\""),
+        "and the field tree itself is in it: {json}"
+    );
+    assert_one_document(json.trim());
+}
+
+/// R311y675 (§1.1n) — the listing is BOUNDED, and says how many it left out.
+///
+/// The walk is one pass per message a reader asked to see. Unbounded, the
+/// output's size depends on how much traffic there was -- the leak every `drops`
+/// counter in `wz-capture` exists to prevent, arriving in the renderer.
+#[test]
+fn the_field_listing_is_bounded_and_says_how_many_it_left_out() {
+    let scratch = Scratch::new("fields-cap");
+    let capture = scratch.write("fields.pcapng", &exchange_capture());
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .args(["--fields", "--max-messages", "1"])
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    // The cap is per FLOW, not per direction -- the same unit `--messages`
+    // bounds. Measured: this expectation was written per-direction and the run
+    // corrected it.
+    assert!(
+        text.contains("... 2 more not listed"),
+        "the flow has three messages and two were cut: {text}"
+    );
+    assert_eq!(
+        text.matches("] Frame").count(),
+        1,
+        "exactly one message survived the cap: {text}"
     );
 }

@@ -64,6 +64,9 @@ pub struct Options {
     pub max_messages: Option<usize>,
     /// R311y673 (§1.2a) — which of the three observer planes to build.
     pub census: Census,
+    /// R311y675 (§1.1n) — dissect each message into its FIELDS, with the bytes
+    /// each was decoded from.
+    pub per_field: bool,
     /// R311y674 (§1.2a) — the SELECTOR narrowing what the planes count.
     ///
     /// Compiled at parse time rather than carried as text, so a selector that
@@ -214,6 +217,11 @@ OPTIONS:
     --census          all three planes above. Each is a separate walk of every
                       frame, which is why they are asked for rather than always
                       built
+    --fields          dissect each message into its FIELDS, printing the byte
+                      range every field was decoded from. Answers which of
+                      those bytes are the keyexpr -- the finest coordinate the
+                      reader has without it is a whole record. Bounded by
+                      --max-messages like the other listings
     --select <expr>   narrow the census planes to the records the selector
                       matches. Terms are `field op value`:
                         key == demo/**        dir == a       kind == query
@@ -238,6 +246,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut max_messages: Option<usize> = None;
     let mut census = Census::default();
     let mut select: Option<wz_capture::filter::Filter> = None;
+    let mut per_field = false;
     let mut at = 0usize;
     while at < args.len() {
         let arg = &args[at];
@@ -248,6 +257,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
             "--exchanges" => census.exchanges = true,
             "--payloads" => census.payloads = true,
             "--census" => census = Census::all(),
+            "--fields" => per_field = true,
             "--select" => {
                 at += 1;
                 let raw = args.get(at).ok_or(UsageError::MissingValue("--select"))?;
@@ -311,6 +321,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
         quic_ports,
         max_messages,
         census,
+        per_field,
         select: match select {
             // A selector with nothing to narrow is a flag that does nothing.
             Some(_) if !census.any() => return Err(UsageError::SelectWithoutPlane),
@@ -422,6 +433,7 @@ pub fn analyze_declaring_quic(
         messages_per_flow,
         quic_ports,
         census: Census::default(),
+        per_field: false,
         select: None,
     })
 }
@@ -460,6 +472,8 @@ pub struct Request<'a> {
     pub quic_ports: &'a [u16],
     /// Which observer planes to build. See [`Census`].
     pub census: Census,
+    /// R311y675 — dissect each message into its fields.
+    pub per_field: bool,
     /// R311y674 — the selector narrowing what those planes count. `None`
     /// selects everything, which is what the planes' unfiltered entry points
     /// already pass.
@@ -477,6 +491,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
         messages_per_flow,
         quic_ports,
         census,
+        per_field,
         select,
     } = request;
     let mut dissection = Dissection::from_capture_declaring_quic(capture, quic_ports)?;
@@ -552,6 +567,10 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
         Format::Text => {
             let mut rendered = report.to_text();
             rendered.push_str(&epoch_lines(&epochs, format));
+            if per_field {
+                rendered.push_str("fields:\n");
+                rendered.push_str(&field_lines(&dissection, format, messages_per_flow));
+            }
             if per_flow {
                 rendered.push_str(&flow_lines(
                     &dissection,
@@ -566,6 +585,10 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
             let mut rendered = String::from("{");
             report.json_fields(&mut rendered);
             rendered.push_str(&epoch_lines(&epochs, format));
+            if per_field {
+                rendered.push(',');
+                rendered.push_str(&field_lines(&dissection, format, messages_per_flow));
+            }
             if per_flow {
                 rendered.push(',');
                 rendered.push_str(&flow_lines(
@@ -675,6 +698,238 @@ fn epoch_lines(witness: &[wz_tls_record::capture::EpochWitness; 2], format: Form
         ));
     }
     out
+}
+
+/// R311y675 (§1.1n) — THE FIELD LAYER: which bytes of a message are which field.
+///
+/// # What was missing, in the store's own words
+///
+/// R311y641 gave each RECORD its span, and R311y645's carry stated the residue
+/// exactly: "The analyzer's finest coordinate is a RECORD -- it can now point at
+/// the bytes a record begins at and cannot say which of them are the keyexpr's
+/// length prefix." `wz-session-core::dissect` walks every message into per-field
+/// spans, is differentially gated against the generated codecs, and nothing in
+/// the reader called a single `walk_*`.
+///
+/// # Why this needs no new accumulation
+///
+/// The obvious route -- keep each message's bytes on its `PassiveFrame` -- adds
+/// an EIGHTH thing that grows with the input, and this crate's whole bound
+/// discipline (`DissectionLimits`, and a paired counter for every bound that
+/// bites) exists because seven was already too many. It is also unnecessary: the
+/// bytes are ALREADY retained, in the one place they have to be, and already
+/// bounded there by `stream_bytes_per_direction`.
+///
+/// So the walk is done AGAIN, on demand, from `StreamAssembler::stream()` at the
+/// coordinates the frame already carries. Nothing is stored; the cost is one
+/// walk per message a reader asked to see, bounded by `--max-messages` like
+/// every other listing.
+///
+/// # And where the bytes are gone, it says so
+///
+/// `retained_from()` is the offset the assembler has trimmed to. A frame older
+/// than that had its bytes dropped to stay inside the bound, and this reports
+/// that rather than skipping the row -- the rule stated at
+/// `DissectionDrops`: a dissection that drops to stay inside its budget and does
+/// not say so is the failure this crate is built to avoid.
+fn field_lines(
+    dissection: &Dissection,
+    format: Format,
+    messages_per_flow: Option<usize>,
+) -> String {
+    use wz_session_core::dissect::{dissect_transport_message, to_json};
+
+    let mut out = String::new();
+    if format == Format::Json {
+        out.push_str("\"fields\":[");
+    }
+    // R311y675 — the separator belongs to the ROW, not to the flow. Counting
+    // flows put one comma between two flows and NONE between the rows inside
+    // one, which concatenated JSON objects into a document no parser accepts.
+    // Measured by running it: the array read `...}}{"from":...`.
+    let mut emitted = 0usize;
+    for flow in dissection.flows() {
+        let mut shown = 0usize;
+        let mut omitted = 0usize;
+        let mut rows = String::new();
+        for frame in &flow.frames {
+            if let Some(cap) = messages_per_flow {
+                if shown >= cap {
+                    omitted += 1;
+                    continue;
+                }
+            }
+            let assembler = flow.assembler(frame.direction);
+            let stream = assembler.stream();
+            let origin = assembler.retained_from();
+            let row = match message_bytes(stream, origin, frame) {
+                Err(why) => FieldRow::Declined(why),
+                Ok(bytes) => {
+                    match dissect_transport_message(bytes, frame.stream_offset + frame.prefix_width)
+                    {
+                        Ok(field) => FieldRow::Walked(field),
+                        // The error type is `sce_forge_runtime`'s and is not
+                        // re-exported publicly here, so it is rendered rather than
+                        // named -- a dependency this crate has no reason to take on
+                        // for one message string.
+                        Err(err) => FieldRow::Declined(format!(
+                            "the field walker refused these bytes: {err:?}"
+                        )),
+                    }
+                }
+            };
+            shown += 1;
+            if format == Format::Json && emitted > 0 {
+                rows.push(',');
+            }
+            emitted += 1;
+            render_field_row(&mut rows, format, flow, frame, &row, &to_json);
+        }
+        if rows.is_empty() {
+            continue;
+        }
+        out.push_str(&rows);
+        if format == Format::Text && omitted > 0 {
+            // Per FLOW, like every other listing this tool bounds: a bound that
+            // reports nothing reports itself as the wire.
+            out.push_str(&format!("    ... {omitted} more not listed\n"));
+        }
+    }
+    if format == Format::Json {
+        out.push(']');
+    }
+    out
+}
+
+/// What the field walk made of one message.
+enum FieldRow {
+    /// The bytes were there and the walker read them.
+    Walked(wz_session_core::dissect::Field),
+    /// They were not, and this is why. NEVER a skipped row: a message whose
+    /// bytes the bound discarded is a fact about the bound.
+    Declined(String),
+}
+
+/// R311y675 — the message's bytes, sliced out of the direction's retained
+/// stream at the coordinates the frame carries.
+///
+/// The length prefix is read from the stream rather than assumed: `prefix_width`
+/// says how wide it is, so the width is a fact the framing already settled and
+/// only the VALUE is read here.
+fn message_bytes<'a>(
+    stream: &'a [u8],
+    origin: usize,
+    frame: &wz_session_core::passive::PassiveFrame,
+) -> Result<&'a [u8], String> {
+    if frame.stream_offset < origin {
+        return Err(format!(
+            "bytes discarded to stay inside stream_bytes_per_direction (retained from {origin}, this message begins at {})",
+            frame.stream_offset
+        ));
+    }
+    let at = frame.stream_offset - origin;
+    let body = at + frame.prefix_width;
+    if body > stream.len() {
+        return Err("the framing unit is past the retained stream".into());
+    }
+    let mut len = 0usize;
+    for (i, b) in stream[at..body].iter().enumerate() {
+        len |= (*b as usize) << (8 * i);
+    }
+    let end = body + len;
+    if end > stream.len() {
+        return Err(format!(
+            "the framing unit declares {len} byte(s) and the retained stream holds {}",
+            stream.len() - body
+        ));
+    }
+    Ok(&stream[body..end])
+}
+
+fn render_field_row(
+    out: &mut String,
+    format: Format,
+    flow: &wz_capture::FlowDissection,
+    frame: &wz_session_core::passive::PassiveFrame,
+    row: &FieldRow,
+    to_json: &dyn Fn(&wz_session_core::dissect::Field) -> String,
+) {
+    // R311y675 — the arrow follows the DIRECTION. `assembler()` maps A to
+    // low_to_high and B to high_to_low, so printing the endpoints in table order
+    // for both would say every message travelled the same way -- a row that is
+    // wrong about the one thing the direction letter beside it exists to state.
+    let (dir, from, to) = match frame.direction {
+        wz_session_core::passive::Direction::A => {
+            ("A", endpoint(&flow.flow.low), endpoint(&flow.flow.high))
+        }
+        wz_session_core::passive::Direction::B => {
+            ("B", endpoint(&flow.flow.high), endpoint(&flow.flow.low))
+        }
+    };
+    match (format, row) {
+        // R311y675 — the keys are `from` / `to` and NOT `low` / `high`. The
+        // values follow the direction, so keeping the flow table's key names
+        // would put a correct value under a name that says the opposite for
+        // every direction-B row -- the same silently-wrong label R311y669
+        // removed when a QUIC row was keyed `tls`.
+        (Format::Json, FieldRow::Walked(field)) => {
+            out.push_str(&format!(
+                "{{\"from\":\"{from}\",\"to\":\"{to}\",\"direction\":\"{dir}\",\
+                 \"stream_offset\":{},\"field\":{}}}",
+                frame.stream_offset,
+                to_json(field)
+            ));
+        }
+        (Format::Json, FieldRow::Declined(why)) => {
+            out.push_str(&format!(
+                "{{\"from\":\"{from}\",\"to\":\"{to}\",\"direction\":\"{dir}\",\
+                 \"stream_offset\":{},\"declined\":\"{}\"}}",
+                frame.stream_offset,
+                why.replace('\\', "\\\\").replace('"', "\\\"")
+            ));
+        }
+        (Format::Text, FieldRow::Walked(field)) => {
+            out.push_str(&format!(
+                "  {from} -> {to} {dir} @{}\n",
+                frame.stream_offset
+            ));
+            push_field_text(out, field, 2);
+        }
+        (Format::Text, FieldRow::Declined(why)) => {
+            out.push_str(&format!(
+                "  {from} -> {to} {dir} @{}: NO FIELDS -- {why}\n",
+                frame.stream_offset
+            ));
+        }
+    }
+}
+
+/// One field per line, indented by nesting, with the BYTES it was decoded from.
+///
+/// The span is the point of the whole layer, so it leads: a reader comparing
+/// this capture against another implementation wants to say "these two bytes"
+/// and not "the keyexpr".
+fn push_field_text(out: &mut String, field: &wz_session_core::dissect::Field, depth: usize) {
+    use wz_session_core::dissect::FieldValue;
+    let pad = "  ".repeat(depth);
+    let span = field.span;
+    match &field.value {
+        FieldValue::Nested(children) => {
+            out.push_str(&format!(
+                "{pad}[{}..{}] {}\n",
+                span.start, span.end, field.name
+            ));
+            for child in children {
+                push_field_text(out, child, depth + 1);
+            }
+        }
+        other => {
+            out.push_str(&format!(
+                "{pad}[{}..{}] {} = {other:?}\n",
+                span.start, span.end, field.name
+            ));
+        }
+    }
 }
 
 /// R311y666 (§1.2a) — one line per flow.
@@ -1021,6 +1276,7 @@ mod tests {
                 quic_ports: Vec::new(),
                 max_messages: None,
                 census: Census::default(),
+                per_field: false,
                 select: None,
             })
         );
@@ -1047,6 +1303,7 @@ mod tests {
                 quic_ports: Vec::new(),
                 max_messages: None,
                 census: Census::default(),
+                per_field: false,
                 select: None,
             })
         );

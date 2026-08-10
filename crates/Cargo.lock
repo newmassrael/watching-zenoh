@@ -2404,6 +2404,7 @@ name = "wz-analyze"
 version = "0.1.0"
 dependencies = [
  "rustls",
+ "serde_json",
  "wz-capture",
  "wz-codecs",
  "wz-session-core",
