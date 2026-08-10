@@ -313,6 +313,10 @@ pub fn analyze_declaring_quic(
         dissection.decrypt_with(&mut opener);
     }
 
+    // R311y671 — what the decryptor OBSERVED about its epoch changes, which the
+    // dissection does not hold: the epochs are the opener's state, and until this
+    // round the `KeyUpdate` messages announcing them were opened and read past.
+    let epochs = opener.epoch_witness();
     let flows = dissection.encrypted_flows();
     let decrypted_flows = flows.iter().filter(|f| f.not_decrypted.is_none()).count();
     let report = CaptureReport::of(&dissection);
@@ -330,6 +334,7 @@ pub fn analyze_declaring_quic(
     let rendered = match format {
         Format::Text => {
             let mut rendered = report.to_text();
+            rendered.push_str(&epoch_lines(&epochs, format));
             if per_flow {
                 rendered.push_str(&flow_lines(
                     &dissection,
@@ -343,6 +348,7 @@ pub fn analyze_declaring_quic(
         Format::Json => {
             let mut rendered = String::from("{");
             report.json_fields(&mut rendered);
+            rendered.push_str(&epoch_lines(&epochs, format));
             if per_flow {
                 rendered.push(',');
                 rendered.push_str(&flow_lines(
@@ -357,6 +363,54 @@ pub fn analyze_declaring_quic(
         }
     };
     Ok((rendered, outcome))
+}
+
+/// R311y671 (§1.2a) — the epoch witness, in whichever format.
+///
+/// # Why this is reported at all
+///
+/// An epoch boundary is found by TRIAL: the current epoch refuses a record and
+/// the next one accepts it. Sound, because a 128-bit AEAD tag is what decides —
+/// but evidence that a new epoch ARRIVED, not that this reader understood why.
+/// A post-handshake `KeyUpdate` is the sender's own announcement of the same
+/// event, and this reader was already opening those records and reading straight
+/// past them.
+///
+/// So the two numbers are printed side by side and never merged. Advances equal
+/// to confirmations is a rekeying session captured whole; fewer confirmations
+/// means at least one boundary rests on the trial alone — which is NOT a defect
+/// (the first application epoch follows the handshake with no `KeyUpdate` at all)
+/// but is a fact a reader weighing this decryption should have rather than infer.
+///
+/// Silent where there was nothing to say, like every other qualifier in this
+/// rendering: a capture with no epoch change in it gets no line about epochs.
+/// In JSON the key is STRUCTURAL, because a consumer must not have to test for it.
+fn epoch_lines(witness: &[wz_tls_record::capture::EpochWitness; 2], format: Format) -> String {
+    let [a, b] = witness;
+    let advances = a.epoch_advances + b.epoch_advances;
+    let confirmed = a.advances_confirmed + b.advances_confirmed;
+    let updates = a.key_updates + b.key_updates;
+    if format == Format::Json {
+        return format!(
+            ",\"epochs\":{{\"advances\":{advances},\"advances_confirmed\":{confirmed},\
+             \"key_updates\":{updates}}}"
+        );
+    }
+    if advances == 0 && updates == 0 {
+        return String::new();
+    }
+    let mut out = format!(
+        "  epochs: {advances} key change(s), {confirmed} confirmed by a KeyUpdate; \
+         {updates} KeyUpdate message(s) read\n"
+    );
+    if advances > confirmed {
+        out.push_str(
+            "    (an unconfirmed change is not an error -- the first application \
+             epoch follows the handshake with no KeyUpdate -- but it rests on the \
+             trial alone)\n",
+        );
+    }
+    out
 }
 
 /// R311y666 (§1.2a) — one line per flow.
@@ -440,6 +494,11 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
         // the row would have read `datagram   3 message(s)` for a flow whose
         // three messages were QUIC packets misread as zenoh.
         let (framing, state) = match &flow.quic {
+            // R311y671 — a flow whose declaration its own packets contradict does
+            // NOT say `QuicProtected`, because that claims protected bytes this
+            // reader identified. It identified none, and the row is the line a
+            // person scans for which connection to look at.
+            Some(c) if c.declaration_unsupported() => ("quic", "QuicDeclaredUnsupported"),
             Some(_) => ("quic", "QuicProtected"),
             // "datagram" sits in the FRAMING column because that column answers
             // "what did these bytes turn out to be", and for UDP the answer is
@@ -1415,6 +1474,117 @@ mod tests {
         assert!(
             json.contains("\"declared_flows\":1") && json.contains("\"one_rtt\":1"),
             "and one with nothing but a short header rests on the flag: {json}"
+        );
+    }
+
+    /// A zenoh datagram carrying `payload` to the zenoh port.
+    fn zenoh_datagram(payload: &[u8]) -> Vec<u8> {
+        udp_to_zenoh_port(payload)
+    }
+
+    /// R311y671 (§1.2a) — A DECLARATION ITS OWN FLOW CONTRADICTS SAYS SO.
+    ///
+    /// THE MEASUREMENT: declaring a port that really carried three ordinary zenoh
+    /// datagrams silenced all three and printed `NOT DECRYPTED (this reader
+    /// recognises QUIC and opens none of it)`. It recognised nothing -- the JSON
+    /// already held the whole signal (`unrecognised: 3`, `one_rtt: 0`,
+    /// `initial: 0`) and nothing read it, so the sentence a person actually sees
+    /// was confidently wrong about the one thing that mattered.
+    ///
+    /// The cost of a wrong premise is the worst this reader can inflict, worse
+    /// than the misread R311y669 closed: there, bytes that were not zenoh were
+    /// named as zenoh; here, bytes that ARE zenoh are withheld and reported as
+    /// protected. So the premise must be able to fail out loud.
+    #[test]
+    fn a_declaration_its_own_flow_contradicts_is_reported_as_probably_wrong() {
+        let ka = zenoh_datagram(&[0x04]);
+        let init = zenoh_datagram(&[0x01, 0x09, 0x01, 0xAA]);
+        let file = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[
+                (0, 1_000_000, &ka),
+                (0, 1_000_001, &init),
+                (0, 1_000_002, &ka),
+            ],
+        );
+
+        let (text, _) =
+            analyze_declaring_quic(&file, None, Format::Text, true, true, None, &[7447])
+                .expect("parses");
+        assert!(
+            text.contains("the --quic port is probably wrong"),
+            "the rendering must say the premise looks wrong: {text}"
+        );
+        assert!(
+            text.contains("withheld from the zenoh decoder"),
+            "and name the COST, which is the part a reader acts on -- their own \
+             traffic is missing from this report: {text}"
+        );
+        assert!(
+            text.contains("QuicDeclaredUnsupported") && !text.contains("QuicProtected"),
+            "and the flow row must not claim protected bytes it never identified: \
+             {text}"
+        );
+
+        let (json, _) =
+            analyze_declaring_quic(&file, None, Format::Json, true, false, None, &[7447])
+                .expect("parses");
+        assert!(
+            json.contains("\"declarations_unsupported\":1") && json.contains("\"unrecognised\":3"),
+            "structurally too: {json}"
+        );
+
+        // THE DISCRIMINATOR: a declaration its packets DO support says nothing of
+        // the kind. Without this, "always warn about a declared flow" would pass
+        // every assertion above while making the flag useless.
+        let mut one_rtt = vec![0x41u8];
+        one_rtt.extend_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7]);
+        one_rtt.extend_from_slice(&[0xBB; 30]);
+        let supported = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000_000, &udp_to_zenoh_port(&one_rtt))],
+        );
+        let (text, _) =
+            analyze_declaring_quic(&supported, None, Format::Text, true, false, None, &[7447])
+                .expect("parses");
+        assert!(
+            !text.contains("probably wrong") && text.contains("QuicProtected"),
+            "a supported declaration must stay quiet: {text}"
+        );
+    }
+
+    /// R311y671 (§1.2a) — WHAT THE SIGNAL MISSES, recorded as a test rather than
+    /// as a sentence in a doc comment.
+    ///
+    /// On a declared flow there is nothing left to check, so any first byte with
+    /// bit `0x40` set is accepted as a 1-RTT packet -- and a zenoh `Fragment` with
+    /// its M flag is exactly that (`0x46`). A wrong declaration over
+    /// fragment-heavy zenoh therefore looks SUPPORTED, and the warning above does
+    /// not fire.
+    ///
+    /// Asserted so the limit cannot quietly become a belief that the premise is
+    /// checked. A partial witness that fires on the shape a wrong flag usually
+    /// takes -- handshake and keepalive bytes, whose MIDs sit below `0x20` with no
+    /// `0x40` flag -- is worth having; believing it complete is not.
+    #[test]
+    fn the_contradiction_signal_misses_zenoh_whose_first_byte_carries_the_fixed_bit() {
+        // A real zenoh Fragment, first byte 0x46, on a wrongly declared port.
+        let file = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000_000, &zenoh_datagram(&[0x46, 0x07, 0xEE]))],
+        );
+        let (text, _) =
+            analyze_declaring_quic(&file, None, Format::Text, true, true, None, &[7447])
+                .expect("parses");
+        assert!(
+            !text.contains("probably wrong"),
+            "the limit, stated: this wrong declaration is NOT caught, because the \
+             byte is a valid 1-RTT first byte and on a declared flow nothing else \
+             is checked: {text}"
+        );
+        assert!(
+            text.contains("\"one_rtt\"") || text.contains("QuicProtected"),
+            "it reads as a supported declaration: {text}"
         );
     }
 

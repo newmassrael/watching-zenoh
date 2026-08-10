@@ -724,3 +724,120 @@ fn scouting_capture() -> Vec<u8> {
     let refs: Vec<(u32, u64, &[u8])> = (0..3).map(|i| (0u32, 1_000_000 + i, &eth[..])).collect();
     wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs)
 }
+
+/// R311y671 (§1.2a) — the EPOCH line reaches the rendering a person reads.
+///
+/// The witness values are asserted in `wz-tls-record`'s oracle suite; this is the
+/// other half, and this project has been bitten by exactly the gap between them:
+/// a fact computed correctly and rendered nowhere. The `epochs` line prints only
+/// when there was a key change to report, so it needs a capture that REKEYS --
+/// which no other fixture here has.
+#[test]
+fn the_epoch_line_reaches_the_rendering() {
+    let scratch = Scratch::new("epochs");
+
+    let gen0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(11).wrapping_add(3))
+        .collect();
+    let gen1: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(29).wrapping_add(5))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(13).wrapping_add(4));
+
+    let unit = {
+        let u = vec![0x04u8];
+        let mut framed = (u.len() as u16).to_le_bytes().to_vec();
+        framed.extend_from_slice(&u);
+        framed
+    };
+    let mut stream = client_hello(&random);
+    // Generation 0: one session record, then the KeyUpdate announcing the change.
+    let mut a = sealer(&gen0);
+    for (seq, (typ, body)) in [
+        (rustls::ContentType::ApplicationData, unit.clone()),
+        (
+            rustls::ContentType::Handshake,
+            b"\x18\x00\x00\x01\x00".to_vec(),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        stream.extend_from_slice(
+            &a.encrypt(
+                OutboundPlainMessage {
+                    typ,
+                    version: rustls::ProtocolVersion::TLSv1_2,
+                    payload: rustls::crypto::cipher::OutboundChunks::Single(&body),
+                },
+                seq as u64,
+            )
+            .expect("seal")
+            .encode(),
+        );
+    }
+    // Generation 1, sequence from zero.
+    let mut b = sealer(&gen1);
+    stream.extend_from_slice(
+        &b.encrypt(
+            OutboundPlainMessage {
+                typ: rustls::ContentType::ApplicationData,
+                version: rustls::ProtocolVersion::TLSv1_2,
+                payload: rustls::crypto::cipher::OutboundChunks::Single(&unit),
+            },
+            0,
+        )
+        .expect("seal")
+        .encode(),
+    );
+
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &stream))],
+    );
+    let capture = scratch.write("rekey.pcapng", &file);
+    let log = format!(
+        "CLIENT_TRAFFIC_SECRET_0 {} {}\nCLIENT_TRAFFIC_SECRET_1 {} {}\n",
+        hex(&random),
+        hex(&gen0),
+        hex(&random),
+        hex(&gen1)
+    );
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--keylog")
+        .arg(&keylog)
+        .output()
+        .expect("runs");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("epochs: 1 key change(s), 1 confirmed by a KeyUpdate"),
+        "the epoch witness must reach the text a person reads: {text}"
+    );
+    assert!(
+        text.contains("1 KeyUpdate message(s) read"),
+        "including that the announcement itself was opened: {text}"
+    );
+    // A confirmed change prints no caveat; the caveat belongs to the other case.
+    assert!(
+        !text.contains("rests on the trial alone"),
+        "a confirmed change needs no hedge: {text}"
+    );
+
+    // And the JSON carries the same three numbers, structurally.
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--keylog")
+        .arg(&keylog)
+        .arg("--json")
+        .output()
+        .expect("runs");
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        json.contains("\"epochs\":{\"advances\":1,\"advances_confirmed\":1,\"key_updates\":1}"),
+        "and the JSON must agree with the text, in one document: {json}"
+    );
+    assert_one_document(json.trim());
+}

@@ -5224,7 +5224,8 @@ layer_c1bw_analyze_cli() {
         the_json_rendering_is_a_single_document_even_with_flows \
         the_messages_option_lists_what_was_read_and_not_only_how_much \
         the_json_listing_carries_the_messages_and_stays_one_document \
-        the_quic_and_max_message_options_reach_the_analysis
+        the_quic_and_max_message_options_reach_the_analysis \
+        the_epoch_line_reaches_the_rendering
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bw FAIL: $name is absent from the binary test target"
@@ -5280,7 +5281,9 @@ layer_c1bw_analyze_cli() {
         tests::a_datagram_flow_is_listed_and_its_scouting_messages_are_named \
         tests::a_capture_with_both_transports_lists_them_in_one_separated_array \
         tests::a_mid_connection_quic_capture_needs_the_caller_to_say_so \
-        tests::a_declared_flow_is_marked_as_a_premise_and_a_recognised_one_is_not
+        tests::a_declared_flow_is_marked_as_a_premise_and_a_recognised_one_is_not \
+        tests::a_declaration_its_own_flow_contradicts_is_reported_as_probably_wrong \
+        tests::the_contradiction_signal_misses_zenoh_whose_first_byte_carries_the_fixed_bit
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bw FAIL: $name is absent from the wz-analyze lib target"
@@ -5335,7 +5338,9 @@ layer_c1bx_tls_record_oracle() {
         the_server_direction_has_no_early_epoch \
         a_hole_across_a_key_change_is_recovered_in_the_new_epoch \
         a_record_that_opens_under_nothing_leaves_the_epoch_where_it_was \
-        a_half_key_log_names_the_direction_rather_than_the_epoch
+        a_half_key_log_names_the_direction_rather_than_the_epoch \
+        a_key_update_message_confirms_the_epoch_change_the_trial_found \
+        an_epoch_change_with_no_announcement_is_counted_and_not_confirmed
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bx FAIL: $name is absent from the oracle target"

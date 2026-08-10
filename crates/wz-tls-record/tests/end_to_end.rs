@@ -1441,3 +1441,208 @@ fn a_half_key_log_names_the_direction_rather_than_the_epoch() {
         "the flow as a whole was not fully read"
     );
 }
+
+/// R311y671 (§1.2a) — A `KeyUpdate` CONFIRMS the epoch boundary the trial found.
+///
+/// R311y668's register carried this as `KeyUpdate is survival, not detection`:
+/// the boundary is located by FAILURE -- the current epoch refuses a record, the
+/// next accepts it -- and the post-handshake message that CAUSED the change is a
+/// record this reader opens, reads, and throws away. A boundary that can be
+/// confirmed and is not is a boundary asserted on a probability.
+///
+/// The fixture is the rekey fixture with the announcement PUT BACK where TLS puts
+/// it: a `KeyUpdate` handshake message (type 24) sealed under the OLD generation,
+/// as the last record of that epoch, then the new generation's records. Sealed by
+/// rustls like every other record here, so the reader has to open it to see it --
+/// which is the whole point, since its outer content type is `application_data`
+/// exactly like the session traffic around it.
+#[test]
+fn a_key_update_message_confirms_the_epoch_change_the_trial_found() {
+    let application_0 = traffic_secret();
+    let application_1: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(23).wrapping_add(4))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(5).wrapping_add(3));
+
+    let mut stream = client_hello(&random);
+    let unit = |i: u8| {
+        let u = vec![0x04u8, i];
+        let mut framed = (u.len() as u16).to_le_bytes().to_vec();
+        framed.extend_from_slice(&u);
+        framed
+    };
+
+    // Generation 0: one session record, then the KeyUpdate that announces the
+    // change. `\x18` is the handshake type, `\x00\x00\x01` its 3-byte length,
+    // `\x00` the `update_not_requested` body (RFC 8446 §4.6.3).
+    let mut gen0 = sealer(&application_0);
+    stream.extend_from_slice(
+        &gen0
+            .encrypt(
+                OutboundPlainMessage {
+                    typ: rustls::ContentType::ApplicationData,
+                    version: rustls::ProtocolVersion::TLSv1_2,
+                    payload: rustls::crypto::cipher::OutboundChunks::Single(&unit(0)),
+                },
+                0,
+            )
+            .expect("seal")
+            .encode(),
+    );
+    stream.extend_from_slice(
+        &gen0
+            .encrypt(
+                OutboundPlainMessage {
+                    typ: rustls::ContentType::Handshake,
+                    version: rustls::ProtocolVersion::TLSv1_2,
+                    payload: rustls::crypto::cipher::OutboundChunks::Single(
+                        b"\x18\x00\x00\x01\x00",
+                    ),
+                },
+                1,
+            )
+            .expect("seal")
+            .encode(),
+    );
+
+    // Generation 1, numbering from zero again.
+    let mut gen1 = sealer(&application_1);
+    stream.extend_from_slice(
+        &gen1
+            .encrypt(
+                OutboundPlainMessage {
+                    typ: rustls::ContentType::ApplicationData,
+                    version: rustls::ProtocolVersion::TLSv1_2,
+                    payload: rustls::crypto::cipher::OutboundChunks::Single(&unit(1)),
+                },
+                0,
+            )
+            .expect("seal")
+            .encode(),
+    );
+
+    let mut file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &stream))],
+    );
+    let log_text = format!(
+        "CLIENT_TRAFFIC_SECRET_0 {} {}\nCLIENT_TRAFFIC_SECRET_1 {} {}\n",
+        hex(&random),
+        hex(&application_0),
+        hex(&random),
+        hex(&application_1)
+    );
+    file.extend_from_slice(&decryption_secrets_block(
+        SECRETS_TYPE_TLS_KEY_LOG,
+        log_text.as_bytes(),
+    ));
+
+    let mut d = wz_capture::Dissection::from_pcapng(&file).expect("the file parses");
+    let (mut opener, _) = CaptureOpener::from_secrets_blocks(d.decryption_secrets());
+    let summary = d.decrypt_with(&mut opener);
+
+    assert_eq!(summary.records, 3, "all three records opened: {summary:?}");
+    // Two zenoh messages, NOT three: the KeyUpdate is a handshake message and
+    // must not reach the zenoh reader. That was already true and is asserted here
+    // because this fixture is the first to put one in the middle of a session.
+    assert_eq!(summary.frames, 2, "the KeyUpdate is not a zenoh message");
+
+    let [client, server] = opener.epoch_witness();
+    assert_eq!(
+        (
+            client.key_updates,
+            client.epoch_advances,
+            client.advances_confirmed
+        ),
+        (1, 1, 1),
+        "the announcement was READ and the advance it announced is CONFIRMED by it"
+    );
+    assert_eq!(
+        (server.key_updates, server.epoch_advances),
+        (0, 0),
+        "and the other direction, which carried none, claims none"
+    );
+}
+
+/// R311y671 (§1.2a) — THE DISCRIMINATING NEGATIVE: an epoch change with no
+/// announcement is counted and NOT confirmed.
+///
+/// Without this leg, `advances_confirmed` could be a copy of `epoch_advances` and
+/// every assertion above would still pass. It is also the ordinary shape rather
+/// than a corner: the first application epoch follows the handshake with no
+/// `KeyUpdate` at all, and a capture beginning mid-session missed the message.
+#[test]
+fn an_epoch_change_with_no_announcement_is_counted_and_not_confirmed() {
+    let handshake_secret: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(7).wrapping_add(9))
+        .collect();
+    let application_0 = traffic_secret();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(7));
+
+    let mut stream = client_hello(&random);
+    // One handshake-epoch record, then the application epoch. No KeyUpdate: TLS
+    // sends none across this boundary.
+    let mut hs = sealer(&handshake_secret);
+    stream.extend_from_slice(
+        &hs.encrypt(
+            OutboundPlainMessage {
+                typ: rustls::ContentType::Handshake,
+                version: rustls::ProtocolVersion::TLSv1_2,
+                payload: rustls::crypto::cipher::OutboundChunks::Single(
+                    b"\x14\x00\x00\x02\x00\x00",
+                ),
+            },
+            0,
+        )
+        .expect("seal")
+        .encode(),
+    );
+    let mut app = sealer(&application_0);
+    let u = vec![0x04u8, 0x00];
+    let mut framed = (u.len() as u16).to_le_bytes().to_vec();
+    framed.extend_from_slice(&u);
+    stream.extend_from_slice(
+        &app.encrypt(
+            OutboundPlainMessage {
+                typ: rustls::ContentType::ApplicationData,
+                version: rustls::ProtocolVersion::TLSv1_2,
+                payload: rustls::crypto::cipher::OutboundChunks::Single(&framed),
+            },
+            0,
+        )
+        .expect("seal")
+        .encode(),
+    );
+
+    let mut file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &stream))],
+    );
+    let log_text = format!(
+        "CLIENT_HANDSHAKE_TRAFFIC_SECRET {} {}\nCLIENT_TRAFFIC_SECRET_0 {} {}\n",
+        hex(&random),
+        hex(&handshake_secret),
+        hex(&random),
+        hex(&application_0)
+    );
+    file.extend_from_slice(&decryption_secrets_block(
+        SECRETS_TYPE_TLS_KEY_LOG,
+        log_text.as_bytes(),
+    ));
+
+    let mut d = wz_capture::Dissection::from_pcapng(&file).expect("the file parses");
+    let (mut opener, _) = CaptureOpener::from_secrets_blocks(d.decryption_secrets());
+    d.decrypt_with(&mut opener);
+
+    let [client, _] = opener.epoch_witness();
+    assert_eq!(
+        (
+            client.key_updates,
+            client.epoch_advances,
+            client.advances_confirmed
+        ),
+        (0, 1, 0),
+        "the change happened, nothing announced it, and the report must not \
+         pretend otherwise"
+    );
+}

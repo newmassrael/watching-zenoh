@@ -290,6 +290,36 @@ impl QuicCensus {
         self.bytes += bytes as u64;
         self.unrecognised += 1;
     }
+
+    /// R311y671 (§1.2a) — does this flow CONTRADICT the declaration it rests on?
+    ///
+    /// A flow classified by [`Self::declared`] and carrying not one packet this
+    /// reader can name as QUIC is a flow whose premise is probably wrong — and
+    /// the cost of a wrong premise is the worst this reader can inflict: the
+    /// datagrams were withheld from the zenoh decoder, so REAL zenoh traffic was
+    /// silenced and the report said the bytes were protected.
+    ///
+    /// MEASURED before this existed: declaring a port that carried three ordinary
+    /// zenoh datagrams produced `unrecognised: 3`, `one_rtt: 0`, `initial: 0` in
+    /// the JSON -- the signal was already there and complete -- while the text
+    /// rendering said `NOT DECRYPTED (this reader recognises QUIC and opens none
+    /// of it)`. Nothing read the signal, and the sentence a person actually sees
+    /// was a confident wrong statement.
+    ///
+    /// # What this does NOT catch, and why it is still worth having
+    ///
+    /// A zenoh message whose first byte happens to carry bit `0x40` -- a
+    /// `Fragment` with its M flag, say -- IS accepted as a 1-RTT packet by
+    /// [`recognise_on_quic_flow`], because on a flow the caller has declared
+    /// there is nothing left to check. So a wrong declaration over
+    /// fragment-heavy traffic looks supported. This answers about the case a
+    /// wrong flag usually produces (handshake and keepalive bytes, whose MIDs sit
+    /// below `0x20` with no `0x40` flag) and it does not answer about every case.
+    /// A partial witness that fires on the common shape beats no witness on a
+    /// premise whose failure is silent.
+    pub fn declaration_unsupported(&self) -> bool {
+        self.declared && self.packets > 0 && self.unrecognised == self.packets
+    }
 }
 
 #[cfg(test)]

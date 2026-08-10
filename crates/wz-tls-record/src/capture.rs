@@ -54,6 +54,15 @@ pub struct CaptureOpener {
     log: KeyLog,
     /// The flow currently being opened, per direction.
     directions: [Option<DirectionState>; 2],
+    /// R311y671 (§1.2a) — the epoch witness of every flow this opener has
+    /// FINISHED, per direction.
+    ///
+    /// `directions` is replaced at each [`RecordOpener::begin_flow`], so a
+    /// capture-wide answer has to survive that reset — the same carry
+    /// `wz_capture`'s `evicted_*` totals exist for, and for the same reason: a
+    /// figure read off the live state answers about whichever flow happened to be
+    /// last.
+    retired: [EpochWitness; 2],
 }
 
 /// R311y662 (§1.2a) — one EPOCH of one direction: the secret in force between
@@ -162,7 +171,68 @@ struct DirectionState {
     /// figure is not read off the wire — the lost records' boundaries went with
     /// them — it is found by trying, once, at the first record after each hole.
     skew: u64,
+    /// R311y671 (§1.2a) — what this direction OBSERVED about its own epoch
+    /// changes, as opposed to what the trial INFERRED.
+    witness: EpochWitness,
+    /// A post-handshake `KeyUpdate` has been read on this direction and the epoch
+    /// it announces has not been entered yet.
+    ///
+    /// The whole reason this field exists: the epoch boundary is found by
+    /// FAILURE — the current epoch refuses a record and the next one accepts it —
+    /// and the message that CAUSED the change is a record this reader now opens
+    /// and reads right past. A boundary that can be confirmed and is not is a
+    /// boundary asserted on a probability.
+    pending_key_update: bool,
 }
+
+/// R311y671 (§1.2a) — one direction's epoch changes, observed against inferred.
+///
+/// # Why the two numbers must be separate
+///
+/// R311y662 finds an epoch boundary by trial: the current epoch refuses a record,
+/// the next accepts it at sequence zero, and the reader advances. That is sound
+/// -- a 128-bit AEAD tag is what decides -- but it is EVIDENCE OF ARRIVAL, not
+/// evidence of cause. R311y667 then applied the resync window in every epoch, and
+/// R311y668's register recorded the residue honestly: the ORDER in which the
+/// window and the epoch advance are tried is a declaration, not a proof, and a
+/// record that authenticates under the wrong one authenticates all the same.
+///
+/// A post-handshake `KeyUpdate` (RFC 8446 §4.6.3) is the independent witness. The
+/// party sending it switches its OWN sending key for the record after it, so the
+/// message and the epoch change are in the same direction, in that order. An
+/// advance with a `KeyUpdate` behind it is confirmed by the sender's own
+/// announcement; an advance without one is the trial's word alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EpochWitness {
+    /// Post-handshake `KeyUpdate` messages read on this direction.
+    pub key_updates: usize,
+    /// Epoch advances the trial made.
+    pub epoch_advances: usize,
+    /// Advances that had an unconsumed `KeyUpdate` behind them.
+    ///
+    /// Never greater than [`Self::epoch_advances`]. Equal to it is the ordinary
+    /// shape of a rekeying session captured whole; less than it means at least
+    /// one boundary rests on the trial alone -- which is not a defect (the first
+    /// application epoch follows the handshake with no `KeyUpdate` at all, and a
+    /// capture that begins mid-session missed the announcement) but IS a fact a
+    /// reader weighing the decryption should have.
+    pub advances_confirmed: usize,
+}
+
+impl EpochWitness {
+    /// Fold another direction-witness in — how a finished flow's numbers survive
+    /// the point its state is replaced.
+    fn plus(self, other: Self) -> Self {
+        Self {
+            key_updates: self.key_updates + other.key_updates,
+            epoch_advances: self.epoch_advances + other.epoch_advances,
+            advances_confirmed: self.advances_confirmed + other.advances_confirmed,
+        }
+    }
+}
+
+/// The handshake message type of a post-handshake `KeyUpdate` (RFC 8446 §4.6.3).
+const HS_KEY_UPDATE: u8 = 24;
 
 /// R311y666 (§1.2a) — the most sequence offsets tried at one record after a
 /// hole.
@@ -191,6 +261,8 @@ impl DirectionState {
             at: 0,
             base: 0,
             skew: 0,
+            witness: EpochWitness::default(),
+            pending_key_update: false,
         })
     }
 
@@ -243,9 +315,31 @@ impl DirectionState {
                     // is the offset. COMMITTED here and only here -- `k` holds
                     // for every later record of this epoch, which is why it is
                     // accumulated rather than applied once.
+                    // R311y671 — an advance is CONFIRMED where the sender's own
+                    // `KeyUpdate` preceded it. Counted here, at the commit, so a
+                    // walk that authenticated under nothing leaves no witness
+                    // behind either (the R311y667 rule this loop already keeps).
+                    if at > self.at {
+                        self.witness.epoch_advances += at - self.at;
+                        if self.pending_key_update {
+                            self.witness.advances_confirmed += 1;
+                            self.pending_key_update = false;
+                        }
+                    }
                     self.at = at;
                     self.base = base;
                     self.skew = skew + k;
+                    // A post-handshake KeyUpdate announces that the SENDER's next
+                    // record uses the next key. Read here rather than by the
+                    // caller because the caller is handed only
+                    // `CT_APPLICATION_DATA` onward -- a KeyUpdate's inner type is
+                    // `handshake`, so nothing downstream ever sees one.
+                    if opened.content_type == wz_capture::tls::CT_HANDSHAKE
+                        && opened.plaintext.first() == Some(&HS_KEY_UPDATE)
+                    {
+                        self.witness.key_updates += 1;
+                        self.pending_key_update = true;
+                    }
                     return Some(opened);
                 }
             }
@@ -271,7 +365,25 @@ impl CaptureOpener {
         Self {
             log,
             directions: [None, None],
+            retired: [EpochWitness::default(); 2],
         }
+    }
+
+    /// R311y671 (§1.2a) — what the two directions of the flow most recently
+    /// opened OBSERVED about their epoch changes, `[A, B]`.
+    ///
+    /// See [`EpochWitness`]: the epoch boundary is found by trial, and a
+    /// post-handshake `KeyUpdate` is the sender's own announcement of the same
+    /// event. Until this existed the reader OPENED those messages and read past
+    /// them -- a boundary that could be confirmed and was not.
+    pub fn epoch_witness(&self) -> [EpochWitness; 2] {
+        core::array::from_fn(|i| {
+            let live = self.directions[i]
+                .as_ref()
+                .map(|d| d.witness)
+                .unwrap_or_default();
+            self.retired[i].plus(live)
+        })
     }
 
     /// R311y661 — build one from a capture file's own Decryption Secrets
@@ -376,6 +488,14 @@ impl RecordOpener for CaptureOpener {
             Direction::A => 0,
             Direction::B => 1,
         };
+        // R311y671 — the outgoing flow's witness is carried BEFORE its state is
+        // dropped. Retiring it afterwards is not possible: the numbers live in
+        // the value being replaced.
+        for i in 0..2usize {
+            if let Some(d) = &self.directions[i] {
+                self.retired[i] = self.retired[i].plus(d.witness);
+            }
+        }
         self.directions[client_index] = DirectionState::new(&client);
         self.directions[1 - client_index] = DirectionState::new(&server);
         Ok(())

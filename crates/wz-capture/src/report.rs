@@ -469,7 +469,7 @@ impl<'a> CaptureReport<'a> {
                 ",\"quic\":{{\"flows\":{},\"packets\":{},\"bytes\":{},\"initial\":{},\
                  \"handshake\":{},\"zero_rtt\":{},\"one_rtt\":{},\"retry\":{},\
                  \"version_negotiation\":{},\"unrecognised\":{},\"declared_flows\":{},\
-                 \"decrypted\":false}}",
+                 \"declarations_unsupported\":{},\"decrypted\":false}}",
                 q.len(),
                 q.iter().map(|c| c.packets).sum::<usize>(),
                 q.iter().map(|c| c.bytes).sum::<u64>(),
@@ -484,6 +484,11 @@ impl<'a> CaptureReport<'a> {
                 // evidence. A consumer that treats a declared flow as a
                 // recognised one is treating someone's flag as a measurement.
                 q.iter().filter(|c| c.declared).count(),
+                // R311y671 — declared flows that carried NOTHING this reader can
+                // name as QUIC. The signal for a wrong `--quic` port, and the
+                // cost of one is the worst this reader inflicts: real zenoh
+                // withheld from the decoder and reported as protected bytes.
+                q.iter().filter(|c| c.declaration_unsupported()).count(),
             ));
         }
         s.push_str(&format!(
@@ -712,6 +717,21 @@ impl<'a> CaptureReport<'a> {
                     q.iter().map(|c| c.packets).sum::<usize>(),
                     q.iter().map(|c| c.bytes).sum::<u64>(),
                 ));
+                // R311y671 — and the sentence for a premise its own flow
+                // CONTRADICTS, which the line above cannot carry: that line says
+                // this reader recognised QUIC, and for such a flow it recognised
+                // nothing at all. MEASURED before this existed — a `--quic` port
+                // that really carried three ordinary zenoh datagrams printed
+                // exactly the sentence above, with the traffic silenced and the
+                // `unrecognised: 3` evidence visible only in the JSON.
+                let unsupported = q.iter().filter(|c| c.declaration_unsupported()).count();
+                if unsupported > 0 {
+                    s.push_str(&format!(
+                        "  QUIC: {unsupported} DECLARED flow(s) carried no packet this \
+                         reader can name as QUIC -- the --quic port is probably wrong, \
+                         and that traffic was withheld from the zenoh decoder\n"
+                    ));
+                }
             }
         }
 
