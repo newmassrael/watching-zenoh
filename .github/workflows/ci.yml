@@ -2456,6 +2456,16 @@ jobs:
       - name: Layer C1bw — the wz-analyze command line (R311y665)
         run: bash scripts/run-ci.sh --layer C1bw
 
+      # R311y668 — and the decryptor's own lane. MEASURED when the reason set
+      # grew: `wz-tls-record` was in run-ci.sh ZERO times, so the only place in
+      # this workspace where wz's AEAD path is checked against an implementation
+      # that is not wz's own was reached solely through `cargo test --workspace`.
+      # An integration target that stops being compiled contributes zero to a
+      # summary line, and the differential silently becomes wz agreeing with
+      # itself. Builds the crate isolated and pins the SET of oracle test names.
+      - name: Layer C1bx — the TLS decryptor vs rustls (R311y668)
+        run: bash scripts/run-ci.sh --layer C1bx
+
   capi-c-arms:
     name: §5.27 api-compat-c — the ABI arms and the SHM oracle (C1ce + arms gate)
     runs-on: ubuntu-22.04

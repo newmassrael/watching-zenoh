@@ -5190,6 +5190,18 @@ PY
 #   2. pins the SET of binary-level test names present, on the R311y634 rule
 #      (pin a SET, never a COUNT), so a test that stops being compiled reds
 #      instead of quietly leaving.
+#
+# R311y668 adds a third, for the same reason and one crate down. The names the
+# listing prints come from `InboundFrame::kind_name` / `ScoutingFrame::kind_name`
+# in `wz-session-core`, whose pins are `#[cfg]`-gated on the `codec-*` features —
+# and that crate's DEFAULT feature set contains NONE of them, so
+# `cargo test -p wz-session-core` reaches only the ungated fall-through arm.
+# MEASURED while the pin was being written: with a deliberately wrong
+# `Init => "Open"` in the tree, the default-feature run reported ok. The pins do
+# run full under Layer C1's `--workspace` unification, which is exactly the
+# borrowed coverage R311y415 warned about for `wz-runtime-core` — drop whichever
+# member pins those features and C1 keeps passing while the pin silently checks
+# one variant. So this lane names the features itself.
 layer_c1bw_analyze_cli() {
     local out listing missing name
     (cd crates && cargo clippy -p wz-analyze --all-targets --quiet -- -D warnings) || return 1
@@ -5210,7 +5222,8 @@ layer_c1bw_analyze_cli() {
         an_unreadable_key_log_fails_instead_of_reporting_the_capture_as_encrypted \
         the_flows_option_names_which_connection_the_summary_cannot \
         the_json_rendering_is_a_single_document_even_with_flows \
-        the_messages_option_lists_what_was_read_and_not_only_how_much
+        the_messages_option_lists_what_was_read_and_not_only_how_much \
+        the_json_listing_carries_the_messages_and_stays_one_document
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bw FAIL: $name is absent from the binary test target"
@@ -5218,7 +5231,95 @@ layer_c1bw_analyze_cli() {
         }
     done
     [[ $missing -eq 0 ]] || return 1
+
+    # R311y668 — the message NAMES, in the crate that owns the variants, with the
+    # `codec-*` features their pins are gated on turned ON.
+    local codecs
+    codecs=codec-init-body,codec-open-body,codec-close,codec-keep-alive
+    codecs=$codecs,codec-frame,reassembly,codec-join,codec-scout,codec-hello
+    (cd crates && cargo test -p wz-session-core --features "$codecs" \
+        --lib kind_name --quiet) || {
+        echo "  C1bw FAIL: the kind_name pins do not pass with the codecs on"
+        return 1; }
+
+    # And the SET of them, never a count (R311y634). A pin that stopped being
+    # compiled -- which for these means a `#[cfg]` that stopped matching -- would
+    # otherwise leave the run above green with fewer variants checked, which is
+    # the exact shape this addition exists to catch.
+    listing="$(cd crates && cargo test -p wz-session-core --features "$codecs" \
+        --lib kind_name -- --list 2>/dev/null)" \
+        || { echo "  C1bw FAIL: the kind_name pins did not list"; return 1; }
+    for name in \
+        inbound::kind_name_tests::the_fixture_vector_reaches_every_variant_this_build_has \
+        inbound::kind_name_tests::every_reachable_variant_is_named_by_its_own_identifier \
+        inbound::kind_name_tests::no_two_variants_answer_the_same_name \
+        scouting_message::kind_name_tests::the_fixture_vector_reaches_every_scouting_variant_this_build_has \
+        scouting_message::kind_name_tests::every_reachable_scouting_variant_is_named_by_its_own_identifier \
+        scouting_message::kind_name_tests::no_scouting_name_collides_with_a_transport_name
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1bw FAIL: $name is absent with the codec features on"
+            missing=1
+        }
+    done
+    [[ $missing -eq 0 ]] || return 1
+
     echo "  C1bw: the analyzer builds as a program and its command line is gated"
+}
+
+# ── R311y668 (§1.2a) — Layer C1bx: the TLS DECRYPTOR's oracle suite.
+#
+# MEASURED while adding a reason to it: `wz-tls-record` appeared ZERO times in
+# this file. The crate holding the entire decryption track -- the record opener,
+# the epoch trial, the resynchronisation walk, the key-update handling -- had no
+# lane of its own, and its whole rustls-differential suite was reached only by
+# Layer C1's `cargo test --workspace`.
+#
+# That is precisely the borrowed coverage C1bw exists for one crate over, and
+# the reason it matters more here: these tests are the ONLY place in the
+# workspace where wz's AEAD path is checked against an implementation that is not
+# wz's own. `cargo test --workspace` reports a summary line, so an integration
+# target that stops being compiled -- a renamed file, a `#[cfg]` that stopped
+# matching, a dev-dependency resolution that dropped `rustls` -- contributes zero
+# without saying so, and the differential silently becomes wz agreeing with
+# itself.
+#
+# So: build the crate ISOLATED (`-p`, its own feature resolution rather than the
+# workspace-unified one), and pin the SET of oracle test names (R311y634 — a SET,
+# never a count).
+layer_c1bx_tls_record_oracle() {
+    local listing missing name
+    (cd crates && cargo clippy -p wz-tls-record --all-targets --quiet -- -D warnings) || return 1
+
+    (cd crates && cargo test -p wz-tls-record --quiet) || {
+        echo "  C1bx FAIL: wz-tls-record does not pass in isolation"; return 1; }
+
+    listing="$(cd crates && cargo test -p wz-tls-record --test end_to_end -- --list 2>/dev/null)" \
+        || { echo "  C1bx FAIL: the oracle tests did not list"; return 1; }
+    missing=0
+    for name in \
+        a_captured_tls_flow_is_decrypted_with_the_captures_own_key_log \
+        a_mid_session_flow_keeps_its_records_and_cannot_be_matched_to_a_log \
+        a_pcapng_carrying_its_own_key_log_decrypts_through_the_public_path \
+        a_pcapng_whose_key_log_is_for_another_connection_says_which_refusal_it_is \
+        a_capture_of_a_full_handshake_finds_the_epoch_boundary_by_trial \
+        the_server_direction_decrypts_with_its_own_secret \
+        a_session_that_rekeys_decrypts_past_the_update \
+        a_hole_desynchronises_the_numbering_and_the_reader_resynchronises \
+        a_resumed_sessions_early_data_decrypts_as_the_first_epoch \
+        the_server_direction_has_no_early_epoch \
+        a_hole_across_a_key_change_is_recovered_in_the_new_epoch \
+        a_record_that_opens_under_nothing_leaves_the_epoch_where_it_was \
+        a_half_key_log_names_the_direction_rather_than_the_epoch
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1bx FAIL: $name is absent from the oracle target"
+            missing=1
+        }
+    done
+    [[ $missing -eq 0 ]] || return 1
+
+    echo "  C1bx: the decryptor is checked against rustls and the SET is pinned"
 }
 
 # container can grant CAP_NET_RAW to a non-root process and a root process can
@@ -10774,6 +10875,7 @@ run_layer C1bq layer_c1bq_zero_copy_arena || overall=1
 run_layer C1br layer_c1br_uring_fixed_buffers || overall=1
 run_layer C1bs layer_c1bs_live_capture || overall=1
 run_layer C1bw layer_c1bw_analyze_cli || overall=1
+run_layer C1bx layer_c1bx_tls_record_oracle || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1bl layer_c1bl_cargo_test_router_failfast || overall=1
 run_layer C1bm layer_c1bm_cargo_test_pico_failfast || overall=1

@@ -243,25 +243,50 @@ impl<'a> CaptureReport<'a> {
     pub fn to_json(&self) -> String {
         let mut s = String::new();
         s.push('{');
-        self.capture_json(&mut s);
+        self.json_fields(&mut s);
+        s.push('}');
+        s
+    }
+
+    /// R311y668 (§1.2a) — the report's top-level keys, WITHOUT the braces that
+    /// close the object around them.
+    ///
+    /// # Why this seam exists
+    ///
+    /// R311y667 put the analyzer's flow list INSIDE the report object, and did
+    /// it by string surgery: pop the rendering's final `}`, append a key, push
+    /// `}` back. That was correct for the renderer as it stands and it was not
+    /// composition — a report that grew a trailing newline, or a second
+    /// top-level form, would fail the `ends_with('}')` guard and take a
+    /// fallback that silently produces the TWO-DOCUMENT shape R311y667 existed
+    /// to remove. A consumer parsing that stream as one value reads the report
+    /// and ignores the flows: this track's own failure mode, arriving through
+    /// the output format.
+    ///
+    /// So the object's inside is nameable, and a caller with more keys to add
+    /// writes `{`, this, `,`, its own, `}`. Nothing pops anything, there is no
+    /// guard to be wrong about, and there is no fallback to regress into.
+    ///
+    /// Emits NO leading or trailing comma — the caller owns the separator,
+    /// which is the only arrangement in which appending nothing is also valid.
+    pub fn json_fields(&self, s: &mut String) {
+        self.capture_json(s);
         if let Some(t) = self.throughput {
             s.push(',');
-            throughput_json(t, &mut s);
+            throughput_json(t, s);
         }
         #[cfg(feature = "network-codecs")]
         if let Some(e) = self.exchanges {
             s.push(',');
-            exchanges_json(e, &mut s);
+            exchanges_json(e, s);
         }
         #[cfg(feature = "network-codecs")]
         if let Some(p) = self.payloads {
             s.push(',');
-            payloads_json(p, &mut s);
+            payloads_json(p, s);
         }
         s.push_str(",\"complete\":");
         s.push_str(if self.is_complete() { "true" } else { "false" });
-        s.push('}');
-        s
     }
 
     fn capture_json(&self, s: &mut String) {
@@ -842,6 +867,7 @@ fn decryption_reason(reason: crate::tls::NotDecrypted) -> &'static str {
         crate::tls::NotDecrypted::NoSessionIdentity => "no_session_identity",
         crate::tls::NotDecrypted::NoKeyForSession => "no_key_for_session",
         crate::tls::NotDecrypted::RecordRefusedKeys { .. } => "record_refused_keys",
+        crate::tls::NotDecrypted::NoKeyForDirection { .. } => "no_key_for_direction",
     }
 }
 
@@ -2285,5 +2311,42 @@ mod tests {
             "no fabricated zero: {json}"
         );
         assert!(r.to_text().contains("unmeasured"), "{}", r.to_text());
+    }
+
+    /// R311y668 (§1.2a) — THE COMPOSITION SEAM. `to_json` is exactly its own
+    /// body inside one pair of braces, and the body carries neither of them.
+    ///
+    /// This is what a caller with more keys to add depends on. R311y667's
+    /// analyzer added its flow list by popping the rendering's final `}` and
+    /// pushing one back, guarded by `ends_with('}')` — correct for this renderer
+    /// and not composition: a report that grew a trailing newline would fail the
+    /// guard, take the fallback, and silently emit the TWO-DOCUMENT shape that
+    /// round existed to remove. The pin makes the seam a contract rather than an
+    /// observation, so a `to_json` that later wrapped its body differently fails
+    /// HERE instead of downstream in a consumer's parser.
+    #[test]
+    fn the_json_body_is_exactly_the_document_without_its_braces() {
+        let d = crate::Dissection::new();
+        let r = CaptureReport::of(&d);
+
+        let mut body = String::new();
+        r.json_fields(&mut body);
+        assert_eq!(
+            r.to_json(),
+            alloc::format!("{{{body}}}"),
+            "the document must be the body braced once and nothing else"
+        );
+        // Neither end, and neither a separator: a body that opened or closed an
+        // object, or that carried a leading / trailing comma, would compose into
+        // malformed JSON at every caller rather than at one.
+        assert!(
+            !body.starts_with('{') && !body.ends_with('}'),
+            "the body must not brace itself: {body}"
+        );
+        assert!(
+            !body.starts_with(',') && !body.ends_with(','),
+            "and the caller owns the separator, which is the only arrangement \
+             in which appending nothing is also valid: {body}"
+        );
     }
 }

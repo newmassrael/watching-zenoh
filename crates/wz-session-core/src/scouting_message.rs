@@ -181,6 +181,29 @@ impl ScoutingFrame {
             ScoutingFrame::Unknown { .. } => ExtAdmission::Unjudged,
         }
     }
+
+    /// R311y668 (§1.2a) — what this scouting message IS, in one word, the
+    /// scouting twin of [`crate::inbound::InboundFrame::kind_name`].
+    ///
+    /// Needed for the same reason the transport one is and by the same caller:
+    /// R311y668 gave the analyzer's flow listing its datagram rows, and a
+    /// scouting-only capture's content is entirely in this namespace — so
+    /// without a name here the rows that finally appeared would have said only
+    /// how many.
+    ///
+    /// The names deliberately do NOT collide with the transport namespace's,
+    /// and that is the whole point of the two enums being separate: a listing
+    /// showing `Scout` and one showing `Init` are showing byte `0x01` read two
+    /// different ways, and a reader must be able to tell which.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            #[cfg(feature = "codec-scout")]
+            ScoutingFrame::Scout { .. } => "Scout",
+            #[cfg(feature = "codec-hello")]
+            ScoutingFrame::Hello { .. } => "Hello",
+            ScoutingFrame::Unknown { .. } => "Unknown",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -288,5 +311,121 @@ mod tests {
     #[test]
     fn an_empty_datagram_is_rejected_rather_than_defaulted() {
         assert!(matches!(parse_scouting(&[]), Err(InboundParseError::Empty)));
+    }
+}
+
+// ── R311y668 (§1.2a) — the scouting NAME, pinned the same way the transport one
+//    is (`crate::inbound::kind_name_tests`). The collision is the reason it needs
+//    its own pin: `S_MID_SCOUT` and `T_MID_INIT` are the same byte, so a listing
+//    that printed `Init` for a scouting datagram would be a confident wrong
+//    answer rather than an absent one. ──
+#[cfg(test)]
+mod kind_name_tests {
+    use super::*;
+    use alloc::vec::Vec;
+
+    /// Every variant this build can reach, as (wire, expected name), over real
+    /// `parse_scouting` decodes.
+    fn reachable() -> Vec<(Vec<u8>, &'static str)> {
+        let mut cases: Vec<(Vec<u8>, &'static str)> = Vec::new();
+
+        #[cfg(feature = "codec-scout")]
+        {
+            let mut scout = wz_codecs::scout::Scout::new();
+            scout.version = 0x09;
+            scout.set_what(0x03);
+            scout.set_i(true);
+            scout.set_zid_len_m1(3);
+            scout.zid = Some(&[0x11, 0x22, 0x33, 0x44]);
+            let mut wire = alloc::vec![wire_const::S_MID_SCOUT];
+            wire.extend_from_slice(&scout.encode_to_vec());
+            cases.push((wire, "Scout"));
+        }
+
+        #[cfg(feature = "codec-hello")]
+        {
+            let mut hello = wz_codecs::hello::Hello::new();
+            hello.version = 0x09;
+            hello.set_whatami(0x01);
+            hello.set_zid_len_m1(3);
+            hello.zid = &[0xA0, 0xA1, 0xA2, 0xA3];
+            let mut wire = alloc::vec![wire_const::S_MID_HELLO];
+            wire.extend_from_slice(&hello.encode_to_vec(0));
+            cases.push((wire, "Hello"));
+        }
+
+        // A MID in neither scouting slot. Ungated, so a build with no scouting
+        // codec at all still has a case and this vector is never empty.
+        cases.push((alloc::vec![0x1F], "Unknown"));
+        cases
+    }
+
+    /// The set this build must reach, stated independently of the vector — the
+    /// R311y634 rule, and the same guard the transport pin needed after a
+    /// default-feature build made its vector a single ungated case.
+    // `vec![]` cannot express this: every element is `#[cfg]`-gated, and a macro
+    // literal has no place to put the attribute. The lint is reading the shape and
+    // not the reason.
+    #[allow(clippy::vec_init_then_push)]
+    fn expected_names() -> Vec<&'static str> {
+        let mut want: Vec<&'static str> = Vec::new();
+        #[cfg(feature = "codec-scout")]
+        want.push("Scout");
+        #[cfg(feature = "codec-hello")]
+        want.push("Hello");
+        want.push("Unknown");
+        want
+    }
+
+    #[test]
+    fn the_fixture_vector_reaches_every_scouting_variant_this_build_has() {
+        let got: Vec<&'static str> = reachable().into_iter().map(|(_, n)| n).collect();
+        for want in expected_names() {
+            assert!(
+                got.contains(&want),
+                "`{want}` is a variant this build compiles and no fixture \
+                 reaches it, so nothing checks its name: {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_reachable_scouting_variant_is_named_by_its_own_identifier() {
+        for (wire, expected) in reachable() {
+            let frame = parse_scouting(&wire).expect("the fixture wire decodes");
+            assert_eq!(
+                frame.kind_name(),
+                expected,
+                "wire {wire:02X?} decoded to {frame:?}, whose name must be \
+                 `{expected}`"
+            );
+        }
+    }
+
+    /// THE ONE THAT MATTERS HERE: no scouting name may collide with a transport
+    /// name. Byte `0x01` is a SCOUT on the scouting group and an INIT on a
+    /// session link, and a listing whose two namespaces shared a word would make
+    /// those two events indistinguishable in the one place a reader looks.
+    #[cfg(all(feature = "codec-scout", feature = "codec-init-body"))]
+    #[test]
+    fn no_scouting_name_collides_with_a_transport_name() {
+        let scouting: Vec<&'static str> = reachable()
+            .into_iter()
+            .map(|(_, n)| n)
+            // `Unknown` is deliberately shared: both enums have an
+            // un-nameable-MID arm and it means the same thing in each.
+            .filter(|n| *n != "Unknown")
+            .collect();
+        for name in scouting {
+            let transport =
+                crate::inbound::parse_inbound(&[wire_const::T_MID_INIT, 0x09, 0x01, 0xAA])
+                    .expect("the init wire decodes");
+            assert_ne!(
+                name,
+                transport.kind_name(),
+                "a scouting message and a transport message must not print the \
+                 same word for the same byte"
+            );
+        }
     }
 }

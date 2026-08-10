@@ -1336,3 +1336,108 @@ fn a_record_that_opens_under_nothing_leaves_the_epoch_where_it_was() {
         "and it is named by index rather than blamed on the keys"
     );
 }
+
+/// R311y668 (§1.2a) — a HALF key log names the DIRECTION whose key is missing.
+///
+/// The commonest arrangement there is, and it had the wrong reason. An
+/// `SSLKEYLOGFILE` is written by ONE process, so a capture of two peers where
+/// only one was instrumented has `CLIENT_TRAFFIC_SECRET_0` and no
+/// `SERVER_TRAFFIC_SECRET_0`. Each secret opens exactly one direction.
+///
+/// MEASURED before the fix, on this fixture: `RecordRefusedKeys { direction: B,
+/// index: 0 }`. That variant's documented cause is the EPOCH -- TLS 1.3 restarts
+/// the AEAD sequence on a key change -- so the report sent a reader to look at
+/// key rotation for a key that was never in the log. The remedies differ and
+/// both are concrete: obtain the other peer's log, versus recapture across the
+/// rotation.
+///
+/// Driven through the REAL cipher, because the claim is about which of two
+/// indistinguishable-looking failures happened: rustls seals the server's
+/// records under a secret this run genuinely does not have, so nothing about the
+/// arrangement is arranged.
+#[test]
+fn a_half_key_log_names_the_direction_rather_than_the_epoch() {
+    let client_secret = traffic_secret();
+    let server_secret: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(13).wrapping_add(5))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(11).wrapping_add(6));
+
+    let mut from_client = client_hello(&random);
+    let mut c = sealer(&client_secret);
+    let sealed = c
+        .encrypt(
+            OutboundPlainMessage {
+                typ: rustls::ContentType::ApplicationData,
+                version: rustls::ProtocolVersion::TLSv1_2,
+                payload: rustls::crypto::cipher::OutboundChunks::Single(b"\x02\x00\x04\x01"),
+            },
+            0,
+        )
+        .expect("seal");
+    from_client.extend_from_slice(&sealed.encode());
+
+    let mut from_server = Vec::new();
+    let mut sv = sealer(&server_secret);
+    for seq in 0..2u64 {
+        let sealed = sv
+            .encrypt(
+                OutboundPlainMessage {
+                    typ: rustls::ContentType::ApplicationData,
+                    version: rustls::ProtocolVersion::TLSv1_2,
+                    payload: rustls::crypto::cipher::OutboundChunks::Single(b"\x02\x00\x04\x01"),
+                },
+                seq,
+            )
+            .expect("seal");
+        from_server.extend_from_slice(&sealed.encode());
+    }
+
+    let mut file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[
+            (0, 1_000_000, &tcp_packet(1000, &from_client)),
+            (0, 1_000_001, &tcp_packet_from_server(5000, &from_server)),
+        ],
+    );
+    // CLIENT ONLY. The server secret is absent from the log entirely.
+    let log_text = format!(
+        "CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+        hex(&random),
+        hex(&client_secret),
+    );
+    file.extend_from_slice(&decryption_secrets_block(
+        SECRETS_TYPE_TLS_KEY_LOG,
+        log_text.as_bytes(),
+    ));
+
+    let mut d = wz_capture::Dissection::from_pcapng(&file).expect("the file parses");
+    let (mut opener, _) = CaptureOpener::from_secrets_blocks(d.decryption_secrets());
+    let summary = d.decrypt_with(&mut opener);
+    assert_eq!(
+        d.encrypted_flows()[0].not_decrypted,
+        Some(wz_capture::tls::NotDecrypted::NoKeyForDirection {
+            direction: wz_capture::tls::Direction::B
+        }),
+        "the reason must name the direction whose secret is absent"
+    );
+    // Not the epoch reason it used to be, stated as its own assertion: the two
+    // are both `Some(..)` and a reader acting on the wrong one goes looking for a
+    // key rotation that never happened.
+    assert!(
+        !matches!(
+            d.encrypted_flows()[0].not_decrypted,
+            Some(wz_capture::tls::NotDecrypted::RecordRefusedKeys { .. })
+        ),
+        "and it must not be the epoch reason: {:?}",
+        d.encrypted_flows()[0].not_decrypted
+    );
+    // The half that HAS its key is still read. A one-sided log reads one side,
+    // and reporting the flow as wholly unread would be a second wrong answer.
+    assert_eq!(summary.records, 1, "the client's one record opened");
+    assert_eq!(summary.frames, 1, "and its zenoh message came out");
+    assert_eq!(
+        summary.decrypted, 0,
+        "the flow as a whole was not fully read"
+    );
+}

@@ -331,6 +331,24 @@ pub enum NotDecrypted {
         /// Its [`EncryptedRecord::index`].
         index: u64,
     },
+    /// R311y668 (§1.2a) — keys for this session were found and they cover only
+    /// ONE of its two directions, so the other's records were never attempted.
+    ///
+    /// The ordinary cause is a HALF key log: `SSLKEYLOGFILE` written by one of
+    /// the two peers gives `CLIENT_TRAFFIC_SECRET_0` and not
+    /// `SERVER_TRAFFIC_SECRET_0`, or the reverse, and each secret opens exactly
+    /// one direction ([`Direction`]).
+    ///
+    /// MEASURED before it existed, which is the reason it does: such a flow
+    /// reported `RecordRefusedKeys { direction: B, index: 0 }` — a reason whose
+    /// documented cause is the EPOCH. It sent a reader to look at key rotation
+    /// for a flow whose key was never in the log at all. Every other variant here
+    /// names a remedy and this one names a different remedy from the variant it
+    /// was folded into: get the other peer's log, not recapture the rotation.
+    NoKeyForDirection {
+        /// The direction no key material covered.
+        direction: Direction,
+    },
 }
 
 /// An encrypted flow, as the report shows it.
@@ -660,6 +678,23 @@ pub trait RecordOpener {
     /// the middle of a byte stream cannot be skipped over — the bytes after it
     /// no longer begin where the reader thinks they do.
     fn open(&mut self, direction: Direction, record: &EncryptedRecord) -> Option<OpenedRecord>;
+
+    /// R311y668 (§1.2a) — does this opener hold key material for `direction` of
+    /// the flow most recently announced?
+    ///
+    /// A SEPARATE question from [`Self::open`] because the two answers a caller
+    /// needs are not the same fact, and folding them cost a reason. `open`
+    /// returning `None` means "this record did not authenticate", whose
+    /// documented cause is the epoch; a direction with no secret at all also
+    /// returns `None` from the first record it is handed, and until this method
+    /// existed the caller reported the second as the first — sending a reader to
+    /// look at key rotation for a flow whose key was never supplied.
+    ///
+    /// NO default implementation, deliberately. A `true` default would let an
+    /// opener that cannot answer be read as "keys for everything", which is the
+    /// silent degradation this project treats as worse than a compile error:
+    /// every implementor states its own answer or does not build.
+    fn has_keys(&self, direction: Direction) -> bool;
 }
 
 impl core::fmt::Debug for EncryptedRecord {

@@ -92,9 +92,11 @@ OPTIONS:
     --keylog <file>   an NSS key log (SSLKEYLOGFILE) to decrypt TLS flows with.
                       Keys carried inside the capture's own Decryption Secrets
                       Blocks are used without this flag.
-    --flows           list every flow: endpoints, framing, messages decoded,
-                      and for an encrypted one whether its plaintext was read
-    --messages        list the decoded messages themselves, under their flow.
+    --flows           list every flow, stream and datagram: endpoints, framing,
+                      messages decoded, scouting messages, and for an encrypted
+                      one whether its plaintext was read
+    --messages        list the decoded messages themselves, under their flow,
+                      with the direction, offset and namespace of each.
                       Implies --flows
     --json            render the report as JSON instead of text
     -h, --help        print this and exit
@@ -220,13 +222,29 @@ pub fn analyze_with(
         key_log_connections,
         foreign_secrets_blocks: foreign,
     };
-    let mut rendered = match format {
-        Format::Text => report.to_text(),
-        Format::Json => report.to_json(),
+    // R311y668 — the JSON is COMPOSED and no longer spliced. The report names
+    // its own keys ([`CaptureReport::json_fields`]) and this is the only place
+    // that decides where the object begins and ends, so a flow list is one more
+    // key rather than a second document appended after the first.
+    let rendered = match format {
+        Format::Text => {
+            let mut rendered = report.to_text();
+            if per_flow {
+                rendered.push_str(&flow_lines(&dissection, format, per_message));
+            }
+            rendered
+        }
+        Format::Json => {
+            let mut rendered = String::from("{");
+            report.json_fields(&mut rendered);
+            if per_flow {
+                rendered.push(',');
+                rendered.push_str(&flow_lines(&dissection, format, per_message));
+            }
+            rendered.push('}');
+            rendered
+        }
     };
-    if per_flow {
-        splice_flows(&mut rendered, &dissection, format, per_message);
-    }
     Ok((rendered, outcome))
 }
 
@@ -236,34 +254,17 @@ pub fn analyze_with(
 /// exposed: which endpoints, what the byte stream turned out to be, how many
 /// messages came out of it, and -- for an encrypted flow -- whether its
 /// plaintext was read and why not.
-/// R311y667 (§1.2a) — put the flow list INSIDE the report rather than after it.
 ///
-/// R311y666 appended a second JSON object, so `--json --flows` emitted two
-/// documents on one stream. A consumer parsing it as a single value gets the
-/// first and silently ignores the second -- which is the whole class of failure
-/// this track exists to end, arriving through the output format: the flows are
-/// there, the reader does not see them, and nothing says so.
+/// R311y668 (§1.2a) — EVERY flow, and the DATAGRAM ones were absent. `flows()`
+/// is the TCP half of a dissection; a capture of scouting traffic has all of its
+/// content in `datagram_flows()`, so `--flows` over one printed the report's
+/// `datagram_flows: N` count above a list with no rows in it. A listing that
+/// omits a whole transport is worse than no listing: it reads as "this capture
+/// had one connection in it and here it is".
 ///
-/// The text rendering has no such constraint and keeps its appended section.
-fn splice_flows(rendered: &mut String, d: &Dissection, format: Format, per_message: bool) {
-    let body = flow_lines(d, format, per_message);
-    if format == Format::Text {
-        rendered.push_str(&body);
-        return;
-    }
-    // The report is one JSON object, so the list becomes another key in it.
-    // Checked rather than assumed: a renderer that stopped producing an object
-    // would otherwise have this appended to whatever it did produce.
-    if rendered.ends_with('}') {
-        rendered.pop();
-        rendered.push(',');
-        rendered.push_str(&body);
-        rendered.push('}');
-    } else {
-        rendered.push_str(&body);
-    }
-}
-
+/// R311y668 — and the JSON carries the MESSAGES. `--messages` reached only the
+/// text branch, so `--json --messages` listed the flows and not their messages:
+/// a silent narrowing of exactly the kind R311y667 closed elsewhere.
 fn flow_lines(d: &Dissection, format: Format, per_message: bool) -> String {
     let mut out = String::new();
     if format == Format::Json {
@@ -271,7 +272,8 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool) -> String {
     } else {
         out.push_str("\nflows:\n");
     }
-    for (i, flow) in d.flows().iter().enumerate() {
+    let mut emitted = 0usize;
+    for flow in d.flows() {
         let encrypted = flow.encrypted();
         let framing = match flow.framing() {
             wz_capture::Framing::Stream => "stream",
@@ -285,37 +287,48 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool) -> String {
             Some(None) => "decrypted".to_string(),
             Some(Some(reason)) => format!("{reason:?}"),
         };
-        let key = &flow.flow;
-        if format == Format::Json {
-            if i > 0 {
-                out.push(',');
-            }
-            out.push_str(&format!(
-                "{{\"low\":\"{}\",\"high\":\"{}\",\"framing\":\"{framing}\",\
-                 \"messages\":{},\"tls\":\"{state}\"}}",
-                endpoint(&key.low),
-                endpoint(&key.high),
-                flow.frames.len()
-            ));
-        } else {
-            out.push_str(&format!(
-                "  {} <-> {}  {framing:<12} {} message(s)  {state}\n",
-                endpoint(&key.low),
-                endpoint(&key.high),
-                flow.frames.len()
-            ));
-            if per_message {
-                for f in &flow.frames {
-                    out.push_str(&format!(
-                        "      {:?} @{} #{}  {}\n",
-                        f.direction,
-                        f.stream_offset,
-                        f.batch_index,
-                        message_name(f)
-                    ));
-                }
-            }
-        }
+        let rows: Vec<MessageRow> = flow.frames.iter().map(MessageRow::transport).collect();
+        push_flow(
+            &mut out,
+            format,
+            &mut emitted,
+            &flow.flow,
+            framing,
+            flow.frames.len(),
+            // A stream flow carries no scouting messages and says so with a
+            // zero rather than by the key's absence, which is the same
+            // structural rule the report's own `encrypted` block follows: a
+            // consumer never has to test for a field to learn a count is nil.
+            0,
+            &state,
+            per_message.then_some(&rows[..]),
+        );
+    }
+    // R311y668 — the DATAGRAM half. Absent from this listing until now, which
+    // made a scouting-only capture report its flow count above an empty list.
+    for flow in d.datagram_flows() {
+        let mut rows: Vec<MessageRow> = flow.frames.iter().map(MessageRow::transport).collect();
+        rows.extend(flow.scouting.iter().map(MessageRow::scouting));
+        push_flow(
+            &mut out,
+            format,
+            &mut emitted,
+            &flow.flow,
+            // "datagram" sits in the FRAMING column because that column answers
+            // "what did these bytes turn out to be", and for UDP the answer is
+            // that there was no stream to frame -- one datagram is one unit.
+            // `Framing` itself is a stream-only enum, so this is the one value
+            // in this column that does not come from it.
+            "datagram",
+            flow.frames.len(),
+            flow.scouting.len(),
+            // Nothing carries a datagram flow over TLS in this reader: DTLS is
+            // not recognised and QUIC is untouched, so the state is not
+            // "decrypted" and not a refusal -- it is not applicable, and saying
+            // so is different from claiming either.
+            "-",
+            per_message.then_some(&rows[..]),
+        );
     }
     if format == Format::Json {
         out.push(']');
@@ -323,31 +336,165 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool) -> String {
     out
 }
 
+/// R311y668 (§1.2a) — one flow's row, in whichever format, for whichever
+/// transport.
+///
+/// Written once for the two loops above rather than twice: the stream and the
+/// datagram halves differ in three values and a listing whose two halves drift
+/// into different shapes is worse than one that lists only half, because a
+/// consumer cannot tell which shape it is reading.
+///
+/// `emitted` is the comma bookkeeping, and it counts across BOTH loops -- the
+/// JSON array is one array, so `i > 0` inside either loop alone would drop a
+/// separator between the last stream flow and the first datagram one.
+#[allow(clippy::too_many_arguments)]
+fn push_flow(
+    out: &mut String,
+    format: Format,
+    emitted: &mut usize,
+    key: &wz_capture::link::FlowKey,
+    framing: &str,
+    messages: usize,
+    scouting: usize,
+    state: &str,
+    rows: Option<&[MessageRow]>,
+) {
+    if format == Format::Json {
+        if *emitted > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"low\":\"{}\",\"high\":\"{}\",\"framing\":\"{framing}\",\
+             \"messages\":{messages},\"scouting\":{scouting},\"tls\":\"{state}\"",
+            endpoint(&key.low),
+            endpoint(&key.high),
+        ));
+        if let Some(rows) = rows {
+            out.push_str(",\"message_list\":[");
+            for (i, row) in rows.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                row.push_json(out);
+            }
+            out.push(']');
+        }
+        out.push('}');
+    } else {
+        out.push_str(&format!(
+            "  {} <-> {}  {framing:<12} {messages} message(s)  \
+             {scouting} scouting  {state}\n",
+            endpoint(&key.low),
+            endpoint(&key.high),
+        ));
+        if let Some(rows) = rows {
+            for row in rows {
+                row.push_text(out);
+            }
+        }
+    }
+    *emitted += 1;
+}
+
+/// R311y668 (§1.2a) — one row of the message listing.
+///
+/// A type and not a formatting closure per call site, because the two message
+/// namespaces do not have the same fields and the listing must not pretend they
+/// do: a scouting datagram has no batch to be inside of, and folding that into a
+/// `0` would claim a position it does not have.
+struct MessageRow {
+    /// Which way it travelled, keyed exactly as its flow keys it.
+    direction: wz_session_core::passive::Direction,
+    /// TCP-space byte offset for a stream flow, packet index for a datagram one
+    /// -- which is what `PassiveFrame::stream_offset` already carries there,
+    /// because a datagram has no stream to be an offset into.
+    offset: usize,
+    /// Which framing unit inside the record it came out of, or `None` for a
+    /// scouting datagram, which is not inside one.
+    batch: Option<usize>,
+    /// Which namespace read it. Part of the row rather than implied by where it
+    /// is printed, because the two namespaces COLLIDE numerically -- `S_MID_SCOUT`
+    /// and `T_MID_INIT` are both `0x01` -- so "a Scout" and "an Init" can be the
+    /// same byte read two ways, and a reader must be able to tell which happened.
+    space: &'static str,
+    /// What it was, by the name its own type gives it.
+    name: String,
+}
+
+impl MessageRow {
+    fn transport(f: &wz_session_core::passive::PassiveFrame) -> Self {
+        Self {
+            direction: f.direction,
+            offset: f.stream_offset,
+            batch: Some(f.batch_index),
+            space: "transport",
+            name: message_name(f),
+        }
+    }
+
+    fn scouting(s: &wz_capture::ScoutingDatagram) -> Self {
+        Self {
+            direction: s.direction,
+            offset: s.packet_index,
+            batch: None,
+            space: "scouting",
+            name: match &s.frame {
+                Ok(f) => f.kind_name().to_string(),
+                Err(e) => format!("undecodable({e:?})"),
+            },
+        }
+    }
+
+    fn push_json(&self, out: &mut String) {
+        let batch = match self.batch {
+            Some(b) => b.to_string(),
+            // `null` and not a number: JSON has a word for "this row has no
+            // such position" and using it is the difference between saying so
+            // and claiming index zero.
+            None => "null".to_string(),
+        };
+        out.push_str(&format!(
+            "{{\"space\":\"{}\",\"direction\":\"{:?}\",\"offset\":{},\
+             \"batch\":{batch},\"name\":\"{}\"}}",
+            self.space, self.direction, self.offset, self.name
+        ));
+    }
+
+    fn push_text(&self, out: &mut String) {
+        match self.batch {
+            Some(b) => out.push_str(&format!(
+                "      {:?} @{} #{b}  {}\n",
+                self.direction, self.offset, self.name
+            )),
+            None => out.push_str(&format!(
+                "      {:?} @{} {}  {}\n",
+                self.direction, self.offset, self.space, self.name
+            )),
+        }
+    }
+}
+
 /// R311y667 (§1.2a) — what one decoded message WAS, in a word.
 ///
-/// ## Why this reads a `Debug` rendering instead of matching the enum
+/// ## Why the name comes from the type and not from a `Debug` rendering
 ///
-/// A total match is this project's rule and is the wrong tool here:
-/// `InboundFrame`'s variants are individually `#[cfg]`-gated on the `codec-*`
-/// features, so an exhaustive match in this crate would have to mirror seven
-/// feature gates it does not own -- and a mirror drifts. A `_ =>` fallback is
-/// worse: it is the arm that silently reports a new message kind as whatever
-/// the default happens to be.
+/// R311y667 read the leading token of the derived `Debug`. The reason it gave
+/// for not matching was sound: `InboundFrame`'s variants are individually
+/// `#[cfg]`-gated on seven `codec-*` features this crate does not own, so an
+/// exhaustive match HERE would mirror those gates and a mirror drifts, while a
+/// `_ =>` arm is worse -- it reports a new message kind as whatever the default
+/// happens to be.
 ///
-/// So the name is taken from the derived `Debug`, whose leading token is the
-/// variant's own identifier. That is a human-facing listing reading a
-/// human-facing rendering; nothing decides anything on it, and a variant added
-/// upstream appears here by its right name without this crate being touched.
+/// What it left behind is a name resting on a `Debug` shape nothing pinned: a
+/// variant whose rendering stopped beginning with its identifier would have
+/// quietly renamed a message here and said nothing. R311y668 moved the naming
+/// to [`wz_session_core::inbound::InboundFrame::kind_name`], where the arms sit
+/// beside the variants under the same `#[cfg]`s and exhaustiveness is the
+/// COMPILER's. There is no mirror to drift, no `Debug` shape to depend on, and
+/// a variant added upstream fails a match instead of taking a fallback.
 fn message_name(frame: &wz_session_core::passive::PassiveFrame) -> String {
     match &frame.frame {
-        Ok(f) => {
-            let rendered = format!("{f:?}");
-            rendered
-                .split(|c: char| !c.is_alphanumeric() && c != '_')
-                .next()
-                .unwrap_or("?")
-                .to_string()
-        }
+        Ok(f) => f.kind_name().to_string(),
         // A message this reader could NOT decode is named as such rather than
         // omitted: a listing that shows only the successes is the silence this
         // whole track exists to end, one layer up.
@@ -531,6 +678,182 @@ mod tests {
             eth.push(0);
         }
         eth
+    }
+
+    /// One Ethernet/IPv4/UDP packet to zenoh's scouting group carrying a SCOUT.
+    ///
+    /// Hand-laid rather than encoded through `wz-codecs`, which is not a
+    /// dependency of this crate: `[S_MID_SCOUT, version, cbyte, zid..]`, with
+    /// `cbyte` bit 3 marking the zid present and its top nibble carrying
+    /// `zid_len - 1` (`out/wz-codecs/scout.rs:70-92`).
+    fn scout_packet() -> Vec<u8> {
+        let scout = [0x01u8, 0x09, (3 << 4) | 0x08 | 0x03, 0x11, 0x22, 0x33, 0x44];
+
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&43210u16.to_be_bytes());
+        udp.extend_from_slice(&7446u16.to_be_bytes());
+        udp.extend_from_slice(&((8 + scout.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(&scout);
+
+        let mut ip = vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+        ip.extend_from_slice(&[192, 168, 1, 5]);
+        // zenoh's `DEFAULT_MULTICAST_SCOUTING_ADDRESS`. The destination is the
+        // discriminator: `S_MID_SCOUT` and `T_MID_INIT` are both `0x01`, and a
+        // multicast transport has no handshake, so on this address the byte can
+        // only be the scouting one.
+        ip.extend_from_slice(&[224, 0, 0, 224]);
+        ip.extend_from_slice(&udp);
+
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// R311y668 (§1.2a) — a DATAGRAM flow gets a row, and its scouting messages
+    /// get names.
+    ///
+    /// R311y666 gave `--flows` its listing over `Dissection::flows()`, which is
+    /// the TCP half. A scouting capture's entire content is in the other half,
+    /// so the report said `datagram_flows: 1` and the list under it had no rows
+    /// at all -- which reads as a capture whose one flow carried nothing, and is
+    /// the silence this track exists to end arriving through the listing that
+    /// was built to end it.
+    #[test]
+    fn a_datagram_flow_is_listed_and_its_scouting_messages_are_named() {
+        let file = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000_000, &scout_packet())],
+        );
+
+        let (text, _) = analyze_with(&file, None, Format::Text, true, true).expect("parses");
+        assert!(
+            text.contains("1 datagram"),
+            "the report must have counted the flow in the first place -- the \
+             defect was a count with no row under it: {text}"
+        );
+        // MEASURED, and it is why the row carries a second number: the
+        // capture-wide `messages decoded` total is 0 here while the flow holds
+        // one scouting message, because `Dissection::decoded_messages` counts
+        // transport frames only. A row that folded scouting into `message(s)`
+        // would disagree with the summary printed three lines above it.
+        assert!(
+            text.contains("messages decoded: 0"),
+            "the summary counts transport frames only: {text}"
+        );
+        assert!(
+            text.contains("192.168.1.5:43210") && text.contains("224.0.0.224:7446"),
+            "the datagram flow needs a ROW with its endpoints on it: {text}"
+        );
+        assert!(
+            text.contains("datagram"),
+            "and the row must say which transport it is: {text}"
+        );
+        assert!(
+            text.contains("1 scouting"),
+            "with the scouting count, which the message total does NOT include: \
+             {text}"
+        );
+        assert!(
+            text.contains("Scout"),
+            "and --messages must NAME the scouting message, which is the whole \
+             content of a capture like this one: {text}"
+        );
+        // Not an `Init`. The two namespaces collide on `0x01`, and naming this
+        // one after the transport reading would be a confident wrong answer
+        // rather than an absent one.
+        assert!(
+            !text.contains("Init"),
+            "byte 0x01 on the scouting group is a Scout and not an Init: {text}"
+        );
+
+        let (json, _) = analyze_with(&file, None, Format::Json, true, true).expect("parses");
+        assert!(
+            json.contains("\"framing\":\"datagram\"") && json.contains("\"scouting\":1"),
+            "the JSON row carries the same two facts: {json}"
+        );
+        assert!(
+            json.contains("\"space\":\"scouting\"") && json.contains("\"name\":\"Scout\""),
+            "and the message row says which namespace read it: {json}"
+        );
+        assert!(
+            json.contains("\"batch\":null"),
+            "a scouting datagram is not inside a batch, and `null` says that \
+             rather than claiming index zero: {json}"
+        );
+    }
+
+    /// R311y668 (§1.2a) — the two halves are ONE array, and the separator
+    /// between them is real.
+    ///
+    /// The DISCRIMINATOR the single-transport test above cannot be: the flow
+    /// list is written by two loops over two different collections, and a comma
+    /// counter kept per loop restarts at the first datagram flow -- emitting
+    /// `}{` between the last stream row and the first datagram one. Neither the
+    /// depth walk in the binary test nor any row assertion sees that: the
+    /// nesting stays balanced and every row is present and correct. What sees it
+    /// is that the two objects are not separated.
+    #[test]
+    fn a_capture_with_both_transports_lists_them_in_one_separated_array() {
+        let file = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[
+                (0, 1_000_000, &tls_packet()),
+                (0, 2_000_000, &scout_packet()),
+            ],
+        );
+
+        let (json, _) = analyze_with(&file, None, Format::Json, true, false).expect("parses");
+        assert!(
+            json.contains("\"framing\":\"tls\"") && json.contains("\"framing\":\"datagram\""),
+            "both transports must have a row: {json}"
+        );
+        assert!(
+            !json.contains("}{"),
+            "two rows with no comma between them is not an array a consumer can \
+             parse, and it is balanced and complete so nothing else catches it: \
+             {json}"
+        );
+
+        let (text, _) = analyze_with(&file, None, Format::Text, true, false).expect("parses");
+        assert_eq!(
+            text.lines().filter(|l| l.contains(" <-> ")).count(),
+            2,
+            "and the text listing has one row each: {text}"
+        );
+    }
+
+    /// R311y668 (§1.2a) — `--json --messages` carries the messages.
+    ///
+    /// R311y667 put `if per_message` inside the TEXT branch only, so the JSON
+    /// listed flows and dropped their messages: the same silent narrowing that
+    /// round closed in the document count, one field lower.
+    #[test]
+    fn the_json_listing_carries_the_messages_and_not_only_their_number() {
+        let file = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000_000, &scout_packet())],
+        );
+
+        let (with, _) = analyze_with(&file, None, Format::Json, true, true).expect("parses");
+        assert!(
+            with.contains("\"message_list\":["),
+            "--json --messages must list them: {with}"
+        );
+
+        // And the DISCRIMINATOR: without the flag the key is absent rather than
+        // empty, so "not asked for" and "none there" stay different answers.
+        let (without, _) = analyze_with(&file, None, Format::Json, true, false).expect("parses");
+        assert!(
+            !without.contains("message_list"),
+            "--json --flows alone must not claim to have listed them: {without}"
+        );
     }
 
     /// R311y664 — a file that is not a capture is an ERROR, not an empty

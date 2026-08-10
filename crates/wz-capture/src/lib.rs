@@ -2214,6 +2214,22 @@ impl Dissection {
             let mut spans: [Vec<(usize, usize)>; 2] = [Vec::new(), Vec::new()];
             for index in 0..2usize {
                 let direction = idx_direction(index);
+                // R311y668 — a direction the opener holds no key for is reported
+                // as such rather than attempted. Attempting it produced
+                // `RecordRefusedKeys { index: 0 }`, whose documented cause is the
+                // EPOCH, for the commonest arrangement there is: an
+                // `SSLKEYLOGFILE` from one of the two peers, carrying one side's
+                // traffic secret. The reader was sent to look at key rotation for
+                // a key that was never in the log.
+                //
+                // Guarded on the direction having records, because a direction
+                // with nothing in it is not missing anything: a capture of a
+                // one-way flow would otherwise report a reason about a half that
+                // carried no ciphertext.
+                if !state.kept[index].is_empty() && !opener.has_keys(direction) {
+                    refusal.get_or_insert(tls::NotDecrypted::NoKeyForDirection { direction });
+                    continue;
+                }
                 for record in &state.kept[index] {
                     match opener.open(direction, record) {
                         Some(opened) => {
@@ -8399,6 +8415,10 @@ mod tls_flow_tests {
         seen: Vec<(Option<[u8; 32]>, Option<Direction>)>,
         /// Every `(direction, index)` it was asked to open.
         asked: Vec<(Direction, u64)>,
+        /// R311y668 — directions this opener holds NO key material for, which is
+        /// what a half key log produces. `[false, false]` is the ordinary fake:
+        /// it serves both sides.
+        keyless: [bool; 2],
     }
 
     impl FakeOpener {
@@ -8411,6 +8431,7 @@ mod tls_flow_tests {
                 decline: None,
                 seen: Vec::new(),
                 asked: Vec::new(),
+                keyless: [false, false],
             }
         }
     }
@@ -8434,7 +8455,15 @@ mod tls_flow_tests {
             record: &crate::tls::EncryptedRecord,
         ) -> Option<crate::tls::OpenedRecord> {
             self.asked.push((direction, record.index));
-            if self.refuse[dir_index(direction)].contains(&record.index) {
+            // R311y668 — a keyless direction opens NOTHING, which is what makes
+            // this fake faithful to the arrangement it models: a real opener with
+            // no secret for a direction returns `None` from the first record it
+            // is handed, indistinguishably from a record that failed the AEAD.
+            // A fake that answered `has_keys(false)` and still opened would make
+            // the guard above look load-bearing when it was not.
+            if self.keyless[dir_index(direction)]
+                || self.refuse[dir_index(direction)].contains(&record.index)
+            {
                 return None;
             }
             let body = record.bytes.get(5..)?;
@@ -8442,6 +8471,10 @@ mod tls_flow_tests {
                 content_type: *body.first()?,
                 plaintext: body[1..].to_vec(),
             })
+        }
+
+        fn has_keys(&self, direction: Direction) -> bool {
+            !self.keyless[dir_index(direction)]
         }
     }
 
@@ -8895,6 +8928,11 @@ mod tls_flow_tests {
                     plaintext: body[1..].to_vec(),
                 })
             }
+            // It keys by SESSION identity and, for a flow it accepted, serves
+            // both directions of it.
+            fn has_keys(&self, _direction: Direction) -> bool {
+                true
+            }
         }
 
         let summary = d.decrypt_with(&mut ByIdentity);
@@ -8947,6 +8985,12 @@ mod tls_flow_tests {
             ) -> Option<crate::tls::OpenedRecord> {
                 None
             }
+            // It declines every flow at `begin_flow`, so nothing ever reaches
+            // the per-direction question. Answering `true` states that: what it
+            // withholds is the SESSION key, not one direction's.
+            fn has_keys(&self, _direction: Direction) -> bool {
+                true
+            }
         }
         d.decrypt_with(&mut AlwaysNoKey);
         let json = crate::report::CaptureReport::of(&d).to_json();
@@ -8954,6 +8998,84 @@ mod tls_flow_tests {
             json.contains("\"reason\":\"mixed\""),
             "two flows refused for DIFFERENT causes: naming either one as the \
              capture's reason sends a reader to the wrong remedy: {json}"
+        );
+    }
+
+    /// R311y668 (§1.2a) — a direction with NO KEY is named as such, not as a
+    /// record that refused the keys.
+    ///
+    /// The commonest arrangement there is: `SSLKEYLOGFILE` written by one of the
+    /// two peers gives that side's traffic secret and not the other's. MEASURED
+    /// before the fix, against real rustls-sealed records in
+    /// `wz-tls-record/tests/end_to_end.rs`: such a flow reported
+    /// `RecordRefusedKeys { direction: B, index: 0 }`, whose documented cause is
+    /// the EPOCH -- so a reader was sent to look at key rotation for a key that
+    /// was never in the log. Both remedies are concrete and they are different
+    /// ones: get the other peer's log, versus recapture across the rotation.
+    #[test]
+    fn a_direction_with_no_key_names_the_direction_and_not_a_refused_record() {
+        let random = [11u8; 32];
+        let mut d = Dissection::new();
+        let mut at = 0usize;
+        // Direction A: the ClientHello and one record.
+        let mut client = hello_with_random(&random);
+        client.extend_from_slice(&protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(0)));
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            at,
+            &tcp_packet(1111, 7447, 1000, &client),
+        );
+        at += 1;
+        // Direction B: two records, from the high port back to the low one.
+        let mut server = Vec::new();
+        for i in 1..3u8 {
+            server.extend_from_slice(&protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(i)));
+        }
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            at,
+            &tcp_packet(7447, 1111, 5000, &server),
+        );
+        d.finish();
+        assert_eq!(
+            (
+                d.encrypted_flows()[0].kept_records[0].len(),
+                d.encrypted_flows()[0].kept_records[1].len()
+            ),
+            (1, 2),
+            "the fixture must hold records on BOTH sides or it cannot show a \
+             one-sided key at all"
+        );
+
+        let mut opener = FakeOpener::new();
+        opener.keyless[dir_index(Direction::B)] = true;
+        d.decrypt_with(&mut opener);
+
+        assert_eq!(
+            d.encrypted_flows()[0].not_decrypted,
+            Some(crate::tls::NotDecrypted::NoKeyForDirection {
+                direction: Direction::B
+            }),
+            "the reason must name the direction whose key is missing"
+        );
+        // And the records were never ATTEMPTED. A reason derived from a failed
+        // attempt would still be `RecordRefusedKeys` no matter what string the
+        // report printed, so this is the half of the claim the reason alone does
+        // not carry.
+        assert!(
+            !opener.asked.iter().any(|(dir, _)| *dir == Direction::B),
+            "a direction with no key must not be handed records at all: {:?}",
+            opener.asked
+        );
+        // A's records still opened: a one-sided key reads one side, and reporting
+        // the flow as wholly unread would be its own wrong answer.
+        assert_eq!(d.encrypted_flows()[0].decrypted_records, [1, 0]);
+
+        let json = crate::report::CaptureReport::of(&d).to_json();
+        assert!(
+            json.contains("\"reason\":\"no_key_for_direction\""),
+            "and the finding must reach the rendering, which is the only thing a \
+             person running this ever sees: {json}"
         );
     }
 

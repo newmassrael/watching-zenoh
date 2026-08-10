@@ -318,6 +318,52 @@ impl InboundFrame {
             InboundFrame::Unknown { .. } => ExtAdmission::Unjudged,
         }
     }
+
+    /// R311y668 (§1.2a) — what this message IS, in one word: the variant's own
+    /// identifier.
+    ///
+    /// # Why the name belongs to the type and not to the listing that prints it
+    ///
+    /// R311y667 gave the analyzer's `--messages` listing a name per message by
+    /// reading the leading token of the derived `Debug` rendering, and the
+    /// reason it gave for not matching was sound *in that crate*: these variants
+    /// are individually `#[cfg]`-gated on seven `codec-*` features the analyzer
+    /// does not own, so an exhaustive match there would MIRROR those gates, and
+    /// a mirror drifts. A `_ =>` arm is worse — it is the arm that reports a new
+    /// message kind as whatever the default happens to be.
+    ///
+    /// What that left behind is a name resting on a `Debug` shape nothing pins.
+    /// Here there is no mirror to drift: the arms sit beside the variants under
+    /// the same `#[cfg]`s, and exhaustiveness is the COMPILER's, so a variant
+    /// added upstream fails this match rather than silently taking a fallback.
+    /// That is the separation [`Self::ext_admission`] already uses, and it is
+    /// why this is a method on the type rather than a function in the reader.
+    ///
+    /// `&'static str`, because the caller is a listing that prints a direction
+    /// and an offset on the same line and a name is one field of it.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            #[cfg(feature = "codec-init-body")]
+            InboundFrame::Init { .. } => "Init",
+            #[cfg(feature = "codec-open-body")]
+            InboundFrame::Open { .. } => "Open",
+            #[cfg(feature = "codec-close")]
+            InboundFrame::Close { .. } => "Close",
+            #[cfg(feature = "codec-keep-alive")]
+            InboundFrame::KeepAlive { .. } => "KeepAlive",
+            #[cfg(feature = "codec-frame")]
+            InboundFrame::Frame { .. } => "Frame",
+            #[cfg(feature = "reassembly")]
+            InboundFrame::Fragment { .. } => "Fragment",
+            #[cfg(feature = "codec-join")]
+            InboundFrame::Join { .. } => "Join",
+            // NOT "Unknown message" and not the MID in hex: this is the
+            // variant's name like every other arm, and the MID a reader needs is
+            // on the variant for whoever wants it. A name that folded the byte
+            // in would make two frames with different MIDs two different kinds.
+            InboundFrame::Unknown { .. } => "Unknown",
+        }
+    }
 }
 
 /// R311y215 — project the QoS priority carried by a decoded Frame/Fragment ext
@@ -1007,5 +1053,186 @@ mod join_tests {
             inbound_to_fsm_event(&frame),
             Some(E::FramingError)
         ));
+    }
+}
+
+// ── R311y668 (§1.2a) — the NAME. `kind_name` is the word a reader's listing puts
+//    on the line, and until this round it came from the leading token of a
+//    derived `Debug` rendering, in a crate that could not match these variants.
+//    Every name below is asserted over a real `parse_inbound` decode of real
+//    wire, on the house rule the `Debug` tests above follow: a name proven over
+//    a hand-built value proves the constructor, not the decoder. ──
+#[cfg(test)]
+mod kind_name_tests {
+    use super::*;
+    use alloc::vec::Vec;
+
+    /// Every variant this build can reach, as (wire, expected name).
+    ///
+    /// A VECTOR and not one test per variant, so the distinctness assertion
+    /// below sees the whole set at once — two arms answering the same word is a
+    /// listing that silently merges two message kinds, and no per-variant test
+    /// can see it.
+    // `vec![]` cannot express this: every element is `#[cfg]`-gated, and a macro
+    // literal has no place to put the attribute. The lint is reading the shape and
+    // not the reason.
+    #[allow(clippy::vec_init_then_push)]
+    fn reachable() -> Vec<(Vec<u8>, &'static str)> {
+        let mut cases: Vec<(Vec<u8>, &'static str)> = Vec::new();
+
+        #[cfg(feature = "codec-init-body")]
+        // version, cbyte (zid_len-1 = 0, whatami peer), then the 1-byte zid.
+        cases.push((
+            alloc::vec![wire_const::T_MID_INIT, 0x09, 0x01, 0xAA],
+            "Init",
+        ));
+
+        #[cfg(feature = "codec-open-body")]
+        // The ACK form: `a` clears the cookie fields, so lease + initial_sn is
+        // the whole body.
+        cases.push((
+            alloc::vec![
+                wire_const::T_MID_OPEN | wire_const::FLAG_T_OPEN_A,
+                0x0A,
+                0x01
+            ],
+            "Open",
+        ));
+
+        #[cfg(feature = "codec-close")]
+        cases.push((alloc::vec![wire_const::T_MID_CLOSE, 0x00], "Close"));
+
+        #[cfg(feature = "codec-keep-alive")]
+        cases.push((alloc::vec![wire_const::T_MID_KEEP_ALIVE], "KeepAlive"));
+
+        #[cfg(feature = "codec-frame")]
+        cases.push((
+            alloc::vec![
+                wire_const::T_MID_FRAME | wire_const::FLAG_T_FRAME_R,
+                0x07,
+                0xEE
+            ],
+            "Frame",
+        ));
+
+        #[cfg(feature = "reassembly")]
+        cases.push((
+            alloc::vec![
+                wire_const::T_MID_FRAGMENT | wire_const::FLAG_T_FRAME_R,
+                0x09,
+                b'h'
+            ],
+            "Fragment",
+        ));
+
+        #[cfg(feature = "codec-join")]
+        {
+            let join = wz_codecs::join::Join {
+                version: 0x09,
+                cbyte: (3 << 4) | 0x01,
+                zid: &[0xA0, 0xA1, 0xA2, 0xA3],
+                sn_res: Some(0x00),
+                batch_size: Some(0x1000),
+                lease: 10_000,
+                next_sn_reliable: 7,
+                next_sn_best_effort: 9,
+            };
+            let mut wire = alloc::vec![wire_const::T_MID_JOIN | wire_const::FLAG_T_JOIN_S];
+            wire.extend_from_slice(&join.encode_to_vec(1));
+            cases.push((wire, "Join"));
+        }
+
+        // ALWAYS present: the fall-through arm is ungated, and a MID outside
+        // every namespace is the one case a build with no codec feature at all
+        // can still reach.
+        cases.push((alloc::vec![0x1F], "Unknown"));
+        cases
+    }
+
+    /// The names this build MUST be able to produce, stated INDEPENDENTLY of the
+    /// vector above.
+    ///
+    /// The redundancy is the point, and it is the R311y634 rule: pin a SET,
+    /// never a count. It is also not hypothetical — it is what went wrong while
+    /// this test was being written. This crate's DEFAULT features carry no
+    /// `codec-*` at all, so `cargo test -p wz-session-core` reaches only the
+    /// ungated fall-through: the vector held ONE case and the suite reported ok
+    /// with a deliberately wrong `Init => "Open"` sitting in the tree. A test
+    /// that can pass by having nothing to check is not a gate, and the fix has
+    /// two halves — this pin, and the lane that runs the module with the
+    /// features ON (`scripts/run-ci.sh`, Layer C1bw).
+    // `vec![]` cannot express this: every element is `#[cfg]`-gated, and a macro
+    // literal has no place to put the attribute. The lint is reading the shape and
+    // not the reason.
+    #[allow(clippy::vec_init_then_push)]
+    fn expected_names() -> Vec<&'static str> {
+        let mut want: Vec<&'static str> = Vec::new();
+        #[cfg(feature = "codec-init-body")]
+        want.push("Init");
+        #[cfg(feature = "codec-open-body")]
+        want.push("Open");
+        #[cfg(feature = "codec-close")]
+        want.push("Close");
+        #[cfg(feature = "codec-keep-alive")]
+        want.push("KeepAlive");
+        #[cfg(feature = "codec-frame")]
+        want.push("Frame");
+        #[cfg(feature = "reassembly")]
+        want.push("Fragment");
+        #[cfg(feature = "codec-join")]
+        want.push("Join");
+        want.push("Unknown");
+        want
+    }
+
+    #[test]
+    fn the_fixture_vector_reaches_every_variant_this_build_has() {
+        let got: Vec<&'static str> = reachable().into_iter().map(|(_, n)| n).collect();
+        for want in expected_names() {
+            assert!(
+                got.contains(&want),
+                "`{want}` is a variant this build compiles and no fixture \
+                 reaches it, so nothing checks its name: {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_reachable_variant_is_named_by_its_own_identifier() {
+        for (wire, expected) in reachable() {
+            let frame = parse_inbound(&wire).expect("the fixture wire decodes");
+            assert_eq!(
+                frame.kind_name(),
+                expected,
+                "wire {wire:02X?} decoded to {frame:?}, whose name must be \
+                 `{expected}` -- a name that disagrees with the variant is how a \
+                 listing renames a message without saying so"
+            );
+        }
+    }
+
+    /// The names must be pairwise DISTINCT. A word reused across two arms makes
+    /// a listing report two message kinds as one, which reads as a capture that
+    /// carried more of the first and none of the second.
+    ///
+    /// Over what `kind_name` ACTUALLY answers and not over the expectations in
+    /// the vector: those are literals in this file, so a distinctness check on
+    /// them would only assert that this file's own list has no duplicate in it.
+    /// Measured while writing it — a probe changing `Init` to answer `"Open"`
+    /// left that version of this test green.
+    #[test]
+    fn no_two_variants_answer_the_same_name() {
+        let mut names: Vec<&'static str> = reachable()
+            .into_iter()
+            .map(|(wire, _)| {
+                parse_inbound(&wire)
+                    .expect("the fixture wire decodes")
+                    .kind_name()
+            })
+            .collect();
+        let before = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), before, "two variants share a name: {names:?}");
     }
 }

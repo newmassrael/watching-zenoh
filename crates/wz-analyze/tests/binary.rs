@@ -452,8 +452,17 @@ fn the_json_rendering_is_a_single_document_even_with_flows() {
         "with the endpoints in it: {json}"
     );
 
-    // Depth, ignoring braces inside strings. A second top-level object shows up
-    // as a return to zero before the end.
+    assert_one_document(json);
+}
+
+/// R311y667 (§1.2a) — the structural document-count check, ignoring braces
+/// inside strings: the nesting depth must return to zero EXACTLY ONCE and at the
+/// last character. Two documents on one stream return to zero twice, and a
+/// consumer parsing the stream as one value sees only the first.
+///
+/// R311y668 — extracted, because a second flag combination now needs it and a
+/// second hand-copied depth walker would be a second thing to get wrong.
+fn assert_one_document(json: &str) {
     let mut depth = 0i32;
     let mut in_string = false;
     let mut escaped = false;
@@ -493,6 +502,65 @@ fn the_json_rendering_is_a_single_document_even_with_flows() {
         json.len() - 1,
         "and that once is the last character"
     );
+}
+
+/// R311y668 (§1.2a) — `--json --messages` carries the MESSAGES, in one document.
+///
+/// R311y667 added `--messages` inside the text branch only, so the JSON form
+/// listed the flows and dropped their messages -- the same silent narrowing that
+/// round closed in the document count, one field lower down. A consumer asking
+/// for the messages got a well-formed document that did not contain them and
+/// nothing said so.
+///
+/// The document count is re-asserted here rather than assumed from the `--flows`
+/// case: the message list adds a nested ARRAY inside a nested array, which is
+/// the shape a depth walker is most likely to be wrong about.
+#[test]
+fn the_json_listing_carries_the_messages_and_stays_one_document() {
+    let scratch = Scratch::new("json-messages");
+    let (file, log, _) = capture_and_key_log();
+    let capture = scratch.write("session.pcapng", &file);
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+
+    let run = |flag: &str| -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .arg("--json")
+            .arg(flag)
+            .output()
+            .expect("runs");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let with = run("--messages");
+    assert_eq!(
+        with.matches("\"name\":\"KeepAlive\"").count(),
+        3,
+        "each of the fixture's three decrypted messages must be in the JSON by \
+         name: {with}"
+    );
+    assert!(
+        with.contains("\"offset\":57")
+            && with.contains("\"offset\":82")
+            && with.contains("\"offset\":107"),
+        "with the TCP-space offset that ties each one back to a packet: {with}"
+    );
+    assert!(
+        with.contains("\"space\":\"transport\""),
+        "and the namespace it was read in: {with}"
+    );
+    assert_one_document(&with);
+
+    // The DISCRIMINATOR: without the flag the key is absent rather than empty,
+    // so "not asked for" and "there were none" remain different answers.
+    let without = run("--flows");
+    assert!(
+        !without.contains("message_list") && without.contains("\"messages\":3"),
+        "--json --flows counts them and does not list them: {without}"
+    );
+    assert_one_document(&without);
 }
 
 /// R311y667 (§1.2a) — `--messages` lists the messages themselves.

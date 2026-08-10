@@ -388,6 +388,24 @@ impl RecordOpener for CaptureOpener {
         };
         self.directions[at].as_mut()?.open(record)
     }
+
+    /// R311y668 — a direction is armed exactly when [`begin_flow`] found at least
+    /// one epoch secret for it, which is what the `Option` here already records:
+    /// `DirectionState::new` answers `None` for an empty epoch list.
+    ///
+    /// So this reads the state rather than re-deriving it from the log. Asking
+    /// the log again would be a second answer to one question, and the two would
+    /// disagree the moment `begin_flow` changed which labels it accepts — which it
+    /// has, twice (R311y662 handshake epochs, R311y666 the 0-RTT one).
+    ///
+    /// [`begin_flow`]: RecordOpener::begin_flow
+    fn has_keys(&self, direction: Direction) -> bool {
+        let at = match direction {
+            Direction::A => 0,
+            Direction::B => 1,
+        };
+        self.directions[at].is_some()
+    }
 }
 
 #[cfg(test)]
