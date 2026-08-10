@@ -701,7 +701,32 @@ impl FlowDissection {
                     match tls::client_hello_verdict(&self.held[dir_index(direction)]) {
                         tls::TlsVerdict::NeedMore => return,
                         tls::TlsVerdict::Yes => Framing::Encrypted(alloc::boxed::Box::default()),
-                        tls::TlsVerdict::No => Framing::Stream,
+                        // R311y649 (§1.2a) — and where the ClientHello question
+                        // says `No`, the CHAIN question gets its turn before
+                        // `Stream` becomes the answer. A ClientHello is the
+                        // client's first record: a capture that began
+                        // mid-session has none, and a SPAN port on the wrong
+                        // side of the link gives only the server's half. Both
+                        // used to land here as `Stream`, where the reader takes
+                        // the record header's first two bytes as a
+                        // little-endian length prefix — measured on a
+                        // mid-session fixture as a decoded `Close` no peer
+                        // sent, carrying a `FlowContext` that claimed a
+                        // negotiated session.
+                        tls::TlsVerdict::No => match tls::record_chain_verdict(
+                            &self.held[dir_index(direction)],
+                            tls::TLS_CHAIN_DEPTH,
+                        ) {
+                            tls::TlsVerdict::Yes => {
+                                Framing::Encrypted(alloc::boxed::Box::default())
+                            }
+                            // A consistent chain shorter than the depth. HELD,
+                            // and bounded: reaching the depth ends the hold,
+                            // breaking the chain ends it, and `finish` settles
+                            // whatever the capture ended in the middle of.
+                            tls::TlsVerdict::NeedMore => return,
+                            tls::TlsVerdict::No => Framing::Stream,
+                        },
                     }
                 }
             };
@@ -747,6 +772,7 @@ impl FlowDissection {
     /// to end one silent hole would open a quieter one.
     fn decide_after_opening_lost(&mut self, flush: bool) {
         let mut evidence = false;
+        let mut tls_evidence = false;
         let mut examined = 0usize;
         for dir in [Direction::A, Direction::B] {
             let before = self.opening_gap[dir_index(dir)]
@@ -757,6 +783,20 @@ impl FlowDissection {
             examined = examined.max(post.len());
             if ws::carries_ws_frames(post, ws::WS_CHAIN_DEPTH) {
                 evidence = true;
+            }
+            // R311y649 (§1.2a) — the same question the far side gets asked
+            // about ws, asked about TLS. Weaker BY CONSTRUCTION and the
+            // weakness is stated: the far side of a hole usually begins in the
+            // MIDDLE of a record, where no chain walks, so this finds a flow
+            // only when the hole happened to end on a record boundary — the
+            // shape of a dropped segment that carried whole records. When it
+            // does not, the `Stream` fallback below is what the flow gets, and
+            // that is the pre-R311y649 answer rather than a new silence.
+            if matches!(
+                tls::record_chain_verdict(post, tls::TLS_CHAIN_DEPTH),
+                tls::TlsVerdict::Yes
+            ) {
+                tls_evidence = true;
             }
         }
         if evidence {
@@ -781,6 +821,17 @@ impl FlowDissection {
                     self.feed(dir, &held[before..]);
                 }
             }
+            return;
+        }
+        // R311y649 — after ws and not before it: a `wss://` flow is BOTH, and
+        // its cleartext upgrade is the evidence that names the link.
+        if tls_evidence {
+            self.framing = Framing::Encrypted(alloc::boxed::Box::default());
+            // Through `replay_held`, not the ws path's far-side-only feed: the
+            // near side's records were a consistent chain before the hole and
+            // are countable, and the gap announced between the two halves is
+            // what drops the pending tail so no record is joined across it.
+            self.replay_held();
             return;
         }
         if !flush && examined <= WS_CLASSIFY_BUDGET {
@@ -877,7 +928,19 @@ impl FlowDissection {
                     b: alloc::boxed::Box::new(ws::WsDeframer::new()),
                 }
             } else if verdicts.contains(&ws::UpgradeVerdict::No) {
-                Framing::Stream
+                // R311y649 (§1.2a) — ws answering `No` no longer means "zenoh
+                // stream"; it means the chain question's turn. A hole that
+                // lands while THAT question is still `NeedMore` took the very
+                // bytes that would have settled it, which is what
+                // `OpeningLost` means — and `OpeningLost` already knows to
+                // decide on the far side. Forcing `Stream` here is the
+                // pre-R311y649 answer, and it hands the far side's records to
+                // a reader that takes their headers for length prefixes.
+                if self.opening_chain_undecided() {
+                    Framing::OpeningLost
+                } else {
+                    Framing::Stream
+                }
             } else {
                 // Every direction is still a PREFIX of an opening, so nothing
                 // seen so far can settle it and nothing later will: the bytes
@@ -892,6 +955,55 @@ impl FlowDissection {
             return;
         }
         self.note_framing_gap(direction, bytes_missing);
+    }
+
+    /// R311y649 (§1.2a) — was some direction being HELD for record-chain
+    /// evidence when the hole arrived?
+    ///
+    /// Deliberately NOT "does the near side look encrypted": a near side that
+    /// answers `Yes` cannot exist here, because `advance` asks the same question
+    /// on the same bytes and settles the framing before any hole can be
+    /// announced. The reachable state is the UNDECIDED one — a chain that is
+    /// consistent and shallower than [`tls::TLS_CHAIN_DEPTH`] — and the bytes
+    /// that would have settled it are exactly the ones the hole took.
+    ///
+    /// Asked on the NEAR side only. Bytes past a hole begin wherever they begin,
+    /// so a chain walked across one is a chain this reader invented.
+    fn opening_chain_undecided(&self) -> bool {
+        [Direction::A, Direction::B].into_iter().any(|dir| {
+            let held = &self.held[dir_index(dir)];
+            let near = &held[..self.opening_gap[dir_index(dir)]
+                .map(|(before, _)| before)
+                .unwrap_or(held.len())
+                .min(held.len())];
+            !near.is_empty()
+                && matches!(
+                    tls::record_chain_verdict(near, tls::TLS_CHAIN_DEPTH),
+                    tls::TlsVerdict::NeedMore
+                )
+        })
+    }
+
+    /// R311y649 (§1.2a) — a flow still `Undecided` when the capture ENDS must be
+    /// reported, not held.
+    ///
+    /// R311y612 wrote this rule for [`Framing::OpeningLost`] and it applies here
+    /// verbatim: bytes held for a verdict that never comes are bytes reported as
+    /// absent, which is the silent hole in a new place. It became reachable for
+    /// more than a truncated `GET ` when [`tls::record_chain_verdict`] started
+    /// holding a flow whose record chain is consistent and shallower than
+    /// [`tls::TLS_CHAIN_DEPTH`].
+    ///
+    /// The fallback is `Stream`, and it is a FALLBACK rather than a finding —
+    /// stated here rather than hidden: a direction that ended holding exactly
+    /// one well-formed record never reached the depth, so its bytes go to the
+    /// zenoh reader, which is what this crate does with bytes it cannot name.
+    fn settle_undecided(&mut self) {
+        if !matches!(self.framing, Framing::Undecided) {
+            return;
+        }
+        self.framing = Framing::Stream;
+        self.replay_held();
     }
 
     /// Tell an ALREADY-DECIDED framing that its bytes are discontinuous.
@@ -1850,6 +1962,12 @@ impl Dissection {
             if matches!(self.flows[idx].framing, Framing::OpeningLost) {
                 self.flows[idx].decide_after_opening_lost(true);
             }
+            // R311y649 (§1.2a) — and the same rule for the state R311y612 did
+            // not have to force, because nothing held there for long. The
+            // record-chain question holds a flow whose chain is consistent and
+            // shallower than the depth, so an `Undecided` flow at the end of a
+            // capture is now an ordinary outcome and not a curiosity.
+            self.flows[idx].settle_undecided();
             self.enforce_flow_limits(idx);
         }
         forced
@@ -6227,6 +6345,7 @@ mod tls_flow_tests {
 
         let mut d = Dissection::new();
         d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &framed));
+        d.finish();
         assert_eq!(d.flows().len(), 1);
         assert!(
             !d.flows()[0].framing().is_encrypted(),
@@ -6235,6 +6354,23 @@ mod tls_flow_tests {
         assert!(
             d.encrypted_flows().is_empty(),
             "and it must not reach the report"
+        );
+        // R311y649 — AND IT MUST SETTLE. Until this leg the control passed on
+        // `Undecided`, which is `!is_encrypted()` for a reason that is not the
+        // claim: R311y649's chain question HOLDS this fixture (its first
+        // record's big-endian length reads 0x0404 = 1028, longer than the 792
+        // bytes there are), so without `settle_undecided` the flow ends the
+        // capture holding every byte and reporting nothing. That is the silence
+        // this whole track exists to refuse, arrived at from the other side.
+        assert!(
+            matches!(d.flows()[0].framing(), Framing::Stream),
+            "a flow held for a verdict that never comes is a flow reported as \
+             absent; framing={:?}",
+            d.flows()[0].framing()
+        );
+        assert!(
+            !d.flows()[0].frames.is_empty(),
+            "and the held bytes must reach the zenoh reader, not be dropped"
         );
 
         // THE SECOND LEG, and it earned its place by falsification: the fixture
@@ -6289,5 +6425,203 @@ mod tls_flow_tests {
             report.to_json()
         );
         assert!(report.is_complete(), "{}", report.to_text());
+    }
+
+    /// A capture that began MID-SESSION: no handshake anywhere, both directions
+    /// opening on `application_data`. The ordinary result of attaching a SPAN
+    /// port to a link that was already up.
+    fn mid_session_tls() -> Dissection {
+        // 800 bytes for the reason `tls_dissection`'s does: read as a zenoh
+        // stream the record's first two bytes are a LITTLE-endian 0x0317 = 791
+        // and the unit that follows opens with 0x03, `T_MID_CLOSE`.
+        let app_b = record(0x17, [0x03, 0x03], &[0xCD; 800]);
+        let app_a = record(0x17, [0x03, 0x03], &[0xAB; 40]);
+        let mut d = Dissection::new();
+        let mut a_seq = 1000u32;
+        let mut b_seq = 5000u32;
+        let mut i = 0usize;
+        let mut push = |d: &mut Dissection, from_a: bool, bytes: &[u8], seq: &mut u32| {
+            let pkt = if from_a {
+                tcp_packet(1111, 7447, *seq, bytes)
+            } else {
+                tcp_packet(7447, 1111, *seq, bytes)
+            };
+            d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+            *seq += bytes.len() as u32;
+            i += 1;
+        };
+        push(&mut d, true, &app_a, &mut a_seq);
+        push(&mut d, false, &app_b, &mut b_seq);
+        push(&mut d, true, &app_a, &mut a_seq);
+        d.finish();
+        d
+    }
+
+    /// R311y649 (§1.2a) — THE DEFECT R311y648 LEFT BEHIND, and it is worse than
+    /// the one that round closed.
+    ///
+    /// R311y648 recognised a TLS flow by its ClientHello, which is the CLIENT's
+    /// first record and nothing else. A capture that began mid-session, or that
+    /// caught only the server's half, has no ClientHello in it — so it fell
+    /// through to `Framing::Stream`, and the stream reader took the record
+    /// header's first two bytes as a little-endian length prefix.
+    ///
+    /// Measured before the fix: the flow was `Stream`, `encrypted_flows()` was
+    /// EMPTY, the report called the capture `complete`, and the server's
+    /// direction decoded a `Close` NOBODY SENT — the confident-wrong-answer this
+    /// crate exists to refuse, produced out of ciphertext.
+    #[test]
+    fn a_capture_that_began_mid_session_is_still_recognised_as_encrypted() {
+        let d = mid_session_tls();
+        assert_eq!(d.flows().len(), 1);
+        assert!(
+            d.flows()[0].framing().is_encrypted(),
+            "a mid-session TLS capture must not be read as a zenoh byte stream; \
+             framing={:?} frames={:?}",
+            d.flows()[0].framing(),
+            d.flows()[0].frames
+        );
+        assert_eq!(
+            d.flows()[0].frames.len(),
+            0,
+            "and NO message may be decoded out of ciphertext -- this fixture's \
+             server record reads as a zenoh Close if it ever reaches the observer"
+        );
+
+        let enc = d.encrypted_flows();
+        assert_eq!(enc.len(), 1);
+        let totals = enc[0].totals();
+        assert_eq!(totals.records, 3, "{:?}", enc[0]);
+        assert_eq!(totals.application_records, 3);
+        assert_eq!(totals.application_bytes, 40 + 800 + 40);
+        let report = crate::report::CaptureReport::of(&d);
+        assert!(!report.is_complete(), "{}", report.to_text());
+    }
+
+    /// R311y649 (§1.2a) — the other capture R311y648 could not name: a SPAN port
+    /// on the wrong side of the link, which sees only the server's half.
+    ///
+    /// `ws::OPENINGS` already carries both literals for exactly this reason, and
+    /// its comment says why: "refusing to classify it would put this crate's
+    /// worst failure mode straight back". The TLS recogniser had only the
+    /// client's opening, so it did.
+    #[test]
+    fn a_capture_of_only_the_servers_half_is_recognised() {
+        let mut flight = record(0x16, [0x03, 0x03], &[0x02, 0x00, 0x00, 0x28]);
+        flight.extend_from_slice(&record(0x14, [0x03, 0x03], &[0x01]));
+        flight.extend_from_slice(&record(0x17, [0x03, 0x03], &[0xCD; 800]));
+        // ANTI-VACUITY: the ClientHello question really does refuse this, so
+        // the chain is what carries the finding and not a widened hello check.
+        assert_eq!(
+            crate::tls::client_hello_verdict(&flight),
+            crate::tls::TlsVerdict::No,
+            "a ServerHello must not be admitted by the ClientHello question"
+        );
+
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(7447, 1111, 5000, &flight));
+        d.finish();
+        assert!(
+            d.flows()[0].framing().is_encrypted(),
+            "framing={:?}",
+            d.flows()[0].framing()
+        );
+        assert_eq!(d.flows()[0].frames.len(), 0);
+        let enc = d.encrypted_flows();
+        assert_eq!(enc[0].per_direction[1].records, 3);
+        assert_eq!(enc[0].per_direction[0].records, 0, "the client is absent");
+        assert_eq!(enc[0].totals().application_bytes, 800);
+    }
+
+    /// R311y649 — `TLS_CHAIN_DEPTH` is a READING, and this is the measurement
+    /// it is read off.
+    ///
+    /// One record header is a coincidence a zenoh stream can produce: a unit
+    /// whose little-endian length prefix reads `[0x16, 0x03]` and whose first
+    /// message id is small IS a well-formed TLS record header, byte for byte.
+    /// At depth 1 the recogniser therefore calls a real zenoh flow encrypted —
+    /// the failure this module exists to prevent, pointing the other way. The
+    /// second record has to land where the first one's BIG-endian length says,
+    /// and the next unit of a little-endian stream does not.
+    #[test]
+    fn one_record_is_a_coincidence_and_the_depth_is_what_refuses_it() {
+        // A 790-byte zenoh unit, framed. Bytes 1..3 of the unit are the ones a
+        // TLS reader takes for a big-endian record length: 0x000A = 10, so the
+        // record COMPLETES inside this stream and the walk moves on.
+        let mut unit = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE; 790];
+        unit[0] = wz_session_core::wire_const::T_MID_INIT;
+        unit[1] = 0x00;
+        unit[2] = 0x0A;
+        let mut framed = alloc::vec![0x16u8, 0x03];
+        framed.extend_from_slice(&unit);
+        assert_eq!(&framed[..3], &[0x16, 0x03, 0x01], "the ambiguous shape");
+
+        assert_eq!(
+            crate::tls::record_chain_verdict(&framed, 1),
+            crate::tls::TlsVerdict::Yes,
+            "one record IS satisfied by a zenoh stream -- if this ever says No \
+             the fixture stopped driving the leg and the depth below proves \
+             nothing"
+        );
+        assert_eq!(
+            crate::tls::record_chain_verdict(&framed, crate::tls::TLS_CHAIN_DEPTH),
+            crate::tls::TlsVerdict::No,
+            "and the second record is what refuses it"
+        );
+
+        // END TO END, at the depth the crate actually uses.
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &framed));
+        d.finish();
+        assert!(!d.flows()[0].framing().is_encrypted());
+        assert!(matches!(d.flows()[0].framing(), Framing::Stream));
+    }
+
+    /// R311y649 (§1.2a) — a hole in the opening of a flow that was being held
+    /// for chain evidence must not force `Stream`.
+    ///
+    /// The two decision sites drifting apart is the defect. `advance` learned
+    /// the chain question; `note_gap` had not, so a TLS flow that lost a segment
+    /// while its chain was still one record deep went straight back to being
+    /// read as a zenoh byte stream — and every record after the hole with it.
+    #[test]
+    fn a_hole_while_the_chain_is_still_shallow_does_not_force_a_stream() {
+        let app = record(0x17, [0x03, 0x03], &[0xCD; 40]);
+        let mut d = Dissection::new();
+        d.set_gap_patience(Some(4));
+        // One record: consistent, shallower than the depth, so it is HELD.
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &app));
+        assert!(
+            matches!(d.flows()[0].framing(), Framing::Undecided),
+            "the fixture must reach the held state or the hole below lands \
+             somewhere else: {:?}",
+            d.flows()[0].framing()
+        );
+        // A dropped segment carrying exactly one whole record, so the far side
+        // resumes ON a record boundary -- the only shape the far-side chain
+        // question can settle, and stated as such in `decide_after_opening_lost`.
+        let mut after = record(0x17, [0x03, 0x03], &[0xEE; 40]);
+        after.extend_from_slice(&record(0x17, [0x03, 0x03], &[0xEE; 40]));
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &tcp_packet(1111, 7447, 1000 + 45 + 45, &after),
+        );
+        d.finish();
+
+        assert!(
+            d.flows()[0].framing().is_encrypted(),
+            "framing={:?} frames={:?}",
+            d.flows()[0].framing(),
+            d.flows()[0].frames
+        );
+        assert_eq!(
+            d.flows()[0].frames.len(),
+            0,
+            "and no message may be decoded out of the far side"
+        );
+        // The near side counted, the gap dropped its tail, the far side
+        // counted: 1 + 2 records, and NOT a fourth invented across the hole.
+        assert_eq!(d.encrypted_flows()[0].per_direction[0].records, 3);
     }
 }

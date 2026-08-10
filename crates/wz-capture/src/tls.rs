@@ -97,10 +97,12 @@ pub enum TlsVerdict {
 /// with a ServerHello that is equally well-formed, and admitting it would mean
 /// answering `Yes` for any handshake-shaped record — including the one a
 /// mid-session capture starts on, where the internal length check has nothing
-/// to disagree with. The cost is stated rather than hidden: a capture that
-/// caught only the server's half is NOT recognised. See
-/// [`carries_tls_records`], which is the weaker, chain-based question a caller
-/// asks about the other direction once one side has settled it.
+/// to disagree with.
+///
+/// R311y649 — that cost is no longer paid by the FLOW. This question stayed
+/// exactly as narrow as it was and [`record_chain_verdict`] was added beside it:
+/// a capture with no ClientHello in it is now recognised by the chain instead,
+/// which is evidence of a different kind rather than a loosening of this one.
 pub fn client_hello_verdict(bytes: &[u8]) -> TlsVerdict {
     // Byte 0 decides against every stream whose first byte is not a handshake
     // record, which is almost all of them.
@@ -167,13 +169,10 @@ pub fn carries_tls_records(bytes: &[u8]) -> Option<RecordCensus> {
             census.trailing_bytes = rest.len();
             return Some(census);
         }
-        if !matches!(
-            rest[0],
-            CT_CHANGE_CIPHER_SPEC | CT_ALERT | CT_HANDSHAKE | CT_APPLICATION_DATA
-        ) {
-            return None;
-        }
-        if rest[1] != 3 || rest[2] > 4 {
+        // R311y649 — the SAME rule the flow-level verdict applies, called
+        // rather than restated. `rest` is at least a full header here, so the
+        // only answers reachable are `Yes` and `No`.
+        if prelude_verdict(rest) != TlsVerdict::Yes {
             return None;
         }
         let len = read_len(rest, 3)?;
@@ -258,6 +257,95 @@ impl EncryptedFlow {
         let mut t = self.per_direction[0];
         t.add(&self.per_direction[1]);
         t
+    }
+}
+
+/// How many chained records [`record_chain_verdict`] needs before it will call
+/// a direction encrypted.
+///
+/// A READING and not a preference, and the falsification is pinned by a test:
+/// at depth 1 this module's own control shape — a zenoh unit whose little-endian
+/// length prefix reads `[0x16, 0x03]` — answers `Yes`, because ONE record header
+/// is exactly the coincidence this module's doc says it is. The second record
+/// has to land where the first one's self-declared BIG-endian length puts it,
+/// and a stream framed by a different byte order in a different field does not
+/// oblige twice.
+pub const TLS_CHAIN_DEPTH: usize = 2;
+
+/// What a record header's first three bytes say — answered the moment each byte
+/// is PRESENT, never on a byte count.
+///
+/// The single place the "could this be a record header" rule lives, so the
+/// census walk and the flow-level verdict cannot drift into different ideas of
+/// what a record looks like.
+fn prelude_verdict(rest: &[u8]) -> TlsVerdict {
+    match rest.first() {
+        None => return TlsVerdict::NeedMore,
+        Some(&ct)
+            if !matches!(
+                ct,
+                CT_CHANGE_CIPHER_SPEC | CT_ALERT | CT_HANDSHAKE | CT_APPLICATION_DATA
+            ) =>
+        {
+            return TlsVerdict::No
+        }
+        Some(_) => {}
+    }
+    match rest.get(1) {
+        None => return TlsVerdict::NeedMore,
+        Some(&3) => {}
+        Some(_) => return TlsVerdict::No,
+    }
+    match rest.get(2) {
+        None => TlsVerdict::NeedMore,
+        Some(&minor) if minor <= 4 => TlsVerdict::Yes,
+        Some(_) => TlsVerdict::No,
+    }
+}
+
+/// R311y649 (§1.2a) — does this direction carry a chain of `depth` TLS records?
+///
+/// The SECOND, independent route to the same finding, and the one that reaches
+/// the captures [`client_hello_verdict`] cannot. A ClientHello is the client's
+/// FIRST record: a capture that began mid-session has none, and one taken from a
+/// SPAN port on the wrong side of the link has only the server's half. R311y648
+/// recognised neither, so both fell through to a zenoh byte-stream reader that
+/// read the record header's first two bytes as a little-endian length prefix —
+/// measured, on a mid-session fixture, as a decoded `Close` no peer sent, with a
+/// `FlowContext` claiming a negotiated session that never happened.
+///
+/// Three-valued for the reason everything else here is: `NeedMore` is a chain
+/// that is consistent so far and shorter than `depth`, and collapsing it into
+/// either answer is a decision taken without the evidence. The caller holds.
+pub fn record_chain_verdict(bytes: &[u8], depth: usize) -> TlsVerdict {
+    let mut at = 0usize;
+    let mut records = 0usize;
+    loop {
+        if records >= depth {
+            return TlsVerdict::Yes;
+        }
+        let rest = &bytes[at.min(bytes.len())..];
+        match prelude_verdict(rest) {
+            TlsVerdict::Yes => {}
+            // Ran out of bytes mid-header — including exactly ON a record
+            // boundary, which is a direction that ended where a record ended
+            // and is not evidence against the next one.
+            TlsVerdict::NeedMore => return TlsVerdict::NeedMore,
+            TlsVerdict::No => return TlsVerdict::No,
+        }
+        let Some(len) = read_len(rest, 3) else {
+            return TlsVerdict::NeedMore;
+        };
+        if len == 0 || len > MAX_FRAGMENT {
+            return TlsVerdict::No;
+        }
+        // The record's own payload is not all here yet: the capture stopped
+        // inside it. That is not a broken chain.
+        if rest.len() < RECORD_HEADER + len {
+            return TlsVerdict::NeedMore;
+        }
+        records += 1;
+        at += RECORD_HEADER + len;
     }
 }
 

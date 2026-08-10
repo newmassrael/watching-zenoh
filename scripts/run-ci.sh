@@ -5399,7 +5399,11 @@ layer_c1bt_capture_no_default_features() {
         tls_flow_tests::a_tls_flow_is_named_as_encrypted_rather_than_reported_empty \
         tls_flow_tests::a_zenoh_stream_that_opens_like_a_client_hello_is_still_a_zenoh_stream \
         tls_flow_tests::a_chain_that_stops_being_tls_stops_the_census \
-        tls_flow_tests::a_plaintext_capture_carries_the_encrypted_fields_at_zero
+        tls_flow_tests::a_plaintext_capture_carries_the_encrypted_fields_at_zero \
+        tls_flow_tests::a_capture_that_began_mid_session_is_still_recognised_as_encrypted \
+        tls_flow_tests::a_capture_of_only_the_servers_half_is_recognised \
+        tls_flow_tests::one_record_is_a_coincidence_and_the_depth_is_what_refuses_it \
+        tls_flow_tests::a_hole_while_the_chain_is_still_shallow_does_not_force_a_stream
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the --no-default-features build"
