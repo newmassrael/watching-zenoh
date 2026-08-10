@@ -498,6 +498,19 @@ pub struct DecryptedStream<'a> {
     /// concatenated in wire order. This is the byte stream the session was fed,
     /// and the space the messages in it are framed in.
     pub plaintext: &'a [u8],
+    /// R311y678 — the frames the session decoded OUT OF [`Self::plaintext`],
+    /// with their coordinates still in its space.
+    ///
+    /// Offered so a consumer never has to walk the framing a second time. It is
+    /// not a convenience: a consumer walking it itself holds a second opinion
+    /// about where the messages are, and nothing in this crate compares the two
+    /// — a capture they disagreed about would report one `messages decoded` and
+    /// a different set underneath it.
+    ///
+    /// Valid only during the call. `remap_decrypted_offsets` rewrites every one
+    /// of these `stream_offset`s into ciphertext space the moment it returns,
+    /// which is what makes this window the only one.
+    pub frames: &'a [wz_session_core::passive::PassiveFrame],
     /// `(offset within `plaintext`, stream offset of the RECORD it came out of)`,
     /// in increasing order of the first.
     ///
@@ -2393,18 +2406,29 @@ impl Dissection {
                 if plaintext[index].is_empty() {
                     continue;
                 }
-                // R311y677 — OFFERED here, before the remap below destroys the
-                // plaintext coordinate and before the buffer goes out of scope.
-                // This is the only point in the program where the plaintext and
-                // the map back to its records are both in hand.
+                let before = flow.frames.len();
+                flow.feed_stream(idx_direction(index), &plaintext[index]);
+                // R311y678 — OFFERED here: after the session has framed the
+                // plaintext and BEFORE the remap below rewrites those frames'
+                // coordinates into ciphertext space.
+                //
+                // R311y677 offered it one line earlier, before the frames
+                // existed, which left a consumer no way to know where the
+                // messages were and forced it to walk the framing itself. That
+                // is a SECOND OPINION about where the messages are, beside the
+                // session's, and nothing compared them: a capture the two
+                // disagreed about would report one count in `messages decoded`
+                // and a different set of rows underneath it.
+                //
+                // This window is the only one where the plaintext, the frames,
+                // and the frames' plaintext coordinates all exist at once.
                 sink.on_plaintext(DecryptedStream {
                     flow: flow.flow,
                     direction: idx_direction(index),
                     plaintext: &plaintext[index],
+                    frames: &flow.frames[before..],
                     record_origins: &spans[index],
                 });
-                let before = flow.frames.len();
-                flow.feed_stream(idx_direction(index), &plaintext[index]);
                 remap_decrypted_offsets(&mut flow.frames[before..], &spans[index]);
                 summary.frames += flow.frames.len() - before;
             }

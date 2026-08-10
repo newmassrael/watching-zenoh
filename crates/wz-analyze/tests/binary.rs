@@ -2262,3 +2262,93 @@ fn the_decrypted_field_listing_is_bounded_and_says_so() {
         "and the two it dropped are counted, not silent: {text}"
     );
 }
+
+/// R311y678 (§1.1n) — THE FIELD ROWS ARE THE MESSAGES THE READER DECODED.
+///
+/// ## The gate R311y677 did not have
+///
+/// That round handed the sink the plaintext before the frames existed, so it
+/// walked the `u16`-length-prefixed units itself. Two walkers, two opinions
+/// about where the messages are, and nothing comparing them: a capture they read
+/// differently would print `messages decoded: N` over a listing of something
+/// else, and every assertion in place would have passed.
+///
+/// The number is now taken from the report's own summary line and compared with
+/// the rows underneath it, on BOTH transports of this listing -- cleartext,
+/// where the rows come from `flow.frames`, and decrypted, where they come from
+/// the sink. One count, two paths, asserted equal in the same run.
+#[test]
+fn the_field_rows_are_the_messages_the_reader_decoded() {
+    let scratch = Scratch::new("fields-agree");
+
+    let cleartext = scratch.write("plain.pcapng", &exchange_capture());
+    let (tls_file, log) = tls_exchange_capture();
+    let tls = scratch.write("tls.pcapng", &tls_file);
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+
+    for (name, args) in [
+        ("cleartext", vec![cleartext.clone()]),
+        (
+            "decrypted",
+            vec![tls.clone(), "--keylog".into(), keylog.clone()],
+        ),
+    ] {
+        let text = String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                .args(&args)
+                .arg("--fields")
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned();
+        let decoded: usize = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("messages decoded: "))
+            .expect("the summary line")
+            .parse()
+            .expect("a number");
+        // ANTI-VACUITY: zero rows would satisfy an equality with zero.
+        assert!(
+            decoded > 0,
+            "{name}: the fixture must decode something: {text}"
+        );
+        let rows = text.matches("] Frame").count() + text.matches("] KeepAlive").count();
+        assert_eq!(
+            rows, decoded,
+            "{name}: the field listing must be the messages the summary counted, \
+             not a second walk's opinion of them: {text}"
+        );
+    }
+}
+
+/// R311y678 (§1.1n) — a DATAGRAM flow says it has no field rows.
+///
+/// `field_lines` walks the TCP half. A scouting or multicast capture is entirely
+/// datagram, so `--fields` on one printed an empty section, which reads as "no
+/// fields in this capture" about a reader that does not look there. The same
+/// silence R311y676 removed for encrypted flows, one list over.
+#[test]
+fn a_datagram_capture_says_it_has_no_field_rows() {
+    let scratch = Scratch::new("fields-datagram");
+    let capture = scratch.write("scout.pcapng", &scouting_capture());
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--fields")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    // ANTI-VACUITY: the capture must really be datagram-only, or the absence of
+    // rows is explained by something else.
+    assert!(
+        text.contains("flows: 0 stream, 1 datagram"),
+        "the fixture must be datagram-only: {text}"
+    );
+    assert!(
+        text.contains("1 datagram flow(s): NO FIELDS"),
+        "and the listing must say it does not cover them: {text}"
+    );
+}

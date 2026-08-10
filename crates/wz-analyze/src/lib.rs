@@ -857,6 +857,23 @@ fn field_lines(
             out.push_str(&format!("    ... {omitted} more not listed\n"));
         }
     }
+    // R311y678 — a DATAGRAM flow says it has no field rows rather than being
+    // absent from the listing.
+    //
+    // `field_lines` walks `dissection.flows()`, the TCP half. A capture of
+    // scouting or multicast traffic is entirely datagram, so `--fields` on one
+    // printed an empty section -- which reads as "no fields in this capture"
+    // about a reader that does not look. The same silence R311y676 removed for
+    // encrypted flows, one list over, and the reason is the same: nothing
+    // retains a datagram's bytes, and this reader cannot walk what it does not
+    // have.
+    let datagrams = dissection.datagram_flows().len();
+    if datagrams > 0 && format == Format::Text {
+        out.push_str(&format!(
+            "  {datagrams} datagram flow(s): NO FIELDS -- a datagram's bytes are \
+             not retained, so this listing covers stream flows only\n"
+        ));
+    }
     if format == Format::Json {
         out.push(']');
     }
@@ -922,47 +939,58 @@ impl FieldSink {
 }
 
 impl wz_capture::PlaintextSink for FieldSink {
-    /// Walk the plaintext as the framed stream it is: a `u16` little-endian
-    /// length, then that many bytes of message, repeated.
+    /// R311y678 — walk the frames THE SESSION decoded, not the framing again.
     ///
-    /// The same framing `message_bytes` reads for a cleartext flow, iterated
-    /// rather than indexed -- there are no frame coordinates to index BY here,
-    /// because the frames this stream produces have not been decoded yet and
-    /// their offsets will be remapped into ciphertext space the moment they are.
+    /// R311y677 was handed the plaintext before the frames existed and walked
+    /// the `u16`-length-prefixed units itself. That made this a THIRD place that
+    /// knows how a zenoh stream is framed, beside the assembler and
+    /// `message_bytes`, and worse: a second opinion about where the messages
+    /// are, beside the session's, with nothing comparing them. A capture the two
+    /// read differently would print `messages decoded: N` over a listing of
+    /// something else.
+    ///
+    /// Now the frames arrive with it, still carrying plaintext coordinates, and
+    /// this slices exactly what the session framed.
     fn on_plaintext(&mut self, stream: wz_capture::DecryptedStream<'_>) {
-        const PREFIX: usize = 2;
         let bytes = stream.plaintext;
-        let mut at = 0usize;
-        while at + PREFIX <= bytes.len() {
-            let len = u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize;
-            let body = at + PREFIX;
-            let Some(end) = body.checked_add(len).filter(|e| *e <= bytes.len()) else {
-                // A trailing partial unit: the capture ended mid-message, which
-                // the report already counts elsewhere. Nothing to walk.
-                break;
+        for frame in stream.frames {
+            let at = frame.stream_offset;
+            let body = at + frame.prefix_width;
+            if body + PREFIX_MAX > bytes.len() && body > bytes.len() {
+                continue;
+            }
+            // The unit's length, read where the session read it.
+            let Some(prefix) = bytes.get(at..body) else {
+                continue;
+            };
+            let mut len = 0usize;
+            for (i, b) in prefix.iter().enumerate() {
+                len |= (*b as usize) << (8 * i);
+            }
+            let Some(message) = bytes.get(body..body + len) else {
+                continue;
             };
             if let Some(cap) = self.cap {
                 if self.kept_for(&stream.flow) >= cap {
                     self.note_omitted(stream.flow);
-                    at = end;
                     continue;
                 }
             }
             // Reported in the coordinate space the rest of the report uses: the
             // record this message's bytes came out of. The spans INSIDE the tree
-            // stay in plaintext space, which is the only space they mean
-            // anything in -- a field's byte range is a range of the message.
+            // stay message-relative, which is the one space they mean anything
+            // in -- a field's byte range is a range of the message.
             let origin = stream.record_origin(at).unwrap_or(at);
-            if let Ok(field) =
-                wz_session_core::dissect::dissect_transport_message(&bytes[body..end], 0)
-            {
+            if let Ok(field) = wz_session_core::dissect::dissect_transport_message(message, 0) {
                 self.rows
                     .push((stream.flow, stream.direction, origin, field));
             }
-            at = end;
         }
     }
 }
+
+/// The widest length prefix this framing uses.
+const PREFIX_MAX: usize = 2;
 
 /// R311y676 (§1.1n) — a flow whose messages came out of DECRYPTED bytes cannot
 /// be walked from the retained stream, and this says so BY NAME.
