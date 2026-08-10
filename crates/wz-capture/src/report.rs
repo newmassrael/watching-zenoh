@@ -343,8 +343,17 @@ impl<'a> CaptureReport<'a> {
                 .sum::<usize>()
         ));
         s.push_str(&format!(
-            ",\"drops\":{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\"flows\":{},\"scout_askers\":{}}}",
-            drops.frames, drops.stream_bytes, drops.skipped, drops.flows, drops.scout_askers
+            ",\"drops\":{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\"flows\":{},\
+             \"scouting\":{},\"scout_askers\":{}}}",
+            drops.frames,
+            drops.stream_bytes,
+            drops.skipped,
+            drops.flows,
+            // R311y651 (§4.4) — a bound that bites and does not reach the export
+            // is a bound that reports itself as the wire, which is the one thing
+            // this object exists to prevent.
+            drops.scouting,
+            drops.scout_askers
         ));
         // The figure the CAPTURE FILE reports about itself, which is a
         // different claim from anything this reader counted: `null` when the

@@ -5407,7 +5407,11 @@ layer_c1bt_capture_no_default_features() {
         tls_flow_tests::an_evicted_encrypted_flows_finding_stays_in_the_report \
         tls_flow_tests::an_evicted_flow_settles_the_verdict_it_was_still_holding \
         tls_flow_tests::a_flow_still_deciding_when_the_capture_ends_settles_too \
-        tls_flow_tests::an_evicted_flow_that_was_still_held_accounts_for_its_bytes
+        tls_flow_tests::an_evicted_flow_that_was_still_held_accounts_for_its_bytes \
+        datagram_tests::the_datagram_flow_table_is_bounded_by_the_same_limit \
+        datagram_tests::a_scouting_only_capture_is_bounded_too \
+        datagram_tests::an_evicted_datagram_flows_sequence_accounting_stays_in_the_total \
+        datagram_tests::the_scouting_list_is_bounded_and_the_loss_is_counted
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the --no-default-features build"

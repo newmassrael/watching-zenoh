@@ -243,6 +243,10 @@ pub struct DatagramDissection {
     /// whoever is presenting, and doing it eagerly would force an ordering on
     /// a consumer that may want the two separated.
     pub scouting: Vec<ScoutingDatagram>,
+    /// R311y651 (§4.4) — the index of the last packet seen on this flow, which
+    /// is what makes "least recently active" answerable here as it already was
+    /// for a stream flow.
+    last_activity: usize,
 }
 
 impl DatagramDissection {
@@ -252,6 +256,7 @@ impl DatagramDissection {
             session: new_session(window_ms),
             frames: Vec::new(),
             scouting: Vec::new(),
+            last_activity: 0,
         }
     }
 }
@@ -1180,9 +1185,19 @@ pub struct DissectionLimits {
     pub stream_bytes_per_direction: Option<usize>,
     /// Entries kept in the skipped-packet list.
     pub skipped_packets: Option<usize>,
-    /// Flows kept. Beyond it the least recently active is evicted, which is
-    /// the one accumulation that cannot be trimmed in place: a 5-tuple that
-    /// never returns is a flow that is never freed.
+    /// Flows kept IN EACH FLOW TABLE. Beyond it the least recently active is
+    /// evicted, which is the one accumulation that cannot be trimmed in place:
+    /// a 5-tuple that never returns is a flow that is never freed.
+    ///
+    /// R311y651 (§4.4) — "each table" and not "both together", stated because
+    /// it is a choice. A shared budget would let a chatty multicast group evict
+    /// the unicast session a reader is actually watching, making which flow
+    /// survives depend on traffic it has nothing to do with. The cost is that
+    /// the bound admits up to twice the number, and that is the trade taken.
+    ///
+    /// Until R311y651 this bounded the STREAM table alone. A UDP-only capture —
+    /// scouting on a multicast group is exactly one — grew a flow per 5-tuple
+    /// forever, on a limit whose whole purpose is that it cannot.
     pub max_flows: Option<usize>,
     /// R311y606 — half-assembled IP datagrams held at once. Beyond it the
     /// OLDEST is evicted.
@@ -1243,6 +1258,14 @@ pub struct DissectionDrops {
     pub skipped: usize,
     /// Flows evicted to stay inside `max_flows`.
     pub flows: usize,
+    /// R311y651 (§4.4) — scouting datagrams discarded to stay inside
+    /// `frames_per_flow`.
+    ///
+    /// Its own field rather than folded into `frames`, for the reason
+    /// [`DatagramDissection::scouting`] is its own list: a scouting message is
+    /// not a transport frame, and a reader diagnosing a discovery problem needs
+    /// to know which of the two lists the bound bit.
+    pub scouting: usize,
     /// R311y608 — scouting askers forgotten to stay inside
     /// `max_scout_askers`.
     ///
@@ -1261,6 +1284,7 @@ impl DissectionDrops {
             || self.stream_bytes > 0
             || self.skipped > 0
             || self.flows > 0
+            || self.scouting > 0
             || self.scout_askers > 0
     }
 }
@@ -2381,6 +2405,7 @@ impl Dissection {
         }
         self.advance_clock(idx, ts_millis, FlowKind::Datagram);
         let flow = &mut self.datagram_flows[idx];
+        flow.last_activity = d.packet_index;
         if scouting.is_some() {
             // Decoded WITHOUT touching the session: a scouting message is not
             // part of any session, so folding it would let a pre-session
@@ -2390,6 +2415,21 @@ impl Dissection {
                 packet_index: d.packet_index,
                 frame: parse_scouting(&d.payload),
             });
+            // R311y651 (§4.4) — bounded by the SAME limit the frame list is,
+            // because it answers the same question — how many decoded messages
+            // of this flow are kept — and a second knob for one axis is a knob
+            // a caller sets once and forgets. Until now this list had no bound
+            // at all: a tap on a scouting group grows one entry per SCOUT for
+            // as long as the process runs, which is the leak `frames_per_flow`
+            // exists to prevent, one list over.
+            if let Some(cap) = self.limits.frames_per_flow {
+                if flow.scouting.len() > cap {
+                    let cut = flow.scouting.len() - cap;
+                    flow.scouting.drain(..cut);
+                    self.drops.scouting += cut;
+                }
+            }
+            self.evict_datagram_flows_beyond_cap();
             return;
         }
         // R311y631 (§1.2b) — one datagram, every message it batched.
@@ -2406,6 +2446,51 @@ impl Dissection {
                 flow.frames.drain(..cut);
                 self.drops.frames += cut;
             }
+        }
+        self.evict_datagram_flows_beyond_cap();
+    }
+
+    /// R311y651 (§4.4) — the datagram table's half of `max_flows`.
+    ///
+    /// A separate walk from the stream table's rather than a generic one over
+    /// both, because what has to be CARRIED off an evicted flow differs: a
+    /// stream flow has assemblers and a ws framing to account for and a
+    /// datagram flow has neither, and a shared function would have to ask
+    /// which kind it was holding at every line.
+    ///
+    /// What is common is the rule, and it is R311y610's: the session counters
+    /// go with the flow unless they are carried, and `framing_health` reads
+    /// those exact fields off `datagram_flows` — so evicting without this carry
+    /// would make a live tap's multicast loss figures improve every time a slot
+    /// recycled.
+    fn evict_datagram_flows_beyond_cap(&mut self) {
+        let Some(cap) = self.limits.max_flows else {
+            return;
+        };
+        while self.datagram_flows.len() > cap {
+            let Some(oldest) = self
+                .datagram_flows
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, f)| f.last_activity)
+                .map(|(i, _)| i)
+            else {
+                break;
+            };
+            let gone = self.datagram_flows.remove(oldest);
+            // The same four the stream path carries, minus the two a datagram
+            // flow cannot have. `resync_accounting` is deliberately absent: a
+            // datagram flow has no framing to lose, which is the reason
+            // `framing_health` does not read it there either.
+            for dir in [Direction::A, Direction::B] {
+                self.evicted_sessions.reserved_headers += gone.session.reserved_headers(dir);
+                self.evicted_sessions.undefined_mandatory_exts +=
+                    gone.session.undefined_mandatory_exts(dir);
+                self.evicted_sessions.unaccounted_batch_bytes +=
+                    gone.session.unaccounted_batch_bytes(dir);
+                add_sn(&mut self.evicted_sessions, gone.session.sn_accounting(dir));
+            }
+            self.drops.flows += 1;
         }
     }
 
@@ -4993,6 +5078,213 @@ mod datagram_tests {
         }
         assert_eq!(d.flows().len(), 2, "the cap holds");
         assert_eq!(d.drops().flows, 1, "and the eviction is counted");
+    }
+
+    /// R311y651 (§4.4) — the DATAGRAM flow table is bounded too.
+    ///
+    /// Measured before the fix, on this fixture: `max_flows: Some(2)` and forty
+    /// 5-tuples produced FORTY flows and `drops.flows == 0`. `max_flows` exists
+    /// because "a 5-tuple that never returns is a flow that is never freed", and
+    /// the plane where that is most true — scouting, where every host on a
+    /// multicast group is its own 5-tuple and none of them ever closes — was the
+    /// one the bound did not reach.
+    #[test]
+    fn the_datagram_flow_table_is_bounded_by_the_same_limit() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows: Some(2),
+            ..DissectionLimits::default()
+        });
+        for i in 0..40u16 {
+            let pkt = udp_packet([10, 0, 0, 1], 7000 + i, [224, 0, 0, 224], 7446, &keepalive);
+            d.push_packet(LINKTYPE_ETHERNET, i as usize, &pkt);
+        }
+        assert_eq!(
+            d.datagram_flows().len(),
+            2,
+            "the cap must hold on this table"
+        );
+        assert_eq!(d.drops().flows, 38, "and every eviction must be counted");
+
+        // THE SECOND LEG, and it earned its place by falsification: never
+        // writing `last_activity` at all leaves the sweep above green, because
+        // every flow then ties at zero and the tie falls to insertion order --
+        // which in the sweep IS activity order. These three flows separate the
+        // two orders: the FIRST one is touched again before the third arrives,
+        // so an LRU keeps it and an insertion-order table drops it.
+        let ports = |d: &Dissection| -> Vec<u32> {
+            d.datagram_flows()
+                .iter()
+                .map(|f| f.flow.high.port.min(f.flow.low.port))
+                .collect()
+        };
+        let mut e = Dissection::with_limits(DissectionLimits {
+            max_flows: Some(2),
+            ..DissectionLimits::default()
+        });
+        let at = |port: u16| udp_packet([10, 0, 0, 1], port, [224, 0, 0, 224], 7446, &keepalive);
+        e.push_packet(LINKTYPE_ETHERNET, 0, &at(7000));
+        e.push_packet(LINKTYPE_ETHERNET, 1, &at(7001));
+        // 7000 is spoken for again, which is the whole distinction.
+        e.push_packet(LINKTYPE_ETHERNET, 2, &at(7000));
+        e.push_packet(LINKTYPE_ETHERNET, 3, &at(7002));
+        assert_eq!(e.datagram_flows().len(), 2);
+        assert_eq!(
+            ports(&e),
+            alloc::vec![7000, 7002],
+            "the LEAST RECENTLY ACTIVE must go, not the first admitted"
+        );
+    }
+
+    /// R311y651 (§4.4) — and R311y610's rule on the plane it was not written
+    /// for: an evicted datagram flow's SEQUENCE accounting stays in the total.
+    ///
+    /// `framing_health` reads `sn_accounting` off `datagram_flows` — multicast
+    /// loss is exactly what that measures — so a cap that evicted without
+    /// carrying would make a live tap's loss figures IMPROVE every time a slot
+    /// recycled. Adding the bound without this carry would have shipped the
+    /// R311y610 defect on a second plane in the same commit that closed the leak.
+    #[test]
+    fn an_evicted_datagram_flows_sequence_accounting_stays_in_the_total() {
+        let frame = |sn: u8| {
+            alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAME
+                    | wz_session_core::wire_const::FLAG_T_FRAME_R,
+                sn,
+                0x1F,
+                0x00,
+                0x00,
+                0x00,
+            ]
+        };
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows: Some(1),
+            ..DissectionLimits::default()
+        });
+        // One flow, numbered frames, and NO handshake in front of them -- so the
+        // reader counts them and cannot judge them, which is the ordinary shape
+        // of a mid-session multicast capture and puts both a count and an
+        // unresolved tally on the flow before it is evicted.
+        for (i, sn) in [0u8, 1, 4].into_iter().enumerate() {
+            let pkt = udp_packet([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, &frame(sn));
+            d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+        }
+        let before = d.framing_health();
+        assert!(
+            before.sn_frames > 0 && before.sn_without_resolution > 0,
+            "the fixture must number frames AND fail to judge some: {before:?}"
+        );
+
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let other = udp_packet([10, 0, 0, 9], 7448, [224, 0, 0, 224], 7446, &keepalive);
+        d.push_packet(LINKTYPE_ETHERNET, 3, &other);
+        assert_eq!(d.datagram_flows().len(), 1, "the cap must have evicted");
+
+        let after = d.framing_health();
+        assert_eq!(
+            (
+                after.sn_frames,
+                after.sn_missing,
+                after.sn_gaps,
+                after.sn_without_resolution
+            ),
+            (
+                before.sn_frames,
+                before.sn_missing,
+                before.sn_gaps,
+                before.sn_without_resolution
+            ),
+            "no loss counter may move when a datagram flow is evicted: \
+             {before:?} -> {after:?}"
+        );
+    }
+
+    /// R311y651 (§4.4) — the SCOUTING list is bounded, and by the same limit
+    /// the frame list beside it is.
+    ///
+    /// Measured before the fix: `frames_per_flow: Some(3)` and thirty SCOUTs on
+    /// one flow left thirty entries. The scouting list is the one a live tap
+    /// grows fastest — a discovery group carries a SCOUT per host per interval
+    /// forever — and it was the one list on a flow with no bound at all.
+    #[test]
+    fn the_scouting_list_is_bounded_and_the_loss_is_counted() {
+        let scout = [wz_session_core::wire_const::S_MID_SCOUT, 0x00, 0x01, 0x00];
+        let mut d = Dissection::with_limits(DissectionLimits {
+            frames_per_flow: Some(3),
+            ..DissectionLimits::default()
+        });
+        for i in 0..30 {
+            let pkt = udp_packet([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, &scout);
+            d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+        }
+        assert_eq!(d.datagram_flows().len(), 1, "one 5-tuple, one flow");
+        assert_eq!(d.datagram_flows()[0].scouting.len(), 3);
+        assert_eq!(
+            d.drops().scouting,
+            27,
+            "a bound that bites silently reports itself as the wire: {:?}",
+            d.drops()
+        );
+        assert_eq!(
+            d.drops().frames,
+            0,
+            "and the two lists' losses must stay distinguishable"
+        );
+        assert!(d.drops().any(), "the roll-up must see it");
+        // AND IT REACHES THE EXPORT. A loss that stops at the typed struct is a
+        // loss the consumer summing the JSON is never told about, which is the
+        // shape this whole object exists to refuse.
+        let rep = crate::report::CaptureReport::of(&d);
+        assert!(
+            rep.to_json().contains("\"scouting\":27"),
+            "{}",
+            rep.to_json()
+        );
+        assert!(!rep.is_complete(), "{}", rep.to_text());
+    }
+
+    /// R311y651 (§4.4) — and the capture the bound was MISSING for, which is
+    /// the one where every packet takes the early return.
+    ///
+    /// A scouting datagram never reaches the frame path: it is decoded into its
+    /// own list and the function returns. So a tap on a discovery group — where
+    /// every host is its own 5-tuple, none of them ever closes, and SCOUTs
+    /// arrive forever — is exactly the capture whose flow table grows without
+    /// end, and it is the one an eviction call on the frame path alone does not
+    /// touch. Found by falsifying R311y651: dropping the scouting path's call
+    /// left all 324 tests green.
+    #[test]
+    fn a_scouting_only_capture_is_bounded_too() {
+        let scout = [wz_session_core::wire_const::S_MID_SCOUT, 0x00, 0x01, 0x00];
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows: Some(2),
+            ..DissectionLimits::default()
+        });
+        for i in 0..25u16 {
+            // A DIFFERENT SOURCE HOST each time, which is what a discovery
+            // group looks like: one asker per node, all to the same group.
+            let pkt = udp_packet(
+                [10, 0, 0, (i + 1) as u8],
+                7447,
+                [224, 0, 0, 224],
+                7446,
+                &scout,
+            );
+            d.push_packet(LINKTYPE_ETHERNET, i as usize, &pkt);
+        }
+        assert_eq!(
+            d.datagram_flows().len(),
+            2,
+            "a scouting-only capture grows one flow per host forever"
+        );
+        assert_eq!(d.drops().flows, 23);
+        // ANTI-VACUITY: the packets really did take the scouting path, so this
+        // is not the frame path's eviction being measured a second time.
+        assert!(
+            d.datagram_flows().iter().all(|f| !f.scouting.is_empty())
+                && d.datagram_flows().iter().all(|f| f.frames.is_empty()),
+            "the fixture must drive the SCOUTING branch"
+        );
     }
 
     /// R311y594 — a pcap replay carries the FILE's clock into the observer.
