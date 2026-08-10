@@ -97,16 +97,31 @@ pub struct KeyexprCounts {
     /// R311y637 (§1.1w) — records attributed here that CARRY a payload this
     /// build cannot size.
     ///
-    /// One case today: a `Query` whose value rides the
-    /// [`QUERY_BODY`](wz_session_core::ext_header::body_ext_id::QUERY_BODY)
-    /// ext. The ext body is `encoding` followed by `payload`
-    /// (`zenoh-protocol-1.5.0/src/zenoh/mod.rs:205-210`), and this decoder
-    /// models it as one opaque ZBUF, so the application half of it cannot be
-    /// separated out. The bytes are REAL and their count is unknown.
+    /// Two cases, and every one of them reaches this counter through
+    /// [`Self::record_payload`] rather than by assigning the byte total
+    /// directly, so a third cannot arrive by writing a number the way the two
+    /// below each once did:
     ///
-    /// A query with NO such ext is not counted here: it carries no value, its
-    /// `0` is a measurement, and conflating the two would make the honest zero
-    /// unreadable — which is the whole defect this field exists to end.
+    /// 1. A `Query` whose value rides the
+    ///    [`QUERY_BODY`](wz_session_core::ext_header::body_ext_id::QUERY_BODY)
+    ///    ext. The ext body is `encoding` followed by `payload`
+    ///    (`zenoh-protocol-1.5.0/src/zenoh/mod.rs:205-210`), and this decoder
+    ///    models it as one opaque ZBUF, so the application half of it cannot be
+    ///    separated out. The bytes are REAL and their count is unknown.
+    /// 2. R311y639 (§4.30) — a `MsgPut` or `Err` whose chain carries the
+    ///    [`SHM`](wz_session_core::ext_header::body_ext_id::SHM) marker. That
+    ///    marker means the payload slot holds a DESCRIPTOR and the data never
+    ///    traversed the network at all, so no length on this wire is the
+    ///    application's. Worse than a descriptor's own size being reported: the
+    ///    marker also switches the field's FRAMING from `len || bytes` to a
+    ///    slice sequence (`zenoh-codec-1.5.0/src/core/zbuf.rs:131-158`,
+    ///    `Zenoh080Sliced`), so the figure this decoder had been reporting was
+    ///    the SLICE COUNT — typically `1` — presented as a byte total.
+    ///
+    /// A record with NO such ext is not counted here: it carries what it
+    /// carries, its number is a measurement, and conflating the two would make
+    /// the honest zero unreadable — which is the whole defect this field exists
+    /// to end.
     pub unsized_payloads: usize,
 }
 
@@ -125,6 +140,34 @@ impl KeyexprCounts {
     /// answer for this row rather than a floor.
     pub fn payload_is_complete(&self) -> bool {
         self.unsized_payloads == 0
+    }
+
+    /// R311y639 (§4.30) — the ONE door a payload measurement enters by.
+    ///
+    /// `Some(n)`: this record's slot held `n` application bytes, and that is a
+    /// MEASUREMENT. `None`: the slot held something real whose size is not on
+    /// this wire, so there is no number to add and the record is counted as the
+    /// admission it is.
+    ///
+    /// It exists because the alternative had already failed twice in the same
+    /// shape. Both R311y637's query value and this round's SHM descriptor were
+    /// carriers whose payload is not the field it looks like, and both reached
+    /// the totals as `counts.payload_bytes = <field>.len()` — a plain
+    /// assignment that cannot express "unknown", so the arm that wrote it had
+    /// no way to say so even had its author noticed. A third carrier arriving
+    /// through this method must supply an `Option`, which is the question
+    /// asked at the only moment the answer is available.
+    ///
+    /// Gated exactly as [`classify`]'s carrier arms are: with `network-codecs`
+    /// off there is no arm left that can name a payload, so the door leads
+    /// nowhere and an ungated one would be dead code the no-default lane fails
+    /// on rather than a wider reach.
+    #[cfg(feature = "network-codecs")]
+    fn record_payload(&mut self, bytes: Option<u64>) {
+        match bytes {
+            Some(n) => self.payload_bytes += n,
+            None => self.unsized_payloads += 1,
+        }
     }
 
     fn add(&mut self, other: &KeyexprCounts) {
@@ -699,6 +742,57 @@ pub(crate) fn sized_payload(counts: &KeyexprCounts) -> Option<u64> {
     }
 }
 
+/// R311y622 (§1.1o) — whether a zenoh-body ext chain carries the SHM marker,
+/// meaning the payload slot holds a DESCRIPTOR and not the data.
+///
+/// Matched on the extension IDENTITY, mandatory bit included
+/// (`zextunit!(0x2, true)`), not on the 4-bit id field. The id space is four
+/// bits wide and zenoh reuses values across encodings deliberately, so an
+/// id-only match would read an unrelated `0x2` entry as an SHM descriptor and
+/// silence a payload this crate could have judged — the mirror of the defect
+/// R311y505 measured on the establishment space.
+///
+/// Read through `ext_header`, which is UNCONDITIONAL, rather than through
+/// `extshm`, which is gated on `transport-shm`. An observer must recognise ids
+/// whose capability its own build cannot perform; that asymmetry is why the id
+/// table lives where it does.
+///
+/// R311y639 (§4.30) — this lives in `agg` now, beside the classification it
+/// shares a rule with, and [`crate::payload`] calls it here. It was private to
+/// that module while the throughput plane, reading the same four carriers, did
+/// not ask the question at all: one plane refusing to judge a descriptor as
+/// data and another reporting its slot length as a byte total is two answers to
+/// one question, which is exactly what a single function forecloses.
+#[cfg(feature = "network-codecs")]
+pub(crate) fn carries_shm_marker(
+    extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>,
+) -> bool {
+    use wz_session_core::ext_header::{body_ext_id, ext_eid, EXT_FLAG_M};
+
+    let want = ext_eid(body_ext_id::SHM | EXT_FLAG_M);
+    extensions
+        .unwrap_or(&[])
+        .iter()
+        .any(|e| ext_eid(e.header) == want)
+}
+
+/// R311y639 (§4.30) — what one `MsgPut` / `Err` slot is worth to the totals.
+///
+/// The pair the carrier arms hand to [`KeyexprCounts::record_payload`], so the
+/// SHM question is asked once for the four sites that carry a sizable slot
+/// (`Push` Put, `Request` Put, `Reply` Put, `Err`) instead of at each of them.
+#[cfg(feature = "network-codecs")]
+fn measured_payload(
+    payload: &[u8],
+    extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>,
+) -> Option<u64> {
+    if carries_shm_marker(extensions) {
+        None
+    } else {
+        Some(payload.len() as u64)
+    }
+}
+
 /// R311y637 (§1.1w) — does this `Query`'s ext chain carry a VALUE?
 ///
 /// Matched on `(id, ZBUF body)` exactly as
@@ -744,7 +838,10 @@ pub(crate) fn classify(
                 PushOwnedVariant::CodecZenohMsgPut(put)
                 | PushOwnedVariant::Default { body: put, .. } => {
                     counts.puts = 1;
-                    counts.payload_bytes = put.payload.as_slice().len() as u64;
+                    counts.record_payload(measured_payload(
+                        put.payload.as_slice(),
+                        put.extensions.as_deref(),
+                    ));
                     RecordKind::Put
                 }
                 PushOwnedVariant::CodecZenohMsgDel(_) => {
@@ -759,7 +856,10 @@ pub(crate) fn classify(
             let kind = match &r.body {
                 RequestOwnedVariant::CodecZenohMsgPut(put) => {
                     counts.puts = 1;
-                    counts.payload_bytes = put.payload.as_slice().len() as u64;
+                    counts.record_payload(measured_payload(
+                        put.payload.as_slice(),
+                        put.extensions.as_deref(),
+                    ));
                     RecordKind::Put
                 }
                 RequestOwnedVariant::CodecZenohMsgDel(_) => {
@@ -775,7 +875,7 @@ pub(crate) fn classify(
                     // query that carries nothing (a real zero) from the one
                     // whose payload this build cannot measure.
                     if query_body_present(q.extensions.as_deref()) {
-                        counts.unsized_payloads = 1;
+                        counts.record_payload(None);
                     }
                     RecordKind::Query
                 }
@@ -807,13 +907,27 @@ pub(crate) fn classify(
                     if let ReplyOwnedVariant::CodecZenohMsgPut(put)
                     | ReplyOwnedVariant::Default { body: put, .. } = &reply.body
                     {
-                        counts.payload_bytes = put.payload.as_slice().len() as u64;
+                        // The marker rides the INNER Put, not the `Reply`
+                        // wrapper: upstream's `ReplyBody` IS `PushBody`
+                        // (`zenoh-protocol-1.5.0/src/zenoh/reply.rs:53`) and the
+                        // `Reply` itself declares no shm ext, so the chain to
+                        // ask is the one this arm already holds.
+                        counts.record_payload(measured_payload(
+                            put.payload.as_slice(),
+                            put.extensions.as_deref(),
+                        ));
                     }
                     RecordKind::Reply
                 }
                 ResponseOwnedVariant::CodecZenohErr(err) => {
                     counts.errs = 1;
-                    counts.payload_bytes = err.payload.as_slice().len() as u64;
+                    // An `Err` carries the shm ext in its own right —
+                    // `zextunit!(0x2, true)`, the same identity on a different
+                    // carrier (`zenoh-protocol-1.5.0/src/zenoh/err.rs:49-68`).
+                    counts.record_payload(measured_payload(
+                        err.payload.as_slice(),
+                        err.extensions.as_deref(),
+                    ));
                     RecordKind::Err
                 }
             };
@@ -1215,6 +1329,320 @@ pub(crate) mod tests {
         .selection();
         assert_eq!(put.matched, 1, "a sized payload still decides");
         assert!(put.is_decisive());
+    }
+
+    /// R311y639 (§4.30) — which body ext, if any, a fixture hangs on its
+    /// carrier.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum BodyExt {
+        /// No chain at all.
+        None,
+        /// `zextunit!(0x2, true)` — the SHM marker. The payload slot is a
+        /// DESCRIPTOR and the data never crossed the network.
+        ShmMarker,
+        /// A ZBUF at the SAME 4-bit id with NO mandatory bit: a DIFFERENT
+        /// extension that an id-only matcher would read as the marker above.
+        /// The discriminator, in the R311y505 direction that silences a
+        /// payload this crate could have measured.
+        ForeignAtTheSameId,
+    }
+
+    impl BodyExt {
+        fn entry(self) -> Option<wz_codecs::ext_entry::ExtEntry<'static>> {
+            use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
+            use wz_session_core::ext_header::{body_ext_id, EXT_ENC_ZBUF, EXT_FLAG_M};
+            match self {
+                BodyExt::None => None,
+                BodyExt::ShmMarker => Some(ExtEntry {
+                    header: body_ext_id::SHM | EXT_FLAG_M,
+                    body: ExtEntryVariant::CodecZenohExtUnit(
+                        wz_codecs::ext_unit::ExtUnit::default(),
+                    ),
+                }),
+                BodyExt::ForeignAtTheSameId => Some(ExtEntry {
+                    header: body_ext_id::SHM | EXT_ENC_ZBUF,
+                    body: ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
+                        value_len: 1,
+                        value: &[0xAB],
+                    }),
+                }),
+            }
+        }
+    }
+
+    /// R311y639 (§4.30) — which of the four `classify` arms that hold a sizable
+    /// slot is carrying it.
+    ///
+    /// One fixture across all four, because the defect was not in any one of
+    /// them: each wrote its own `payload_bytes = <field>.len()` and each was
+    /// equally unable to say "unknown". A per-carrier fixture would have let
+    /// three of them stay wrong while the fourth was fixed.
+    #[derive(Clone, Copy)]
+    enum Carrier {
+        Push,
+        Request,
+        Reply,
+        Err,
+    }
+
+    /// A record carrying `payload` under `keyexpr`, in `carrier`, with `ext` on
+    /// its zenoh-body chain.
+    fn record_with_body_ext(
+        carrier: Carrier,
+        keyexpr: &'static str,
+        payload: &'static [u8],
+        ext: BodyExt,
+    ) -> Vec<u8> {
+        use wz_codecs::wire_const::{FLAG_N_N, FLAG_Z_ERR_Z, FLAG_Z_PUT_Z};
+        let entry = ext.entry();
+        let z_put = if entry.is_some() { FLAG_Z_PUT_Z } else { 0 };
+        let put = wz_codecs::msg_put::MsgPut {
+            header: wz_codecs::msg_put::MsgPut::default().header | z_put,
+            extensions: entry.clone().map(|e| core::iter::once(e).collect()),
+            payload_len: payload.len() as u64,
+            payload,
+            ..Default::default()
+        };
+        let kexpr = sender_space(0, Some(keyexpr));
+        match carrier {
+            Carrier::Push => wz_codecs::push::Push {
+                header: wz_codecs::push::Push::default().header | FLAG_N_N,
+                keyexpr: kexpr,
+                body: wz_codecs::push::PushVariant::CodecZenohMsgPut(put),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            Carrier::Request => wz_codecs::request::Request {
+                header: wz_codecs::request::Request::default().header | FLAG_N_N,
+                rid: 11,
+                keyexpr: kexpr,
+                body: wz_codecs::request::RequestVariant::CodecZenohMsgPut(put),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            Carrier::Reply => wz_codecs::response::Response {
+                header: wz_codecs::response::Response::default().header | FLAG_N_N,
+                request_id: 11,
+                keyexpr: kexpr,
+                body: wz_codecs::response::ResponseVariant::CodecZenohReply(
+                    wz_codecs::reply::Reply {
+                        body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(put),
+                        ..Default::default()
+                    },
+                ),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            // The ERR carrier does NOT wrap a Put: it declares `encoding` and
+            // `payload` as its own fields, and its own shm ext beside them.
+            Carrier::Err => {
+                let z_err = if entry.is_some() { FLAG_Z_ERR_Z } else { 0 };
+                wz_codecs::response::Response {
+                    header: wz_codecs::response::Response::default().header | FLAG_N_N,
+                    request_id: 11,
+                    keyexpr: kexpr,
+                    body: wz_codecs::response::ResponseVariant::CodecZenohErr(
+                        wz_codecs::err::Err {
+                            header: wz_codecs::err::Err::default().header | z_err,
+                            extensions: entry.map(|e| core::iter::once(e).collect()),
+                            payload_len: payload.len() as u64,
+                            payload,
+                            ..Default::default()
+                        },
+                    ),
+                    ..Default::default()
+                }
+                .encode_to_vec()
+            }
+        }
+    }
+
+    const CARRIERS: [(Carrier, &str); 4] = [
+        (Carrier::Push, "push"),
+        (Carrier::Request, "request"),
+        (Carrier::Reply, "reply"),
+        (Carrier::Err, "err"),
+    ];
+
+    /// ANTI-VACUITY for everything below. Each carrier really does put three
+    /// DIFFERENT byte strings on the wire, and each really decodes as one
+    /// record this plane attributes to the keyexpr.
+    ///
+    /// Without this leg an encoder that dropped the ext chain would make "the
+    /// descriptor is unsized" and "the plain payload is measured" both true of
+    /// one identical record, and a carrier whose ext broke the decode outright
+    /// would look like a carrier that simply reported no bytes.
+    #[test]
+    fn each_carrier_puts_three_distinct_records_on_the_wire() {
+        for (carrier, name) in CARRIERS {
+            let shm = record_with_body_ext(carrier, "demo/shm", b"descriptor", BodyExt::ShmMarker);
+            let foreign = record_with_body_ext(
+                carrier,
+                "demo/shm",
+                b"descriptor",
+                BodyExt::ForeignAtTheSameId,
+            );
+            let plain = record_with_body_ext(carrier, "demo/shm", b"descriptor", BodyExt::None);
+            assert_ne!(shm, foreign, "{name}: the two exts must differ on the wire");
+            assert_ne!(shm, plain, "{name}: the marker must reach the wire");
+            for (bytes, which) in [(&shm, "shm"), (&foreign, "foreign"), (&plain, "plain")] {
+                let t = aggregate_datagrams(&[(true, bytes.clone())]);
+                assert_eq!(t.records(), 1, "{name}/{which}: one record");
+                assert!(
+                    t.row("demo/shm").is_some(),
+                    "{name}/{which}: attributed to the keyexpr"
+                );
+            }
+        }
+    }
+
+    /// §4.30, THE DEFECT, on all four carriers that hold a sizable slot.
+    ///
+    /// The SHM marker means the payload slot holds a DESCRIPTOR and the
+    /// application's bytes never traversed the network at all
+    /// (`zenoh-protocol-1.5.0/src/zenoh/put.rs:71-75`, `err.rs:49-68` —
+    /// `zextunit!(0x2, true)`). This plane was reporting that slot's length as
+    /// an application byte total: a confident number for a quantity no length
+    /// on this wire holds. The [`crate::payload`] plane had refused to judge
+    /// the same bytes since R311y622, so the two planes were answering one
+    /// question two ways.
+    ///
+    /// The control leg is the whole test. A record with NO marker keeps its
+    /// number and keeps it as a MEASUREMENT; had the fix been "a Put with any
+    /// ext chain is unknown", this leg would fail.
+    #[test]
+    fn a_descriptor_slot_is_unsized_on_every_carrier_and_a_plain_one_is_measured() {
+        for (carrier, name) in CARRIERS {
+            let shm = aggregate_datagrams(&[(
+                true,
+                record_with_body_ext(carrier, "demo/shm", b"descriptor", BodyExt::ShmMarker),
+            )]);
+            assert_eq!(
+                shm.unsized_payloads(),
+                1,
+                "{name}: the slot is a descriptor"
+            );
+            assert_eq!(
+                shm.total_payload_bytes(),
+                0,
+                "{name}: a floor, and `unsized_payloads` is what says so"
+            );
+            assert!(!shm
+                .row("demo/shm")
+                .expect("row")
+                .totals()
+                .payload_is_complete());
+
+            let plain = aggregate_datagrams(&[(
+                true,
+                record_with_body_ext(carrier, "demo/shm", b"descriptor", BodyExt::None),
+            )]);
+            assert_eq!(
+                plain.unsized_payloads(),
+                0,
+                "{name}: no marker, so the bytes are the bytes"
+            );
+            assert_eq!(plain.total_payload_bytes(), b"descriptor".len() as u64);
+            assert!(plain
+                .row("demo/shm")
+                .expect("row")
+                .totals()
+                .payload_is_complete());
+        }
+    }
+
+    /// THE DISCRIMINATOR. A body ext sharing the marker's 4-BIT ID FIELD and
+    /// differing in its encoding bits is a DIFFERENT extension, and its record's
+    /// payload is ordinary data this plane can measure.
+    ///
+    /// Matching on the id column alone would silence it — the R311y505 defect
+    /// aimed the other way, and the leg that reds if this crate ever reaches for
+    /// `ext_id` where it means `ext_eid`.
+    #[test]
+    fn a_body_ext_sharing_the_markers_id_field_leaves_the_payload_measured() {
+        for (carrier, name) in CARRIERS {
+            let foreign = aggregate_datagrams(&[(
+                true,
+                record_with_body_ext(
+                    carrier,
+                    "demo/shm",
+                    b"descriptor",
+                    BodyExt::ForeignAtTheSameId,
+                ),
+            )]);
+            assert_eq!(
+                foreign.unsized_payloads(),
+                0,
+                "{name}: a ZBUF at 0x2 with no mandatory bit is not the marker"
+            );
+            assert_eq!(
+                foreign.total_payload_bytes(),
+                b"descriptor".len() as u64,
+                "{name}: and its payload is measurable data"
+            );
+        }
+    }
+
+    /// The consequence for a selector, and the leg that names the failure this
+    /// axis ends: `bytes == 10` is the number the plane USED to report for a
+    /// descriptor slot ten bytes long — a reader asking for records of exactly
+    /// that size got the descriptor back as though it were the data.
+    ///
+    /// It is now UNDECIDED, not `no`: the record's payload is real and its size
+    /// is not on this wire. Both controls matter — the same term over the
+    /// foreign-ext record decides `yes`, and over a record whose slot really is
+    /// a different length decides `no`, so the unknown is scoped to the record
+    /// whose size is genuinely unavailable rather than smeared over the plane.
+    #[test]
+    fn a_bytes_term_over_a_descriptor_slot_is_undecided_rather_than_its_length() {
+        let one = |record: Vec<u8>, selector: &str| {
+            let mut d = Dissection::new();
+            let wire = crate::datagram_tests::frame_carrying(&record);
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                0,
+                &udp_packet(LOW, 43210, HIGH, 7447, &wire),
+            );
+            let filter = Filter::parse(selector).expect("parses");
+            aggregate_where(&d, &filter).selection()
+        };
+        for (carrier, name) in CARRIERS {
+            assert_eq!(
+                one(
+                    record_with_body_ext(carrier, "demo/shm", b"descriptor", BodyExt::ShmMarker),
+                    "bytes == 10"
+                ),
+                Selection {
+                    matched: 0,
+                    rejected: 0,
+                    undecided: 1
+                },
+                "{name}: the descriptor's own length is not the payload's"
+            );
+            assert_eq!(
+                one(
+                    record_with_body_ext(
+                        carrier,
+                        "demo/shm",
+                        b"descriptor",
+                        BodyExt::ForeignAtTheSameId
+                    ),
+                    "bytes == 10"
+                )
+                .matched,
+                1,
+                "{name}: ten real bytes still decide yes"
+            );
+            assert_eq!(
+                one(
+                    record_with_body_ext(carrier, "demo/shm", b"short", BodyExt::None),
+                    "bytes == 10"
+                )
+                .rejected,
+                1,
+                "{name}: five real bytes still decide no"
+            );
+        }
     }
 
     /// R311y638 (§1.1r) — the capture origin is the EARLIEST instant over every

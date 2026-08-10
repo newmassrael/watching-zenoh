@@ -679,6 +679,17 @@ pub mod wire_const {
     /// misread rather than a compile error.
     #[cfg(feature = "codec-response")]
     pub const FLAG_Z_ERR_E: u8 = 0x40;
+    /// `Z` on a zenoh-message ERR header (`sources/codecs/err.scxml:74`): an
+    /// extension chain follows.
+    ///
+    /// R311y639 (§4.30) — added for the same reason [`FLAG_Z_ERR_E`] carries
+    /// its own name rather than borrowing the PUT one, and the round that
+    /// needed it is the argument: an `Err` declares the shm ext in its own
+    /// right (`zenoh-protocol-1.5.0/src/zenoh/err.rs:49-68`,
+    /// `zextunit!(0x2, true)`), so a fixture must be able to hang a chain on an
+    /// ERR header without spelling a PUT constant at it.
+    #[cfg(feature = "codec-response")]
+    pub const FLAG_Z_ERR_Z: u8 = 0x80;
     /// DECLARE envelope MID (network.h:34). Gated on `codec-declare`.
     #[cfg(feature = "codec-declare")]
     pub const N_MID_DECLARE: u8 = 0x1E;

@@ -820,30 +820,13 @@ impl PayloadCensus {
     }
 }
 
-/// R311y622 (§1.1o) — whether a zenoh-body ext chain carries the SHM marker,
-/// meaning the payload slot holds a DESCRIPTOR and not the data.
-///
-/// Matched on the extension IDENTITY, mandatory bit included
-/// (`zextunit!(0x2, true)`), not on the 4-bit id field. The id space is four
-/// bits wide and zenoh reuses values across encodings deliberately, so an
-/// id-only match would read an unrelated `0x2` entry as an SHM descriptor and
-/// silence a payload this plane could have judged — the mirror of the defect
-/// R311y505 measured on the establishment space.
-///
-/// Read through `ext_header`, which is UNCONDITIONAL, rather than through
-/// `extshm`, which is gated on `transport-shm`. An observer must recognise ids
-/// whose capability its own build cannot perform; that asymmetry is why the
-/// id table lives where it does.
+/// R311y639 (§4.30) — the SHM-marker predicate moved to [`crate::agg`], which
+/// is where the classification it shares a rule with lives. It was private here
+/// while the throughput plane read the same four carriers and never asked, so
+/// this plane refused to judge a descriptor as data and that one reported the
+/// descriptor slot's length as a byte total. One function, one answer.
 #[cfg(feature = "network-codecs")]
-fn carries_shm_marker(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> bool {
-    use wz_session_core::ext_header::{body_ext_id, ext_eid, EXT_FLAG_M};
-
-    let want = ext_eid(body_ext_id::SHM | EXT_FLAG_M);
-    extensions
-        .unwrap_or(&[])
-        .iter()
-        .any(|e| ext_eid(e.header) == want)
-}
+use crate::agg::carries_shm_marker;
 
 /// The declared encoding and the bytes a record carries, with its keyexpr.
 ///

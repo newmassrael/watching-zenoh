@@ -1481,6 +1481,19 @@ PY
     # page, a solo page that gains a second plane, and a builder set the scan
     # cannot read — each reds, and the revert returns OK.
     python3 scripts/lib/solo_plane_page_lint.py || return 1
+    # R311y639 (§4.30) — the PAYLOAD-MEASUREMENT gate. Two rounds in a row a
+    # carrier arm of `agg::classify` wrote a byte total with a bare assignment
+    # and so had no way to say "unknown": R311y637's query carries its value in
+    # an ext and was reported as zero bytes, R311y639's SHM descriptor stands in
+    # for data that never crossed the wire and was reported as its own slot
+    # length. Both fixes route the write through `KeyexprCounts::record_payload`,
+    # whose parameter is an `Option`. Nothing required the door, so a THIRD
+    # carrier could be added with a bare assignment and every test would pass —
+    # a test cannot observe a question that was never asked. The guarded field
+    # set is READ from what the door writes, not listed here. Enforcement
+    # MEASURED both ways in: restoring the y639 assignment reds, and a
+    # `KeyexprCounts` struct literal naming a guarded field reds.
+    python3 scripts/lib/payload_measurement_lint.py || return 1
     # R311y565 — the EXPIRED-BLOCKER lint. Eight times across y561-y563 a field
     # or a family sat unimplemented behind a comment naming its own reason, and
     # the reason had already dissolved -- twice in the round that wrote it. Each
@@ -5454,7 +5467,11 @@ layer_c1bt_capture_no_default_features() {
         report::tests::an_unsizable_payload_reaches_the_document_and_the_verdict \
         agg::tests::the_capture_origin_is_the_earliest_instant_over_every_packet \
         agg::tests::an_elapsed_window_selects_what_an_absolute_one_would_and_time_does_not \
-        agg::tests::a_hand_folded_plane_cannot_decide_an_elapsed_term
+        agg::tests::a_hand_folded_plane_cannot_decide_an_elapsed_term \
+        agg::tests::each_carrier_puts_three_distinct_records_on_the_wire \
+        agg::tests::a_descriptor_slot_is_unsized_on_every_carrier_and_a_plain_one_is_measured \
+        agg::tests::a_body_ext_sharing_the_markers_id_field_leaves_the_payload_measured \
+        agg::tests::a_bytes_term_over_a_descriptor_slot_is_undecided_rather_than_its_length
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the network-codecs build"
