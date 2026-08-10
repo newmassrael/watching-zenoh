@@ -291,7 +291,10 @@ impl InboundFrame {
             feature = "codec-join"
         ))]
         fn judge(mid: u8, entries: &[ExtEntryOwned]) -> ExtAdmission {
-            crate::ext_admit::judge_ext_chain(mid, entries.iter().map(|e| e.header))
+            crate::ext_admit::judge_ext_chain(
+                crate::ext_admit::ExtCarrier::Transport(mid),
+                entries.iter().map(|e| e.header),
+            )
         }
         match self {
             #[cfg(feature = "codec-init-body")]

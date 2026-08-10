@@ -6360,12 +6360,13 @@ layer_epico_library_oracles() {
     # A lane that skipped here would go green having compared nothing, and
     # Layer A4 reads "this lane is in ci.yml" as evidence its proofs executed.
     (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
-    # R311y630 — 2 -> 4. The triage of the 27 divergences added the MECHANISM
+    # R311y630 — 2 -> 5. The triage of the 27 divergences added the MECHANISM
     # WITNESS for the surviving sixteen (pico's CLOSE verdict is independent of
-    # the extension chain, measured rather than read off transport.c), and the
-    # VOCABULARY oracle added the half the blind sweep cannot reach: the seven
-    # extension identities the wire spec actually names.
-    _runci_guarded_test "Epico transport-decode differential" 4 \
+    # the extension chain, measured rather than read off transport.c); the
+    # VOCABULARY oracle added the half the blind sweep cannot reach (the seven
+    # extension identities the wire spec actually names); and the SCOUTING leg
+    # added the second namespace, where the id `0x01` is not `T_MID_INIT`.
+    _runci_guarded_test "Epico transport-decode differential" 5 \
         cargo test -p wz-integration-tests \
         --test pico_transport_decode_differential -- --ignored --quiet --test-threads=1 \
         || return 1

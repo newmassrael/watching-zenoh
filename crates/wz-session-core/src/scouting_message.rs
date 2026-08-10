@@ -149,6 +149,40 @@ pub fn parse_scouting(bytes: &[u8]) -> Result<ScoutingFrame, InboundParseError> 
     }
 }
 
+impl ScoutingFrame {
+    /// R311y630d — what a conforming PARTICIPANT must do with this frame's
+    /// extension chain, the scouting twin of
+    /// [`crate::inbound::InboundFrame::ext_admission`].
+    ///
+    /// It carries the whole reason [`crate::ext_admit::ExtCarrier`] exists.
+    /// SCOUT is MID `0x01` and so is INIT, and the two have DIFFERENT
+    /// extension spaces: `zenoh-protocol-1.5.0/src/scouting/{scout,hello}.rs`
+    /// declare no `mod ext` at all, while `transport/init.rs` declares eight.
+    /// Judging a SCOUT against INIT's table would admit an extension nothing
+    /// in the scouting namespace defines — a confident wrong answer, which is
+    /// exactly what `the_two_namespaces_collide_on_the_same_byte` in this
+    /// module has asserted the shape of since R311y607.
+    ///
+    /// pico agrees that the space is empty by construction:
+    /// `_z_scouting_message_decode_na` ends in
+    /// `_z_msg_ext_skip_non_mandatories` (`src/protocol/codec/message.c:756`),
+    /// which refuses every mandatory entry without exception.
+    pub fn ext_admission(&self) -> crate::ext_admit::ExtAdmission {
+        use crate::ext_admit::{judge_ext_chain, ExtAdmission, ExtCarrier};
+        #[cfg(any(feature = "codec-scout", feature = "codec-hello"))]
+        fn judge(mid: u8, entries: &[ExtEntryOwned]) -> ExtAdmission {
+            judge_ext_chain(ExtCarrier::Scouting(mid), entries.iter().map(|e| e.header))
+        }
+        match self {
+            #[cfg(feature = "codec-scout")]
+            ScoutingFrame::Scout { extensions, .. } => judge(wire_const::S_MID_SCOUT, extensions),
+            #[cfg(feature = "codec-hello")]
+            ScoutingFrame::Hello { extensions, .. } => judge(wire_const::S_MID_HELLO, extensions),
+            ScoutingFrame::Unknown { .. } => ExtAdmission::Unjudged,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

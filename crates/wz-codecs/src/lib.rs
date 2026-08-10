@@ -740,13 +740,19 @@ pub mod wire_const {
     /// scout/hello body codecs carry no header byte (`_z_scout_encode`
     /// ignores it); the scouting-message envelope prepends this MID —
     /// the wz glue prepends it the same way session_glue prepends
-    /// `T_MID_INIT`. Gated on `codec-scout`.
-    #[cfg(feature = "codec-scout")]
+    /// `T_MID_INIT`.
+    ///
+    /// R311y630d — UNGATED, with `T_MID_INIT` and for the same reason: the
+    /// bare MID is wire-spec ground truth and `wz_session_core::ext_admit` is
+    /// an unconditional consumer. It is also the id whose ambiguity that
+    /// module now makes structural — the note above says `0x01` is
+    /// "context-disambiguated by which link decoded it", and
+    /// `ExtCarrier::Scouting` is that context turned into a type rather than
+    /// left as a convention a caller has to remember.
     pub const S_MID_SCOUT: u8 = 0x01;
     /// Scouting-message HELLO MID (transport.h:29 `_Z_MID_HELLO`). See
-    /// [`S_MID_SCOUT`] for the disjoint-namespace rationale. Gated on
-    /// `codec-hello`.
-    #[cfg(feature = "codec-hello")]
+    /// [`S_MID_SCOUT`] for the disjoint-namespace rationale, and for why it
+    /// is ungated.
     pub const S_MID_HELLO: u8 = 0x02;
     /// Scouting HELLO locators-present flag (`_Z_FLAG_T_HELLO_L`, bit 5).
     /// Set on the HELLO header byte when the Hello body carries a

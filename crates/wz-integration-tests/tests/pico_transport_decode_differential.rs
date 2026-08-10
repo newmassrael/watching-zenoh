@@ -747,6 +747,155 @@ fn the_two_agree_on_the_extensions_the_spec_names() {
     );
 }
 
+/// R311y630d (§14.2) — THE SAME RECIPE ON THE SCOUTING NAMESPACE, which is
+/// where the id `0x01` means something else.
+///
+/// pico exports `_z_scouting_message_decode` beside the transport one, so the
+/// second namespace costs one more symbol and no new machinery. What it buys
+/// is the check that MATTERS for `ext_admit`: SCOUT is MID `0x01` and so is
+/// INIT, their extension spaces differ (none versus eight), and a judge keyed
+/// on a bare `u8` would answer INIT's question for a SCOUT. The
+/// `ExtCarrier::Scouting` arm is what stops that, and this is the measurement
+/// that it stops it against the real decoder rather than against wz's opinion
+/// of itself.
+// wz-proves: codec-scout codec-parity partial
+// wz-proves: codec-hello codec-parity partial
+#[test]
+#[ignore = "needs libzenohpico.so (CMake build product); Layer E runs via --ignored"]
+fn the_two_agree_on_the_scouting_namespaces_extensions() {
+    let pico = unsafe { open(&zenoh_pico_shared_library()) };
+
+    // SCOUT: version, cbyte (`what` in the low 3 bits, I flag CLEAR so no zid
+    // follows). HELLO: version, cbyte (whatami + zid_len-1 = 0), the 1-byte
+    // zid, L flag clear so no locator list.
+    let bodies: [(u8, &[u8]); 2] = [
+        (wz_session_core::wire_const::S_MID_SCOUT, &[0x09, 0x01]),
+        (
+            wz_session_core::wire_const::S_MID_HELLO,
+            &[0x09, 0x01, 0xAA],
+        ),
+    ];
+    // The scouting namespace declares NO extensions, so the space is empty and
+    // the two controls are the whole vocabulary: a non-mandatory unknown both
+    // sides must skip, and a mandatory unknown both sides must refuse.
+    let chains: [(&str, u8, bool); 2] = [
+        ("non-mandatory unknown", 0x0F, true),
+        ("mandatory unknown", 0x1F, false),
+    ];
+
+    let mut agreed = 0usize;
+    let mut disagreements = Vec::new();
+    for (mid, body) in bodies {
+        for (name, ext, must_accept) in chains {
+            let mut wire = vec![mid | 0x80];
+            wire.extend_from_slice(body);
+            wire.push(ext);
+            let theirs = unsafe { pico_accepts_scouting(&pico, &wire) };
+            let mine = wz_scouting_verdict(&wire);
+            let mine_accepts = mine == WzVerdict::Named;
+            if mine_accepts == theirs && mine_accepts == must_accept {
+                agreed += 1;
+            } else {
+                disagreements.push(format!(
+                    "MID {mid:#04X} {name}: wz={mine:?} pico={} (spec says {})",
+                    if theirs { "accept" } else { "reject" },
+                    if must_accept { "accept" } else { "reject" },
+                ));
+            }
+        }
+    }
+    assert!(
+        disagreements.is_empty(),
+        "{} scouting disagreement(s):\n  {}",
+        disagreements.len(),
+        disagreements.join("\n  ")
+    );
+    assert_eq!(agreed, 4, "every case must have been decided");
+
+    // THE POINT, asserted directly rather than left implicit in the four
+    // above: the SAME chain judged in the TRANSPORT namespace comes out
+    // differently, because `0x01` is INIT there. Without this the scouting
+    // arm would pass on a judge that ignored the carrier entirely.
+    use wz_session_core::ext_admit::{judge_ext_chain, ExtAdmission, ExtCarrier};
+    assert_eq!(
+        judge_ext_chain(ExtCarrier::Scouting(0x01), [0x27u8]),
+        ExtAdmission::Admissible,
+        "0x27 is not mandatory, so scouting skips it"
+    );
+    assert_eq!(
+        judge_ext_chain(ExtCarrier::Transport(0x01), [0x27u8]),
+        ExtAdmission::Admissible,
+        "and INIT knows it as Patch"
+    );
+    // The discriminating pair: a MANDATORY id that INIT's space would also not
+    // define, so both refuse — and a scouting chain can never be admissible on
+    // a mandatory entry, whatever the transport table says.
+    assert_eq!(
+        judge_ext_chain(ExtCarrier::Scouting(0x01), [0x31u8]),
+        ExtAdmission::UnknownMandatory { eid: 0x31 },
+        "the scouting space is EMPTY, so the data plane's QoS is unknown here"
+    );
+    assert_eq!(
+        judge_ext_chain(ExtCarrier::Transport(0x05), [0x31u8]),
+        ExtAdmission::Admissible,
+        "while the same identity on a FRAME is the extension the spec defines \
+         — one byte, two answers, and the carrier is what tells them apart"
+    );
+}
+
+/// Hand `bytes` to pico's SCOUTING decoder — the sibling entry point to
+/// `_z_transport_message_decode`, with the same slot discipline.
+///
+/// # Safety
+///
+/// `lib` must be `libzenohpico.so`; the slots are opaque and freed by pico's
+/// own clear functions.
+unsafe fn pico_accepts_scouting(lib: &Library, bytes: &[u8]) -> bool {
+    unsafe {
+        let zbuf_make: Symbol<unsafe extern "C" fn(*mut u8, usize)> = lib
+            .get(b"_z_zbuf_make\0")
+            .expect("_z_zbuf_make is exported");
+        let zbuf_clear: Symbol<unsafe extern "C" fn(*mut u8)> = lib
+            .get(b"_z_zbuf_clear\0")
+            .expect("_z_zbuf_clear is exported");
+        let decode: Symbol<unsafe extern "C" fn(*mut u8, *mut u8) -> i8> = lib
+            .get(b"_z_scouting_message_decode\0")
+            .expect("_z_scouting_message_decode is exported");
+        let msg_clear: Symbol<unsafe extern "C" fn(*mut u8)> = lib
+            .get(b"_z_s_msg_clear\0")
+            .expect("_z_s_msg_clear is exported");
+
+        let mut zbuf = Slot::<SLOT>::zeroed();
+        zbuf_make(zbuf.as_mut_ptr(), bytes.len().max(1));
+        let base = zbuf.as_mut_ptr();
+        let buf = base.add(IOS_BUF).cast::<*mut u8>().read();
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+        base.add(IOS_R_POS).cast::<usize>().write(0);
+        base.add(IOS_W_POS).cast::<usize>().write(bytes.len());
+
+        let mut msg = Slot::<SLOT>::zeroed();
+        let rc = decode(msg.as_mut_ptr(), base);
+        msg_clear(msg.as_mut_ptr());
+        zbuf_clear(base);
+        rc == 0
+    }
+}
+
+/// wz's verdict on a SCOUTING datagram, through the namespace's own entry
+/// point and its own admission table.
+fn wz_scouting_verdict(bytes: &[u8]) -> WzVerdict {
+    use wz_session_core::ext_admit::ExtAdmission;
+    use wz_session_core::scouting_message::{parse_scouting, ScoutingFrame};
+    match parse_scouting(bytes) {
+        Ok(ScoutingFrame::Unknown { .. }) => WzVerdict::Unnamed,
+        Ok(frame) => match frame.ext_admission() {
+            ExtAdmission::UnknownMandatory { .. } => WzVerdict::Inadmissible,
+            ExtAdmission::Admissible | ExtAdmission::Unjudged => WzVerdict::Named,
+        },
+        Err(_) => WzVerdict::Refused,
+    }
+}
+
 /// THE ORACLE. The two implementations must agree on WHETHER each generated
 /// byte string is a transport message.
 ///

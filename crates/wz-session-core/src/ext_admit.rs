@@ -70,6 +70,28 @@ pub enum ExtAdmission {
     Unjudged,
 }
 
+/// WHICH NAMESPACE a message id was read from.
+///
+/// R311y630d — the id alone is not enough, and this workspace already wrote
+/// down why in a different place: "an id is only meaningful together with the
+/// carrier it was read from" ([`crate::ext_header::body_ext_id`]). The same
+/// hazard is here one level up. `0x01` is `T_MID_INIT` in the transport
+/// namespace and `S_MID_SCOUT` in the scouting one, `0x02` is `T_MID_OPEN` and
+/// `S_MID_HELLO`, and the two have DIFFERENT extension spaces — INIT declares
+/// eight, SCOUT declares none. A bare `u8` key would have silently answered
+/// the transport question for a scouting message.
+///
+/// Making the namespace part of the key means that mistake cannot be written,
+/// which is the difference between a rule that is right today and one that
+/// stays right when the next namespace arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtCarrier {
+    /// A transport message, keyed by its `T_MID_*`.
+    Transport(u8),
+    /// A scouting message (SCOUT / HELLO), keyed by its `S_MID_*`.
+    Scouting(u8),
+}
+
 /// The MANDATORY extensions each transport message's space defines, as
 /// extension IDENTITIES (`id | M | enc` — zenoh `iext::eid`, matched with
 /// [`ext_eid`]).
@@ -100,7 +122,13 @@ pub enum ExtAdmission {
 ///   `First` / `Drop` which are `zextunit!(_, false)`.
 /// - JOIN (`transport/join.rs`) — `QoS = zextzbuf!(0x1, true)` and
 ///   `Shm = zextzbuf!(0x2, true)`, both mandatory.
-pub fn mandatory_ext_space(mid: u8) -> Option<&'static [u8]> {
+/// - SCOUT (`zenoh-protocol-1.5.0/src/scouting/scout.rs`) and HELLO
+///   (`scouting/hello.rs`) declare no `mod ext` AT ALL, so the scouting
+///   namespace's space is empty and any mandatory extension on one is unknown.
+///   pico agrees by construction: `_z_scouting_message_decode_na`
+///   (`src/protocol/codec/message.c:756`) ends in
+///   `_z_msg_ext_skip_non_mandatories`, which refuses every mandatory entry.
+pub fn mandatory_ext_space(carrier: ExtCarrier) -> Option<&'static [u8]> {
     /// `zextz64!(0x1, true)` = id 1 | `FLAG_M` | `ENC_Z64`.
     const FRAME_QOS: u8 = 0x01 | EXT_FLAG_M | crate::ext_header::EXT_ENC_Z64;
     /// `zextzbuf!(0x1, true)` = id 1 | `FLAG_M` | `ENC_ZBUF`. Also
@@ -110,18 +138,23 @@ pub fn mandatory_ext_space(mid: u8) -> Option<&'static [u8]> {
     /// `zextzbuf!(0x2, true)`.
     const JOIN_SHM: u8 = 0x02 | EXT_FLAG_M | crate::ext_header::EXT_ENC_ZBUF;
 
-    match mid {
-        wire_const::T_MID_INIT
-        | wire_const::T_MID_OPEN
-        | wire_const::T_MID_CLOSE
-        | wire_const::T_MID_KEEP_ALIVE => Some(&[]),
-        wire_const::T_MID_FRAME | wire_const::T_MID_FRAGMENT => Some(&[FRAME_QOS]),
-        wire_const::T_MID_JOIN => Some(&[JOIN_QOS, JOIN_SHM]),
+    match carrier {
+        ExtCarrier::Transport(
+            wire_const::T_MID_INIT
+            | wire_const::T_MID_OPEN
+            | wire_const::T_MID_CLOSE
+            | wire_const::T_MID_KEEP_ALIVE,
+        ) => Some(&[]),
+        ExtCarrier::Transport(wire_const::T_MID_FRAME | wire_const::T_MID_FRAGMENT) => {
+            Some(&[FRAME_QOS])
+        }
+        ExtCarrier::Transport(wire_const::T_MID_JOIN) => Some(&[JOIN_QOS, JOIN_SHM]),
+        ExtCarrier::Scouting(wire_const::S_MID_SCOUT | wire_const::S_MID_HELLO) => Some(&[]),
         _ => None,
     }
 }
 
-/// Judge a decoded extension chain for a transport message of `mid`.
+/// Judge a decoded extension chain for the message named by `carrier`.
 ///
 /// `headers` is the raw header byte of each entry in chain order. The
 /// chain-continuation `Z` bit is not part of an extension's identity and is
@@ -131,8 +164,8 @@ pub fn mandatory_ext_space(mid: u8) -> Option<&'static [u8]> {
 /// Reports the FIRST offending entry, matching both upstreams: zenoh's
 /// `skip_all` loop and pico's `_z_msg_ext_decode_iter` both abort at the first
 /// unknown mandatory extension rather than surveying the rest.
-pub fn judge_ext_chain(mid: u8, headers: impl IntoIterator<Item = u8>) -> ExtAdmission {
-    let Some(space) = mandatory_ext_space(mid) else {
+pub fn judge_ext_chain(carrier: ExtCarrier, headers: impl IntoIterator<Item = u8>) -> ExtAdmission {
+    let Some(space) = mandatory_ext_space(carrier) else {
         return ExtAdmission::Unjudged;
     };
     for header in headers {
@@ -161,12 +194,12 @@ mod tests {
     fn a_mandatory_unknown_extension_is_refused_and_a_non_mandatory_one_is_not() {
         // id 0x4, UNIT encoding, M set, chain terminator.
         assert_eq!(
-            judge_ext_chain(wire_const::T_MID_KEEP_ALIVE, [0x14]),
+            judge_ext_chain(ExtCarrier::Transport(wire_const::T_MID_KEEP_ALIVE), [0x14]),
             ExtAdmission::UnknownMandatory { eid: 0x14 }
         );
         // The same extension without the mandatory marker.
         assert_eq!(
-            judge_ext_chain(wire_const::T_MID_KEEP_ALIVE, [0x04]),
+            judge_ext_chain(ExtCarrier::Transport(wire_const::T_MID_KEEP_ALIVE), [0x04]),
             ExtAdmission::Admissible
         );
     }
@@ -177,7 +210,10 @@ mod tests {
     #[test]
     fn the_chain_continuation_bit_is_not_part_of_the_identity() {
         assert_eq!(
-            judge_ext_chain(wire_const::T_MID_OPEN, [0x94u8, 0x00]),
+            judge_ext_chain(
+                ExtCarrier::Transport(wire_const::T_MID_OPEN),
+                [0x94u8, 0x00]
+            ),
             ExtAdmission::UnknownMandatory { eid: 0x14 }
         );
     }
@@ -192,11 +228,11 @@ mod tests {
     #[test]
     fn the_frame_qos_extension_is_understood_but_only_at_its_own_encoding() {
         assert_eq!(
-            judge_ext_chain(wire_const::T_MID_FRAME, [0x31]),
+            judge_ext_chain(ExtCarrier::Transport(wire_const::T_MID_FRAME), [0x31]),
             ExtAdmission::Admissible
         );
         assert_eq!(
-            judge_ext_chain(wire_const::T_MID_FRAME, [0x11]),
+            judge_ext_chain(ExtCarrier::Transport(wire_const::T_MID_FRAME), [0x11]),
             ExtAdmission::UnknownMandatory { eid: 0x11 }
         );
     }
@@ -206,14 +242,20 @@ mod tests {
     /// by a caller that matches exhaustively.
     #[test]
     fn an_unnameable_message_is_unjudged_rather_than_admissible() {
-        assert_eq!(judge_ext_chain(0x1F, [0x14]), ExtAdmission::Unjudged);
+        assert_eq!(
+            judge_ext_chain(ExtCarrier::Transport(0x1F), [0x14]),
+            ExtAdmission::Unjudged
+        );
     }
 
     /// The FIRST offender is the one reported, like both upstreams' abort.
     #[test]
     fn the_first_offending_extension_is_the_one_reported() {
         assert_eq!(
-            judge_ext_chain(wire_const::T_MID_INIT, [0x95u8, 0x96, 0x17]),
+            judge_ext_chain(
+                ExtCarrier::Transport(wire_const::T_MID_INIT),
+                [0x95u8, 0x96, 0x17]
+            ),
             ExtAdmission::UnknownMandatory { eid: 0x15 }
         );
     }
@@ -222,10 +264,11 @@ mod tests {
     #[test]
     fn an_empty_chain_is_admissible() {
         for mid in [
-            wire_const::T_MID_INIT,
-            wire_const::T_MID_CLOSE,
-            wire_const::T_MID_FRAME,
-            wire_const::T_MID_JOIN,
+            ExtCarrier::Transport(wire_const::T_MID_INIT),
+            ExtCarrier::Transport(wire_const::T_MID_CLOSE),
+            ExtCarrier::Transport(wire_const::T_MID_FRAME),
+            ExtCarrier::Transport(wire_const::T_MID_JOIN),
+            ExtCarrier::Scouting(wire_const::S_MID_SCOUT),
         ] {
             assert_eq!(judge_ext_chain(mid, []), ExtAdmission::Admissible);
         }

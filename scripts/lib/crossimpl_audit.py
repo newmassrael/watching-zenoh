@@ -233,7 +233,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # found three disagreements, all pico's, including the one that matters --
 # `frame::ext::QoS`, the single mandatory extension the data plane defines,
 # which zenoh's Frame codec reads and pico's refuses.
-FOREIGN_ADJUDICATOR_LINKS = 806
+# R311y630d took it to 808, in one step of two, from the SECOND NAMESPACE:
+# pico exports `_z_scouting_message_decode` beside the transport one, so SCOUT
+# and HELLO cost one symbol and no new machinery. The step is worth naming
+# because of what it adjudicates rather than its size -- SCOUT is MID 0x01 and
+# so is INIT, their extension spaces differ (none versus eight), and this is
+# the measurement that `ExtCarrier` tells them apart against the REAL decoder
+# rather than against wz's opinion of itself.
+FOREIGN_ADJUDICATOR_LINKS = 808
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

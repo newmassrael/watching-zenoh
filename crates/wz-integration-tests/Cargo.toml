@@ -110,7 +110,16 @@ wz-session-core = { path = "../wz-session-core", features = [
     # the `multicast_join` module itself. This pin puts `transport-qos` in the
     # in-process test binary's feature closure (audit A4-5 containment) and is
     # what compiles the qos ext path in reach at all (it is opt-in, in no preset).
-    "transport-qos", "session-multicast", "codec-join"] }
+    "transport-qos", "session-multicast", "codec-join",
+    # R311y630d — the SCOUTING half of the driving oracle
+    # (pico_transport_decode_differential.rs::
+    # the_two_agree_on_the_scouting_namespaces_extensions) drives pico's
+    # `_z_scouting_message_decode` and wz's `parse_scouting` over the same
+    # bytes. `scouting_message` is gated on `any(codec-scout, codec-hello)`, so
+    # without this pin the module is configured out and the leg cannot compile
+    # — the same shape as the `transport-qos` pin above. It is what puts the
+    # namespace whose MID `0x01` is NOT `T_MID_INIT` in reach of a test at all.
+    "codec-scout", "codec-hello"] }
 # R311y501 — the §5.26 REST bridge, driven IN-PROCESS by the wz<->zenohd REST
 # interop leg (tests/wz_rest_zenohd_interop.rs). The leg runs wz's bridge and
 # the real `libzenoh_plugin_rest.so` against ONE zenohd and differentials their
