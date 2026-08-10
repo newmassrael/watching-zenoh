@@ -64,6 +64,12 @@ pub struct Options {
     pub max_messages: Option<usize>,
     /// R311y673 (§1.2a) — which of the three observer planes to build.
     pub census: Census,
+    /// R311y674 (§1.2a) — the SELECTOR narrowing what the planes count.
+    ///
+    /// Compiled at parse time rather than carried as text, so a selector that
+    /// does not parse is refused before a file is opened and the analysis has
+    /// no failure mode left for it.
+    pub select: Option<wz_capture::filter::Filter>,
 }
 
 /// R311y673 (§1.2a) — which of `wz-capture`'s three OBSERVER PLANES the report
@@ -138,6 +144,21 @@ pub enum UsageError {
     /// could not be decrypted, which is a wrong answer that looks like a right
     /// one.
     UnknownFlag(String),
+    /// R311y674 — a selector the filter language did not accept, carrying the
+    /// parser's OWN reason.
+    ///
+    /// [`BadValue`](Self::BadValue) would have fitted the shape and thrown the
+    /// reason away. A selector is a small language with a column-accurate error,
+    /// and "`--select` does not take `key = demo/**`" is a worse message than
+    /// the one the parser already wrote.
+    BadSelector(String),
+    /// R311y674 — a selector was given and no plane was asked for.
+    ///
+    /// REFUSED rather than accepted as a no-op. The three census planes are the
+    /// only thing a selector narrows, so `--select` alone changes nothing about
+    /// the output, and a flag that silently does nothing is the shape this
+    /// workspace turns into a refusal wherever a person typed the input.
+    SelectWithoutPlane,
 }
 
 impl core::fmt::Display for UsageError {
@@ -148,6 +169,12 @@ impl core::fmt::Display for UsageError {
             Self::MissingValue(flag) => write!(f, "{flag} needs a value"),
             Self::UnknownFlag(flag) => write!(f, "unknown option `{flag}`"),
             Self::BadValue(flag, got) => write!(f, "{flag} does not take `{got}`"),
+            Self::BadSelector(why) => write!(f, "--select: {why}"),
+            Self::SelectWithoutPlane => write!(
+                f,
+                "--select narrows the census planes and none was asked for; \
+                 add --census (or --throughput / --exchanges / --payloads)"
+            ),
         }
     }
 }
@@ -187,6 +214,16 @@ OPTIONS:
     --census          all three planes above. Each is a separate walk of every
                       frame, which is why they are asked for rather than always
                       built
+    --select <expr>   narrow the census planes to the records the selector
+                      matches. Terms are `field op value`:
+                        key == demo/**        dir == a       kind == query
+                        bytes > 100           time < 5000    delay >= 10
+                      joined with and / or / not and parentheses. The report
+                      says how many records matched, how many were rejected,
+                      and how many are UNDECIDED -- a keyexpr whose declaration
+                      went past before the tap started cannot be judged, and
+                      counting it as a non-match would make a short total look
+                      whole
     -h, --help        print this and exit
 ";
 
@@ -200,6 +237,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut quic_ports: Vec<u16> = Vec::new();
     let mut max_messages: Option<usize> = None;
     let mut census = Census::default();
+    let mut select: Option<wz_capture::filter::Filter> = None;
     let mut at = 0usize;
     while at < args.len() {
         let arg = &args[at];
@@ -210,6 +248,14 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
             "--exchanges" => census.exchanges = true,
             "--payloads" => census.payloads = true,
             "--census" => census = Census::all(),
+            "--select" => {
+                at += 1;
+                let raw = args.get(at).ok_or(UsageError::MissingValue("--select"))?;
+                select = Some(
+                    wz_capture::filter::Filter::parse(raw)
+                        .map_err(|err| UsageError::BadSelector(err.to_string()))?,
+                );
+            }
             "--messages" => {
                 // The messages are printed under their flow, so asking for them
                 // asks for the flows too. Silently implying it beats refusing a
@@ -265,6 +311,11 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
         quic_ports,
         max_messages,
         census,
+        select: match select {
+            // A selector with nothing to narrow is a flag that does nothing.
+            Some(_) if !census.any() => return Err(UsageError::SelectWithoutPlane),
+            other => other,
+        },
     })
 }
 
@@ -371,6 +422,7 @@ pub fn analyze_declaring_quic(
         messages_per_flow,
         quic_ports,
         census: Census::default(),
+        select: None,
     })
 }
 
@@ -408,6 +460,10 @@ pub struct Request<'a> {
     pub quic_ports: &'a [u16],
     /// Which observer planes to build. See [`Census`].
     pub census: Census,
+    /// R311y674 — the selector narrowing what those planes count. `None`
+    /// selects everything, which is what the planes' unfiltered entry points
+    /// already pass.
+    pub select: Option<&'a wz_capture::filter::Filter>,
 }
 
 /// Read a capture and report on it, as [`Request`] describes.
@@ -421,6 +477,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
         messages_per_flow,
         quic_ports,
         census,
+        select,
     } = request;
     let mut dissection = Dissection::from_capture_declaring_quic(capture, quic_ports)?;
 
@@ -454,15 +511,21 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     // purpose: a flow whose plaintext was just opened carries messages, and a
     // plane built before it would census the ciphertext-only view and report a
     // floor as a total.
+    // R311y674 — ONE fold path, filtered or not. `Filter::any()` is the
+    // identity the crate's own unfiltered entry points pass, and the reason it
+    // exists is stated there: a filtered fold beside an unfiltered copy is two
+    // things to keep in step.
+    let everything = wz_capture::filter::Filter::any();
+    let filter = select.unwrap_or(&everything);
     let throughput = census
         .throughput
-        .then(|| wz_capture::agg::aggregate(&dissection));
+        .then(|| wz_capture::agg::aggregate_where(&dissection, filter));
     let exchanges = census
         .exchanges
-        .then(|| wz_capture::exchange::exchanges(&dissection));
+        .then(|| wz_capture::exchange::exchanges_where(&dissection, filter));
     let payloads = census
         .payloads
-        .then(|| wz_capture::payload::payloads(&dissection));
+        .then(|| wz_capture::payload::payloads_where(&dissection, filter));
     let mut report = CaptureReport::of(&dissection);
     if let Some(table) = &throughput {
         report = report.with_throughput(table);
@@ -958,6 +1021,7 @@ mod tests {
                 quic_ports: Vec::new(),
                 max_messages: None,
                 census: Census::default(),
+                select: None,
             })
         );
     }
@@ -983,6 +1047,7 @@ mod tests {
                 quic_ports: Vec::new(),
                 max_messages: None,
                 census: Census::default(),
+                select: None,
             })
         );
     }

@@ -1719,3 +1719,138 @@ fn the_census_planes_reach_the_json_as_one_document() {
     assert!(json.contains("\"payloads\""), "payloads key: {json}");
     assert_one_document(json.trim());
 }
+
+/// R311y674 (§1.2a) — THE SELECTOR reaches the command line.
+///
+/// ## What was measured
+///
+/// `wz-capture::filter` is a language: a lexer, a three-valued evaluator, six
+/// fields, wildcards behind their own feature, and `aggregate_where` /
+/// `exchanges_where` / `payloads_where` to fold under it. Swept for consumers,
+/// every call site of all four was inside `wz-capture`'s own tests. R311y673
+/// made the planes reachable and that made this visible in the same breath: the
+/// tool emitted the WHOLE keyexpr tree with no way to ask about one subtree,
+/// which is the R311y642 item arriving where a reader can see it.
+///
+/// ## What the narrowed report must still say
+///
+/// The three planes report a [`Selection`] -- matched, rejected, and UNDECIDED --
+/// and the last is the one that matters. A keyexpr whose declaration went past
+/// before the tap started cannot be judged, and a filter that counted it as a
+/// non-match would hand back a total that is quietly short. That line was
+/// rendered by `report.rs` already and nothing could produce it.
+#[test]
+fn a_selector_narrows_the_census_planes_and_says_what_it_left_out() {
+    let scratch = Scratch::new("select");
+    let capture = scratch.write("select.pcapng", &exchange_capture());
+    let run = |args: &[&str]| {
+        String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                .arg(&capture)
+                .args(args)
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned()
+    };
+
+    // Unfiltered: BOTH keyexprs are in the rows. This is the control -- without
+    // it, a selector that rejected everything would satisfy every assertion
+    // below about what is absent.
+    let all = run(&["--census"]);
+    assert!(
+        all.contains("demo/a") && all.contains("demo/**"),
+        "the control must carry both rows: {all}"
+    );
+
+    let one = run(&["--census", "--select", "key == demo/a"]);
+    assert!(
+        one.contains("selection: 1 matched, 1 rejected, 0 UNDECIDED"),
+        "the plane must say what the selector left out, not merely show fewer \
+         rows: {one}"
+    );
+    assert!(
+        one.contains("throughput: 1 of 2 record(s) attributed, 5 bytes"),
+        "and the narrowed totals are the selected records' own: {one}"
+    );
+    assert!(
+        one.contains("demo/a") && !one.contains("demo/**"),
+        "the rejected keyexpr must be gone from the rows: {one}"
+    );
+
+    // A DIFFERENT field, so the wiring is not one term deep: `kind` selects the
+    // query and its exchange, where `key == demo/a` selected the reply.
+    let queries = run(&["--census", "--select", "kind == query"]);
+    assert!(
+        queries.contains("exchanges: 1 request(s), 1 completed"),
+        "the exchange plane folds under the selector too: {queries}"
+    );
+    assert!(
+        queries.contains("demo/**") && !queries.contains("demo/a"),
+        "and it selected the OTHER record than the key term did, which is what \
+         makes this a second term rather than the same one twice: {queries}"
+    );
+}
+
+/// R311y674 (§1.2a) — a selector that does not parse is refused, with the
+/// PARSER's own reason.
+///
+/// `--select` could have joined `--quic` under `BadValue` and printed
+/// "--select does not take `key = demo/**`". The filter language writes a
+/// column-accurate message and throwing it away would make a typo in a
+/// six-field language a guessing game.
+#[test]
+fn a_selector_that_does_not_parse_is_refused_with_the_parsers_own_reason() {
+    let scratch = Scratch::new("select-bad");
+    let capture = scratch.write("select.pcapng", &exchange_capture());
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .args(["--census", "--select", "key = demo/**"])
+        .output()
+        .expect("runs");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a bad command line is this tool failing (2), not the capture being \
+         incomplete (1)"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--select: at byte 4: unexpected character '='"),
+        "the parser's own column-accurate reason must survive to the terminal: \
+         {err}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).is_empty(),
+        "and nothing is reported about a capture that was never analysed"
+    );
+}
+
+/// R311y674 (§1.2a) — a selector with no plane to narrow is REFUSED.
+///
+/// The three census planes are the only thing a selector narrows, so `--select`
+/// without one changes nothing about the output. A flag that silently does
+/// nothing is exactly the shape this workspace turns into a refusal wherever a
+/// person typed the input, and the message names the flags that would make it
+/// mean something.
+#[test]
+fn a_selector_with_no_plane_to_narrow_is_refused_rather_than_ignored() {
+    let scratch = Scratch::new("select-noplane");
+    let capture = scratch.write("select.pcapng", &exchange_capture());
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .args(["--select", "key == demo/a"])
+        .output()
+        .expect("runs");
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--select narrows the census planes and none was asked for"),
+        "refused by name: {err}"
+    );
+    assert!(
+        err.contains("--census"),
+        "and the message says what would make it mean something: {err}"
+    );
+}
