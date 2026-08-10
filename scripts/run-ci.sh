@@ -2013,9 +2013,18 @@ layer_c1bb_cargo_test_qos() {
     # cannot see this lane's own subject go dark. Measured, the same feature set
     # minus transport-qos drops the sweep to 276 and the `qos` filter from 21 to
     # 12, so the qos-gated session-core cases would vanish under a still-green
-    # `+`. The exact 21 pins them; nothing else in this lane covers the
+    # `+`. The exact count pins them; nothing else in this lane covers the
     # session-core side (its other exact guards are all wz-runtime-tokio).
-    _runci_guarded_test C1bb 21 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
+    #
+    # R311y630c — 21 -> 22. `ext_admit`'s
+    # `the_frame_qos_extension_is_understood_but_only_at_its_own_encoding`
+    # matches this filter by NAME, which is the pin doing its job on a test
+    # that has nothing to do with the transport-qos feature: the filter is a
+    # substring, so the count is a claim about the whole `qos`-named
+    # population rather than about this lane's subject alone. That is the
+    # accepted cost of an exact pin, and the remedy is to move it deliberately
+    # rather than to loosen the filter.
+    _runci_guarded_test C1bb 22 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --all-targets --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --quiet -- -D warnings \
