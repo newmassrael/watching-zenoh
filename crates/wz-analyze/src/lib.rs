@@ -762,21 +762,26 @@ fn field_lines(
             let assembler = flow.assembler(frame.direction);
             let stream = assembler.stream();
             let origin = assembler.retained_from();
-            let row = match message_bytes(stream, origin, frame) {
-                Err(why) => FieldRow::Declined(why),
-                Ok(bytes) => {
-                    match dissect_transport_message(bytes, frame.stream_offset + frame.prefix_width)
-                    {
-                        Ok(field) => FieldRow::Walked(field),
-                        // The error type is `sce_forge_runtime`'s and is not
-                        // re-exported publicly here, so it is rendered rather than
-                        // named -- a dependency this crate has no reason to take on
-                        // for one message string.
-                        Err(err) => FieldRow::Declined(format!(
-                            "the field walker refused these bytes: {err:?}"
-                        )),
+            let row = match decrypted_coordinates(flow) {
+                Some(why) => FieldRow::Declined(why),
+                None => match message_bytes(stream, origin, frame) {
+                    Err(why) => FieldRow::Declined(why),
+                    Ok(bytes) => {
+                        match dissect_transport_message(
+                            bytes,
+                            frame.stream_offset + frame.prefix_width,
+                        ) {
+                            Ok(field) => FieldRow::Walked(field),
+                            // The error type is `sce_forge_runtime`'s and is not
+                            // re-exported publicly here, so it is rendered rather than
+                            // named -- a dependency this crate has no reason to take on
+                            // for one message string.
+                            Err(err) => FieldRow::Declined(format!(
+                                "the field walker refused these bytes: {err:?}"
+                            )),
+                        }
                     }
-                }
+                },
             };
             shown += 1;
             if format == Format::Json && emitted > 0 {
@@ -808,6 +813,39 @@ enum FieldRow {
     /// They were not, and this is why. NEVER a skipped row: a message whose
     /// bytes the bound discarded is a fact about the bound.
     Declined(String),
+}
+
+/// R311y676 (§1.1n) — a flow whose messages came out of DECRYPTED bytes cannot
+/// be walked from the retained stream, and this says so BY NAME.
+///
+/// # The defect this closes, measured
+///
+/// `Dissection::decrypt_with` opens the records into a plaintext `Vec`, feeds it
+/// to the session, and then `remap_decrypted_offsets` puts every resulting
+/// frame's `stream_offset` BACK to the ciphertext record it came out of -- so a
+/// reader can point at the packet. The plaintext is a local that the pass drops,
+/// deliberately: it is already the unbounded third copy of the flow's bytes that
+/// this project carries as an open item.
+///
+/// So R311y675's walk sliced `assembler.stream()` -- the CIPHERTEXT -- at
+/// coordinates that name positions in it but bytes that are not there. Measured
+/// on a decrypted fixture before this fix: it read a length prefix of `791` out
+/// of encrypted bytes and declined with "the framing unit declares 791 byte(s)
+/// and the retained stream holds 73".
+///
+/// That decline was an ACCIDENT, and the message blamed the bound for a
+/// mismatch the bound had nothing to do with. Ciphertext that happened to carry
+/// a plausible small length would have walked bytes that are not a message and
+/// printed a confident field tree over them -- a wrong answer that looks exactly
+/// like a right one, which is the failure mode this whole reader is built
+/// against.
+fn decrypted_coordinates(flow: &wz_capture::FlowDissection) -> Option<String> {
+    flow.encrypted().map(|_| {
+        "this flow's messages were decrypted, so their coordinates name the \
+         ciphertext record they came out of and the plaintext they were decoded \
+         from is not retained"
+            .to_string()
+    })
 }
 
 /// R311y675 — the message's bytes, sliced out of the direction's retained

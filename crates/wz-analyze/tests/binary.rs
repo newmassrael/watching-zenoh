@@ -2016,3 +2016,97 @@ fn the_field_listing_is_bounded_and_says_how_many_it_left_out() {
         "exactly one message survived the cap: {text}"
     );
 }
+
+/// R311y676 (§1.1n) — a DECRYPTED flow declines the field walk BY NAME, and the
+/// reason is the true one.
+///
+/// ## The defect this pins, measured before the fix
+///
+/// R311y675 sliced the direction's retained stream at each frame's
+/// `stream_offset`. For a decrypted flow those coordinates are correct and name
+/// the CIPHERTEXT: `decrypt_with` opens the records into a plaintext `Vec`, feeds
+/// it to the session, and `remap_decrypted_offsets` puts each frame's offset back
+/// to the record it came out of so a reader can point at the packet. The
+/// plaintext is dropped with the local.
+///
+/// So the walk read encrypted bytes as a length prefix. Measured on this exact
+/// fixture: `the framing unit declares 791 byte(s) and the retained stream holds
+/// 73`. It declined -- by ACCIDENT, and blaming the bound for a mismatch the
+/// bound had nothing to do with.
+///
+/// ## Why the OLD message is asserted absent
+///
+/// A fix that only reworded the refusal would leave the walk reading ciphertext
+/// and would pass an assertion on the new sentence alone. The old sentence is
+/// therefore asserted GONE: it can only be produced by the length-prefix read,
+/// so its absence is evidence the read no longer happens.
+#[test]
+fn a_decrypted_flow_declines_the_field_walk_by_name() {
+    let scratch = Scratch::new("fields-tls");
+    let (file, log, _) = capture_and_key_log();
+    let capture = scratch.write("fields.pcapng", &file);
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .arg("--fields")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+
+    // The flow DID decrypt -- without this the test would pass on a capture
+    // whose rows are absent for an unrelated reason.
+    assert!(
+        text.contains("DECRYPTED: 1 flow(s), 3 record(s) opened"),
+        "the fixture must actually decrypt, or there is nothing to decline: \
+         {text}"
+    );
+    assert!(
+        text.contains(
+            "this flow's messages were decrypted, so their coordinates name the \
+             ciphertext record they came out of"
+        ),
+        "the refusal must name the real reason: {text}"
+    );
+    // THE DISCRIMINATOR, and the first attempt at it did not work. Asserting
+    // that the OLD sentence is absent was falsified in one move: a probe that
+    // left the ciphertext read in place and merely reworded its message passed
+    // every assertion above. Measured, not supposed.
+    //
+    // What separates the two is not the wording, it is the KIND of statement. A
+    // refusal read off the flow's structure is the same sentence for every
+    // message and carries no measurement; a refusal computed from bytes reports
+    // what it measured and therefore differs per message ("declares 791 ...
+    // holds 73", "... holds 48", "... holds 23").
+    let reasons: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.split_once("NO FIELDS -- "))
+        .map(|(_, why)| why)
+        .collect();
+    assert_eq!(reasons.len(), 3, "one per message: {text}");
+    assert!(
+        reasons.iter().all(|r| *r == reasons[0]),
+        "a structural refusal does not vary per message; one computed from the \
+         bytes does: {reasons:?}"
+    );
+    assert!(
+        !reasons[0].chars().any(|c| c.is_ascii_digit()),
+        "and it carries no measurement, because it measured nothing: {:?}",
+        reasons[0]
+    );
+    // WHAT THIS STILL CANNOT CATCH, stated so it does not harden into a belief
+    // that it can: none of the above proves the stream was not READ, only that
+    // the refusal did not come from what was read. The decisive fixture would be
+    // ciphertext that happens to carry a plausible length at the remapped
+    // offset, so the unguarded walk prints a tree instead of declining -- and
+    // that cannot be constructed on demand out of real AEAD output.
+    assert!(
+        !text.contains("] Frame"),
+        "a declined flow contributes no fields: {text}"
+    );
+}
