@@ -5367,6 +5367,8 @@ layer_c1bt_capture_no_default_features() {
         ws_flow_tests::the_other_directions_opening_settles_a_hole_in_this_one \
         ws_flow_tests::every_mid_on_a_websocket_link_is_named_rather_than_unknown \
         datagram_tests::announcing_the_hole_stops_the_reader_swallowing_the_frames_after_it \
+        datagram_tests::a_link_type_this_build_cannot_read_is_named_and_arp_is_not_it \
+        datagram_tests::the_skip_census_survives_the_cap_the_skipped_list_does_not \
         ws::tests::every_structural_desync_recovers_and_not_only_the_announced_one \
         ws_flow_tests::a_structural_desync_mid_segment_does_not_end_the_flow \
         datagram_tests::a_frame_carries_the_capture_instant_in_every_feature_arm \
@@ -5472,6 +5474,7 @@ layer_c1bt_capture_no_default_features() {
         agg::tests::a_topic_split_across_keys_is_invisible_to_the_flat_ranking \
         agg::tests::a_flat_key_space_names_no_subtree \
         report::tests::the_keyexpr_hierarchy_reaches_both_renderings \
+        report::tests::a_capture_under_an_unreadable_link_type_says_so_in_both_renderings \
         agg::tests::each_carrier_puts_three_distinct_records_on_the_wire \
         agg::tests::a_descriptor_slot_is_unsized_on_every_carrier_and_a_plain_one_is_measured \
         agg::tests::a_body_ext_sharing_the_markers_id_field_leaves_the_payload_measured \

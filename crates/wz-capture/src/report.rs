@@ -230,6 +230,33 @@ impl<'a> CaptureReport<'a> {
             ",\"ip_checksum_invalid\":{},\"transport_checksum_invalid\":{}",
             health.ip_checksum_invalid, health.transport_checksum_invalid
         ));
+        // R311y643 (§1.1e) — the skip count above is a number; this is what it
+        // MEANS. Structural like `gaps`: present with zeroes on a clean capture,
+        // so a consumer's field lookup never depends on this particular file
+        // having had that kind of trouble.
+        let sk = d.skip_census();
+        s.push_str(&format!(
+            ",\"skips\":{{\"unsupported_link_type\":{},\"truncated\":{},\
+             \"not_ip\":{},\"not_transport\":{},\"ipv4_fragment\":{},\
+             \"ip_fragment_pending\":{},\"vsock_non_payload\":{},\
+             \"ipv6_extension_chain\":{},\"ipv6_fragment\":{},\"link_types\":[",
+            sk.unsupported_link_type,
+            sk.truncated,
+            sk.not_ip,
+            sk.not_transport,
+            sk.ipv4_fragment,
+            sk.ip_fragment_pending,
+            sk.vsock_non_payload,
+            sk.ipv6_extension_chain,
+            sk.ipv6_fragment
+        ));
+        for (i, dlt) in sk.unsupported_link_types.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!("{dlt}"));
+        }
+        s.push_str("]}");
         // R311y624 (§1.1m) — the FRAMING witnesses. Every figure below was
         // already computed by the dissection and none of it reached the
         // document, so a reader of the export could not see that a peer had
@@ -309,6 +336,26 @@ impl<'a> CaptureReport<'a> {
             d.datagram_flows().len(),
             health.packets_skipped
         ));
+        // R311y643 (§1.1e) — the line that turns a skip COUNT into a
+        // diagnosis, and it leads with the link types because that is the one
+        // reason a reader can act on: every other skip is furniture in an
+        // otherwise-readable capture, while this one means the file was never
+        // read. Printed only when this build refused a link type at all.
+        let sk = d.skip_census();
+        if !sk.unsupported_link_types.is_empty() {
+            let mut dlts = String::new();
+            for (i, dlt) in sk.unsupported_link_types.iter().enumerate() {
+                if i > 0 {
+                    dlts.push_str(", ");
+                }
+                dlts.push_str(&format!("{dlt}"));
+            }
+            s.push_str(&format!(
+                "  link type not read by this build: {} ({} packet(s)); \
+                 this capture was not dissected\n",
+                dlts, sk.unsupported_link_type
+            ));
+        }
         // R311y624 (§1.1m) — printed ONLY when non-zero, unlike the JSON object
         // beside it. The two formats answer different readers: a consumer
         // parses fields and needs them present unconditionally, a person reads
@@ -1271,6 +1318,52 @@ mod tests {
         assert!(
             !unfiltered.contains("selection:"),
             "an unfiltered report must not carry a line that says nothing: {unfiltered}"
+        );
+    }
+
+    /// R311y643 (§1.1e) — a capture this build cannot decapsulate SAYS SO, in
+    /// both renderings, and names the link type.
+    ///
+    /// The document is the whole point of the census: a reader holding a serial
+    /// or unix-socket capture previously got "0 flows, N packets skipped" and no
+    /// way to tell that from a deployment with no traffic in it.
+    ///
+    /// The control is a clean Ethernet capture, which must print no such line
+    /// and carry an empty link-type list — so the line is a decision about this
+    /// file and not a banner.
+    #[test]
+    fn a_capture_under_an_unreadable_link_type_says_so_in_both_renderings() {
+        let mut d = crate::Dissection::new();
+        for i in 0..3 {
+            d.push_packet(250, i, &[0xAA; 20]);
+        }
+        let r = CaptureReport::of(&d);
+        let text = r.to_text();
+        assert!(
+            text.contains("link type not read by this build: 250"),
+            "the text must name what it refused: {text}"
+        );
+        let json = r.to_json();
+        assert!(
+            json.contains("\"unsupported_link_type\":3"),
+            "the export must carry the count: {json}"
+        );
+        assert!(
+            json.contains("\"link_types\":[250]"),
+            "and the SET behind it: {json}"
+        );
+
+        let clean = crate::Dissection::new();
+        let cr = CaptureReport::of(&clean);
+        assert!(
+            !cr.to_text().contains("link type not read"),
+            "a capture with no refusal must not print one: {}",
+            cr.to_text()
+        );
+        assert!(
+            cr.to_json().contains("\"link_types\":[]"),
+            "the field is structural, present and empty: {}",
+            cr.to_json()
         );
     }
 

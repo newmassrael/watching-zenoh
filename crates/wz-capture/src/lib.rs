@@ -83,6 +83,7 @@ pub mod report;
 pub mod tcp;
 pub mod ws;
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use wz_session_core::parse_error::InboundParseError;
@@ -93,6 +94,97 @@ use wz_session_core::scouting_message::{parse_scouting, ScoutingFrame};
 
 use crate::link::{FlowKey, SkipReason, Transport};
 use crate::tcp::StreamAssembler;
+
+/// R311y643 (§1.1e) — every packet this build could not read, BY REASON.
+///
+/// # A count is not a diagnosis
+///
+/// `packets_skipped` has always been one number, and the reasons behind it are
+/// not one kind of thing. "40 packets skipped" over an Ethernet capture full of
+/// ARP is a healthy capture; the same number over a capture whose LINK TYPE this
+/// build does not decapsulate means the file was never read at all. Both
+/// rendered identically, and the second is indistinguishable from "this
+/// deployment carried no zenoh traffic" — which is the wrong conclusion about a
+/// working system, reached from a correct number.
+///
+/// That case is not hypothetical here. wz drives three links with no assigned
+/// libpcap DLT — unix sockets, unix pipes and serial — so a capture of one
+/// arrives under a private-use or vendor link type, is refused packet by packet,
+/// and produces an empty dissection with a plausible-looking skip count.
+///
+/// # Counted at the door, never derived from the list
+///
+/// [`Dissection::skipped`] is CAPPED
+/// ([`DissectionLimits::skipped_packets`]) and its overflow is dropped, so a
+/// census folded from it would be silently short on exactly the large captures
+/// that need one. These counters are incremented where the skip is decided,
+/// which is the only place the total is known.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkipCensus {
+    /// The capture's link type is not decapsulated by this build.
+    pub unsupported_link_type: usize,
+    /// The LINK TYPES behind that count — a SET, because the actionable fact is
+    /// WHICH one, and a reader holding it can say "DLT 147" rather than "some
+    /// packets were skipped". A count alone cannot name what to add.
+    pub unsupported_link_types: BTreeSet<u32>,
+    /// Shorter than the headers it declared.
+    pub truncated: usize,
+    /// Not IP: ARP, LLDP, and the ordinary furniture of a real capture.
+    pub not_ip: usize,
+    /// IP, but neither TCP nor UDP.
+    pub not_transport: usize,
+    /// An IPv4 fragment other than the first, recorded by a consumer that does
+    /// not reassemble.
+    pub ipv4_fragment: usize,
+    /// A piece of a datagram still waiting for the rest of it.
+    pub ip_fragment_pending: usize,
+    /// A vsock packet carrying no payload (a control op).
+    pub vsock_non_payload: usize,
+    /// An IPv6 extension chain this reader may not walk past — ESP, the two
+    /// experimental numbers, or one longer than the bound.
+    pub ipv6_extension_chain: usize,
+    /// An IPv6 fragment other than the first.
+    pub ipv6_fragment: usize,
+}
+
+impl SkipCensus {
+    /// Every skip, whatever the reason — equal to
+    /// [`CaptureHealth::packets_skipped`] and computed independently of it, so
+    /// the two disagreeing would mean one of them stopped seeing a path.
+    pub fn total(&self) -> usize {
+        self.unsupported_link_type
+            + self.truncated
+            + self.not_ip
+            + self.not_transport
+            + self.ipv4_fragment
+            + self.ip_fragment_pending
+            + self.vsock_non_payload
+            + self.ipv6_extension_chain
+            + self.ipv6_fragment
+    }
+
+    /// `true` when nothing was skipped at all.
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
+
+    fn note(&mut self, reason: SkipReason) {
+        match reason {
+            SkipReason::UnsupportedLinkType(dlt) => {
+                self.unsupported_link_type += 1;
+                self.unsupported_link_types.insert(dlt);
+            }
+            SkipReason::Truncated => self.truncated += 1,
+            SkipReason::NotIp => self.not_ip += 1,
+            SkipReason::NotTransport(_) => self.not_transport += 1,
+            SkipReason::Ipv4Fragment => self.ipv4_fragment += 1,
+            SkipReason::IpFragmentPending => self.ip_fragment_pending += 1,
+            SkipReason::VsockNonPayload(_) => self.vsock_non_payload += 1,
+            SkipReason::Ipv6ExtensionChain(_) => self.ipv6_extension_chain += 1,
+            SkipReason::Ipv6Fragment => self.ipv6_fragment += 1,
+        }
+    }
+}
 
 /// A packet the dissector could not turn into stream bytes, and why.
 ///
@@ -1183,6 +1275,9 @@ pub struct Dissection {
     flows: Vec<FlowDissection>,
     datagram_flows: Vec<DatagramDissection>,
     skipped: Vec<SkippedPacket>,
+    /// R311y643 (§1.1e) — the by-reason census, counted at the door rather than
+    /// folded from `skipped` above, which is capped.
+    skip_census: SkipCensus,
     /// R311y594b — what this dissection may accumulate.
     limits: DissectionLimits,
     /// What the limits have cost so far.
@@ -1261,6 +1356,7 @@ impl Default for Dissection {
             flows: Vec::new(),
             datagram_flows: Vec::new(),
             skipped: Vec::new(),
+            skip_census: SkipCensus::default(),
             limits: DissectionLimits::default(),
             drops: DissectionDrops::default(),
             checksums: [0; 6],
@@ -1415,11 +1511,7 @@ impl Dissection {
         let packet_index = piece.packet_index;
         let ip_checksum = piece.checksums.ip;
         let Some(done) = self.fragments.push(piece, ts_millis) else {
-            self.skipped.push(SkippedPacket {
-                packet_index,
-                reason: SkipReason::IpFragmentPending,
-            });
-            self.trim_skipped();
+            self.note_skip(packet_index, SkipReason::IpFragmentPending);
             return;
         };
         // The transport checksum covers the whole datagram, so this is the
@@ -1457,18 +1549,10 @@ impl Dissection {
             // IP has. Recorded rather than ignored so the impossibility is
             // observable if it ever stops being one.
             Ok(Transport::Vsock(_) | Transport::IpFragment(_)) => {
-                self.skipped.push(SkippedPacket {
-                    packet_index: done.packet_index,
-                    reason: SkipReason::NotTransport(done.key.proto),
-                });
-                self.trim_skipped();
+                self.note_skip(done.packet_index, SkipReason::NotTransport(done.key.proto));
             }
             Err(reason) => {
-                self.skipped.push(SkippedPacket {
-                    packet_index: done.packet_index,
-                    reason,
-                });
-                self.trim_skipped();
+                self.note_skip(done.packet_index, reason);
             }
         }
     }
@@ -1532,6 +1616,21 @@ impl Dissection {
     }
 
     /// Keep [`Self::skipped`] inside its bound, counting what that costs.
+    /// R311y643 (§1.1e) — the ONE place a skip is recorded.
+    ///
+    /// Four sites used to push onto `skipped` and call `trim_skipped`
+    /// themselves; each was a place a new reason could be added without ever
+    /// reaching a total. The census is incremented here, BEFORE the trim, so a
+    /// capture past the cap still counts what it dropped.
+    fn note_skip(&mut self, packet_index: usize, reason: SkipReason) {
+        self.skip_census.note(reason);
+        self.skipped.push(SkippedPacket {
+            packet_index,
+            reason,
+        });
+        self.trim_skipped();
+    }
+
     fn trim_skipped(&mut self) {
         if let Some(cap) = self.limits.skipped_packets {
             if self.skipped.len() > cap {
@@ -1593,8 +1692,20 @@ impl Dissection {
     }
 
     /// Packets that yielded no stream bytes, each with its reason.
+    ///
+    /// CAPPED by [`DissectionLimits::skipped_packets`]; the overflow is counted
+    /// in [`DissectionDrops::skipped`] and the whole population, by reason, is
+    /// [`Self::skip_census`].
     pub fn skipped(&self) -> &[SkippedPacket] {
         &self.skipped
+    }
+
+    /// R311y643 (§1.1e) — every skipped packet by REASON, uncapped.
+    ///
+    /// The answer to "did this build fail to read the file, or did the file
+    /// carry no zenoh traffic", which `packets_skipped` alone cannot give.
+    pub fn skip_census(&self) -> &SkipCensus {
+        &self.skip_census
     }
 
     /// The flow matching `key`, if the capture carried one.
@@ -1728,11 +1839,7 @@ impl Dissection {
                 return;
             }
             Err(reason) => {
-                self.skipped.push(SkippedPacket {
-                    packet_index,
-                    reason,
-                });
-                self.trim_skipped();
+                self.note_skip(packet_index, reason);
                 return;
             }
         };
@@ -2524,6 +2631,91 @@ mod datagram_tests {
             flow.frames.first().map(|f| &f.carried)
         );
         assert_eq!(d.health().packets_skipped, 0);
+    }
+
+    /// R311y643 (§1.1e) — a capture this build cannot decapsulate says WHICH
+    /// link type it refused, and a healthy capture with ordinary furniture in it
+    /// says something else entirely.
+    ///
+    /// THE FAILURE THIS ENDS. wz drives three links with no assigned libpcap
+    /// DLT — unix sockets, unix pipes and serial — so a capture of one arrives
+    /// under a private-use or vendor link type and is refused packet by packet.
+    /// The result was an empty dissection and a plausible skip COUNT, which is
+    /// indistinguishable from "this deployment carried no zenoh traffic": a
+    /// wrong conclusion about a working system, reached from a correct number.
+    ///
+    /// The control leg is what makes the census a diagnosis rather than a
+    /// second spelling of the count: an ARP packet on an ETHERNET capture is
+    /// also a skip, and it must land somewhere else with no link type named.
+    #[test]
+    fn a_link_type_this_build_cannot_read_is_named_and_arp_is_not_it() {
+        // 250 is `LINKTYPE_RTAC_SERIAL`; nothing in this build decapsulates it,
+        // which is exactly the position a serial capture is in.
+        let mut d = Dissection::new();
+        for i in 0..3 {
+            d.push_packet(250, i, &[0xAA; 20]);
+        }
+        let sk = d.skip_census();
+        assert_eq!(sk.unsupported_link_type, 3);
+        assert_eq!(
+            sk.unsupported_link_types
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            alloc::vec![250],
+            "the SET is the actionable fact, not the count"
+        );
+        assert_eq!(sk.not_ip, 0, "the reason must be the specific one");
+        assert_eq!(
+            sk.total(),
+            d.health().packets_skipped,
+            "two counts, one truth"
+        );
+        assert!(d.flows().is_empty() && d.datagram_flows().is_empty());
+
+        // THE CONTROL: an ARP frame on Ethernet is skipped too, and is NOT a
+        // link-type refusal. A census that folded every skip into one bucket
+        // would satisfy the assertions above and be useless.
+        let mut arp = Dissection::new();
+        let mut frame = alloc::vec![0u8; 14];
+        frame[12] = 0x08;
+        frame[13] = 0x06;
+        frame.extend_from_slice(&[0u8; 28]);
+        arp.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &frame);
+        let a = arp.skip_census();
+        assert_eq!(a.not_ip, 1);
+        assert_eq!(a.unsupported_link_type, 0);
+        assert!(
+            a.unsupported_link_types.is_empty(),
+            "a readable capture names no unreadable link type"
+        );
+    }
+
+    /// R311y643 (§1.1e) — the census counts EVERY skip, including the ones the
+    /// capped list threw away.
+    ///
+    /// The trap this exists for: `skipped()` is bounded by
+    /// `DissectionLimits::skipped_packets` and its overflow is dropped, so a
+    /// census folded from that list would be silently short on exactly the large
+    /// captures that need one. Driven with a cap of ONE so the list holds a
+    /// single entry while the census holds all five.
+    #[test]
+    fn the_skip_census_survives_the_cap_the_skipped_list_does_not() {
+        let mut d = Dissection::with_limits(DissectionLimits {
+            skipped_packets: Some(1),
+            ..DissectionLimits::default()
+        });
+        for i in 0..5 {
+            d.push_packet(250, i, &[0xAA; 20]);
+        }
+        assert_eq!(d.skipped().len(), 1, "the list really is capped");
+        assert_eq!(d.drops().skipped, 4, "and the overflow really was dropped");
+        assert_eq!(
+            d.skip_census().unsupported_link_type,
+            5,
+            "the census counted what the list could not keep"
+        );
+        assert_eq!(d.skip_census().total(), d.health().packets_skipped);
     }
 
     /// THE INTERLOCK, and the reason R311y609 had to touch two layers.
