@@ -5484,7 +5484,8 @@ layer_c1bt_capture_no_default_features() {
         agg::tests::a_records_offset_is_measured_from_the_front_of_the_unit \
         agg::tests::the_three_planes_place_one_record_at_one_byte \
         agg::tests::an_absent_payload_and_an_unseparated_one_are_different_facts \
-        report::tests::the_two_reasons_a_payload_is_unmeasured_reach_both_renderings
+        report::tests::the_two_reasons_a_payload_is_unmeasured_reach_both_renderings \
+        report::tests::a_row_says_whether_its_own_byte_total_is_whole
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the network-codecs build"

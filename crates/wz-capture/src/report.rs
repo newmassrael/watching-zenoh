@@ -618,11 +618,17 @@ fn subtree_json(node: &crate::agg::KeyexprSubtree, s: &mut String) {
     s.push_str("{\"prefix\":");
     quote_into(&node.prefix, s);
     s.push_str(&format!(
-        ",\"rows\":{},\"messages\":{},\"payload_bytes\":{},\"unsized_payloads\":{}",
+        ",\"rows\":{},\"messages\":{},\"payload_bytes\":{},\"unsized_payloads\":{},\
+         \"payload_bytes_ceiling\":{}",
         node.rows,
         node.totals.messages(),
         node.totals.payload_bytes,
-        node.totals.unsized_payloads
+        node.totals.unsized_payloads,
+        // R311y647 (§4.50) — the same ceiling the rows and the capture carry.
+        // A node's totals are INCLUSIVE of its descendants, so this is the
+        // ceiling for that whole subtree and a reader moving between the three
+        // renderings never meets a number qualified in two different ways.
+        node.totals.payload_bytes + node.totals.unresolved_at_most_bytes
     ));
     s.push_str(",\"children\":[");
     for (i, c) in node.children.iter().enumerate() {
@@ -713,6 +719,20 @@ fn throughput_json(t: &ThroughputTable, s: &mut String) {
             totals.queries,
             totals.replies,
             totals.errs
+        ));
+        // R311y647 (§4.50) — the ROW's own qualifier, which it did not have.
+        // The capture-wide count says SOME total is a floor and never which, so
+        // a consumer reading one row got a bare number and no way to learn it
+        // was short. The tree beside these rows has carried `unsized_payloads`
+        // since R311y642 and was folded from exactly this data, so the document
+        // was qualifying one rendering of a number and not the other.
+        s.push_str(&format!(
+            ",\"unsized_payloads\":{},\"payloads_elsewhere\":{},\
+             \"payloads_unresolved\":{},\"payload_bytes_ceiling\":{}",
+            totals.unsized_payloads,
+            totals.payloads_elsewhere,
+            totals.payloads_unresolved,
+            totals.payload_bytes + totals.unresolved_at_most_bytes
         ));
         s.push_str(&format!(
             ",\"first_anchor\":{},\"last_anchor\":{}}}",
@@ -1398,6 +1418,84 @@ mod tests {
                 && pj.contains("\"payloads_unresolved\":0")
                 && pj.contains("\"payload_bytes_ceiling\":10"),
             "the fields are structural, and the ceiling is the measured total: {pj}"
+        );
+    }
+
+    /// R311y647 (§4.50) — a ROW says whether its own byte total is whole.
+    ///
+    /// THE DEFECT, and it is a disagreement inside one document rather than a
+    /// missing field: the tree has carried `unsized_payloads` per node since
+    /// R311y642, and the flat rows it is folded FROM carried a bare
+    /// `payload_bytes`. So the same quantity was qualified in one rendering and
+    /// presented as whole in the other, and a consumer reading rows — the
+    /// obvious thing to read — got a confident number for a keyexpr whose bytes
+    /// this build could not size.
+    ///
+    /// TWO KEYEXPRS, one of each kind, because the capture-wide count cannot
+    /// tell them apart and a per-row field must. The measured row is the control
+    /// and it is the half that matters: a build that stamped the capture's
+    /// qualifier onto every row would satisfy every assertion about the unsized
+    /// one and fail here.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_row_says_whether_its_own_byte_total_is_whole() {
+        use crate::exchange::tests as fx;
+
+        let d = fx::dissect(&[
+            (
+                true,
+                Some(10),
+                crate::agg::tests::record_with_body_ext(
+                    crate::agg::tests::Carrier::Push,
+                    "demo/measured",
+                    b"abcd",
+                    crate::agg::tests::BodyExt::None,
+                ),
+            ),
+            (
+                true,
+                Some(11),
+                crate::agg::tests::record_with_body_ext(
+                    crate::agg::tests::Carrier::Push,
+                    "demo/descriptor",
+                    b"descriptor",
+                    crate::agg::tests::BodyExt::ShmMarker,
+                ),
+            ),
+        ]);
+        let t = crate::agg::aggregate(&d);
+        // ANTI-VACUITY: two rows, one of each kind.
+        assert_eq!(t.rows().len(), 2, "{:?}", t.rows());
+        assert_eq!(t.unsized_payloads(), 1);
+
+        let json = CaptureReport::of(&d).with_throughput(&t).to_json();
+        // The rows are emitted in `rows()` order and each carries its OWN
+        // qualifier. Sliced by keyexpr so the assertion cannot be satisfied by
+        // the other row's fields.
+        let row_of = |key: &str| {
+            let at = json
+                .find(&alloc::format!("\"keyexpr\":\"{key}\""))
+                .expect(key);
+            let end = json[at..].find('}').expect("the row closes") + at;
+            json[at..end].to_string()
+        };
+        let unsized_row = row_of("demo/descriptor");
+        assert!(
+            unsized_row.contains("\"unsized_payloads\":1")
+                && unsized_row.contains("\"payloads_elsewhere\":1")
+                && unsized_row.contains("\"payload_bytes\":0")
+                && unsized_row.contains("\"payload_bytes_ceiling\":0"),
+            "the row whose bytes are elsewhere must say so: {unsized_row}"
+        );
+
+        // THE CONTROL. The measured row is complete, and its ceiling is its
+        // total rather than the capture's.
+        let measured_row = row_of("demo/measured");
+        assert!(
+            measured_row.contains("\"unsized_payloads\":0")
+                && measured_row.contains("\"payload_bytes\":4")
+                && measured_row.contains("\"payload_bytes_ceiling\":4"),
+            "the measured row must not inherit the capture's qualifier: {measured_row}"
         );
     }
 
