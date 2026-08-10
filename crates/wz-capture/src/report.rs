@@ -133,7 +133,7 @@ impl<'a> CaptureReport<'a> {
         // and then reached no surface at all: not this verdict, not the export,
         // not one test. A capture holding an abandoned chain reported
         // `complete: true` and did not mention it.
-        if self.dissection.expired_chains() > 0 {
+        if self.dissection.expired_chains() > 0 || self.dissection.abandoned_chains() > 0 {
             return false;
         }
         let framing = self.dissection.framing_health();
@@ -372,8 +372,9 @@ impl<'a> CaptureReport<'a> {
         // with a zero on a build that reassembles nothing, so a consumer's
         // field lookup never depends on which features this binary carries.
         s.push_str(&format!(
-            ",\"reassembly\":{{\"expired_chains\":{}}}",
-            d.expired_chains()
+            ",\"reassembly\":{{\"expired_chains\":{},\"abandoned_at_end\":{}}}",
+            d.expired_chains(),
+            d.abandoned_chains()
         ));
         s.push_str(",\"capture_reported_drops\":");
         s.push_str(&opt_u64(d.capture_reported_drops()));
@@ -443,6 +444,14 @@ impl<'a> CaptureReport<'a> {
         // wire or the capture tool did; this one names a message the analyzer
         // gave up on, and a reader who is not told cannot distinguish it from a
         // message that was never sent.
+        if d.abandoned_chains() > 0 {
+            s.push_str(&format!(
+                "  {} reassembly chain(s) still OPEN when the capture ended; the \
+                 messages they carried are absent from the totals below and no \
+                 deadline would have changed that\n",
+                d.abandoned_chains()
+            ));
+        }
         if d.expired_chains() > 0 {
             s.push_str(&format!(
                 "  {} reassembly chain(s) ABANDONED on this reader's own \

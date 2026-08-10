@@ -1594,6 +1594,21 @@ pub struct Dissection {
     /// first 200 packets are someone else's traffic did not start at record
     /// one.
     capture_origin_ms: Option<u64>,
+    /// R311y655 (§1.1f) — chains still OPEN when the caller said the capture
+    /// had ended, abandoned by [`Self::finish`].
+    ///
+    /// A separate number from `expired_chains` and not a share of it, on the
+    /// rule `DissectionDrops` keeps its five fields apart: the two have the same
+    /// consequence and different CAUSES, and a reader acts on them differently.
+    /// A chain that missed the reassembly deadline is a bound this reader can be
+    /// asked to widen; a chain still open when the file ran out is nothing
+    /// anyone can widen, and telling a reader to raise a window would be advice
+    /// about the wrong thing.
+    ///
+    /// UNCONDITIONAL where `expired_chains` is `reassembly`-gated, because the
+    /// verb it counts is: a build that reassembles nothing abandons nothing and
+    /// answers `0`.
+    abandoned_chains: usize,
 }
 
 /// Hand-written for ONE field: `gap_patience` defaults to
@@ -1619,6 +1634,7 @@ impl Default for Dissection {
             scouts: ScoutingCorrelation::default(),
             gap_patience: Some(crate::tcp::DEFAULT_GAP_PATIENCE),
             capture_origin_ms: None,
+            abandoned_chains: 0,
         }
     }
 }
@@ -1942,6 +1958,12 @@ impl Dissection {
         }
     }
 
+    /// R311y655 (§1.1f) — how many chains were still open when the capture
+    /// ended. See [`Self::expired_chains`] for why the two are counted apart.
+    pub fn abandoned_chains(&self) -> usize {
+        self.abandoned_chains
+    }
+
     /// Every TCP flow seen, in first-appearance order.
     pub fn flows(&self) -> &[FlowDissection] {
         &self.flows
@@ -2050,6 +2072,22 @@ impl Dissection {
             // cap evicting a flow — takes them too.
             self.flows[idx].settle_on_exit();
             self.enforce_flow_limits(idx);
+        }
+        // R311y655 (§1.1f) — and the chains, on exactly the argument the gap
+        // forcing above rests on: "no further packet is coming" is a fact only
+        // the caller has. A chain opened by the LAST fragment on a flow is never
+        // swept, because the sweep runs when the NEXT packet on that flow
+        // advances the clock and there is no next packet — so the capture used
+        // to end holding it, report `complete`, and never mention the message it
+        // was carrying. Measured that way before this line existed.
+        //
+        // Both flow tables, because both hold sessions and a datagram flow is
+        // where fragments actually arrive.
+        for flow in &mut self.flows {
+            self.abandoned_chains += flow.session.abandon_open_chains();
+        }
+        for flow in &mut self.datagram_flows {
+            self.abandoned_chains += flow.session.abandon_open_chains();
         }
         forced
     }
@@ -2648,6 +2686,43 @@ mod datagram_tests {
         ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
         ip.extend_from_slice(&[10, 0, 0, 1]);
         ip.extend_from_slice(&[10, 0, 0, 2]);
+        ip.extend_from_slice(&tcp);
+
+        let mut eth = alloc::vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// R311y655 — the same packet from HIGH to LOW: addresses swapped as well
+    /// as ports, which is what keeps it the same 5-tuple in the other direction
+    /// rather than a second flow.
+    ///
+    /// Gated to match its ONLY caller rather than more widely: a fixture built
+    /// in an arm nothing calls it from is dead code, and `-D dead-code` finds it
+    /// in exactly the arm a default-features run never compiles.
+    #[cfg(feature = "reassembly")]
+    pub(crate) fn tcp_packet_reverse(seq: u32, payload: &[u8]) -> Vec<u8> {
+        let mut tcp = Vec::new();
+        tcp.extend_from_slice(&7447u16.to_be_bytes());
+        tcp.extend_from_slice(&1111u16.to_be_bytes());
+        tcp.extend_from_slice(&seq.to_be_bytes());
+        tcp.extend_from_slice(&0u32.to_be_bytes());
+        tcp.push(5 << 4);
+        tcp.push(0x10);
+        tcp.extend_from_slice(&64u16.to_be_bytes());
+        tcp.extend_from_slice(&0u16.to_be_bytes());
+        tcp.extend_from_slice(&0u16.to_be_bytes());
+        tcp.extend_from_slice(payload);
+
+        let mut ip = alloc::vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
+        ip.extend_from_slice(&[10, 0, 0, 2]);
+        ip.extend_from_slice(&[10, 0, 0, 1]);
         ip.extend_from_slice(&tcp);
 
         let mut eth = alloc::vec![0u8; 12];
@@ -5481,7 +5556,7 @@ mod datagram_tests {
         );
         assert!(
             rep.to_json()
-                .contains("\"reassembly\":{\"expired_chains\":1}"),
+                .contains("\"reassembly\":{\"expired_chains\":1,\"abandoned_at_end\":0}"),
             "{}",
             rep.to_json()
         );
@@ -5513,12 +5588,161 @@ mod datagram_tests {
         let rep = crate::report::CaptureReport::of(&d);
         assert!(
             rep.to_json()
-                .contains("\"reassembly\":{\"expired_chains\":0}"),
+                .contains("\"reassembly\":{\"expired_chains\":0,\"abandoned_at_end\":0}"),
             "the field is structural, in every feature arm: {}",
             rep.to_json()
         );
         assert!(!rep.to_text().contains("ABANDONED"), "{}", rep.to_text());
         assert!(rep.is_complete(), "{}", rep.to_text());
+    }
+
+    /// R311y655 (§1.1f) — a chain still OPEN when the capture ends is abandoned
+    /// and said so, rather than held forever by a sweep that never runs.
+    ///
+    /// The sweep is driven by the NEXT packet on the same flow advancing that
+    /// flow's clock. A chain opened by the LAST fragment on a flow therefore has
+    /// no sweep coming: measured before this round, such a capture reported
+    /// `expired_chains == 0`, `complete: true`, and the text said "capture:
+    /// complete" while the message the fragment belonged to was in no total
+    /// anywhere.
+    ///
+    /// It is verbatim R311y609's argument for `force_oldest_gap`, one layer in:
+    /// "no further packet is coming" is a fact only the caller has, which is why
+    /// the new verb is called from `finish` and not from a destructor.
+    ///
+    /// Counted APART from the deadline sweep, and the text says why: a reader
+    /// told a chain expired can widen the window, and a reader told the file ran
+    /// out cannot.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_chain_still_open_when_the_capture_ends_is_abandoned_and_said_so() {
+        let fragment = |sn: u8, more: bool, piece: &[u8]| {
+            let mut wire = alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAGMENT
+                    | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
+                    | if more {
+                        wz_codecs::wire_const::FLAG_T_FRAGMENT_M
+                    } else {
+                        0
+                    },
+                sn,
+            ];
+            wire.extend_from_slice(piece);
+            wire
+        };
+        let mut d = Dissection::with_limits(DissectionLimits {
+            // A window LONGER than the capture, on purpose: this fixture must
+            // not be rescuable by the deadline sweep, or it would be measuring
+            // R311y654's leg a second time.
+            reassembly_window_ms: Some(600_000),
+            ..DissectionLimits::default()
+        });
+        for (i, (from_low, ts, message)) in [
+            (true, 0u64, init_datagram(false, &[])),
+            (false, 0, init_datagram(true, &[])),
+            (true, 0, open_datagram(false)),
+            (false, 0, open_datagram(true)),
+            // THE LAST PACKET opens a chain. Nothing follows it, so nothing
+            // advances this flow's clock again.
+            (true, 10, fragment(0, true, &[0xDE, 0xAD])),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let packet = if from_low {
+                udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &message)
+            } else {
+                udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 43210, &message)
+            };
+            d.push_packet_at(LINKTYPE_ETHERNET, i, Some(ts), &packet);
+        }
+        // ANTI-VACUITY: nothing has expired and nothing may have, so whatever
+        // the verdict says after `finish` is said by the new verb alone.
+        assert_eq!(d.abandoned_chains(), 0, "not until the caller says so");
+        assert_eq!(
+            d.expired_chains(),
+            0,
+            "and the deadline must NOT be reached"
+        );
+        assert!(
+            crate::report::CaptureReport::of(&d).is_complete(),
+            "the pre-finish verdict is the one this round changes"
+        );
+
+        d.finish();
+        assert_eq!(d.abandoned_chains(), 1);
+        assert_eq!(
+            d.expired_chains(),
+            0,
+            "a chain the file ran out on did not miss a deadline, and folding \
+             the two would tell a reader to widen a window that was never hit"
+        );
+        let rep = crate::report::CaptureReport::of(&d);
+        assert!(!rep.is_complete(), "{}", rep.to_text());
+        assert!(
+            rep.to_json()
+                .contains("\"expired_chains\":0,\"abandoned_at_end\":1"),
+            "{}",
+            rep.to_json()
+        );
+        assert!(
+            rep.to_text().contains("still OPEN when the capture ended"),
+            "{}",
+            rep.to_text()
+        );
+
+        // IDEMPOTENT, which `finish`'s own contract requires: a second call
+        // abandons nothing further rather than counting the same chain twice.
+        d.finish();
+        assert_eq!(d.abandoned_chains(), 1);
+
+        // THE STREAM LEG, and it earned its place by falsification: with only
+        // the datagram fixture above, deleting `finish`'s walk over the STREAM
+        // flow table left every test green. The two tables hold the same kind
+        // of session and a TCP capture ends on an open chain exactly as a UDP
+        // one does.
+        let framed = |wire: &[u8]| {
+            let mut out = (wire.len() as u16).to_le_bytes().to_vec();
+            out.extend_from_slice(wire);
+            out
+        };
+        let mut e = Dissection::with_limits(DissectionLimits {
+            reassembly_window_ms: Some(600_000),
+            ..DissectionLimits::default()
+        });
+        let mut seq_low = 1000u32;
+        let mut seq_high = 5000u32;
+        for (i, (from_low, wire)) in [
+            (true, init_datagram(false, &[])),
+            (false, init_datagram(true, &[])),
+            (true, open_datagram(false)),
+            (false, open_datagram(true)),
+            (true, fragment(0, true, &[0xDE, 0xAD])),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bytes = framed(&wire);
+            let (seq, pkt) = if from_low {
+                let s = seq_low;
+                seq_low += bytes.len() as u32;
+                (s, tcp_packet(s, &bytes))
+            } else {
+                let s = seq_high;
+                seq_high += bytes.len() as u32;
+                (s, tcp_packet_reverse(s, &bytes))
+            };
+            let _ = seq;
+            e.push_packet_at(LINKTYPE_ETHERNET, i, Some(10), &pkt);
+        }
+        assert_eq!(e.flows().len(), 1, "the fixture must be a STREAM flow");
+        assert_eq!(e.abandoned_chains(), 0);
+        e.finish();
+        assert_eq!(
+            e.abandoned_chains(),
+            1,
+            "a TCP capture ends on an open chain exactly as a UDP one does"
+        );
     }
 
     /// R311y594 — a pcap replay carries the FILE's clock into the observer.

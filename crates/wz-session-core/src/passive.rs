@@ -1109,6 +1109,38 @@ impl PassiveSession {
         }
     }
 
+    /// R311y655 — abandon every chain still open, WHATEVER its deadline says.
+    ///
+    /// The deadline sweep in [`Self::observe_at`] answers "has this chain waited
+    /// too long"; this answers a question the observer cannot ask itself at all:
+    /// "is anything more coming". Only the caller knows that a capture ended, a
+    /// file ran out, or a link closed — the same argument R311y609's
+    /// `force_oldest_gap` was written for, one layer up, and the reason it is a
+    /// separate verb rather than a destructor: calling it on a live tap would
+    /// abandon a chain that was still going to complete.
+    ///
+    /// UNGATED, like [`Self::observe_at`] beside it and for the same reason: a
+    /// build without `reassembly` holds no chains, so `0` is the true answer and
+    /// a caller must not have to know which features this binary carries.
+    ///
+    /// Does NOT touch the observation clock. `observe_at(u64::MAX)` would sweep
+    /// the same slots and would leave every later frame stamped at the end of
+    /// time.
+    pub fn abandon_open_chains(&mut self) -> usize {
+        #[cfg(feature = "reassembly")]
+        {
+            // `u64::MAX` is what makes the deadline unreachable-in-reverse: a
+            // slot is kept when `now < deadline`, so the largest instant there
+            // is expires every open slot including the ones built with no
+            // window at all, whose deadline is that same value.
+            self.reasm[0].sweep(u64::MAX) + self.reasm[1].sweep(u64::MAX)
+        }
+        #[cfg(not(feature = "reassembly"))]
+        {
+            0
+        }
+    }
+
     /// The observation instant last handed to [`Self::observe_at`], or `0` if
     /// none ever was.
     ///
