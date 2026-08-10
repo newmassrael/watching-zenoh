@@ -2582,6 +2582,61 @@ mod datagram_tests {
         d
     }
 
+    /// R311y645 (§4.38) — a capture whose data arrives as a COMPLETED fragment
+    /// chain: a full handshake, then `record` split across two `T_MID_FRAGMENT`
+    /// datagrams.
+    ///
+    /// The handshake is what separates this from
+    /// [`midsession_fragment_dissection`]: with an InitAck observed the session
+    /// has an SN resolution, so the chain is tracked and completes, and the
+    /// reassembled bytes become a real `Carried::Reassembled` batch with real
+    /// records in it. That is the only shape in which a record exists whose
+    /// bytes were never contiguous on the wire.
+    /// Gated on BOTH features, matching its consumers rather than only the one
+    /// it names: the record it splits is a network record, so every test that
+    /// drives it is `network-codecs`-gated too, and a fixture gated more widely
+    /// than its callers is dead code in exactly the arm nothing builds locally
+    /// (the R311y644 mistake, caught the same way).
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    pub(crate) fn reassembled_record_dissection(record: &[u8]) -> Dissection {
+        let split = record.len() / 2;
+        assert!(split > 0, "the record must be splittable to be fragmented");
+        let fragment = |sn: u8, more: bool, piece: &[u8]| {
+            let mut wire = alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAGMENT
+                    | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
+                    | if more {
+                        wz_codecs::wire_const::FLAG_T_FRAGMENT_M
+                    } else {
+                        0
+                    },
+                sn,
+            ];
+            wire.extend_from_slice(piece);
+            wire
+        };
+        let mut d = Dissection::new();
+        for (i, (from_low, message)) in [
+            (true, init_datagram(false, &[])),
+            (false, init_datagram(true, &[])),
+            (true, open_datagram(false)),
+            (false, open_datagram(true)),
+            (true, fragment(0, true, &record[..split])),
+            (true, fragment(1, false, &record[split..])),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let packet = if from_low {
+                udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &message)
+            } else {
+                udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 43210, &message)
+            };
+            d.push_packet(LINKTYPE_ETHERNET, i, &packet);
+        }
+        d
+    }
+
     /// R311y621 (§1.4i) — a capture that STARTED MID-SESSION: a Fragment and no
     /// InitAck before it.
     ///

@@ -243,18 +243,26 @@ pub struct RecordView<'a> {
     /// thing a predicate needs to know.
     pub elapsed_ms: Option<u64>,
     /// R311y641 (§1.1n) — byte offset of this record's message within the
-    /// framing unit that carried it
-    /// ([`PassiveFrame::unit_offset`](wz_session_core::passive::PassiveFrame::unit_offset)).
-    ///
-    /// Not an `Option`: every record this crate produces came out of a walked
-    /// unit, so the coordinate is always known. That is the difference between
-    /// it and `elapsed_ms` beside it, whose absence is a real state.
+    /// framing unit that carried it, composed from
+    /// [`PassiveFrame::unit_offset`](wz_session_core::passive::PassiveFrame::unit_offset),
+    /// [`PassiveFrame::batch_offset`](wz_session_core::passive::PassiveFrame::batch_offset)
+    /// and the record's own span within the batch.
     ///
     /// `0` is the front of a unit. Anything above it is a record a reader that
     /// treated a framing unit as ONE message would never have seen at all —
-    /// which is what R311y631 measured and, until now, could only report as an
-    /// ordinal.
-    pub unit_offset: u64,
+    /// which is what R311y631 measured and, until R311y641, could only report
+    /// as an ordinal.
+    ///
+    /// R311y645 (§4.37 / §4.38) — an `Option`, and it was NOT one until this
+    /// round, which is the whole of the defect. The number was the record's
+    /// offset within its `Frame`'s PAYLOAD while the name said framing unit, so
+    /// `offset == 0` selected every record that merely came first inside its own
+    /// frame — however deep into the unit that frame began. `None` now covers
+    /// the two cases where no wire coordinate exists at all: a batch
+    /// decompressed out of an lz4 body and a batch reassembled from several
+    /// fragments both index a buffer this reader built, and the old field
+    /// reported those buffer offsets as capture ones.
+    pub unit_offset: Option<u64>,
     /// R311y644 (§1.1p) — milliseconds from the SOURCE stamping this record to
     /// this observer seeing it, or `None` when the question cannot be answered
     /// here.
@@ -452,10 +460,15 @@ impl Term {
                 None => Truth::Unknown,
                 Some(ms) => Truth::of(op.apply(ms, *value)),
             },
-            // R311y641 (§1.1n) — always decidable, unlike the two clock terms
-            // above: a record exists because a unit was walked, and the walk
-            // knows where in that unit it stood.
-            Self::Offset { op, value } => Truth::of(op.apply(record.unit_offset, *value)),
+            // R311y645 (§4.37) — the fifth undecidable case, and it was decided
+            // wrongly rather than left open until this round: a record walked
+            // out of a decompressed or reassembled buffer has an offset into
+            // that buffer and none into the capture, so the term declines
+            // instead of reporting where the reader's own scratch space put it.
+            Self::Offset { op, value } => match record.unit_offset {
+                None => Truth::Unknown,
+                Some(at) => Truth::of(op.apply(at, *value)),
+            },
             // Undecidable for three different reasons the field's doc names,
             // and deliberately not told apart here: each means the question
             // cannot be answered about THIS record.
@@ -1211,7 +1224,7 @@ mod tests {
             // The default is a plane that was never told the capture origin,
             // so every pre-existing test below drives the undecidable arm.
             elapsed_ms: None,
-            unit_offset: 0,
+            unit_offset: Some(0),
             source_delay_ms: None,
             // The default is the NON-correlating plane, so every pre-existing
             // test below drives the view the throughput plane builds.

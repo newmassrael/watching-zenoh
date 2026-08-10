@@ -256,7 +256,7 @@ struct OpenExchange {
     /// records and only one of them can anchor the axis; the request is the one
     /// `time` and `elapsed` already name, so a selector cannot end up with two
     /// terms pointing at opposite ends of the same exchange.
-    requested_unit_offset: u64,
+    requested_unit_offset: Option<u64>,
     /// R311y644 (§1.1p) — the REQUEST's source-to-observer delay, if it had one.
     requested_delay_ms: Option<u64>,
     first_reply_at: Option<u64>,
@@ -444,7 +444,7 @@ impl ExchangeTable {
                     kind,
                     payload_bytes,
                     requested_at: at,
-                    requested_unit_offset: span.map(|(o, _)| o as u64).unwrap_or(0),
+                    requested_unit_offset: crate::agg::record_unit_offset(frame, span),
                     requested_delay_ms: crate::agg::source_delay_ms(
                         frame.observed_at_ms,
                         crate::agg::source_timestamp(message),

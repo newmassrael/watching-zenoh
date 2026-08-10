@@ -450,6 +450,18 @@ impl<'a> CaptureReport<'a> {
                     t.source_ahead_of_observer()
                 ));
             }
+            // R311y645 (§4.38) — printed only when it happened, like the line
+            // above: a capture read straight off the wire has nothing to say
+            // here, and a permanent "0 records could not be located" would be
+            // noise on every ordinary report.
+            if t.unlocatable_records() > 0 {
+                s.push_str(&format!(
+                    "  {} record(s) were reassembled or decompressed and have \
+                     no offset in this capture: they cannot be pointed at in \
+                     the file\n",
+                    t.unlocatable_records()
+                ));
+            }
             for row in t.rows() {
                 let totals = row.totals();
                 s.push_str(&format!(
@@ -639,6 +651,13 @@ fn throughput_json(t: &ThroughputTable, s: &mut String) {
     s.push_str(&format!(
         ",\"source_ahead_of_observer\":{}",
         t.source_ahead_of_observer()
+    ));
+    // R311y645 (§4.38) — UNCONDITIONAL for the same reason as the two above: it
+    // says how much of this report cannot be pointed at in the capture file,
+    // and a consumer that has to test for the key to learn that will not.
+    s.push_str(&format!(
+        ",\"unlocatable_records\":{}",
+        t.unlocatable_records()
     ));
     s.push_str(&format!(
         ",\"declarations\":{declared},\"undeclarations\":{undeclared}"
@@ -1383,6 +1402,59 @@ mod tests {
             sr.to_json().contains("\"source_ahead_of_observer\":0"),
             "but must still carry the field: {}",
             sr.to_json()
+        );
+    }
+
+    /// R311y645 (§4.38) — a record with no offset into the capture is NAMED as
+    /// such in both renderings.
+    ///
+    /// The failure this ends is quieter than a wrong number: the record is in
+    /// the rows, its keyexpr resolved and its bytes counted, so every total in
+    /// the report is right — and a reader who then goes looking for it in the
+    /// file has nowhere to look, because its bytes arrived in pieces at two
+    /// unrelated places. Until R311y645 the report said the record was at
+    /// offset zero of its unit, which is a place in a packet that never carried
+    /// it.
+    ///
+    /// The control is the SAME record read straight off the wire: the text must
+    /// print no such line and the JSON must still carry the zero, so a consumer
+    /// never has to test for a key's presence to learn its rows are locatable.
+    #[cfg(all(feature = "network-codecs", feature = "reassembly"))]
+    #[test]
+    fn a_record_with_no_offset_in_the_capture_is_named_in_both_renderings() {
+        use crate::datagram_tests::{push, sender_space};
+        let record = push(sender_space(0, Some("demo/split")), &[0u8; 8]);
+
+        let joined = crate::datagram_tests::reassembled_record_dissection(&record);
+        let jt = crate::agg::aggregate(&joined);
+        // ANTI-VACUITY: the chain completed, so the report is describing a
+        // record it really did read.
+        assert_eq!(jt.records(), 1);
+        let r = CaptureReport::of(&joined).with_throughput(&jt);
+        assert!(
+            r.to_text().contains("cannot be pointed at in the file"),
+            "the text must say the rows cannot be located: {}",
+            r.to_text()
+        );
+        assert!(
+            r.to_json().contains("\"unlocatable_records\":1"),
+            "and the export must carry the count: {}",
+            r.to_json()
+        );
+
+        let plain = crate::exchange::tests::dissect(&[(true, Some(1), record)]);
+        let pt = crate::agg::aggregate(&plain);
+        assert_eq!(pt.records(), 1, "the control read the same record");
+        let pr = CaptureReport::of(&plain).with_throughput(&pt);
+        assert!(
+            !pr.to_text().contains("cannot be pointed at"),
+            "a capture read off the wire must not print the warning: {}",
+            pr.to_text()
+        );
+        assert!(
+            pr.to_json().contains("\"unlocatable_records\":0"),
+            "but must still carry the field: {}",
+            pr.to_json()
         );
     }
 

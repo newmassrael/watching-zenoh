@@ -744,7 +744,7 @@ impl PayloadCensus {
             keyexpr: keyexpr.as_deref(),
             kind,
             payload_bytes,
-            unit_offset: span.map(|(o, _)| o as u64).unwrap_or(0),
+            unit_offset: crate::agg::record_unit_offset(frame, span),
             // R311y644 (§1.1p) — the census of clock-offset witnesses belongs
             // to the throughput plane, so this one reads the axis and does not
             // count what it cannot own.

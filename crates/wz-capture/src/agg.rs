@@ -357,6 +357,35 @@ fn dir_index(d: Direction) -> usize {
     }
 }
 
+/// R311y645 (§1.1n / §4.37 / §4.38) — a record's byte offset within the FRAMING
+/// UNIT that carried it, or `None` when the capture holds no such coordinate.
+///
+/// THE ONE PLACE THIS IS COMPOSED, for the reason R311y639 made
+/// `record_payload` one statement: the three planes each build their own
+/// [`RecordView`] and each used to write `span.map(..).unwrap_or(0)` by hand.
+/// Three copies of a coordinate is three chances for one of them to keep saying
+/// `0` where the answer is "there is no offset", and a fabricated zero is
+/// indistinguishable from the front of a unit.
+///
+/// Two absences fold into the same `None`, and both are real:
+/// [`PassiveFrame::batch_offset`] is `None` when the batch's bytes were never on
+/// the wire in that form, and `span` is `None` when the walk did not record
+/// where this record stood.
+///
+/// THREE coordinates are added and each is measured by whoever owns it: where
+/// the transport message stands in its unit, where the payload starts inside
+/// that message, and where the record starts inside that payload. Dropping any
+/// one of them still yields a plausible number, which is exactly why the two
+/// tests below drive a fixture where all three differ.
+pub(crate) fn record_unit_offset(
+    frame: &PassiveFrame,
+    span: Option<(usize, usize)>,
+) -> Option<u64> {
+    let batch_offset = frame.batch_offset?;
+    let (record_offset, _) = span?;
+    Some((frame.unit_offset + batch_offset + record_offset) as u64)
+}
+
 /// The two keyexpr id spaces of ONE flow.
 ///
 /// Public because a consumer walking frames itself — a live tap, a replay —
@@ -465,6 +494,16 @@ pub struct ThroughputTable {
     /// capture suspect. Without it a capture full of ahead-running publishers
     /// reports no measured delays and says nothing about why.
     source_ahead_of_observer: usize,
+    /// R311y645 (§4.38) — records this table read that have NO byte offset into
+    /// the capture.
+    ///
+    /// Their bytes were never contiguous on the wire (a reassembled fragment
+    /// chain) or were never on it in that form at all (a decompressed batch), so
+    /// there is no packet a reader can be pointed at. Counted here rather than
+    /// left to `selection().undecided`, which only speaks about a selector that
+    /// happened to carry an `offset` term: a reader who never wrote one still
+    /// needs to know that part of this report cannot be located in the file.
+    unlocatable_records: usize,
     /// R311y638 (§1.1r) — where the capture began, for the `elapsed` term.
     /// Set only by the whole-capture entry points, because only they have seen
     /// the whole capture; a caller folding flows by hand leaves it `None` and
@@ -676,7 +715,7 @@ impl ThroughputTable {
             keyexpr: resolved.as_ref().ok().map(|k| k.as_str()),
             kind,
             payload_bytes: sized_payload(&counts),
-            unit_offset: span.map(|(o, _)| o as u64).unwrap_or(0),
+            unit_offset: record_unit_offset(frame, span),
             source_delay_ms: delay,
             observed_at_ms: frame.observed_at_ms,
             elapsed_ms: elapsed_since(self.capture_origin_ms, frame.observed_at_ms),
@@ -693,6 +732,12 @@ impl ThroughputTable {
         }
 
         self.records += 1;
+        // R311y645 (§4.38) — counted off the SAME value the selector was asked
+        // about, so the census cannot say a record is locatable while the
+        // `offset` term declines to speak about it.
+        if view.unit_offset.is_none() {
+            self.unlocatable_records += 1;
+        }
         // R311y637 (§1.1w) — counted at the TABLE and not only on the row,
         // because a record whose keyexpr did not resolve has no row to carry
         // it and its unmeasured bytes are exactly as absent from
@@ -865,6 +910,18 @@ impl ThroughputTable {
     /// capture, and it is the only thing that says so.
     pub fn source_ahead_of_observer(&self) -> usize {
         self.source_ahead_of_observer
+    }
+
+    /// R311y645 (§4.38) — records in this table that cannot be pointed at in
+    /// the capture file, because their bytes were reassembled or decompressed
+    /// rather than read where they lay.
+    ///
+    /// Not a [`ThroughputGaps`] member, for the reason [`Self::unsized_payloads`]
+    /// is not one: nothing was lost. The record was read, named and attributed;
+    /// only its LOCATION is absent, which qualifies what a reader can do with it
+    /// rather than what the totals are worth.
+    pub fn unlocatable_records(&self) -> usize {
+        self.unlocatable_records
     }
 
     /// Application bytes across every resolved keyexpr.
@@ -2523,6 +2580,13 @@ pub(crate) mod tests {
     /// Driven through the production entry point on real packet bytes, so a
     /// build whose walk never produced a second record would fail the first
     /// assertion rather than quietly agree with the rest.
+    ///
+    /// R311y645 (§4.37) — the two literals moved and the test got STRONGER, not
+    /// weaker. It used to expect the first record at `offset == 0` because the
+    /// number was measured from the front of the `Frame`'s PAYLOAD, and this
+    /// fixture puts that payload at unit offset 2. Both records are now placed
+    /// against the front of the unit, so the assertion says where in the
+    /// datagram the bytes are — which is what the term's name always claimed.
     #[test]
     fn a_records_offset_in_its_unit_reaches_the_selector() {
         // Two self-delimiting Pushes in ONE datagram: exactly the batch shape
@@ -2533,6 +2597,10 @@ pub(crate) mod tests {
         let boundary = first.len();
         let mut unit = first;
         unit.extend_from_slice(&second);
+        // What `aggregate_datagrams` wraps the batch in — read off the helper
+        // rather than written as a literal, so a change to the envelope moves
+        // this test's expectations with it instead of reddening it.
+        let payload_at = crate::datagram_tests::frame_carrying(&[]).len();
 
         let all = aggregate_datagrams(&[(true, unit.clone())]);
         assert_eq!(all.records(), 2, "the walk must reach the second message");
@@ -2540,21 +2608,28 @@ pub(crate) mod tests {
         // ANTI-VACUITY: the boundary is a real number this test did not invent,
         // and the second message really does begin past the front.
         assert!(boundary > 0);
+        assert!(payload_at > 0, "the frame's own header is ahead of them");
 
         let at_front = aggregate_datagrams_where(&[(true, unit.clone())], "offset == 0");
         assert_eq!(
             at_front.selection(),
             Selection {
-                matched: 1,
-                rejected: 1,
+                matched: 0,
+                rejected: 2,
                 undecided: 0
             },
-            "one record is at the front of the unit and one is not"
+            "byte 0 of the unit is the Frame's header, so NO record begins there"
         );
-        assert!(at_front.row("batch/first").is_some());
+
+        let first_at = aggregate_datagrams_where(
+            &[(true, unit.clone())],
+            &alloc::format!("offset == {payload_at}"),
+        );
+        assert_eq!(first_at.selection().matched, 1);
+        assert!(first_at.row("batch/first").is_some());
         assert!(
-            at_front.row("batch/second").is_none(),
-            "the second message is not at offset zero"
+            first_at.row("batch/second").is_none(),
+            "the second message does not begin where the first does"
         );
 
         // THE DECISIVE LEG: the offset is the message's own BOUNDARY, not an
@@ -2566,8 +2641,10 @@ pub(crate) mod tests {
             0,
             "an ordinal would have matched here; a byte offset does not"
         );
-        let exact =
-            aggregate_datagrams_where(&[(true, unit)], &alloc::format!("offset == {boundary}"));
+        let exact = aggregate_datagrams_where(
+            &[(true, unit)],
+            &alloc::format!("offset == {}", payload_at + boundary),
+        );
         assert_eq!(exact.selection().matched, 1);
         assert!(
             exact.row("batch/second").is_some(),
@@ -2944,6 +3021,205 @@ pub(crate) mod tests {
         }
         let filter = crate::filter::Filter::parse(selector).expect("the selector must compile");
         aggregate_where(&d, &filter)
+    }
+
+    /// The same pipeline over RAW framing units — the bytes of a datagram
+    /// exactly as given, with no `Frame` wrapped around them.
+    ///
+    /// [`aggregate_datagrams_where`] beside it wraps every record in its own
+    /// `Frame` and so can only ever produce a unit whose first record sits at a
+    /// fixed distance from the front. A unit carrying a transport message
+    /// AHEAD of the frame is the shape that tells a payload coordinate apart
+    /// from a unit coordinate, and no helper here could build one.
+    fn dissect_units(units: &[(bool, Vec<u8>)]) -> Dissection {
+        let mut d = Dissection::new();
+        for (i, (from_low, unit)) in units.iter().enumerate() {
+            let pkt = if *from_low {
+                udp_packet(LOW, 43210, HIGH, 7447, unit)
+            } else {
+                udp_packet(HIGH, 7447, LOW, 43210, unit)
+            };
+            d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+        }
+        d
+    }
+
+    fn aggregate_units_where(units: &[(bool, Vec<u8>)], selector: &str) -> ThroughputTable {
+        let d = dissect_units(units);
+        let filter = crate::filter::Filter::parse(selector).expect("the selector must compile");
+        aggregate_where(&d, &filter)
+    }
+
+    /// R311y645 (§4.26 / §4.37) — THE THREE PLANES PLACE ONE RECORD AT ONE
+    /// BYTE.
+    ///
+    /// The `offset` term has been in the language since R311y641 and only the
+    /// throughput plane ever drove it. The other two build their own
+    /// [`RecordView`] and each wrote the coordinate by hand, so a plane left
+    /// behind by a change to the composition would keep answering with the old
+    /// number and nothing would say so — the failure R311y618 measured on the
+    /// selector's three planes and R311y639 measured on `payload_bytes`.
+    ///
+    /// One record, one capture, one selector, three planes. The record sits
+    /// behind a KeepAlive so the unit coordinate and the payload coordinate
+    /// differ; a plane still measuring from the front of the `Frame`'s payload
+    /// answers `no` here while the others answer `yes`.
+    #[test]
+    fn the_three_planes_place_one_record_at_one_byte() {
+        use crate::exchange::tests as fx;
+
+        // A `Request` carrying a Put: traffic under a keyexpr (the throughput
+        // plane), a payload to inspect (the payload plane) and the opening of
+        // an exchange (the exchange plane) all in ONE record, so the three
+        // answers are about the same bytes rather than about three fixtures.
+        let request = fx::request_put(7, fx::sender_space(0, Some("demo/topic")), b"{}");
+        let mut unit = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        unit.extend_from_slice(&crate::datagram_tests::frame_carrying(&request));
+        let front_of_record = unit.len() - request.len();
+        assert!(
+            front_of_record > 0,
+            "ANTI-VACUITY: the record must not begin at the front of the unit"
+        );
+
+        let d = dissect_units(&[
+            (true, unit),
+            (
+                false,
+                crate::datagram_tests::frame_carrying(&fx::response_final(7)),
+            ),
+        ]);
+        let at = crate::filter::Filter::parse(&alloc::format!("offset == {front_of_record}"))
+            .expect("parses");
+        // The coordinate a plane measuring from the payload would answer with.
+        let payload_relative = crate::filter::Filter::parse("offset == 0").expect("parses");
+
+        let throughput = aggregate_where(&d, &at);
+        assert_eq!(throughput.selection().matched, 1);
+        assert!(throughput.row("demo/topic").is_some());
+        assert_eq!(
+            aggregate_where(&d, &payload_relative).selection().matched,
+            0
+        );
+
+        let payloads = crate::payload::payloads_where(&d, &at);
+        assert_eq!(payloads.selection().matched, 1);
+        assert_eq!(payloads.payloads(), 1);
+        assert_eq!(
+            crate::payload::payloads_where(&d, &payload_relative)
+                .selection()
+                .matched,
+            0
+        );
+
+        let exchanges = crate::exchange::exchanges_where(&d, &at);
+        assert_eq!(exchanges.selection().matched, 1);
+        assert_eq!(exchanges.requests(), 1);
+        assert_eq!(
+            crate::exchange::exchanges_where(&d, &payload_relative)
+                .selection()
+                .matched,
+            0
+        );
+    }
+
+    /// R311y645 (§1.1n / §4.37) — THE DEFECT: `offset` says "within the
+    /// framing unit" and measures "within this `Frame`'s payload".
+    ///
+    /// The two coincide for every fixture this crate had, because every one of
+    /// them puts exactly one `Frame` at the front of its own datagram. They
+    /// come apart the moment a unit carries a transport message ahead of the
+    /// frame — the `[KeepAlive][Frame]` shape R311y631 taught this reader to
+    /// walk, and the one both reference implementations emit.
+    ///
+    /// What the reader loses is not precision, it is the meaning of the answer:
+    /// `offset == 0` reads as "at the front of the unit" and selects every
+    /// record that is merely first inside its own frame, however deep into the
+    /// unit that frame begins.
+    #[test]
+    fn a_records_offset_is_measured_from_the_front_of_the_unit() {
+        let record = push(sender_space(0, Some("behind/keepalive")), &[0u8; 4]);
+        let mut unit = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        unit.extend_from_slice(&crate::datagram_tests::frame_carrying(&record));
+
+        // ANTI-VACUITY: the record really does begin past the front, and the
+        // distance is read off the fixture rather than asserted as a literal.
+        let front_of_record = unit.len() - record.len();
+        assert_eq!(
+            front_of_record, 3,
+            "one KeepAlive byte, then the Frame's header and sn"
+        );
+
+        let at_front = aggregate_units_where(&[(true, unit.clone())], "offset == 0");
+        assert_eq!(
+            at_front.selection().matched,
+            0,
+            "byte 0 of this unit is the KeepAlive, and a KeepAlive is not a record"
+        );
+
+        let exact = aggregate_units_where(
+            &[(true, unit)],
+            &alloc::format!("offset == {front_of_record}"),
+        );
+        assert_eq!(exact.selection().matched, 1);
+        assert!(
+            exact.row("behind/keepalive").is_some(),
+            "and it is the record that begins there"
+        );
+    }
+
+    /// R311y645 (§4.38) — a record REASSEMBLED out of fragments has no offset
+    /// into the capture, and the term says so instead of reporting where the
+    /// reader's own join buffer put it.
+    ///
+    /// The record is real, it is counted, and its keyexpr resolves — this is not
+    /// a capture the plane failed to read. What does not exist is the
+    /// coordinate: its bytes arrived in two pieces at two unrelated places in
+    /// two different datagrams, so there is no single offset any of them begins
+    /// at. The old field answered `0` here, which is a byte a reader can point
+    /// at in a packet that never carried this record.
+    ///
+    /// THE CONTROL is the same record through the ordinary path, which decides
+    /// the same term. Without it a plane that had simply stopped answering
+    /// `offset` at all would satisfy every assertion here.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_reassembled_record_declines_the_offset_it_never_had() {
+        let record = push(sender_space(0, Some("split/across")), &[0u8; 8]);
+        let d = crate::datagram_tests::reassembled_record_dissection(&record);
+
+        // ANTI-VACUITY: the chain really did complete and the record really is
+        // in the table. A capture whose fragments never joined would leave the
+        // selector nothing to be undecided about.
+        let all = aggregate(&d);
+        assert_eq!(all.records(), 1, "the fragment chain must complete");
+        assert!(all.row("split/across").is_some());
+        assert!(
+            all.gaps().is_clean(),
+            "nothing was lost -- only the coordinate is absent: {:?}",
+            all.gaps()
+        );
+
+        // Any offset term at all, in either direction, is UNDECIDABLE. Two
+        // comparisons that cannot both be false, so a plane answering `no`
+        // rather than `unknown` fails one of them.
+        for selector in ["offset == 0", "offset >= 0"] {
+            let filtered = aggregate_where(&d, &Filter::parse(selector).expect("parses"));
+            assert_eq!(
+                filtered.selection(),
+                Selection {
+                    matched: 0,
+                    rejected: 0,
+                    undecided: 1
+                },
+                "{selector}: a reassembled record has no offset into the capture"
+            );
+            assert_eq!(filtered.rows().len(), 0);
+        }
+
+        // THE CONTROL: the same record, contiguous on the wire, decides both.
+        let control = aggregate_datagrams_where(&[(true, record)], "offset >= 0");
+        assert_eq!(control.selection().matched, 1);
+        assert!(control.selection().is_decisive());
     }
 
     /// The same pipeline, with the instant each record was CAPTURED at.

@@ -327,6 +327,42 @@ pub struct PassiveFrame {
     /// would silently change what every existing consumer of that anchor
     /// resolves.
     pub batch_index: usize,
+    /// R311y645 (§1.1n / §4.37) — byte offset of this transport message within
+    /// its framing unit, counted from zero.
+    ///
+    /// [`Self::batch_index`] beside it is the ORDINAL of the same message, and
+    /// the two come apart the moment a unit's messages differ in length: the
+    /// second message of every unit has ordinal `1` and a different offset in
+    /// each. R311y641 computed this coordinate at the record layer and
+    /// deliberately did NOT keep the transport one, because at that point
+    /// nothing consumed it and a second coordinate with no consumer is the
+    /// defect R311y639 closed elsewhere.
+    ///
+    /// What made it worth keeping is [`Self::batch_base`]: without this, a
+    /// record's offset can only be stated against the payload it happened to
+    /// sit in, and "at the front of the payload" was being read as "at the
+    /// front of the unit".
+    pub unit_offset: usize,
+    /// R311y645 (§1.1n / §4.37) — where the bytes behind [`Carried::Batch`]
+    /// begin within THIS MESSAGE, or `None` when those bytes were never on the
+    /// wire in that form.
+    ///
+    /// Message-relative and not unit-relative, so that each of these two fields
+    /// states ONE measured fact rather than a sum: this is the width of the
+    /// header, the sn and the ext chain ahead of the payload, and
+    /// [`Self::unit_offset`] is where the message itself stands. A consumer
+    /// wanting a record's place in the unit adds them (`wz-capture`'s
+    /// `agg::record_unit_offset` is that one door).
+    ///
+    /// `None` is not "this frame carried no batch". It is the honest answer for
+    /// the three cases where a wire coordinate does not survive: a message that
+    /// is not a `Frame` at all, a batch decompressed out of an lz4 body, and a
+    /// batch REASSEMBLED from the payloads of several fragments. The last two
+    /// produce a buffer that exists only inside this reader, so a record within
+    /// it has an offset into that buffer and NO offset into the capture —
+    /// handing out the buffer's offset is how a fabricated coordinate gets read
+    /// as a measured one.
+    pub batch_offset: Option<usize>,
     /// Width of the length prefix that framed it — recorded rather than
     /// recomputed, since the width can change between frames on the same
     /// stream.
@@ -1330,10 +1366,13 @@ impl PassiveSession {
             let sn_verdict = self.track_sn(direction, &frame);
             let carried = self.decode_carried(direction, &frame);
             let undefined_mandatory_ext = self.note_undefined_mandatory_ext(direction, &frame);
+            let batch_offset = self.batch_offset_of(&frame, consumed);
             out.push(PassiveFrame {
                 direction,
                 stream_offset: offset,
                 batch_index,
+                unit_offset: pos,
+                batch_offset,
                 undefined_mandatory_ext,
                 prefix_width,
                 frame,
@@ -1700,6 +1739,35 @@ impl PassiveSession {
             }
             _ => Carried::Nothing,
         }
+    }
+
+    /// R311y645 (§1.1n / §4.37) — where a `Frame`'s payload begins within the
+    /// message, when the bytes of that payload are the wire's own.
+    ///
+    /// The length is not re-derived from the layout: the payload is the
+    /// message's TAIL, so everything ahead of it — the header, the sn and the
+    /// Z-gated ext chain — is exactly the difference between what the decode
+    /// consumed and what it kept. A reader that re-walked the header instead
+    /// would be a second opinion on a length this walk already measured, and
+    /// the two could disagree.
+    ///
+    /// Answers `None` for a COMPRESSED session even though the offset would be
+    /// arithmetically available: what sits at that offset on the wire is an lz4
+    /// block, and the batch's records were walked out of the decompressed
+    /// bytes. Their offsets index a buffer this reader made.
+    #[cfg(feature = "codec-frame")]
+    fn batch_offset_of(
+        &self,
+        frame: &Result<InboundFrame, InboundParseError>,
+        consumed: usize,
+    ) -> Option<usize> {
+        let Ok(InboundFrame::Frame { payload, .. }) = frame else {
+            return None;
+        };
+        if self.context.compression_active() {
+            return None;
+        }
+        consumed.checked_sub(payload.len())
     }
 
     /// Decompress if the session negotiated it, then walk the batch.

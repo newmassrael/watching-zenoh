@@ -5480,7 +5480,9 @@ layer_c1bt_capture_no_default_features() {
         agg::tests::each_carrier_puts_three_distinct_records_on_the_wire \
         agg::tests::a_descriptor_slot_is_unsized_on_every_carrier_and_a_plain_one_is_measured \
         agg::tests::a_body_ext_sharing_the_markers_id_field_leaves_the_payload_measured \
-        agg::tests::a_bytes_term_over_a_descriptor_slot_is_undecided_rather_than_its_length
+        agg::tests::a_bytes_term_over_a_descriptor_slot_is_undecided_rather_than_its_length \
+        agg::tests::a_records_offset_is_measured_from_the_front_of_the_unit \
+        agg::tests::the_three_planes_place_one_record_at_one_byte
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the network-codecs build"
@@ -5516,11 +5518,31 @@ layer_c1bt_capture_no_default_features() {
 }
 
 layer_c1bn_passive_dissection_features() {
-    local out
+    # `name` is LOCAL on purpose: bash scopes dynamically, so a loop variable
+    # left global here overwrites `run_layer`'s own `local name` and the lane
+    # reports its pass under the name of the last test it pinned. C1bt beside it
+    # declares the same four for the same reason.
+    local out listing name
     (cd crates && cargo clippy -p wz-capture --all-targets --quiet -- -D warnings) || return 1
     out="$(cd crates && cargo test -p wz-capture --quiet 2>&1)" || { echo "$out"; return 1; }
     grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
         echo "  C1bn FAIL: wz-capture ran no tests"; echo "$out"; return 1; }
+
+    # R311y645 — the tests that need BOTH `reassembly` and `network-codecs`, so
+    # C1bt's arms cannot see them: its network arm has no reassembly and its
+    # default-off arm has neither. This is the only lane that builds the pair,
+    # which makes it the only place their names can be held down — and a name
+    # pin is what R311y636 showed to be a gate in its own right: a test hidden
+    # behind one more `#[cfg]` still leaves a green suite behind it.
+    listing="$(cd crates && cargo test -p wz-capture -- --list 2>/dev/null)" \
+        || { echo "  C1bn FAIL: the wz-capture --list did not run"; return 1; }
+    for name in \
+        agg::tests::a_reassembled_record_declines_the_offset_it_never_had \
+        report::tests::a_record_with_no_offset_in_the_capture_is_named_in_both_renderings
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1bn FAIL: $name is absent from the default build"; return 1; }
+    done
 
     out="$(cd crates && cargo test -p wz-session-core --features dissect-serde dissect:: --quiet 2>&1)" \
         || { echo "$out"; return 1; }
