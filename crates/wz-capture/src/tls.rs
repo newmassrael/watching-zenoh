@@ -560,10 +560,40 @@ pub struct EncryptedRecord {
     /// stream offset here, so a frame can be attributed to the record that
     /// carried it and through it to a real packet.
     pub stream_offset: usize,
+    /// R311y666 (§1.2a) — bytes this direction LOST between the previous kept
+    /// record and this one, from segments the capture never saw.
+    ///
+    /// ## Why a decryptor cannot do without it
+    ///
+    /// [`Self::index`] counts records this reader WALKED. The AEAD sequence
+    /// number counts records the SENDER protected. A record swallowed by a
+    /// dropped segment is never walked, so after a hole the two disagree by
+    /// exactly the number of lost records — and every later record is opened at
+    /// a nonce that was never used. Measured: a capture missing ONE record of
+    /// four opens the two before the hole and refuses everything after it, and
+    /// reports `RecordRefusedKeys`, which reads as "wrong key log" about a key
+    /// log that is perfect.
+    ///
+    /// How many records were lost cannot be read off the wire — their boundaries
+    /// went with them. But this number BOUNDS it: a TLS 1.3 protected record is
+    /// at least [`MIN_PROTECTED_RECORD`] bytes, so at most
+    /// `lost_before / MIN_PROTECTED_RECORD` of them fitted in the hole. A
+    /// decryptor can therefore search a bounded window and let the AEAD tag say
+    /// which offset is right, which is a 128-bit answer rather than a guess.
+    ///
+    /// `0` on every record of a direction the capture saw whole.
+    pub lost_before: u64,
     /// The record, header included, exactly as the wire carried it. The header
     /// is the AEAD's additional data.
     pub bytes: Vec<u8>,
 }
+
+/// R311y666 (§1.2a) — the smallest a TLS 1.3 protected record can be.
+///
+/// A 5-byte header, and a payload that must hold at least the inner content
+/// type (1 byte) and the AEAD tag (16 bytes for every suite RFC 8446 defines).
+/// Used to bound how many records a hole of a given size could have swallowed.
+pub const MIN_PROTECTED_RECORD: u64 = 5 + 1 + 16;
 
 /// R311y661 (§1.2a) — the plaintext of one opened record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -618,17 +648,18 @@ pub trait RecordOpener {
 
     /// Open one record of the flow most recently announced.
     ///
-    /// `record` is the WHOLE record, header included, because the header is the
-    /// AEAD's additional data. `index` is [`EncryptedRecord::index`] — the
-    /// record's position among the protected records of its direction, which is
-    /// the AEAD sequence number for as long as the keys have not rotated.
+    /// R311y666 — the whole [`EncryptedRecord`] rather than an index and a
+    /// slice. It carries the bytes (header included, because the header is the
+    /// AEAD's additional data), the index, and — the reason the signature
+    /// changed — [`EncryptedRecord::lost_before`], without which a decryptor
+    /// cannot tell a record whose sequence jumped from one whose key changed.
     ///
     /// `None` means this record did not open. It is not "no more records": the
     /// caller stops the direction and reports
     /// [`NotDecrypted::RecordRefusedKeys`] naming this index, because a gap in
     /// the middle of a byte stream cannot be skipped over — the bytes after it
     /// no longer begin where the reader thinks they do.
-    fn open(&mut self, direction: Direction, index: u64, record: &[u8]) -> Option<OpenedRecord>;
+    fn open(&mut self, direction: Direction, record: &EncryptedRecord) -> Option<OpenedRecord>;
 }
 
 impl core::fmt::Debug for EncryptedRecord {
@@ -707,6 +738,13 @@ pub struct TlsFlowState {
     pub(crate) outcome: Option<Option<NotDecrypted>>,
     /// R311y661 — records opened per direction by that pass.
     pub(crate) opened: [usize; 2],
+    /// R311y666 (§1.2a) — bytes lost since the last KEPT record of each
+    /// direction, waiting to be charged to the next one.
+    ///
+    /// Held here rather than applied at the gap because a hole is announced
+    /// between records: what it costs a decryptor is a jump in the sequence of
+    /// the NEXT record, and that record is where the fact has to arrive.
+    pub(crate) pending_gap_bytes: [u64; 2],
 }
 
 impl TlsFlowState {
@@ -769,6 +807,9 @@ impl TlsFlowState {
             self.kept[index].push(EncryptedRecord {
                 index: self.next_index[index],
                 stream_offset,
+                // R311y666 — charged to the FIRST record after the hole and to
+                // no other, which is where the sequence jump actually is.
+                lost_before: core::mem::take(&mut self.pending_gap_bytes[index]),
                 bytes,
             });
             self.next_index[index] += 1;
@@ -792,6 +833,13 @@ impl TlsFlowState {
         self.stream_at[index] = self.stream_at[index]
             .saturating_add(held)
             .saturating_add(bytes_missing as usize);
+        // R311y666 — and the loss is REMEMBERED for the next kept record. The
+        // held tail goes with it: those bytes were part of a record this reader
+        // will never complete, so whatever the hole did not swallow of it is
+        // lost the same way.
+        self.pending_gap_bytes[index] = self.pending_gap_bytes[index]
+            .saturating_add(bytes_missing)
+            .saturating_add(held as u64);
     }
 
     /// The per-direction census, `[A, B]`, with each direction's unwalked tail

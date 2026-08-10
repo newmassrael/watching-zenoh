@@ -22,7 +22,9 @@ use alloc::vec::Vec;
 
 extern crate alloc;
 
-use wz_capture::tls::{Direction, NotDecrypted, OpenedRecord, RecordOpener};
+use wz_capture::tls::{
+    Direction, EncryptedRecord, NotDecrypted, OpenedRecord, RecordOpener, MIN_PROTECTED_RECORD,
+};
 
 use crate::keylog::{KeyLog, SecretLabel, SecretsBlockError};
 use crate::{Suite, TrafficKeys};
@@ -152,7 +154,26 @@ struct DirectionState {
     at: usize,
     /// The record index at which the current epoch's sequence numbering starts.
     base: u64,
+    /// R311y666 (§1.2a) — records the capture LOST, discovered so far, which is
+    /// how far this reader's numbering lags the sender's sequence.
+    ///
+    /// A hole swallows records whole and they are never walked, so
+    /// `index - base` undercounts the sequence by exactly the number lost. The
+    /// figure is not read off the wire — the lost records' boundaries went with
+    /// them — it is found by trying, once, at the first record after each hole.
+    skew: u64,
 }
+
+/// R311y666 (§1.2a) — the most sequence offsets tried at one record after a
+/// hole.
+///
+/// The window is normally bounded by the hole's own size (see
+/// [`wz_capture::tls::EncryptedRecord::lost_before`]); this is the second bound,
+/// on the loss itself. A capture that dropped a megabyte would otherwise ask for
+/// tens of thousands of AEAD attempts on one record, and a reader that cannot
+/// resynchronise within this many is a reader whose remaining plaintext is not
+/// worth an unbounded search.
+const MAX_RESYNC_ATTEMPTS: u64 = 4096;
 
 impl DirectionState {
     /// Build from the secrets a key log carried for this direction, in epoch
@@ -169,15 +190,46 @@ impl DirectionState {
             epochs,
             at: 0,
             base: 0,
+            skew: 0,
         })
     }
 
-    /// Open one record, advancing the epoch when the current one refuses it and
-    /// the next one accepts it at sequence zero.
-    fn open(&mut self, index: u64, record: &[u8]) -> Option<OpenedRecord> {
+    /// Open one record, resynchronising after a hole and advancing the epoch
+    /// when the current one refuses and the next one accepts at sequence zero.
+    ///
+    /// ## The two ways a sequence can be wrong, and why they are answered in
+    /// this order
+    ///
+    /// A hole makes the number too SMALL by however many records it swallowed;
+    /// a key change makes it too LARGE, because the sender restarted at zero.
+    /// The hole is answered first and only where the capture says there was one,
+    /// so a record that simply refuses is never mistaken for a resynchronisation
+    /// problem — and the search is bounded by the hole's own byte count, which
+    /// is a measurement rather than a window someone picked.
+    fn open(&mut self, record: &EncryptedRecord) -> Option<OpenedRecord> {
+        // R311y666 — after a hole, find how far the numbering slipped. At most
+        // `lost_before / MIN_PROTECTED_RECORD` records fitted in it.
+        if record.lost_before > 0 {
+            let window = (record.lost_before / MIN_PROTECTED_RECORD).min(MAX_RESYNC_ATTEMPTS);
+            let from = (record.index - self.base) + self.skew;
+            for k in 0..=window {
+                if let Some(opened) = self.epochs[self.at].open(from + k, &record.bytes) {
+                    // Found, and by AUTHENTICATION rather than by inference: the
+                    // tag is a 128-bit check, so the offset that opens the record
+                    // is the offset. It holds for every later record of this
+                    // epoch, which is why it is accumulated rather than applied
+                    // once.
+                    self.skew += k;
+                    return Some(opened);
+                }
+            }
+            // Not recoverable within the window. Fall through: the record may
+            // still be the first of the NEXT epoch, whose sequence starts over
+            // and owes nothing to the hole.
+        }
         loop {
-            let base = self.base;
-            if let Some(opened) = self.epochs[self.at].open(index.saturating_sub(base), record) {
+            let seq = (record.index - self.base) + self.skew;
+            if let Some(opened) = self.epochs[self.at].open(seq, &record.bytes) {
                 return Some(opened);
             }
             // The current epoch refused. If there is a later one, this record is
@@ -187,7 +239,9 @@ impl DirectionState {
                 return None;
             }
             self.at += 1;
-            self.base = index;
+            self.base = record.index;
+            // A new epoch numbers from zero and has lost nothing YET.
+            self.skew = 0;
         }
     }
 }
@@ -270,8 +324,17 @@ impl RecordOpener for CaptureOpener {
         // order. A long-lived session rekeys, and each rekey is another epoch
         // whose sequence restarts at zero; the trial walks them in exactly the
         // order TLS enters them.
-        let epochs_of = |handshake: SecretLabel, server: bool| -> Vec<&[u8]> {
-            let mut out: Vec<&[u8]> = secrets.get(handshake).into_iter().collect();
+        // R311y666 — and the 0-RTT epoch in FRONT of the handshake one, for the
+        // client only. A resuming client sends application data under the early
+        // secret BEFORE the handshake epoch begins, so it is the first epoch its
+        // direction enters; a server never sends 0-RTT data and has no early
+        // secret at all.
+        let epochs_of = |early: Option<SecretLabel>, handshake: SecretLabel, server: bool| {
+            let mut out: Vec<&[u8]> = early
+                .and_then(|l| secrets.get(l))
+                .into_iter()
+                .chain(secrets.get(handshake))
+                .collect();
             out.extend(
                 secrets
                     .application_secrets(server)
@@ -280,8 +343,12 @@ impl RecordOpener for CaptureOpener {
             );
             out
         };
-        let client = epochs_of(SecretLabel::ClientHandshake, false);
-        let server = epochs_of(SecretLabel::ServerHandshake, true);
+        let client = epochs_of(
+            Some(SecretLabel::ClientEarly),
+            SecretLabel::ClientHandshake,
+            false,
+        );
+        let server = epochs_of(None, SecretLabel::ServerHandshake, true);
         if client.is_empty() && server.is_empty() {
             // The entry exists and carries nothing this crate can act on.
             return Err(NotDecrypted::NoKeyForSession);
@@ -295,12 +362,12 @@ impl RecordOpener for CaptureOpener {
         Ok(())
     }
 
-    fn open(&mut self, direction: Direction, index: u64, record: &[u8]) -> Option<OpenedRecord> {
+    fn open(&mut self, direction: Direction, record: &EncryptedRecord) -> Option<OpenedRecord> {
         let at = match direction {
             Direction::A => 0,
             Direction::B => 1,
         };
-        self.directions[at].as_mut()?.open(index, record)
+        self.directions[at].as_mut()?.open(record)
     }
 }
 

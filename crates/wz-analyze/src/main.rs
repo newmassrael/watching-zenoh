@@ -45,7 +45,12 @@ fn main() -> ExitCode {
         }
     };
 
-    let (rendered, outcome) = match analyze_with(&capture, keylog.as_deref(), options.format) {
+    let (rendered, outcome) = match analyze_with(
+        &capture,
+        keylog.as_deref(),
+        options.format,
+        options.per_flow,
+    ) {
         Ok(out) => out,
         Err(err) => {
             eprintln!("wz-analyze: {}: {err:?}", options.capture);

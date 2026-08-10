@@ -12,6 +12,12 @@
 # path by the permission layer, which a headless round cannot answer.
 /.round/
 crates/target/
+# R311y666 — and WITHOUT the trailing slash, because a build cache may be a
+# SYMLINK rather than a directory and `crates/target/` does not match one. This
+# tree's is (`crates/target -> ~/.buildcache/...`), and it reached the index of
+# a `git add -A crates` before this line existed: build output, and a
+# machine-local absolute path, in a committed file.
+crates/target
 vendor/sce/target/
 # R311be — deploy/mcu-qemu-demo is a standalone workspace
 # (cross-compile to thumbv7m-none-eabi); its target/ is build

@@ -46,6 +46,8 @@ pub struct Options {
     pub keylog: Option<String>,
     /// How to render.
     pub format: Format,
+    /// R311y666 (§1.2a) — list every flow, not just the capture-wide summary.
+    pub per_flow: bool,
 }
 
 /// Why a command line was not accepted.
@@ -88,6 +90,8 @@ OPTIONS:
     --keylog <file>   an NSS key log (SSLKEYLOGFILE) to decrypt TLS flows with.
                       Keys carried inside the capture's own Decryption Secrets
                       Blocks are used without this flag.
+    --flows           list every flow: endpoints, framing, messages decoded,
+                      and for an encrypted one whether its plaintext was read
     --json            render the report as JSON instead of text
     -h, --help        print this and exit
 ";
@@ -97,11 +101,13 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut capture: Option<String> = None;
     let mut keylog: Option<String> = None;
     let mut format = Format::Text;
+    let mut per_flow = false;
     let mut at = 0usize;
     while at < args.len() {
         let arg = &args[at];
         match arg.as_str() {
             "--json" => format = Format::Json,
+            "--flows" => per_flow = true,
             "--keylog" => {
                 at += 1;
                 keylog = Some(
@@ -127,6 +133,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
         capture: capture.ok_or(UsageError::NoCapture)?,
         keylog,
         format,
+        per_flow,
     })
 }
 
@@ -156,14 +163,20 @@ pub struct Outcome {
 /// test are the ordinary pair, and either may hold connections the other does
 /// not.
 pub fn analyze(capture: &[u8], keylog: Option<&[u8]>) -> Result<(String, Outcome), CaptureError> {
-    analyze_with(capture, keylog, Format::Text)
+    analyze_with(capture, keylog, Format::Text, false)
 }
 
 /// [`analyze`], rendering in the format given.
+///
+/// R311y666 — `per_flow` appends a line per flow. The capture-wide report is a
+/// SUMMARY, and a summary cannot answer "which connection"; a person looking at
+/// a capture with two peers in it and one undecrypted flow has no way, from the
+/// totals alone, to say which one it was.
 pub fn analyze_with(
     capture: &[u8],
     keylog: Option<&[u8]>,
     format: Format,
+    per_flow: bool,
 ) -> Result<(String, Outcome), CaptureError> {
     let mut dissection = Dissection::from_capture(capture)?;
 
@@ -193,11 +206,82 @@ pub fn analyze_with(
         key_log_connections,
         foreign_secrets_blocks: foreign,
     };
-    let rendered = match format {
+    let mut rendered = match format {
         Format::Text => report.to_text(),
         Format::Json => report.to_json(),
     };
+    if per_flow {
+        rendered.push_str(&flow_lines(&dissection, format));
+    }
     Ok((rendered, outcome))
+}
+
+/// R311y666 (§1.2a) — one line per flow.
+///
+/// Everything here is a fact the dissection already held and no rendering
+/// exposed: which endpoints, what the byte stream turned out to be, how many
+/// messages came out of it, and -- for an encrypted flow -- whether its
+/// plaintext was read and why not.
+fn flow_lines(d: &Dissection, format: Format) -> String {
+    let mut out = String::new();
+    if format == Format::Json {
+        out.push_str("\n{\"flows\":[");
+    } else {
+        out.push_str("\nflows:\n");
+    }
+    for (i, flow) in d.flows().iter().enumerate() {
+        let encrypted = flow.encrypted();
+        let framing = match flow.framing() {
+            wz_capture::Framing::Stream => "stream",
+            wz_capture::Framing::WebSocket { .. } => "websocket",
+            wz_capture::Framing::Encrypted(_) => "tls",
+            wz_capture::Framing::Undecided => "undecided",
+            wz_capture::Framing::OpeningLost => "opening-lost",
+        };
+        let state = match encrypted.as_ref().map(|e| e.not_decrypted) {
+            None => "-".to_string(),
+            Some(None) => "decrypted".to_string(),
+            Some(Some(reason)) => format!("{reason:?}"),
+        };
+        let key = &flow.flow;
+        if format == Format::Json {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                "{{\"low\":\"{}\",\"high\":\"{}\",\"framing\":\"{framing}\",\
+                 \"messages\":{},\"tls\":\"{state}\"}}",
+                endpoint(&key.low),
+                endpoint(&key.high),
+                flow.frames.len()
+            ));
+        } else {
+            out.push_str(&format!(
+                "  {} <-> {}  {framing:<12} {} message(s)  {state}\n",
+                endpoint(&key.low),
+                endpoint(&key.high),
+                flow.frames.len()
+            ));
+        }
+    }
+    if format == Format::Json {
+        out.push_str("]}");
+    }
+    out
+}
+
+/// An endpoint as `addr:port`, IPv4 dotted or IPv6 hex-grouped.
+fn endpoint(e: &wz_capture::link::Endpoint) -> String {
+    let addr = e.addr();
+    if addr.len() == 4 {
+        format!("{}.{}.{}.{}:{}", addr[0], addr[1], addr[2], addr[3], e.port)
+    } else {
+        let groups: Vec<String> = addr
+            .chunks(2)
+            .map(|c| format!("{:x}", u16::from_be_bytes([c[0], c[1]])))
+            .collect();
+        format!("[{}]:{}", groups.join(":"), e.port)
+    }
 }
 
 #[cfg(test)]
@@ -216,6 +300,7 @@ mod tests {
                 capture: "cap.pcapng".into(),
                 keylog: None,
                 format: Format::Text,
+                per_flow: false,
             })
         );
     }
@@ -223,11 +308,18 @@ mod tests {
     #[test]
     fn the_keylog_and_json_options_are_read() {
         assert_eq!(
-            parse(&args(&["--keylog", "keys.txt", "cap.pcapng", "--json"])),
+            parse(&args(&[
+                "--keylog",
+                "keys.txt",
+                "cap.pcapng",
+                "--json",
+                "--flows"
+            ])),
             Ok(Options {
                 capture: "cap.pcapng".into(),
                 keylog: Some("keys.txt".into()),
                 format: Format::Json,
+                per_flow: true,
             })
         );
     }

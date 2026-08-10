@@ -1720,6 +1720,12 @@ pub struct Dissection {
     /// nothing, and this one asks for a larger `max_flows` — advice about the
     /// wrong knob is worse than none, which is why they are not one field.
     evicted_chains: usize,
+    /// R311y666 (§1.2a) — transport messages decoded on flows the cap evicted.
+    ///
+    /// The carry `messages_decoded` needed and R311y665 knowingly shipped
+    /// without: a count read off the live table alone walks backwards on a live
+    /// tap, and a census of what this reader SAW must only ever go up.
+    evicted_messages: usize,
     /// R311y661 (§1.2a) — the Decryption Secrets Blocks the capture FILE
     /// carried, kept so a caller can build an opener out of the capture's own
     /// key material.
@@ -1764,6 +1770,7 @@ impl Default for Dissection {
             capture_origin_ms: None,
             abandoned_chains: 0,
             evicted_chains: 0,
+            evicted_messages: 0,
             decryption_secrets: Vec::new(),
         }
     }
@@ -2117,6 +2124,23 @@ impl Dissection {
         self.flows.iter().filter_map(|f| f.encrypted()).collect()
     }
 
+    /// R311y666 (§1.2a) — transport messages this reader decoded, over every
+    /// flow it HELD rather than every flow it still holds.
+    ///
+    /// The capture-wide question, and the one every summary must ask: the live
+    /// tables are what a reader LOOKS at, and a flow the cap evicted took its
+    /// decoded messages with it. Same shape as [`Self::encrypted_census`], and
+    /// added for the same reason R311y650 added that one.
+    pub fn decoded_messages(&self) -> usize {
+        self.evicted_messages
+            + self.flows.iter().map(|f| f.frames.len()).sum::<usize>()
+            + self
+                .datagram_flows
+                .iter()
+                .map(|f| f.frames.len())
+                .sum::<usize>()
+    }
+
     /// R311y661 (§1.2a) — the Decryption Secrets Blocks the capture file
     /// carried, in file order.
     ///
@@ -2191,7 +2215,7 @@ impl Dissection {
             for index in 0..2usize {
                 let direction = idx_direction(index);
                 for record in &state.kept[index] {
-                    match opener.open(direction, record.index, &record.bytes) {
+                    match opener.open(direction, record) {
                         Some(opened) => {
                             state.opened[index] += 1;
                             summary.records += 1;
@@ -2558,6 +2582,14 @@ impl Dissection {
             if let Some(e) = gone.encrypted() {
                 self.evicted_encrypted.add_flow(&e.per_direction);
             }
+            // R311y666 (§1.2a) — and the MESSAGES it decoded. R311y665 added
+            // `messages_decoded` reading the live table and said so in its own
+            // carry: without this the number walks BACKWARDS on a live tap every
+            // time the flow cap recycles a slot, which is the one direction a
+            // count of what this reader saw must never move. The sixth counter
+            // to need this carry, and the rule is the same every time: a flow is
+            // either live or counted here, never both.
+            self.evicted_messages += gone.frames.len();
             // R311y605 (F5) — carry the evicted flow's stream counters, or a
             // live tap's totals would silently reset every time the flow cap
             // recycled a slot.
@@ -8399,14 +8431,13 @@ mod tls_flow_tests {
         fn open(
             &mut self,
             direction: Direction,
-            index: u64,
-            record: &[u8],
+            record: &crate::tls::EncryptedRecord,
         ) -> Option<crate::tls::OpenedRecord> {
-            self.asked.push((direction, index));
-            if self.refuse[dir_index(direction)].contains(&index) {
+            self.asked.push((direction, record.index));
+            if self.refuse[dir_index(direction)].contains(&record.index) {
                 return None;
             }
-            let body = record.get(5..)?;
+            let body = record.bytes.get(5..)?;
             Some(crate::tls::OpenedRecord {
                 content_type: *body.first()?,
                 plaintext: body[1..].to_vec(),
@@ -8856,10 +8887,9 @@ mod tls_flow_tests {
             fn open(
                 &mut self,
                 _direction: Direction,
-                _index: u64,
-                record: &[u8],
+                record: &crate::tls::EncryptedRecord,
             ) -> Option<crate::tls::OpenedRecord> {
-                let body = record.get(5..)?;
+                let body = record.bytes.get(5..)?;
                 Some(crate::tls::OpenedRecord {
                     content_type: *body.first()?,
                     plaintext: body[1..].to_vec(),
@@ -8913,8 +8943,7 @@ mod tls_flow_tests {
             fn open(
                 &mut self,
                 _direction: Direction,
-                _index: u64,
-                _record: &[u8],
+                _record: &crate::tls::EncryptedRecord,
             ) -> Option<crate::tls::OpenedRecord> {
                 None
             }
@@ -8925,6 +8954,49 @@ mod tls_flow_tests {
             json.contains("\"reason\":\"mixed\""),
             "two flows refused for DIFFERENT causes: naming either one as the \
              capture's reason sends a reader to the wrong remedy: {json}"
+        );
+    }
+
+    /// R311y666 (§1.2a) — the decoded-message count does not walk backwards
+    /// when the flow cap recycles a slot.
+    ///
+    /// R311y665 added the count reading the live tables and named this in its
+    /// own carry rather than fixing it. It is the sixth counter to need the
+    /// same repair (R311y605 streams, R311y610 sessions, R311y650 the encrypted
+    /// census, R311y656 chains), and the argument has not changed: a census of
+    /// what this reader SAW may only ever go up. A live tap recycles slots
+    /// forever, so on one the number would fall as the capture went on -- and a
+    /// falling total reads as messages that were never there.
+    #[test]
+    fn the_decoded_message_count_survives_an_eviction() {
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows: Some(1),
+            ..DissectionLimits::default()
+        });
+        // A plaintext zenoh flow, so the messages are decoded without keys.
+        let mut unit = alloc::vec![0x02u8, 0x00];
+        unit.extend_from_slice(&[wz_session_core::wire_const::T_MID_KEEP_ALIVE, 0x00]);
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &unit));
+        d.finish();
+        let before = d.decoded_messages();
+        assert_eq!(before, 1, "the fixture must decode one message");
+
+        // A second 5-tuple, which the cap of one evicts the first for.
+        d.push_packet(LINKTYPE_ETHERNET, 1, &tcp_packet(2222, 7447, 1000, &unit));
+        d.finish();
+        assert_eq!(d.drops().flows, 1, "the fixture must have evicted");
+        assert_eq!(
+            d.decoded_messages(),
+            2,
+            "the evicted flow's message must still be counted -- reading the \
+             live table alone answers 1 here, which is FEWER than before the \
+             second flow arrived"
+        );
+        assert!(
+            crate::report::CaptureReport::of(&d)
+                .to_json()
+                .contains("\"messages_decoded\":2"),
+            "and the report must carry the same number"
         );
     }
 

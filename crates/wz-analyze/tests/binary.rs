@@ -363,3 +363,54 @@ fn an_unreadable_key_log_fails_instead_of_reporting_the_capture_as_encrypted() {
         "and no report may be printed: a report here would be believed"
     );
 }
+
+/// R311y666 (§1.2a) — `--flows` names WHICH connection, which a summary cannot.
+///
+/// The capture-wide report answers "how much of this capture was unreadable".
+/// With more than one peer in a file it cannot answer "which one" -- and that is
+/// the question a person looking at a capture actually has. Every fact printed
+/// here was already in the dissection and had no rendering at all.
+#[test]
+fn the_flows_option_names_which_connection_the_summary_cannot() {
+    let scratch = Scratch::new("per-flow");
+    let (file, log, _) = capture_and_key_log();
+    let capture = scratch.write("session.pcapng", &file);
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--keylog")
+        .arg(&keylog)
+        .arg("--flows")
+        .output()
+        .expect("runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("10.0.0.1:1111 <-> 10.0.0.2:7447"),
+        "the endpoints must be named: {stdout}"
+    );
+    assert!(
+        stdout.contains("tls") && stdout.contains("decrypted"),
+        "with what the stream turned out to be and whether it was read: {stdout}"
+    );
+    assert!(
+        stdout.contains("3 message(s)"),
+        "and how many messages came out of THIS flow: {stdout}"
+    );
+
+    // WITHOUT the flag the same run prints no flow rows, so the assertions
+    // above are about `--flows` and not about the summary having named them all
+    // along.
+    let plain = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--keylog")
+        .arg(&keylog)
+        .output()
+        .expect("runs");
+    let plain = String::from_utf8_lossy(&plain.stdout);
+    assert!(
+        !plain.contains("10.0.0.1:1111"),
+        "the summary must not have named endpoints all along: {plain}"
+    );
+}

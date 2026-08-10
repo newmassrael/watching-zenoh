@@ -50,6 +50,20 @@ pub type ClientRandom = [u8; 32];
 /// direction" cannot select it by spelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SecretLabel {
+    /// `CLIENT_EARLY_TRAFFIC_SECRET` — the client's 0-RTT records.
+    ///
+    /// R311y666 (§1.2a) — the FIRST epoch of a resumed connection, and one this
+    /// crate refused by name until now. A client resuming a session may send
+    /// application data immediately, protected under this secret, BEFORE the
+    /// handshake epoch begins; those records are `application_data` on the
+    /// outside like every other protected record, so `wz-capture` keeps and
+    /// numbers them, and a reader whose first epoch was the handshake opened
+    /// none of them.
+    ///
+    /// The client only: there is no server early secret. A server does not send
+    /// 0-RTT data, so the server direction's epochs begin at its handshake
+    /// secret and this variant never appears in them.
+    ClientEarly,
     /// `CLIENT_HANDSHAKE_TRAFFIC_SECRET` — the client's handshake records.
     ClientHandshake,
     /// `SERVER_HANDSHAKE_TRAFFIC_SECRET` — the server's handshake records.
@@ -78,6 +92,7 @@ impl SecretLabel {
     /// claiming to hold the key.
     pub fn from_label(label: &str) -> Option<Self> {
         match label {
+            "CLIENT_EARLY_TRAFFIC_SECRET" => return Some(Self::ClientEarly),
             "CLIENT_HANDSHAKE_TRAFFIC_SECRET" => return Some(Self::ClientHandshake),
             "SERVER_HANDSHAKE_TRAFFIC_SECRET" => return Some(Self::ServerHandshake),
             _ => {}
@@ -104,7 +119,7 @@ impl SecretLabel {
     /// The generation of an application secret, or `None` for a handshake one.
     pub fn generation(self) -> Option<u32> {
         match self {
-            Self::ClientHandshake | Self::ServerHandshake => None,
+            Self::ClientEarly | Self::ClientHandshake | Self::ServerHandshake => None,
             Self::ClientApplication(n) | Self::ServerApplication(n) => Some(n),
         }
     }
@@ -118,14 +133,11 @@ impl SecretLabel {
 /// the useful half of the answer — `CLIENT_RANDOM` means bring a TLS 1.2
 /// reader, and a later `_N` means bring key update support.
 fn is_keylog_label(label: &str) -> bool {
-    const KNOWN: [&str; 6] = [
-        "CLIENT_RANDOM",
-        "CLIENT_EARLY_TRAFFIC_SECRET",
-        "CLIENT_HANDSHAKE_TRAFFIC_SECRET",
-        "SERVER_HANDSHAKE_TRAFFIC_SECRET",
-        "EARLY_EXPORTER_SECRET",
-        "EXPORTER_SECRET",
-    ];
+    // R311y666 — `CLIENT_EARLY_TRAFFIC_SECRET` and the two handshake labels are
+    // no longer here: they are ACTIONABLE, so `SecretLabel::from_label` takes
+    // them first and they never reach this function. What is left is what this
+    // crate recognises and genuinely cannot use.
+    const KNOWN: [&str; 3] = ["CLIENT_RANDOM", "EARLY_EXPORTER_SECRET", "EXPORTER_SECRET"];
     if KNOWN.contains(&label) {
         return true;
     }

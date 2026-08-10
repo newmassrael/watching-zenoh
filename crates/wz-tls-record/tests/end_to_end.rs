@@ -881,3 +881,264 @@ fn a_session_that_rekeys_decrypts_past_the_update() {
         vec![0, 1]
     );
 }
+
+/// R311y666 (§1.2a) — a hole desynchronises the record numbering, and the
+/// reader RESYNCHRONISES instead of calling it a key problem.
+///
+/// ## The defect, measured before the fix
+///
+/// The AEAD sequence number counts records the SENDER protected. `wz-capture`
+/// numbers the records it WALKED, and a record swallowed by a dropped segment is
+/// never walked -- so after a hole every index is short by exactly the number of
+/// lost records, and every later record is opened at a nonce that was never
+/// used. Measured on this fixture before the fix: `records: 2` of 3, with the
+/// flow reporting `RecordRefusedKeys`, which reads as "wrong key log" about a
+/// key log that is perfect.
+///
+/// ## Why it is recoverable at all
+///
+/// How many records the hole swallowed cannot be read off the wire -- their
+/// boundaries went with them. But the hole's SIZE IN BYTES is known, and a TLS
+/// 1.3 protected record is at least `MIN_PROTECTED_RECORD` bytes, so the count
+/// is bounded. Within that bound the AEAD tag decides: an offset that opens the
+/// record is the offset, to 128 bits. The search is a measurement, not a guess.
+#[test]
+fn a_hole_desynchronises_the_numbering_and_the_reader_resynchronises() {
+    let secret = traffic_secret();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(13).wrapping_add(3));
+
+    let framed = || {
+        let u = vec![0x04u8];
+        let mut f = (u.len() as u16).to_le_bytes().to_vec();
+        f.extend_from_slice(&u);
+        f
+    };
+    let mut enc = sealer(&secret);
+    let sealed: Vec<Vec<u8>> = (0..5u8)
+        .map(|i| {
+            enc.encrypt(
+                OutboundPlainMessage {
+                    typ: rustls::ContentType::ApplicationData,
+                    version: rustls::ProtocolVersion::TLSv1_2,
+                    payload: rustls::crypto::cipher::OutboundChunks::Single(&framed()),
+                },
+                i as u64,
+            )
+            .expect("seal")
+            .encode()
+        })
+        .collect();
+
+    // Records 0 and 1, then a lost segment carrying record 2, then records 3
+    // and 4. TWO records after the hole, which is what makes the skew's
+    // ACCUMULATION testable: the second of them carries no loss of its own and
+    // can only open if the offset found at the first one was kept.
+    let mut first = client_hello(&random);
+    first.extend_from_slice(&sealed[0]);
+    first.extend_from_slice(&sealed[1]);
+    let lost = sealed[2].len() as u32;
+    let mut after = sealed[3].clone();
+    after.extend_from_slice(&sealed[4]);
+
+    let mut d = wz_capture::Dissection::new();
+    d.set_gap_patience(Some(4));
+    d.push_packet(
+        wz_capture::link::LINKTYPE_ETHERNET,
+        0,
+        &tcp_packet(1000, &first),
+    );
+    d.push_packet(
+        wz_capture::link::LINKTYPE_ETHERNET,
+        1,
+        &tcp_packet(1000 + first.len() as u32 + lost, &after),
+    );
+    d.finish();
+
+    let flow = &d.encrypted_flows()[0];
+    let indices: Vec<u64> = flow.kept_records[0].iter().map(|r| r.index).collect();
+    assert_eq!(
+        indices,
+        vec![0, 1, 2, 3],
+        "the reader numbers what it WALKED, so the sender's records 3 and 4 are \
+         numbered 2 and 3 -- this is the desynchronisation, and it is not a bug \
+         in the numbering: the lost record is genuinely not there"
+    );
+    let losses: Vec<u64> = flow.kept_records[0].iter().map(|r| r.lost_before).collect();
+    assert_eq!(
+        losses,
+        vec![0, 0, lost as u64, 0],
+        "and the loss is charged to the FIRST record after the hole and to no \
+         other, because that is where the sequence jumps"
+    );
+
+    let log_text = format!(
+        "CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+        hex(&random),
+        hex(&secret)
+    );
+    let mut opener = CaptureOpener::new(
+        KeyLog::from_secrets_block(SECRETS_TYPE_TLS_KEY_LOG, log_text.as_bytes())
+            .expect("a key log"),
+    );
+    let summary = d.decrypt_with(&mut opener);
+
+    assert_eq!(
+        summary.records, 4,
+        "ALL FOUR kept records must open: two before the hole and two after it, \
+         the pair after it at a sequence this reader recovered: {summary:?}"
+    );
+    assert_eq!(
+        summary.frames, 4,
+        "and the zenoh messages come out of all of them"
+    );
+    assert_eq!(
+        d.encrypted_flows()[0].not_decrypted,
+        None,
+        "the flow is fully decrypted -- a hole cost this capture ONE record, \
+         not every record after it"
+    );
+}
+
+/// R311y666 (§1.2a) — a RESUMED session's 0-RTT data decrypts, and it is the
+/// epoch that comes FIRST.
+///
+/// A client resuming a session may send application data immediately, under
+/// `CLIENT_EARLY_TRAFFIC_SECRET`, before the handshake epoch exists. Those
+/// records read `application_data` on the outside like every other protected
+/// record, so `wz-capture` keeps and numbers them -- and a reader whose first
+/// epoch was the handshake secret opened NONE of them, because the trial only
+/// ever moves forward.
+///
+/// R311y659 refused this label by name. That was right while nothing could act
+/// on it and became a silence the moment the epoch machinery existed.
+#[test]
+fn a_resumed_sessions_early_data_decrypts_as_the_first_epoch() {
+    let early_secret: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(19).wrapping_add(7))
+        .collect();
+    let handshake_secret: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(23).wrapping_add(11))
+        .collect();
+    let application_secret = traffic_secret();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(29).wrapping_add(13));
+
+    let framed = || {
+        let u = vec![0x04u8];
+        let mut f = (u.len() as u16).to_le_bytes().to_vec();
+        f.extend_from_slice(&u);
+        f
+    };
+
+    let mut stream = client_hello(&random);
+    // THE 0-RTT DATA, before anything else is protected.
+    let mut early = sealer(&early_secret);
+    for seq in 0..2u64 {
+        stream.extend_from_slice(
+            &early
+                .encrypt(
+                    OutboundPlainMessage {
+                        typ: rustls::ContentType::ApplicationData,
+                        version: rustls::ProtocolVersion::TLSv1_2,
+                        payload: rustls::crypto::cipher::OutboundChunks::Single(&framed()),
+                    },
+                    seq,
+                )
+                .expect("seal")
+                .encode(),
+        );
+    }
+    // Then the handshake epoch, then the session.
+    let mut hs = sealer(&handshake_secret);
+    stream.extend_from_slice(
+        &hs.encrypt(
+            OutboundPlainMessage {
+                typ: rustls::ContentType::Handshake,
+                version: rustls::ProtocolVersion::TLSv1_2,
+                payload: rustls::crypto::cipher::OutboundChunks::Single(
+                    b"\x14\x00\x00\x02\x00\x00",
+                ),
+            },
+            0,
+        )
+        .expect("seal")
+        .encode(),
+    );
+    let mut app = sealer(&application_secret);
+    stream.extend_from_slice(
+        &app.encrypt(
+            OutboundPlainMessage {
+                typ: rustls::ContentType::ApplicationData,
+                version: rustls::ProtocolVersion::TLSv1_2,
+                payload: rustls::crypto::cipher::OutboundChunks::Single(&framed()),
+            },
+            0,
+        )
+        .expect("seal")
+        .encode(),
+    );
+
+    let packet = tcp_packet(1000, &stream);
+    let mut file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &packet)],
+    );
+    let log_text = format!(
+        "CLIENT_EARLY_TRAFFIC_SECRET {} {}\n\
+         CLIENT_HANDSHAKE_TRAFFIC_SECRET {} {}\n\
+         CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+        hex(&random),
+        hex(&early_secret),
+        hex(&random),
+        hex(&handshake_secret),
+        hex(&random),
+        hex(&application_secret)
+    );
+    file.extend_from_slice(&decryption_secrets_block(
+        SECRETS_TYPE_TLS_KEY_LOG,
+        log_text.as_bytes(),
+    ));
+
+    let mut d = wz_capture::Dissection::from_pcapng(&file).expect("the file parses");
+    assert_eq!(d.encrypted_flows()[0].kept_records[0].len(), 4);
+
+    let (mut opener, _) = CaptureOpener::from_secrets_blocks(d.decryption_secrets());
+    assert!(
+        opener.log().refused().is_empty(),
+        "the early secret must no longer be refused by name: {:?}",
+        opener.log().refused()
+    );
+    let summary = d.decrypt_with(&mut opener);
+
+    assert_eq!(
+        summary.records, 4,
+        "two 0-RTT records, one handshake record and one session record: \
+         {summary:?}"
+    );
+    assert_eq!(
+        summary.frames, 3,
+        "and the zenoh messages are the two early ones AND the session one -- \
+         0-RTT data IS application data, which is the whole point of it"
+    );
+    assert_eq!(d.encrypted_flows()[0].not_decrypted, None);
+}
+
+/// R311y666 — and the SERVER has no early epoch, which is not an omission.
+///
+/// A server never sends 0-RTT data, so there is no `SERVER_EARLY_TRAFFIC_SECRET`
+/// in the format at all. Giving that direction an early epoch would put a secret
+/// in front of its handshake one that no record can ever match, and the trial
+/// would spend its first attempt there on every server record.
+#[test]
+fn the_server_direction_has_no_early_epoch() {
+    use wz_tls_record::keylog::SecretLabel;
+    assert_eq!(
+        SecretLabel::from_label("CLIENT_EARLY_TRAFFIC_SECRET"),
+        Some(SecretLabel::ClientEarly)
+    );
+    assert_eq!(
+        SecretLabel::from_label("SERVER_EARLY_TRAFFIC_SECRET"),
+        None,
+        "there is no such label, and inventing one would give the server \
+         direction an epoch no record can ever be in"
+    );
+}

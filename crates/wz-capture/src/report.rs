@@ -816,15 +816,14 @@ impl<'a> CaptureReport<'a> {
 /// and what a decrypted TLS flow in this workspace's own tests is -- reported
 /// zero while three messages sat in the rows.
 ///
-/// Over the LIVE table and not a census, and stated rather than hidden: an
-/// evicted flow's decoded messages left with it, exactly as its chains and its
-/// sequence accounting did. `drops.flows` is what says a flow left.
+/// R311y666 — over every flow the capture HELD, not every flow it still holds.
+/// R311y665 shipped this reading the live tables and named the consequence in
+/// its own carry: on a live tap the number walked BACKWARDS every time the flow
+/// cap recycled a slot. `Dissection::decoded_messages` carries the evicted
+/// flows' share, which is the same repair R311y650 made to the encrypted
+/// census and R311y605/y610 made to the stream and session tallies.
 fn decoded_messages(d: &crate::Dissection) -> usize {
-    d.flows().iter().map(|f| f.frames.len()).sum::<usize>()
-        + d.datagram_flows()
-            .iter()
-            .map(|f| f.frames.len())
-            .sum::<usize>()
+    d.decoded_messages()
 }
 
 /// R311y661 (§1.2a) — the wire name of one undecrypted-flow reason.
