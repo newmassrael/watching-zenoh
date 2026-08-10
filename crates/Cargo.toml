@@ -36,6 +36,12 @@ members = [
     # oracle. Kept out of `wz-capture` because that crate's zero-third-party
     # rule is load-bearing for the MCU profiles that build it.
     "wz-tls-record",
+    # R311y664 (§1.2a) — the analyzer's command line, and the COMPOSITION ROOT
+    # where `wz-capture` and `wz-tls-record` meet in a shipped artifact.
+    # Measured before it was written: `Dissection::from_pcapng` had two callers
+    # in the whole workspace, a test and the C ABI, so every finding this track
+    # added was reachable only by writing Rust.
+    "wz-analyze",
     # §5.27 api-compat-pico — zenoh-pico-compatible C ABI (cdylib+rlib)
     # wrapping the wz AP tokio Session. Reverse of the *-sys crates
     # (which BIND to C); this crate EXPORTS a C ABI. AP/std-only.

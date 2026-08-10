@@ -111,7 +111,29 @@ impl<'a> CaptureReport<'a> {
         // cap evicted is a flow this reader could not decrypt just the same, and
         // reading the verdict off `encrypted_flows()` made the answer depend on
         // whether the flow was still in the table when the caller asked.
-        if self.dissection.encrypted_census().flows > 0 {
+        //
+        // R311y664 (§1.2a) — and it asks whether they were OPENED. Until this
+        // round any encrypted flow made the capture incomplete, which was right
+        // while nothing could decrypt one: the rows were a floor because the
+        // session was unreadable. A flow whose every kept record opened is not a
+        // shortfall in the rows — its messages ARE the rows — and reporting the
+        // capture as incomplete would tell a reader to go looking for traffic
+        // that is already in front of them.
+        //
+        // The census stays the population (R311y650: an evicted flow is one this
+        // reader could not open, and reading the verdict off the live table made
+        // the answer depend on whether the flow was still in it). What is
+        // subtracted is the live flows a decryption pass fully opened, which are
+        // by construction still in the table -- a flow that left it took its
+        // plaintext with it.
+        let enc = self.dissection.encrypted_census().flows;
+        let opened = self
+            .dissection
+            .encrypted_flows()
+            .iter()
+            .filter(|f| f.not_decrypted.is_none())
+            .count();
+        if enc > opened {
             return false;
         }
         // R311y624 (§1.1m) — the FRAMING witnesses reach the verdict, and until
@@ -472,14 +494,45 @@ impl<'a> CaptureReport<'a> {
         // person reading a capture whose encrypted flow was evicted was shown a
         // dropped-flow count and no hint that the traffic was TLS, which is the
         // idle-looking capture this line exists to prevent.
+        //
+        // R311y664 (§1.2a) — and it says WHICH of the two happened. R311y661
+        // made the JSON's `decrypted` a fact and left this line stating
+        // "NOT DECRYPTED (no keys supplied)" unconditionally, so the two
+        // renderings of one report disagreed about the same capture — and this
+        // is the one a person reads. Found by running the binary R311y664 added:
+        // the JSON said `"decrypted":true` and the text said the session could
+        // not be seen into, about the same file, in the same run.
         let enc = d.encrypted_census();
         if enc.flows > 0 {
+            let live = d.encrypted_flows();
+            let opened = live.iter().filter(|f| f.not_decrypted.is_none()).count();
+            let records: usize = live
+                .iter()
+                .map(|f| f.decrypted_records[0] + f.decrypted_records[1])
+                .sum();
             s.push_str(&format!(
                 "  {} flow(s) carry zenoh inside TLS: {} record(s), {} byte(s) of \
-                 application data. NOT DECRYPTED (no keys supplied) -- the \
-                 session is there and this report cannot see into it\n",
+                 application data.",
                 enc.flows, enc.census.records, enc.census.application_bytes
             ));
+            if opened == 0 {
+                s.push_str(
+                    " NOT DECRYPTED -- the session is there and this report \
+                     cannot see into it",
+                );
+            } else {
+                s.push_str(&format!(
+                    " DECRYPTED: {opened} flow(s), {records} record(s) opened; \
+                     their messages are in the rows above"
+                ));
+                if opened < live.len() {
+                    s.push_str(&format!(" ({} flow(s) were not)", live.len() - opened));
+                }
+            }
+            if let Some(reason) = live.iter().find_map(|f| f.not_decrypted) {
+                s.push_str(&format!(" [{}]", decryption_reason(reason)));
+            }
+            s.push('\n');
         }
         // R311y654 (§1.1f) — and the bound this reader applied to ITSELF, which
         // no other line here reports. Every other qualifier names something the

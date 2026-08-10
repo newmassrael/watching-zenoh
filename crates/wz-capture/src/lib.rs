@@ -7538,10 +7538,12 @@ mod tls_flow_tests {
         // silence dangerous rather than merely unhelpful.
         let report = crate::report::CaptureReport::of(&d);
         assert!(!report.is_complete(), "{}", report.to_text());
+        // R311y664 — the reason moved into a bracketed tag so the sentence can
+        // also state the OPPOSITE outcome. It is still the reason, and a
+        // keyless dissection still names it.
         assert!(
-            report
-                .to_text()
-                .contains("NOT DECRYPTED (no keys supplied)"),
+            report.to_text().contains("NOT DECRYPTED")
+                && report.to_text().contains("[no_keys_supplied]"),
             "the text must say why: {}",
             report.to_text()
         );
@@ -8147,8 +8149,13 @@ mod tls_flow_tests {
             "a census of what this reader COULD NOT see must never walk backwards"
         );
         let rep = crate::report::CaptureReport::of(&d);
+        // R311y664 — and here the reason TAG is absent, which is a real
+        // difference and not a gap in the assertion: this flow was EVICTED, so
+        // it is in the census and not in the live table, and a per-flow reason
+        // is exactly what eviction takes with it. The finding survives, which is
+        // what R311y650 added this line for.
         assert!(
-            rep.to_text().contains("NOT DECRYPTED (no keys supplied)"),
+            rep.to_text().contains("NOT DECRYPTED"),
             "the person reading this capture is otherwise told only that a flow \
              was dropped: {}",
             rep.to_text()

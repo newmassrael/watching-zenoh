@@ -230,6 +230,18 @@ impl CaptureOpener {
     pub fn log(&self) -> &KeyLog {
         &self.log
     }
+
+    /// R311y664 (§1.2a) — fold another key log in, for the ordinary case where
+    /// the keys arrive in a SEPARATE file from the capture.
+    ///
+    /// A capture written by one tool and an `SSLKEYLOGFILE` written by the
+    /// process under test is the usual pair; keys embedded in the capture's own
+    /// Decryption Secrets Blocks are the rarer arrangement. Merged rather than
+    /// preferred either way, because either source may hold connections the
+    /// other does not.
+    pub fn absorb(&mut self, log: KeyLog) {
+        self.log.absorb(log);
+    }
 }
 
 impl RecordOpener for CaptureOpener {

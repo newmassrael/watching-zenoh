@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-analyze — R311y664 (§1.2a), the analyzer's COMMAND LINE.
+#
+# Measured before it was written: nothing in this workspace called
+# `Dissection::from_pcapng` outside a test and the C ABI. The dissector, the
+# report, the TLS recogniser and the decryptor were all reachable only by
+# writing Rust, so "the analyzer" was a library that no one could run.
+#
+# This crate is the COMPOSITION ROOT and that is why it is a crate of its own:
+# it is the only place `wz-capture` (zero third-party dependencies, builds for
+# the MCU profiles) and `wz-tls-record` (ring) meet in a shipped artifact.
+# Putting a `main` in either would have given that crate the other's dependency
+# graph, which is the constraint R311y661 inverted the seam to avoid.
+[package]
+name = "wz-analyze"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+publish = false
+
+[[bin]]
+name = "wz-analyze"
+path = "src/main.rs"
+
+[dependencies]
+wz-capture = { path = "../wz-capture" }
+wz-tls-record = { path = "../wz-tls-record" }
+
+[dev-dependencies]
+# THE ORACLE, and never a dependency -- the same role it plays for
+# `wz-tls-record`. The binary's own test needs a capture that genuinely
+# decrypts, which means records genuinely sealed by an implementation that is
+# not this workspace's.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
