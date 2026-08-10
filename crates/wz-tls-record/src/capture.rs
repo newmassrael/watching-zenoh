@@ -63,6 +63,15 @@ pub struct CaptureOpener {
     /// figure read off the live state answers about whichever flow happened to be
     /// last.
     retired: [EpochWitness; 2],
+    /// R311y672 (§1.2a) — direction `i` owes the peer a `KeyUpdate`.
+    ///
+    /// The obligation is the whole reason the `request_update` byte is worth
+    /// reading: RFC 8446 §4.6.3 says a party receiving `update_requested` MUST
+    /// send its own `KeyUpdate` in reply. That is the ONE fact in this protocol
+    /// that crosses the two directions, and it therefore cannot live in
+    /// [`DirectionState`] — which is why until this round the byte was skipped
+    /// and each direction counted only its own messages.
+    owed: [bool; 2],
 }
 
 /// R311y662 (§1.2a) — one EPOCH of one direction: the secret in force between
@@ -183,6 +192,20 @@ struct DirectionState {
     /// and reads right past. A boundary that can be confirmed and is not is a
     /// boundary asserted on a probability.
     pending_key_update: bool,
+    /// R311y672 (§1.2a) — the index of the first APPLICATION epoch, which is the
+    /// line between boundaries TLS announces and boundaries it does not.
+    ///
+    /// Every boundary at or below this index is one the protocol crosses in
+    /// silence: 0-RTT to handshake, and handshake to the first application
+    /// generation, are both ended by a `Finished` that is itself encrypted under
+    /// the OLD key, so no `KeyUpdate` exists to confirm them and none ever will.
+    /// Every boundary ABOVE it is a rekey, and RFC 8446 §4.6.3 says a rekey is
+    /// announced — so an unconfirmed one there is a different fact entirely.
+    ///
+    /// Derived from what SURVIVED [`EpochState::new`] rather than from the label
+    /// list, because a secret of an unusable width is dropped and would otherwise
+    /// shift every index below it.
+    first_application_epoch: usize,
 }
 
 /// R311y671 (§1.2a) — one direction's epoch changes, observed against inferred.
@@ -206,7 +229,33 @@ struct DirectionState {
 pub struct EpochWitness {
     /// Post-handshake `KeyUpdate` messages read on this direction.
     pub key_updates: usize,
+    /// R311y672 — of those, the ones carrying `update_requested`.
+    ///
+    /// RFC 8446 §4.6.3 gives `KeyUpdate` a one-byte body, and that byte is an
+    /// instruction to the PEER: `update_requested` (1) obliges the other side to
+    /// send its own `KeyUpdate` in reply, `update_not_requested` (0) does not.
+    /// Until this round the byte was not read at all, so a message demanding a
+    /// reply and a message merely announcing were the same number.
+    pub updates_requested: usize,
+    /// R311y672 — `KeyUpdate`s on this direction that discharged an outstanding
+    /// `update_requested` from the peer.
+    ///
+    /// The only cross-direction fact this protocol offers. An advance on THIS
+    /// direction backed by such a message is confirmed twice over: by its own
+    /// announcement, and by the peer's demand that it happen.
+    pub updates_answering: usize,
+    /// R311y672 — `update_requested` messages sent on the OTHER direction that
+    /// this one never answered, at the point the flow ended.
+    ///
+    /// A peer that ignores the obligation, or -- far likelier -- a capture that
+    /// ended before the reply. Either way it is the reason an expected advance on
+    /// this direction is absent, and nothing else in the report says so.
+    pub requests_unanswered: usize,
     /// Epoch advances the trial made.
+    ///
+    /// Always the sum of [`Self::advances_confirmed`],
+    /// [`Self::advances_unannounced`] and [`Self::advances_unwitnessed`]: every
+    /// advance is classified into exactly one of the three.
     pub epoch_advances: usize,
     /// Advances that had an unconsumed `KeyUpdate` behind them.
     ///
@@ -217,6 +266,22 @@ pub struct EpochWitness {
     /// capture that begins mid-session missed the announcement) but IS a fact a
     /// reader weighing the decryption should have.
     pub advances_confirmed: usize,
+    /// R311y672 — unconfirmed advances across a boundary TLS NEVER announces.
+    ///
+    /// 0-RTT to handshake, and handshake to the first application generation.
+    /// Both are ended by an encrypted `Finished` rather than by a `KeyUpdate`, so
+    /// no announcement exists to find. Expected, harmless, and the ordinary shape
+    /// of any capture taken from the start of a connection.
+    pub advances_unannounced: usize,
+    /// R311y672 — unconfirmed advances across a boundary TLS DOES announce.
+    ///
+    /// A rekey with no `KeyUpdate` behind it. Every one of these is either a
+    /// capture that began mid-session (the announcement went past before the tap
+    /// started), a capture with a hole over the announcing record, or a boundary
+    /// the trial reached on a 128-bit coincidence. **This is the number worth
+    /// looking at**, and until this round it was summed with the harmless kind
+    /// above into a single "unconfirmed" figure that could not tell them apart.
+    pub advances_unwitnessed: usize,
 }
 
 impl EpochWitness {
@@ -225,14 +290,86 @@ impl EpochWitness {
     fn plus(self, other: Self) -> Self {
         Self {
             key_updates: self.key_updates + other.key_updates,
+            updates_requested: self.updates_requested + other.updates_requested,
+            updates_answering: self.updates_answering + other.updates_answering,
+            requests_unanswered: self.requests_unanswered + other.requests_unanswered,
             epoch_advances: self.epoch_advances + other.epoch_advances,
             advances_confirmed: self.advances_confirmed + other.advances_confirmed,
+            advances_unannounced: self.advances_unannounced + other.advances_unannounced,
+            advances_unwitnessed: self.advances_unwitnessed + other.advances_unwitnessed,
         }
     }
 }
 
 /// The handshake message type of a post-handshake `KeyUpdate` (RFC 8446 §4.6.3).
 const HS_KEY_UPDATE: u8 = 24;
+
+/// The `KeyUpdateRequest` value obliging the peer to rekey (RFC 8446 §4.6.3).
+const KEY_UPDATE_REQUESTED: u8 = 1;
+
+/// A `KeyUpdate` body is exactly one byte wide (RFC 8446 §4.6.3).
+const KEY_UPDATE_BODY_LEN: usize = 1;
+
+/// The fixed header of a TLS handshake message: one type byte, then a `uint24`
+/// body length (RFC 8446 §4).
+const HS_HEADER_LEN: usize = 4;
+
+/// R311y672 (§1.2a) — the `KeyUpdate` messages in one decrypted `handshake`
+/// record.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct KeyUpdateScan {
+    /// Well-formed `KeyUpdate` messages found.
+    seen: usize,
+    /// Of those, ones carrying `update_requested`.
+    requested: usize,
+}
+
+/// Walk the handshake messages of one decrypted record and report its
+/// `KeyUpdate`s.
+///
+/// # Why this is a walk and not a look at the first byte
+///
+/// R311y671 tested `plaintext.first() == Some(&HS_KEY_UPDATE)`, which is two
+/// claims at once and both are wrong at the edges. A handshake record may carry
+/// SEVERAL messages back to back, and post-handshake the common pair is a
+/// `NewSessionTicket` followed by something else — so a `KeyUpdate` that is not
+/// first was invisible. In the other direction, any record whose first plaintext
+/// byte happened to be 24 was counted as a `KeyUpdate` without the length ever
+/// being checked, so a malformed or truncated message confirmed an epoch
+/// boundary it never announced.
+///
+/// The walk answers both by reading the framing the RFC actually specifies, and
+/// stops at the first message whose declared body runs past the record. That tail
+/// is not a defect to report: a handshake message may be FRAGMENTED across
+/// records, and this crate does not reassemble them — a limit worth naming
+/// (a `KeyUpdate` is 5 bytes and is never split in practice, but a large
+/// `NewSessionTicket` in front of one may be).
+fn scan_key_updates(plaintext: &[u8]) -> KeyUpdateScan {
+    let mut scan = KeyUpdateScan::default();
+    let mut at = 0usize;
+    while at + HS_HEADER_LEN <= plaintext.len() {
+        let msg_type = plaintext[at];
+        let len = u32::from_be_bytes([0, plaintext[at + 1], plaintext[at + 2], plaintext[at + 3]])
+            as usize;
+        let body = at + HS_HEADER_LEN;
+        let Some(end) = body.checked_add(len) else {
+            break;
+        };
+        if end > plaintext.len() {
+            // Fragmented or truncated: the rest of this message is in another
+            // record this walk does not have.
+            break;
+        }
+        if msg_type == HS_KEY_UPDATE && len == KEY_UPDATE_BODY_LEN {
+            scan.seen += 1;
+            if plaintext[body] == KEY_UPDATE_REQUESTED {
+                scan.requested += 1;
+            }
+        }
+        at = end;
+    }
+    scan
+}
 
 /// R311y666 (§1.2a) — the most sequence offsets tried at one record after a
 /// hole.
@@ -248,15 +385,32 @@ const MAX_RESYNC_ATTEMPTS: u64 = 4096;
 impl DirectionState {
     /// Build from the secrets a key log carried for this direction, in epoch
     /// order. `None` when none of them names a TLS 1.3 hash width.
-    fn new(secrets: &[&[u8]]) -> Option<Self> {
-        let epochs: Vec<EpochState> = secrets
-            .iter()
-            .filter_map(|s| EpochState::new(s.to_vec()))
-            .collect();
+    ///
+    /// R311y672 — each secret arrives PAIRED with whether it is an application
+    /// generation, because [`Self::first_application_epoch`] cannot be recovered
+    /// afterwards: a secret of an unusable width is dropped here, and counting
+    /// labels instead of survivors would put the line one index off in exactly
+    /// the case the drop happened.
+    fn new(secrets: &[(&[u8], bool)]) -> Option<Self> {
+        let mut epochs: Vec<EpochState> = Vec::new();
+        let mut first_application = None;
+        for (secret, is_application) in secrets {
+            let Some(epoch) = EpochState::new(secret.to_vec()) else {
+                continue;
+            };
+            if *is_application && first_application.is_none() {
+                first_application = Some(epochs.len());
+            }
+            epochs.push(epoch);
+        }
         if epochs.is_empty() {
             return None;
         }
         Some(Self {
+            // No application epoch survived: every boundary this direction can
+            // reach is one the protocol crosses in silence, which `len()` states
+            // by putting the line past the last index.
+            first_application_epoch: first_application.unwrap_or(epochs.len()),
             epochs,
             at: 0,
             base: 0,
@@ -264,6 +418,28 @@ impl DirectionState {
             witness: EpochWitness::default(),
             pending_key_update: false,
         })
+    }
+
+    /// R311y672 — classify and count one advance's worth of epoch steps.
+    ///
+    /// A single record can carry the reader across MORE than one boundary: a hole
+    /// that spans a rekey leaves the trial to walk two epochs before one
+    /// authenticates. Each step is therefore classified on its own, and the
+    /// pending announcement — of which there is at most one — confirms the FIRST,
+    /// because that is the step the sender announced when it wrote the message.
+    fn count_advance(&mut self, to: usize) {
+        let mut pending = core::mem::take(&mut self.pending_key_update);
+        for target in (self.at + 1)..=to {
+            self.witness.epoch_advances += 1;
+            if pending {
+                self.witness.advances_confirmed += 1;
+                pending = false;
+            } else if target <= self.first_application_epoch {
+                self.witness.advances_unannounced += 1;
+            } else {
+                self.witness.advances_unwitnessed += 1;
+            }
+        }
     }
 
     /// Open one record, resynchronising after a hole and advancing the epoch
@@ -300,7 +476,11 @@ impl DirectionState {
     /// exactly the kind of state that is wrong the moment something reads it.
     /// The walk now happens on a copy and is committed only where a record
     /// actually opened.
-    fn open(&mut self, record: &EncryptedRecord) -> Option<OpenedRecord> {
+    fn open(
+        &mut self,
+        record: &EncryptedRecord,
+        owed: bool,
+    ) -> Option<(OpenedRecord, KeyUpdateScan)> {
         // At most this many records fitted in the hole, whichever epoch they
         // belonged to. Zero where there was no hole, which makes the loop below
         // one attempt per epoch -- the R311y662 behaviour exactly.
@@ -320,11 +500,7 @@ impl DirectionState {
                     // walk that authenticated under nothing leaves no witness
                     // behind either (the R311y667 rule this loop already keeps).
                     if at > self.at {
-                        self.witness.epoch_advances += at - self.at;
-                        if self.pending_key_update {
-                            self.witness.advances_confirmed += 1;
-                            self.pending_key_update = false;
-                        }
+                        self.count_advance(at);
                     }
                     self.at = at;
                     self.base = base;
@@ -334,13 +510,23 @@ impl DirectionState {
                     // caller because the caller is handed only
                     // `CT_APPLICATION_DATA` onward -- a KeyUpdate's inner type is
                     // `handshake`, so nothing downstream ever sees one.
-                    if opened.content_type == wz_capture::tls::CT_HANDSHAKE
-                        && opened.plaintext.first() == Some(&HS_KEY_UPDATE)
-                    {
-                        self.witness.key_updates += 1;
+                    let scan = if opened.content_type == wz_capture::tls::CT_HANDSHAKE {
+                        scan_key_updates(&opened.plaintext)
+                    } else {
+                        KeyUpdateScan::default()
+                    };
+                    if scan.seen > 0 {
+                        self.witness.key_updates += scan.seen;
+                        self.witness.updates_requested += scan.requested;
+                        // R311y672 — the peer asked for this one. At most one
+                        // reply discharges at most one request, so this counts a
+                        // record, not a message.
+                        if owed {
+                            self.witness.updates_answering += 1;
+                        }
                         self.pending_key_update = true;
                     }
-                    return Some(opened);
+                    return Some((opened, scan));
                 }
             }
             // This epoch refused every offset. If there is a later one, the
@@ -366,6 +552,7 @@ impl CaptureOpener {
             log,
             directions: [None, None],
             retired: [EpochWitness::default(); 2],
+            owed: [false, false],
         }
     }
 
@@ -382,7 +569,15 @@ impl CaptureOpener {
                 .as_ref()
                 .map(|d| d.witness)
                 .unwrap_or_default();
-            self.retired[i].plus(live)
+            let mut out = self.retired[i].plus(live);
+            // R311y672 — an obligation still standing at the moment the report is
+            // read is one that was never discharged. Composed here rather than
+            // stored, because "unanswered" is only ever true of the PRESENT: the
+            // very next record of this direction may answer it.
+            if self.owed[i] {
+                out.requests_unanswered += 1;
+            }
+            out
         })
     }
 
@@ -460,17 +655,22 @@ impl RecordOpener for CaptureOpener {
         // secret BEFORE the handshake epoch begins, so it is the first epoch its
         // direction enters; a server never sends 0-RTT data and has no early
         // secret at all.
+        // R311y672 — each secret is TAGGED with whether it is an application
+        // generation. That flag is what separates the boundaries TLS announces
+        // from the ones it crosses in silence, and it is knowable only here,
+        // where the labels are still in hand.
         let epochs_of = |early: Option<SecretLabel>, handshake: SecretLabel, server: bool| {
-            let mut out: Vec<&[u8]> = early
+            let mut out: Vec<(&[u8], bool)> = early
                 .and_then(|l| secrets.get(l))
                 .into_iter()
                 .chain(secrets.get(handshake))
+                .map(|s| (s, false))
                 .collect();
             out.extend(
                 secrets
                     .application_secrets(server)
                     .into_iter()
-                    .map(|(_, s)| s),
+                    .map(|(_, s)| (s, true)),
             );
             out
         };
@@ -495,7 +695,16 @@ impl RecordOpener for CaptureOpener {
             if let Some(d) = &self.directions[i] {
                 self.retired[i] = self.retired[i].plus(d.witness);
             }
+            // R311y672 — and an obligation the outgoing flow never discharged is
+            // carried the same way. Dropping it silently would make a request the
+            // peer ignored indistinguishable from one that was answered.
+            if self.owed[i] {
+                self.retired[i].requests_unanswered += 1;
+            }
         }
+        // The obligation belongs to a CONNECTION, so it does not cross into the
+        // next one.
+        self.owed = [false, false];
         self.directions[client_index] = DirectionState::new(&client);
         self.directions[1 - client_index] = DirectionState::new(&server);
         Ok(())
@@ -506,7 +715,20 @@ impl RecordOpener for CaptureOpener {
             Direction::A => 0,
             Direction::B => 1,
         };
-        self.directions[at].as_mut()?.open(record)
+        // Read BEFORE the direction is borrowed: the obligation lives on the
+        // opener precisely because it is the one fact neither direction owns.
+        let owed = self.owed[at];
+        let (opened, scan) = self.directions[at].as_mut()?.open(record, owed)?;
+        if scan.seen > 0 {
+            // Whatever this direction owed, it has now sent a `KeyUpdate` and the
+            // obligation is discharged.
+            self.owed[at] = false;
+            if scan.requested > 0 {
+                // And RFC 8446 §4.6.3 puts the PEER under one.
+                self.owed[1 - at] = true;
+            }
+        }
+        Some(opened)
     }
 
     /// R311y668 — a direction is armed exactly when [`begin_flow`] found at least
@@ -567,7 +789,7 @@ mod tests {
         );
         // R311y662 — and a direction built from NO usable secret is refused, so
         // an unusable width cannot become an epoch that silently opens nothing.
-        assert!(DirectionState::new(&[&[0u8; 33][..]]).is_none());
+        assert!(DirectionState::new(&[(&[0u8; 33][..], true)]).is_none());
     }
 
     /// R311y662 — the epochs are ordered handshake-then-application, which is
@@ -626,7 +848,7 @@ mod tests {
     /// nothing reads it, and wrong the moment something does.
     #[test]
     fn a_record_that_opens_under_no_epoch_leaves_the_direction_untouched() {
-        let mut state = DirectionState::new(&[&[1u8; 48][..], &[2u8; 48][..]])
+        let mut state = DirectionState::new(&[(&[1u8; 48][..], false), (&[2u8; 48][..], true)])
             .expect("two epochs of a valid width");
         assert_eq!((state.at, state.base, state.skew), (0, 0, 0));
 
@@ -639,7 +861,7 @@ mod tests {
             lost_before: 0,
             bytes,
         };
-        assert!(state.open(&record).is_none(), "nothing can open it");
+        assert!(state.open(&record, false).is_none(), "nothing can open it");
         assert_eq!(
             (state.at, state.base, state.skew),
             (0, 0, 0),
@@ -654,7 +876,7 @@ mod tests {
             lost_before: 10_000,
             ..record.clone()
         };
-        assert!(state.open(&wide).is_none());
+        assert!(state.open(&wide, false).is_none());
         assert_eq!((state.at, state.base, state.skew), (0, 0, 0));
     }
 

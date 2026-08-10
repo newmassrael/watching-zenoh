@@ -77,12 +77,38 @@ fn checksum(parts: &[&[u8]]) -> u16 {
 /// builds read as corrupt, which is a fine thing to ignore in a test asserting
 /// a frame count and a wrong thing to build an exit-code claim on.
 fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
-    const SRC: [u8; 4] = [10, 0, 0, 1];
-    const DST: [u8; 4] = [10, 0, 0, 2];
+    tcp_segment(seq, payload, false)
+}
+
+/// R311y672 — the SAME connection, travelling the other way.
+///
+/// A `KeyUpdate` obligation crosses the two directions (RFC 8446 §4.6.3), so a
+/// fixture for it needs both halves of one flow rather than two flows. The
+/// addresses and ports are simply swapped, which is what makes the dissector fold
+/// these packets into direction B of the connection the forward packets opened.
+fn tcp_packet_reverse(seq: u32, payload: &[u8]) -> Vec<u8> {
+    tcp_segment(seq, payload, true)
+}
+
+fn tcp_segment(seq: u32, payload: &[u8], reverse: bool) -> Vec<u8> {
+    const CLIENT: [u8; 4] = [10, 0, 0, 1];
+    const SERVER: [u8; 4] = [10, 0, 0, 2];
+    const CLIENT_PORT: u16 = 1111;
+    const SERVER_PORT: u16 = 7447;
+    let (src, dst) = if reverse {
+        (SERVER, CLIENT)
+    } else {
+        (CLIENT, SERVER)
+    };
+    let (src_port, dst_port) = if reverse {
+        (SERVER_PORT, CLIENT_PORT)
+    } else {
+        (CLIENT_PORT, SERVER_PORT)
+    };
 
     let mut tcp = Vec::new();
-    tcp.extend_from_slice(&1111u16.to_be_bytes());
-    tcp.extend_from_slice(&7447u16.to_be_bytes());
+    tcp.extend_from_slice(&src_port.to_be_bytes());
+    tcp.extend_from_slice(&dst_port.to_be_bytes());
     tcp.extend_from_slice(&seq.to_be_bytes());
     tcp.extend_from_slice(&0u32.to_be_bytes());
     tcp.push(5 << 4);
@@ -93,8 +119,8 @@ fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
     tcp.extend_from_slice(payload);
     // The TCP checksum covers a pseudo-header of the addresses, the protocol
     // and the segment length.
-    let mut pseudo = SRC.to_vec();
-    pseudo.extend_from_slice(&DST);
+    let mut pseudo = src.to_vec();
+    pseudo.extend_from_slice(&dst);
     pseudo.extend_from_slice(&[0, 6]);
     pseudo.extend_from_slice(&(tcp.len() as u16).to_be_bytes());
     let tcp_sum = checksum(&[&pseudo, &tcp]);
@@ -103,8 +129,8 @@ fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
     let mut ip = vec![0x45u8, 0];
     ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
     ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
-    ip.extend_from_slice(&SRC);
-    ip.extend_from_slice(&DST);
+    ip.extend_from_slice(&src);
+    ip.extend_from_slice(&dst);
     let ip_sum = checksum(&[&ip[..20]]);
     ip[10..12].copy_from_slice(&ip_sum.to_be_bytes());
     ip.extend_from_slice(&tcp);
@@ -116,6 +142,40 @@ fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
         eth.push(0);
     }
     eth
+}
+
+/// R311y672 — seal one record at one sequence number.
+///
+/// The epoch fixtures below each build several records under several generations,
+/// and written out longhand the `OutboundPlainMessage` literal is nine lines that
+/// say nothing. What varies between records is the content type, the plaintext
+/// and the sequence — so those are the arguments, and everything else is stated
+/// once here.
+fn seal_at(
+    enc: &mut Box<dyn rustls::crypto::cipher::MessageEncrypter>,
+    typ: rustls::ContentType,
+    payload: &[u8],
+    seq: u64,
+) -> Vec<u8> {
+    enc.encrypt(
+        OutboundPlainMessage {
+            typ,
+            version: rustls::ProtocolVersion::TLSv1_2,
+            payload: rustls::crypto::cipher::OutboundChunks::Single(payload),
+        },
+        seq,
+    )
+    .expect("seal")
+    .encode()
+}
+
+/// One length-framed zenoh KeepAlive, which is the smallest thing that makes a
+/// decrypted record count as a message rather than as opened bytes.
+fn unit(id: u8) -> Vec<u8> {
+    let body = vec![0x04u8, id];
+    let mut framed = (body.len() as u16).to_le_bytes().to_vec();
+    framed.extend_from_slice(&body);
+    framed
 }
 
 fn client_hello(random: &[u8; 32]) -> Vec<u8> {
@@ -826,7 +886,7 @@ fn the_epoch_line_reaches_the_rendering() {
         "a confirmed change needs no hedge: {text}"
     );
 
-    // And the JSON carries the same three numbers, structurally.
+    // And the JSON carries the same numbers, structurally.
     let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
         .arg(&capture)
         .arg("--keylog")
@@ -836,8 +896,589 @@ fn the_epoch_line_reaches_the_rendering() {
         .expect("runs");
     let json = String::from_utf8_lossy(&out.stdout);
     assert!(
-        json.contains("\"epochs\":{\"advances\":1,\"advances_confirmed\":1,\"key_updates\":1}"),
+        json.contains(
+            "\"epochs\":{\"advances\":1,\"advances_confirmed\":1,\
+             \"advances_unannounced\":0,\"advances_unwitnessed\":0,\
+             \"key_updates\":1,\"updates_requested\":0,\
+             \"updates_answering\":0,\"requests_unanswered\":0}"
+        ),
         "and the JSON must agree with the text, in one document: {json}"
+    );
+    assert_one_document(json.trim());
+}
+
+/// R311y672 (§1.2a) — an unconfirmed key change says WHICH KIND it is, and the
+/// two kinds are told apart by the SAME run.
+///
+/// ## The defect this pins, measured before the fix
+///
+/// R311y671 reported `advances` and `advances_confirmed` and let the reader
+/// subtract. The difference has two causes that call for opposite responses:
+///
+/// - the handshake-to-application boundary, which TLS ends with an encrypted
+///   `Finished` and never announces, so nothing was missed; and
+/// - a rekey, which RFC 8446 §4.6.3 says IS announced, so an unconfirmed one
+///   means the announcement was missed or the trial crossed on a coincidence.
+///
+/// Both printed the same figure and the same parenthetical. Measured on this
+/// fixture under the old rendering: `epochs: 2 key change(s), 0 confirmed`, with
+/// one hedge covering both — a reader could not tell that exactly one of the two
+/// was worth investigating.
+///
+/// ## Why the fixture carries BOTH in one capture
+///
+/// Separately, each leg passes against a renderer that simply relabelled the
+/// single count: call every unconfirmed advance "unannounced" and the
+/// handshake-boundary capture is right; call them all "unwitnessed" and the
+/// mid-session one is. Only a capture holding one of each fails both of those.
+#[test]
+fn an_unconfirmed_key_change_distinguishes_the_announced_boundary_from_the_silent_one() {
+    let scratch = Scratch::new("epoch-kinds");
+    let handshake: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(11).wrapping_add(5))
+        .collect();
+    let gen0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(29).wrapping_add(6))
+        .collect();
+    let gen1: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(31).wrapping_add(7))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(19).wrapping_add(2));
+
+    let mut stream = client_hello(&random);
+    // Epoch 0: the handshake flight. No KeyUpdate ends it -- TLS sends none.
+    let mut hs = sealer(&handshake);
+    stream.extend_from_slice(&seal_at(
+        &mut hs,
+        rustls::ContentType::Handshake,
+        b"\x14\x00\x00\x02\x00\x00",
+        0,
+    ));
+    // Epoch 1: the first application generation. Reached WITHOUT an announcement,
+    // which is the expected kind.
+    let mut app0 = sealer(&gen0);
+    stream.extend_from_slice(&seal_at(
+        &mut app0,
+        rustls::ContentType::ApplicationData,
+        &unit(0),
+        0,
+    ));
+    // Epoch 2: a REKEY, and deliberately with no KeyUpdate in front of it -- the
+    // announcing record is the one a mid-session tap or a hole would have missed.
+    let mut app1 = sealer(&gen1);
+    stream.extend_from_slice(&seal_at(
+        &mut app1,
+        rustls::ContentType::ApplicationData,
+        &unit(1),
+        0,
+    ));
+
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &stream))],
+    );
+    let capture = scratch.write("epoch-kinds.pcapng", &file);
+    let keylog = scratch.write(
+        "keys.txt",
+        format!(
+            "CLIENT_HANDSHAKE_TRAFFIC_SECRET {} {}\n\
+             CLIENT_TRAFFIC_SECRET_0 {} {}\n\
+             CLIENT_TRAFFIC_SECRET_1 {} {}\n",
+            hex(&random),
+            hex(&handshake),
+            hex(&random),
+            hex(&gen0),
+            hex(&random),
+            hex(&gen1)
+        )
+        .as_bytes(),
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--keylog")
+        .arg(&keylog)
+        .output()
+        .expect("runs");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("epochs: 2 key change(s), 0 confirmed by a KeyUpdate"),
+        "two boundaries were crossed and neither was announced: {text}"
+    );
+    assert!(
+        text.contains("1 crossed a boundary TLS never announces"),
+        "the handshake-to-application boundary is the harmless one: {text}"
+    );
+    assert!(
+        text.contains("1 was a rekey with NO KeyUpdate behind it"),
+        "and the rekey is the one worth looking at -- naming them the same way \
+         is what this round replaces: {text}"
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--keylog")
+        .arg(&keylog)
+        .arg("--json")
+        .output()
+        .expect("runs");
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        json.contains("\"advances\":2,\"advances_confirmed\":0,\"advances_unannounced\":1,\"advances_unwitnessed\":1"),
+        "the split reaches JSON too, and the three parts must sum to the whole: {json}"
+    );
+    assert_one_document(json.trim());
+}
+
+/// R311y672 (§1.2a) — the `update_requested` byte is READ, and it attributes a
+/// key change on the OTHER direction.
+///
+/// ## What was missing
+///
+/// `KeyUpdate` carries a one-byte body (RFC 8446 §4.6.3). `update_requested` (1)
+/// obliges the PEER to send its own `KeyUpdate` in reply; `update_not_requested`
+/// (0) does not. R311y671 opened the message, checked its type byte, and never
+/// looked at the body — so the one fact in this protocol that crosses the two
+/// directions was on the floor, and each direction could only ever confirm its
+/// own advances.
+///
+/// ## The discriminating shape
+///
+/// The client sends `update_requested`; the server answers with its own
+/// `KeyUpdate` and rekeys. If the body byte were still ignored, `updates_answering`
+/// would be 0 here — the server's message would be an unrelated announcement
+/// rather than the discharge of an obligation — while every other figure in the
+/// report stayed exactly as it is.
+#[test]
+fn a_key_update_requesting_one_back_attributes_the_peers_change() {
+    let scratch = Scratch::new("epoch-request");
+    let c0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(37).wrapping_add(1))
+        .collect();
+    let c1: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(41).wrapping_add(2))
+        .collect();
+    let s0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(43).wrapping_add(3))
+        .collect();
+    let s1: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(47).wrapping_add(4))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(23).wrapping_add(5));
+
+    // Client: one record, then a KeyUpdate whose body is `update_requested` (1),
+    // then its own new generation.
+    let mut client = client_hello(&random);
+    let mut cg0 = sealer(&c0);
+    client.extend_from_slice(&seal_at(
+        &mut cg0,
+        rustls::ContentType::ApplicationData,
+        &unit(0),
+        0,
+    ));
+    client.extend_from_slice(&seal_at(
+        &mut cg0,
+        rustls::ContentType::Handshake,
+        b"\x18\x00\x00\x01\x01",
+        1,
+    ));
+    let mut cg1 = sealer(&c1);
+    client.extend_from_slice(&seal_at(
+        &mut cg1,
+        rustls::ContentType::ApplicationData,
+        &unit(1),
+        0,
+    ));
+
+    // Server: the obliged reply -- `update_not_requested`, because answering a
+    // request must not start an infinite exchange -- and then its own new key.
+    let mut server = Vec::new();
+    let mut sg0 = sealer(&s0);
+    server.extend_from_slice(&seal_at(
+        &mut sg0,
+        rustls::ContentType::ApplicationData,
+        &unit(2),
+        0,
+    ));
+    server.extend_from_slice(&seal_at(
+        &mut sg0,
+        rustls::ContentType::Handshake,
+        b"\x18\x00\x00\x01\x00",
+        1,
+    ));
+    let mut sg1 = sealer(&s1);
+    server.extend_from_slice(&seal_at(
+        &mut sg1,
+        rustls::ContentType::ApplicationData,
+        &unit(3),
+        0,
+    ));
+
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[
+            (0, 1_000_000, &tcp_packet(1000, &client)),
+            (0, 1_000_100, &tcp_packet_reverse(1000, &server)),
+        ],
+    );
+    let capture = scratch.write("epoch-request.pcapng", &file);
+    let keylog = scratch.write(
+        "keys.txt",
+        format!(
+            "CLIENT_TRAFFIC_SECRET_0 {} {}\nCLIENT_TRAFFIC_SECRET_1 {} {}\n\
+             SERVER_TRAFFIC_SECRET_0 {} {}\nSERVER_TRAFFIC_SECRET_1 {} {}\n",
+            hex(&random),
+            hex(&c0),
+            hex(&random),
+            hex(&c1),
+            hex(&random),
+            hex(&s0),
+            hex(&random),
+            hex(&s1)
+        )
+        .as_bytes(),
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--keylog")
+        .arg(&keylog)
+        .arg("--json")
+        .output()
+        .expect("runs");
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        json.contains("\"key_updates\":2,\"updates_requested\":1,\"updates_answering\":1"),
+        "two announcements, ONE of which demanded a reply, and the peer's message \
+         is recognised AS that reply: {json}"
+    );
+    assert!(
+        json.contains("\"requests_unanswered\":0"),
+        "the obligation was discharged, so nothing is outstanding: {json}"
+    );
+    assert_one_document(json.trim());
+
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        text.contains("1 KeyUpdate(s) asked the peer to rekey; 1 answered"),
+        "and a person reading the report is told so: {text}"
+    );
+}
+
+/// R311y672 (§1.2a) — THE DISCRIMINATING NEGATIVE for the byte: a `KeyUpdate`
+/// carrying `update_not_requested` demands nothing.
+///
+/// Without this leg, `updates_requested` could be a copy of `key_updates` and the
+/// test above would pass unchanged. This is the same fixture as the confirming
+/// one with the single body byte flipped from `\x01` to `\x00`, so the byte is
+/// the only difference between the two measurements.
+#[test]
+fn a_key_update_not_requesting_one_back_demands_nothing() {
+    let scratch = Scratch::new("epoch-norequest");
+    let c0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(37).wrapping_add(1))
+        .collect();
+    let c1: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(41).wrapping_add(2))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(23).wrapping_add(5));
+
+    let mut client = client_hello(&random);
+    let mut cg0 = sealer(&c0);
+    client.extend_from_slice(&seal_at(
+        &mut cg0,
+        rustls::ContentType::ApplicationData,
+        &unit(0),
+        0,
+    ));
+    // The ONLY difference from the test above: `\x00` where that one has `\x01`.
+    client.extend_from_slice(&seal_at(
+        &mut cg0,
+        rustls::ContentType::Handshake,
+        b"\x18\x00\x00\x01\x00",
+        1,
+    ));
+    let mut cg1 = sealer(&c1);
+    client.extend_from_slice(&seal_at(
+        &mut cg1,
+        rustls::ContentType::ApplicationData,
+        &unit(1),
+        0,
+    ));
+
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &client))],
+    );
+    let capture = scratch.write("epoch-norequest.pcapng", &file);
+    let keylog = scratch.write(
+        "keys.txt",
+        format!(
+            "CLIENT_TRAFFIC_SECRET_0 {} {}\nCLIENT_TRAFFIC_SECRET_1 {} {}\n",
+            hex(&random),
+            hex(&c0),
+            hex(&random),
+            hex(&c1)
+        )
+        .as_bytes(),
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--keylog")
+        .arg(&keylog)
+        .arg("--json")
+        .output()
+        .expect("runs");
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        json.contains("\"key_updates\":1,\"updates_requested\":0,\"updates_answering\":0"),
+        "the message was read and it asked for NOTHING -- a count that cannot \
+         say this is a count that is not reading the byte: {json}"
+    );
+    assert!(
+        json.contains("\"requests_unanswered\":0"),
+        "and no obligation was created, so none can be outstanding: {json}"
+    );
+    assert_one_document(json.trim());
+}
+
+/// R311y672 (§1.2a) — a request the capture never sees answered is REPORTED.
+///
+/// The obligation is the reason an expected key change on the other direction is
+/// absent. A capture that ends between the demand and the reply — the ordinary
+/// shape of a tap stopped by hand — otherwise shows a peer that simply never
+/// rekeyed, with nothing anywhere saying it had been asked to.
+#[test]
+fn a_request_the_peer_never_answered_is_reported_as_outstanding() {
+    let scratch = Scratch::new("epoch-outstanding");
+    let c0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(53).wrapping_add(1))
+        .collect();
+    let c1: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(59).wrapping_add(2))
+        .collect();
+    let s0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(61).wrapping_add(3))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(29).wrapping_add(11));
+
+    let mut client = client_hello(&random);
+    let mut cg0 = sealer(&c0);
+    client.extend_from_slice(&seal_at(
+        &mut cg0,
+        rustls::ContentType::Handshake,
+        b"\x18\x00\x00\x01\x01",
+        0,
+    ));
+    let mut cg1 = sealer(&c1);
+    client.extend_from_slice(&seal_at(
+        &mut cg1,
+        rustls::ContentType::ApplicationData,
+        &unit(1),
+        0,
+    ));
+
+    // The server sends ordinary traffic and never the KeyUpdate it owes: the
+    // capture stopped first.
+    let mut server = Vec::new();
+    let mut sg0 = sealer(&s0);
+    server.extend_from_slice(&seal_at(
+        &mut sg0,
+        rustls::ContentType::ApplicationData,
+        &unit(2),
+        0,
+    ));
+
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[
+            (0, 1_000_000, &tcp_packet(1000, &client)),
+            (0, 1_000_100, &tcp_packet_reverse(1000, &server)),
+        ],
+    );
+    let capture = scratch.write("epoch-outstanding.pcapng", &file);
+    let keylog = scratch.write(
+        "keys.txt",
+        format!(
+            "CLIENT_TRAFFIC_SECRET_0 {} {}\nCLIENT_TRAFFIC_SECRET_1 {} {}\n\
+             SERVER_TRAFFIC_SECRET_0 {} {}\n",
+            hex(&random),
+            hex(&c0),
+            hex(&random),
+            hex(&c1),
+            hex(&random),
+            hex(&s0)
+        )
+        .as_bytes(),
+    );
+
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        text.contains("1 request(s) still unanswered when the capture ended"),
+        "the demand was read and the reply never came, and BOTH halves of that \
+         have to be in the report for either to mean anything: {text}"
+    );
+
+    let json = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .arg("--json")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        json.contains("\"updates_requested\":1,\"updates_answering\":0,\"requests_unanswered\":1"),
+        "and the same three numbers in JSON: {json}"
+    );
+    assert_one_document(json.trim());
+}
+
+/// R311y672 (§1.2a) — the `KeyUpdate` scan reads the RFC's framing, not the
+/// first byte.
+///
+/// ## Two defects in one look
+///
+/// R311y671 asked `plaintext.first() == Some(&HS_KEY_UPDATE)`, which fails in
+/// both directions at once:
+///
+/// - a handshake record may carry SEVERAL messages back to back, and
+///   post-handshake the common shape is a `NewSessionTicket` followed by
+///   something else — so a `KeyUpdate` that is not first was invisible, and the
+///   epoch it announced went unconfirmed; and
+/// - the declared body length was never checked, so any record whose first
+///   plaintext byte happened to be 24 confirmed a boundary it never announced.
+///
+/// ## Why the fixture needs TWO hidden messages and one malformed one
+///
+/// Measured, not reasoned: the obvious fixture -- one `KeyUpdate` behind a ticket
+/// plus one ill-framed type-24 message -- was written first and PASSED against
+/// the old look. The two defects cancel exactly. The old look misses the hidden
+/// message (one false negative) and accepts the malformed one (one false
+/// positive), so its total is 1 and the walk's total is 1, and every assertion
+/// about that total holds under both. The pending announcement survives the same
+/// way, so `advances_confirmed` matched too.
+///
+/// So the counts are made to DIFFER rather than merely be right: two well-framed
+/// `KeyUpdate`s hidden behind tickets, one ill-framed message, three generations.
+/// The walk reads 2; the old look reads 1 and leaves the second boundary
+/// unconfirmed.
+#[test]
+fn a_key_update_is_found_by_framing_rather_than_by_the_first_byte() {
+    let scratch = Scratch::new("epoch-framing");
+    let c0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(67).wrapping_add(1))
+        .collect();
+    let c1: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(71).wrapping_add(2))
+        .collect();
+    let c2: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(73).wrapping_add(3))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(31).wrapping_add(13));
+
+    let mut client = client_hello(&random);
+    let mut cg0 = sealer(&c0);
+    // A NewSessionTicket (type 4, body 3 bytes) and THEN the real KeyUpdate, in
+    // one record. The old look saw only the ticket and stopped.
+    client.extend_from_slice(&seal_at(
+        &mut cg0,
+        rustls::ContentType::Handshake,
+        b"\x04\x00\x00\x03\xaa\xbb\xcc\x18\x00\x00\x01\x01",
+        0,
+    ));
+    // A malformed message of type 24: the `uint24` length says 4, and a KeyUpdate
+    // body is one byte. Counted by the old look, refused by the framing walk.
+    client.extend_from_slice(&seal_at(
+        &mut cg0,
+        rustls::ContentType::Handshake,
+        b"\x18\x00\x00\x04\x00\x00\x00\x00",
+        1,
+    ));
+    // Generation 1, and a second hidden KeyUpdate announcing generation 2.
+    let mut cg1 = sealer(&c1);
+    client.extend_from_slice(&seal_at(
+        &mut cg1,
+        rustls::ContentType::ApplicationData,
+        &unit(1),
+        0,
+    ));
+    client.extend_from_slice(&seal_at(
+        &mut cg1,
+        rustls::ContentType::Handshake,
+        b"\x04\x00\x00\x03\xdd\xee\xff\x18\x00\x00\x01\x00",
+        1,
+    ));
+    let mut cg2 = sealer(&c2);
+    client.extend_from_slice(&seal_at(
+        &mut cg2,
+        rustls::ContentType::ApplicationData,
+        &unit(2),
+        0,
+    ));
+
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &client))],
+    );
+    let capture = scratch.write("epoch-framing.pcapng", &file);
+    let keylog = scratch.write(
+        "keys.txt",
+        format!(
+            "CLIENT_TRAFFIC_SECRET_0 {} {}\nCLIENT_TRAFFIC_SECRET_1 {} {}\n\
+             CLIENT_TRAFFIC_SECRET_2 {} {}\n",
+            hex(&random),
+            hex(&c0),
+            hex(&random),
+            hex(&c1),
+            hex(&random),
+            hex(&c2)
+        )
+        .as_bytes(),
+    );
+
+    let json = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .arg("--json")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        json.contains("\"key_updates\":2,\"updates_requested\":1"),
+        "EXACTLY the two well-framed messages, both of them behind a ticket, and \
+         NOT the ill-framed one -- a look at the first byte reads 1 here: {json}"
+    );
+    assert!(
+        json.contains("\"advances\":2,\"advances_confirmed\":2,\"advances_unannounced\":0,\"advances_unwitnessed\":0"),
+        "and both boundaries are confirmed by the message that announced them; \
+         missing the second hidden one leaves it an unwitnessed rekey: {json}"
     );
     assert_one_document(json.trim());
 }

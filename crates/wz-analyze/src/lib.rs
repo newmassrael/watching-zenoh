@@ -385,15 +385,40 @@ pub fn analyze_declaring_quic(
 /// Silent where there was nothing to say, like every other qualifier in this
 /// rendering: a capture with no epoch change in it gets no line about epochs.
 /// In JSON the key is STRUCTURAL, because a consumer must not have to test for it.
+///
+/// # R311y672 — and an unconfirmed change now says WHICH KIND it is
+///
+/// The round above printed one figure for every unconfirmed advance and one
+/// parenthetical covering both reasons at once, which is the shape of a sentence
+/// that cannot be acted on. The two are not the same fact:
+///
+/// - A boundary TLS **never announces** — 0-RTT to handshake, handshake to the
+///   first application key — is ended by an encrypted `Finished`, so there is no
+///   `KeyUpdate` to find and its absence proves nothing. Every capture taken from
+///   the start of a connection has one.
+/// - A **rekey** IS announced (RFC 8446 §4.6.3). An unconfirmed one means the
+///   announcement was missed — a mid-session capture, a hole over the announcing
+///   record — or that the trial crossed on a 128-bit coincidence. That is the
+///   number a reader weighing this decryption actually wants.
+///
+/// Reported separately for the same reason `advances` and `advances_confirmed`
+/// were never merged: a figure that sums two causes answers neither.
 fn epoch_lines(witness: &[wz_tls_record::capture::EpochWitness; 2], format: Format) -> String {
     let [a, b] = witness;
     let advances = a.epoch_advances + b.epoch_advances;
     let confirmed = a.advances_confirmed + b.advances_confirmed;
+    let unannounced = a.advances_unannounced + b.advances_unannounced;
+    let unwitnessed = a.advances_unwitnessed + b.advances_unwitnessed;
     let updates = a.key_updates + b.key_updates;
+    let requested = a.updates_requested + b.updates_requested;
+    let answering = a.updates_answering + b.updates_answering;
+    let unanswered = a.requests_unanswered + b.requests_unanswered;
     if format == Format::Json {
         return format!(
             ",\"epochs\":{{\"advances\":{advances},\"advances_confirmed\":{confirmed},\
-             \"key_updates\":{updates}}}"
+             \"advances_unannounced\":{unannounced},\"advances_unwitnessed\":{unwitnessed},\
+             \"key_updates\":{updates},\"updates_requested\":{requested},\
+             \"updates_answering\":{answering},\"requests_unanswered\":{unanswered}}}"
         );
     }
     if advances == 0 && updates == 0 {
@@ -403,12 +428,34 @@ fn epoch_lines(witness: &[wz_tls_record::capture::EpochWitness; 2], format: Form
         "  epochs: {advances} key change(s), {confirmed} confirmed by a KeyUpdate; \
          {updates} KeyUpdate message(s) read\n"
     );
-    if advances > confirmed {
-        out.push_str(
-            "    (an unconfirmed change is not an error -- the first application \
-             epoch follows the handshake with no KeyUpdate -- but it rests on the \
-             trial alone)\n",
-        );
+    if unannounced > 0 {
+        out.push_str(&format!(
+            "    {unannounced} crossed a boundary TLS never announces (handshake \
+             to first application key) -- expected, nothing was missed\n"
+        ));
+    }
+    if unwitnessed > 0 {
+        out.push_str(&format!(
+            "    {unwitnessed} was a rekey with NO KeyUpdate behind it -- the \
+             announcement was missed (mid-session capture, or a hole over it) and \
+             the boundary rests on the trial alone\n"
+        ));
+    }
+    // R311y672 — the `update_requested` byte, which the round above opened and
+    // read past. It is the only fact in this protocol that crosses the two
+    // directions, so it is the only one that can explain an advance on the OTHER
+    // side, and its absence explains one that never came.
+    if requested > 0 {
+        out.push_str(&format!(
+            "    {requested} KeyUpdate(s) asked the peer to rekey; {answering} \
+             answered\n"
+        ));
+    }
+    if unanswered > 0 {
+        out.push_str(&format!(
+            "    {unanswered} request(s) still unanswered when the capture ended \
+             -- an expected key change on the other direction did not arrive\n"
+        ));
     }
     out
 }
