@@ -2835,6 +2835,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-tls-record"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "rustls",
+]
+
+[[package]]
 name = "wz-volume-abi"
 version = "0.1.0"
 

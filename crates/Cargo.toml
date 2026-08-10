@@ -31,6 +31,11 @@
 resolver = "2"
 members = [
     "wz",
+    # R311y657 (§1.2a) — the TLS 1.3 record layer, on the far side of the seam
+    # `wz-capture` draws. `ring` for the primitives, rustls as a DEV-only
+    # oracle. Kept out of `wz-capture` because that crate's zero-third-party
+    # rule is load-bearing for the MCU profiles that build it.
+    "wz-tls-record",
     # §5.27 api-compat-pico — zenoh-pico-compatible C ABI (cdylib+rlib)
     # wrapping the wz AP tokio Session. Reverse of the *-sys crates
     # (which BIND to C); this crate EXPORTS a C ABI. AP/std-only.

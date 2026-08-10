@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-tls-record — R311y657 (§1.2a), the TLS 1.3 RECORD layer, on the far side
+# of the seam `wz-capture` draws.
+#
+# `wz-capture` has zero third-party dependencies by design and recognises an
+# encrypted flow without opening one byte of it. This crate is where the cipher
+# is allowed to live, and the split between the two is not a preference: it was
+# read off the pinned versions. rustls 0.23.40 keeps `hkdf_expand_label`
+# `pub(crate)` (src/tls13/key_schedule.rs:889) while ring 0.17.14 makes
+# `hkdf::Prk::new_less_safe` public (src/hkdf.rs:117) -- so the PRIMITIVES are
+# available to a caller that already holds a traffic secret, and the TLS 1.3
+# PROTOCOL layer above them is not. That protocol layer is exactly what a wire
+# analyzer must own, and it is what this crate is.
+#
+# `ring` and nothing else. rustls appears as a DEV-dependency only, where it is
+# the oracle: it seals a record that this crate must open, and it derives the
+# same key schedule this crate must reproduce byte for byte.
+[package]
+name = "wz-tls-record"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+publish = false
+
+[dependencies]
+# The AEAD and HKDF-Expand primitives. Pinned by the workspace lock at 0.17.14,
+# already present because `transport-link-tls` pulls it through tokio-rustls --
+# this crate adds no new third-party name to the tree.
+ring = "0.17"
+
+[dev-dependencies]
+# THE ORACLE, and never a dependency: rustls seals what this crate opens, and
+# derives what this crate derives. Two independent implementations agreeing is
+# the claim; one implementation agreeing with itself is not.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
