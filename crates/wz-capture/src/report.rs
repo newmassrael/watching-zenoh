@@ -106,7 +106,12 @@ impl<'a> CaptureReport<'a> {
         // totals, and a reader summing them would otherwise be told the sum is
         // the whole capture. The strongest form of the defect this closes: the
         // flow used to be silent AND the verdict used to say `complete`.
-        if !self.dissection.encrypted_flows().is_empty() {
+        //
+        // R311y650 — asked of the CENSUS and not of the live table. A flow the
+        // cap evicted is a flow this reader could not decrypt just the same, and
+        // reading the verdict off `encrypted_flows()` made the answer depend on
+        // whether the flow was still in the table when the caller asked.
+        if self.dissection.encrypted_census().flows > 0 {
             return false;
         }
         // R311y624 (§1.1m) — the FRAMING witnesses reach the verdict, and until
@@ -246,19 +251,20 @@ impl<'a> CaptureReport<'a> {
         // add reasons a reader acts on differently (wrong session, one
         // direction, mid-handshake start) and a boolean would have to be
         // widened by whoever adds them.
-        let enc = d.encrypted_flows();
+        //
+        // R311y650 — over every flow the capture HELD. Summing the live table
+        // made these four numbers walk backwards when the flow cap recycled a
+        // slot, which is the one direction a census of what a reader COULD NOT
+        // see must never move.
+        let enc = d.encrypted_census();
         s.push_str(&format!(
             ",\"encrypted\":{{\"flows\":{},\"records\":{},\"application_records\":{},\
              \"application_bytes\":{},\"decrypted\":false,\"reason\":\"{}\"}}",
-            enc.len(),
-            enc.iter().map(|e| e.totals().records).sum::<usize>(),
-            enc.iter()
-                .map(|e| e.totals().application_records)
-                .sum::<usize>(),
-            enc.iter()
-                .map(|e| e.totals().application_bytes)
-                .sum::<u64>(),
-            match enc.first().map(|e| e.not_decrypted) {
+            enc.flows,
+            enc.census.records,
+            enc.census.application_records,
+            enc.census.application_bytes,
+            match d.encrypted_flows().first().map(|e| e.not_decrypted) {
                 None | Some(crate::tls::NotDecrypted::NoKeysSupplied) => "no_keys_supplied",
             }
         ));
@@ -392,17 +398,18 @@ impl<'a> CaptureReport<'a> {
         // as an idle one. Printed only when there IS such a flow, like every
         // other qualifier here; a plaintext capture is not told about a hazard
         // it does not have.
-        let enc = d.encrypted_flows();
-        if !enc.is_empty() {
-            let records: usize = enc.iter().map(|e| e.totals().records).sum();
-            let bytes: u64 = enc.iter().map(|e| e.totals().application_bytes).sum();
+        //
+        // R311y650 — the census, for the reason the JSON beside it uses one: a
+        // person reading a capture whose encrypted flow was evicted was shown a
+        // dropped-flow count and no hint that the traffic was TLS, which is the
+        // idle-looking capture this line exists to prevent.
+        let enc = d.encrypted_census();
+        if enc.flows > 0 {
             s.push_str(&format!(
                 "  {} flow(s) carry zenoh inside TLS: {} record(s), {} byte(s) of \
                  application data. NOT DECRYPTED (no keys supplied) -- the \
                  session is there and this report cannot see into it\n",
-                enc.len(),
-                records,
-                bytes
+                enc.flows, enc.census.records, enc.census.application_bytes
             ));
         }
         // R311y624 (§1.1m) — printed ONLY when non-zero, unlike the JSON object

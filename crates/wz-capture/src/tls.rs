@@ -220,7 +220,7 @@ pub struct RecordCensus {
 }
 
 impl RecordCensus {
-    fn add(&mut self, other: &RecordCensus) {
+    pub(crate) fn add(&mut self, other: &RecordCensus) {
         self.records += other.records;
         self.application_records += other.application_records;
         self.application_bytes += other.application_bytes;
@@ -257,6 +257,36 @@ impl EncryptedFlow {
         let mut t = self.per_direction[0];
         t.add(&self.per_direction[1]);
         t
+    }
+}
+
+/// R311y650 (§1.2a) — every encrypted flow a capture HELD, live or evicted.
+///
+/// [`crate::Dissection::encrypted_flows`] lists the flows still in the table,
+/// which is the right answer for a reader who wants to look at one and the
+/// wrong answer for "was any of this capture unreadable": a flow-cap eviction
+/// removes the flow and, until this type existed, removed the finding with it.
+/// The report then said a flow had been dropped and never said it was
+/// ENCRYPTED — R311y648's silence reached through a different door, and the
+/// same door R311y605 and R311y610 had already had to close on two other
+/// counters.
+///
+/// A flow is either live or counted here, never both — the invariant
+/// [`crate::Dissection::evicted_streams`] states for the stream tally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EncryptedTotals {
+    /// How many flows were recognised as carrying zenoh inside TLS.
+    pub flows: usize,
+    /// Their combined record census, both directions of every flow.
+    pub census: RecordCensus,
+}
+
+impl EncryptedTotals {
+    /// Fold one flow's per-direction census in.
+    pub(crate) fn add_flow(&mut self, per_direction: &[RecordCensus; 2]) {
+        self.flows += 1;
+        self.census.add(&per_direction[0]);
+        self.census.add(&per_direction[1]);
     }
 }
 

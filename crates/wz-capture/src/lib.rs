@@ -1006,6 +1006,28 @@ impl FlowDissection {
         self.replay_held();
     }
 
+    /// R311y650 (§1.2a) — the exit EVERY flow takes when no further byte of it
+    /// will be read, wherever that happens.
+    ///
+    /// R311y612 wrote the rule for [`Framing::OpeningLost`] and R311y649 wrote
+    /// it for [`Framing::Undecided`], and both wrote it at ONE call site:
+    /// [`Dissection::finish`]. A flow has a second way out of the table — the
+    /// flow cap evicts the least recently active one — and it left through that
+    /// door still holding its bytes, so every counter those bytes would have
+    /// moved read zero. That is the same silence from a third direction, and it
+    /// is the one a LIVE TAP hits rather than a file reader: a file ends and
+    /// calls `finish`, a tap recycles slots forever and never does.
+    ///
+    /// Stating it as one verb both exits call is the point. Two exits that each
+    /// remember to settle is a pair that drifts, which is exactly how the
+    /// eviction path came to be missing the rule for eleven rounds.
+    fn settle_on_exit(&mut self) {
+        if matches!(self.framing, Framing::OpeningLost) {
+            self.decide_after_opening_lost(true);
+        }
+        self.settle_undecided();
+    }
+
     /// Tell an ALREADY-DECIDED framing that its bytes are discontinuous.
     fn note_framing_gap(&mut self, direction: Direction, bytes_missing: u64) {
         match &mut self.framing {
@@ -1492,6 +1514,14 @@ pub struct Dissection {
     /// to [`Self::evicted_streams`] — and [`Self::framing_health`] overwrites
     /// them, so the shared type is a reuse rather than a conflation.
     evicted_sessions: FramingHealth,
+    /// R311y650 (§1.2a) — the same carry for the TLS record census, which
+    /// R311y648 created and no eviction path knew about.
+    ///
+    /// The third counter to need this and the first that is a FINDING rather
+    /// than a loss tally: an evicted encrypted flow took the whole "this
+    /// capture is unreadable and here is how much of it" statement with it,
+    /// leaving a report that named a dropped flow and not what was in it.
+    evicted_encrypted: tls::EncryptedTotals,
     /// R311y606 — half-assembled IP datagrams. Bounded by
     /// [`DissectionLimits::max_pending_fragments`] and by the same
     /// `reassembly_window_ms` deadline the message chains use, because the two
@@ -1557,6 +1587,7 @@ impl Default for Dissection {
             checksums: [0; 6],
             evicted_streams: StreamTally::default(),
             evicted_sessions: FramingHealth::default(),
+            evicted_encrypted: tls::EncryptedTotals::default(),
             fragments: frag::FragmentTable::default(),
             #[cfg(feature = "reassembly")]
             expired_chains: 0,
@@ -1892,6 +1923,24 @@ impl Dissection {
         self.flows.iter().filter_map(|f| f.encrypted()).collect()
     }
 
+    /// R311y650 (§1.2a) — how much of this capture was encrypted, over every
+    /// flow it HELD rather than every flow it still holds.
+    ///
+    /// The capture-wide question, and the one every summary must ask instead of
+    /// [`Self::encrypted_flows`]: that list is the live table, so a flow the cap
+    /// evicted left it — and with it the report's only statement that part of
+    /// this capture was unreadable. `encrypted_flows` remains the right call for
+    /// a reader who wants to LOOK at a flow, which an evicted one no longer is.
+    pub fn encrypted_census(&self) -> tls::EncryptedTotals {
+        let mut totals = self.evicted_encrypted;
+        for flow in &self.flows {
+            if let Some(e) = flow.encrypted() {
+                totals.add_flow(&e.per_direction);
+            }
+        }
+        totals
+    }
+
     /// Every UDP flow seen, in first-appearance order. Where scouting,
     /// multicast Join, and the UDP unicast link land.
     pub fn datagram_flows(&self) -> &[DatagramDissection] {
@@ -1959,15 +2008,11 @@ impl Dissection {
             // capture ends must be reported rather than held. The state that
             // ended one silent hole would otherwise open a quieter one: bytes
             // held for a verdict that never comes are bytes reported as absent.
-            if matches!(self.flows[idx].framing, Framing::OpeningLost) {
-                self.flows[idx].decide_after_opening_lost(true);
-            }
-            // R311y649 (§1.2a) — and the same rule for the state R311y612 did
-            // not have to force, because nothing held there for long. The
-            // record-chain question holds a flow whose chain is consistent and
-            // shallower than the depth, so an `Undecided` flow at the end of a
-            // capture is now an ordinary outcome and not a curiosity.
-            self.flows[idx].settle_undecided();
+            //
+            // R311y649 (§1.2a) added the same rule for `Undecided`, and R311y650
+            // moved both behind one verb so the flow table's OTHER exit — the
+            // cap evicting a flow — takes them too.
+            self.flows[idx].settle_on_exit();
             self.enforce_flow_limits(idx);
         }
         forced
@@ -2169,7 +2214,21 @@ impl Dissection {
             else {
                 break;
             };
-            let gone = self.flows.remove(oldest);
+            let mut gone = self.flows.remove(oldest);
+            // R311y650 (§1.2a) — the flow is LEAVING, so it takes the same exit
+            // the end of a capture gives it, BEFORE any counter below is
+            // harvested. A flow held for a verdict that will never come now has
+            // two ways to leave holding its bytes, and the carries below can
+            // only carry what the flow has already accounted for.
+            gone.settle_on_exit();
+            // R311y650 (§1.2a) — and the ENCRYPTED census carries, on exactly
+            // the rule the three carries below exist for. Without it the report
+            // said a flow was dropped and never said it carried zenoh inside
+            // TLS: the finding R311y648 was written to produce, deleted by the
+            // flow cap.
+            if let Some(e) = gone.encrypted() {
+                self.evicted_encrypted.add_flow(&e.per_direction);
+            }
             // R311y605 (F5) — carry the evicted flow's stream counters, or a
             // live tap's totals would silently reset every time the flow cap
             // recycled a slot.
@@ -6623,5 +6682,261 @@ mod tls_flow_tests {
         // The near side counted, the gap dropped its tail, the far side
         // counted: 1 + 2 records, and NOT a fourth invented across the hole.
         assert_eq!(d.encrypted_flows()[0].per_direction[0].records, 3);
+    }
+
+    /// One plain zenoh keepalive, framed — the SECOND 5-tuple every eviction
+    /// test below needs, and deliberately the most ordinary flow there is: the
+    /// finding under test must survive being displaced by traffic that is
+    /// itself unremarkable.
+    fn evicting_flow(d: &mut Dissection, index: usize) {
+        let mut framed = 1u16.to_le_bytes().to_vec();
+        framed.push(wz_session_core::wire_const::T_MID_KEEP_ALIVE);
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            index,
+            &tcp_packet(2222, 7447, 3000, &framed),
+        );
+    }
+
+    /// R311y650 (§1.2a) — an encrypted flow the FLOW CAP evicted is still an
+    /// encrypted flow, and the report has to say so.
+    ///
+    /// Measured before the fix, on this fixture: `encrypted_flows()` went empty,
+    /// the JSON's `encrypted.flows` went from 1 back to 0, and the text's "NOT
+    /// DECRYPTED" line disappeared entirely — leaving a report that named a
+    /// dropped flow and never said what was in it. R311y648's whole finding,
+    /// deleted by a bound.
+    ///
+    /// This is the third counter to need the eviction carry (R311y605 took the
+    /// stream tally, R311y610 the session one) and the first that is a FINDING
+    /// rather than a loss tally, which is why it was missed: the two before it
+    /// were numbers about the reader, and this one is a statement about the
+    /// capture.
+    #[test]
+    fn an_evicted_encrypted_flows_finding_stays_in_the_report() {
+        let hello = record(0x16, [0x03, 0x01], &[0x01, 0x00, 0x00, 0x30]);
+        let app_a = record(0x17, [0x03, 0x03], &[0xAB; 40]);
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows: Some(1),
+            ..DissectionLimits::default()
+        });
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &hello));
+        d.push_packet(LINKTYPE_ETHERNET, 1, &tcp_packet(1111, 7447, 1009, &app_a));
+        // ANTI-VACUITY: the flow really is recognised BEFORE the eviction, so a
+        // pass below cannot come from a fixture that was never encrypted.
+        assert!(
+            d.flows()[0].framing().is_encrypted(),
+            "framing={:?}",
+            d.flows()[0].framing()
+        );
+        let before = d.encrypted_census();
+        assert_eq!((before.flows, before.census.records), (1, 2));
+
+        evicting_flow(&mut d, 2);
+        d.finish();
+        assert_eq!(d.flows().len(), 1, "the cap must have evicted");
+        assert_eq!(d.drops().flows, 1);
+        assert!(
+            d.encrypted_flows().is_empty(),
+            "the evicted flow is no longer one a reader can LOOK at -- which is \
+             exactly why the census below cannot be read off this list"
+        );
+
+        let after = d.encrypted_census();
+        assert_eq!(
+            (
+                after.flows,
+                after.census.records,
+                after.census.application_records,
+                after.census.application_bytes
+            ),
+            (1, 2, 1, 40),
+            "a census of what this reader COULD NOT see must never walk backwards"
+        );
+        let rep = crate::report::CaptureReport::of(&d);
+        assert!(
+            rep.to_text().contains("NOT DECRYPTED (no keys supplied)"),
+            "the person reading this capture is otherwise told only that a flow \
+             was dropped: {}",
+            rep.to_text()
+        );
+        assert!(
+            rep.to_json().contains("\"encrypted\":{\"flows\":1")
+                && rep.to_json().contains("\"application_bytes\":40"),
+            "{}",
+            rep.to_json()
+        );
+        assert!(!rep.is_complete(), "{}", rep.to_text());
+    }
+
+    /// A flow that has DEFINITIVELY lost its framing and is still deciding what
+    /// it is — the resting `OpeningLost` state, reached the way a live tap
+    /// reaches it and not by `finish`.
+    ///
+    /// The far side is a zenoh-framed unit carrying bytes no message accounts
+    /// for. Neither a TLS chain nor a ws frame, so the evidence after the hole
+    /// is INCONCLUSIVE and the flow rests rather than deciding on its own —
+    /// which is what makes the exit, not the arrival, the thing under test.
+    fn flow_resting_in_opening_lost() -> Dissection {
+        let far_side = || {
+            let mut v = alloc::vec![88u8, 0x02];
+            v.push(wz_session_core::wire_const::T_MID_KEEP_ALIVE);
+            v.resize(602, 0x00);
+            v
+        };
+        let app = record(0x17, [0x03, 0x03], &[0xCD; 40]);
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows: Some(1),
+            ..DissectionLimits::default()
+        });
+        // PATIENCE 1: the hole has to be ANNOUNCED while the capture is still
+        // running, and a live tap announces it by spending patience on later
+        // segments.
+        d.set_gap_patience(Some(1));
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &app));
+        let mut seq = 1000u32 + 45 + 45;
+        for i in 0..2 {
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                1 + i,
+                &tcp_packet(1111, 7447, seq, &far_side()),
+            );
+            seq += 602;
+        }
+        // ANTI-VACUITY for every caller: the flow really is still deciding. If
+        // this ever reads `Encrypted` or `Stream` the flow settled on arrival
+        // and no exit is under test.
+        assert!(
+            matches!(d.flows()[0].framing(), Framing::OpeningLost),
+            "framing={:?}",
+            d.flows()[0].framing()
+        );
+        assert_eq!(
+            d.framing_health().desyncs,
+            0,
+            "the loss must not be recorded before the flow leaves"
+        );
+        d
+    }
+
+    /// R311y650 (§1.2a) — a flow the cap evicts takes the SAME exit a flow at
+    /// the end of a capture takes.
+    ///
+    /// R311y612 and R311y649 both wrote "a flow that will not be read again must
+    /// decide", and both wrote it at ONE call site: [`Dissection::finish`]. The
+    /// flow table has a second door, and this is the state that makes walking
+    /// out of it visible — `OpeningLost`, a flow that has definitively lost its
+    /// framing and knows it.
+    ///
+    /// The claim is R311y610's, one exit later: a loss counter must never walk
+    /// backwards. Measured before the fix, on this fixture, `desyncs` read 0
+    /// after the eviction. The flow had lost the framing; the number that says
+    /// so was never written, because the bytes that would have written it left
+    /// with the flow still held.
+    ///
+    /// It is the LIVE-TAP case specifically. A file ends and calls `finish`; a
+    /// tap recycles slots forever and never does — so this test never calls it
+    /// either.
+    #[test]
+    fn an_evicted_flow_settles_the_verdict_it_was_still_holding() {
+        let mut d = flow_resting_in_opening_lost();
+
+        evicting_flow(&mut d, 4);
+        assert_eq!(d.flows().len(), 1, "the cap must have evicted");
+        // NO `finish` HERE, deliberately: it is the verb this path does not get.
+        assert_eq!(
+            d.framing_health().desyncs,
+            1,
+            "a flow evicted while still deciding decided nothing, and the loss it \
+             had already suffered left with it: health={:?}",
+            d.framing_health()
+        );
+    }
+
+    /// R311y650 — and the door R311y612 wrote the rule for, which nothing was
+    /// holding shut.
+    ///
+    /// Found by falsifying R311y650: deleting the `OpeningLost` arm of
+    /// `settle_on_exit` reds the eviction test above and NOTHING ELSE, at every
+    /// feature arm. R311y612's flush — "a flow still deciding when the capture
+    /// ends must be reported, not held" — had no test that fails when it is
+    /// removed, because every fixture written for it decided on its own before
+    /// `finish` was ever reached.
+    ///
+    /// Same fixture as the eviction test, same assertion, other exit. That is
+    /// the point: one rule, two doors, and now a witness at each.
+    #[test]
+    fn a_flow_still_deciding_when_the_capture_ends_settles_too() {
+        let mut d = flow_resting_in_opening_lost();
+        d.finish();
+        assert_eq!(
+            d.framing_health().desyncs,
+            1,
+            "a capture that ended on a flow that had lost its framing reported \
+             none: health={:?}",
+            d.framing_health()
+        );
+        assert!(
+            !matches!(d.flows()[0].framing(), Framing::OpeningLost),
+            "and the flow must not still be deciding: {:?}",
+            d.flows()[0].framing()
+        );
+    }
+
+    /// R311y650 (§1.2a) — and the state that has no verdict to reach: a flow
+    /// HELD by the chain question, evicted.
+    ///
+    /// The held bytes are the finding here. Settling hands them to the zenoh
+    /// reader, which is what makes them countable; without it they leave with
+    /// the flow and every counter they would have moved reads zero — a live
+    /// tap's loss accounting walking backwards, which is the one direction
+    /// R311y610 says it must never move.
+    ///
+    /// The fixture is a ZENOH unit and not a TLS one on purpose. It is the
+    /// `Undecided` state's actual population: `prelude_verdict` requires the
+    /// third byte to be `<= 4`, so the only zenoh units that can hold the chain
+    /// are the ones opening with a small unflagged message id, and this is one.
+    #[test]
+    fn an_evicted_flow_that_was_still_held_accounts_for_its_bytes() {
+        // LE length 0x0317 = 791, so as TLS this is one `application_data`
+        // record whose BE length 0x0314 = 788 lands the run EXACTLY on the
+        // record boundary -- consistent, one record deep, and therefore held.
+        let mut unit = alloc::vec![0x00u8; 791];
+        unit[0] = wz_session_core::wire_const::T_MID_KEEP_ALIVE;
+        unit[1] = 0x03;
+        unit[2] = 0x14;
+        let mut framed = alloc::vec![0x17u8, 0x03];
+        framed.extend_from_slice(&unit);
+        assert_eq!(
+            crate::tls::record_chain_verdict(&framed, crate::tls::TLS_CHAIN_DEPTH),
+            crate::tls::TlsVerdict::NeedMore,
+            "the fixture must reach the HELD state or this test drives another one"
+        );
+
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows: Some(1),
+            ..DissectionLimits::default()
+        });
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &framed));
+        assert!(
+            matches!(d.flows()[0].framing(), Framing::Undecided),
+            "framing={:?}",
+            d.flows()[0].framing()
+        );
+        assert_eq!(d.framing_health().unaccounted_batch_bytes, 0);
+
+        evicting_flow(&mut d, 1);
+        assert_eq!(d.flows().len(), 1, "the cap must have evicted");
+        assert_eq!(
+            d.framing_health().unaccounted_batch_bytes,
+            788,
+            "the held bytes left with the flow and nothing recorded that they \
+             were ever there: health={:?}",
+            d.framing_health()
+        );
+        assert!(
+            !crate::report::CaptureReport::of(&d).is_complete(),
+            "and the verdict must carry the shortfall"
+        );
     }
 }
