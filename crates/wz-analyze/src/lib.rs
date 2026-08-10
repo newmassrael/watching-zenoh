@@ -48,6 +48,8 @@ pub struct Options {
     pub format: Format,
     /// R311y666 (§1.2a) — list every flow, not just the capture-wide summary.
     pub per_flow: bool,
+    /// R311y667 (§1.2a) — list the decoded MESSAGES, not just how many.
+    pub per_message: bool,
 }
 
 /// Why a command line was not accepted.
@@ -92,6 +94,8 @@ OPTIONS:
                       Blocks are used without this flag.
     --flows           list every flow: endpoints, framing, messages decoded,
                       and for an encrypted one whether its plaintext was read
+    --messages        list the decoded messages themselves, under their flow.
+                      Implies --flows
     --json            render the report as JSON instead of text
     -h, --help        print this and exit
 ";
@@ -102,12 +106,20 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut keylog: Option<String> = None;
     let mut format = Format::Text;
     let mut per_flow = false;
+    let mut per_message = false;
     let mut at = 0usize;
     while at < args.len() {
         let arg = &args[at];
         match arg.as_str() {
             "--json" => format = Format::Json,
             "--flows" => per_flow = true,
+            "--messages" => {
+                // The messages are printed under their flow, so asking for them
+                // asks for the flows too. Silently implying it beats refusing a
+                // combination that has one sensible meaning.
+                per_flow = true;
+                per_message = true;
+            }
             "--keylog" => {
                 at += 1;
                 keylog = Some(
@@ -134,6 +146,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
         keylog,
         format,
         per_flow,
+        per_message,
     })
 }
 
@@ -163,7 +176,7 @@ pub struct Outcome {
 /// test are the ordinary pair, and either may hold connections the other does
 /// not.
 pub fn analyze(capture: &[u8], keylog: Option<&[u8]>) -> Result<(String, Outcome), CaptureError> {
-    analyze_with(capture, keylog, Format::Text, false)
+    analyze_with(capture, keylog, Format::Text, false, false)
 }
 
 /// [`analyze`], rendering in the format given.
@@ -177,6 +190,7 @@ pub fn analyze_with(
     keylog: Option<&[u8]>,
     format: Format,
     per_flow: bool,
+    per_message: bool,
 ) -> Result<(String, Outcome), CaptureError> {
     let mut dissection = Dissection::from_capture(capture)?;
 
@@ -211,7 +225,7 @@ pub fn analyze_with(
         Format::Json => report.to_json(),
     };
     if per_flow {
-        rendered.push_str(&flow_lines(&dissection, format));
+        splice_flows(&mut rendered, &dissection, format, per_message);
     }
     Ok((rendered, outcome))
 }
@@ -222,10 +236,38 @@ pub fn analyze_with(
 /// exposed: which endpoints, what the byte stream turned out to be, how many
 /// messages came out of it, and -- for an encrypted flow -- whether its
 /// plaintext was read and why not.
-fn flow_lines(d: &Dissection, format: Format) -> String {
+/// R311y667 (§1.2a) — put the flow list INSIDE the report rather than after it.
+///
+/// R311y666 appended a second JSON object, so `--json --flows` emitted two
+/// documents on one stream. A consumer parsing it as a single value gets the
+/// first and silently ignores the second -- which is the whole class of failure
+/// this track exists to end, arriving through the output format: the flows are
+/// there, the reader does not see them, and nothing says so.
+///
+/// The text rendering has no such constraint and keeps its appended section.
+fn splice_flows(rendered: &mut String, d: &Dissection, format: Format, per_message: bool) {
+    let body = flow_lines(d, format, per_message);
+    if format == Format::Text {
+        rendered.push_str(&body);
+        return;
+    }
+    // The report is one JSON object, so the list becomes another key in it.
+    // Checked rather than assumed: a renderer that stopped producing an object
+    // would otherwise have this appended to whatever it did produce.
+    if rendered.ends_with('}') {
+        rendered.pop();
+        rendered.push(',');
+        rendered.push_str(&body);
+        rendered.push('}');
+    } else {
+        rendered.push_str(&body);
+    }
+}
+
+fn flow_lines(d: &Dissection, format: Format, per_message: bool) -> String {
     let mut out = String::new();
     if format == Format::Json {
-        out.push_str("\n{\"flows\":[");
+        out.push_str("\"flows\":[");
     } else {
         out.push_str("\nflows:\n");
     }
@@ -262,12 +304,55 @@ fn flow_lines(d: &Dissection, format: Format) -> String {
                 endpoint(&key.high),
                 flow.frames.len()
             ));
+            if per_message {
+                for f in &flow.frames {
+                    out.push_str(&format!(
+                        "      {:?} @{} #{}  {}\n",
+                        f.direction,
+                        f.stream_offset,
+                        f.batch_index,
+                        message_name(f)
+                    ));
+                }
+            }
         }
     }
     if format == Format::Json {
-        out.push_str("]}");
+        out.push(']');
     }
     out
+}
+
+/// R311y667 (§1.2a) — what one decoded message WAS, in a word.
+///
+/// ## Why this reads a `Debug` rendering instead of matching the enum
+///
+/// A total match is this project's rule and is the wrong tool here:
+/// `InboundFrame`'s variants are individually `#[cfg]`-gated on the `codec-*`
+/// features, so an exhaustive match in this crate would have to mirror seven
+/// feature gates it does not own -- and a mirror drifts. A `_ =>` fallback is
+/// worse: it is the arm that silently reports a new message kind as whatever
+/// the default happens to be.
+///
+/// So the name is taken from the derived `Debug`, whose leading token is the
+/// variant's own identifier. That is a human-facing listing reading a
+/// human-facing rendering; nothing decides anything on it, and a variant added
+/// upstream appears here by its right name without this crate being touched.
+fn message_name(frame: &wz_session_core::passive::PassiveFrame) -> String {
+    match &frame.frame {
+        Ok(f) => {
+            let rendered = format!("{f:?}");
+            rendered
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()
+                .unwrap_or("?")
+                .to_string()
+        }
+        // A message this reader could NOT decode is named as such rather than
+        // omitted: a listing that shows only the successes is the silence this
+        // whole track exists to end, one layer up.
+        Err(e) => format!("undecodable({e:?})"),
+    }
 }
 
 /// An endpoint as `addr:port`, IPv4 dotted or IPv6 hex-grouped.
@@ -301,6 +386,7 @@ mod tests {
                 keylog: None,
                 format: Format::Text,
                 per_flow: false,
+                per_message: false,
             })
         );
     }
@@ -313,13 +399,16 @@ mod tests {
                 "keys.txt",
                 "cap.pcapng",
                 "--json",
-                "--flows"
+                "--messages"
             ])),
             Ok(Options {
                 capture: "cap.pcapng".into(),
                 keylog: Some("keys.txt".into()),
                 format: Format::Json,
+                // `--messages` implies `--flows`: the messages are printed
+                // under their flow, so the pairing has one sensible meaning.
                 per_flow: true,
+                per_message: true,
             })
         );
     }
@@ -453,5 +542,52 @@ mod tests {
     #[test]
     fn a_file_that_is_not_a_capture_is_refused() {
         assert!(analyze(b"not a capture at all", None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod message_name_tests {
+    use super::*;
+
+    /// R311y667 — a message this reader could NOT decode is NAMED, not omitted.
+    ///
+    /// A listing that shows only the successes is the silence this whole track
+    /// exists to end, arriving one layer up: a flow reporting "2 messages" while
+    /// printing two lines out of three reads as a capture that carried two.
+    ///
+    /// Driven on a hand-built `PassiveFrame` because the shape is hard to reach
+    /// through a capture -- a framed unit whose body is short enough to fail the
+    /// codec is also short enough that the FRAMER usually rejects it first, and
+    /// a fixture that has to defeat two layers to reach one arm is a fixture
+    /// that stops testing the arm.
+    #[test]
+    fn a_message_that_did_not_decode_is_named_rather_than_dropped() {
+        let frame = wz_session_core::passive::PassiveFrame {
+            direction: wz_session_core::passive::Direction::A,
+            stream_offset: 12,
+            batch_index: 0,
+            unit_offset: 0,
+            batch_offset: None,
+            prefix_width: 2,
+            frame: Err(wz_session_core::parse_error::InboundParseError::Empty),
+            context: Default::default(),
+            exceeds_negotiated_batch: false,
+            carried: wz_session_core::passive::Carried::Nothing,
+            inadmissible_on_link: false,
+            sn_verdict: None,
+            resync: None,
+            observed_at_ms: None,
+            reserved_header_bits: 0,
+            undefined_mandatory_ext: None,
+        };
+        let name = message_name(&frame);
+        assert!(
+            name.starts_with("undecodable("),
+            "an undecodable message must say so: {name}"
+        );
+        assert!(
+            name.contains("Empty"),
+            "and carry WHY, because the reason is what a reader acts on: {name}"
+        );
     }
 }

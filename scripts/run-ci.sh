@@ -5208,7 +5208,9 @@ layer_c1bw_analyze_cli() {
         the_binary_decrypts_a_capture_given_a_key_log_on_the_command_line \
         the_exit_code_separates_an_incomplete_capture_from_a_failed_run \
         an_unreadable_key_log_fails_instead_of_reporting_the_capture_as_encrypted \
-        the_flows_option_names_which_connection_the_summary_cannot
+        the_flows_option_names_which_connection_the_summary_cannot \
+        the_json_rendering_is_a_single_document_even_with_flows \
+        the_messages_option_lists_what_was_read_and_not_only_how_much
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bw FAIL: $name is absent from the binary test target"

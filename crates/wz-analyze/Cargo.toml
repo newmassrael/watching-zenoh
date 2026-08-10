@@ -27,6 +27,9 @@ path = "src/main.rs"
 [dependencies]
 wz-capture = { path = "../wz-capture" }
 wz-tls-record = { path = "../wz-tls-record" }
+# R311y667 — for `PassiveFrame`, which is the type `wz-capture` hands the
+# decoded messages back in. Naming one in a listing means naming its type.
+wz-session-core = { path = "../wz-session-core" }
 
 [dev-dependencies]
 # THE ORACLE, and never a dependency -- the same role it plays for

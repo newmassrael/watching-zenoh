@@ -414,3 +414,137 @@ fn the_flows_option_names_which_connection_the_summary_cannot() {
         "the summary must not have named endpoints all along: {plain}"
     );
 }
+
+/// R311y667 (§1.2a) — `--json --flows` is ONE document.
+///
+/// R311y666 appended the flow list as a second JSON object on the same stream.
+/// A consumer parsing that as a single value gets the first object and silently
+/// ignores the second: the flows are there, the reader does not see them, and
+/// nothing says so -- the exact failure this whole track exists to end, arriving
+/// through the output format.
+///
+/// Checked structurally rather than by eye: the nesting depth returns to zero
+/// exactly once, at the very end. Two documents return to zero twice.
+#[test]
+fn the_json_rendering_is_a_single_document_even_with_flows() {
+    let scratch = Scratch::new("one-doc");
+    let (file, log, _) = capture_and_key_log();
+    let capture = scratch.write("session.pcapng", &file);
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--keylog")
+        .arg(&keylog)
+        .arg("--json")
+        .arg("--flows")
+        .output()
+        .expect("runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json = stdout.trim();
+
+    assert!(
+        json.contains("\"flows\":["),
+        "the flow list must be in the output at all: {json}"
+    );
+    assert!(
+        json.contains("10.0.0.1:1111"),
+        "with the endpoints in it: {json}"
+    );
+
+    // Depth, ignoring braces inside strings. A second top-level object shows up
+    // as a return to zero before the end.
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut closed_at: Vec<usize> = Vec::new();
+    for (i, c) in json.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    closed_at.push(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(depth, 0, "the document must be balanced: {json}");
+    assert_eq!(
+        closed_at.len(),
+        1,
+        "the nesting must return to zero EXACTLY ONCE -- more than once is more \
+         than one document, and a consumer sees only the first: {json}"
+    );
+    assert_eq!(
+        closed_at[0],
+        json.len() - 1,
+        "and that once is the last character"
+    );
+}
+
+/// R311y667 (§1.2a) — `--messages` lists the messages themselves.
+///
+/// Three rounds carried "the decoded messages have no rendering". A count says
+/// how much was read; a list says WHAT was read, which is the question a person
+/// opening a capture actually has -- and for a decrypted TLS flow those messages
+/// are the entire point of the track that produced them.
+#[test]
+fn the_messages_option_lists_what_was_read_and_not_only_how_much() {
+    let scratch = Scratch::new("messages");
+    let (file, log, _) = capture_and_key_log();
+    let capture = scratch.write("session.pcapng", &file);
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--keylog")
+        .arg(&keylog)
+        .arg("--messages")
+        .output()
+        .expect("runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // The fixture's three messages are KeepAlives, decrypted out of TLS.
+    assert_eq!(
+        stdout.matches("KeepAlive").count(),
+        3,
+        "each decoded message must appear BY NAME: {stdout}"
+    );
+    // The hello is 57 bytes and each sealed record is 25 (5 header + 3
+    // plaintext + 1 inner content type + 16 tag), so the three records begin at
+    // 57, 82 and 107 of the TCP stream. TCP-space, not plaintext-space -- which
+    // is what ties a message back to a packet.
+    assert!(
+        stdout.contains("A @57") && stdout.contains("A @82") && stdout.contains("A @107"),
+        "with the direction and the TCP-space offset of the record it came out \
+         of: {stdout}"
+    );
+
+    // `--flows` alone gives the count and NOT the list, so the assertions above
+    // are about `--messages`.
+    let flows_only = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--keylog")
+        .arg(&keylog)
+        .arg("--flows")
+        .output()
+        .expect("runs");
+    let flows_only = String::from_utf8_lossy(&flows_only.stdout);
+    assert!(
+        flows_only.contains("3 message(s)") && !flows_only.contains("KeepAlive"),
+        "--flows counts them and does not name them: {flows_only}"
+    );
+}

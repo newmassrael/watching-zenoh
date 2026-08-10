@@ -1142,3 +1142,197 @@ fn the_server_direction_has_no_early_epoch() {
          direction an epoch no record can ever be in"
     );
 }
+
+/// R311y667 (§1.2a) — a hole that lands ACROSS a key change.
+///
+/// R311y666 answered a hole inside one epoch, and R311y662 answered a key
+/// change with nothing lost. This is both at once, which is not a contrived
+/// pairing: the two are independent events, so a capture that drops segments
+/// for a while drops them across whatever happens meanwhile.
+///
+/// The record that arrives after such a hole is the first this reader SEES of
+/// the new epoch and is NOT its sequence zero -- records of it went into the
+/// hole. R311y666 searched the window in the current epoch only and tried the
+/// next epoch at zero exactly, so this record opened under neither.
+#[test]
+fn a_hole_across_a_key_change_is_recovered_in_the_new_epoch() {
+    let first_secret = traffic_secret();
+    let second_secret: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(31).wrapping_add(17))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(37).wrapping_add(5));
+
+    let framed = || {
+        let u = vec![0x04u8];
+        let mut f = (u.len() as u16).to_le_bytes().to_vec();
+        f.extend_from_slice(&u);
+        f
+    };
+    let seal = |secret: &[u8], seq: u64| {
+        sealer(secret)
+            .encrypt(
+                OutboundPlainMessage {
+                    typ: rustls::ContentType::ApplicationData,
+                    version: rustls::ProtocolVersion::TLSv1_2,
+                    payload: rustls::crypto::cipher::OutboundChunks::Single(&framed()),
+                },
+                seq,
+            )
+            .expect("seal")
+            .encode()
+    };
+
+    // Generation 0: records at sequence 0 and 1, both captured.
+    let mut before = client_hello(&random);
+    before.extend_from_slice(&seal(&first_secret, 0));
+    before.extend_from_slice(&seal(&first_secret, 1));
+
+    // THE HOLE swallows the last record of generation 0 AND the first two of
+    // generation 1, so what arrives next is generation 1 at SEQUENCE TWO.
+    let hole = seal(&first_secret, 2).len()
+        + seal(&second_secret, 0).len()
+        + seal(&second_secret, 1).len();
+
+    // What the capture sees next: generation 1 at sequence 2, then 3.
+    let mut after = seal(&second_secret, 2);
+    after.extend_from_slice(&seal(&second_secret, 3));
+
+    let mut d = wz_capture::Dissection::new();
+    d.set_gap_patience(Some(4));
+    d.push_packet(
+        wz_capture::link::LINKTYPE_ETHERNET,
+        0,
+        &tcp_packet(1000, &before),
+    );
+    d.push_packet(
+        wz_capture::link::LINKTYPE_ETHERNET,
+        1,
+        &tcp_packet(1000 + before.len() as u32 + hole as u32, &after),
+    );
+    d.finish();
+
+    let flow = &d.encrypted_flows()[0];
+    assert_eq!(
+        flow.kept_records[0].len(),
+        4,
+        "two records before the hole and two after it"
+    );
+
+    let log_text = format!(
+        "CLIENT_TRAFFIC_SECRET_0 {} {}\nCLIENT_TRAFFIC_SECRET_1 {} {}\n",
+        hex(&random),
+        hex(&first_secret),
+        hex(&random),
+        hex(&second_secret)
+    );
+    let mut opener = CaptureOpener::new(
+        KeyLog::from_secrets_block(SECRETS_TYPE_TLS_KEY_LOG, log_text.as_bytes())
+            .expect("a key log"),
+    );
+    let summary = d.decrypt_with(&mut opener);
+
+    assert_eq!(
+        summary.records, 4,
+        "ALL FOUR: two under the old key, and two under the new one at a \
+         sequence the hole moved -- neither epoch's zero and neither reachable \
+         by trying one of the two answers alone: {summary:?}"
+    );
+    assert_eq!(summary.frames, 4);
+    assert_eq!(d.encrypted_flows()[0].not_decrypted, None);
+}
+
+/// R311y667 (§1.2a) — a record that opens under NOTHING leaves the direction
+/// exactly as it found it.
+///
+/// R311y666 advanced the epoch pointer while searching, so a refusal left the
+/// direction describing an epoch it had never entered. Nothing read that state
+/// afterwards -- the caller stops the direction on a refusal -- which is what
+/// makes it the kind of defect that is discovered later, by the first code that
+/// does.
+///
+/// Driven through the PUBLIC surface: a flow whose first record is corrupt is
+/// refused, and a second flow with the same identity and sound records then
+/// decrypts completely. Were the state left moved, the opener would be reset by
+/// `begin_flow` anyway -- so the assertion is made where it can be seen, on the
+/// epoch a SECOND record of the same flow lands in.
+#[test]
+fn a_record_that_opens_under_nothing_leaves_the_epoch_where_it_was() {
+    let handshake_secret: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(41).wrapping_add(9))
+        .collect();
+    let application_secret = traffic_secret();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(43).wrapping_add(11));
+
+    let framed = || {
+        let u = vec![0x04u8];
+        let mut f = (u.len() as u16).to_le_bytes().to_vec();
+        f.extend_from_slice(&u);
+        f
+    };
+    let mut hs = sealer(&handshake_secret);
+    let good = hs
+        .encrypt(
+            OutboundPlainMessage {
+                typ: rustls::ContentType::ApplicationData,
+                version: rustls::ProtocolVersion::TLSv1_2,
+                payload: rustls::crypto::cipher::OutboundChunks::Single(&framed()),
+            },
+            0,
+        )
+        .expect("seal")
+        .encode();
+
+    // A record of the handshake epoch with one ciphertext byte flipped: it
+    // authenticates under no key at all.
+    let mut corrupt = hs
+        .encrypt(
+            OutboundPlainMessage {
+                typ: rustls::ContentType::ApplicationData,
+                version: rustls::ProtocolVersion::TLSv1_2,
+                payload: rustls::crypto::cipher::OutboundChunks::Single(&framed()),
+            },
+            1,
+        )
+        .expect("seal")
+        .encode();
+    let last = corrupt.len() - 1;
+    corrupt[last] ^= 0xff;
+
+    let mut stream = client_hello(&random);
+    stream.extend_from_slice(&corrupt);
+    stream.extend_from_slice(&good);
+
+    let mut d = wz_capture::Dissection::new();
+    d.push_packet(
+        wz_capture::link::LINKTYPE_ETHERNET,
+        0,
+        &tcp_packet(1000, &stream),
+    );
+    d.finish();
+
+    let log_text = format!(
+        "CLIENT_HANDSHAKE_TRAFFIC_SECRET {} {}\nCLIENT_TRAFFIC_SECRET_0 {} {}\n",
+        hex(&random),
+        hex(&handshake_secret),
+        hex(&random),
+        hex(&application_secret)
+    );
+    let mut opener = CaptureOpener::new(
+        KeyLog::from_secrets_block(SECRETS_TYPE_TLS_KEY_LOG, log_text.as_bytes())
+            .expect("a key log"),
+    );
+    let summary = d.decrypt_with(&mut opener);
+
+    assert_eq!(
+        summary.records, 0,
+        "the corrupt record is the first one, so nothing opens: {summary:?}"
+    );
+    assert_eq!(
+        d.encrypted_flows()[0].not_decrypted,
+        Some(wz_capture::tls::NotDecrypted::RecordRefusedKeys {
+            direction: wz_capture::tls::Direction::A,
+            index: 0,
+        }),
+        "and it is named by index rather than blamed on the keys"
+    );
+}

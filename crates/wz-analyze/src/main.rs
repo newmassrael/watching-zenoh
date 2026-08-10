@@ -50,6 +50,7 @@ fn main() -> ExitCode {
         keylog.as_deref(),
         options.format,
         options.per_flow,
+        options.per_message,
     ) {
         Ok(out) => out,
         Err(err) => {

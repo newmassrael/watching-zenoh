@@ -206,42 +206,61 @@ impl DirectionState {
     /// so a record that simply refuses is never mistaken for a resynchronisation
     /// problem — and the search is bounded by the hole's own byte count, which
     /// is a measurement rather than a window someone picked.
+    ///
+    /// ## R311y667 — the two can happen AT THE SAME RECORD
+    ///
+    /// A key change and a hole are independent events, so a capture can lose
+    /// segments across the moment the keys rotate. The record that then arrives
+    /// is the first this reader SEES of the new epoch and is not that epoch's
+    /// sequence zero — records of it went into the hole. R311y666 searched the
+    /// window in the CURRENT epoch only and tried the next one at zero exactly,
+    /// so this record opened under neither and the direction stopped.
+    ///
+    /// Every epoch therefore gets the same window, and the window is the same
+    /// measurement in each: the hole's byte count bounds how many records fitted
+    /// in it whichever key was protecting them.
+    ///
+    /// ## And the state is not moved by a failure
+    ///
+    /// R311y666 advanced `at` and `base` while SEARCHING, so a record that
+    /// opened under nothing left this direction describing an epoch it never
+    /// entered. Harmless while the caller stops at the first refusal, and
+    /// exactly the kind of state that is wrong the moment something reads it.
+    /// The walk now happens on a copy and is committed only where a record
+    /// actually opened.
     fn open(&mut self, record: &EncryptedRecord) -> Option<OpenedRecord> {
-        // R311y666 — after a hole, find how far the numbering slipped. At most
-        // `lost_before / MIN_PROTECTED_RECORD` records fitted in it.
-        if record.lost_before > 0 {
-            let window = (record.lost_before / MIN_PROTECTED_RECORD).min(MAX_RESYNC_ATTEMPTS);
-            let from = (record.index - self.base) + self.skew;
+        // At most this many records fitted in the hole, whichever epoch they
+        // belonged to. Zero where there was no hole, which makes the loop below
+        // one attempt per epoch -- the R311y662 behaviour exactly.
+        let window = (record.lost_before / MIN_PROTECTED_RECORD).min(MAX_RESYNC_ATTEMPTS);
+        let (mut at, mut base, mut skew) = (self.at, self.base, self.skew);
+        loop {
+            let from = (record.index - base) + skew;
             for k in 0..=window {
-                if let Some(opened) = self.epochs[self.at].open(from + k, &record.bytes) {
+                if let Some(opened) = self.epochs[at].open(from + k, &record.bytes) {
                     // Found, and by AUTHENTICATION rather than by inference: the
                     // tag is a 128-bit check, so the offset that opens the record
-                    // is the offset. It holds for every later record of this
-                    // epoch, which is why it is accumulated rather than applied
-                    // once.
-                    self.skew += k;
+                    // is the offset. COMMITTED here and only here -- `k` holds
+                    // for every later record of this epoch, which is why it is
+                    // accumulated rather than applied once.
+                    self.at = at;
+                    self.base = base;
+                    self.skew = skew + k;
                     return Some(opened);
                 }
             }
-            // Not recoverable within the window. Fall through: the record may
-            // still be the first of the NEXT epoch, whose sequence starts over
-            // and owes nothing to the hole.
-        }
-        loop {
-            let seq = (record.index - self.base) + self.skew;
-            if let Some(opened) = self.epochs[self.at].open(seq, &record.bytes) {
-                return Some(opened);
-            }
-            // The current epoch refused. If there is a later one, this record is
-            // a candidate for being its FIRST -- so it is retried at sequence
-            // zero, which is where a key change restarts the count.
-            if self.at + 1 >= self.epochs.len() {
+            // This epoch refused every offset. If there is a later one, the
+            // record is a candidate for being its first SEEN record -- at
+            // sequence zero if nothing was lost, and within the window if
+            // something was.
+            if at + 1 >= self.epochs.len() {
+                // Nothing opened it, so nothing about this direction changes.
                 return None;
             }
-            self.at += 1;
-            self.base = record.index;
+            at += 1;
+            base = record.index;
             // A new epoch numbers from zero and has lost nothing YET.
-            self.skew = 0;
+            skew = 0;
         }
     }
 }
@@ -449,6 +468,56 @@ mod tests {
         );
         assert_eq!(state.epochs[1].secret, application);
         assert_eq!(state.at, 0, "and the trial starts in it");
+    }
+
+    /// R311y667 — a record that opens under NO epoch leaves the direction
+    /// exactly as it found it.
+    ///
+    /// ## Why this test is here and not in the integration suite
+    ///
+    /// It was tried there first and could not be written: the caller stops a
+    /// direction at its first refusal, so nothing downstream ever reads the
+    /// state a failed walk left behind, and every assertion available through
+    /// the public surface passed with the defect present. A claim whose witness
+    /// cannot be built is not a claim -- so the observation is made where the
+    /// state IS observable, on the type that owns it.
+    ///
+    /// The defect it pins is R311y666's: the walk advanced `at` and `base` as it
+    /// searched, so a record that authenticated under nothing left this
+    /// direction describing an epoch it had never entered. Harmless while
+    /// nothing reads it, and wrong the moment something does.
+    #[test]
+    fn a_record_that_opens_under_no_epoch_leaves_the_direction_untouched() {
+        let mut state = DirectionState::new(&[&[1u8; 48][..], &[2u8; 48][..]])
+            .expect("two epochs of a valid width");
+        assert_eq!((state.at, state.base, state.skew), (0, 0, 0));
+
+        // A record no key opens: the bytes are not a sealed record at all.
+        let mut bytes = alloc::vec![0x17u8, 0x03, 0x03, 0x00, 0x20];
+        bytes.extend_from_slice(&[0u8; 32]);
+        let record = EncryptedRecord {
+            index: 7,
+            stream_offset: 0,
+            lost_before: 0,
+            bytes,
+        };
+        assert!(state.open(&record).is_none(), "nothing can open it");
+        assert_eq!(
+            (state.at, state.base, state.skew),
+            (0, 0, 0),
+            "the search walked both epochs and must have left neither pointer \
+             moved: a failed walk is not a state change"
+        );
+
+        // And with a hole in front of it, so the window is walked too.
+        let wide = EncryptedRecord {
+            index: 9,
+            stream_offset: 0,
+            lost_before: 10_000,
+            ..record.clone()
+        };
+        assert!(state.open(&wide).is_none());
+        assert_eq!((state.at, state.base, state.skew), (0, 0, 0));
     }
 
     /// A flow with no identity is declined by name.

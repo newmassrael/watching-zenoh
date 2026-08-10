@@ -2405,6 +2405,7 @@ version = "0.1.0"
 dependencies = [
  "rustls",
  "wz-capture",
+ "wz-session-core",
  "wz-tls-record",
 ]
 
