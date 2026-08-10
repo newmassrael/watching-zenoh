@@ -151,6 +151,36 @@ pub fn client_hello_verdict(bytes: &[u8]) -> TlsVerdict {
     TlsVerdict::Yes
 }
 
+/// R311y659 (§1.2a) — the ClientHello's 32-byte `Random`, if this direction's
+/// opening carries a whole one.
+///
+/// A SEPARATE question from [`client_hello_verdict`] and not a widening of it.
+/// That function's narrowness is load-bearing (R311y649: admitting any
+/// handshake-shaped record is what leaves the internal length check with
+/// nothing to disagree with), so this one does not decide anything -- it reads
+/// a field out of bytes the caller has already decided about.
+///
+/// The random is what a key log line is keyed by, so it is the ONLY thing that
+/// ties a flow in a capture to the secrets in that capture's own Decryption
+/// Secrets Block. Without it R311y658's parsed secrets have no way to be
+/// selected for a connection.
+///
+/// ## The offset, and why it is a constant rather than a walk
+///
+/// RFC 8446 §4.1.2 fixes everything in front of it: a 5-byte record header, a
+/// 4-byte handshake header (type + 3-byte length), and the 2-byte
+/// `legacy_version`. The random is the next 32 bytes. Nothing before it is
+/// variable-length, which is why this is arithmetic and not a parser.
+///
+/// `None` when the bytes are not all here yet. A ClientHello may be split
+/// across records -- rare and legal -- and a capture may simply have stopped;
+/// both are "not yet", and returning a partial random would key a connection
+/// under something no key log contains.
+pub fn client_hello_random(bytes: &[u8]) -> Option<[u8; 32]> {
+    const RANDOM_AT: usize = RECORD_HEADER + 4 + 2;
+    bytes.get(RANDOM_AT..RANDOM_AT + 32)?.try_into().ok()
+}
+
 /// Does this run of bytes walk as a chain of TLS records?
 ///
 /// The second, independent question, and the one that separates a record header
@@ -249,6 +279,13 @@ pub struct EncryptedFlow {
     pub per_direction: [RecordCensus; 2],
     /// Why its plaintext is absent from this report.
     pub not_decrypted: NotDecrypted,
+    /// R311y659 (§1.2a) — the ClientHello `Random` this flow opened with, which
+    /// is the key a capture's own key log is indexed by.
+    ///
+    /// `None` where the flow was recognised by its record CHAIN rather than by
+    /// a ClientHello -- a mid-session capture or a server-half one -- because
+    /// there is no ClientHello in those to read one from.
+    pub client_random: Option<[u8; 32]>,
 }
 
 impl EncryptedFlow {
@@ -396,6 +433,15 @@ pub struct TlsFlowState {
     pub(crate) per_direction: [RecordCensus; 2],
     /// Bytes held for a direction whose last record was incomplete.
     pub(crate) pending: [Vec<u8>; 2],
+    /// R311y659 (§1.2a) — the ClientHello `Random`, where this flow was
+    /// recognised BY its ClientHello.
+    ///
+    /// `None` for the two capture shapes R311y649 added: a mid-session capture
+    /// and a server-half one are recognised by the record chain, and neither
+    /// has a ClientHello in it to read. That is a real limit on which flows a
+    /// key log can be matched to, and carrying `Option` rather than a sentinel
+    /// is what makes a caller say so instead of matching on 32 zero bytes.
+    pub(crate) client_random: Option<[u8; 32]>,
 }
 
 impl TlsFlowState {

@@ -70,6 +70,17 @@ const BT_ISB: u32 = 0x0000_0005;
 /// about such a file is a true statement about the reader and a false one about
 /// the capture.
 const BT_DSB: u32 = 0x0000_000A;
+
+/// R311y659 (§1.2a) — the most Decryption Secrets Block payload this reader
+/// retains, across every DSB in a file.
+///
+/// A key log is text and a long-running process writes a large one, so this is
+/// the one accumulation in this parser that grows with the file's CONTENT
+/// rather than with its packet count. 1 MiB is roughly 8 000 TLS 1.3
+/// connections' worth of lines -- far past any capture a person opens -- and it
+/// is a bound rather than a policy: what is dropped is reported through
+/// [`DecryptionSecrets::truncated`] rather than being silently short.
+pub const MAX_DECRYPTION_SECRETS_BYTES: usize = 1024 * 1024;
 /// Name Resolution Block — address-to-name records this reader does not use.
 const BT_NRB: u32 = 0x0000_0004;
 /// The byte-order magic inside an SHB body.
@@ -296,6 +307,14 @@ pub struct DecryptionSecrets {
     pub secrets_type: u32,
     /// The block's secrets data, exactly as the file carried it.
     pub secrets: Vec<u8>,
+    /// R311y659 — `true` when this reader kept less than the block held,
+    /// because [`MAX_DECRYPTION_SECRETS_BYTES`] was reached.
+    ///
+    /// Its own flag rather than a comparison a caller could make, because a
+    /// caller cannot: the bytes it did not get are the evidence it would need.
+    /// A key log cut in the middle parses to FEWER connections with no error,
+    /// which is the silent shortfall this crate refuses everywhere else.
+    pub truncated: bool,
 }
 
 impl core::fmt::Debug for DecryptionSecrets {
@@ -306,6 +325,7 @@ impl core::fmt::Debug for DecryptionSecrets {
         f.debug_struct("DecryptionSecrets")
             .field("secrets_type", &format_args!("{:#010x}", self.secrets_type))
             .field("secrets", &format_args!("<{} byte(s)>", self.secrets.len()))
+            .field("truncated", &self.truncated)
             .finish()
     }
 }
@@ -490,6 +510,7 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
     // R311y625 (§1.4d) — block types stepped over, counted rather than dropped.
     let mut skipped: Vec<SkippedBlock> = Vec::new();
     let mut dsb: Vec<DecryptionSecrets> = Vec::new();
+    let mut dsb_bytes = 0usize;
     // R311y607 — obsolete-Packet-Block drop counters, summed per interface.
     // A map rather than a Vec because the interface list is rebuilt at each
     // section boundary while these are accumulated across the whole file, and
@@ -720,7 +741,7 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
             // and the payload is what a decryptor needs, and dropping the
             // skipped entry would make the file look fully understood.
             BT_DSB => {
-                if body.len() >= 8 {
+                if body.len() >= 8 && dsb_bytes < MAX_DECRYPTION_SECRETS_BYTES {
                     let secrets_type = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
                     let len = u32::from_le_bytes([body[4], body[5], body[6], body[7]]) as usize;
                     // The declared length is the file's claim; the block is the
@@ -728,9 +749,18 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
                     // truncated, and taking `min` keeps what is really there
                     // rather than reading whatever follows in the buffer.
                     let end = (8 + len).min(body.len());
+                    // R311y659 — bounded, like every other accumulation in this
+                    // crate. A capture may embed a key log of any size and this
+                    // is the only thing here that grows with the FILE's content
+                    // rather than with its packet count. The cap is on the
+                    // total across blocks, so a file that splits one huge log
+                    // across many DSBs is bounded the same as one that does not.
+                    let keep = (MAX_DECRYPTION_SECRETS_BYTES - dsb_bytes).min(end - 8);
+                    dsb_bytes += keep;
                     dsb.push(DecryptionSecrets {
                         secrets_type,
-                        secrets: body[8..end].to_vec(),
+                        secrets: body[8..8 + keep].to_vec(),
+                        truncated: 8 + keep < end,
                     });
                 }
                 let entry = skipped
@@ -1118,6 +1148,10 @@ mod tests {
             body.to_vec(),
             "the payload must arrive byte for byte, without the padding"
         );
+        assert!(
+            !parsed.decryption_secrets[0].truncated,
+            "a payload that fits is not truncated"
+        );
 
         // AND NO KEY MATERIAL IN THE DEBUG RENDERING: a capture tool that
         // spilled secrets into a log would be worse than one that could not
@@ -1125,6 +1159,34 @@ mod tests {
         let shown = alloc::format!("{:?}", parsed.decryption_secrets[0]);
         assert!(shown.contains("byte(s)"), "{shown}");
         assert!(!shown.contains("CLIENT_TRAFFIC"), "{shown}");
+
+        // R311y659 — THE BOUND, and its report. Every other accumulation in
+        // this crate is capped and counted; the retained payload was the one
+        // that grew with the FILE's content and had no limit at all. What is
+        // dropped is not silent: `truncated` says the log a caller parses is
+        // shorter than the one the file carried, which a caller cannot work out
+        // for itself -- the bytes it did not get are the evidence it would need.
+        let over = MAX_DECRYPTION_SECRETS_BYTES + 100;
+        let mut big = Vec::new();
+        big.extend_from_slice(&BT_DSB.to_le_bytes());
+        let total = 12 + 8 + over;
+        big.extend_from_slice(&(total as u32).to_le_bytes());
+        big.extend_from_slice(&TLSK.to_le_bytes());
+        big.extend_from_slice(&(over as u32).to_le_bytes());
+        big.resize(big.len() + over, b'x');
+        big.extend_from_slice(&(total as u32).to_le_bytes());
+        let mut file = write(&[(1, 6)], &[(0, 1_000_000, &[0xAA; 4])]);
+        file.extend_from_slice(&big);
+        let parsed = parse(&file).expect("an oversized DSB must not be fatal");
+        assert_eq!(
+            parsed.decryption_secrets[0].secrets.len(),
+            MAX_DECRYPTION_SECRETS_BYTES,
+            "the bound must hold"
+        );
+        assert!(
+            parsed.decryption_secrets[0].truncated,
+            "and it must say that it bit"
+        );
 
         // A TRUNCATED DSB: the block declares more secrets than it carries,
         // which is the ordinary shape of a capture cut short while the writer

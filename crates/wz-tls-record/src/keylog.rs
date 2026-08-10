@@ -78,6 +78,37 @@ impl SecretLabel {
     }
 }
 
+/// R311y659 — is this first field a label the NSS key log format defines?
+///
+/// Wider than [`SecretLabel::from_label`] on purpose: that answers "can this
+/// crate act on it", and this answers "was this a key log record at all". The
+/// gap between the two is exactly what [`KeyLog::refused`] reports, and it is
+/// the useful half of the answer — `CLIENT_RANDOM` means bring a TLS 1.2
+/// reader, and a later `_N` means bring key update support.
+fn is_keylog_label(label: &str) -> bool {
+    const KNOWN: [&str; 6] = [
+        "CLIENT_RANDOM",
+        "CLIENT_EARLY_TRAFFIC_SECRET",
+        "CLIENT_HANDSHAKE_TRAFFIC_SECRET",
+        "SERVER_HANDSHAKE_TRAFFIC_SECRET",
+        "EARLY_EXPORTER_SECRET",
+        "EXPORTER_SECRET",
+    ];
+    if KNOWN.contains(&label) {
+        return true;
+    }
+    // The application secrets are numbered, and every number past 0 is a key
+    // update this crate does not follow. Matched as prefix-plus-digits rather
+    // than as a bare prefix, because `SecretLabel::from_label`'s own doc
+    // records why a bare prefix is wrong there.
+    for stem in ["CLIENT_TRAFFIC_SECRET_", "SERVER_TRAFFIC_SECRET_"] {
+        if let Some(rest) = label.strip_prefix(stem) {
+            return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
+        }
+    }
+    false
+}
+
 /// One connection's secrets, as a key log carried them.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ConnectionSecrets {
@@ -142,7 +173,37 @@ impl core::fmt::Debug for KeyLog {
     }
 }
 
+/// The registered pcapng secrets type for an NSS key log — `"TLSK"` as a
+/// big-endian word (draft-tuexen-opsawg-pcapng §4.7).
+pub const SECRETS_TYPE_TLS_KEY_LOG: u32 = 0x544c_534b;
+
+/// Why a Decryption Secrets Block was not read as a key log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretsBlockError {
+    /// The block carries a registered secrets type this crate does not read —
+    /// a WireGuard or ZigBee key set, for instance.
+    UnknownSecretsType(u32),
+}
+
 impl KeyLog {
+    /// R311y659 (§1.2a) — parse a Decryption Secrets Block, CHECKING its type.
+    ///
+    /// The entry point a capture reader should use, and the reason it exists is
+    /// that the untyped one cannot refuse: handed a block of some other
+    /// registered secrets type, [`Self::parse`] counts every line as unparsed
+    /// and reports an empty log. That is true and useless -- "this capture's
+    /// secrets are for a protocol I do not read" and "this capture's key log is
+    /// corrupt" send a reader to different places.
+    pub fn from_secrets_block(
+        secrets_type: u32,
+        secrets: &[u8],
+    ) -> Result<Self, SecretsBlockError> {
+        if secrets_type != SECRETS_TYPE_TLS_KEY_LOG {
+            return Err(SecretsBlockError::UnknownSecretsType(secrets_type));
+        }
+        Ok(Self::parse(secrets))
+    }
+
     /// Parse an NSS key log.
     ///
     /// Never fails: a key log is a growing text file that a capture may hold a
@@ -164,9 +225,18 @@ impl KeyLog {
                 continue;
             };
             let Some(label) = SecretLabel::from_label(label) else {
-                // RECOGNISED as a key log line and not actionable, which is a
-                // different fact from "this was not a line at all".
-                out.refused.push(String::from(label));
+                // R311y659 — `refused` means RECOGNISED AND NOT ACTIONABLE, so
+                // only a real key log label may enter it. Anything else is not
+                // a record at all. Found by a test: with any first field
+                // admitted here, a block of some other protocol's secrets
+                // reported a LIST OF REFUSED LABELS made of its own bytes,
+                // which reads as "this is a key log I could not use" about
+                // something that was never one.
+                if is_keylog_label(label) {
+                    out.refused.push(String::from(label));
+                } else {
+                    out.unparsed += 1;
+                }
                 continue;
             };
             let (Some(random), Some(secret)) = (unhex_random(random), unhex(secret)) else {
@@ -451,6 +521,69 @@ mod tests {
             other.nonce(0),
             "a secret that arrived as zeroes would derive the same iv as one"
         );
+    }
+
+    /// R311y659 — `refused` means RECOGNISED, so arbitrary text does not enter
+    /// it. Found by writing the test below: with any first field admitted, a
+    /// block of another protocol's secrets reported a list of "refused labels"
+    /// built out of its own bytes.
+    #[test]
+    fn only_a_real_keylog_label_is_reported_as_refused() {
+        let text = format!(
+            "not a tls key log at all\n\
+             CLIENT_RANDOM {RANDOM_A} 0102\n\
+             SERVER_TRAFFIC_SECRET_7 {RANDOM_A} 0102\n\
+             CLIENT_TRAFFIC_SECRET_ {RANDOM_A} 0102\n\
+             EXPORTER_SECRET {RANDOM_A} 0102\n"
+        );
+        let log = KeyLog::parse(text.as_bytes());
+        assert_eq!(
+            log.refused(),
+            &[
+                "CLIENT_RANDOM".to_string(),
+                "SERVER_TRAFFIC_SECRET_7".to_string(),
+                "EXPORTER_SECRET".to_string()
+            ],
+            "only labels the format defines"
+        );
+        assert_eq!(
+            log.unparsed(),
+            2,
+            "the prose line and the unnumbered stem are not records: {log:?}"
+        );
+    }
+
+    /// R311y659 — a block of some OTHER registered secrets type is refused by
+    /// its type rather than parsed into an empty log.
+    ///
+    /// The untyped entry point cannot tell the two apart: handed a WireGuard
+    /// key set it counts every line as unparsed and reports "no connections",
+    /// which reads exactly like a corrupt TLS key log. The type is in the block
+    /// and checking it is the only place that distinction can be made.
+    #[test]
+    fn a_secrets_block_of_another_type_is_refused_by_its_type() {
+        const WIREGUARD: u32 = 0x5747_4b4c;
+        let body = b"not a tls key log at all\n";
+        assert_eq!(
+            KeyLog::from_secrets_block(WIREGUARD, body).unwrap_err(),
+            SecretsBlockError::UnknownSecretsType(WIREGUARD)
+        );
+        // THE CONTROL, and what makes the refusal a discrimination rather than
+        // a rejection of everything: the same bytes under the TLSK type are
+        // read, and reported as unparsed lines rather than as nothing.
+        let log = KeyLog::from_secrets_block(SECRETS_TYPE_TLS_KEY_LOG, body)
+            .expect("the registered TLS key log type");
+        assert!(log.is_empty());
+        assert_eq!(log.unparsed(), 1, "the line WAS looked at");
+        assert!(
+            log.refused().is_empty(),
+            "and prose must not be reported as a refused LABEL: {log:?}"
+        );
+
+        let text = format!("CLIENT_TRAFFIC_SECRET_0 {RANDOM_A} 01020304\n");
+        let log = KeyLog::from_secrets_block(SECRETS_TYPE_TLS_KEY_LOG, text.as_bytes())
+            .expect("the registered type");
+        assert_eq!(log.len(), 1);
     }
 
     /// Hex is accepted in either case, because stacks differ and a log written

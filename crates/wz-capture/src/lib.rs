@@ -631,6 +631,7 @@ impl FlowDissection {
             Framing::Encrypted(state) => Some(tls::EncryptedFlow {
                 per_direction: state.census(),
                 not_decrypted: tls::NotDecrypted::NoKeysSupplied,
+                client_random: state.client_random,
             }),
             _ => None,
         }
@@ -705,7 +706,18 @@ impl FlowDissection {
                 ws::UpgradeVerdict::No => {
                     match tls::client_hello_verdict(&self.held[dir_index(direction)]) {
                         tls::TlsVerdict::NeedMore => return,
-                        tls::TlsVerdict::Yes => Framing::Encrypted(alloc::boxed::Box::default()),
+                        // R311y659 (§1.2a) — and the RANDOM is read here and
+                        // nowhere else: this is the one place a ClientHello has
+                        // been positively identified, and the bytes it was
+                        // identified from are still in hand. Reading it later
+                        // would mean finding the opening again in a stream this
+                        // flow has since replayed.
+                        tls::TlsVerdict::Yes => {
+                            let mut state = alloc::boxed::Box::<tls::TlsFlowState>::default();
+                            state.client_random =
+                                tls::client_hello_random(&self.held[dir_index(direction)]);
+                            Framing::Encrypted(state)
+                        }
                         // R311y649 (§1.2a) — and where the ClientHello question
                         // says `No`, the CHAIN question gets its turn before
                         // `Stream` becomes the answer. A ClientHello is the
@@ -7314,6 +7326,90 @@ mod tls_flow_tests {
                 && json.contains("\"decrypted\":false")
                 && json.contains("\"reason\":\"no_keys_supplied\""),
             "the export must carry the finding: {json}"
+        );
+    }
+
+    /// R311y659 (§1.2a) — the ClientHello's RANDOM reaches the report, which is
+    /// the only thing that can tie a flow to the secrets in the capture's own
+    /// key log.
+    ///
+    /// A key log holds every session a process ever made, keyed by this
+    /// 32-byte field. Without it R311y658's parsed secrets have nothing to be
+    /// selected BY, which is why this is the first move of the wiring rather
+    /// than part of it.
+    ///
+    /// The reader is a SEPARATE question from `client_hello_verdict` and not a
+    /// widening of it: that function's narrowness is what R311y649 measured as
+    /// load-bearing, so this one decides nothing and only reads a field out of
+    /// bytes already decided about.
+    #[test]
+    fn the_client_hello_random_reaches_the_report() {
+        // A ClientHello whose body is 0x30 = 48 bytes: version(2) + random(32)
+        // + the rest. The random is a recognisable ramp so a wrong offset
+        // cannot land on it by accident.
+        let mut body = alloc::vec![0x03u8, 0x03];
+        body.extend((0..32u8).map(|i| i.wrapping_mul(5).wrapping_add(1)));
+        body.resize(0x30, 0);
+        let mut hello_body = alloc::vec![0x01u8, 0x00, 0x00, body.len() as u8];
+        hello_body.extend_from_slice(&body);
+        let hello = record(0x16, [0x03, 0x01], &hello_body);
+        let app = record(0x17, [0x03, 0x03], &[0xAB; 40]);
+
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &hello));
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &tcp_packet(1111, 7447, 1000 + hello.len() as u32, &app),
+        );
+        d.finish();
+        assert!(
+            d.flows()[0].framing().is_encrypted(),
+            "the fixture must be TLS"
+        );
+
+        let expected: [u8; 32] =
+            core::array::from_fn(|i| (i as u8).wrapping_mul(5).wrapping_add(1));
+        assert_eq!(
+            d.encrypted_flows()[0].client_random,
+            Some(expected),
+            "the random must arrive from the wire, at the RFC 8446 offset"
+        );
+
+        // A CAPTURE THAT STOPPED INSIDE THE RANDOM answers `None`, not a
+        // zero-padded value. Found by falsification: with the full-length
+        // fixture alone, padding a partial read to 32 bytes passed -- and a
+        // padded random would key a connection under something no key log
+        // contains, which is a lookup that fails for a reason nobody can see.
+        for cut in [11usize, 20, 42] {
+            assert_eq!(
+                crate::tls::client_hello_random(&hello[..cut.min(hello.len())]),
+                None,
+                "a random cut at {cut} must not be completed by this reader"
+            );
+        }
+        assert_eq!(
+            crate::tls::client_hello_random(&hello[..43]),
+            Some(expected),
+            "and 43 bytes is exactly enough, so the bound above is not \
+             refusing everything"
+        );
+    }
+
+    /// THE OTHER HALF, and it is a real limit rather than an omission: a flow
+    /// recognised by its record CHAIN has no ClientHello to read a random from,
+    /// so it cannot be matched to a key log at all.
+    ///
+    /// `None` and not 32 zero bytes, so a caller has to say so rather than look
+    /// up a connection that no log contains.
+    #[test]
+    fn a_flow_recognised_by_its_chain_has_no_random_to_offer() {
+        let d = mid_session_tls();
+        assert!(d.flows()[0].framing().is_encrypted());
+        assert_eq!(
+            d.encrypted_flows()[0].client_random,
+            None,
+            "a mid-session capture has no ClientHello in it"
         );
     }
 
