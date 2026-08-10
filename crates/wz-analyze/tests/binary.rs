@@ -232,6 +232,20 @@ fn the_binary_decrypts_a_capture_given_a_key_log_on_the_command_line() {
         stdout.contains("\"records_decrypted\":3"),
         "with the record count: {stdout}"
     );
+    // R311y665 — AND THE MESSAGE COUNT, which is the number the analyzer exists
+    // to produce and which no line of the report carried until this round. The
+    // three messages here are KeepAlives, so `sequence.frames` -- the only
+    // frame-ish number the report had -- reads zero for them.
+    assert!(
+        stdout.contains("\"messages_decoded\":3"),
+        "the report must say how many messages it read: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"frames\":0"),
+        "and the pre-existing `sequence.frames` must still read zero, which is \
+         what makes the new field a different question rather than a rename: \
+         {stdout}"
+    );
     assert!(
         stdout.contains("\"complete\":true"),
         "AND THE CAPTURE IS COMPLETE: a flow whose every record opened is not a \
@@ -267,7 +281,7 @@ fn the_binary_decrypts_a_capture_given_a_key_log_on_the_command_line() {
         .expect("the binary runs");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("\"decrypted\":false") && stdout.contains("\"frames\":0"),
+        stdout.contains("\"decrypted\":false") && stdout.contains("\"messages_decoded\":0"),
         "keyless, the same capture must yield no session: {stdout}"
     );
     assert_eq!(

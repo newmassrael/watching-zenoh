@@ -279,6 +279,9 @@ impl<'a> CaptureReport<'a> {
             ",\"retransmits\":{},\"out_of_order\":{},\"partial_overlaps\":{}",
             health.retransmits, health.out_of_order, health.partial_overlaps
         ));
+        // R311y665 (§1.2a) — see `decoded_messages`. STRUCTURAL, so a consumer
+        // never has to test for the field.
+        s.push_str(&format!(",\"messages_decoded\":{}", decoded_messages(d)));
         s.push_str(&format!(
             ",\"ip_checksum_invalid\":{},\"transport_checksum_invalid\":{}",
             health.ip_checksum_invalid, health.transport_checksum_invalid
@@ -465,6 +468,13 @@ impl<'a> CaptureReport<'a> {
             d.datagram_flows().len(),
             health.packets_skipped
         ));
+        // R311y665 (§1.2a) — HOW MANY MESSAGES THIS READER DECODED, which no
+        // line of this report said. `sequence` below counts frames that carry a
+        // sequence NUMBER, and a KeepAlive does not carry one -- so a capture
+        // whose whole session is KeepAlives reported zero everywhere while
+        // holding three decoded messages. That is R311y648's silence in the one
+        // place it had not been closed: the summary of what WAS read.
+        s.push_str(&format!("  messages decoded: {}\n", decoded_messages(d)));
         // R311y643 (§1.1e) — the line that turns a skip COUNT into a
         // diagnosis, and it leads with the link types because that is the one
         // reason a reader can act on: every other skip is furniture in an
@@ -795,6 +805,26 @@ impl<'a> CaptureReport<'a> {
         }
         s
     }
+}
+
+/// R311y665 (§1.2a) — transport messages this reader DECODED, over every flow
+/// still in the table.
+///
+/// The number the whole analyzer exists to produce, and the report did not carry
+/// it: `sequence.frames` counts frames whose message type carries a sequence
+/// number, so a session of KeepAlives -- which is what an idle zenoh link is,
+/// and what a decrypted TLS flow in this workspace's own tests is -- reported
+/// zero while three messages sat in the rows.
+///
+/// Over the LIVE table and not a census, and stated rather than hidden: an
+/// evicted flow's decoded messages left with it, exactly as its chains and its
+/// sequence accounting did. `drops.flows` is what says a flow left.
+fn decoded_messages(d: &crate::Dissection) -> usize {
+    d.flows().iter().map(|f| f.frames.len()).sum::<usize>()
+        + d.datagram_flows()
+            .iter()
+            .map(|f| f.frames.len())
+            .sum::<usize>()
 }
 
 /// R311y661 (§1.2a) — the wire name of one undecrypted-flow reason.

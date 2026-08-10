@@ -5176,6 +5176,48 @@ PY
 #      repo keeps paying for.
 #
 # The capability is PROBED by opening the socket, not by comparing uid to 0: a
+# ── R311y665 (§1.2a) — Layer C1bw: the analyzer's COMMAND LINE.
+#
+# `wz-analyze` is the composition root R311y664 added, and it was in no lane of
+# its own: `cargo test --workspace` (Layer C1) builds and runs it, and that is
+# precisely the coverage this project has repeatedly found to be invisible when
+# it stops. A binary target that fails to build, or an integration test that
+# silently stops being compiled, does not announce itself in a workspace run's
+# summary line -- it just contributes zero.
+#
+# So this lane does the two things a workspace run does not:
+#   1. builds the BINARY (`--bins`), which `cargo test` alone does not link;
+#   2. pins the SET of binary-level test names present, on the R311y634 rule
+#      (pin a SET, never a COUNT), so a test that stops being compiled reds
+#      instead of quietly leaving.
+layer_c1bw_analyze_cli() {
+    local out listing missing name
+    (cd crates && cargo clippy -p wz-analyze --all-targets --quiet -- -D warnings) || return 1
+    (cd crates && cargo build -p wz-analyze --bins --quiet) || {
+        echo "  C1bw FAIL: the wz-analyze binary does not build"; return 1; }
+
+    out="$(cd crates && cargo test -p wz-analyze --quiet 2>&1)" || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1bw FAIL: wz-analyze ran no tests"
+        echo "$out"; return 1; }
+
+    listing="$(cd crates && cargo test -p wz-analyze --test binary -- --list 2>/dev/null)" \
+        || { echo "  C1bw FAIL: the binary-level tests did not list"; return 1; }
+    missing=0
+    for name in \
+        the_binary_decrypts_a_capture_given_a_key_log_on_the_command_line \
+        the_exit_code_separates_an_incomplete_capture_from_a_failed_run \
+        an_unreadable_key_log_fails_instead_of_reporting_the_capture_as_encrypted
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1bw FAIL: $name is absent from the binary test target"
+            missing=1
+        }
+    done
+    [[ $missing -eq 0 ]] || return 1
+    echo "  C1bw: the analyzer builds as a program and its command line is gated"
+}
+
 # container can grant CAP_NET_RAW to a non-root process and a root process can
 # be denied it by seccomp. Same arming-flag contract as C1br — a green SKIP on
 # hosted is the R311y265 masked-skip burn.
@@ -10728,6 +10770,7 @@ run_layer C1bt layer_c1bt_capture_no_default_features || overall=1
 run_layer C1bq layer_c1bq_zero_copy_arena || overall=1
 run_layer C1br layer_c1br_uring_fixed_buffers || overall=1
 run_layer C1bs layer_c1bs_live_capture || overall=1
+run_layer C1bw layer_c1bw_analyze_cli || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1bl layer_c1bl_cargo_test_router_failfast || overall=1
 run_layer C1bm layer_c1bm_cargo_test_pico_failfast || overall=1

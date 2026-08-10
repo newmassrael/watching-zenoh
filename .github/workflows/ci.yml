@@ -2446,6 +2446,16 @@ jobs:
       - name: Layer C1bt — wz-capture --no-default-features (R311y612)
         run: bash scripts/run-ci.sh --layer C1bt
 
+      # R311y665 (§1.2a) — the analyzer's COMMAND LINE, which had no lane at
+      # all: `cargo test --workspace` builds and runs `wz-analyze`, and that is
+      # exactly the coverage this project has repeatedly found invisible when it
+      # stops. This one links the BINARY (`--bins`, which `cargo test` does not)
+      # and pins the SET of binary-level test names, so a test that quietly
+      # stops being compiled reds instead of leaving. Falsified by renaming one:
+      # red, named.
+      - name: Layer C1bw — the wz-analyze command line (R311y665)
+        run: bash scripts/run-ci.sh --layer C1bw
+
   capi-c-arms:
     name: §5.27 api-compat-c — the ABI arms and the SHM oracle (C1ce + arms gate)
     runs-on: ubuntu-22.04
