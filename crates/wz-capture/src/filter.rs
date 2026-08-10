@@ -47,6 +47,38 @@
 //! | `kind` | `put` `del` `query` `reply` `err` | `==` `!=` | never |
 //! | `bytes` | an integer | `==` `!=` `<` `<=` `>` `>=` | never |
 //! | `time` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | the capture carried no clock |
+//! | `replies` | an integer | `==` `!=` `<` `<=` `>` `>=` | the plane does not correlate exchanges |
+//! | `errs` | an integer | `==` `!=` `<` `<=` `>` `>=` | as above |
+//! | `first_reply` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | as above, or nothing answered, or no clock |
+//! | `completion` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | as above, or it never closed |
+//! | `closed` | `yes` / `no` | `==` `!=` | the plane does not correlate exchanges |
+//!
+//! ## R311y636 (§1.1v) — the last five are about the OUTCOME, not the request
+//!
+//! Everything above the rule was a property of one record AS IT WENT PAST, so a
+//! predicate could be answered the instant the record was decoded. The questions
+//! a reader actually arrives with are not all of that shape: *which queries went
+//! unanswered*, *which took longer than 100ms* are properties of how the
+//! exchange TURNED OUT, and no amount of looking at the `Request` decides them.
+//!
+//! They are not a second language. They are the same one, and what moved is
+//! WHEN the single verdict is taken: a plane that correlates exchanges now asks
+//! the filter once per exchange **at its close** (or at the end of the flow, for
+//! one that never closed), where the request's own fields are all still known
+//! and the outcome's are known too. A selector built only from the first five
+//! fields therefore gets exactly the verdict it always got — the answer cannot
+//! depend on when a question about the request alone is asked.
+//!
+//! ## And on a plane that does not correlate exchanges, they are UNKNOWN
+//!
+//! [`crate::agg`] folds records, not exchanges; it has no `replies` to count for
+//! the record in its hand. So [`RecordView::outcome`] is `None` there and every
+//! outcome term is [`Truth::Unknown`] — the same answer, for the same reason, as
+//! a `time` term over a capture with no clock. A reader who points `replies == 0`
+//! at the throughput plane sees `undecided == seen` and has been told precisely
+//! what happened: the question was well-formed and that plane cannot answer it.
+//! Answering `no` would have produced an empty table indistinguishable from a
+//! capture with no unanswered queries in it.
 //!
 //! `dir` is `a` / `b` and not `a2b` / `b2a` because
 //! [`Direction`](wz_session_core::passive::Direction) is what the rest of the
@@ -119,10 +151,39 @@ impl RecordKind {
     }
 }
 
+/// R311y636 (§1.1v) — how an exchange TURNED OUT, for the terms no `Request`
+/// can answer.
+///
+/// Built by the plane that correlates exchanges ([`crate::exchange`]) at the
+/// point the exchange is complete, which is the only point every field below is
+/// a fact rather than a guess. Every interval is an `Option` for the reason the
+/// rest of this crate keeps them so: an exchange nothing answered has no
+/// first-reply interval AT ALL, and reporting `0` for it would put the fastest
+/// possible number on the one exchange that never came back.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct OutcomeView {
+    /// `Response` records carrying a `Reply`.
+    pub replies: u64,
+    /// `Response` records carrying an `Err`.
+    pub errs: u64,
+    /// Request to first answer, in ms — `None` when nothing answered, when the
+    /// capture carried no clock, or when the clock ran backwards across the
+    /// pair.
+    pub first_reply_ms: Option<u64>,
+    /// Request to close, in ms — `None` for the same three reasons, plus the
+    /// fourth: the exchange never closed.
+    pub completion_ms: Option<u64>,
+    /// Whether a `ResponseFinal` closed it. `false` covers both "the capture
+    /// ended first" and "the rid was reused", which is what
+    /// [`ExchangeTable::unclosed`](crate::exchange::ExchangeTable::unclosed)
+    /// already counts as one thing.
+    pub closed: bool,
+}
+
 /// One record, as a filter sees it.
 ///
-/// Both optional fields are optional for a REASON rather than for convenience,
-/// and the reason is the same in each: the capture may not carry the fact. A
+/// Every optional field is optional for a REASON rather than for convenience,
+/// and the reason is the same in each: the observation may not carry the fact. A
 /// `None` here is what makes a term over that field undecidable instead of
 /// false.
 #[derive(Debug, Clone, Copy)]
@@ -140,6 +201,14 @@ pub struct RecordView<'a> {
     /// capture format carried no timestamp
     /// ([`PassiveFrame::observed_at_ms`](wz_session_core::passive::PassiveFrame::observed_at_ms)).
     pub observed_at_ms: Option<u64>,
+    /// R311y636 (§1.1v) — the outcome of the exchange this record opened, or
+    /// `None` on a plane that does not correlate exchanges.
+    ///
+    /// `None` is a statement about the PLANE and not about the traffic, which
+    /// is why it makes the outcome terms undecidable rather than false: the
+    /// throughput plane has not decided that this record's exchange had no
+    /// replies, it has decided nothing at all about exchanges.
+    pub outcome: Option<OutcomeView>,
 }
 
 /// A three-valued answer.
@@ -236,6 +305,29 @@ enum Term {
         op: Op,
         value: u64,
     },
+    /// R311y636 (§1.1v) — the outcome axis. One variant per field rather than a
+    /// `field: OutcomeField` discriminant carried alongside, so a new outcome
+    /// field cannot be added without the match below failing to compile.
+    Replies {
+        op: Op,
+        value: u64,
+    },
+    Errs {
+        op: Op,
+        value: u64,
+    },
+    FirstReply {
+        op: Op,
+        value: u64,
+    },
+    Completion {
+        op: Op,
+        value: u64,
+    },
+    Closed {
+        want: bool,
+        negated: bool,
+    },
 }
 
 impl Term {
@@ -265,6 +357,34 @@ impl Term {
                 // by keeping the clock an `Option` all the way up.
                 None => Truth::Unknown,
                 Some(at) => Truth::of(op.apply(at, *value)),
+            },
+            // R311y636 (§1.1v). The third undecidable case, and the widest: a
+            // plane with no exchange correlation carries no outcome at all, so
+            // all five say so rather than guessing at a count of zero.
+            Self::Replies { op, value } => match record.outcome {
+                None => Truth::Unknown,
+                Some(o) => Truth::of(op.apply(o.replies, *value)),
+            },
+            Self::Errs { op, value } => match record.outcome {
+                None => Truth::Unknown,
+                Some(o) => Truth::of(op.apply(o.errs, *value)),
+            },
+            // The fourth: an exchange nothing answered has no first-reply
+            // interval, so `first_reply > 100` over it is not `no`. Saying `no`
+            // would rank the query that never came back among the fast ones.
+            // The question a reader means by that is `replies == 0`, and it is
+            // decidable.
+            Self::FirstReply { op, value } => match record.outcome.and_then(|o| o.first_reply_ms) {
+                None => Truth::Unknown,
+                Some(ms) => Truth::of(op.apply(ms, *value)),
+            },
+            Self::Completion { op, value } => match record.outcome.and_then(|o| o.completion_ms) {
+                None => Truth::Unknown,
+                Some(ms) => Truth::of(op.apply(ms, *value)),
+            },
+            Self::Closed { want, negated } => match record.outcome {
+                None => Truth::Unknown,
+                Some(o) => Truth::of((o.closed == *want) != *negated),
             },
         }
     }
@@ -489,7 +609,8 @@ impl fmt::Display for FilterError {
             FilterErrorKind::UnterminatedQuote => write!(f, "unterminated quoted value"),
             FilterErrorKind::UnknownField(name) => write!(
                 f,
-                "unknown field {name:?} (known: key, dir, kind, bytes, time)"
+                "unknown field {name:?} (known: key, dir, kind, bytes, time, \
+                 replies, errs, first_reply, completion, closed)"
             ),
             FilterErrorKind::UnknownValue { field, value } => {
                 write!(f, "{field} does not admit the value {value:?}")
@@ -831,6 +952,44 @@ impl<'a> Parser<'a> {
                 op,
                 value: integer(&value, value_at)?,
             },
+            "replies" => Term::Replies {
+                op,
+                value: integer(&value, value_at)?,
+            },
+            "errs" => Term::Errs {
+                op,
+                value: integer(&value, value_at)?,
+            },
+            "first_reply" => Term::FirstReply {
+                op,
+                value: integer(&value, value_at)?,
+            },
+            "completion" => Term::Completion {
+                op,
+                value: integer(&value, value_at)?,
+            },
+            "closed" => {
+                let negated = equality_negation(op, "closed", op_at)?;
+                // `yes` / `no` and not `true` / `false`: the reader is asking
+                // about what the capture showed, and this crate's own vocabulary
+                // for a three-valued answer already spends `true`. A bare
+                // `closed` with no value would have been shorter and would have
+                // made `closed` the one field with a second grammar.
+                let want = match value.as_str() {
+                    "yes" | "y" => true,
+                    "no" | "n" => false,
+                    _ => {
+                        return Err(FilterError {
+                            at: value_at,
+                            kind: FilterErrorKind::UnknownValue {
+                                field: "closed",
+                                value,
+                            },
+                        })
+                    }
+                };
+                Term::Closed { want, negated }
+            }
             _ => {
                 return Err(FilterError {
                     at: field_at,
@@ -901,6 +1060,11 @@ fn static_field_name(field: &str) -> Option<&'static str> {
         "kind" => "kind",
         "bytes" => "bytes",
         "time" => "time",
+        "replies" => "replies",
+        "errs" => "errs",
+        "first_reply" => "first_reply",
+        "completion" => "completion",
+        "closed" => "closed",
         _ => return None,
     })
 }
@@ -922,6 +1086,9 @@ mod tests {
             kind,
             payload_bytes,
             observed_at_ms,
+            // The default is the NON-correlating plane, so every pre-existing
+            // test below drives the view the throughput plane builds.
+            outcome: None,
         }
     }
 
@@ -1081,6 +1248,182 @@ mod tests {
                 Filter::parse(source).expect(source).matches(&r),
                 expected,
                 "{source}"
+            );
+        }
+    }
+
+    /// R311y636 (§1.1v) — the outcome axis, driven the same way: every field,
+    /// every operator, over an exchange whose outcome is fully known.
+    ///
+    /// The view is an exchange that got two replies and one error, first
+    /// answered 30ms after the request and closed 50ms after it.
+    #[test]
+    fn each_outcome_field_reads_the_axis_it_names() {
+        let mut r = view(
+            Direction::A,
+            Some("demo/temp"),
+            RecordKind::Query,
+            0,
+            Some(1_000),
+        );
+        r.outcome = Some(OutcomeView {
+            replies: 2,
+            errs: 1,
+            first_reply_ms: Some(30),
+            completion_ms: Some(50),
+            closed: true,
+        });
+        for (source, expected) in [
+            ("replies == 2", Truth::Yes),
+            ("replies != 2", Truth::No),
+            ("replies > 0", Truth::Yes),
+            ("replies < 2", Truth::No),
+            ("replies >= 2", Truth::Yes),
+            ("replies <= 1", Truth::No),
+            ("errs == 1", Truth::Yes),
+            ("errs == 0", Truth::No),
+            ("first_reply == 30", Truth::Yes),
+            ("first_reply > 100", Truth::No),
+            ("first_reply < 100", Truth::Yes),
+            ("completion == 50", Truth::Yes),
+            ("completion >= 50", Truth::Yes),
+            ("completion > 50", Truth::No),
+            ("closed == yes", Truth::Yes),
+            ("closed == no", Truth::No),
+            ("closed != no", Truth::Yes),
+            // The point of ONE language: a request-time term and an
+            // outcome-time term compose in a single predicate.
+            ("key == demo/temp and completion > 40", Truth::Yes),
+            ("key == demo/temp and completion > 60", Truth::No),
+        ] {
+            assert_eq!(
+                Filter::parse(source).expect(source).matches(&r),
+                expected,
+                "{source}"
+            );
+        }
+    }
+
+    /// THE §1.1v QUESTION, in the two shapes the debt named: *the exchange
+    /// nobody answered* and *the exchange that took too long*.
+    ///
+    /// Both are decidable, and the control legs are what make that a claim: the
+    /// answered exchange is rejected by the first selector and the fast one by
+    /// the second, so neither is a predicate that admits everything.
+    #[test]
+    fn an_unanswered_exchange_and_a_slow_one_are_both_expressible() {
+        let exchange = |replies: u64, first: Option<u64>, completion: Option<u64>| {
+            let mut r = view(Direction::A, Some("demo/q"), RecordKind::Query, 0, Some(1));
+            r.outcome = Some(OutcomeView {
+                replies,
+                errs: 0,
+                first_reply_ms: first,
+                completion_ms: completion,
+                closed: completion.is_some(),
+            });
+            r
+        };
+        let silent = exchange(0, None, Some(2_000));
+        let answered = exchange(3, Some(12), Some(20));
+        let slow = exchange(1, Some(450), Some(460));
+
+        let unanswered = Filter::parse("replies == 0").expect("parses");
+        assert_eq!(unanswered.matches(&silent), Truth::Yes);
+        assert_eq!(unanswered.matches(&answered), Truth::No);
+
+        let sluggish = Filter::parse("first_reply > 100").expect("parses");
+        assert_eq!(sluggish.matches(&slow), Truth::Yes);
+        assert_eq!(sluggish.matches(&answered), Truth::No);
+        // An exchange nothing answered has NO first-reply interval, so this
+        // question is undecidable over it rather than false. Answering `no`
+        // would have filed the query that never came back among the fast ones.
+        assert_eq!(sluggish.matches(&silent), Truth::Unknown);
+        // And that is why the two selectors are different questions: the
+        // reader who wants both writes the disjunction, and gets it.
+        let either = Filter::parse("first_reply > 100 or replies == 0").expect("parses");
+        assert_eq!(either.matches(&silent), Truth::Yes);
+        assert_eq!(either.matches(&slow), Truth::Yes);
+        assert_eq!(either.matches(&answered), Truth::No);
+    }
+
+    /// The rule that keeps the outcome axis honest on the planes that do not
+    /// have one: UNDECIDABLE, never false.
+    ///
+    /// `put(..)` is the view [`crate::agg`] builds — `outcome: None` — so this
+    /// is the throughput plane's answer to an exchange question, and the
+    /// conjunction leg is the one that matters: `kind == put` is decidably
+    /// `Yes` there and the pair still comes out unknown, so a reader cannot be
+    /// handed a short table that looks whole.
+    #[test]
+    fn a_plane_that_does_not_correlate_exchanges_cannot_decide_an_outcome_term() {
+        let r = put(Some("demo/a"));
+        for source in [
+            "replies == 0",
+            "replies > 3",
+            "errs == 0",
+            "first_reply < 5",
+            "completion > 1",
+            "closed == yes",
+            "closed == no",
+            "kind == put and replies == 0",
+        ] {
+            assert_eq!(
+                Filter::parse(source).expect(source).matches(&r),
+                Truth::Unknown,
+                "{source}"
+            );
+        }
+        // Kleene, not infection: a decidable `No` still settles the
+        // conjunction even though the other half is unanswerable.
+        assert_eq!(
+            Filter::parse("kind == query and replies == 0")
+                .expect("parses")
+                .matches(&r),
+            Truth::No
+        );
+        // And negation leaves it unknown rather than flipping it to yes.
+        assert_eq!(
+            Filter::parse("not replies == 0")
+                .expect("parses")
+                .matches(&r),
+            Truth::Unknown
+        );
+    }
+
+    /// The outcome fields are refused the same way every other field is when
+    /// they are misused — by name, at the offending byte.
+    #[test]
+    fn the_outcome_fields_refuse_what_they_do_not_admit() {
+        let err = Filter::parse("closed >= yes").expect_err("closed is not ordered");
+        assert_eq!(
+            err.kind,
+            FilterErrorKind::OperatorNotAdmitted {
+                field: "closed",
+                op: ">="
+            }
+        );
+        let err = Filter::parse("closed == maybe").expect_err("two-valued on the wire");
+        assert_eq!(
+            err.kind,
+            FilterErrorKind::UnknownValue {
+                field: "closed",
+                value: "maybe".to_string()
+            }
+        );
+        let err = Filter::parse("replies > two").expect_err("not an integer");
+        assert!(matches!(err.kind, FilterErrorKind::NotAnInteger(_)));
+        // The unknown-field message names the whole vocabulary, so a reader who
+        // guessed `latency` is told what this language calls it.
+        let err = Filter::parse("latency > 100").expect_err("no such field");
+        assert_eq!(
+            err.kind,
+            FilterErrorKind::UnknownField("latency".to_string())
+        );
+        let rendered = err.to_string();
+        for field in ["replies", "errs", "first_reply", "completion", "closed"] {
+            assert!(
+                rendered.contains(field),
+                "{field} missing from {rendered:?}"
             );
         }
     }

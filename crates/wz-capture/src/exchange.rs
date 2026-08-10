@@ -61,8 +61,14 @@
 //! streams frames without retaining them must therefore call this per flow and
 //! per bounded window; that is a real limit and it is stated rather than
 //! papered over with a cap number nobody measured.
+//!
+//! R311y636 (§1.1v) held one more thing in that map: an exchange a selector
+//! will go on to reject is now carried to its close rather than dropped at its
+//! request, because the selector cannot be asked until the outcome exists. The
+//! BOUND is unchanged — it was already "one entry per `Request` in the window",
+//! and a filtered run simply reaches it where an unfiltered run always did.
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -70,7 +76,7 @@ use wz_session_core::network_message::{BatchParse, NetworkMessage};
 use wz_session_core::passive::{Carried, Direction, PassiveFrame};
 
 use crate::agg::{KeyexprSpaces, ThroughputGaps};
-use crate::filter::{Filter, RecordView, Selection, Truth};
+use crate::filter::{Filter, OutcomeView, RecordView, Selection, Truth};
 
 fn dir_index(d: Direction) -> usize {
     match d {
@@ -224,15 +230,43 @@ impl ExchangeGaps {
 }
 
 /// One exchange awaiting its close, within one flow.
+///
+/// R311y636 (§1.1v) — it carries the REQUEST's own filterable fields as well as
+/// the accumulating outcome, because the single verdict is taken at the close
+/// and the request is long past by then. Copying five scalars per open exchange
+/// is what lets the language stay one language: `key == demo/** and replies ==
+/// 0` is one predicate over one view, not a request-time half joined to an
+/// outcome-time half.
 #[derive(Debug, Clone)]
 struct OpenExchange {
     /// `None` when the request's keyexpr did not resolve — the exchange is
     /// still correlated and still timed, it just has no row to land in.
     keyexpr: Option<String>,
+    /// The direction that minted the rid, for a `dir` term at close.
+    direction: Direction,
+    /// The request's kind and payload size, from the throughput plane's
+    /// classifier, for `kind` and `bytes` terms at close.
+    kind: crate::filter::RecordKind,
+    payload_bytes: u64,
     requested_at: Option<u64>,
     first_reply_at: Option<u64>,
     replies: usize,
     errs: usize,
+}
+
+/// How an exchange ended, as [`ExchangeTable::finish`] needs to know it.
+///
+/// A two-state enum and not `Option<Option<u64>>`, because the two `None`s
+/// there mean different things — "no close" and "no clock on the close" — and a
+/// caller reading the signature would have to guess which nesting was which.
+#[derive(Debug, Clone, Copy)]
+enum Ending {
+    /// A `ResponseFinal` closed it, at this capture instant. `None` inside when
+    /// the frame that carried the close had no timestamp.
+    Closed(Option<u64>),
+    /// The capture never showed a close: the flow's frames ran out, or the rid
+    /// was reused before one arrived.
+    Unclosed,
 }
 
 /// Query/Reply exchanges and their latencies, over one or more flows.
@@ -270,25 +304,31 @@ impl ExchangeTable {
     /// R311y618 (§1.1q) — the same correlation, over the exchanges a selector
     /// picks.
     ///
-    /// ## The unit judged is the EXCHANGE, and the REQUEST is what carries it
+    /// ## The unit judged is the EXCHANGE, and it is judged when it is COMPLETE
     ///
-    /// A selector is asked ONCE PER EXCHANGE, at its `Request`, and the
-    /// responses follow whatever the request's verdict was. This is the rule
-    /// R311y616 left undecided, and the alternative — judging each `Response`
-    /// on its own — is not merely different, it is unsound here: a `Response`
-    /// identifies itself by `request_id` and its keyexpr field is the
-    /// responder's, so a `key ==` term could admit a request and reject its own
-    /// reply, leaving a completion latency measured against an exchange the
+    /// A selector is asked ONCE PER EXCHANGE. The alternative — judging each
+    /// `Response` on its own — is not merely different, it is unsound here: a
+    /// `Response` identifies itself by `request_id` and its keyexpr field is
+    /// the responder's, so a `key ==` term could admit a request and reject its
+    /// own reply, leaving a completion latency measured against an exchange the
     /// table says never happened.
+    ///
+    /// R311y618 asked at the `Request`. R311y636 (§1.1v) moved the SAME single
+    /// question to the exchange's close — its `ResponseFinal`, or the end of
+    /// the flow for one that never closed — because that is the first moment
+    /// `replies`, `errs`, `first_reply`, `completion` and `closed` are facts.
+    /// A selector built only from request-time fields is unaffected: the
+    /// request's own fields are carried on [`OpenExchange`] and answer the same
+    /// way whenever they are asked.
     ///
     /// ## What a rejected exchange does NOT do
     ///
-    /// It does not become an orphan. The responses to a suppressed request are
-    /// dropped WITHOUT touching [`ExchangeGaps::orphan_responses`], because
-    /// that counter means "this capture began mid-query" and a selector that
-    /// manufactured it out of its own choice would make the number unreadable
-    /// — the reader could no longer tell a truncated capture from a narrow
-    /// question. For the same reason a suppressed exchange is never
+    /// It does not become an orphan. Its responses land in its own open entry
+    /// and go with it, WITHOUT touching [`ExchangeGaps::orphan_responses`],
+    /// because that counter means "this capture began mid-query" and a selector
+    /// that manufactured it out of its own choice would make the number
+    /// unreadable — the reader could no longer tell a truncated capture from a
+    /// narrow question. For the same reason a rejected exchange is never
     /// [`Self::unclosed`].
     ///
     /// ## Where the filter still does not reach
@@ -302,26 +342,15 @@ impl ExchangeTable {
     pub fn observe_flow_where(&mut self, frames: &[PassiveFrame], filter: &Filter) {
         let mut spaces = KeyexprSpaces::new();
         let mut open: BTreeMap<(usize, u64), OpenExchange> = BTreeMap::new();
-        let mut suppressed: BTreeSet<(usize, u64)> = BTreeSet::new();
         for frame in frames {
             match &frame.carried {
-                Carried::Batch(batch) => self.observe_batch(
-                    &mut spaces,
-                    &mut open,
-                    &mut suppressed,
-                    frame,
-                    batch,
-                    filter,
-                ),
+                Carried::Batch(batch) => {
+                    self.observe_batch(&mut spaces, &mut open, frame, batch, filter)
+                }
                 #[cfg(feature = "reassembly")]
-                Carried::Reassembled(batch) => self.observe_batch(
-                    &mut spaces,
-                    &mut open,
-                    &mut suppressed,
-                    frame,
-                    batch,
-                    filter,
-                ),
+                Carried::Reassembled(batch) => {
+                    self.observe_batch(&mut spaces, &mut open, frame, batch, filter)
+                }
                 // Matched by name for the reason R311y614 matched them by name
                 // in the throughput plane: a new `Carried` variant must fail to
                 // compile here rather than join the silent set.
@@ -334,18 +363,23 @@ impl ExchangeTable {
             }
         }
         // Whatever is still open when the flow's frames run out was never
-        // closed on the wire this observer saw. Counted, never completed: a
-        // query whose reply the capture missed is not a query that answered
-        // instantly.
-        self.unclosed += open.len();
+        // closed on the wire this observer saw. It is judged here — an unclosed
+        // exchange is a complete OBSERVATION even though it is an incomplete
+        // exchange, and `closed == no` is precisely the selector that asks for
+        // these. Counted, never completed: a query whose reply the capture
+        // missed is not a query that answered instantly.
+        //
+        // Drained in key order rather than by iterating and clearing, so the
+        // sequence of verdicts over one flow does not depend on map internals.
+        while let Some((_, entry)) = open.pop_first() {
+            self.finish(entry, Ending::Unclosed, filter);
+        }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn observe_batch(
         &mut self,
         spaces: &mut KeyexprSpaces,
         open: &mut BTreeMap<(usize, u64), OpenExchange>,
-        suppressed: &mut BTreeSet<(usize, u64)>,
         frame: &PassiveFrame,
         batch: &BatchParse,
         filter: &Filter,
@@ -355,16 +389,14 @@ impl ExchangeTable {
             self.unread.unparsed_bytes += batch.unparsed_bytes;
         }
         for message in &batch.messages {
-            self.observe_message(spaces, open, suppressed, frame, message, filter);
+            self.observe_message(spaces, open, frame, message, filter);
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn observe_message(
         &mut self,
         spaces: &mut KeyexprSpaces,
         open: &mut BTreeMap<(usize, u64), OpenExchange>,
-        suppressed: &mut BTreeSet<(usize, u64)>,
         frame: &PassiveFrame,
         message: &NetworkMessage,
         filter: &Filter,
@@ -375,80 +407,42 @@ impl ExchangeTable {
             NetworkMessage::Declare(d) => spaces.absorb(direction, d),
             NetworkMessage::Request(r) => {
                 let key = (dir_index(direction), r.rid);
+                // Resolution happens HERE and not at the close, because a
+                // keyexpr id is resolved against the space as it stood when the
+                // request went past: a `DeclKexpr` arriving later must not
+                // retroactively name an earlier request's alias.
                 let resolved = spaces.resolve(direction, &r.keyexpr.body);
-                // The filter is asked AFTER resolution, because a `key` term
-                // needs the resolved name, and BEFORE any counter moves,
-                // because a rejected exchange must leave no trace in the
-                // totals. The record's kind and payload size come from the
-                // THROUGHPUT plane's classifier so `kind == query` means the
-                // same thing whichever plane a reader points it at.
+                // The record's kind and payload size come from the THROUGHPUT
+                // plane's classifier so `kind == query` means the same thing
+                // whichever plane a reader points it at.
                 let (kind, payload_bytes) = match crate::agg::classify(message) {
                     Some((_, counts, kind)) => (kind, counts.payload_bytes),
                     None => (crate::filter::RecordKind::Query, 0),
                 };
-                let view = RecordView {
+                // R311y636 (§1.1v) — no verdict and no counter moves here. The
+                // exchange is opened whatever the selector will say about it,
+                // and `finish` is the single place that judges and commits.
+                let entry = OpenExchange {
+                    keyexpr: resolved.ok(),
                     direction,
-                    keyexpr: resolved.as_ref().ok().map(|k| k.as_str()),
                     kind,
                     payload_bytes,
-                    observed_at_ms: at,
+                    requested_at: at,
+                    first_reply_at: None,
+                    replies: 0,
+                    errs: 0,
                 };
-                let truth = filter.matches(&view);
-                self.selection.record(truth);
-                if truth != Truth::Yes {
-                    // Remember the rid so this exchange's own responses are
-                    // dropped in silence rather than counted as orphans, and
-                    // drop any earlier exchange this rid reopened — an
-                    // un-admitted request cannot leave a predecessor behind to
-                    // be reported unclosed.
-                    suppressed.insert(key);
-                    open.remove(&key);
-                    return;
-                }
-                suppressed.remove(&key);
-                let keyexpr = match resolved {
-                    Ok(k) => Some(k),
-                    Err(_) => {
-                        self.gaps.unattributed_requests += 1;
-                        None
-                    }
-                };
-                self.requests += 1;
-                if let Some(ref k) = keyexpr {
-                    self.rows
-                        .entry(k.clone())
-                        .or_insert_with(|| ExchangeRow::new(k.clone()))
-                        .requests += 1;
-                }
                 // A repeated rid inside one flow means the first exchange was
                 // never closed — the same loss `unclosed` counts at the end of
-                // the flow, reached one query earlier.
-                if open
-                    .insert(
-                        key,
-                        OpenExchange {
-                            keyexpr,
-                            requested_at: at,
-                            first_reply_at: None,
-                            replies: 0,
-                            errs: 0,
-                        },
-                    )
-                    .is_some()
-                {
-                    self.unclosed += 1;
+                // the flow, reached one query earlier. It is judged on its own
+                // merits: a later request's verdict is not evidence about it.
+                if let Some(displaced) = open.insert(key, entry) {
+                    self.finish(displaced, Ending::Unclosed, filter);
                 }
             }
             NetworkMessage::Response(r) => {
                 // The reply travels back, so the rid lives in the PEER's space.
                 let key = (dir_index(direction.peer()), r.request_id);
-                // R311y618 — a response to an exchange the selector did not
-                // admit is not an orphan. It is a response this reader chose
-                // not to look at, and saying otherwise would report the
-                // signature of a truncated capture.
-                if suppressed.contains(&key) {
-                    return;
-                }
                 let Some(entry) = open.get_mut(&key) else {
                     self.gaps.orphan_responses += 1;
                     return;
@@ -464,34 +458,47 @@ impl ExchangeTable {
             }
             NetworkMessage::ResponseFinal(f) => {
                 let key = (dir_index(direction.peer()), f.request_id);
-                // The close is where the suppression is FORGOTTEN as well as
-                // honoured: the rid is free again afterwards, so a later
-                // exchange reusing it is judged on its own request.
-                if suppressed.remove(&key) {
-                    return;
-                }
                 let Some(entry) = open.remove(&key) else {
                     self.gaps.orphan_responses += 1;
                     return;
                 };
-                self.close(entry, at);
+                self.finish(entry, Ending::Closed(at), filter);
             }
             _ => {}
         }
     }
 
-    /// Fold one closed exchange into the totals and, when it has a keyexpr,
-    /// into its row.
+    /// R311y636 (§1.1v) — judge one COMPLETE exchange, and fold it in if the
+    /// selector admits it.
+    ///
+    /// The single place a verdict is taken and the single place a counter
+    /// moves, which is what keeps the two in step: there is no path by which a
+    /// rejected exchange reaches a total, and none by which an admitted one
+    /// skips a gap counter it earned.
+    ///
+    /// ## What the outcome view reports, and what the TABLE accumulates
+    ///
+    /// They are deliberately not the same set. The view describes the exchange
+    /// as it can be measured — an unclosed exchange that was answered has a
+    /// real first-reply interval, and `first_reply > 100 and closed == no` is a
+    /// question about exactly those. The latency samples still accumulate only
+    /// over COMPLETED exchanges, unchanged since R311y615: a table row summing
+    /// half-observed exchanges into its mean would answer "how long does this
+    /// keyexpr take" with a number built partly from exchanges that never
+    /// finished.
     ///
     /// The two gap counters are raised AT MOST ONCE PER EXCHANGE, not once per
     /// interval. An unstamped capture would otherwise report twice as many
     /// unstamped exchanges as it holds, and a reader comparing that figure
     /// against [`Self::completed`] would conclude the file was internally
-    /// inconsistent.
-    fn close(&mut self, entry: OpenExchange, closed_at: Option<u64>) {
-        self.completed += 1;
-        self.replies += entry.replies;
-        self.errs += entry.errs;
+    /// inconsistent. They are raised only for a CLOSED exchange, because an
+    /// unclosed one is not missing a timestamp — it is missing a close.
+    fn finish(&mut self, entry: OpenExchange, ending: Ending, filter: &Filter) {
+        let closed_at = match ending {
+            Ending::Closed(at) => at,
+            Ending::Unclosed => None,
+        };
+        let closed = matches!(ending, Ending::Closed(_));
 
         let mut unstamped = false;
         let mut backwards = false;
@@ -516,7 +523,54 @@ impl ExchangeTable {
         } else {
             None
         };
-        let total = measure(entry.requested_at, closed_at);
+        let total = if closed {
+            measure(entry.requested_at, closed_at)
+        } else {
+            None
+        };
+
+        let view = RecordView {
+            direction: entry.direction,
+            keyexpr: entry.keyexpr.as_deref(),
+            kind: entry.kind,
+            payload_bytes: entry.payload_bytes,
+            // The REQUEST's instant, so `time` keeps meaning what it meant when
+            // R311y618 asked at the request. A `time` term that silently became
+            // "when it closed" would move every reader's window by the latency
+            // they were trying to measure.
+            observed_at_ms: entry.requested_at,
+            outcome: Some(OutcomeView {
+                replies: entry.replies as u64,
+                errs: entry.errs as u64,
+                first_reply_ms: first,
+                completion_ms: total,
+                closed,
+            }),
+        };
+        let truth = filter.matches(&view);
+        self.selection.record(truth);
+        if truth != Truth::Yes {
+            return;
+        }
+
+        self.requests += 1;
+        match entry.keyexpr {
+            None => self.gaps.unattributed_requests += 1,
+            Some(ref k) => {
+                self.rows
+                    .entry(k.clone())
+                    .or_insert_with(|| ExchangeRow::new(k.clone()))
+                    .requests += 1;
+            }
+        }
+        if !closed {
+            self.unclosed += 1;
+            return;
+        }
+
+        self.completed += 1;
+        self.replies += entry.replies;
+        self.errs += entry.errs;
         if unstamped {
             self.gaps.unstamped += 1;
         }
@@ -1594,5 +1648,209 @@ pub(crate) mod tests {
         merged.merge(&b);
         assert_eq!(merged.selection().matched, 2);
         assert_eq!(merged.selection().rejected, 2);
+    }
+
+    // R311y636 (§1.1v) — the OUTCOME axis, end to end. Every case below goes in
+    // as packet bytes and comes out as a table, so what is under test is the
+    // wiring from the correlator's close through the view into the verdict, not
+    // a `RecordView` a test built by hand.
+
+    /// Four exchanges whose only interesting difference is how they turned out.
+    ///
+    /// Every one of them is a `Query` from A on its own keyexpr, so no
+    /// request-time term separates them and a selector that picked the right
+    /// one can only have done it on the outcome.
+    fn four_outcomes() -> Vec<(bool, Option<u64>, Vec<u8>)> {
+        alloc::vec![
+            // Answered quickly, closed.
+            (
+                true,
+                Some(1_000),
+                request_query(1, sender_space(0, Some("demo/fast")))
+            ),
+            (
+                false,
+                Some(1_010),
+                response_reply(1, sender_space(0, Some("demo/fast")), b"x")
+            ),
+            (false, Some(1_020), response_final(1)),
+            // Answered slowly, closed.
+            (
+                true,
+                Some(2_000),
+                request_query(2, sender_space(0, Some("demo/slow")))
+            ),
+            (
+                false,
+                Some(2_400),
+                response_reply(2, sender_space(0, Some("demo/slow")), b"x")
+            ),
+            (false, Some(2_450), response_final(2)),
+            // Closed with NOTHING in it — the empty query answer.
+            (
+                true,
+                Some(3_000),
+                request_query(3, sender_space(0, Some("demo/silent")))
+            ),
+            (false, Some(3_005), response_final(3)),
+            // Never closed at all.
+            (
+                true,
+                Some(4_000),
+                request_query(4, sender_space(0, Some("demo/hung")))
+            ),
+        ]
+    }
+
+    /// ANTI-VACUITY for the four: unfiltered, the plane really does see four
+    /// distinct outcomes. Without this leg every selector below could be
+    /// picking from a fixture that only ever held one exchange.
+    #[test]
+    fn the_four_outcomes_fixture_really_carries_four_different_outcomes() {
+        let t = correlate(&four_outcomes());
+        assert_eq!(t.requests(), 4);
+        assert_eq!(t.completed(), 3);
+        assert_eq!(t.unclosed(), 1);
+        assert_eq!(t.responses(), (2, 0));
+        assert_eq!(
+            t.row("demo/fast").expect("row").first_reply.mean_ms(),
+            Some(10)
+        );
+        assert_eq!(
+            t.row("demo/slow").expect("row").first_reply.mean_ms(),
+            Some(400)
+        );
+        assert!(t.row("demo/silent").expect("row").first_reply.is_empty());
+        assert_eq!(t.row("demo/hung").expect("row").completed, 0);
+    }
+
+    /// §1.1v, the first shape the debt named: *which exchanges took longer than
+    /// 100ms*. No request-time term can express it — the four requests differ
+    /// only in their keyexpr, and the reader does not know which keyexpr was
+    /// slow, which is why they asked.
+    #[test]
+    fn a_first_reply_term_picks_the_slow_exchange_out_of_four() {
+        let (t, plain) = correlate_where(&four_outcomes(), "first_reply > 100");
+        assert_eq!(
+            plain.requests(),
+            4,
+            "the control: all four are in the capture"
+        );
+        assert_eq!(t.requests(), 1);
+        assert_eq!(t.rows().len(), 1);
+        assert_eq!(t.rows()[0].keyexpr, "demo/slow");
+        assert_eq!(t.totals().0.mean_ms(), Some(400));
+        assert_eq!(
+            t.selection(),
+            crate::filter::Selection {
+                matched: 1,
+                // `demo/fast` is decidably not slow; `demo/silent` and
+                // `demo/hung` have no first-reply interval to compare, and
+                // being told that is the point.
+                rejected: 1,
+                undecided: 2,
+            }
+        );
+    }
+
+    /// §1.1v, the second shape: *which exchanges went unanswered*. Both the
+    /// closed-but-empty one and the one that never closed qualify, and the
+    /// conjunction with `closed` separates them — which is the proof that the
+    /// two outcome fields are independent axes rather than one restated.
+    #[test]
+    fn a_replies_term_picks_the_exchanges_nothing_answered() {
+        let (t, _) = correlate_where(&four_outcomes(), "replies == 0");
+        let mut named: Vec<&str> = t.rows().iter().map(|r| r.keyexpr.as_str()).collect();
+        named.sort_unstable();
+        assert_eq!(named, ["demo/hung", "demo/silent"]);
+
+        let (closed, _) = correlate_where(&four_outcomes(), "replies == 0 and closed == yes");
+        assert_eq!(closed.rows().len(), 1);
+        assert_eq!(closed.rows()[0].keyexpr, "demo/silent");
+        assert_eq!(closed.completed(), 1);
+        assert_eq!(closed.unclosed(), 0);
+    }
+
+    /// The END-OF-FLOW sweep judges rather than counts: an exchange that never
+    /// closed is a complete OBSERVATION, so `closed == no` selects it and
+    /// `closed == yes` does not.
+    ///
+    /// This is the leg that fails if the sweep goes back to adding `open.len()`
+    /// to `unclosed` without asking the filter.
+    #[test]
+    fn the_exchange_that_never_closed_is_judged_and_not_merely_counted() {
+        let (hung, plain) = correlate_where(&four_outcomes(), "closed == no");
+        assert_eq!(plain.unclosed(), 1, "the control");
+        assert_eq!(hung.requests(), 1);
+        assert_eq!(hung.unclosed(), 1);
+        assert_eq!(hung.completed(), 0);
+        assert_eq!(hung.rows().len(), 1);
+        assert_eq!(hung.rows()[0].keyexpr, "demo/hung");
+
+        let (settled, _) = correlate_where(&four_outcomes(), "closed == yes");
+        assert_eq!(settled.completed(), 3);
+        assert_eq!(
+            settled.unclosed(),
+            0,
+            "the unclosed exchange was REJECTED, not counted"
+        );
+    }
+
+    /// An exchange the outcome selector rejects leaves no trace, exactly as a
+    /// request-time rejection leaves none: not in the totals, not in the rows,
+    /// not in the latency samples, and not in the gaps.
+    #[test]
+    fn an_outcome_rejection_leaves_no_trace_in_the_totals() {
+        let (t, plain) = correlate_where(&four_outcomes(), "completion < 100");
+        assert_eq!(plain.completed(), 3, "the control");
+        // `demo/fast` (20ms) and `demo/silent` (5ms) survive; `demo/slow`
+        // (450ms) is rejected and `demo/hung` has no completion at all.
+        assert_eq!(t.completed(), 2);
+        assert_eq!(t.responses(), (1, 0), "only the fast exchange's reply");
+        assert_eq!(t.totals().1.max_ms(), Some(20));
+        assert!(t.row("demo/slow").is_none());
+        assert!(t.row("demo/hung").is_none());
+        assert!(t.gaps().is_clean(), "unexpected gaps: {:?}", t.gaps());
+    }
+
+    /// R311y636 — a `time` term still means the REQUEST's instant after the
+    /// verdict moved to the close. Driven at a boundary that separates the two:
+    /// `demo/slow` is requested at 2000 and closed at 2450, so a `time < 2400`
+    /// window admits it under the request reading and rejects it under the
+    /// close reading.
+    #[test]
+    fn moving_the_verdict_to_the_close_did_not_move_what_time_means() {
+        let (t, _) = correlate_where(&four_outcomes(), "time >= 2000 and time < 2400");
+        assert_eq!(t.requests(), 1);
+        assert_eq!(t.rows()[0].keyexpr, "demo/slow");
+    }
+
+    /// The honest-degradation leg, wired: the same selector pointed at the
+    /// THROUGHPUT plane, which correlates nothing, reports every record
+    /// undecided instead of an empty table.
+    ///
+    /// The control is what makes it a claim — a request-time selector over the
+    /// same records decides them all, so `undecided` here is this plane saying
+    /// "not my question" rather than a filter that stopped working.
+    #[test]
+    fn the_throughput_plane_reports_an_outcome_term_as_undecided_not_empty() {
+        let d = dissect(&four_outcomes());
+        let outcome = crate::filter::Filter::parse("replies == 0").expect("parses");
+        let table = crate::agg::aggregate_where(&d, &outcome);
+        let selection = table.selection();
+        assert_eq!(selection.matched, 0);
+        assert_eq!(selection.rejected, 0);
+        assert!(
+            selection.undecided > 0 && selection.undecided == selection.seen(),
+            "every record must be undecided, got {selection:?}"
+        );
+        assert!(!selection.is_decisive());
+
+        let request_time = crate::filter::Filter::parse("kind == query").expect("parses");
+        let control = crate::agg::aggregate_where(&d, &request_time).selection();
+        assert!(
+            control.is_decisive() && control.matched > 0,
+            "the control: this plane decides a request-time term, got {control:?}"
+        );
     }
 }

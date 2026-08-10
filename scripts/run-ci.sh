@@ -5364,6 +5364,10 @@ layer_c1bt_capture_no_default_features() {
         filter::tests::the_three_valued_connectives_follow_kleene_rather_than_infecting \
         filter::tests::a_malformed_selector_is_refused_by_name_rather_than_guessed \
         filter::tests::a_wildcard_pattern_is_refused_where_the_matcher_cannot_honour_it \
+        filter::tests::each_outcome_field_reads_the_axis_it_names \
+        filter::tests::an_unanswered_exchange_and_a_slow_one_are_both_expressible \
+        filter::tests::a_plane_that_does_not_correlate_exchanges_cannot_decide_an_outcome_term \
+        filter::tests::the_outcome_fields_refuse_what_they_do_not_admit \
         payload::tests::the_encoding_table_is_the_wire_table_and_the_index_is_the_id \
         payload::tests::an_id_outside_the_table_is_reported_rather_than_defaulted \
         payload::tests::a_payload_that_contradicts_its_declaration_is_a_finding_with_an_offset \
@@ -5435,7 +5439,14 @@ layer_c1bt_capture_no_default_features() {
         payload::census_tests::the_err_term_selects_error_payloads_and_leaves_the_rest \
         payload::census_tests::a_payload_the_capture_does_not_hold_is_named_rather_than_judged \
         payload::census_tests::an_extension_sharing_the_id_field_is_not_the_shm_marker \
-        agg::tests::the_parts_account_for_every_record_walked
+        agg::tests::the_parts_account_for_every_record_walked \
+        exchange::tests::the_four_outcomes_fixture_really_carries_four_different_outcomes \
+        exchange::tests::a_first_reply_term_picks_the_slow_exchange_out_of_four \
+        exchange::tests::a_replies_term_picks_the_exchanges_nothing_answered \
+        exchange::tests::the_exchange_that_never_closed_is_judged_and_not_merely_counted \
+        exchange::tests::an_outcome_rejection_leaves_no_trace_in_the_totals \
+        exchange::tests::moving_the_verdict_to_the_close_did_not_move_what_time_means \
+        exchange::tests::the_throughput_plane_reports_an_outcome_term_as_undecided_not_empty
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the network-codecs build"

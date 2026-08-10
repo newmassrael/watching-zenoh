@@ -452,6 +452,11 @@ impl ThroughputTable {
             kind,
             payload_bytes: counts.payload_bytes,
             observed_at_ms: frame.observed_at_ms,
+            // R311y636 (§1.1v) — this plane folds RECORDS, so it has no
+            // exchange outcome to offer and says so. An outcome term over it is
+            // undecidable, which is what puts the records in
+            // `selection().undecided` rather than in an empty answer.
+            outcome: None,
         };
         let truth = filter.matches(&view);
         self.selection.record(truth);

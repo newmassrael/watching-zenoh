@@ -739,6 +739,10 @@ impl PayloadCensus {
             kind,
             payload_bytes,
             observed_at_ms: frame.observed_at_ms,
+            // R311y636 (§1.1v) — as in `agg`: this plane inspects one payload
+            // and correlates nothing, so an outcome term over it is undecidable
+            // rather than false.
+            outcome: None,
         });
         self.selection.record(truth);
         if truth != crate::filter::Truth::Yes {
