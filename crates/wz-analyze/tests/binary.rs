@@ -2322,14 +2322,29 @@ fn the_field_rows_are_the_messages_the_reader_decoded() {
     }
 }
 
-/// R311y678 (§1.1n) — a DATAGRAM flow says it has no field rows.
+/// R311y679 (§1.1n) — DATAGRAM flows are WALKED, and R311y678 said they could
+/// not be.
 ///
-/// `field_lines` walks the TCP half. A scouting or multicast capture is entirely
-/// datagram, so `--fields` on one printed an empty section, which reads as "no
-/// fields in this capture" about a reader that does not look there. The same
-/// silence R311y676 removed for encrypted flows, one list over.
+/// ## The claim that round made, and what measuring said
+///
+/// R311y678 declared this blocked: "a datagram's bytes are not reachable ... the
+/// symmetric answer is the sink shape, offered at `push_packet_at`, and it needs
+/// a construction seam". Every piece of that was already public.
+/// `pcapng::parse` is; a `Packet` carries `link_type` and `data`;
+/// `link::decapsulate` is; and a datagram frame's `stream_offset` IS its packet
+/// index. Nothing was added to `wz-capture` and nothing is retained -- the
+/// capture bytes were in this crate's hand the whole time.
+///
+/// ## Why the SCOUTING list and not `frames`
+///
+/// Measured, not assumed. A discovery capture reports `messages decoded: 0`
+/// beside `scouting: 3 message(s)`: the scouting datagrams are a different MID
+/// space in a different list, walked by a different entry point. A walk of
+/// `frames` alone produced an EMPTY listing over a capture that is nothing but
+/// discovery traffic -- which is the silence R311y678 replaced with a notice,
+/// arriving one list further in.
 #[test]
-fn a_datagram_capture_says_it_has_no_field_rows() {
+fn a_datagram_capture_has_its_fields_walked() {
     let scratch = Scratch::new("fields-datagram");
     let capture = scratch.write("scout.pcapng", &scouting_capture());
     let text = String::from_utf8_lossy(
@@ -2341,14 +2356,98 @@ fn a_datagram_capture_says_it_has_no_field_rows() {
             .stdout,
     )
     .into_owned();
-    // ANTI-VACUITY: the capture must really be datagram-only, or the absence of
-    // rows is explained by something else.
+
+    // ANTI-VACUITY, both halves: datagram-only, and carrying messages.
     assert!(
         text.contains("flows: 0 stream, 1 datagram"),
         "the fixture must be datagram-only: {text}"
     );
     assert!(
-        text.contains("1 datagram flow(s): NO FIELDS"),
-        "and the listing must say it does not cover them: {text}"
+        text.contains("scouting: 3 message(s)"),
+        "and must carry three of them: {text}"
+    );
+    assert_eq!(
+        text.matches("] Scout").count(),
+        3,
+        "every scouting message is walked into its fields: {text}"
+    );
+    // The FIELDS, to the byte: a Scout's version, its flag byte, and the zid
+    // whose length that byte encodes.
+    assert!(
+        text.contains("[1..2] version = Uint(9)"),
+        "the version byte is named and located: {text}"
+    );
+    assert!(
+        text.contains("[3..7] zid = Bytes([17, 34, 51, 68])"),
+        "and the zid is the four bytes after the flag byte: {text}"
+    );
+    // THE LABEL MUST BE HONEST. `render_sink_row` hardcoded `(decrypted)` when
+    // its only caller was the TLS sink; these rows are cleartext.
+    assert!(
+        !text.contains("(decrypted)"),
+        "a cleartext datagram row must not claim to have been decrypted: {text}"
+    );
+    // And the R311y678 notice is gone, because it is no longer true.
+    assert!(
+        !text.contains("NO FIELDS"),
+        "nothing is declined here: {text}"
+    );
+}
+
+/// R311y679 (§1.1n) — a flow this reader walks NOTHING of still says so.
+///
+/// The R311y678 notice is kept for the case that is still real: a datagram flow
+/// whose messages this build cannot walk contributes no rows, and silence there
+/// reads as "this flow carried nothing".
+#[test]
+fn a_datagram_row_the_reader_cannot_walk_is_still_named() {
+    let scratch = Scratch::new("fields-datagram-none");
+    // A UDP flow carrying one datagram that is not a zenoh message at all.
+    // An EMPTY datagram: a flow with no message in it at all.
+    let junk: [u8; 0] = [];
+    let mut udp = Vec::new();
+    udp.extend_from_slice(&43210u16.to_be_bytes());
+    udp.extend_from_slice(&7446u16.to_be_bytes());
+    udp.extend_from_slice(&((8 + junk.len()) as u16).to_be_bytes());
+    udp.extend_from_slice(&0u16.to_be_bytes());
+    udp.extend_from_slice(&junk);
+    let mut ip = vec![0x45u8, 0];
+    ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+    ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+    ip.extend_from_slice(&[192, 168, 1, 5]);
+    ip.extend_from_slice(&[224, 0, 0, 224]);
+    ip.extend_from_slice(&udp);
+    let mut packet = vec![0u8; 12];
+    packet.extend_from_slice(&[0x08, 0x00]);
+    packet.extend_from_slice(&ip);
+    while packet.len() < 60 {
+        packet.push(0);
+    }
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &packet)],
+    );
+    let capture = scratch.write("junk.pcapng", &file);
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--fields")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    // ANTI-VACUITY: the flow must EXIST, or the notice is absent for the
+    // trivial reason. Measured -- the first fixture for this test used a
+    // malformed zenoh MID and the walker read it as `Unknown` and produced a
+    // row, so the branch was not reached at all; an EMPTY datagram is what
+    // makes a flow with nothing in it.
+    assert!(
+        text.contains("flows: 0 stream, 1 datagram"),
+        "the flow must exist: {text}"
+    );
+    assert!(
+        text.contains("NO FIELDS -- this reader walked none of this datagram flow's messages"),
+        "a datagram flow with nothing walkable must say so: {text}"
     );
 }

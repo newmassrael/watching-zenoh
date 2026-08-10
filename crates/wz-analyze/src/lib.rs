@@ -578,6 +578,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
             if per_field {
                 rendered.push_str("fields:\n");
                 rendered.push_str(&field_lines(
+                    capture,
                     &dissection,
                     &fields,
                     format,
@@ -601,6 +602,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
             if per_field {
                 rendered.push(',');
                 rendered.push_str(&field_lines(
+                    capture,
                     &dissection,
                     &fields,
                     format,
@@ -751,6 +753,7 @@ fn epoch_lines(witness: &[wz_tls_record::capture::EpochWitness; 2], format: Form
 /// `DissectionDrops`: a dissection that drops to stay inside its budget and does
 /// not say so is the failure this crate is built to avoid.
 fn field_lines(
+    capture: &[u8],
     dissection: &Dissection,
     decrypted: &FieldSink,
     format: Format,
@@ -830,7 +833,9 @@ fn field_lines(
                 rows.push(',');
             }
             emitted += 1;
-            render_sink_row(&mut rows, format, flow.flow, *direction, *origin, field);
+            render_sink_row(
+                &mut rows, format, flow.flow, *direction, *origin, field, true,
+            );
         }
         if let Some((_, n)) = decrypted.omitted.iter().find(|(f, _)| *f == flow.flow) {
             omitted += n;
@@ -857,23 +862,24 @@ fn field_lines(
             out.push_str(&format!("    ... {omitted} more not listed\n"));
         }
     }
-    // R311y678 — a DATAGRAM flow says it has no field rows rather than being
-    // absent from the listing.
+    // R311y679 — DATAGRAM flows, walked from the capture's own bytes.
     //
-    // `field_lines` walks `dissection.flows()`, the TCP half. A capture of
-    // scouting or multicast traffic is entirely datagram, so `--fields` on one
-    // printed an empty section -- which reads as "no fields in this capture"
-    // about a reader that does not look. The same silence R311y676 removed for
-    // encrypted flows, one list over, and the reason is the same: nothing
-    // retains a datagram's bytes, and this reader cannot walk what it does not
-    // have.
-    let datagrams = dissection.datagram_flows().len();
-    if datagrams > 0 && format == Format::Text {
-        out.push_str(&format!(
-            "  {datagrams} datagram flow(s): NO FIELDS -- a datagram's bytes are \
-             not retained, so this listing covers stream flows only\n"
-        ));
-    }
+    // R311y678 declared this unreachable and needing a construction seam. That
+    // was wrong, and measuring said so: `pcapng::parse` is public, `Packet`
+    // carries `link_type` and `data`, `link::decapsulate` is public, and a
+    // datagram frame's `stream_offset` IS its packet index. Nothing had to be
+    // added to `wz-capture` and nothing has to be retained -- the capture bytes
+    // are in the caller's hand, which is where they were the whole time.
+    //
+    // Re-parsed rather than kept: the file is already in memory and parsing it
+    // twice costs a walk that only a reader who asked for `--fields` pays.
+    out.push_str(&datagram_field_rows(
+        capture,
+        dissection,
+        format,
+        messages_per_flow,
+        &mut emitted,
+    ));
     if format == Format::Json {
         out.push(']');
     }
@@ -1119,6 +1125,148 @@ fn render_field_row(
     }
 }
 
+/// R311y679 (§1.1n) — the field rows of every DATAGRAM flow.
+///
+/// # Why this needed nothing added anywhere
+///
+/// R311y678 reported this blocked, needing a sink at `push_packet_at` and a
+/// construction seam to install it. Measuring said otherwise: `pcapng::parse`
+/// is public, a `Packet` carries its `link_type` and its `data`,
+/// `link::decapsulate` is public, and a datagram frame's `stream_offset` IS its
+/// packet index. Every piece was already reachable from here, and the capture
+/// bytes never left the caller's hand.
+///
+/// So nothing is retained and nothing was added to `wz-capture`. The file is
+/// parsed a second time, which costs one walk and is paid only by a reader who
+/// asked for `--fields`.
+///
+/// A capture this reader could not parse a second time yields no rows rather
+/// than a panic: it was parsed once already to produce the dissection, so a
+/// failure here would be a disagreement between two reads of one file, and the
+/// listing says how many flows it could not cover.
+fn datagram_field_rows(
+    capture: &[u8],
+    dissection: &Dissection,
+    format: Format,
+    messages_per_flow: Option<usize>,
+    emitted: &mut usize,
+) -> String {
+    let mut out = String::new();
+    if dissection.datagram_flows().is_empty() {
+        return out;
+    }
+    let Ok(file) = wz_capture::pcapng::parse(capture) else {
+        // Not a pcapng, or unreadable on the second pass. Said rather than
+        // silently skipped, which is the whole point of this round's sibling.
+        if format == Format::Text {
+            out.push_str(
+                "  datagram flow(s): NO FIELDS -- this capture's packets could \
+                 not be re-read to walk them\n",
+            );
+        }
+        return out;
+    };
+    for flow in dissection.datagram_flows() {
+        let mut shown = 0usize;
+        let mut omitted = 0usize;
+        for frame in &flow.frames {
+            // The datagram coordinate: `stream_offset` names the PACKET, because
+            // a datagram link has no stream to be offset within.
+            let Some(packet) = file.packets.get(frame.stream_offset) else {
+                continue;
+            };
+            let Ok(wz_capture::link::Transport::Udp(datagram)) =
+                wz_capture::link::decapsulate(packet.link_type, packet.index, &packet.data)
+            else {
+                continue;
+            };
+            let body = frame.unit_offset;
+            let Some(message) = datagram.payload.get(body..) else {
+                continue;
+            };
+            if let Some(cap) = messages_per_flow {
+                if shown >= cap {
+                    omitted += 1;
+                    continue;
+                }
+            }
+            let Ok(field) = wz_session_core::dissect::dissect_transport_message(message, 0) else {
+                continue;
+            };
+            shown += 1;
+            if format == Format::Json && *emitted > 0 {
+                out.push(',');
+            }
+            *emitted += 1;
+            render_sink_row(
+                &mut out,
+                format,
+                flow.flow,
+                frame.direction,
+                frame.stream_offset,
+                &field,
+                false,
+            );
+        }
+        // R311y679 — the SCOUTING list, which is where a discovery capture's
+        // messages actually are. `frames` is the transport-MID space and a
+        // scouting datagram is a different one (Scout / Hello), walked by a
+        // different entry point -- measured, not assumed: the scouting fixture
+        // reports `messages decoded: 0` beside `scouting: 3 message(s)`, so a
+        // walk of `frames` alone produces an empty listing over a capture that
+        // is nothing but discovery traffic.
+        for datagram in &flow.scouting {
+            let Some(packet) = file.packets.get(datagram.packet_index) else {
+                continue;
+            };
+            let Ok(wz_capture::link::Transport::Udp(udp)) =
+                wz_capture::link::decapsulate(packet.link_type, packet.index, &packet.data)
+            else {
+                continue;
+            };
+            if let Some(cap) = messages_per_flow {
+                if shown >= cap {
+                    omitted += 1;
+                    continue;
+                }
+            }
+            let Ok(Some(field)) =
+                wz_session_core::dissect::dissect_scouting_message(&udp.payload, 0)
+            else {
+                continue;
+            };
+            shown += 1;
+            if format == Format::Json && *emitted > 0 {
+                out.push(',');
+            }
+            *emitted += 1;
+            render_sink_row(
+                &mut out,
+                format,
+                flow.flow,
+                datagram.direction,
+                datagram.packet_index,
+                &field,
+                false,
+            );
+        }
+        if format == Format::Text && omitted > 0 {
+            out.push_str(&format!("    ... {omitted} more not listed\n"));
+        }
+        // A datagram flow this reader could not walk says so, rather than being
+        // absent -- the R311y678 rule, kept now that the absence has a second
+        // possible cause.
+        if shown == 0 && format == Format::Text {
+            out.push_str(&format!(
+                "  {} : NO FIELDS -- this reader walked none of this datagram \
+                 flow's messages\n",
+                endpoint(&flow.flow.low)
+            ));
+        }
+    }
+    out
+}
+
 /// R311y677 — one row the sink produced, in whichever format.
 ///
 /// Structurally identical to [`render_field_row`]'s walked arm and deliberately
@@ -1132,6 +1280,12 @@ fn render_sink_row(
     direction: wz_session_core::passive::Direction,
     origin: usize,
     field: &wz_session_core::dissect::Field,
+    // R311y679 — whether these bytes came out of a DECRYPTION. Not a constant:
+    // this renderer took its second caller this round and the datagram rows it
+    // produces are cleartext, so a hardcoded `(decrypted)` is a label that is
+    // silently false for every one of them -- the shape R311y669 removed when a
+    // QUIC row was keyed `tls`.
+    decrypted: bool,
 ) {
     let (dir, from, to) = match direction {
         wz_session_core::passive::Direction::A => ("A", endpoint(&flow.low), endpoint(&flow.high)),
@@ -1140,11 +1294,12 @@ fn render_sink_row(
     match format {
         Format::Json => out.push_str(&format!(
             "{{\"from\":\"{from}\",\"to\":\"{to}\",\"direction\":\"{dir}\",\
-             \"stream_offset\":{origin},\"decrypted\":true,\"field\":{}}}",
+             \"stream_offset\":{origin},\"decrypted\":{decrypted},\"field\":{}}}",
             wz_session_core::dissect::to_json(field)
         )),
         Format::Text => {
-            out.push_str(&format!("  {from} -> {to} {dir} @{origin} (decrypted)\n"));
+            let how = if decrypted { " (decrypted)" } else { "" };
+            out.push_str(&format!("  {from} -> {to} {dir} @{origin}{how}\n"));
             push_field_text(out, field, 2);
         }
     }
