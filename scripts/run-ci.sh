@@ -4553,6 +4553,18 @@ layer_c1p_multicast() {
         || return 1
     _runci_guarded_test C1p 48 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
+    # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
+    # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
+    # on session-multicast + codec-join + codec-frame + codec-close + alloc, so
+    # neither of them compiles the module at all: their 32 / 48 counts are a
+    # measurement of a different population. The only other lane that selects
+    # all four filters on `--lib namespace`, which compiles these tests and runs
+    # none of them. Without this arm the batch walk over a multicast datagram
+    # is gated by clippy alone.
+    _runci_guarded_test C1p 2 cargo test -p wz-session-core \
+        --features session-multicast,codec-join,codec-frame,codec-close,reassembly \
+        --lib multicast_rx --quiet \
+        || return 1
     (cd crates \
         && cargo test -p wz-session-core --features session-multicast --quiet) \
         && (cd crates \

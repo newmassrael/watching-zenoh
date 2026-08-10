@@ -77,6 +77,68 @@ pub enum MulticastRxNext {
     Fragment,
 }
 
+/// R311y633 (§17.6) — how many bytes the message at the front of `msg`
+/// occupies, when that is knowable AND another message can follow it.
+///
+/// `None` means the walk over this framing unit ends here: either the message
+/// consumes the remainder by construction, or its extent is unknown and a walk
+/// that guessed would dispatch bytes parsed out of the middle of something.
+fn multicast_message_len(msg: &[u8]) -> Option<usize> {
+    match msg.first().map(|h| h & 0x1f) {
+        // A Frame or a Fragment reads to the end of its unit by construction
+        // (`zenoh-codec-1.5.0/src/transport/frame.rs:173`), which is why a real
+        // batch ends with one. Answered from the MID alone so an admitted data
+        // frame is never parsed a second time just to be told it was last.
+        Some(wire_const::T_MID_FRAME) | Some(wire_const::T_MID_FRAGMENT) => None,
+        _ => crate::inbound::parse_inbound_consuming(msg)
+            .ok()
+            .map(|(_, consumed)| consumed)
+            .filter(|consumed| *consumed > 0 && *consumed < msg.len()),
+    }
+}
+
+/// R311y633 (§17.6) — dispatch EVERY transport message the datagram carried.
+///
+/// # Why a datagram is not a message
+///
+/// This is the path zenoh's own batch loop is written for: its multicast rx
+/// reads `while !batch.is_empty()` over a received unit
+/// (`zenoh-transport-1.5.0/src/multicast/rx.rs:287`), and pico does not even
+/// re-read the link while its buffer still holds bytes
+/// (`vendor/zenoh-pico/src/transport/multicast/rx.c:68-77`, advancing by one
+/// message at `:99`). Batching is on by default in zenoh's transmission
+/// pipeline (`common/pipeline.rs:318` holds the batch instead of flushing it),
+/// so a group member's data frame batched behind its keepalive or its JOIN was
+/// being dropped here.
+///
+/// The walk stops at the first message whose verdict is not
+/// [`MulticastRxNext::Done`]: `Frame` and `Fragment` consume the remainder, and
+/// a `Close` ends the peer whose later messages would otherwise re-admit it.
+pub fn dispatch_multicast_inbound<F, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    params: &MulticastParams,
+    bytes: &[u8],
+    src: SocketAddr,
+    now_ms: u64,
+    on_event: &mut F,
+) -> MulticastRxNext
+where
+    F: FnMut(IterationEvent<'_>),
+{
+    let mut pos = 0usize;
+    loop {
+        let msg = &bytes[pos..];
+        let next = dispatch_multicast_message(dispatcher, params, msg, src, now_ms, on_event);
+        if !matches!(next, MulticastRxNext::Done) {
+            return next;
+        }
+        match multicast_message_len(msg) {
+            Some(consumed) => pos += consumed,
+            None => return MulticastRxNext::Done,
+        }
+    }
+}
+
 /// Classify one inbound multicast datagram by its transport MID and apply the
 /// §3.2 dispatch that needs no reassembly state: JOIN -> validate + admit (own
 /// zid filtered, since multicast loopback echoes our own beacon); Frame -> the
@@ -86,7 +148,7 @@ pub enum MulticastRxNext {
 /// reassembly-aware tail. `src` is the §3.2 peer key (the datagram source
 /// address — Frame / KeepAlive / Close carry no zid on the wire, exactly like
 /// zenoh-pico `_z_find_peer_entry`).
-pub fn dispatch_multicast_inbound<F, const MAX_PEERS: usize>(
+fn dispatch_multicast_message<F, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     params: &MulticastParams,
     bytes: &[u8],
@@ -264,49 +326,67 @@ pub fn dispatch_multicast_inbound_reassembling<
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
     F: FnMut(IterationEvent<'_>),
 {
-    match dispatch_multicast_inbound(dispatcher, params, bytes, src, now_ms, on_event) {
-        MulticastRxNext::Done => {}
-        MulticastRxNext::FrameOutOfOrder { reliable, priority } => {
-            // An out-of-order Frame clears the channel's in-progress chain
-            // (pico clears the dbuf + state, multicast/rx.c): the dropped frame
-            // may have superseded the chain's continuation. R311y227 — abort the
-            // SAME (peer, priority, reliable) chain the rejected frame's band
-            // would have continued, so a qos peer's OTHER-priority chains are
-            // untouched. DEFAULT for a non-qos frame (byte-identical to before).
-            if let Some(idx) = dispatcher.peer_index_by_src(src) {
-                reasm.abort_channel(&multicast_chain_key(idx), priority, reliable);
+    // R311y633 (§17.6) — the SAME walk as the plain entry point, but the tail
+    // has to run per MESSAGE: the `Fragment` arm re-parses the bytes it was
+    // handed, and parsing from the front of the DATAGRAM would read the message
+    // at offset zero instead of the one that produced the verdict.
+    let mut pos = 0usize;
+    loop {
+        let msg = &bytes[pos..];
+        match dispatch_multicast_message(dispatcher, params, msg, src, now_ms, on_event) {
+            MulticastRxNext::Done => match multicast_message_len(msg) {
+                Some(consumed) => {
+                    pos += consumed;
+                    continue;
+                }
+                None => return,
+            },
+            MulticastRxNext::FrameOutOfOrder { reliable, priority } => {
+                // An out-of-order Frame clears the channel's in-progress chain
+                // (pico clears the dbuf + state, multicast/rx.c): the dropped frame
+                // may have superseded the chain's continuation. R311y227 — abort the
+                // SAME (peer, priority, reliable) chain the rejected frame's band
+                // would have continued, so a qos peer's OTHER-priority chains are
+                // untouched. DEFAULT for a non-qos frame (byte-identical to before).
+                if let Some(idx) = dispatcher.peer_index_by_src(src) {
+                    reasm.abort_channel(&multicast_chain_key(idx), priority, reliable);
+                }
+            }
+            MulticastRxNext::Fragment => {
+                // SN-gate per peer, reassemble per (slot, channel) chain; a
+                // completed chain fans the SAME FramePayload Poll a whole Frame does
+                // (zenoh-pico `_z_multicast_handle_fragment_inner`).
+                if let Ok(InboundFrame::Fragment {
+                    reliable,
+                    sn,
+                    more,
+                    payload,
+                    priority,
+                    ..
+                }) = parse_inbound(msg)
+                {
+                    // R311y227 — the fragment's decoded `ext_qos` band selects its
+                    // per-priority conduit gate + reassembly chain (DEFAULT for a
+                    // non-qos peer, so the pre-R311y227 path is unchanged).
+                    ingest_multicast_fragment_qos(
+                        dispatcher, reasm, src, reliable, sn, more, priority, &payload, now_ms,
+                        on_event,
+                    );
+                }
+            }
+            MulticastRxNext::Close => {
+                // The departing peer's in-progress chains die with it BEFORE its
+                // slot index can recycle (pico's per-entry dbufs).
+                if let Some(idx) = dispatcher.peer_index_by_src(src) {
+                    abort_peer_chains(reasm, idx);
+                }
+                dispatcher.close_by_src(src);
             }
         }
-        MulticastRxNext::Fragment => {
-            // SN-gate per peer, reassemble per (slot, channel) chain; a
-            // completed chain fans the SAME FramePayload Poll a whole Frame does
-            // (zenoh-pico `_z_multicast_handle_fragment_inner`).
-            if let Ok(InboundFrame::Fragment {
-                reliable,
-                sn,
-                more,
-                payload,
-                priority,
-                ..
-            }) = parse_inbound(bytes)
-            {
-                // R311y227 — the fragment's decoded `ext_qos` band selects its
-                // per-priority conduit gate + reassembly chain (DEFAULT for a
-                // non-qos peer, so the pre-R311y227 path is unchanged).
-                ingest_multicast_fragment_qos(
-                    dispatcher, reasm, src, reliable, sn, more, priority, &payload, now_ms,
-                    on_event,
-                );
-            }
-        }
-        MulticastRxNext::Close => {
-            // The departing peer's in-progress chains die with it BEFORE its
-            // slot index can recycle (pico's per-entry dbufs).
-            if let Some(idx) = dispatcher.peer_index_by_src(src) {
-                abort_peer_chains(reasm, idx);
-            }
-            dispatcher.close_by_src(src);
-        }
+        // Every arm above is terminal for this unit: a Frame or a Fragment ate
+        // the remainder, and a Close ended the peer that the bytes behind it
+        // would otherwise re-admit.
+        return;
     }
 }
 
@@ -336,4 +416,128 @@ pub fn sweep_multicast_reassembling<
 {
     crate::reassembly_dispatch::sweep_reporting(reasm, now_ms, on_event);
     dispatcher.sweep_with(now_ms, |idx| abort_peer_chains(reasm, idx));
+}
+
+#[cfg(all(test, feature = "session-multicast", feature = "codec-join"))]
+mod batch_walk_tests {
+    use super::*;
+    use crate::multicast_dispatch::MulticastConfig;
+    use crate::multicast_join::encode_join;
+    use crate::sn::{self, MulticastTxConduits};
+    use alloc::vec::Vec;
+    use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use wz_codecs::whatami::WhatAmI;
+
+    const PEER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7447);
+
+    fn params(zid: &[u8]) -> MulticastParams {
+        MulticastParams {
+            version: 0x09,
+            whatami: WhatAmI::Peer,
+            zid: zid.to_vec(),
+            lease_ms: 5_000,
+            join_interval_ms: 1,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+            is_qos: false,
+        }
+    }
+
+    /// A peer's beacon, through the REAL encoder so the fixture cannot drift
+    /// from what wz emits on the wire.
+    fn peer_join(zid: &[u8]) -> Vec<u8> {
+        let p = params(zid);
+        encode_join(
+            &p,
+            &MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res)),
+        )
+    }
+
+    /// One `T_MID_FRAME` at sn 0 carrying no network records — enough to be
+    /// FANNED, which is the thing the walk either reaches or does not.
+    fn frame_sn0() -> Vec<u8> {
+        alloc::vec![
+            wire_const::T_MID_FRAME | wz_codecs::wire_const::FLAG_T_FRAME_R,
+            0x00,
+        ]
+    }
+
+    fn running<const N: usize>() -> MulticastDispatcher<N> {
+        let mut d = MulticastDispatcher::<N>::new(MulticastConfig::new(5_000));
+        d.create();
+        d.notify_link_ready();
+        d
+    }
+
+    /// R311y633 (§17.6) — a multicast datagram carrying a JOIN AND a data
+    /// frame delivers BOTH.
+    ///
+    /// # Why this shape
+    ///
+    /// It is the batch this path exists to receive: zenoh's multicast rx is
+    /// where the `while !batch.is_empty()` loop lives
+    /// (`zenoh-transport-1.5.0/src/multicast/rx.rs:287`), and its transmission
+    /// pipeline holds a batch open by default rather than flushing per message
+    /// (`common/pipeline.rs:318`). A beacon and a publish leaving together is
+    /// therefore ordinary, and before this round the frame behind the beacon
+    /// was dropped without a trace — the peer was admitted and its data was
+    /// not.
+    ///
+    /// The JOIN must come FIRST for the frame to be admitted at all (the SN
+    /// gate has no conduit for an unknown peer), which is also why the two
+    /// halves cannot be checked separately: the frame's delivery PROVES the
+    /// walk continued past a message that had already been fully handled.
+    #[test]
+    fn a_multicast_datagram_carrying_a_join_and_a_frame_delivers_both() {
+        let mut d = running::<4>();
+        let local = params(&[0x11; 4]);
+        let mut unit = peer_join(&[0x22; 4]);
+        unit.extend_from_slice(&frame_sn0());
+
+        let mut polls = 0usize;
+        let next = dispatch_multicast_inbound(&mut d, &local, &unit, PEER, 1_000, &mut |event| {
+            if matches!(event, IterationEvent::Poll(_)) {
+                polls += 1;
+            }
+        });
+
+        assert!(
+            matches!(next, MulticastRxNext::Done),
+            "both messages were handled here; got {next:?}"
+        );
+        assert!(
+            d.peer_index_by_src(PEER).is_some(),
+            "the JOIN at the front admitted the peer"
+        );
+        assert_eq!(
+            polls, 1,
+            "the frame BEHIND the beacon must be fanned: a walk that stopped \
+             at the JOIN reports zero"
+        );
+    }
+
+    /// R311y633 (§17.6) — and the walk stops where the extent is unknown
+    /// rather than dispatching bytes it cannot place.
+    ///
+    /// `0x00` is no transport MID, so nothing can say where that candidate
+    /// ends; the JOIN in front of it is still handled.
+    #[test]
+    fn a_tail_whose_extent_is_unknown_stops_the_walk_without_dispatching_it() {
+        let mut d = running::<4>();
+        let local = params(&[0x11; 4]);
+        let mut unit = peer_join(&[0x22; 4]);
+        unit.extend_from_slice(&[0x00, 0x11, 0x22]);
+
+        let mut polls = 0usize;
+        let next = dispatch_multicast_inbound(&mut d, &local, &unit, PEER, 1_000, &mut |event| {
+            if matches!(event, IterationEvent::Poll(_)) {
+                polls += 1;
+            }
+        });
+
+        assert!(matches!(next, MulticastRxNext::Done), "{next:?}");
+        assert!(d.peer_index_by_src(PEER).is_some(), "the JOIN still landed");
+        assert_eq!(polls, 0, "and nothing was invented from the tail");
+    }
 }
