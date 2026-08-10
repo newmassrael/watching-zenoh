@@ -115,7 +115,7 @@ use crate::session_init_params::SessionInitParams;
 use crate::signing_key::generate_cookie_hmac_sha256;
 
 // inbound parse (handle_inbound)
-use crate::inbound::{parse_inbound, InboundFrame};
+use crate::inbound::{parse_inbound_consuming, InboundFrame};
 use crate::parse_error::InboundParseError;
 
 // metadata carriers for the *_with_meta action methods. UNGATED on purpose:
@@ -902,6 +902,27 @@ pub struct LinkState<R: SessionRuntime> {
     /// [`TimeSource::now_monotonic_ms`] contract that wz callers
     /// will use across AP + Phase W targets.
     pub last_inbound_at: R::Mutex<Option<u64>>,
+    /// R311y632 (§17) — bytes of the CURRENT framing unit that have not been
+    /// dispatched yet.
+    ///
+    /// One framing unit is a BATCH, not a message: zenoh walks a received unit
+    /// to its end on both its datagram and its stream paths
+    /// (`zenoh-transport-1.5.0/src/multicast/rx.rs:287`,
+    /// `.../unicast/universal/rx.rs:220`) and pico decodes the next message out
+    /// of the residue without re-reading the link
+    /// (`vendor/zenoh-pico/src/transport/multicast/rx.c:68-77`). This participant
+    /// dispatched the FRONT of a unit and dropped the rest, and zenoh batches by
+    /// default (`common/pipeline.rs:318` holds the batch instead of flushing it).
+    ///
+    /// Per LINK rather than per session, because a batch belongs to the link
+    /// that carried it: two links of one aggregated session receive units
+    /// independently and their residues must not interleave.
+    ///
+    /// Stored DECOMPRESSED. Compression wraps a whole unit, so what is parked
+    /// here has already come out of the decompressor and must not go back in —
+    /// which is why [`crate::drive::dispatch_pending`] re-enters at
+    /// `dispatch_unit` and not at `dispatch_link_event`.
+    pub pending_batch: R::Mutex<Option<Vec<u8>>>,
     /// R84 — monotonic timestamp in milliseconds captured when the
     /// session FSM enters the `Established` state. Populated by the
     /// `record_established_at()` Lua action wired to the
@@ -1390,6 +1411,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             link: R::share(LinkState {
                 driver,
                 last_inbound_at: R::new_mutex(None::<u64>),
+                pending_batch: R::new_mutex(None::<Vec<u8>>),
                 established_at: R::new_mutex(None::<u64>),
                 last_outbound_at: R::new_mutex(None::<u64>),
                 transport_available: R::new_mutex(true),
@@ -3214,7 +3236,26 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// belongs in a follow-up round when the inbound-event channel
     /// from `LinkDriver::poll_event` lands.
     pub fn handle_inbound(&self, bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
-        let frame = parse_inbound(bytes)?;
+        self.handle_inbound_consuming(bytes).map(|(frame, _)| frame)
+    }
+
+    /// R311y632 (§17) — the same, told how many bytes the message occupied.
+    ///
+    /// The length is what lets a caller walk to the NEXT message of a batch,
+    /// and one framing unit is a batch: zenoh holds a batch open instead of
+    /// flushing it per message (`zenoh-transport-1.5.0/src/common/pipeline.rs:318`)
+    /// and both reference receivers walk a received unit to its end. It is
+    /// returned from HERE rather than measured by a second parse in the caller,
+    /// because a second parse of a data frame copies the whole payload again.
+    ///
+    /// `0` means the extent is unknown — an unrecognised MID — and a caller
+    /// walking a batch must stop rather than guess where the next message
+    /// starts. See [`crate::inbound::parse_inbound_consuming`].
+    pub fn handle_inbound_consuming(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(InboundFrame, usize), InboundParseError> {
+        let (frame, consumed) = parse_inbound_consuming(bytes)?;
         match &frame {
             #[cfg(feature = "codec-init-body")]
             InboundFrame::Init {
@@ -3358,7 +3399,26 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 *slot = Some(now);
             });
         }
-        Ok(frame)
+        Ok((frame, consumed))
+    }
+
+    /// R311y632 (§17) — park the undispatched remainder of a framing unit.
+    ///
+    /// Empty input parks nothing: an absent residue and a zero-length one are
+    /// the same fact, and storing `Some(vec![])` would make the drain hand the
+    /// dispatcher an empty unit to fail on.
+    pub fn park_pending_batch(&self, residue: &[u8]) {
+        if residue.is_empty() {
+            return;
+        }
+        R::with_mutex_mut(&self.link.pending_batch, |slot| {
+            *slot = Some(residue.to_vec());
+        });
+    }
+
+    /// R311y632 (§17) — take the parked remainder, if any.
+    pub fn take_pending_batch(&self) -> Option<Vec<u8>> {
+        R::with_mutex_mut(&self.link.pending_batch, |slot| slot.take())
     }
 
     /// R311kc — initiator-side InitAck params admission, the dispatcher

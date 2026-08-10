@@ -106,513 +106,532 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
             let bytes: &[u8] = decompressed.as_deref().unwrap_or(&rx.bytes);
             #[cfg(not(feature = "transport-compression"))]
             let bytes: &[u8] = &rx.bytes;
+            dispatch_unit(bytes, actions, engine)
+        }
+    }
+}
 
-            // transport-lowlatency — lean rx: once this session negotiated
-            // lowlatency AND is established, a datagram whose leading message id
-            // is neither Close nor KeepAlive is a BARE NetworkMessage with NO
-            // Frame(sn) wrapper. zenoh's lowlatency rx dispatches the leading id
-            // and routes the default (non-Close/-KeepAlive) arm straight to a
-            // NetworkMessage decode (codec/transport/mod.rs:60-73). Decode the
-            // payload directly and surface it as a FramePayload, synthesizing
-            // reliable=true / sn=0 — the lean wire carries no SN and the
-            // per-channel half-window gate (`admit_rx_frame_sn`) does not exist on
-            // this path (zenoh's lowlatency transport tracks no SN). Close /
-            // KeepAlive (and an empty datagram) fall through to `handle_inbound`:
-            // their wire form is identical in both modes (top-level transport
-            // messages, never Frame-wrapped). The `is_established` guard keeps the
-            // handshake Init / Open frames (which still ride the universal path —
-            // lowlatency only selects the transport post-establishment, zenoh
-            // manager.rs:611) off this branch.
-            #[cfg(feature = "transport-lowlatency")]
-            if actions.is_lowlatency() && actions.is_established() {
-                // Dispatch the leading message id (zenoh lean rx,
-                // codec/transport/mod.rs:60-73): KeepAlive / Close fall through
-                // to the universal `handle_inbound` (their wire form is identical
-                // in both modes — top-level transport messages, never
-                // Frame-wrapped); any OTHER leading id is a bare NetworkMessage
-                // (mids 0x19..=0x1F) decoded directly with no Frame(sn) wrapper.
-                // Using the message-id constants (not the network-mid range)
-                // keeps the test feature-robust: `T_MID_KEEP_ALIVE` is ungated,
-                // and the `T_MID_CLOSE` arm rides `codec-close` exactly like the
-                // `handle_inbound` decode arm it defers to.
-                let lean_network = match bytes.first().map(|h| h & 0x1F) {
-                    None => false,
-                    Some(wire_const::T_MID_KEEP_ALIVE) => false,
-                    #[cfg(feature = "codec-close")]
-                    Some(wire_const::T_MID_CLOSE) => false,
-                    Some(_) => true,
+/// R311y632 (§17) — dispatch ONE framing unit that [`dispatch_link_event`]
+/// has already un-wrapped.
+///
+/// Split out so the REMAINDER of a batch can re-enter WITHOUT being handed to
+/// the decompressor a second time: compression wraps the whole unit, so bytes
+/// that have already come out of it must not go back in.
+/// [`dispatch_pending`] is the other caller.
+fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
+    bytes: &[u8],
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+) -> DriverLoopOutcome {
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+
+    // transport-lowlatency — lean rx: once this session negotiated
+    // lowlatency AND is established, a datagram whose leading message id
+    // is neither Close nor KeepAlive is a BARE NetworkMessage with NO
+    // Frame(sn) wrapper. zenoh's lowlatency rx dispatches the leading id
+    // and routes the default (non-Close/-KeepAlive) arm straight to a
+    // NetworkMessage decode (codec/transport/mod.rs:60-73). Decode the
+    // payload directly and surface it as a FramePayload, synthesizing
+    // reliable=true / sn=0 — the lean wire carries no SN and the
+    // per-channel half-window gate (`admit_rx_frame_sn`) does not exist on
+    // this path (zenoh's lowlatency transport tracks no SN). Close /
+    // KeepAlive (and an empty datagram) fall through to `handle_inbound`:
+    // their wire form is identical in both modes (top-level transport
+    // messages, never Frame-wrapped). The `is_established` guard keeps the
+    // handshake Init / Open frames (which still ride the universal path —
+    // lowlatency only selects the transport post-establishment, zenoh
+    // manager.rs:611) off this branch.
+    #[cfg(feature = "transport-lowlatency")]
+    if actions.is_lowlatency() && actions.is_established() {
+        // Dispatch the leading message id (zenoh lean rx,
+        // codec/transport/mod.rs:60-73): KeepAlive / Close fall through
+        // to the universal `handle_inbound` (their wire form is identical
+        // in both modes — top-level transport messages, never
+        // Frame-wrapped); any OTHER leading id is a bare NetworkMessage
+        // (mids 0x19..=0x1F) decoded directly with no Frame(sn) wrapper.
+        // Using the message-id constants (not the network-mid range)
+        // keeps the test feature-robust: `T_MID_KEEP_ALIVE` is ungated,
+        // and the `T_MID_CLOSE` arm rides `codec-close` exactly like the
+        // `handle_inbound` decode arm it defers to.
+        let lean_network = match bytes.first().map(|h| h & 0x1F) {
+            None => false,
+            Some(wire_const::T_MID_KEEP_ALIVE) => false,
+            #[cfg(feature = "codec-close")]
+            Some(wire_const::T_MID_CLOSE) => false,
+            Some(_) => true,
+        };
+        if lean_network {
+            return match parse_frame_payload(bytes) {
+                Ok(messages) => DriverLoopOutcome::FramePayload {
+                    reliable: true,
+                    sn: 0,
+                    messages,
+                    has_ext: false,
+                    extensions: Vec::new(),
+                    // R311y221 — the lowlatency lean wire carries no Frame
+                    // envelope and no ext_qos (zenoh lowlatency tracks no
+                    // SN / no per-priority conduit), so the delivered band
+                    // is DEFAULT.
+                    priority: crate::qos::Priority::DEFAULT,
+                },
+                Err(codec_err) => {
+                    engine.process_event(E::FramingError);
+                    DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err))
+                }
+            };
+        }
+    }
+    // R311y632 (§17) — THE UNIT IS A BATCH. Take the message at the front and
+    // park whatever follows it, so the next drive-loop turn dispatches that
+    // instead of the peer's next datagram. `consumed == 0` means the extent is
+    // unknown (an unrecognised MID), and the walk must not guess where the next
+    // message begins: nothing is parked, and the `Unknown` frame below already
+    // projects to `FramingError`, which is what both reference implementations
+    // do with a batch they cannot finish reading.
+    let parsed = actions.handle_inbound_consuming(bytes);
+    if let Ok((_, consumed)) = &parsed {
+        if *consumed > 0 && *consumed < bytes.len() {
+            actions.park_pending_batch(&bytes[*consumed..]);
+        }
+    }
+    match parsed.map(|(frame, _)| frame) {
+        Ok(frame) => match inbound_to_fsm_event(&frame) {
+            Some(event) => {
+                // R311kc — initiator InitAck params validation (zenoh-pico
+                // unicast/transport.c:123-140): an InitAck whose size
+                // parameters exceed our InitSyn advertisement REJECTS the
+                // session — `framing.error` drives Closing with
+                // `CloseReason::Invalid` (wire Close(INVALID)) and the
+                // typed outcome surfaces the reason to the open loop.
+                // Unlike the silent-drop admissions below, the reject must
+                // advance the FSM: hanging until the handshake timeout
+                // would mislabel a non-conforming peer as a silent one.
+                // `handle_inbound` already captured the (rejected) caps
+                // into `inbound_peer_init_caps`; inert — the session is
+                // torn down before any mint reads them.
+                //
+                // R311kj review fix — scoped to `SentInitSyn`, the ONE
+                // Initiator state that awaits the InitAck (pico validates
+                // exactly there in its open sequence). The R311kc
+                // `!is_established()` scope was role-blind: a bogus
+                // enlarging InitAck aimed at an ACCEPTOR mid-handshake
+                // tore the session down where pico (and pre-R311kc wz)
+                // lets the FSM ignore the no-transition event. Outside
+                // SentInitSyn the frame now falls through to the FSM,
+                // which ignores it (pico drops it).
+                #[cfg(feature = "codec-init-body")]
+                if let InboundFrame::Init {
+                    is_ack: true, body, ..
+                } = &frame
+                {
+                    use crate::session_fsm_unicast::SessionFsmUnicastState as S;
+                    if engine.get_current_state() == S::SentInitSyn
+                        && !actions.init_ack_caps_acceptable(body.sn_res, body.batch_size)
+                    {
+                        engine.process_event(E::FramingError);
+                        return DriverLoopOutcome::InitAckCapsRejected;
+                    }
+                }
+                // R311il — §2.7 dispatcher admission pre-classify. The
+                // accept-side caps (half-open + token bucket on
+                // init_syn; cookie HMAC on open_syn) depend on HOST
+                // state, not on the triggering frame's wire payload, so
+                // the engine-free FSM carries no `cond=` for them — the
+                // dispatcher evaluates admission and injects the event
+                // only when it passes. Denial drops silently: no Close
+                // frame, no FSM advance (anti-amplification per the §2.7
+                // trust-class matrix). Engine-free successor of the
+                // retired Lua `cond="cookie_valid()"` transition guard.
+                let admit = match event {
+                    E::InitSynReceived => {
+                        actions.half_open_cap_available() && actions.accept_rate_token()
+                    }
+                    E::OpenSynReceived => actions.cookie_valid(),
+                    _ => true,
                 };
-                if lean_network {
-                    return match parse_frame_payload(bytes) {
+                if !admit {
+                    return DriverLoopOutcome::SideEffectOnly;
+                }
+                // R311y578 — take the `min(local, peer)` protocol PATCH
+                // level off every admitted Init frame (zenoh-pico
+                // `transport.c:237-241` runs the same cap on both sides).
+                // wz has emitted its own patch ext since R121f1 and never
+                // read the peer's; the negotiated level is the sole gate
+                // on the Fragment chain-boundary markers, so a session
+                // that never took it can only ever leave them off.
+                #[cfg(feature = "codec-init-body")]
+                if let InboundFrame::Init { extensions, .. } = &frame {
+                    actions.negotiate_patch_against_peer(crate::extpatch::peer_patch(extensions));
+                }
+                // transport-lowlatency — AND the peer's lowlatency offer into
+                // the session capability on every admitted Init frame (zenoh
+                // `is_lowlatency &= other_ext.is_some()`, both the acceptor's
+                // recv_init_syn and the initiator's recv_init_ack). Runs
+                // BEFORE `engine.process_event` below, so the acceptor's merge
+                // lands before the InitSyn transition fires its InitAck send
+                // (which reflects the ext only if the merged flag still
+                // holds). Acceptor sees InitSyn (is_ack=false), initiator sees
+                // InitAck (is_ack=true) — both are negotiation points, so the
+                // arm matches any Init frame.
+                #[cfg(all(feature = "transport-lowlatency", feature = "codec-init-body"))]
+                if let InboundFrame::Init { extensions, .. } = &frame {
+                    actions.negotiate_lowlatency_against_peer(
+                        crate::extlowlatency::peer_offered_lowlatency(extensions),
+                    );
+                }
+                // transport-qos — the same `&=` merge for the Z_EXT_QOS
+                // offer on every admitted Init frame (zenoh "both sides
+                // QoS or NoQoS", both recv_init_syn and recv_init_ack),
+                // BEFORE the InitAck reflect. `peer_offered_qos` accepts
+                // the unit OR the z64 QoSLink form at id 0x1.
+                #[cfg(all(feature = "transport-qos", feature = "codec-init-body"))]
+                if let InboundFrame::Init { extensions, .. } = &frame {
+                    actions.negotiate_qos_against_peer(crate::extqos::peer_offered_qos(extensions));
+                }
+                // session-extqos — the z64 `QoSLink` half: merge the
+                // peer's priority band / reliability into ours under
+                // the DIRECTIONAL containment (acceptor on InitSyn
+                // demands a subset, initiator on InitAck demands a
+                // superset). Runs right after the `&=` above, so the
+                // acceptor's InitAck reflects the MERGED band. A refusal
+                // is a handshake abort upstream (zenoh `?`s the
+                // `zerror!` out of the establishment FSM), so wz injects
+                // `FramingError` — the `InitAckCapsRejected` pattern —
+                // instead of degrading to a band neither side agreed to.
+                #[cfg(all(feature = "session-extqos", feature = "codec-init-body"))]
+                if let InboundFrame::Init {
+                    is_ack, extensions, ..
+                } = &frame
+                {
+                    if let Err(err) = actions.negotiate_qos_link_against_peer(*is_ack, extensions) {
+                        engine.process_event(E::FramingError);
+                        return DriverLoopOutcome::QosLinkRejected(err);
+                    }
+                }
+                // session-extcompression — the same `&=` merge for the
+                // Z_EXT_COMPRESSION offer on every admitted Init frame
+                // (zenoh `is_compression &= other_ext.is_some()`, both
+                // recv_init_syn and recv_init_ack), BEFORE the InitAck
+                // send reflects it.
+                #[cfg(all(feature = "session-extcompression", feature = "codec-init-body"))]
+                if let InboundFrame::Init { extensions, .. } = &frame {
+                    actions.negotiate_compression_against_peer(
+                        crate::extcompression::peer_offered_compression(extensions),
+                    );
+                }
+                // session-extshm — the same `&=` merge for the SHM
+                // capability (the scoped unit-ext negotiation) on every
+                // admitted Init frame, BEFORE the InitAck reflect.
+                #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
+                if let InboundFrame::Init { extensions, .. } = &frame {
+                    actions.negotiate_shm_against_peer(actions.shm_peer_offered(extensions));
+                }
+                // session-extshm (R311y507) — the CHALLENGE-RESPONSE,
+                // which supersedes the capability `&=` above whenever an
+                // authenticator is installed. Init phase: the ACCEPTOR
+                // maps the initiator's segment on InitSyn (before its
+                // InitAck echoes the challenge back); the INITIATOR
+                // validates that echo against its own challenge on
+                // InitAck and maps the acceptor's segment.
+                //
+                // Only the acceptor's arm can ABORT: zenoh `bail!`s on a
+                // malformed InitSyn body while the initiator's mirror
+                // degrades to "no SHM", and that asymmetry is upstream's
+                // — a malformed challenge aimed at an acceptor is an
+                // attack surface, a malformed answer is just a peer that
+                // will not get shared memory.
+                #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
+                if let InboundFrame::Init {
+                    is_ack, extensions, ..
+                } = &frame
+                {
+                    if *is_ack {
+                        actions.shm_recv_init_ack(extensions);
+                    } else if actions.shm_recv_init_syn(extensions).is_err() {
+                        engine.process_event(E::FramingError);
+                        return DriverLoopOutcome::ShmChallengeRejected;
+                    }
+                }
+                // session-extshm (R311y507) — the Open phase, where BOTH
+                // roles finally decide `is_shm`: the acceptor on the
+                // initiator's echo (OpenSyn), the initiator on the
+                // acceptor's literal `1` (OpenAck). A peer that offered
+                // SHM but never proved it can map our memory lands on
+                // `is_shm = false` here rather than at the capability
+                // merge — which is the whole difference between a
+                // capability flag and a proof.
+                #[cfg(all(feature = "session-extshm", feature = "codec-open-body"))]
+                if let InboundFrame::Open {
+                    is_ack, extensions, ..
+                } = &frame
+                {
+                    if *is_ack {
+                        actions.shm_recv_open_ack(extensions);
+                    } else {
+                        actions.shm_recv_open_syn(extensions);
+                    }
+                }
+                // R3b — feed the admitted handshake frame's ext chain into
+                // the matching Z_EXT_AUTH demux stage BEFORE advancing the
+                // FSM, so a usrpwd reject tears the session down instead of
+                // emitting the next handshake message. zenoh runs auth recv
+                // inside the establishment FSM transition; this is the
+                // engine-free analogue, placed right where the per-event
+                // admission already gates (an unadmitted frame returned
+                // above and is never auth-checked). An empty dispatch admits
+                // every stage (zenoh `Auth::default()`). The InitSyn/OpenSyn
+                // (accept) and InitAck/OpenAck (initiator) demux stages each
+                // pair an event with its frame variant.
+                #[cfg(feature = "session-extauth")]
+                {
+                    let auth: Option<Result<(), crate::auth_dispatch::AuthError>> = match &frame {
+                        #[cfg(feature = "codec-init-body")]
+                        InboundFrame::Init {
+                            is_ack: false,
+                            extensions,
+                            ..
+                        } => Some(actions.with_auth(|d| d.accept_recv_init_syn(extensions))),
+                        #[cfg(feature = "codec-init-body")]
+                        InboundFrame::Init {
+                            is_ack: true,
+                            extensions,
+                            ..
+                        } => Some(actions.with_auth(|d| d.open_recv_init_ack(extensions))),
+                        #[cfg(feature = "codec-open-body")]
+                        InboundFrame::Open {
+                            is_ack: false,
+                            extensions,
+                            ..
+                        } => Some(actions.with_auth(|d| d.accept_recv_open_syn(extensions))),
+                        #[cfg(feature = "codec-open-body")]
+                        InboundFrame::Open {
+                            is_ack: true,
+                            extensions,
+                            ..
+                        } => Some(actions.with_auth(|d| d.open_recv_open_ack(extensions))),
+                        _ => None,
+                    };
+                    if let Some(Err(e)) = auth {
+                        engine.process_event(E::FramingError);
+                        return DriverLoopOutcome::AuthRejected(e);
+                    }
+                }
+                // R311y205 (transport-multilink IMPL-2b-ii) — feed the
+                // admitted handshake frame's ext chain into the matching
+                // 0x4 Z_EXT_MULTILINK demux stage, BESIDE the auth demux
+                // above (the 0x4 ext is UN-wrapped, not muxed through
+                // auth). `with_multilink` is `None` when no dispatch is
+                // installed (max_links=1) — the peer's 0x4 ext, if any, is
+                // then ignored. A challenge failure rejects the session
+                // exactly like an auth reject; a success latches the peer's
+                // captured ephemeral pubkey (the join gate's identity key).
+                #[cfg(feature = "transport-multilink")]
+                {
+                    let ml: Option<Result<(), crate::auth_dispatch::AuthError>> = match &frame {
+                        #[cfg(feature = "codec-init-body")]
+                        InboundFrame::Init {
+                            is_ack: false,
+                            extensions,
+                            ..
+                        } => actions.with_multilink(|d| d.accept_recv_init_syn(extensions)),
+                        #[cfg(feature = "codec-init-body")]
+                        InboundFrame::Init {
+                            is_ack: true,
+                            extensions,
+                            ..
+                        } => actions.with_multilink(|d| d.open_recv_init_ack(extensions)),
+                        #[cfg(feature = "codec-open-body")]
+                        InboundFrame::Open {
+                            is_ack: false,
+                            extensions,
+                            ..
+                        } => actions.with_multilink(|d| d.accept_recv_open_syn(extensions)),
+                        #[cfg(feature = "codec-open-body")]
+                        InboundFrame::Open {
+                            is_ack: true,
+                            extensions,
+                            ..
+                        } => actions.with_multilink(|d| d.open_recv_open_ack(extensions)),
+                        _ => None,
+                    };
+                    if let Some(Err(e)) = ml {
+                        engine.process_event(E::FramingError);
+                        return DriverLoopOutcome::AuthRejected(e);
+                    }
+                    // Latch the peer's captured ephemeral pubkey (no-op
+                    // when no dispatch / no key captured yet).
+                    actions.capture_multilink_pubkey();
+                }
+                engine.process_event(event);
+                DriverLoopOutcome::AdvancedFsm
+            }
+            None => match frame {
+                #[cfg(feature = "codec-frame")]
+                InboundFrame::Frame {
+                    reliable,
+                    sn,
+                    payload,
+                    has_ext,
+                    extensions,
+                    priority,
+                } => {
+                    // R311y215 (SN-safety F5) — a non-DEFAULT ext_qos on
+                    // a session that did NOT negotiate QoS is a wire-spec
+                    // violation (a peer must not prioritize without a
+                    // negotiated `is_qos`); drop it rather than admit
+                    // prioritized traffic onto a non-QoS transport. Under
+                    // a non-QoS session `priority` is always DEFAULT, so
+                    // this never fires; a QoS session accepts every
+                    // priority on its own conduit.
+                    #[cfg(feature = "transport-qos")]
+                    if !actions.is_qos() && priority != crate::qos::Priority::DEFAULT {
+                        return DriverLoopOutcome::RxSnRejected {
+                            priority,
+                            reliable,
+                            sn,
+                        };
+                    }
+                    // R311ke — per-channel RX SN gate (pico
+                    // `_z_sn_precedes`, unicast/rx.c:108-131): a stale
+                    // / duplicate / reordered frame drops before its
+                    // payload reaches the application layer. R311y215 —
+                    // the gate is per-(priority, reliable) conduit. The
+                    // typed outcome lets `report_outcome_reassembling`
+                    // clear the channel's in-progress chain (dbuf-clear
+                    // parity) and observers count the drop.
+                    if !actions.admit_rx_frame_sn(priority, reliable, sn) {
+                        return DriverLoopOutcome::RxSnRejected {
+                            priority,
+                            reliable,
+                            sn,
+                        };
+                    }
+                    match parse_frame_payload(&payload) {
                         Ok(messages) => DriverLoopOutcome::FramePayload {
-                            reliable: true,
-                            sn: 0,
+                            reliable,
+                            sn,
                             messages,
-                            has_ext: false,
-                            extensions: Vec::new(),
-                            // R311y221 — the lowlatency lean wire carries no Frame
-                            // envelope and no ext_qos (zenoh lowlatency tracks no
-                            // SN / no per-priority conduit), so the delivered band
-                            // is DEFAULT.
-                            priority: crate::qos::Priority::DEFAULT,
+                            has_ext,
+                            extensions,
+                            // R311y221 — the true decoded band (already
+                            // in scope from the InboundFrame::Frame
+                            // destructure above; gates the RX conduit at
+                            // `admit_rx_frame_sn`). DEFAULT under non-QoS.
+                            priority,
                         },
                         Err(codec_err) => {
                             engine.process_event(E::FramingError);
                             DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err))
                         }
-                    };
-                }
-            }
-            match actions.handle_inbound(bytes) {
-                Ok(frame) => match inbound_to_fsm_event(&frame) {
-                    Some(event) => {
-                        // R311kc — initiator InitAck params validation (zenoh-pico
-                        // unicast/transport.c:123-140): an InitAck whose size
-                        // parameters exceed our InitSyn advertisement REJECTS the
-                        // session — `framing.error` drives Closing with
-                        // `CloseReason::Invalid` (wire Close(INVALID)) and the
-                        // typed outcome surfaces the reason to the open loop.
-                        // Unlike the silent-drop admissions below, the reject must
-                        // advance the FSM: hanging until the handshake timeout
-                        // would mislabel a non-conforming peer as a silent one.
-                        // `handle_inbound` already captured the (rejected) caps
-                        // into `inbound_peer_init_caps`; inert — the session is
-                        // torn down before any mint reads them.
-                        //
-                        // R311kj review fix — scoped to `SentInitSyn`, the ONE
-                        // Initiator state that awaits the InitAck (pico validates
-                        // exactly there in its open sequence). The R311kc
-                        // `!is_established()` scope was role-blind: a bogus
-                        // enlarging InitAck aimed at an ACCEPTOR mid-handshake
-                        // tore the session down where pico (and pre-R311kc wz)
-                        // lets the FSM ignore the no-transition event. Outside
-                        // SentInitSyn the frame now falls through to the FSM,
-                        // which ignores it (pico drops it).
-                        #[cfg(feature = "codec-init-body")]
-                        if let InboundFrame::Init {
-                            is_ack: true, body, ..
-                        } = &frame
-                        {
-                            use crate::session_fsm_unicast::SessionFsmUnicastState as S;
-                            if engine.get_current_state() == S::SentInitSyn
-                                && !actions.init_ack_caps_acceptable(body.sn_res, body.batch_size)
-                            {
-                                engine.process_event(E::FramingError);
-                                return DriverLoopOutcome::InitAckCapsRejected;
-                            }
-                        }
-                        // R311il — §2.7 dispatcher admission pre-classify. The
-                        // accept-side caps (half-open + token bucket on
-                        // init_syn; cookie HMAC on open_syn) depend on HOST
-                        // state, not on the triggering frame's wire payload, so
-                        // the engine-free FSM carries no `cond=` for them — the
-                        // dispatcher evaluates admission and injects the event
-                        // only when it passes. Denial drops silently: no Close
-                        // frame, no FSM advance (anti-amplification per the §2.7
-                        // trust-class matrix). Engine-free successor of the
-                        // retired Lua `cond="cookie_valid()"` transition guard.
-                        let admit = match event {
-                            E::InitSynReceived => {
-                                actions.half_open_cap_available() && actions.accept_rate_token()
-                            }
-                            E::OpenSynReceived => actions.cookie_valid(),
-                            _ => true,
-                        };
-                        if !admit {
-                            return DriverLoopOutcome::SideEffectOnly;
-                        }
-                        // R311y578 — take the `min(local, peer)` protocol PATCH
-                        // level off every admitted Init frame (zenoh-pico
-                        // `transport.c:237-241` runs the same cap on both sides).
-                        // wz has emitted its own patch ext since R121f1 and never
-                        // read the peer's; the negotiated level is the sole gate
-                        // on the Fragment chain-boundary markers, so a session
-                        // that never took it can only ever leave them off.
-                        #[cfg(feature = "codec-init-body")]
-                        if let InboundFrame::Init { extensions, .. } = &frame {
-                            actions.negotiate_patch_against_peer(crate::extpatch::peer_patch(
-                                extensions,
-                            ));
-                        }
-                        // transport-lowlatency — AND the peer's lowlatency offer into
-                        // the session capability on every admitted Init frame (zenoh
-                        // `is_lowlatency &= other_ext.is_some()`, both the acceptor's
-                        // recv_init_syn and the initiator's recv_init_ack). Runs
-                        // BEFORE `engine.process_event` below, so the acceptor's merge
-                        // lands before the InitSyn transition fires its InitAck send
-                        // (which reflects the ext only if the merged flag still
-                        // holds). Acceptor sees InitSyn (is_ack=false), initiator sees
-                        // InitAck (is_ack=true) — both are negotiation points, so the
-                        // arm matches any Init frame.
-                        #[cfg(all(feature = "transport-lowlatency", feature = "codec-init-body"))]
-                        if let InboundFrame::Init { extensions, .. } = &frame {
-                            actions.negotiate_lowlatency_against_peer(
-                                crate::extlowlatency::peer_offered_lowlatency(extensions),
-                            );
-                        }
-                        // transport-qos — the same `&=` merge for the Z_EXT_QOS
-                        // offer on every admitted Init frame (zenoh "both sides
-                        // QoS or NoQoS", both recv_init_syn and recv_init_ack),
-                        // BEFORE the InitAck reflect. `peer_offered_qos` accepts
-                        // the unit OR the z64 QoSLink form at id 0x1.
-                        #[cfg(all(feature = "transport-qos", feature = "codec-init-body"))]
-                        if let InboundFrame::Init { extensions, .. } = &frame {
-                            actions.negotiate_qos_against_peer(crate::extqos::peer_offered_qos(
-                                extensions,
-                            ));
-                        }
-                        // session-extqos — the z64 `QoSLink` half: merge the
-                        // peer's priority band / reliability into ours under
-                        // the DIRECTIONAL containment (acceptor on InitSyn
-                        // demands a subset, initiator on InitAck demands a
-                        // superset). Runs right after the `&=` above, so the
-                        // acceptor's InitAck reflects the MERGED band. A refusal
-                        // is a handshake abort upstream (zenoh `?`s the
-                        // `zerror!` out of the establishment FSM), so wz injects
-                        // `FramingError` — the `InitAckCapsRejected` pattern —
-                        // instead of degrading to a band neither side agreed to.
-                        #[cfg(all(feature = "session-extqos", feature = "codec-init-body"))]
-                        if let InboundFrame::Init {
-                            is_ack, extensions, ..
-                        } = &frame
-                        {
-                            if let Err(err) =
-                                actions.negotiate_qos_link_against_peer(*is_ack, extensions)
-                            {
-                                engine.process_event(E::FramingError);
-                                return DriverLoopOutcome::QosLinkRejected(err);
-                            }
-                        }
-                        // session-extcompression — the same `&=` merge for the
-                        // Z_EXT_COMPRESSION offer on every admitted Init frame
-                        // (zenoh `is_compression &= other_ext.is_some()`, both
-                        // recv_init_syn and recv_init_ack), BEFORE the InitAck
-                        // send reflects it.
-                        #[cfg(all(
-                            feature = "session-extcompression",
-                            feature = "codec-init-body"
-                        ))]
-                        if let InboundFrame::Init { extensions, .. } = &frame {
-                            actions.negotiate_compression_against_peer(
-                                crate::extcompression::peer_offered_compression(extensions),
-                            );
-                        }
-                        // session-extshm — the same `&=` merge for the SHM
-                        // capability (the scoped unit-ext negotiation) on every
-                        // admitted Init frame, BEFORE the InitAck reflect.
-                        #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
-                        if let InboundFrame::Init { extensions, .. } = &frame {
-                            actions
-                                .negotiate_shm_against_peer(actions.shm_peer_offered(extensions));
-                        }
-                        // session-extshm (R311y507) — the CHALLENGE-RESPONSE,
-                        // which supersedes the capability `&=` above whenever an
-                        // authenticator is installed. Init phase: the ACCEPTOR
-                        // maps the initiator's segment on InitSyn (before its
-                        // InitAck echoes the challenge back); the INITIATOR
-                        // validates that echo against its own challenge on
-                        // InitAck and maps the acceptor's segment.
-                        //
-                        // Only the acceptor's arm can ABORT: zenoh `bail!`s on a
-                        // malformed InitSyn body while the initiator's mirror
-                        // degrades to "no SHM", and that asymmetry is upstream's
-                        // — a malformed challenge aimed at an acceptor is an
-                        // attack surface, a malformed answer is just a peer that
-                        // will not get shared memory.
-                        #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
-                        if let InboundFrame::Init {
-                            is_ack, extensions, ..
-                        } = &frame
-                        {
-                            if *is_ack {
-                                actions.shm_recv_init_ack(extensions);
-                            } else if actions.shm_recv_init_syn(extensions).is_err() {
-                                engine.process_event(E::FramingError);
-                                return DriverLoopOutcome::ShmChallengeRejected;
-                            }
-                        }
-                        // session-extshm (R311y507) — the Open phase, where BOTH
-                        // roles finally decide `is_shm`: the acceptor on the
-                        // initiator's echo (OpenSyn), the initiator on the
-                        // acceptor's literal `1` (OpenAck). A peer that offered
-                        // SHM but never proved it can map our memory lands on
-                        // `is_shm = false` here rather than at the capability
-                        // merge — which is the whole difference between a
-                        // capability flag and a proof.
-                        #[cfg(all(feature = "session-extshm", feature = "codec-open-body"))]
-                        if let InboundFrame::Open {
-                            is_ack, extensions, ..
-                        } = &frame
-                        {
-                            if *is_ack {
-                                actions.shm_recv_open_ack(extensions);
-                            } else {
-                                actions.shm_recv_open_syn(extensions);
-                            }
-                        }
-                        // R3b — feed the admitted handshake frame's ext chain into
-                        // the matching Z_EXT_AUTH demux stage BEFORE advancing the
-                        // FSM, so a usrpwd reject tears the session down instead of
-                        // emitting the next handshake message. zenoh runs auth recv
-                        // inside the establishment FSM transition; this is the
-                        // engine-free analogue, placed right where the per-event
-                        // admission already gates (an unadmitted frame returned
-                        // above and is never auth-checked). An empty dispatch admits
-                        // every stage (zenoh `Auth::default()`). The InitSyn/OpenSyn
-                        // (accept) and InitAck/OpenAck (initiator) demux stages each
-                        // pair an event with its frame variant.
-                        #[cfg(feature = "session-extauth")]
-                        {
-                            let auth: Option<Result<(), crate::auth_dispatch::AuthError>> =
-                                match &frame {
-                                    #[cfg(feature = "codec-init-body")]
-                                    InboundFrame::Init {
-                                        is_ack: false,
-                                        extensions,
-                                        ..
-                                    } => Some(
-                                        actions.with_auth(|d| d.accept_recv_init_syn(extensions)),
-                                    ),
-                                    #[cfg(feature = "codec-init-body")]
-                                    InboundFrame::Init {
-                                        is_ack: true,
-                                        extensions,
-                                        ..
-                                    } => Some(
-                                        actions.with_auth(|d| d.open_recv_init_ack(extensions)),
-                                    ),
-                                    #[cfg(feature = "codec-open-body")]
-                                    InboundFrame::Open {
-                                        is_ack: false,
-                                        extensions,
-                                        ..
-                                    } => Some(
-                                        actions.with_auth(|d| d.accept_recv_open_syn(extensions)),
-                                    ),
-                                    #[cfg(feature = "codec-open-body")]
-                                    InboundFrame::Open {
-                                        is_ack: true,
-                                        extensions,
-                                        ..
-                                    } => Some(
-                                        actions.with_auth(|d| d.open_recv_open_ack(extensions)),
-                                    ),
-                                    _ => None,
-                                };
-                            if let Some(Err(e)) = auth {
-                                engine.process_event(E::FramingError);
-                                return DriverLoopOutcome::AuthRejected(e);
-                            }
-                        }
-                        // R311y205 (transport-multilink IMPL-2b-ii) — feed the
-                        // admitted handshake frame's ext chain into the matching
-                        // 0x4 Z_EXT_MULTILINK demux stage, BESIDE the auth demux
-                        // above (the 0x4 ext is UN-wrapped, not muxed through
-                        // auth). `with_multilink` is `None` when no dispatch is
-                        // installed (max_links=1) — the peer's 0x4 ext, if any, is
-                        // then ignored. A challenge failure rejects the session
-                        // exactly like an auth reject; a success latches the peer's
-                        // captured ephemeral pubkey (the join gate's identity key).
-                        #[cfg(feature = "transport-multilink")]
-                        {
-                            let ml: Option<Result<(), crate::auth_dispatch::AuthError>> =
-                                match &frame {
-                                    #[cfg(feature = "codec-init-body")]
-                                    InboundFrame::Init {
-                                        is_ack: false,
-                                        extensions,
-                                        ..
-                                    } => actions
-                                        .with_multilink(|d| d.accept_recv_init_syn(extensions)),
-                                    #[cfg(feature = "codec-init-body")]
-                                    InboundFrame::Init {
-                                        is_ack: true,
-                                        extensions,
-                                        ..
-                                    } => {
-                                        actions.with_multilink(|d| d.open_recv_init_ack(extensions))
-                                    }
-                                    #[cfg(feature = "codec-open-body")]
-                                    InboundFrame::Open {
-                                        is_ack: false,
-                                        extensions,
-                                        ..
-                                    } => actions
-                                        .with_multilink(|d| d.accept_recv_open_syn(extensions)),
-                                    #[cfg(feature = "codec-open-body")]
-                                    InboundFrame::Open {
-                                        is_ack: true,
-                                        extensions,
-                                        ..
-                                    } => {
-                                        actions.with_multilink(|d| d.open_recv_open_ack(extensions))
-                                    }
-                                    _ => None,
-                                };
-                            if let Some(Err(e)) = ml {
-                                engine.process_event(E::FramingError);
-                                return DriverLoopOutcome::AuthRejected(e);
-                            }
-                            // Latch the peer's captured ephemeral pubkey (no-op
-                            // when no dispatch / no key captured yet).
-                            actions.capture_multilink_pubkey();
-                        }
-                        engine.process_event(event);
-                        DriverLoopOutcome::AdvancedFsm
                     }
-                    None => match frame {
-                        #[cfg(feature = "codec-frame")]
-                        InboundFrame::Frame {
-                            reliable,
-                            sn,
-                            payload,
-                            has_ext,
-                            extensions,
-                            priority,
-                        } => {
-                            // R311y215 (SN-safety F5) — a non-DEFAULT ext_qos on
-                            // a session that did NOT negotiate QoS is a wire-spec
-                            // violation (a peer must not prioritize without a
-                            // negotiated `is_qos`); drop it rather than admit
-                            // prioritized traffic onto a non-QoS transport. Under
-                            // a non-QoS session `priority` is always DEFAULT, so
-                            // this never fires; a QoS session accepts every
-                            // priority on its own conduit.
-                            #[cfg(feature = "transport-qos")]
-                            if !actions.is_qos() && priority != crate::qos::Priority::DEFAULT {
-                                return DriverLoopOutcome::RxSnRejected {
-                                    priority,
-                                    reliable,
-                                    sn,
-                                };
-                            }
-                            // R311ke — per-channel RX SN gate (pico
-                            // `_z_sn_precedes`, unicast/rx.c:108-131): a stale
-                            // / duplicate / reordered frame drops before its
-                            // payload reaches the application layer. R311y215 —
-                            // the gate is per-(priority, reliable) conduit. The
-                            // typed outcome lets `report_outcome_reassembling`
-                            // clear the channel's in-progress chain (dbuf-clear
-                            // parity) and observers count the drop.
-                            if !actions.admit_rx_frame_sn(priority, reliable, sn) {
-                                return DriverLoopOutcome::RxSnRejected {
-                                    priority,
-                                    reliable,
-                                    sn,
-                                };
-                            }
-                            match parse_frame_payload(&payload) {
-                                Ok(messages) => DriverLoopOutcome::FramePayload {
-                                    reliable,
-                                    sn,
-                                    messages,
-                                    has_ext,
-                                    extensions,
-                                    // R311y221 — the true decoded band (already
-                                    // in scope from the InboundFrame::Frame
-                                    // destructure above; gates the RX conduit at
-                                    // `admit_rx_frame_sn`). DEFAULT under non-QoS.
-                                    priority,
-                                },
-                                Err(codec_err) => {
-                                    engine.process_event(E::FramingError);
-                                    DriverLoopOutcome::ParseError(InboundParseError::Codec(
-                                        codec_err,
-                                    ))
-                                }
-                            }
-                        }
-                        #[cfg(feature = "codec-keep-alive")]
-                        InboundFrame::KeepAlive { .. } => DriverLoopOutcome::SideEffectOnly,
-                        // R311im — surface the decoded fragment to the drive
-                        // loop, which owns the stateful ReassemblyDispatcher +
-                        // clock. This pure helper cannot reassemble (no slot
-                        // pool, no `now_ms`), so it hands the fragment up.
-                        #[cfg(feature = "reassembly")]
-                        InboundFrame::Fragment {
-                            reliable,
-                            sn,
-                            more,
-                            payload,
-                            has_ext,
-                            extensions,
-                            priority,
-                            markers,
-                        } => {
-                            // R311y215 (SN-safety F5) — as with Frame, drop a
-                            // prioritized fragment on a non-QoS session.
-                            #[cfg(feature = "transport-qos")]
-                            if !actions.is_qos() && priority != crate::qos::Priority::DEFAULT {
-                                return DriverLoopOutcome::RxSnRejected {
-                                    priority,
-                                    reliable,
-                                    sn,
-                                };
-                            }
-                            // R311ke — fragments ride the same per-(priority,
-                            // reliable) conduit SN counter as frames (pico gates
-                            // them through the same `_z_sn_precedes`,
-                            // rx.c:160-176), so the gate must see them too or a
-                            // frame following a fragment chain would compare
-                            // against a stale baseline. The chain-level
-                            // ring-consecutive check stays in the
-                            // ReassemblyDispatcher (a forward GAP passes here
-                            // and aborts there, exactly pico's two-stage check).
-                            if !actions.admit_rx_frame_sn(priority, reliable, sn) {
-                                return DriverLoopOutcome::RxSnRejected {
-                                    priority,
-                                    reliable,
-                                    sn,
-                                };
-                            }
-                            DriverLoopOutcome::Fragment {
-                                reliable,
-                                sn,
-                                more,
-                                payload,
-                                has_ext,
-                                extensions,
-                                priority,
-                                markers,
-                            }
-                        }
-                        #[cfg(feature = "codec-init-body")]
-                        InboundFrame::Init { .. } => {
-                            unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
-                        }
-                        #[cfg(feature = "codec-open-body")]
-                        InboundFrame::Open { .. } => {
-                            unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
-                        }
-                        #[cfg(feature = "codec-close")]
-                        InboundFrame::Close { .. } => {
-                            unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
-                        }
-                        // R311y605 — a JOIN reaches `inbound_to_fsm_event` as
-                        // `Some(FramingError)`, exactly as it did before it was
-                        // decodable at all (it fell through to `Unknown` then).
-                        // Same unreachability, same reason.
-                        #[cfg(feature = "codec-join")]
-                        InboundFrame::Join { .. } => {
-                            unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
-                        }
-                        InboundFrame::Unknown { .. } => {
-                            // inbound_to_fsm_event projects these to Some(event),
-                            // so the outer Some arm handled them — this branch
-                            // is unreachable.
-                            unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
-                        }
-                    },
-                },
-                Err(err) => {
-                    engine.process_event(E::FramingError);
-                    DriverLoopOutcome::ParseError(err)
                 }
-            }
+                #[cfg(feature = "codec-keep-alive")]
+                InboundFrame::KeepAlive { .. } => DriverLoopOutcome::SideEffectOnly,
+                // R311im — surface the decoded fragment to the drive
+                // loop, which owns the stateful ReassemblyDispatcher +
+                // clock. This pure helper cannot reassemble (no slot
+                // pool, no `now_ms`), so it hands the fragment up.
+                #[cfg(feature = "reassembly")]
+                InboundFrame::Fragment {
+                    reliable,
+                    sn,
+                    more,
+                    payload,
+                    has_ext,
+                    extensions,
+                    priority,
+                    markers,
+                } => {
+                    // R311y215 (SN-safety F5) — as with Frame, drop a
+                    // prioritized fragment on a non-QoS session.
+                    #[cfg(feature = "transport-qos")]
+                    if !actions.is_qos() && priority != crate::qos::Priority::DEFAULT {
+                        return DriverLoopOutcome::RxSnRejected {
+                            priority,
+                            reliable,
+                            sn,
+                        };
+                    }
+                    // R311ke — fragments ride the same per-(priority,
+                    // reliable) conduit SN counter as frames (pico gates
+                    // them through the same `_z_sn_precedes`,
+                    // rx.c:160-176), so the gate must see them too or a
+                    // frame following a fragment chain would compare
+                    // against a stale baseline. The chain-level
+                    // ring-consecutive check stays in the
+                    // ReassemblyDispatcher (a forward GAP passes here
+                    // and aborts there, exactly pico's two-stage check).
+                    if !actions.admit_rx_frame_sn(priority, reliable, sn) {
+                        return DriverLoopOutcome::RxSnRejected {
+                            priority,
+                            reliable,
+                            sn,
+                        };
+                    }
+                    DriverLoopOutcome::Fragment {
+                        reliable,
+                        sn,
+                        more,
+                        payload,
+                        has_ext,
+                        extensions,
+                        priority,
+                        markers,
+                    }
+                }
+                #[cfg(feature = "codec-init-body")]
+                InboundFrame::Init { .. } => {
+                    unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
+                }
+                #[cfg(feature = "codec-open-body")]
+                InboundFrame::Open { .. } => {
+                    unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
+                }
+                #[cfg(feature = "codec-close")]
+                InboundFrame::Close { .. } => {
+                    unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
+                }
+                // R311y605 — a JOIN reaches `inbound_to_fsm_event` as
+                // `Some(FramingError)`, exactly as it did before it was
+                // decodable at all (it fell through to `Unknown` then).
+                // Same unreachability, same reason.
+                #[cfg(feature = "codec-join")]
+                InboundFrame::Join { .. } => {
+                    unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
+                }
+                InboundFrame::Unknown { .. } => {
+                    // inbound_to_fsm_event projects these to Some(event),
+                    // so the outer Some arm handled them — this branch
+                    // is unreachable.
+                    unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
+                }
+            },
+        },
+        Err(err) => {
+            engine.process_event(E::FramingError);
+            DriverLoopOutcome::ParseError(err)
         }
     }
 }
-
+/// R311y632 (§17) — dispatch the next message of the framing unit already in
+/// hand, if the last one did not exhaust it.
+///
+/// # Why the caller polls this BEFORE the link
+///
+/// A drive loop's shape is "poll the link, dispatch what came back". A unit
+/// holding two messages therefore delivers the second one only when the PEER
+/// sends again — which is a loss whenever it never does, and a latency bug
+/// whenever it does. So the loops ask here first, and only reach for the link
+/// when nothing is parked.
+///
+/// `None` is the ordinary answer: most units hold one message.
+pub fn dispatch_pending<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+) -> Option<DriverLoopOutcome> {
+    let residue = actions.take_pending_batch()?;
+    Some(dispatch_unit(&residue, actions, engine))
+}
 /// R77/R84 — compare the session's lease baseline against `params.lease` and
 /// inject `SessionFsmUnicastEvent::LeaseExpired` when the window has elapsed,
 /// so the session-fsm `lease.expired -> Closing(Expired)` transition fires.

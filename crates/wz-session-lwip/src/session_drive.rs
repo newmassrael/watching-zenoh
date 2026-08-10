@@ -26,7 +26,8 @@ use wz_runtime_core::TimeSource;
 #[cfg(feature = "transport-keepalive")]
 use wz_session_core::drive::{check_keepalive_deadline, keepalive_wake_deadline};
 use wz_session_core::drive::{
-    check_lease_deadline, dispatch_link_event, lease_wake_deadline, new_session_engine,
+    check_lease_deadline, dispatch_link_event, dispatch_pending, lease_wake_deadline,
+    new_session_engine,
 };
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 use wz_session_core::link::{LinkEvent, RxFrame};
@@ -178,6 +179,17 @@ where
         // never arrives is reclaimed here once `now_ms` crosses its deadline.
         #[cfg(feature = "reassembly")]
         sweep_reporting(&mut reasm, now_ms, &mut on_event);
+
+        // R311y632 (§17) — the parked remainder of the LAST unit first. A unit
+        // is a batch, and `try_recv` below would otherwise hold the second
+        // message until the peer sends again.
+        if let Some(outcome) = dispatch_pending(actions, &mut engine) {
+            #[cfg(feature = "reassembly")]
+            report_outcome_reassembling(&outcome, &mut reasm, actions, now_ms, &mut on_event);
+            #[cfg(not(feature = "reassembly"))]
+            on_event(IterationEvent::Poll(&outcome));
+            continue;
+        }
 
         // Inbound datagram? Dispatch it and loop promptly for the next.
         if let Some(dg) = driver.try_recv() {

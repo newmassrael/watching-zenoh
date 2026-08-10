@@ -548,3 +548,68 @@ async fn r311kj_acceptor_ignores_enlarging_init_ack() {
         "acceptor session survives a bogus InitAck"
     );
 }
+
+/// R311y632 (§17) — a framing unit holding TWO transport messages delivers
+/// BOTH, and the second arrives WITHOUT the peer sending again.
+///
+/// # What was wrong
+///
+/// `handle_inbound` read the message at the front of a unit and nothing read
+/// the rest. That is not a stricter dialect than the wire's — zenoh holds a
+/// batch open instead of flushing per message
+/// (`zenoh-transport-1.5.0/src/common/pipeline.rs:318`, batching on by default)
+/// and both reference receivers walk a received unit to its end
+/// (`.../multicast/rx.rs:287`, `.../unicast/universal/rx.rs:220`,
+/// `vendor/zenoh-pico/src/transport/multicast/rx.c:68-77`). So a peer's data
+/// frame batched behind a keepalive was simply dropped by this participant.
+///
+/// # Why the empty driver queue is the discriminator
+///
+/// `QueueDriver` yields `LinkEvent::Lost { PeerClosed }` once its queue drains,
+/// so the second call CANNOT get a Frame from the link. If the Frame arrives,
+/// it came from the parked remainder of the first unit — which is exactly the
+/// claim. A drive loop that reached for the link first would answer `LinkLost`
+/// here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_batched_unit_delivers_every_message_it_carried() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    // [KeepAlive][Frame(best-effort, sn=0, empty payload)] — the smallest batch
+    // that can exist. A Frame consumes the remainder of its unit by
+    // construction, so a real batch ends with one and never begins with one.
+    let unit = vec![0x04, 0x05, 0x00];
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(unit))]);
+
+    let first = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(first, DriverLoopOutcome::SideEffectOnly),
+        "the KeepAlive at the front of the batch; got {first:?}"
+    );
+
+    let second = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    match second {
+        DriverLoopOutcome::FramePayload {
+            reliable,
+            sn,
+            ref messages,
+            ..
+        } => {
+            assert!(!reliable, "no R flag -> best-effort");
+            assert_eq!(sn, 0);
+            assert!(messages.is_empty(), "empty tail -> empty batch");
+        }
+        other => panic!(
+            "the batched Frame must be delivered without the peer speaking \
+             again; got {other:?}"
+        ),
+    }
+
+    // And the unit is then EXHAUSTED rather than replayed: the next turn
+    // reaches the link, which has nothing left.
+    let third = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(third, DriverLoopOutcome::LinkLost(LostCause::PeerClosed)),
+        "a drained unit must not keep answering; got {third:?}"
+    );
+}

@@ -591,7 +591,7 @@ pub use wz_session_core::driver_loop::DriverLoopOutcome;
 // Stage 3 — the synchronous dispatch core of `poll_and_dispatch_one` lives in
 // wz-session-core so the lwIP MCU loop shares it; the AP async wrapper calls it
 // after the one `.await`.
-use wz_session_core::drive::dispatch_link_event;
+use wz_session_core::drive::{dispatch_link_event, dispatch_pending};
 
 /// R76 — production driver loop unit. Poll a single `LinkEvent` from
 /// `driver` and forward it through the inbound chain so the session
@@ -618,6 +618,15 @@ pub async fn poll_and_dispatch_one<D: LinkDriver>(
     actions: &Arc<SessionLinkActions>,
     engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>>,
 ) -> DriverLoopOutcome {
+    // R311y632 (§17) — the parked remainder of the LAST framing unit comes
+    // first, before this poll blocks on the link. A unit is a batch, and its
+    // second message is already in hand; reaching for the link first would
+    // deliver it only when the peer next speaks — a loss if it never does.
+    // Every caller of this function loops, so this is where the walk resumes
+    // without any of them changing.
+    if let Some(outcome) = dispatch_pending(actions, engine) {
+        return outcome;
+    }
     // Stage 3 — the synchronous dispatch core is the runtime-agnostic
     // `wz_session_core::drive::dispatch_link_event`; this AP wrapper keeps only
     // the one `.await` (the `D: LinkDriver` poll) the no_std core cannot host.
