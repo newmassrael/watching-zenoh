@@ -376,8 +376,46 @@ declare -A BASELINE_MC_TEXT=(
     # objects the link pulls in. Both sit inside the +-256 band against the
     # hosted figure, so one baseline still governs both machines; a local
     # reading is a direction, not an authority. Old: 52068/52124 (R311y592).
-    ["thumbv7m-none-eabi"]=52588
-    ["thumbv7em-none-eabihf"]=52588
+    #
+    # R311y636 — GREW after R311y633 made the multicast receiver walk its
+    # datagram to the end instead of reading only its front. Attributed to ONE
+    # commit rather than to an arc: Layer G+Q was green at `1487b071` (y632)
+    # and red at `7702864a` (y635), and `7bc26dd6` is the only production-code
+    # commit between them — y634 and y635 add tests to wz-integration-tests,
+    # which this artifact does not link. Built here at both ends, one host, one
+    # toolchain, with the R311y267 path remap:
+    #
+    #   | commit                                  | thumbv7m | delta |
+    #   |-----------------------------------------|----------|-------|
+    #   | 1487b071 (y632 tip, at this baseline)   | 52820*   |    +0 |
+    #   | 7702864a (y635 tip, the red run)        | 53372*   |  +552 |
+    #
+    #   (*) un-remapped readings, kept only because both ends were measured the
+    #   same way; the remapped lane reads 53096 / 53092 at the second row.
+    #
+    # Per-symbol ELF diff of those two (arm-none-eabi-nm -S, demangled sums):
+    #
+    #   +1314  wz_session_core::inbound::parse_inbound_consuming  (NEW here)
+    #   -1214  wz_session_core::inbound::parse_inbound            (superseded)
+    #    +366  __cortex_m_rt_main                                 (the walk)
+    #     +16  .Lanon .rodata                                     (hash rename)
+    #
+    # INTENTIONAL, and the same trade the R311y605 row above records. A walk
+    # needs to know where each message ENDS, so the binary swaps a decoder that
+    # cannot say (`parse_inbound`) for one that can (`parse_inbound_consuming`)
+    # — that swap, not the loop, is 1300 of the 552 net bytes. Before it, a
+    # group member's data frame batched behind its JOIN or its keepalive was
+    # dropped by this profile, and zenoh batches by DEFAULT
+    # (`zenoh-transport-1.5.0/src/common/pipeline.rs:318`). The ROM was smaller
+    # because the binary read one message per datagram and the wire carries
+    # more.
+    #
+    # Hosted figures recorded: 53100 / 53128 — the two axes DIVERGE for the
+    # first time on this artifact (28 B), so they are no longer one number.
+    # This host reads 53096 / 53092 under the remap: -4 / -36, the same shape
+    # the row above records. Old: 52588/52588 (R311y605).
+    ["thumbv7m-none-eabi"]=53100
+    ["thumbv7em-none-eabihf"]=53128
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
