@@ -257,6 +257,8 @@ struct OpenExchange {
     /// `time` and `elapsed` already name, so a selector cannot end up with two
     /// terms pointing at opposite ends of the same exchange.
     requested_unit_offset: u64,
+    /// R311y644 (§1.1p) — the REQUEST's source-to-observer delay, if it had one.
+    requested_delay_ms: Option<u64>,
     first_reply_at: Option<u64>,
     replies: usize,
     errs: usize,
@@ -443,6 +445,11 @@ impl ExchangeTable {
                     payload_bytes,
                     requested_at: at,
                     requested_unit_offset: span.map(|(o, _)| o as u64).unwrap_or(0),
+                    requested_delay_ms: crate::agg::source_delay_ms(
+                        frame.observed_at_ms,
+                        crate::agg::source_timestamp(message),
+                    )
+                    .unwrap_or(None),
                     first_reply_at: None,
                     replies: 0,
                     errs: 0,
@@ -554,6 +561,11 @@ impl ExchangeTable {
             // "when it closed" would move every reader's window by the latency
             // they were trying to measure.
             unit_offset: entry.requested_unit_offset,
+            // The REQUEST's delay, at the same instant `time` is taken. A
+            // `Query` carries no source stamp, so this is `None` for the shape
+            // this plane most often holds -- and that is the honest answer
+            // rather than the close's delay standing in for the request's.
+            source_delay_ms: entry.requested_delay_ms,
             observed_at_ms: entry.requested_at,
             // R311y638 (§1.1r) — relative to the CAPTURE and taken at the same
             // instant `time` is, so the two fields cannot name different

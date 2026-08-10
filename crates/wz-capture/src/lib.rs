@@ -2387,6 +2387,59 @@ mod datagram_tests {
     /// [`FLAG_N_N`](wz_codecs::wire_const::FLAG_N_N) rather than the number
     /// `0x20`, which is the other half of the same rule: a fixture that spells
     /// a flag as a literal is a byte string wearing a struct.
+    /// R311y644 (§1.1p) — a `Push` whose `MsgPut` carries a SOURCE timestamp.
+    ///
+    /// `stamped_ms` is a wall-clock instant in milliseconds; it is converted to
+    /// the NTP64 word zenoh puts on the wire through
+    /// [`Ntp64`](wz_session_core::ntp64::Ntp64), the same type the reader uses,
+    /// so the fixture cannot agree with the reader on a layout the wire does not
+    /// have. The `T` flag is NAMED, because a fixture that set the wrong one of
+    /// the three PUT flags stopped decoding rather than losing its timestamp
+    /// (R311y617 added the names on the strength of exactly that).
+    /// Gated to match its only consumers: both tests that drive the delay axis
+    /// live behind `network-codecs`, and an ungated fixture would be dead code
+    /// the no-default lane fails on rather than a wider reach.
+    #[cfg(feature = "network-codecs")]
+    pub(crate) fn push_stamped(
+        keyexpr: Wireexpr<'static>,
+        payload: &[u8],
+        stamped_ms: u64,
+    ) -> Vec<u8> {
+        let has_suffix = match &keyexpr.body {
+            WireexprVariant::WireexprLocal(a) => a.suffix.is_some(),
+            WireexprVariant::WireexprNonlocal(a) => a.suffix.is_some(),
+        };
+        let n_flag = if has_suffix {
+            wz_codecs::wire_const::FLAG_N_N
+        } else {
+            0
+        };
+        let word = wz_session_core::ntp64::Ntp64::from_unix(
+            stamped_ms / 1000,
+            ((stamped_ms % 1000) * 1_000_000) as u32,
+        )
+        .as_word();
+        const ZID: [u8; 16] = [7u8; 16];
+        wz_codecs::push::Push {
+            header: wz_codecs::push::Push::default().header | n_flag,
+            keyexpr,
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                header: wz_codecs::msg_put::MsgPut::default().header
+                    | wz_codecs::wire_const::FLAG_Z_PUT_T,
+                timestamp: Some(wz_codecs::timestamp::Timestamp {
+                    time: word,
+                    zid_len: ZID.len() as u64,
+                    zid: &ZID,
+                }),
+                payload_len: payload.len() as u64,
+                payload,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
     pub(crate) fn push(keyexpr: Wireexpr<'static>, payload: &[u8]) -> Vec<u8> {
         let has_suffix = match &keyexpr.body {
             WireexprVariant::WireexprLocal(a) => a.suffix.is_some(),

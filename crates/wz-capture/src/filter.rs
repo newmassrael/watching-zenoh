@@ -49,6 +49,7 @@
 //! | `time` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | the capture carried no clock |
 //! | `elapsed` | an integer, ms since the capture began | `==` `!=` `<` `<=` `>` `>=` | no clock, or the plane was not told the origin |
 //! | `offset` | an integer, bytes into the framing unit | `==` `!=` `<` `<=` `>` `>=` | never — every record was walked out of a unit |
+//! | `delay` | an integer, ms from the source's stamp to arrival | `==` `!=` `<` `<=` `>` `>=` | no source clock, no arrival clock, or the source's clock is ahead |
 //! | `replies` | an integer | `==` `!=` `<` `<=` `>` `>=` | the plane does not correlate exchanges |
 //! | `errs` | an integer | `==` `!=` `<` `<=` `>` `>=` | as above |
 //! | `first_reply` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | as above, or nothing answered, or no clock |
@@ -254,6 +255,16 @@ pub struct RecordView<'a> {
     /// which is what R311y631 measured and, until now, could only report as an
     /// ordinal.
     pub unit_offset: u64,
+    /// R311y644 (§1.1p) — milliseconds from the SOURCE stamping this record to
+    /// this observer seeing it, or `None` when the question cannot be answered
+    /// here.
+    ///
+    /// `None` covers three absences a predicate answers identically: the record
+    /// carries no source clock (a `Query`, an `Err`, a `Put` with its `T` flag
+    /// clear), the capture carried no arrival clock, or the source's stamp is
+    /// LATER than the arrival -- which is not a negative delay but proof the two
+    /// machines' clocks are offset.
+    pub source_delay_ms: Option<u64>,
     /// R311y636 (§1.1v) — the outcome of the exchange this record opened, or
     /// `None` on a plane that does not correlate exchanges.
     ///
@@ -370,6 +381,11 @@ enum Term {
         op: Op,
         value: u64,
     },
+    /// R311y644 (§1.1p) -- the one-way axis: source stamp to observer arrival.
+    Delay {
+        op: Op,
+        value: u64,
+    },
     /// R311y636 (§1.1v) — the outcome axis. One variant per field rather than a
     /// `field: OutcomeField` discriminant carried alongside, so a new outcome
     /// field cannot be added without the match below failing to compile.
@@ -440,6 +456,13 @@ impl Term {
             // above: a record exists because a unit was walked, and the walk
             // knows where in that unit it stood.
             Self::Offset { op, value } => Truth::of(op.apply(record.unit_offset, *value)),
+            // Undecidable for three different reasons the field's doc names,
+            // and deliberately not told apart here: each means the question
+            // cannot be answered about THIS record.
+            Self::Delay { op, value } => match record.source_delay_ms {
+                None => Truth::Unknown,
+                Some(ms) => Truth::of(op.apply(ms, *value)),
+            },
             // R311y636 (§1.1v). The third undecidable case, and the widest: a
             // plane with no exchange correlation carries no outcome at all, so
             // all five say so rather than guessing at a count of zero.
@@ -692,7 +715,8 @@ impl fmt::Display for FilterError {
             FilterErrorKind::UnknownField(name) => write!(
                 f,
                 "unknown field {name:?} (known: key, dir, kind, bytes, time, \
-                 elapsed, offset, replies, errs, first_reply, completion, \
+                 elapsed, offset, delay, replies, errs, first_reply, \
+                 completion, \
                  closed)"
             ),
             FilterErrorKind::UnknownValue { field, value } => {
@@ -1043,6 +1067,10 @@ impl<'a> Parser<'a> {
                 op,
                 value: integer(&value, value_at)?,
             },
+            "delay" => Term::Delay {
+                op,
+                value: integer(&value, value_at)?,
+            },
             "replies" => Term::Replies {
                 op,
                 value: integer(&value, value_at)?,
@@ -1153,6 +1181,7 @@ fn static_field_name(field: &str) -> Option<&'static str> {
         "time" => "time",
         "elapsed" => "elapsed",
         "offset" => "offset",
+        "delay" => "delay",
         "replies" => "replies",
         "errs" => "errs",
         "first_reply" => "first_reply",
@@ -1183,6 +1212,7 @@ mod tests {
             // so every pre-existing test below drives the undecidable arm.
             elapsed_ms: None,
             unit_offset: 0,
+            source_delay_ms: None,
             // The default is the NON-correlating plane, so every pre-existing
             // test below drives the view the throughput plane builds.
             outcome: None,

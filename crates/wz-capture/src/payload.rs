@@ -745,6 +745,14 @@ impl PayloadCensus {
             kind,
             payload_bytes,
             unit_offset: span.map(|(o, _)| o as u64).unwrap_or(0),
+            // R311y644 (§1.1p) — the census of clock-offset witnesses belongs
+            // to the throughput plane, so this one reads the axis and does not
+            // count what it cannot own.
+            source_delay_ms: crate::agg::source_delay_ms(
+                frame.observed_at_ms,
+                crate::agg::source_timestamp(message),
+            )
+            .unwrap_or(None),
             observed_at_ms: frame.observed_at_ms,
             elapsed_ms: crate::agg::elapsed_since(self.capture_origin_ms, frame.observed_at_ms),
             // R311y636 (§1.1v) — as in `agg`: this plane inspects one payload

@@ -457,6 +457,14 @@ pub struct ThroughputTable {
     records: usize,
     unattributed: usize,
     unsized_payloads: usize,
+    /// R311y644 (§1.1p) — records whose SOURCE stamped them later than this
+    /// observer saw them.
+    ///
+    /// Not a delay and not zero: proof that the publisher's clock and the
+    /// capture host's are offset, which makes every `delay` figure in the same
+    /// capture suspect. Without it a capture full of ahead-running publishers
+    /// reports no measured delays and says nothing about why.
+    source_ahead_of_observer: usize,
     /// R311y638 (§1.1r) — where the capture began, for the `elapsed` term.
     /// Set only by the whole-capture entry points, because only they have seen
     /// the whole capture; a caller folding flows by hand leaves it `None` and
@@ -638,6 +646,24 @@ impl ThroughputTable {
             self.unattributed += 1;
             return;
         };
+        // R311y644 (§1.1p) — computed BEFORE the filter, since a `delay` term
+        // has to be answerable at the same moment every other term is. The
+        // clock-offset witness is counted here rather than inside the helper:
+        // this is the plane that owns the capture-wide census.
+        #[cfg(feature = "network-codecs")]
+        let delay = match source_delay_ms(frame.observed_at_ms, source_timestamp(message)) {
+            Ok(d) => d,
+            Err(SourceAhead) => {
+                self.source_ahead_of_observer += 1;
+                None
+            }
+        };
+        // Gated exactly as the two helpers are: without the network codecs there
+        // is no body this build can read a source stamp out of, so the axis
+        // declines for every record -- which is a smaller reach and not a wrong
+        // answer.
+        #[cfg(not(feature = "network-codecs"))]
+        let delay = None;
         let resolved = spaces.resolve(direction, keyexpr_body);
 
         // R311y616 — the filter is asked AFTER resolution and BEFORE any
@@ -651,6 +677,7 @@ impl ThroughputTable {
             kind,
             payload_bytes: sized_payload(&counts),
             unit_offset: span.map(|(o, _)| o as u64).unwrap_or(0),
+            source_delay_ms: delay,
             observed_at_ms: frame.observed_at_ms,
             elapsed_ms: elapsed_since(self.capture_origin_ms, frame.observed_at_ms),
             // R311y636 (§1.1v) — this plane folds RECORDS, so it has no
@@ -833,6 +860,13 @@ impl ThroughputTable {
         self.unsized_payloads
     }
 
+    /// R311y644 (§1.1p) — records whose source clock ran ahead of this
+    /// observer's. Non-zero means the `delay` axis cannot be trusted for this
+    /// capture, and it is the only thing that says so.
+    pub fn source_ahead_of_observer(&self) -> usize {
+        self.source_ahead_of_observer
+    }
+
     /// Application bytes across every resolved keyexpr.
     ///
     /// A FLOOR whenever [`Self::unsized_payloads`] is non-zero — read the two
@@ -934,6 +968,54 @@ pub(crate) fn carries_shm_marker(
         .any(|e| ext_eid(e.header) == want)
 }
 
+/// R311y644 (§1.1p) — how long a record took to reach this observer, in ms.
+///
+/// # A one-way axis from a single tap
+///
+/// The exchange plane measures a ROUND TRIP: request out, reply back, both seen
+/// at the same vantage point, so nothing about it separates the two legs. A
+/// one-way figure normally needs two synchronised taps, which is why this axis
+/// sat unbuilt.
+///
+/// It does not, for the records that carry a `Timestamp`. zenoh stamps a `Put`
+/// or a `Del` at the SOURCE with an HLC word (`zenoh-protocol-1.5.0`
+/// re-exports `uhlc::Timestamp`; the word's layout is
+/// [`Ntp64`](wz_session_core::ntp64::Ntp64)), and the capture stamps the packet
+/// on arrival. The difference is the time from the publisher stamping the value
+/// to this observer seeing it — publisher-to-tap, which is the leg a reader
+/// actually asks about when data is late.
+///
+/// # What it is NOT, and why the contradiction is a separate answer
+///
+/// The two clocks are DIFFERENT MACHINES and nothing here synchronises them, so
+/// the figure carries the publisher-to-observer clock offset. A capture whose
+/// publisher runs ahead therefore produces a stamp LATER than the arrival, and
+/// that is not a negative delay — it is proof the offset is not zero, which
+/// makes every other figure in the same capture suspect. It answers `None` and
+/// is counted where a reader can see it
+/// ([`ThroughputTable::source_ahead_of_observer`]), rather than saturating to a
+/// confident `0`.
+#[cfg(feature = "network-codecs")]
+pub(crate) fn source_delay_ms(
+    observed_at_ms: Option<u64>,
+    timestamp: Option<&wz_codecs::timestamp::TimestampOwned>,
+) -> Result<Option<u64>, SourceAhead> {
+    let (Some(seen), Some(ts)) = (observed_at_ms, timestamp) else {
+        return Ok(None);
+    };
+    let stamped = wz_session_core::ntp64::Ntp64::from_word(ts.time).to_millis();
+    match u128::from(seen).checked_sub(stamped) {
+        // The cast cannot lose: `stamped <= seen` and `seen` came from a u64.
+        Some(d) => Ok(Some(d as u64)),
+        None => Err(SourceAhead),
+    }
+}
+
+/// R311y644 (§1.1p) — the source stamped a record LATER than this observer saw
+/// it, so the two clocks are provably offset.
+#[cfg(feature = "network-codecs")]
+pub(crate) struct SourceAhead;
+
 /// R311y639 (§4.30) — what one `MsgPut` / `Err` slot is worth to the totals.
 ///
 /// The pair the carrier arms hand to [`KeyexprCounts::record_payload`], so the
@@ -1004,6 +1086,46 @@ fn query_body_bytes(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) 
             _ => None,
         }
     })
+}
+
+/// R311y644 (§1.1p) — the SOURCE timestamp a record carries, if it carries one.
+///
+/// Only `Put` and `Del` do (`out/wz-codecs/msg_put.rs`, `msg_del.rs`; a `Query`,
+/// a `Reply` envelope and an `Err` declare no timestamp field at all), and a
+/// `Put` carries one only when its `T` flag was set. Extracted HERE rather than
+/// in each plane for the reason [`classify`] is: three spellings of "which
+/// records have a source clock" is three places for the answer to drift.
+#[cfg(feature = "network-codecs")]
+pub(crate) fn source_timestamp(
+    message: &NetworkMessage,
+) -> Option<&wz_codecs::timestamp::TimestampOwned> {
+    use wz_codecs::push::PushOwnedVariant;
+    use wz_codecs::reply::ReplyOwnedVariant;
+    use wz_codecs::request::RequestOwnedVariant;
+    use wz_codecs::response::ResponseOwnedVariant;
+    match message {
+        NetworkMessage::Push(p) => match &p.body {
+            PushOwnedVariant::CodecZenohMsgPut(m) | PushOwnedVariant::Default { body: m, .. } => {
+                m.timestamp.as_ref()
+            }
+            PushOwnedVariant::CodecZenohMsgDel(m) => m.timestamp.as_ref(),
+        },
+        NetworkMessage::Request(r) => match &r.body {
+            RequestOwnedVariant::CodecZenohMsgPut(m) => m.timestamp.as_ref(),
+            RequestOwnedVariant::CodecZenohMsgDel(m) => m.timestamp.as_ref(),
+            _ => None,
+        },
+        NetworkMessage::Response(r) => match &r.body {
+            ResponseOwnedVariant::CodecZenohReply(reply)
+            | ResponseOwnedVariant::Default { body: reply, .. } => match &reply.body {
+                ReplyOwnedVariant::CodecZenohMsgPut(m)
+                | ReplyOwnedVariant::Default { body: m, .. } => m.timestamp.as_ref(),
+                ReplyOwnedVariant::CodecZenohMsgDel(m) => m.timestamp.as_ref(),
+            },
+            ResponseOwnedVariant::CodecZenohErr(_) => None,
+        },
+        _ => None,
+    }
 }
 
 pub(crate) fn classify(
@@ -1258,7 +1380,7 @@ mod no_codec_tests {
 #[cfg(all(test, feature = "network-codecs"))]
 pub(crate) mod tests {
     use super::*;
-    use crate::datagram_tests::{push, sender_space, udp_packet};
+    use crate::datagram_tests::{push, push_stamped, sender_space, udp_packet};
     use crate::link::LINKTYPE_ETHERNET;
     use crate::Dissection;
 
@@ -2526,6 +2648,84 @@ pub(crate) mod tests {
         assert_eq!(inner.rows, 1);
     }
 
+    /// R311y644 (§1.1p) — THE ONE-WAY AXIS. A record stamped at its source and
+    /// seen here yields publisher-to-observer time, which no round-trip figure
+    /// can be decomposed into.
+    ///
+    /// THE DECISIVE LEG IS THE THIRD STATE. A source stamp LATER than the
+    /// arrival is not a delay of zero and not a negative one: it proves the two
+    /// machines' clocks are offset, so the axis declines AND the capture says
+    /// why. Clamping it to zero would have made an unsynchronised deployment
+    /// report perfect delivery.
+    #[test]
+    fn a_stamped_record_yields_a_one_way_delay_and_an_ahead_clock_declines() {
+        let seen_at = 1_700_000_005_000u64;
+
+        // Stamped 250 ms before this observer saw it.
+        let late = aggregate_datagrams_at(&[(
+            true,
+            Some(seen_at),
+            push_stamped(sender_space(0, Some("demo/p")), b"x", seen_at - 250),
+        )]);
+        assert_eq!(late.source_ahead_of_observer(), 0);
+        let picked = aggregate_datagrams_at_where(
+            &[(
+                true,
+                Some(seen_at),
+                push_stamped(sender_space(0, Some("demo/p")), b"x", seen_at - 250),
+            )],
+            "delay == 250",
+        );
+        assert_eq!(
+            picked.selection(),
+            Selection {
+                matched: 1,
+                rejected: 0,
+                undecided: 0
+            },
+            "the axis is the difference between the two clocks' readings"
+        );
+
+        // THE CONTROL: an UNSTAMPED record cannot answer the term at all, and
+        // that is Unknown rather than a delay of zero.
+        let unstamped = aggregate_datagrams_at_where(
+            &[(
+                true,
+                Some(seen_at),
+                push(sender_space(0, Some("demo/p")), b"x"),
+            )],
+            "delay == 0",
+        );
+        assert_eq!(
+            unstamped.selection(),
+            Selection {
+                matched: 0,
+                rejected: 0,
+                undecided: 1
+            },
+            "no source clock is not a delay of zero"
+        );
+
+        // THE DECISIVE LEG: the source's clock runs 500 ms AHEAD.
+        let ahead_records = alloc::vec![(
+            true,
+            Some(seen_at),
+            push_stamped(sender_space(0, Some("demo/p")), b"x", seen_at + 500),
+        )];
+        let ahead = aggregate_datagrams_at(&ahead_records);
+        assert_eq!(
+            ahead.source_ahead_of_observer(),
+            1,
+            "the offset is WITNESSED, not swallowed"
+        );
+        let ahead_sel = aggregate_datagrams_at_where(&ahead_records, "delay >= 0");
+        assert_eq!(
+            ahead_sel.selection().undecided,
+            1,
+            "and the axis declines rather than reporting a delay of zero"
+        );
+    }
+
     /// THE CONTROL for the test above: a FLAT key space has no shared prefix to
     /// report, and must say nothing rather than dress its own root up as one.
     ///
@@ -2757,6 +2957,21 @@ pub(crate) mod tests {
     /// sticky, so an unstamped packet behind a stamped one inherits the stamp
     /// (`passive.rs:984`). A capture that must reach the filter with no time at
     /// all is therefore unstamped THROUGHOUT.
+    /// The same stamped pipeline, unfiltered.
+    fn aggregate_datagrams_at(records: &[(bool, Option<u64>, Vec<u8>)]) -> ThroughputTable {
+        let mut d = Dissection::new();
+        for (i, (from_low, ts, record)) in records.iter().enumerate() {
+            let wire = crate::datagram_tests::frame_carrying(record);
+            let pkt = if *from_low {
+                udp_packet(LOW, 43210, HIGH, 7447, &wire)
+            } else {
+                udp_packet(HIGH, 7447, LOW, 43210, &wire)
+            };
+            d.push_packet_at(LINKTYPE_ETHERNET, i, *ts, &pkt);
+        }
+        aggregate(&d)
+    }
+
     fn aggregate_datagrams_at_where(
         records: &[(bool, Option<u64>, Vec<u8>)],
         selector: &str,

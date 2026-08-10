@@ -5475,6 +5475,8 @@ layer_c1bt_capture_no_default_features() {
         agg::tests::a_flat_key_space_names_no_subtree \
         report::tests::the_keyexpr_hierarchy_reaches_both_renderings \
         report::tests::a_capture_under_an_unreadable_link_type_says_so_in_both_renderings \
+        agg::tests::a_stamped_record_yields_a_one_way_delay_and_an_ahead_clock_declines \
+        report::tests::an_offset_source_clock_is_named_in_both_renderings \
         agg::tests::each_carrier_puts_three_distinct_records_on_the_wire \
         agg::tests::a_descriptor_slot_is_unsized_on_every_carrier_and_a_plain_one_is_measured \
         agg::tests::a_body_ext_sharing_the_markers_id_field_leaves_the_payload_measured \

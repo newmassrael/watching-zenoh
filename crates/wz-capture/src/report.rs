@@ -442,6 +442,14 @@ impl<'a> CaptureReport<'a> {
                     sel.matched, sel.rejected, sel.undecided
                 ));
             }
+            if t.source_ahead_of_observer() > 0 {
+                s.push_str(&format!(
+                    "  {} record(s) stamped by their source AFTER this capture \
+                     saw them: the two clocks are offset and no delay figure \
+                     here is trustworthy\n",
+                    t.source_ahead_of_observer()
+                ));
+            }
             for row in t.rows() {
                 let totals = row.totals();
                 s.push_str(&format!(
@@ -623,6 +631,14 @@ fn throughput_json(t: &ThroughputTable, s: &mut String) {
         // will not, and the field is the only thing qualifying the number
         // beside it.
         t.unsized_payloads()
+    ));
+    // R311y644 (§1.1p) — UNCONDITIONAL, like `unsized_payloads` above and for
+    // the same reason: it is the field that qualifies every `delay` figure in
+    // the capture, and a consumer that must test for a key's presence to learn
+    // the axis is untrustworthy will not.
+    s.push_str(&format!(
+        ",\"source_ahead_of_observer\":{}",
+        t.source_ahead_of_observer()
     ));
     s.push_str(&format!(
         ",\"declarations\":{declared},\"undeclarations\":{undeclared}"
@@ -1318,6 +1334,55 @@ mod tests {
         assert!(
             !unfiltered.contains("selection:"),
             "an unfiltered report must not carry a line that says nothing: {unfiltered}"
+        );
+    }
+
+    /// R311y644 (§1.1p) — an offset source clock reaches BOTH renderings, and
+    /// the field that qualifies the delay axis is present even when it is zero.
+    ///
+    /// The control is a capture whose stamps precede their arrivals: the text
+    /// must say nothing and the JSON must still carry the zero, so a consumer
+    /// never has to test for a key's presence to learn the axis is sound.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn an_offset_source_clock_is_named_in_both_renderings() {
+        use crate::datagram_tests::{push_stamped, sender_space};
+        let seen = 1_700_000_005_000u64;
+
+        let ahead = crate::exchange::tests::dissect(&[(
+            true,
+            Some(seen),
+            push_stamped(sender_space(0, Some("demo/p")), b"x", seen + 500),
+        )]);
+        let at = crate::agg::aggregate(&ahead);
+        let r = CaptureReport::of(&ahead).with_throughput(&at);
+        assert!(
+            r.to_text().contains("the two clocks are offset"),
+            "the text must say the axis cannot be trusted: {}",
+            r.to_text()
+        );
+        assert!(
+            r.to_json().contains("\"source_ahead_of_observer\":1"),
+            "and the export must carry the count: {}",
+            r.to_json()
+        );
+
+        let sound = crate::exchange::tests::dissect(&[(
+            true,
+            Some(seen),
+            push_stamped(sender_space(0, Some("demo/p")), b"x", seen - 250),
+        )]);
+        let st = crate::agg::aggregate(&sound);
+        let sr = CaptureReport::of(&sound).with_throughput(&st);
+        assert!(
+            !sr.to_text().contains("clocks are offset"),
+            "a sound capture must not print the warning: {}",
+            sr.to_text()
+        );
+        assert!(
+            sr.to_json().contains("\"source_ahead_of_observer\":0"),
+            "but must still carry the field: {}",
+            sr.to_json()
         );
     }
 
