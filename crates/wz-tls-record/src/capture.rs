@@ -254,16 +254,22 @@ impl RecordOpener for CaptureOpener {
         // from the start of the connection the first kept records are the
         // encrypted handshake flight, and a direction holding only the
         // application secret opens none of them and stops at index 0.
-        let client: [Option<&[u8]>; 2] = [
-            secrets.get(SecretLabel::ClientHandshake),
-            secrets.get(SecretLabel::ClientApplication),
-        ];
-        let server: [Option<&[u8]>; 2] = [
-            secrets.get(SecretLabel::ServerHandshake),
-            secrets.get(SecretLabel::ServerApplication),
-        ];
-        let client: Vec<&[u8]> = client.into_iter().flatten().collect();
-        let server: Vec<&[u8]> = server.into_iter().flatten().collect();
+        // R311y663 — and every APPLICATION generation after it, in generation
+        // order. A long-lived session rekeys, and each rekey is another epoch
+        // whose sequence restarts at zero; the trial walks them in exactly the
+        // order TLS enters them.
+        let epochs_of = |handshake: SecretLabel, server: bool| -> Vec<&[u8]> {
+            let mut out: Vec<&[u8]> = secrets.get(handshake).into_iter().collect();
+            out.extend(
+                secrets
+                    .application_secrets(server)
+                    .into_iter()
+                    .map(|(_, s)| s),
+            );
+            out
+        };
+        let client = epochs_of(SecretLabel::ClientHandshake, false);
+        let server = epochs_of(SecretLabel::ServerHandshake, true);
         if client.is_empty() && server.is_empty() {
             // The entry exists and carries nothing this crate can act on.
             return Err(NotDecrypted::NoKeyForSession);

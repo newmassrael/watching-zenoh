@@ -54,26 +54,58 @@ pub enum SecretLabel {
     ClientHandshake,
     /// `SERVER_HANDSHAKE_TRAFFIC_SECRET` — the server's handshake records.
     ServerHandshake,
-    /// `CLIENT_TRAFFIC_SECRET_0` — the client's application records.
-    ClientApplication,
-    /// `SERVER_TRAFFIC_SECRET_0` — the server's application records.
-    ServerApplication,
+    /// `CLIENT_TRAFFIC_SECRET_N` — the client's application records under the
+    /// `N`th application key.
+    ///
+    /// R311y663 (§1.2a) — the GENERATION is part of the label, and until this
+    /// round it was not: the variant meant `_0` and every later one was refused
+    /// by name, so a session that rekeyed decrypted up to the update and stopped.
+    /// The enum was asserting that a connection has one application secret per
+    /// direction, which is true only of a session short enough never to rekey —
+    /// and a zenoh session is long-lived by design.
+    ClientApplication(u32),
+    /// `SERVER_TRAFFIC_SECRET_N` — the server's, likewise.
+    ServerApplication(u32),
 }
 
 impl SecretLabel {
     /// The label a line spells, or `None` for one this crate does not act on.
     ///
-    /// Exact strings and no prefix matching: `CLIENT_TRAFFIC_SECRET_0` and a
-    /// hypothetical `CLIENT_TRAFFIC_SECRET_1` (after a key update) are
-    /// different secrets, and a prefix match would file the second under the
-    /// first and decrypt nothing while claiming to hold the key.
+    /// The application secrets are matched as stem-plus-DIGITS and the digits
+    /// are KEPT. Never as a bare prefix: `CLIENT_TRAFFIC_SECRET_0` and
+    /// `CLIENT_TRAFFIC_SECRET_1` are different secrets protecting different
+    /// records, and filing the second under the first decrypts nothing while
+    /// claiming to hold the key.
     pub fn from_label(label: &str) -> Option<Self> {
         match label {
-            "CLIENT_HANDSHAKE_TRAFFIC_SECRET" => Some(Self::ClientHandshake),
-            "SERVER_HANDSHAKE_TRAFFIC_SECRET" => Some(Self::ServerHandshake),
-            "CLIENT_TRAFFIC_SECRET_0" => Some(Self::ClientApplication),
-            "SERVER_TRAFFIC_SECRET_0" => Some(Self::ServerApplication),
-            _ => None,
+            "CLIENT_HANDSHAKE_TRAFFIC_SECRET" => return Some(Self::ClientHandshake),
+            "SERVER_HANDSHAKE_TRAFFIC_SECRET" => return Some(Self::ServerHandshake),
+            _ => {}
+        }
+        for (stem, make) in [
+            (
+                "CLIENT_TRAFFIC_SECRET_",
+                Self::ClientApplication as fn(u32) -> Self,
+            ),
+            (
+                "SERVER_TRAFFIC_SECRET_",
+                Self::ServerApplication as fn(u32) -> Self,
+            ),
+        ] {
+            if let Some(rest) = label.strip_prefix(stem) {
+                // Parsed rather than prefix-matched, so `_10` is generation ten
+                // and not a malformed `_1`.
+                return rest.parse::<u32>().ok().map(make);
+            }
+        }
+        None
+    }
+
+    /// The generation of an application secret, or `None` for a handshake one.
+    pub fn generation(self) -> Option<u32> {
+        match self {
+            Self::ClientHandshake | Self::ServerHandshake => None,
+            Self::ClientApplication(n) | Self::ServerApplication(n) => Some(n),
         }
     }
 }
@@ -97,10 +129,11 @@ fn is_keylog_label(label: &str) -> bool {
     if KNOWN.contains(&label) {
         return true;
     }
-    // The application secrets are numbered, and every number past 0 is a key
-    // update this crate does not follow. Matched as prefix-plus-digits rather
-    // than as a bare prefix, because `SecretLabel::from_label`'s own doc
-    // records why a bare prefix is wrong there.
+    // R311y663 — the numbered application secrets are ACTIONABLE now, at every
+    // generation, so they never reach this function: `SecretLabel::from_label`
+    // takes them first. What remains here is the shape that looks like one and
+    // is not — a generation this reader cannot parse as a `u32`, which is a key
+    // log record it recognises and cannot use, exactly what `refused` means.
     for stem in ["CLIENT_TRAFFIC_SECRET_", "SERVER_TRAFFIC_SECRET_"] {
         if let Some(rest) = label.strip_prefix(stem) {
             return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
@@ -141,8 +174,8 @@ impl ConnectionSecrets {
         self.entries.iter().map(|(l, _)| *l)
     }
 
-    /// `true` when both APPLICATION secrets are present, which is the minimum
-    /// for reading a session's payload in both directions.
+    /// `true` when both directions have a generation-zero APPLICATION secret,
+    /// which is the minimum for reading a session's payload both ways.
     ///
     /// Its own question rather than two `get` calls at every call site, because
     /// "half a connection" is a state a reader must be told about: with one
@@ -150,8 +183,31 @@ impl ConnectionSecrets {
     /// otherwise look like a session where the other peer was silent — the
     /// exact confusion R311y648 was written to end.
     pub fn has_both_application_directions(&self) -> bool {
-        self.get(SecretLabel::ClientApplication).is_some()
-            && self.get(SecretLabel::ServerApplication).is_some()
+        self.get(SecretLabel::ClientApplication(0)).is_some()
+            && self.get(SecretLabel::ServerApplication(0)).is_some()
+    }
+
+    /// R311y663 (§1.2a) — one direction's application secrets, ORDERED BY
+    /// GENERATION.
+    ///
+    /// The order is the epochs' order, and it must come from the generation
+    /// rather than from the order the log's lines happened to arrive in: a key
+    /// log is appended to by a running process and a capture may hold a
+    /// truncated or interleaved copy, so line order is not key order. Sorting by
+    /// a number the label states is the only reading that does not depend on how
+    /// the file was assembled.
+    pub fn application_secrets(&self, server: bool) -> Vec<(u32, &[u8])> {
+        let mut out: Vec<(u32, &[u8])> = self
+            .entries
+            .iter()
+            .filter_map(|(label, secret)| match (label, server) {
+                (SecretLabel::ClientApplication(n), false)
+                | (SecretLabel::ServerApplication(n), true) => Some((*n, secret.as_slice())),
+                _ => None,
+            })
+            .collect();
+        out.sort_by_key(|(n, _)| *n);
+        out
     }
 }
 
@@ -398,7 +454,7 @@ mod tests {
         let a = log.get(&random(RANDOM_A)).expect("connection A");
         assert!(a.has_both_application_directions());
         assert_eq!(
-            a.get(SecretLabel::ClientApplication),
+            a.get(SecretLabel::ClientApplication(0)),
             Some(
                 &[
                     0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
@@ -421,7 +477,7 @@ mod tests {
         // said and reads exactly like a session where the other was silent.
         let b = log.get(&random(RANDOM_B)).expect("connection B");
         assert!(!b.has_both_application_directions());
-        assert!(b.get(SecretLabel::ServerApplication).is_none());
+        assert!(b.get(SecretLabel::ServerApplication(0)).is_none());
     }
 
     /// R311y658 — a TLS 1.2 line is REFUSED BY NAME, not skipped.
@@ -440,24 +496,74 @@ mod tests {
         assert_eq!(log.refused(), &["CLIENT_RANDOM".to_string()]);
     }
 
-    /// A key update's later secrets are refused by name too, and by the same
-    /// mechanism: `CLIENT_TRAFFIC_SECRET_1` is a real line a long session
-    /// produces, and matching it as a prefix of `_0` would file a secret that
-    /// decrypts nothing under a label that claims it does.
+    /// R311y663 — a key update's later secrets are KEPT, each under its own
+    /// generation, and this REVERSES R311y659's refusal of them.
+    ///
+    /// That round refused `_1` by name and was right to, given what the enum
+    /// could then express: one application secret per direction. Refusing was
+    /// strictly better than filing the second under the first, which decrypts
+    /// nothing while claiming to hold the key. But the refusal was never the
+    /// goal — it was the honest response to a missing feature, and a session
+    /// long enough to rekey (which a zenoh session is) stopped decrypting at the
+    /// update.
+    ///
+    /// The claim R311y659 was protecting is unchanged and still gated below:
+    /// `_1` must not overwrite `_0`. What changed is that `_1` is now a secret
+    /// of its own rather than a line thrown away.
     #[test]
-    fn a_later_application_secret_is_refused_rather_than_matched_as_a_prefix() {
+    fn a_later_application_secret_is_kept_under_its_own_generation() {
         let text = format!(
             "CLIENT_TRAFFIC_SECRET_1 {RANDOM_A} 0102030405060708\n\
              CLIENT_TRAFFIC_SECRET_0 {RANDOM_A} 1112131415161718\n"
         );
         let log = KeyLog::parse(text.as_bytes());
-        assert_eq!(log.refused(), &["CLIENT_TRAFFIC_SECRET_1".to_string()]);
+        assert!(
+            log.refused().is_empty(),
+            "a generation this reader can act on is not a refusal: {:?}",
+            log.refused()
+        );
+        let c = log.get(&random(RANDOM_A)).expect("the connection");
         assert_eq!(
-            log.get(&random(RANDOM_A))
-                .and_then(|c| c.get(SecretLabel::ClientApplication)),
+            c.get(SecretLabel::ClientApplication(0)),
             Some(&[0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18][..]),
             "the _0 line must not have been overwritten by the _1 one"
         );
+        assert_eq!(
+            c.get(SecretLabel::ClientApplication(1)),
+            Some(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08][..]),
+            "and the _1 line is a secret now, not a discarded one"
+        );
+        // ORDERED BY GENERATION and not by line order -- the file above states
+        // them backwards on purpose, because a key log is appended to by a
+        // running process and a capture may hold an interleaved copy.
+        assert_eq!(
+            c.application_secrets(false)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect::<Vec<_>>(),
+            alloc::vec![0, 1],
+            "the epochs must come out in the order TLS enters them, whatever \
+             order the lines arrived in"
+        );
+    }
+
+    /// R311y663 — a generation this reader cannot parse is still a refusal.
+    ///
+    /// The gap `refused` exists to report did not close, it moved: a label
+    /// shaped like an application secret whose number does not fit a `u32` is a
+    /// key log record recognised and not actionable, which is what the list
+    /// means.
+    #[test]
+    fn a_generation_that_does_not_parse_is_refused_rather_than_dropped() {
+        let text = format!("CLIENT_TRAFFIC_SECRET_99999999999 {RANDOM_A} 01020304\n");
+        let log = KeyLog::parse(text.as_bytes());
+        assert!(log.is_empty(), "nothing usable came of it");
+        assert_eq!(
+            log.refused(),
+            &["CLIENT_TRAFFIC_SECRET_99999999999".to_string()],
+            "and it must not be counted as a line that was never a record"
+        );
+        assert_eq!(log.unparsed(), 0);
     }
 
     /// Malformed lines are COUNTED, which is what keeps a truncated key log
@@ -502,7 +608,7 @@ mod tests {
         let c = log.get(&random(RANDOM_A)).expect("one connection");
         assert_eq!(c.labels().count(), 1, "one label, not two");
         assert_eq!(
-            c.get(SecretLabel::ClientApplication),
+            c.get(SecretLabel::ClientApplication(0)),
             Some(&[0x05, 0x06, 0x07, 0x08][..]),
             "the later line wins"
         );
@@ -539,7 +645,7 @@ mod tests {
         let log = KeyLog::parse(text.as_bytes());
         let secret = log
             .get(&random(RANDOM_A))
-            .and_then(|c| c.get(crate::keylog::SecretLabel::ClientApplication))
+            .and_then(|c| c.get(crate::keylog::SecretLabel::ClientApplication(0)))
             .expect("the log carried it");
         assert_eq!(secret.len(), 32, "a SHA-256 traffic secret");
 
@@ -572,12 +678,17 @@ mod tests {
         let log = KeyLog::parse(text.as_bytes());
         assert_eq!(
             log.refused(),
-            &[
-                "CLIENT_RANDOM".to_string(),
-                "SERVER_TRAFFIC_SECRET_7".to_string(),
-                "EXPORTER_SECRET".to_string()
-            ],
-            "only labels the format defines"
+            &["CLIENT_RANDOM".to_string(), "EXPORTER_SECRET".to_string()],
+            "only labels the format defines -- and R311y663 moved \
+             SERVER_TRAFFIC_SECRET_7 OUT of this list by making generation 7 a \
+             secret this crate can act on"
+        );
+        assert_eq!(
+            log.get(&random(RANDOM_A))
+                .and_then(|c| c.get(SecretLabel::ServerApplication(7)))
+                .map(|s| s.len()),
+            Some(2),
+            "and it is kept rather than merely un-refused"
         );
         assert_eq!(
             log.unparsed(),

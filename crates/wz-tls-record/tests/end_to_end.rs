@@ -174,7 +174,7 @@ fn a_captured_tls_flow_is_decrypted_with_the_captures_own_key_log() {
         .get(&flows[0].client_random.expect("the capture read one"))
         .expect("the log is indexed by exactly what the capture reported");
     let from_log = secrets
-        .get(SecretLabel::ClientApplication)
+        .get(SecretLabel::ClientApplication(0))
         .expect("the client's application secret");
 
     // AND THE PLAINTEXT COMES OUT.
@@ -752,4 +752,132 @@ fn tcp_packet_from_server(seq: u32, payload: &[u8]) -> Vec<u8> {
         eth.push(0);
     }
     eth
+}
+
+/// R311y663 (§1.2a) — a session that REKEYS decrypts past the update.
+///
+/// TLS 1.3 rotates the application key on `KeyUpdate`, and a stack rotates on
+/// its own once a direction has protected enough records (rustls does, and
+/// zenoh sessions are long-lived by design, so this is reached in practice
+/// rather than in principle). The key log then carries
+/// `CLIENT_TRAFFIC_SECRET_1` beside `_0`.
+///
+/// R311y659 REFUSED that line by name, which was the honest response to a
+/// missing feature: the label enum could hold one application secret per
+/// direction, and filing `_1` under `_0` would have decrypted nothing while
+/// claiming to hold the key. The consequence was that a rekeying session
+/// decrypted up to the update and reported `RecordRefusedKeys` at it.
+///
+/// Three epochs here — handshake, application 0, application 1 — each with its
+/// sequence restarting at zero, and the trial walks all three.
+#[test]
+fn a_session_that_rekeys_decrypts_past_the_update() {
+    let handshake_secret: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(3).wrapping_add(2))
+        .collect();
+    let application_0 = traffic_secret();
+    let application_1: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(17).wrapping_add(8))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(9).wrapping_add(1));
+
+    let mut stream = client_hello(&random);
+
+    // One encrypted handshake record.
+    let mut hs = sealer(&handshake_secret);
+    stream.extend_from_slice(
+        &hs.encrypt(
+            OutboundPlainMessage {
+                typ: rustls::ContentType::Handshake,
+                version: rustls::ProtocolVersion::TLSv1_2,
+                payload: rustls::crypto::cipher::OutboundChunks::Single(
+                    b"\x14\x00\x00\x02\x00\x00",
+                ),
+            },
+            0,
+        )
+        .expect("seal")
+        .encode(),
+    );
+
+    // Two records under application generation 0, then two under generation 1
+    // whose sequence starts over.
+    let unit = |i: u8| {
+        let u = vec![0x04u8, i];
+        let mut framed = (u.len() as u16).to_le_bytes().to_vec();
+        framed.extend_from_slice(&u);
+        framed
+    };
+    for (secret, ids) in [(&application_0, [0u8, 1u8]), (&application_1, [2u8, 3u8])] {
+        let mut enc = sealer(secret);
+        for (seq, id) in ids.iter().enumerate() {
+            stream.extend_from_slice(
+                &enc.encrypt(
+                    OutboundPlainMessage {
+                        typ: rustls::ContentType::ApplicationData,
+                        version: rustls::ProtocolVersion::TLSv1_2,
+                        payload: rustls::crypto::cipher::OutboundChunks::Single(&unit(*id)),
+                    },
+                    seq as u64,
+                )
+                .expect("seal")
+                .encode(),
+            );
+        }
+    }
+
+    let packet = tcp_packet(1000, &stream);
+    let mut file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &packet)],
+    );
+    let log_text = format!(
+        "CLIENT_HANDSHAKE_TRAFFIC_SECRET {} {}\n\
+         CLIENT_TRAFFIC_SECRET_1 {} {}\n\
+         CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+        hex(&random),
+        hex(&handshake_secret),
+        hex(&random),
+        hex(&application_1),
+        hex(&random),
+        hex(&application_0)
+    );
+    file.extend_from_slice(&decryption_secrets_block(
+        SECRETS_TYPE_TLS_KEY_LOG,
+        log_text.as_bytes(),
+    ));
+
+    let mut d = wz_capture::Dissection::from_pcapng(&file).expect("the file parses");
+    assert_eq!(d.encrypted_flows()[0].kept_records[0].len(), 5);
+
+    let (mut opener, _) = CaptureOpener::from_secrets_blocks(d.decryption_secrets());
+    let summary = d.decrypt_with(&mut opener);
+
+    assert_eq!(
+        summary.records, 5,
+        "one handshake record and two epochs of two: {summary:?}"
+    );
+    assert_eq!(summary.decrypted, 1, "the flow must not stop at the update");
+    assert_eq!(
+        summary.frames, 4,
+        "all four zenoh messages, two of them protected by a key that did not \
+         exist when the session opened"
+    );
+    assert_eq!(d.encrypted_flows()[0].not_decrypted, None);
+
+    // THE LINES ARE STATED OUT OF ORDER IN THE LOG ABOVE, on purpose: `_1`
+    // precedes `_0`. A reader that took the epochs in line order would try
+    // generation 1 first, fail every record of generation 0, and have nothing
+    // left to advance into.
+    assert_eq!(
+        opener
+            .log()
+            .get(&random)
+            .expect("the connection")
+            .application_secrets(false)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
 }
