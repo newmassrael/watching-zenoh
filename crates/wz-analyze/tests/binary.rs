@@ -1910,22 +1910,28 @@ fn the_field_layer_names_which_bytes_are_the_keyexpr() {
     // located, to the byte. This is the sentence R311y645 said could not be
     // produced.
     assert!(
-        text.contains("[7..8] suffix_len = Uint(7)"),
-        "the keyexpr's LENGTH PREFIX is one byte at offset 7: {text}"
+        text.contains("[5..6] suffix_len = Uint(7)"),
+        "the keyexpr's LENGTH PREFIX is one byte at offset 5 OF THE MESSAGE: \
+         {text}"
     );
     assert!(
-        text.contains("[8..15] suffix = Text(\"demo/**\")"),
+        text.contains("[6..13] suffix = Text(\"demo/**\")"),
         "and the seven bytes after it are the keyexpr itself: {text}"
     );
-    // The coordinate BASE: the frame starts at 2 because `stream_offset` names
-    // the two-byte length prefix. Handed base 0, every span above would be two
-    // too low and every name would still be right.
+    // R311y677 — spans are MESSAGE-RELATIVE, one space for every row. R311y675
+    // passed the stream offset here, which made a cleartext row absolute and a
+    // decrypted row -- whose plaintext has no position in the stream -- relative,
+    // in one listing, marked by nothing.
+    //
+    // The discriminator is now the message's own LENGTH: the framed unit is 14
+    // bytes, so a walk handed the wrong bytes cannot produce `[0..14]` with the
+    // right fields inside it.
     assert!(
-        text.contains("[2..16] Frame"),
-        "the message begins after its length prefix, not at it: {text}"
+        text.contains("[0..14] Frame"),
+        "the frame spans the whole message and nothing else: {text}"
     );
     assert!(
-        text.contains("[3..4] sn = Uint(0)"),
+        text.contains("[1..2] sn = Uint(0)"),
         "and the transport sequence number is the byte after the header: {text}"
     );
     // The DIRECTION is the other half of a coordinate: B travels the other way,
@@ -2017,31 +2023,29 @@ fn the_field_listing_is_bounded_and_says_how_many_it_left_out() {
     );
 }
 
-/// R311y676 (§1.1n) — a DECRYPTED flow declines the field walk BY NAME, and the
-/// reason is the true one.
+/// R311y677 (§1.1n) — a DECRYPTED flow is WALKED, and the R311y676 defect
+/// cannot come back under any wording.
 ///
-/// ## The defect this pins, measured before the fix
+/// ## What this test was, and why it changed
 ///
-/// R311y675 sliced the direction's retained stream at each frame's
-/// `stream_offset`. For a decrypted flow those coordinates are correct and name
-/// the CIPHERTEXT: `decrypt_with` opens the records into a plaintext `Vec`, feeds
-/// it to the session, and `remap_decrypted_offsets` puts each frame's offset back
-/// to the record it came out of so a reader can point at the packet. The
-/// plaintext is dropped with the local.
+/// R311y676 asserted this fixture DECLINED, which was the honest state then: the
+/// walk had been slicing the retained ciphertext at coordinates that name
+/// positions in it but bytes that are not there, reading a length prefix of
+/// `791` out of encrypted bytes and declining by accident. The refusal replaced
+/// an accident with a named fact.
 ///
-/// So the walk read encrypted bytes as a length prefix. Measured on this exact
-/// fixture: `the framing unit declares 791 byte(s) and the retained stream holds
-/// 73`. It declined -- by ACCIDENT, and blaming the bound for a mismatch the
-/// bound had nothing to do with.
+/// R311y677 replaces the refusal with the feature. The premise moved, so the
+/// test moves with it -- what must NOT move is the defect: no field row here may
+/// come from reading the ciphertext.
 ///
-/// ## Why the OLD message is asserted absent
+/// ## The discriminator, kept
 ///
-/// A fix that only reworded the refusal would leave the walk reading ciphertext
-/// and would pass an assertion on the new sentence alone. The old sentence is
-/// therefore asserted GONE: it can only be produced by the length-prefix read,
-/// so its absence is evidence the read no longer happens.
+/// A refusal computed from the bytes reports what it measured and differs per
+/// message; a walk of the real plaintext produces the message's own fields. Both
+/// are asserted, so a regression that resumed the ciphertext read would either
+/// produce a measured refusal again or produce fields that are not these.
 #[test]
-fn a_decrypted_flow_declines_the_field_walk_by_name() {
+fn a_decrypted_flow_is_walked_and_never_from_the_ciphertext() {
     let scratch = Scratch::new("fields-tls");
     let (file, log, _) = capture_and_key_log();
     let capture = scratch.write("fields.pcapng", &file);
@@ -2059,54 +2063,202 @@ fn a_decrypted_flow_declines_the_field_walk_by_name() {
     )
     .into_owned();
 
-    // The flow DID decrypt -- without this the test would pass on a capture
-    // whose rows are absent for an unrelated reason.
     assert!(
         text.contains("DECRYPTED: 1 flow(s), 3 record(s) opened"),
-        "the fixture must actually decrypt, or there is nothing to decline: \
+        "the fixture must actually decrypt: {text}"
+    );
+    // The plaintext of this capture is three KeepAlives, one byte each.
+    assert_eq!(
+        text.matches("[0..1] KeepAlive").count(),
+        3,
+        "every opened message is walked, from its own plaintext: {text}"
+    );
+    assert_eq!(
+        text.matches("(decrypted)").count(),
+        3,
+        "and every row says the bytes came from a decryption: {text}"
+    );
+    // THE R311y676 DEFECT: a length prefix read out of ciphertext. Its message
+    // is gone, and so is the shape that produced it -- nothing here declines.
+    assert!(
+        !text.contains("the framing unit declares"),
+        "no length prefix may be read out of encrypted bytes: {text}"
+    );
+    assert!(
+        !text.contains("NO FIELDS"),
+        "and nothing is declined, because the plaintext was there: {text}"
+    );
+}
+
+/// A TLS capture whose PLAINTEXT is the same query exchange, and its key log.
+fn tls_exchange_capture() -> (Vec<u8>, String) {
+    let secret: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(19).wrapping_add(7))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(11).wrapping_add(13));
+    let mut stream = client_hello(&random);
+    let mut enc = sealer(&secret);
+    for (seq, record) in [query(7, "demo/**"), reply(7, "demo/a", b"first")]
+        .iter()
+        .enumerate()
+    {
+        stream.extend_from_slice(&seal_at(
+            &mut enc,
+            rustls::ContentType::ApplicationData,
+            &framed_frame(record),
+            seq as u64,
+        ));
+    }
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &stream))],
+    );
+    let log = format!(
+        "CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+        hex(&random),
+        hex(&secret)
+    );
+    (file, log)
+}
+
+/// R311y677 (§1.1n) — THE FIELD LAYER READS INSIDE TLS.
+///
+/// ## What R311y676 left, and why it was not the feature
+///
+/// That round made `--fields` decline a decrypted flow by name, because its
+/// frames' coordinates are remapped to the CIPHERTEXT record they came out of
+/// and the plaintext is a local that `decrypt_with` drops. Honest, and TLS is
+/// the interesting case for an analyzer: a zenoh session on the wire is a
+/// `tls/...` endpoint, and a reader that can name the keyexpr's bytes only for
+/// cleartext can name them almost never.
+///
+/// ## Why a sink rather than a stored buffer
+///
+/// Keeping the plaintext would add an eighth thing to `wz-capture` that grows
+/// with the input, to a crate whose bound discipline exists because seven was
+/// already too many, and it is the third copy of a flow's bytes. So
+/// `decrypt_with_sink` OFFERS it at the one moment it exists and keeps nothing;
+/// what this reader keeps is bounded by the same `--max-messages` as every other
+/// listing.
+#[test]
+fn the_field_layer_reads_the_keyexpr_inside_tls() {
+    let scratch = Scratch::new("fields-tls-ok");
+    let (file, log) = tls_exchange_capture();
+    let capture = scratch.write("fields.pcapng", &file);
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .arg("--fields")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+
+    // ANTI-VACUITY: the flow must actually have decrypted, or there is nothing
+    // to have walked and every assertion below is about an empty listing.
+    assert!(
+        text.contains("DECRYPTED: 1 flow(s), 2 record(s) opened"),
+        "the fixture must decrypt: {text}"
+    );
+    // THE CLAIM: the keyexpr's length prefix and its text, named to the byte,
+    // out of a flow that was encrypted on the wire.
+    assert!(
+        text.contains("suffix = Text(\"demo/**\")"),
+        "the query's keyexpr, read from inside TLS: {text}"
+    );
+    assert!(
+        text.contains("suffix = Text(\"demo/a\")"),
+        "and the reply's: {text}"
+    );
+    assert!(
+        text.contains("[5..6] suffix_len"),
+        "with the length prefix separately located, in the SAME message-relative \
+         space a cleartext row uses: {text}"
+    );
+    // The ROW coordinate is the ciphertext record's, because that is the space
+    // the rest of the report speaks; the SPANS are message-relative, because a
+    // field's byte range is a range of the message. Two spaces on one line, on
+    // purpose, and the row says which it is.
+    assert!(
+        text.contains("(decrypted)"),
+        "and the row says the bytes came from a decryption: {text}"
+    );
+    // THE R311y676 DEFECT MUST NOT COME BACK: no length prefix read out of
+    // ciphertext, under any wording.
+    assert!(
+        !text.contains("NO FIELDS"),
+        "nothing is declined here -- the plaintext was available: {text}"
+    );
+}
+
+/// R311y677 (§1.1n) — THE DISCRIMINATING NEGATIVE: without the keys, the same
+/// capture declines rather than inventing fields.
+///
+/// Without this leg, a sink that walked something other than the plaintext could
+/// satisfy the test above on a fixture that happens to decrypt. Here the bytes
+/// are identical and only the key log is withheld.
+#[test]
+fn the_same_capture_without_keys_has_no_fields_to_show() {
+    let scratch = Scratch::new("fields-tls-nokey");
+    let (file, _) = tls_exchange_capture();
+    let capture = scratch.write("fields.pcapng", &file);
+
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--fields")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        !text.contains("suffix = Text"),
+        "no keys, no plaintext, no fields -- and certainly not these ones: \
          {text}"
     );
     assert!(
-        text.contains(
-            "this flow's messages were decrypted, so their coordinates name the \
-             ciphertext record they came out of"
-        ),
-        "the refusal must name the real reason: {text}"
+        text.contains("NO FIELDS -- this flow's messages were decrypted")
+            || !text.contains("] KeepAlive"),
+        "an encrypted flow with nothing opened contributes no field rows: {text}"
     );
-    // THE DISCRIMINATOR, and the first attempt at it did not work. Asserting
-    // that the OLD sentence is absent was falsified in one move: a probe that
-    // left the ciphertext read in place and merely reworded its message passed
-    // every assertion above. Measured, not supposed.
-    //
-    // What separates the two is not the wording, it is the KIND of statement. A
-    // refusal read off the flow's structure is the same sentence for every
-    // message and carries no measurement; a refusal computed from bytes reports
-    // what it measured and therefore differs per message ("declares 791 ...
-    // holds 73", "... holds 48", "... holds 23").
-    let reasons: Vec<&str> = text
-        .lines()
-        .filter_map(|l| l.split_once("NO FIELDS -- "))
-        .map(|(_, why)| why)
-        .collect();
-    assert_eq!(reasons.len(), 3, "one per message: {text}");
-    assert!(
-        reasons.iter().all(|r| *r == reasons[0]),
-        "a structural refusal does not vary per message; one computed from the \
-         bytes does: {reasons:?}"
+}
+
+/// R311y677 (§1.1n) — the SINK's bound bites, and says how many it left out.
+///
+/// `wz-capture` offers the plaintext and keeps nothing; what this reader keeps is
+/// its own accumulation and therefore its own bound. Measured by a probe first:
+/// the bound was written with no gate, and disabling it left every test green.
+#[test]
+fn the_decrypted_field_listing_is_bounded_and_says_so() {
+    let scratch = Scratch::new("fields-tls-cap");
+    let (file, log, _) = capture_and_key_log();
+    let capture = scratch.write("fields.pcapng", &file);
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .args(["--fields", "--max-messages", "1"])
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert_eq!(
+        text.matches("[0..1] KeepAlive").count(),
+        1,
+        "one message survived the cap: {text}"
     );
     assert!(
-        !reasons[0].chars().any(|c| c.is_ascii_digit()),
-        "and it carries no measurement, because it measured nothing: {:?}",
-        reasons[0]
-    );
-    // WHAT THIS STILL CANNOT CATCH, stated so it does not harden into a belief
-    // that it can: none of the above proves the stream was not READ, only that
-    // the refusal did not come from what was read. The decisive fixture would be
-    // ciphertext that happens to carry a plausible length at the remapped
-    // offset, so the unguarded walk prints a tree instead of declining -- and
-    // that cannot be constructed on demand out of real AEAD output.
-    assert!(
-        !text.contains("] Frame"),
-        "a declined flow contributes no fields: {text}"
+        text.contains("... 2 more not listed"),
+        "and the two it dropped are counted, not silent: {text}"
     );
 }

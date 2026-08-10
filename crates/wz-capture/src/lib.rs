@@ -486,6 +486,63 @@ fn remap_decrypted_offsets(frames: &mut [PassiveFrame], spans: &[(usize, usize)]
     }
 }
 
+/// R311y677 (§1.1n) — one direction's opened plaintext, offered to a
+/// [`PlaintextSink`] while it exists.
+#[derive(Debug, Clone, Copy)]
+pub struct DecryptedStream<'a> {
+    /// The connection it belongs to.
+    pub flow: link::FlowKey,
+    /// Which half of it.
+    pub direction: Direction,
+    /// Every `application_data` record of this direction, opened and
+    /// concatenated in wire order. This is the byte stream the session was fed,
+    /// and the space the messages in it are framed in.
+    pub plaintext: &'a [u8],
+    /// `(offset within `plaintext`, stream offset of the RECORD it came out of)`,
+    /// in increasing order of the first.
+    ///
+    /// The map that lets a consumer report a plaintext finding in the
+    /// coordinate space the rest of the report uses — the same map
+    /// `remap_decrypted_offsets` applies to the frames, offered rather than
+    /// applied so a consumer can also stay in plaintext space if that is the
+    /// question it is answering.
+    pub record_origins: &'a [(usize, usize)],
+}
+
+impl DecryptedStream<'_> {
+    /// The stream offset of the record `at` came out of, for reporting a
+    /// plaintext position in the report's coordinate space.
+    ///
+    /// `None` only when `at` precedes the first record, which cannot happen for
+    /// an offset inside [`Self::plaintext`] and is answered rather than panicked
+    /// on for the same reason `BatchParse::span_of` answers `None`.
+    pub fn record_origin(&self, at: usize) -> Option<usize> {
+        self.record_origins
+            .iter()
+            .rev()
+            .find(|(plain_at, _)| *plain_at <= at)
+            .map(|(_, stream_offset)| *stream_offset)
+    }
+}
+
+/// R311y677 (§1.1n) — a consumer of the plaintext a decryption pass opens.
+///
+/// Implemented by `()` as a no-op, which is what [`Dissection::decrypt_with`]
+/// passes: a caller who does not want the plaintext must not pay for it, and
+/// must not have to say so.
+pub trait PlaintextSink {
+    /// One direction of one flow, fully opened.
+    ///
+    /// Called before the frames are decoded from it, so a sink sees exactly the
+    /// bytes the session will see. It borrows: nothing here obliges a sink to
+    /// keep any of it, and a sink that does keep some owns that bound itself.
+    fn on_plaintext(&mut self, stream: DecryptedStream<'_>);
+}
+
+impl PlaintextSink for () {
+    fn on_plaintext(&mut self, _stream: DecryptedStream<'_>) {}
+}
+
 /// R311y661 (§1.2a) — what one [`Dissection::decrypt_with`] pass did.
 ///
 /// Returned rather than only recorded per flow, because the caller's question
@@ -2224,6 +2281,39 @@ impl Dissection {
     /// Each frame is therefore mapped back to the stream offset of the RECORD
     /// its bytes came out of, via [`tls::EncryptedRecord::stream_offset`].
     pub fn decrypt_with(&mut self, opener: &mut impl tls::RecordOpener) -> DecryptionSummary {
+        self.decrypt_with_sink(opener, &mut ())
+    }
+
+    /// R311y677 (§1.1n) — [`Self::decrypt_with`], handing the opened plaintext
+    /// to a caller who asked for it, at the one moment it exists.
+    ///
+    /// # Why a sink and not a stored buffer
+    ///
+    /// The plaintext is built here, fed to the session, and dropped with the
+    /// call. A consumer that wants it — the field walker is the first — has no
+    /// way to ask afterwards: the frames' coordinates are remapped to the
+    /// CIPHERTEXT record they came out of (see the note above, which is
+    /// deliberate and load bearing for `packet_for`), and the plaintext offset
+    /// they had is not kept.
+    ///
+    /// Keeping the plaintext instead would add an eighth accumulation that grows
+    /// with the input, to a crate whose bound discipline
+    /// ([`DissectionLimits`], and a paired [`DissectionDrops`] counter for every
+    /// bound that bites) exists because seven was already too many. It is also
+    /// the third copy of a flow's bytes, which this workspace already carries as
+    /// an open item.
+    ///
+    /// So the data is OFFERED rather than stored. A caller who wants it takes
+    /// what it needs under its own bound; a caller who does not pays nothing,
+    /// because `()` implements [`PlaintextSink`] as a no-op and this method is
+    /// what [`Self::decrypt_with`] has always been. Same inversion as
+    /// [`tls::RecordOpener`], for the same reason: the knowledge belongs to the
+    /// caller and the moment belongs to this loop.
+    pub fn decrypt_with_sink(
+        &mut self,
+        opener: &mut impl tls::RecordOpener,
+        sink: &mut impl PlaintextSink,
+    ) -> DecryptionSummary {
         let mut summary = DecryptionSummary::default();
         for flow in &mut self.flows {
             let Framing::Encrypted(state) = &mut flow.framing else {
@@ -2303,6 +2393,16 @@ impl Dissection {
                 if plaintext[index].is_empty() {
                     continue;
                 }
+                // R311y677 — OFFERED here, before the remap below destroys the
+                // plaintext coordinate and before the buffer goes out of scope.
+                // This is the only point in the program where the plaintext and
+                // the map back to its records are both in hand.
+                sink.on_plaintext(DecryptedStream {
+                    flow: flow.flow,
+                    direction: idx_direction(index),
+                    plaintext: &plaintext[index],
+                    record_origins: &spans[index],
+                });
                 let before = flow.frames.len();
                 flow.feed_stream(idx_direction(index), &plaintext[index]);
                 remap_decrypted_offsets(&mut flow.frames[before..], &spans[index]);

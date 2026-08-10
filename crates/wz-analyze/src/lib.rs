@@ -508,8 +508,16 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     // session" -- which is false about a run that had no keys at all.
     // `no_keys_supplied` is what such a flow reports when no pass has run, and
     // it is the accurate statement.
+    // R311y677 — the field sink is installed BEFORE the pass, because the
+    // plaintext exists only during it. A run that did not ask for fields passes
+    // the no-op sink and the pass is byte-for-byte what it was.
+    let mut fields = FieldSink::new(messages_per_flow);
     if key_log_connections > 0 {
-        dissection.decrypt_with(&mut opener);
+        if per_field {
+            dissection.decrypt_with_sink(&mut opener, &mut fields);
+        } else {
+            dissection.decrypt_with(&mut opener);
+        }
     }
 
     // R311y671 — what the decryptor OBSERVED about its epoch changes, which the
@@ -569,7 +577,12 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
             rendered.push_str(&epoch_lines(&epochs, format));
             if per_field {
                 rendered.push_str("fields:\n");
-                rendered.push_str(&field_lines(&dissection, format, messages_per_flow));
+                rendered.push_str(&field_lines(
+                    &dissection,
+                    &fields,
+                    format,
+                    messages_per_flow,
+                ));
             }
             if per_flow {
                 rendered.push_str(&flow_lines(
@@ -587,7 +600,12 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
             rendered.push_str(&epoch_lines(&epochs, format));
             if per_field {
                 rendered.push(',');
-                rendered.push_str(&field_lines(&dissection, format, messages_per_flow));
+                rendered.push_str(&field_lines(
+                    &dissection,
+                    &fields,
+                    format,
+                    messages_per_flow,
+                ));
             }
             if per_flow {
                 rendered.push(',');
@@ -734,6 +752,7 @@ fn epoch_lines(witness: &[wz_tls_record::capture::EpochWitness; 2], format: Form
 /// not say so is the failure this crate is built to avoid.
 fn field_lines(
     dissection: &Dissection,
+    decrypted: &FieldSink,
     format: Format,
     messages_per_flow: Option<usize>,
 ) -> String {
@@ -763,14 +782,26 @@ fn field_lines(
             let stream = assembler.stream();
             let origin = assembler.retained_from();
             let row = match decrypted_coordinates(flow) {
-                Some(why) => FieldRow::Declined(why),
+                // R311y677 — a decrypted flow's rows come from the SINK, which
+                // took them while the plaintext existed. Emitted once for the
+                // whole flow below rather than once per frame, since the sink
+                // walked the stream itself and its rows are not this loop's.
+                Some(_) => break,
                 None => match message_bytes(stream, origin, frame) {
                     Err(why) => FieldRow::Declined(why),
                     Ok(bytes) => {
-                        match dissect_transport_message(
-                            bytes,
-                            frame.stream_offset + frame.prefix_width,
-                        ) {
+                        // R311y677 — MESSAGE-RELATIVE, base 0, and that is a
+                        // correction of R311y675. That round passed the stream
+                        // offset, so a cleartext row's spans were absolute while
+                        // a decrypted row's -- whose plaintext has no position in
+                        // the stream at all -- could only ever be relative. Two
+                        // coordinate spaces in one listing, distinguishable by
+                        // nothing a reader can see, which is the defect this
+                        // workspace has already paid for twice.
+                        //
+                        // One space everywhere: a span is a range of THE MESSAGE.
+                        // Where it sits is on the row, once.
+                        match dissect_transport_message(bytes, 0) {
                             Ok(field) => FieldRow::Walked(field),
                             // The error type is `sce_forge_runtime`'s and is not
                             // re-exported publicly here, so it is rendered rather than
@@ -790,7 +821,33 @@ fn field_lines(
             emitted += 1;
             render_field_row(&mut rows, format, flow, frame, &row, &to_json);
         }
+        // R311y677 — the sink's rows for this flow, if it was a decrypted one.
+        for (f, direction, origin, field) in &decrypted.rows {
+            if *f != flow.flow {
+                continue;
+            }
+            if format == Format::Json && emitted > 0 {
+                rows.push(',');
+            }
+            emitted += 1;
+            render_sink_row(&mut rows, format, flow.flow, *direction, *origin, field);
+        }
+        if let Some((_, n)) = decrypted.omitted.iter().find(|(f, _)| *f == flow.flow) {
+            omitted += n;
+        }
+        // R311y677 — an ENCRYPTED flow that produced no rows says why, once. It
+        // is the R311y676 refusal kept for the case the sink could not fill:
+        // a flow whose plaintext was never opened has no bytes to walk, and
+        // silence there would read as "this flow carried nothing".
         if rows.is_empty() {
+            if let Some(why) = decrypted_coordinates(flow) {
+                if format == Format::Text {
+                    out.push_str(&format!(
+                        "  {} : NO FIELDS -- {why}\n",
+                        endpoint(&flow.flow.low)
+                    ));
+                }
+            }
             continue;
         }
         out.push_str(&rows);
@@ -813,6 +870,98 @@ enum FieldRow {
     /// They were not, and this is why. NEVER a skipped row: a message whose
     /// bytes the bound discarded is a fact about the bound.
     Declined(String),
+}
+
+/// R311y677 (§1.1n) — the field trees of every DECRYPTED flow, walked while the
+/// plaintext existed.
+///
+/// R311y676 made `--fields` decline such a flow by name, which was honest and
+/// was not the feature: TLS is the interesting case for an analyzer, and the
+/// bytes are there for the duration of the decryption pass and nowhere after it.
+/// This is the [`wz_capture::PlaintextSink`] that takes them at that moment.
+///
+/// # The bound is this type's own
+///
+/// `wz-capture` offers the plaintext and keeps nothing. What is kept here is
+/// bounded by the same `--max-messages` that bounds every other listing, and the
+/// count left out is kept beside it — a bound that reports nothing reports
+/// itself as the wire.
+#[derive(Default)]
+struct FieldSink {
+    /// `(flow, direction, stream offset of the record, tree)`, in wire order.
+    rows: Vec<(
+        wz_capture::link::FlowKey,
+        wz_session_core::passive::Direction,
+        usize,
+        wz_session_core::dissect::Field,
+    )>,
+    /// Messages the bound left out, per flow.
+    omitted: Vec<(wz_capture::link::FlowKey, usize)>,
+    /// The ceiling on rows kept per flow; `None` is unbounded.
+    cap: Option<usize>,
+}
+
+impl FieldSink {
+    fn new(cap: Option<usize>) -> Self {
+        Self {
+            cap,
+            ..Default::default()
+        }
+    }
+
+    fn kept_for(&self, flow: &wz_capture::link::FlowKey) -> usize {
+        self.rows.iter().filter(|(f, ..)| f == flow).count()
+    }
+
+    fn note_omitted(&mut self, flow: wz_capture::link::FlowKey) {
+        match self.omitted.iter_mut().find(|(f, _)| *f == flow) {
+            Some((_, n)) => *n += 1,
+            None => self.omitted.push((flow, 1)),
+        }
+    }
+}
+
+impl wz_capture::PlaintextSink for FieldSink {
+    /// Walk the plaintext as the framed stream it is: a `u16` little-endian
+    /// length, then that many bytes of message, repeated.
+    ///
+    /// The same framing `message_bytes` reads for a cleartext flow, iterated
+    /// rather than indexed -- there are no frame coordinates to index BY here,
+    /// because the frames this stream produces have not been decoded yet and
+    /// their offsets will be remapped into ciphertext space the moment they are.
+    fn on_plaintext(&mut self, stream: wz_capture::DecryptedStream<'_>) {
+        const PREFIX: usize = 2;
+        let bytes = stream.plaintext;
+        let mut at = 0usize;
+        while at + PREFIX <= bytes.len() {
+            let len = u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize;
+            let body = at + PREFIX;
+            let Some(end) = body.checked_add(len).filter(|e| *e <= bytes.len()) else {
+                // A trailing partial unit: the capture ended mid-message, which
+                // the report already counts elsewhere. Nothing to walk.
+                break;
+            };
+            if let Some(cap) = self.cap {
+                if self.kept_for(&stream.flow) >= cap {
+                    self.note_omitted(stream.flow);
+                    at = end;
+                    continue;
+                }
+            }
+            // Reported in the coordinate space the rest of the report uses: the
+            // record this message's bytes came out of. The spans INSIDE the tree
+            // stay in plaintext space, which is the only space they mean
+            // anything in -- a field's byte range is a range of the message.
+            let origin = stream.record_origin(at).unwrap_or(at);
+            if let Ok(field) =
+                wz_session_core::dissect::dissect_transport_message(&bytes[body..end], 0)
+            {
+                self.rows
+                    .push((stream.flow, stream.direction, origin, field));
+            }
+            at = end;
+        }
+    }
 }
 
 /// R311y676 (§1.1n) — a flow whose messages came out of DECRYPTED bytes cannot
@@ -938,6 +1087,37 @@ fn render_field_row(
                 "  {from} -> {to} {dir} @{}: NO FIELDS -- {why}\n",
                 frame.stream_offset
             ));
+        }
+    }
+}
+
+/// R311y677 — one row the sink produced, in whichever format.
+///
+/// Structurally identical to [`render_field_row`]'s walked arm and deliberately
+/// not merged with it: that one takes a `PassiveFrame` and this one takes what
+/// the sink kept, and threading a frame that does not exist through the other
+/// would mean inventing one.
+fn render_sink_row(
+    out: &mut String,
+    format: Format,
+    flow: wz_capture::link::FlowKey,
+    direction: wz_session_core::passive::Direction,
+    origin: usize,
+    field: &wz_session_core::dissect::Field,
+) {
+    let (dir, from, to) = match direction {
+        wz_session_core::passive::Direction::A => ("A", endpoint(&flow.low), endpoint(&flow.high)),
+        wz_session_core::passive::Direction::B => ("B", endpoint(&flow.high), endpoint(&flow.low)),
+    };
+    match format {
+        Format::Json => out.push_str(&format!(
+            "{{\"from\":\"{from}\",\"to\":\"{to}\",\"direction\":\"{dir}\",\
+             \"stream_offset\":{origin},\"decrypted\":true,\"field\":{}}}",
+            wz_session_core::dissect::to_json(field)
+        )),
+        Format::Text => {
+            out.push_str(&format!("  {from} -> {to} {dir} @{origin} (decrypted)\n"));
+            push_field_text(out, field, 2);
         }
     }
 }
