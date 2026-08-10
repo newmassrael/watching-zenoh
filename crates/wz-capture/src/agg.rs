@@ -90,7 +90,24 @@ pub struct KeyexprCounts {
     /// A `Query`'s parameters are deliberately NOT counted here. They are a
     /// selector, not data, and folding them in would make a busy query topic
     /// read as though it were publishing.
+    ///
+    /// R311y637 (§1.1w) — this total is SHORT by an unknown amount whenever
+    /// [`Self::unsized_payloads`] is non-zero. Read the two together.
     pub payload_bytes: u64,
+    /// R311y637 (§1.1w) — records attributed here that CARRY a payload this
+    /// build cannot size.
+    ///
+    /// One case today: a `Query` whose value rides the
+    /// [`QUERY_BODY`](wz_session_core::ext_header::body_ext_id::QUERY_BODY)
+    /// ext. The ext body is `encoding` followed by `payload`
+    /// (`zenoh-protocol-1.5.0/src/zenoh/mod.rs:205-210`), and this decoder
+    /// models it as one opaque ZBUF, so the application half of it cannot be
+    /// separated out. The bytes are REAL and their count is unknown.
+    ///
+    /// A query with NO such ext is not counted here: it carries no value, its
+    /// `0` is a measurement, and conflating the two would make the honest zero
+    /// unreadable — which is the whole defect this field exists to end.
+    pub unsized_payloads: usize,
 }
 
 impl KeyexprCounts {
@@ -104,6 +121,12 @@ impl KeyexprCounts {
         self.messages() == 0 && self.payload_bytes == 0
     }
 
+    /// R311y637 (§1.1w) — `true` when [`Self::payload_bytes`] is the whole
+    /// answer for this row rather than a floor.
+    pub fn payload_is_complete(&self) -> bool {
+        self.unsized_payloads == 0
+    }
+
     fn add(&mut self, other: &KeyexprCounts) {
         self.puts += other.puts;
         self.dels += other.dels;
@@ -111,6 +134,7 @@ impl KeyexprCounts {
         self.replies += other.replies;
         self.errs += other.errs;
         self.payload_bytes += other.payload_bytes;
+        self.unsized_payloads += other.unsized_payloads;
     }
 }
 
@@ -266,6 +290,7 @@ pub struct ThroughputTable {
     undeclarations: usize,
     records: usize,
     unattributed: usize,
+    unsized_payloads: usize,
     gaps: ThroughputGaps,
     selection: Selection,
 }
@@ -450,7 +475,7 @@ impl ThroughputTable {
             direction,
             keyexpr: resolved.as_ref().ok().map(|k| k.as_str()),
             kind,
-            payload_bytes: counts.payload_bytes,
+            payload_bytes: sized_payload(&counts),
             observed_at_ms: frame.observed_at_ms,
             // R311y636 (§1.1v) — this plane folds RECORDS, so it has no
             // exchange outcome to offer and says so. An outcome term over it is
@@ -465,6 +490,11 @@ impl ThroughputTable {
         }
 
         self.records += 1;
+        // R311y637 (§1.1w) — counted at the TABLE and not only on the row,
+        // because a record whose keyexpr did not resolve has no row to carry
+        // it and its unmeasured bytes are exactly as absent from
+        // `total_payload_bytes` as an attributed one's.
+        self.unsized_payloads += counts.unsized_payloads;
         match resolved {
             Ok(keyexpr) => {
                 let row = self.rows.entry(keyexpr.clone()).or_insert(KeyexprRow {
@@ -585,7 +615,22 @@ impl ThroughputTable {
         (self.declarations, self.undeclarations)
     }
 
+    /// R311y637 (§1.1w) — records this table read whose payload it could not
+    /// SIZE, so [`Self::total_payload_bytes`] is a floor rather than a total.
+    ///
+    /// Not a [`ThroughputGaps`] member on purpose: a gap there means traffic
+    /// this plane could not READ, and these records were read, named and
+    /// attributed. Only their byte contribution is unknown, which is a
+    /// qualifier on ONE total rather than on the rows.
+    pub fn unsized_payloads(&self) -> usize {
+        self.unsized_payloads
+    }
+
     /// Application bytes across every resolved keyexpr.
+    ///
+    /// A FLOOR whenever [`Self::unsized_payloads`] is non-zero — read the two
+    /// together, exactly as [`Self::records`] is read against
+    /// [`Self::walked_records`].
     pub fn total_payload_bytes(&self) -> u64 {
         self.rows.values().map(|r| r.totals().payload_bytes).sum()
     }
@@ -623,6 +668,42 @@ impl ThroughputTable {
 /// reply` against the payload plane must get the same answer the throughput
 /// plane would give for the same bytes, and the only way that cannot break is
 /// for there to be one function.
+/// R311y637 (§1.1w) — one record's payload size as a filter must see it.
+///
+/// The single place the two representations meet, so the rule cannot be spelled
+/// differently in the three planes that build a [`RecordView`]: a record with
+/// an unsizable payload has NO byte figure at all, rather than the `0` that
+/// [`KeyexprCounts::payload_bytes`] necessarily holds for it.
+pub(crate) fn sized_payload(counts: &KeyexprCounts) -> Option<u64> {
+    if counts.unsized_payloads > 0 {
+        None
+    } else {
+        Some(counts.payload_bytes)
+    }
+}
+
+/// R311y637 (§1.1w) — does this `Query`'s ext chain carry a VALUE?
+///
+/// Matched on `(id, ZBUF body)` exactly as
+/// [`decode_attachment_ext`](wz_session_core::attachment::decode_attachment_ext)
+/// matches its own: the `ExtZbuf` arm IS the decode-time witness that the
+/// header carried `ENC_ZBUF`, so no separate encoding test is needed. The id is
+/// read from the named constant rather than spelled `0x03` here, because `0x03`
+/// in this space is `Attachment` on a `Put` and this is a `Query`.
+#[cfg(feature = "network-codecs")]
+fn query_body_present(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> bool {
+    let Some(chain) = extensions else {
+        return false;
+    };
+    chain.iter().any(|ext| {
+        ext.ext_id() == wz_session_core::ext_header::body_ext_id::QUERY_BODY
+            && matches!(
+                ext.body,
+                wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZbuf(_)
+            )
+    })
+}
+
 pub(crate) fn classify(
     message: &NetworkMessage,
 ) -> Option<(&WireexprOwnedVariant, KeyexprCounts, RecordKind)> {
@@ -668,7 +749,24 @@ pub(crate) fn classify(
                     counts.dels = 1;
                     RecordKind::Del
                 }
-                RequestOwnedVariant::CodecZenohQuery(_) | RequestOwnedVariant::Default { .. } => {
+                RequestOwnedVariant::CodecZenohQuery(q) => {
+                    counts.queries = 1;
+                    // R311y637 (§1.1w) — a query's VALUE is not a field of the
+                    // message, it is an ext. Looking only at the body and
+                    // reporting `0` was a confident answer to a question this
+                    // decoder cannot answer; asking the chain separates the
+                    // query that carries nothing (a real zero) from the one
+                    // whose payload this build cannot measure.
+                    if query_body_present(q.extensions.as_deref()) {
+                        counts.unsized_payloads = 1;
+                    }
+                    RecordKind::Query
+                }
+                // The unknown request variant is decoded INTO a `Query` body by
+                // the codec's declared default arm, but nothing says the bytes
+                // were a query — so its chain is not read for a query body
+                // either. It keeps the honest zero it always had.
+                RequestOwnedVariant::Default { .. } => {
                     counts.queries = 1;
                     RecordKind::Query
                 }
@@ -827,7 +925,7 @@ mod no_codec_tests {
 // network codecs does, and a build without them cannot be asked. Gating the
 // module rather than each test keeps the two from drifting.
 #[cfg(all(test, feature = "network-codecs"))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::datagram_tests::{push, sender_space, udp_packet};
     use crate::link::LINKTYPE_ETHERNET;
@@ -909,6 +1007,193 @@ mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+    }
+
+    /// R311y637 (§1.1w) — a `Request` carrying a `Query`, optionally with the
+    /// VALUE ext that makes its payload real and unmeasurable.
+    ///
+    /// The ext is built from the named id and the ZBUF arm rather than a
+    /// literal `0x03` and a hand-set encoding nibble, so the fixture and the
+    /// classifier cannot drift apart by agreeing on a wrong number: if
+    /// `QUERY_BODY` were wrong, both would move together and this test would
+    /// still pass — which is why the constant's own doc cites
+    /// `zenoh-protocol-1.5.0/src/zenoh/query.rs:104` instead of asserting it
+    /// here.
+    pub(crate) fn request_query_valued(
+        rid: u64,
+        keyexpr: Wireexpr<'static>,
+        value: Option<&'static [u8]>,
+    ) -> Vec<u8> {
+        use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+        use wz_session_core::ext_header::{body_ext_id, EXT_ENC_ZBUF};
+        let has_suffix = match &keyexpr.body {
+            WireexprVariant::WireexprLocal(a) => a.suffix.is_some(),
+            WireexprVariant::WireexprNonlocal(a) => a.suffix.is_some(),
+        };
+        let n_flag = if has_suffix {
+            wz_codecs::wire_const::FLAG_N_N
+        } else {
+            0
+        };
+        // Built OWNED and projected back to the borrowed form, because the
+        // borrowed `Query` holds a bounded (heapless) chain this crate has no
+        // direct constructor for. `try_as_borrowed` is the codec's own
+        // projection, so the fixture goes through the same narrowing a decode
+        // does rather than around it.
+        let borrowed_default = wz_codecs::query::Query::default();
+        let mut owned: wz_codecs::query::QueryOwned = borrowed_default
+            .try_into_owned_in()
+            .expect("an empty query owns trivially");
+        if let Some(bytes) = value {
+            owned.extensions = Some(alloc::vec![ExtEntryOwned {
+                header: body_ext_id::QUERY_BODY | EXT_ENC_ZBUF,
+                body: ExtEntryOwnedVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbufOwned {
+                    value_len: bytes.len() as u64,
+                    value: wz_session_core::codec_owned::owned_bytes(bytes)
+                        .expect("the fixture value is within the owned bound"),
+                }),
+            }]);
+            owned.header |= 0x80;
+        }
+        let query = owned.try_as_borrowed().expect("the chain is within bounds");
+        // Bound rather than returned directly: the borrowed query points into
+        // `owned`, which the tail expression would drop first.
+        let encoded = wz_codecs::request::Request {
+            header: wz_codecs::request::Request::default().header | n_flag,
+            rid,
+            keyexpr,
+            body: wz_codecs::request::RequestVariant::CodecZenohQuery(query),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        encoded
+    }
+
+    /// ANTI-VACUITY for everything below: the fixture really does put a query
+    /// WITH a value and a query WITHOUT one on the wire, and they really are
+    /// different bytes. Without this leg a build that dropped the ext on encode
+    /// would make "the valued query is unsized" and "the bare query is zero"
+    /// both true of the same record.
+    #[test]
+    fn the_fixture_puts_a_valued_query_and_a_bare_one_on_the_wire() {
+        let valued = request_query_valued(1, sender_space(0, Some("demo/q")), Some(b"payload"));
+        let bare = request_query_valued(1, sender_space(0, Some("demo/q")), None);
+        assert_ne!(valued, bare, "the value ext must reach the wire");
+        assert!(valued.len() > bare.len());
+        let t = aggregate_datagrams(&[(true, valued)]);
+        assert_eq!(t.records(), 1, "the valued query decodes as one record");
+        assert_eq!(t.walked_records(), 1);
+    }
+
+    /// §1.1w, THE DEFECT. A query whose value rides its ext chain was reported
+    /// as carrying zero application bytes — a confident answer to a question
+    /// this decoder cannot answer, and the one shape this crate refuses
+    /// everywhere else.
+    ///
+    /// The control leg is the whole test: a query with NO value keeps its
+    /// zero, and it keeps it as a MEASUREMENT. If the fix had been "every query
+    /// is unknown", this leg would fail.
+    #[test]
+    fn a_query_carrying_a_value_is_unsized_and_a_bare_one_is_a_measured_zero() {
+        let valued = aggregate_datagrams(&[(
+            true,
+            request_query_valued(1, sender_space(0, Some("demo/q")), Some(b"payload")),
+        )]);
+        assert_eq!(valued.unsized_payloads(), 1);
+        assert_eq!(
+            valued.total_payload_bytes(),
+            0,
+            "a floor, and `unsized_payloads` is what says so"
+        );
+        let row = valued.row("demo/q").expect("the query has a row");
+        assert!(!row.totals().payload_is_complete());
+
+        let bare = aggregate_datagrams(&[(
+            true,
+            request_query_valued(2, sender_space(0, Some("demo/q")), None),
+        )]);
+        assert_eq!(
+            bare.unsized_payloads(),
+            0,
+            "a query with no value carries nothing, and that is measured"
+        );
+        assert!(bare
+            .row("demo/q")
+            .expect("row")
+            .totals()
+            .payload_is_complete());
+    }
+
+    /// The consequence for a selector: `bytes > 0` over the valued query is
+    /// UNDECIDABLE, not `no`. Before this it was `no` — the filter reported
+    /// that a query carrying seven bytes carried none.
+    ///
+    /// Both control legs matter. The bare query is decidably `no` (it really
+    /// does carry nothing), and a PUT of the same bytes is decidably `yes`, so
+    /// the unknown is scoped to the record whose size is genuinely unavailable.
+    #[test]
+    fn a_bytes_term_over_an_unsizable_payload_is_undecided_rather_than_false() {
+        let filter = Filter::parse("bytes > 0").expect("parses");
+        let valued = {
+            let mut d = Dissection::new();
+            let wire = crate::datagram_tests::frame_carrying(&request_query_valued(
+                1,
+                sender_space(0, Some("demo/q")),
+                Some(b"payload"),
+            ));
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                0,
+                &udp_packet(LOW, 43210, HIGH, 7447, &wire),
+            );
+            aggregate_where(&d, &filter).selection()
+        };
+        assert_eq!(
+            valued,
+            Selection {
+                matched: 0,
+                rejected: 0,
+                undecided: 1
+            },
+            "the query's bytes are real and unmeasured"
+        );
+
+        let bare = {
+            let mut d = Dissection::new();
+            let wire = crate::datagram_tests::frame_carrying(&request_query_valued(
+                2,
+                sender_space(0, Some("demo/q")),
+                None,
+            ));
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                0,
+                &udp_packet(LOW, 43210, HIGH, 7447, &wire),
+            );
+            aggregate_where(&d, &filter).selection()
+        };
+        assert_eq!(bare.rejected, 1, "no value really is no bytes");
+        assert!(bare.is_decisive());
+
+        let put = aggregate_where(
+            &{
+                let mut d = Dissection::new();
+                let wire = crate::datagram_tests::frame_carrying(&push(
+                    sender_space(0, Some("demo/q")),
+                    b"payload",
+                ));
+                d.push_packet(
+                    LINKTYPE_ETHERNET,
+                    0,
+                    &udp_packet(LOW, 43210, HIGH, 7447, &wire),
+                );
+                d
+            },
+            &filter,
+        )
+        .selection();
+        assert_eq!(put.matched, 1, "a sized payload still decides");
+        assert!(put.is_decisive());
     }
 
     /// Push a list of `(from_low, record)` through a real dissection, one

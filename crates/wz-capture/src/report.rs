@@ -132,6 +132,15 @@ impl<'a> CaptureReport<'a> {
             if !t.gaps().is_clean() || t.unresolved_records() > 0 {
                 return false;
             }
+            // R311y637 (§1.1w) — a record whose payload this build cannot size
+            // makes `total_payload_bytes` a floor, so it reaches the verdict on
+            // the same rule as an unread batch. It is NOT a `gaps()` member:
+            // the record was read and attributed, and only its byte
+            // contribution is unknown. A reader who sums the table still has
+            // to be told the sum is short.
+            if t.unsized_payloads() > 0 {
+                return false;
+            }
             // R311y616 — a selector that could not judge part of the capture
             // makes the rows under it a floor, exactly as an unread batch does.
             // The two shortfalls have different causes and the same
@@ -360,6 +369,16 @@ impl<'a> CaptureReport<'a> {
                 t.total_payload_bytes(),
                 t.unresolved_records()
             ));
+            // R311y637 (§1.1w) — printed only when non-zero, like every other
+            // qualifier in this rendering: a reader of an ordinary capture is
+            // not told about a hazard it does not have.
+            if t.unsized_payloads() > 0 {
+                s.push_str(&format!(
+                    "  UNSIZED: {} record(s) carry a payload this build cannot \
+                     measure; the byte total above is a floor\n",
+                    t.unsized_payloads()
+                ));
+            }
             if !g.is_clean() {
                 s.push_str(&format!(
                     "  UNREAD: {} halted batch(es) ({} bytes), {} undecompressible, {} unresolvable fragment(s)\n",
@@ -501,7 +520,8 @@ fn throughput_json(t: &ThroughputTable, s: &mut String) {
     s.push_str("\"throughput\":{");
     s.push_str(&format!(
         "\"records\":{},\"unattributed_records\":{},\"walked_records\":{},\
-         \"unresolved_records\":{},\"total_payload_bytes\":{}",
+         \"unresolved_records\":{},\"total_payload_bytes\":{},\
+         \"unsized_payloads\":{}",
         t.records(),
         // R311y622 (§1.4h) — the denominator rides BESIDE the numerator rather
         // than being left for the consumer to add up from four fields, which is
@@ -509,7 +529,12 @@ fn throughput_json(t: &ThroughputTable, s: &mut String) {
         t.unattributed_records(),
         t.walked_records(),
         t.unresolved_records(),
-        t.total_payload_bytes()
+        t.total_payload_bytes(),
+        // UNCONDITIONAL in JSON, conditional in text: a machine consumer that
+        // has to test for a key's presence to learn whether the total is whole
+        // will not, and the field is the only thing qualifying the number
+        // beside it.
+        t.unsized_payloads()
     ));
     s.push_str(&format!(
         ",\"declarations\":{declared},\"undeclarations\":{undeclared}"
@@ -1076,6 +1101,68 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    /// R311y637 (§1.1w) — a byte total that is a FLOOR says so, in both
+    /// renderings and in the verdict.
+    ///
+    /// The failure this refuses: a reader sums `total_payload_bytes` over a
+    /// capture full of queries carrying values and gets a number that is not
+    /// short by a little but short by everything those queries carried, with
+    /// nothing anywhere saying so.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn an_unsizable_payload_reaches_the_document_and_the_verdict() {
+        use crate::exchange::tests as fx;
+
+        let valued = fx::dissect(&[(
+            true,
+            Some(10),
+            crate::agg::tests::request_query_valued(
+                1,
+                fx::sender_space(0, Some("demo/q")),
+                Some(b"payload"),
+            ),
+        )]);
+        let throughput = crate::agg::aggregate(&valued);
+        assert_eq!(
+            throughput.unsized_payloads(),
+            1,
+            "the fixture must actually hold an unsizable record"
+        );
+
+        let r = CaptureReport::of(&valued).with_throughput(&throughput);
+        assert!(
+            !r.is_complete(),
+            "a byte total that is a floor is not a complete capture: {}",
+            r.to_text()
+        );
+        assert!(
+            r.to_json().contains("\"unsized_payloads\":1"),
+            "the JSON must qualify the total beside it: {}",
+            r.to_json()
+        );
+        assert!(
+            r.to_text().contains("UNSIZED"),
+            "the text must say the total is a floor: {}",
+            r.to_text()
+        );
+
+        // THE CONTROL, and it is the half that makes the three assertions above
+        // a decision rather than a counter that is always on: the same query
+        // WITHOUT a value produces a complete report, a zero in the JSON, and
+        // no UNSIZED line at all.
+        let bare = fx::dissect(&[(
+            true,
+            Some(10),
+            crate::agg::tests::request_query_valued(1, fx::sender_space(0, Some("demo/q")), None),
+        )]);
+        let bare_throughput = crate::agg::aggregate(&bare);
+        let br = CaptureReport::of(&bare).with_throughput(&bare_throughput);
+        assert_eq!(bare_throughput.unsized_payloads(), 0);
+        assert!(br.is_complete(), "{}", br.to_text());
+        assert!(br.to_json().contains("\"unsized_payloads\":0"));
+        assert!(!br.to_text().contains("UNSIZED"));
     }
 
     /// R311y616 — a filtered report carries what the selector could NOT judge,

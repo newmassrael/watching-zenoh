@@ -730,8 +730,8 @@ impl PayloadCensus {
         // as it does there; deriving it locally is the second spelling that
         // would let the two planes disagree about one record.
         let (kind, payload_bytes) = match crate::agg::classify(message) {
-            Some((_, counts, kind)) => (kind, counts.payload_bytes),
-            None => (crate::filter::RecordKind::Put, 0),
+            Some((_, counts, kind)) => (kind, crate::agg::sized_payload(&counts)),
+            None => (crate::filter::RecordKind::Put, Some(0)),
         };
         let truth = filter.matches(&crate::filter::RecordView {
             direction,

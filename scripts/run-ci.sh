@@ -5446,7 +5446,11 @@ layer_c1bt_capture_no_default_features() {
         exchange::tests::the_exchange_that_never_closed_is_judged_and_not_merely_counted \
         exchange::tests::an_outcome_rejection_leaves_no_trace_in_the_totals \
         exchange::tests::moving_the_verdict_to_the_close_did_not_move_what_time_means \
-        exchange::tests::the_throughput_plane_reports_an_outcome_term_as_undecided_not_empty
+        exchange::tests::the_throughput_plane_reports_an_outcome_term_as_undecided_not_empty \
+        agg::tests::the_fixture_puts_a_valued_query_and_a_bare_one_on_the_wire \
+        agg::tests::a_query_carrying_a_value_is_unsized_and_a_bare_one_is_a_measured_zero \
+        agg::tests::a_bytes_term_over_an_unsizable_payload_is_undecided_rather_than_false \
+        report::tests::an_unsizable_payload_reaches_the_document_and_the_verdict
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the network-codecs build"

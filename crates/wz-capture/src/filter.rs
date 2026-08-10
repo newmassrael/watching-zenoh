@@ -45,7 +45,7 @@
 //! | `key` | a keyexpr pattern (`demo/**`) | `==` `!=` | the reference did not resolve |
 //! | `dir` | `a` / `b` | `==` `!=` | never |
 //! | `kind` | `put` `del` `query` `reply` `err` | `==` `!=` | never |
-//! | `bytes` | an integer | `==` `!=` `<` `<=` `>` `>=` | never |
+//! | `bytes` | an integer | `==` `!=` `<` `<=` `>` `>=` | the record carries a payload this build cannot size |
 //! | `time` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | the capture carried no clock |
 //! | `replies` | an integer | `==` `!=` `<` `<=` `>` `>=` | the plane does not correlate exchanges |
 //! | `errs` | an integer | `==` `!=` `<` `<=` `>` `>=` | as above |
@@ -195,8 +195,17 @@ pub struct RecordView<'a> {
     pub keyexpr: Option<&'a str>,
     /// What the record is.
     pub kind: RecordKind,
-    /// Application payload bytes present in it.
-    pub payload_bytes: u64,
+    /// Application payload bytes present in it, or `None` when the record
+    /// carries a payload this build cannot SIZE.
+    ///
+    /// R311y637 (§1.1w) — `None` is not "no payload". A `Query`'s value rides
+    /// an ext whose body is `encoding` then `payload`, and this decoder models
+    /// that ext as one opaque ZBUF, so the application half cannot be
+    /// separated out. `Some(0)` and `None` are different facts: the first is a
+    /// record with nothing in it, the second is a record whose contents are
+    /// real and unmeasured. Reporting the second as `0` made `bytes > 0`
+    /// answer `no` about traffic that was there.
+    pub payload_bytes: Option<u64>,
     /// The capture clock as of the frame that carried it, or `None` when the
     /// capture format carried no timestamp
     /// ([`PassiveFrame::observed_at_ms`](wz_session_core::passive::PassiveFrame::observed_at_ms)).
@@ -348,7 +357,13 @@ impl Term {
                 Truth::of((dir_index(record.direction) == dir_index(*want)) != *negated)
             }
             Self::Kind { want, negated } => Truth::of((record.kind == *want) != *negated),
-            Self::Bytes { op, value } => Truth::of(op.apply(record.payload_bytes, *value)),
+            Self::Bytes { op, value } => match record.payload_bytes {
+                // R311y637 (§1.1w) — the fifth undecidable case, and the one
+                // that had been answering `no` instead: a payload this build
+                // cannot size is not a payload of zero bytes.
+                None => Truth::Unknown,
+                Some(bytes) => Truth::of(op.apply(bytes, *value)),
+            },
             Self::Time { op, value } => match record.observed_at_ms {
                 // The second undecidable case: pcap carries a timestamp per
                 // packet and a raw byte-stream fixture carries none, so a
@@ -1084,7 +1099,7 @@ mod tests {
             direction,
             keyexpr,
             kind,
-            payload_bytes,
+            payload_bytes: Some(payload_bytes),
             observed_at_ms,
             // The default is the NON-correlating plane, so every pre-existing
             // test below drives the view the throughput plane builds.

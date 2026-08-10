@@ -247,7 +247,9 @@ struct OpenExchange {
     /// The request's kind and payload size, from the throughput plane's
     /// classifier, for `kind` and `bytes` terms at close.
     kind: crate::filter::RecordKind,
-    payload_bytes: u64,
+    /// `None` when the request carries a payload this build cannot size — a
+    /// `Query` whose value rides its ext chain (R311y637, §1.1w).
+    payload_bytes: Option<u64>,
     requested_at: Option<u64>,
     first_reply_at: Option<u64>,
     replies: usize,
@@ -416,8 +418,8 @@ impl ExchangeTable {
                 // plane's classifier so `kind == query` means the same thing
                 // whichever plane a reader points it at.
                 let (kind, payload_bytes) = match crate::agg::classify(message) {
-                    Some((_, counts, kind)) => (kind, counts.payload_bytes),
-                    None => (crate::filter::RecordKind::Query, 0),
+                    Some((_, counts, kind)) => (kind, crate::agg::sized_payload(&counts)),
+                    None => (crate::filter::RecordKind::Query, Some(0)),
                 };
                 // R311y636 (§1.1v) — no verdict and no counter moves here. The
                 // exchange is opened whatever the selector will say about it,

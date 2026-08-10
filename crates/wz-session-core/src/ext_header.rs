@@ -120,4 +120,27 @@ pub mod body_ext_id {
     /// marker meaning the payload slot holds a DESCRIPTOR rather than the
     /// data. The bytes it stands in for never traverse the network.
     pub const SHM: u8 = 0x02;
+
+    /// R311y637 (§1.1w) — `zenoh::query::ext::QueryBody`, the ZBUF ext that
+    /// carries a `Query`'s VALUE:
+    /// `ValueType<{ ZExtZBuf::<0x03>::id(false) }, 0x04>`
+    /// (`zenoh-protocol-1.5.0/src/zenoh/query.rs:104`).
+    ///
+    /// A `Query`'s payload is not a decoded field of the message the way a
+    /// `Put`'s is — it rides here, which is why a reader that only looks at
+    /// the message body finds nothing and must not conclude there is nothing.
+    ///
+    /// ## The id is only meaningful WITH ITS CARRIER, and this is the case
+    /// that proves it
+    ///
+    /// `0x03` in the body space is `QueryBody` on a `Query` and `Attachment`
+    /// on a `Put` (`put.rs:78`, and it is
+    /// [`ATTACHMENT_EXT_ID_PUSH`](crate::attachment::ATTACHMENT_EXT_ID_PUSH)
+    /// here). The same number, two extensions, one space. The module header
+    /// above states the rule against the ESTABLISHMENT space; this pair states
+    /// it WITHIN the body space, which is the sharper and easier-to-miss form.
+    /// Upstream's own numbering per carrier, read rather than remembered:
+    /// Put `{sinfo 0x1, shm 0x2, attachment 0x3}`, Del `{sinfo 0x1,
+    /// attachment 0x2}`, Query `{sinfo 0x1, body 0x3, attachment 0x5}`.
+    pub const QUERY_BODY: u8 = 0x03;
 }
