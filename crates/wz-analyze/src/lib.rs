@@ -62,6 +62,59 @@ pub struct Options {
     /// `None` unconditionally, so the bound had no caller — the shape this crate
     /// exists to correct, one argument deep.
     pub max_messages: Option<usize>,
+    /// R311y673 (§1.2a) — which of the three observer planes to build.
+    pub census: Census,
+}
+
+/// R311y673 (§1.2a) — which of `wz-capture`'s three OBSERVER PLANES the report
+/// should carry.
+///
+/// # What was measured
+///
+/// [`CaptureReport`] has taken a throughput table, an exchange table and a
+/// payload census since long before this crate existed, and renders all three in
+/// both formats. Swept for consumers, `with_throughput` / `with_exchanges` /
+/// `with_payloads` were called from exactly one place each -- `report.rs`'s own
+/// `#[cfg(test)]` module -- and `wz-analyze` called none of them. The only
+/// program a person runs attached NO plane, so every fact the three hold (which
+/// keyexpr carries the traffic, how long a query took to answer, what the
+/// payloads are) was unreachable without writing Rust. That is the exact shape
+/// this crate was created to end, one layer further in.
+///
+/// # Why opt-in rather than always
+///
+/// Each plane is a SEPARATE walk of every frame in the capture
+/// (`agg::aggregate`, `exchange::exchanges`, `payload::payloads`), and the cost
+/// of walking the same frames three times has never been measured here. Charging
+/// it to every reader who wanted a decryption summary would be a silent tax; the
+/// flags make it a request. `Default` is all three off, which is exactly the
+/// behaviour every existing caller already had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Census {
+    /// The keyexpr THROUGHPUT plane: rows per keyexpr, subtree rollups, the
+    /// declaration resolution state.
+    pub throughput: bool,
+    /// The EXCHANGE plane: queries matched to their replies, first-reply delay,
+    /// and the ones that were never answered.
+    pub exchanges: bool,
+    /// The PAYLOAD plane: what the samples carry, by shape and size.
+    pub payloads: bool,
+}
+
+impl Census {
+    /// All three, which is what `--census` asks for.
+    pub const fn all() -> Self {
+        Self {
+            throughput: true,
+            exchanges: true,
+            payloads: true,
+        }
+    }
+
+    /// Whether any plane was asked for at all.
+    pub const fn any(&self) -> bool {
+        self.throughput || self.exchanges || self.payloads
+    }
 }
 
 /// Why a command line was not accepted.
@@ -126,6 +179,14 @@ OPTIONS:
                       were declared rather than recognised
     --max-messages <n>  list at most n messages per flow, saying how many more
                       there were. Unbounded by default
+    --throughput      the keyexpr plane: which keyexprs carry the traffic, with
+                      subtree rollups and the declarations still unresolved
+    --exchanges       the query plane: queries matched to their replies, the
+                      first-reply delay, and the ones never answered
+    --payloads        the payload plane: what the samples carry, by shape
+    --census          all three planes above. Each is a separate walk of every
+                      frame, which is why they are asked for rather than always
+                      built
     -h, --help        print this and exit
 ";
 
@@ -138,12 +199,17 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut per_message = false;
     let mut quic_ports: Vec<u16> = Vec::new();
     let mut max_messages: Option<usize> = None;
+    let mut census = Census::default();
     let mut at = 0usize;
     while at < args.len() {
         let arg = &args[at];
         match arg.as_str() {
             "--json" => format = Format::Json,
             "--flows" => per_flow = true,
+            "--throughput" => census.throughput = true,
+            "--exchanges" => census.exchanges = true,
+            "--payloads" => census.payloads = true,
+            "--census" => census = Census::all(),
             "--messages" => {
                 // The messages are printed under their flow, so asking for them
                 // asks for the flows too. Silently implying it beats refusing a
@@ -198,6 +264,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
         per_message,
         quic_ports,
         max_messages,
+        census,
     })
 }
 
@@ -295,6 +362,66 @@ pub fn analyze_declaring_quic(
     messages_per_flow: Option<usize>,
     quic_ports: &[u16],
 ) -> Result<(String, Outcome), CaptureError> {
+    analyze_request(&Request {
+        capture,
+        keylog,
+        format,
+        per_flow,
+        per_message,
+        messages_per_flow,
+        quic_ports,
+        census: Census::default(),
+    })
+}
+
+/// R311y673 (§1.2a) — one analysis, described rather than enumerated.
+///
+/// # Why this type exists
+///
+/// The four functions above are the same function with one more argument each
+/// time: R311y666 added `per_flow`, R311y667 `per_message`, R311y669
+/// `messages_per_flow`, R311y670 `quic_ports`. Arity reached seven and this
+/// round needed an eighth. Each addition was individually reasonable and the
+/// sequence is a design smell — a positional list of five booleans and options
+/// is a list callers get wrong silently, since every one of them type-checks in
+/// any order.
+///
+/// So the knobs become FIELDS. The next one is a field with a name and a
+/// default, not a new wrapper and a new positional slot, and the older functions
+/// stay as they are: they are a stable surface with callers, and delegating
+/// keeps them honest by construction rather than by a second copy of the logic.
+#[derive(Debug, Clone, Copy)]
+pub struct Request<'a> {
+    /// The capture file's bytes.
+    pub capture: &'a [u8],
+    /// An EXTERNAL key log, merged with whatever the capture carried itself.
+    pub keylog: Option<&'a [u8]>,
+    /// How to render.
+    pub format: Format,
+    /// List every flow rather than only the capture-wide summary.
+    pub per_flow: bool,
+    /// List the decoded messages themselves. Implies `per_flow`.
+    pub per_message: bool,
+    /// The ceiling on messages listed per flow; `None` is unbounded.
+    pub messages_per_flow: Option<usize>,
+    /// UDP ports the caller declares to be QUIC.
+    pub quic_ports: &'a [u16],
+    /// Which observer planes to build. See [`Census`].
+    pub census: Census,
+}
+
+/// Read a capture and report on it, as [`Request`] describes.
+pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), CaptureError> {
+    let &Request {
+        capture,
+        keylog,
+        format,
+        per_flow,
+        per_message,
+        messages_per_flow,
+        quic_ports,
+        census,
+    } = request;
     let mut dissection = Dissection::from_capture_declaring_quic(capture, quic_ports)?;
 
     // The capture's own keys first, then the external log folded in.
@@ -319,7 +446,34 @@ pub fn analyze_declaring_quic(
     let epochs = opener.epoch_witness();
     let flows = dissection.encrypted_flows();
     let decrypted_flows = flows.iter().filter(|f| f.not_decrypted.is_none()).count();
-    let report = CaptureReport::of(&dissection);
+    // R311y673 — the three OBSERVER PLANES, built only where asked for.
+    //
+    // Each is a separate walk of every frame the dissection holds, and the
+    // report borrows the tables rather than owning them, so they are bound here
+    // and outlive the report by construction. Built AFTER the decryption pass on
+    // purpose: a flow whose plaintext was just opened carries messages, and a
+    // plane built before it would census the ciphertext-only view and report a
+    // floor as a total.
+    let throughput = census
+        .throughput
+        .then(|| wz_capture::agg::aggregate(&dissection));
+    let exchanges = census
+        .exchanges
+        .then(|| wz_capture::exchange::exchanges(&dissection));
+    let payloads = census
+        .payloads
+        .then(|| wz_capture::payload::payloads(&dissection));
+    let mut report = CaptureReport::of(&dissection);
+    if let Some(table) = &throughput {
+        report = report.with_throughput(table);
+    }
+    if let Some(table) = &exchanges {
+        report = report.with_exchanges(table);
+    }
+    if let Some(table) = &payloads {
+        report = report.with_payloads(table);
+    }
+    let report = report;
     let outcome = Outcome {
         complete: report.is_complete(),
         decrypted_flows,
@@ -803,6 +957,7 @@ mod tests {
                 per_message: false,
                 quic_ports: Vec::new(),
                 max_messages: None,
+                census: Census::default(),
             })
         );
     }
@@ -827,6 +982,7 @@ mod tests {
                 per_message: true,
                 quic_ports: Vec::new(),
                 max_messages: None,
+                census: Census::default(),
             })
         );
     }

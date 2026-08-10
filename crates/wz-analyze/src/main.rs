@@ -7,7 +7,7 @@
 
 use std::process::ExitCode;
 
-use wz_analyze::{analyze_declaring_quic, parse, USAGE};
+use wz_analyze::{analyze_request, parse, Request, USAGE};
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -48,15 +48,19 @@ fn main() -> ExitCode {
     // R311y670 — every option the command line accepts reaches the analysis.
     // The two added this round had to, or they would have been flags the parser
     // read and nothing acted on.
-    let (rendered, outcome) = match analyze_declaring_quic(
-        &capture,
-        keylog.as_deref(),
-        options.format,
-        options.per_flow,
-        options.per_message,
-        options.max_messages,
-        &options.quic_ports,
-    ) {
+    // R311y673 — and the request is now DESCRIBED rather than enumerated, so a
+    // new option is a named field here instead of a positional slot that
+    // type-checks in the wrong place.
+    let (rendered, outcome) = match analyze_request(&Request {
+        capture: &capture,
+        keylog: keylog.as_deref(),
+        format: options.format,
+        per_flow: options.per_flow,
+        per_message: options.per_message,
+        messages_per_flow: options.max_messages,
+        quic_ports: &options.quic_ports,
+        census: options.census,
+    }) {
         Ok(out) => out,
         Err(err) => {
             eprintln!("wz-analyze: {}: {err:?}", options.capture);

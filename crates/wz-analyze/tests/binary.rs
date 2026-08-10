@@ -1482,3 +1482,240 @@ fn a_key_update_is_found_by_framing_rather_than_by_the_first_byte() {
     );
     assert_one_document(json.trim());
 }
+
+/// R311y673 (§1.2a) — a sender-space keyexpr with a literal suffix.
+fn keyexpr(suffix: &'static str) -> wz_codecs::wireexpr::Wireexpr<'static> {
+    wz_codecs::wireexpr::Wireexpr {
+        body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
+            wz_codecs::wireexpr_local::WireexprLocal {
+                id: 0,
+                suffix_len: Some(suffix.len() as u64),
+                suffix: Some(suffix),
+            },
+        ),
+    }
+}
+
+/// One network message wrapped in a transport `Frame` and length-framed for a
+/// stream link, which is what a TLS record carries.
+fn framed_frame(record: &[u8]) -> Vec<u8> {
+    let mut frame = vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
+    frame.extend_from_slice(record);
+    let mut out = (frame.len() as u16).to_le_bytes().to_vec();
+    out.extend_from_slice(&frame);
+    out
+}
+
+/// A `Request` carrying a `Query` for `suffix`, under `rid`.
+fn query(rid: u64, suffix: &'static str) -> Vec<u8> {
+    wz_codecs::request::Request {
+        header: wz_codecs::request::Request::default().header | wz_codecs::wire_const::FLAG_N_N,
+        rid,
+        keyexpr: keyexpr(suffix),
+        body: wz_codecs::request::RequestVariant::CodecZenohQuery(
+            wz_codecs::query::Query::default(),
+        ),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+/// The `Response` that answers it, carrying `payload`.
+fn reply(request_id: u64, suffix: &'static str, payload: &'static [u8]) -> Vec<u8> {
+    wz_codecs::response::Response {
+        header: wz_codecs::response::Response::default().header | wz_codecs::wire_const::FLAG_N_N,
+        request_id,
+        keyexpr: keyexpr(suffix),
+        body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
+            body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                payload_len: payload.len() as u64,
+                payload,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+/// The closing `ResponseFinal`.
+fn response_final(request_id: u64) -> Vec<u8> {
+    wz_codecs::response_final::ResponseFinal {
+        request_id,
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+/// A cleartext TCP capture of ONE query exchange: the client asks, the server
+/// replies and closes.
+fn exchange_capture() -> Vec<u8> {
+    let mut client = Vec::new();
+    client.extend_from_slice(&framed_frame(&query(7, "demo/**")));
+    let mut server = Vec::new();
+    server.extend_from_slice(&framed_frame(&reply(7, "demo/a", b"first")));
+    server.extend_from_slice(&framed_frame(&response_final(7)));
+    wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[
+            (0, 1_000_000, &tcp_packet(1000, &client)),
+            (0, 1_030_000, &tcp_packet_reverse(1000, &server)),
+        ],
+    )
+}
+
+/// R311y673 (§1.2a) — THE THREE OBSERVER PLANES REACH THE PROGRAM A PERSON RUNS.
+///
+/// ## What was measured, and it is the reason this crate exists said twice
+///
+/// `CaptureReport` has taken a throughput table, an exchange table and a payload
+/// census for many rounds, and `to_text` / `to_json` render all three when they
+/// are attached. Swept for consumers, `with_throughput` / `with_exchanges` /
+/// `with_payloads` had exactly ONE call site each -- `report.rs`'s own
+/// `#[cfg(test)]` module -- and `wz-analyze` had NONE. Measured with the
+/// R311y654 question ("which public accessor has no consumer") applied to the
+/// rest of the crate, which R311y660 recorded as still unasked.
+///
+/// So the shipped analyzer could not say which keyexpr carried the traffic, how
+/// long a query took to answer, or what the samples held. Those planes are the
+/// bulk of what `wz-capture` knows, and the tool a person runs attached none of
+/// them.
+///
+/// ## Why the fixture carries a real query exchange
+///
+/// A capture of KeepAlives makes all three planes answer zero, HONESTLY -- and a
+/// test pinning those zeroes would pass equally against planes that were never
+/// handed a frame. Measured that way first: the KeepAlive fixture prints
+/// `throughput: 0 of 0`, which is the same string a plane built from an empty
+/// dissection prints. The numbers here are non-zero, so a wiring that reached the
+/// renderer without reaching the data cannot produce them.
+#[test]
+fn the_census_planes_reach_the_command_line() {
+    let scratch = Scratch::new("census");
+    let capture = scratch.write("census.pcapng", &exchange_capture());
+
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--census")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        text.contains("exchanges: 1 request(s), 1 completed, 0 unclosed"),
+        "the exchange plane must have CORRELATED the reply to the query -- a \
+         plane handed no frames reports 0 requests and reads identical to a \
+         capture with no queries in it: {text}"
+    );
+    // 2 of 3, not 3 of 3, and the difference is the point: the closing
+    // `ResponseFinal` carries no keyexpr, so it is walked and NOT attributed.
+    // Measured rather than predicted -- this assertion was first written as
+    // `2 of 2` and the run corrected it.
+    assert!(
+        text.contains("throughput: 2 of 3 record(s) attributed, 5 bytes"),
+        "and the throughput plane must have attributed the two keyed records: \
+         {text}"
+    );
+    assert!(
+        text.contains("demo/**") && text.contains("demo/a"),
+        "with the keyexpr ROWS, which are the plane's actual answer to `which \
+         keyexpr carries the traffic` and were unreachable from a command line \
+         until this round: {text}"
+    );
+    assert!(
+        text.contains("first reply 30ms"),
+        "and the exchange plane's latency, measured against the capture's own \
+         clock (the reply packet is stamped 30ms after the query): {text}"
+    );
+    assert!(
+        text.contains("payloads: 1 judged"),
+        "and the payload plane must have judged the reply's bytes: {text}"
+    );
+
+    // WITHOUT the flag, none of the three is built and none of the three lines
+    // appears. This is the other half of the claim: the planes are a REQUEST,
+    // because each is a separate walk of every frame and the cost of walking
+    // them three times has never been measured here.
+    let bare = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    for plane in ["throughput:", "exchanges:", "payloads:"] {
+        assert!(
+            !bare.contains(plane),
+            "`{plane}` must be absent without --census: {bare}"
+        );
+    }
+    assert!(
+        bare.contains("messages decoded: 3"),
+        "while the capture itself reads exactly the same either way: {bare}"
+    );
+}
+
+/// R311y673 (§1.2a) — each plane flag turns on ITS OWN plane and no other.
+///
+/// Without this, `--census` could be the only path that works and the three
+/// single flags could all set the same bit -- or `Census::all()` could be
+/// returned from every arm. Each is asserted to bring exactly one line.
+#[test]
+fn each_census_flag_builds_only_its_own_plane() {
+    let scratch = Scratch::new("census-each");
+    let capture = scratch.write("census.pcapng", &exchange_capture());
+
+    for (flag, mine, others) in [
+        ("--throughput", "throughput:", ["exchanges:", "payloads:"]),
+        ("--exchanges", "exchanges:", ["throughput:", "payloads:"]),
+        ("--payloads", "payloads:", ["throughput:", "exchanges:"]),
+    ] {
+        let text = String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                .arg(&capture)
+                .arg(flag)
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned();
+        assert!(text.contains(mine), "{flag} must build {mine}: {text}");
+        for other in others {
+            assert!(
+                !text.contains(other),
+                "{flag} must NOT build {other}: {text}"
+            );
+        }
+    }
+}
+
+/// R311y673 (§1.2a) — the JSON carries the planes too, in ONE document.
+///
+/// The text and JSON renderings are two paths over one fact, and this workspace
+/// has measured them disagreeing (R311y664: a flow reported decrypted in JSON and
+/// NOT DECRYPTED in text, in the same run). Asserted in the same test for that
+/// reason.
+#[test]
+fn the_census_planes_reach_the_json_as_one_document() {
+    let scratch = Scratch::new("census-json");
+    let capture = scratch.write("census.pcapng", &exchange_capture());
+
+    let json = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--census")
+            .arg("--json")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(json.contains("\"throughput\""), "throughput key: {json}");
+    assert!(json.contains("\"exchanges\""), "exchanges key: {json}");
+    assert!(json.contains("\"payloads\""), "payloads key: {json}");
+    assert_one_document(json.trim());
+}
