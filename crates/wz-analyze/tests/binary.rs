@@ -2451,3 +2451,71 @@ fn a_datagram_row_the_reader_cannot_walk_is_still_named() {
         "a datagram flow with nothing walkable must say so: {text}"
     );
 }
+
+/// R311y680 (§1.1n) — the packet cross-check does not reject a scout/hello
+/// exchange, which spans two flows by design.
+#[test]
+fn a_scout_and_its_hello_are_both_walked_across_two_flows() {
+    let scratch = Scratch::new("observe-sh");
+    // A SCOUT to the multicast group, then a HELLO back from a responder.
+    let mk = |src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, body: &[u8]| {
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&sport.to_be_bytes());
+        udp.extend_from_slice(&dport.to_be_bytes());
+        udp.extend_from_slice(&((8 + body.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(body);
+        let mut ip = vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+        ip.extend_from_slice(&src);
+        ip.extend_from_slice(&dst);
+        ip.extend_from_slice(&udp);
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    };
+    let scout = [0x01u8, 0x09, (3 << 4) | 0x08 | 0x03, 0x11, 0x22, 0x33, 0x44];
+    let hello = [0x02u8, 0x09, (3 << 4) | 0x03, 0x55, 0x66, 0x77, 0x88, 0x00];
+    let a = mk([192, 168, 1, 5], [224, 0, 0, 224], 43210, 7446, &scout);
+    let b = mk([192, 168, 1, 9], [192, 168, 1, 5], 7447, 43210, &hello);
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &a), (0, 1_000_100, &b)],
+    );
+    let capture = scratch.write("sh.pcapng", &file);
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--fields")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+
+    // ANTI-VACUITY: TWO flows, which is the whole point -- a single-flow capture
+    // could not tell a cross-check that compares flow keys from one that does
+    // not.
+    assert!(
+        text.contains("flows: 0 stream, 2 datagram"),
+        "the exchange must span two flows: {text}"
+    );
+    assert!(
+        text.contains("] Scout") && text.contains("] Hello"),
+        "both halves are walked: {text}"
+    );
+    // AND NEITHER IS REJECTED. `Dissection::push_packet_at` notes that a SCOUT's
+    // key is (asker, group) while its HELLO's is (asker, responder), so the two
+    // messages of one exchange live in DIFFERENT flows -- exactly the shape that
+    // would make a flow-key cross-check throw away legitimate rows.
+    assert!(
+        !text.contains("message(s) skipped"),
+        "a scout/hello exchange spans two flows BY DESIGN and neither row may be \
+         rejected for it: {text}"
+    );
+}

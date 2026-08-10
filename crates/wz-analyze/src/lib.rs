@@ -1125,6 +1125,49 @@ fn render_field_row(
     }
 }
 
+/// R311y680 (§1.1n) — does the packet at this index really belong to this flow,
+/// travelling this way?
+///
+/// # Why the packet COUNT would not have been this
+///
+/// R311y679's carry asked for the two parses to be compared and proposed
+/// `file.packets.len()`. That comparison is very close to a tautology: both
+/// reads are `pcapng::parse` over the same immutable slice, so a disagreement
+/// would mean the function is not deterministic, which is not the failure worth
+/// guarding. The check that earns its place is the one on the LOOKUP: this
+/// reader indexes `file.packets` by a frame's `stream_offset`, on the rule that
+/// a datagram frame's offset IS its packet index. That rule is an inherited
+/// fact about another crate's coordinate, exactly the kind this workspace has
+/// had move under it before, and nothing was testing it.
+///
+/// So the decapsulated packet is asked to agree about all three coordinates it
+/// carries independently: which flow, which direction, which index. A row that
+/// cannot answer yes is not rendered from bytes nobody has vouched for, and the
+/// count of such rows is REPORTED -- a listing short by rows nobody accounted
+/// for is a listing that looks whole.
+///
+/// # What has no fixture witness, stated so it does not harden into one
+///
+/// With correct code upstream this can never fire, so there is no capture that
+/// exercises it: its witnesses are PROBES. Breaking the index by one, and
+/// pointing every lookup at the first packet, each produce the message on the
+/// scout/hello fixture. The committed test asserts the other direction -- that a
+/// scout and its hello, which live in DIFFERENT flows by design, are both walked
+/// and neither is rejected.
+fn packet_agrees(
+    datagram: &wz_capture::link::Datagram,
+    flow: &wz_capture::link::FlowKey,
+    direction: wz_session_core::passive::Direction,
+    index: usize,
+) -> bool {
+    let travels = if datagram.from_low {
+        wz_session_core::passive::Direction::A
+    } else {
+        wz_session_core::passive::Direction::B
+    };
+    datagram.flow == *flow && travels == direction && datagram.packet_index == index
+}
+
 /// R311y679 (§1.1n) — the field rows of every DATAGRAM flow.
 ///
 /// # Why this needed nothing added anywhere
@@ -1169,17 +1212,30 @@ fn datagram_field_rows(
     for flow in dissection.datagram_flows() {
         let mut shown = 0usize;
         let mut omitted = 0usize;
+        // R311y680 — messages whose packet did not vouch for itself.
+        let mut disagreed = 0usize;
         for frame in &flow.frames {
             // The datagram coordinate: `stream_offset` names the PACKET, because
             // a datagram link has no stream to be offset within.
+            // R311y680 — a packet the second read does not have, or one it
+            // reads as something other than UDP, is the COUNT half of the
+            // disagreement the two parses can have. Silent `continue`s here
+            // would drop rows and leave the listing looking whole, which is the
+            // failure this whole check exists for.
             let Some(packet) = file.packets.get(frame.stream_offset) else {
+                disagreed += 1;
                 continue;
             };
             let Ok(wz_capture::link::Transport::Udp(datagram)) =
                 wz_capture::link::decapsulate(packet.link_type, packet.index, &packet.data)
             else {
+                disagreed += 1;
                 continue;
             };
+            if !packet_agrees(&datagram, &flow.flow, frame.direction, frame.stream_offset) {
+                disagreed += 1;
+                continue;
+            }
             let body = frame.unit_offset;
             let Some(message) = datagram.payload.get(body..) else {
                 continue;
@@ -1217,13 +1273,19 @@ fn datagram_field_rows(
         // is nothing but discovery traffic.
         for datagram in &flow.scouting {
             let Some(packet) = file.packets.get(datagram.packet_index) else {
+                disagreed += 1;
                 continue;
             };
             let Ok(wz_capture::link::Transport::Udp(udp)) =
                 wz_capture::link::decapsulate(packet.link_type, packet.index, &packet.data)
             else {
+                disagreed += 1;
                 continue;
             };
+            if !packet_agrees(&udp, &flow.flow, datagram.direction, datagram.packet_index) {
+                disagreed += 1;
+                continue;
+            }
             if let Some(cap) = messages_per_flow {
                 if shown >= cap {
                     omitted += 1;
@@ -1252,6 +1314,17 @@ fn datagram_field_rows(
         }
         if format == Format::Text && omitted > 0 {
             out.push_str(&format!("    ... {omitted} more not listed\n"));
+        }
+        // R311y680 — and a disagreement between the two reads of this file is
+        // REPORTED, not skipped. It cannot be silent for the same reason a bound
+        // that bites cannot: a listing short by rows nobody accounted for is a
+        // listing that looks whole.
+        if disagreed > 0 && format == Format::Text {
+            out.push_str(&format!(
+                "    {disagreed} message(s) skipped -- the packet at that index \
+                 does not belong to this flow and direction, so this reader's \
+                 two reads of the file disagree\n"
+            ));
         }
         // A datagram flow this reader could not walk says so, rather than being
         // absent -- the R311y678 rule, kept now that the absence has a second
@@ -2569,6 +2642,108 @@ mod message_name_tests {
         assert!(
             name.contains("Empty"),
             "and carry WHY, because the reason is what a reader acts on: {name}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod packet_agreement_tests {
+    use super::*;
+    use wz_session_core::passive::Direction;
+
+    /// One UDP packet, Ethernet/IPv4, carrying `body`.
+    fn udp(body: &[u8]) -> Vec<u8> {
+        let mut u = Vec::new();
+        u.extend_from_slice(&43210u16.to_be_bytes());
+        u.extend_from_slice(&7446u16.to_be_bytes());
+        u.extend_from_slice(&((8 + body.len()) as u16).to_be_bytes());
+        u.extend_from_slice(&0u16.to_be_bytes());
+        u.extend_from_slice(body);
+        let mut ip = vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + u.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+        ip.extend_from_slice(&[192, 168, 1, 5]);
+        ip.extend_from_slice(&[224, 0, 0, 224]);
+        ip.extend_from_slice(&u);
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// R311y680 (§1.1n) — the cross-check answers NO on each of its three axes
+    /// INDEPENDENTLY.
+    ///
+    /// # Why this test exists at all
+    ///
+    /// Measured: removing the whole check left every binary test green, because
+    /// with correct code upstream it never fires and nothing observable changes.
+    /// A guard with no gate is a comment. Its rejecting direction is unreachable
+    /// from a capture, so it is driven HERE, on the predicate, where the three
+    /// coordinates can be varied one at a time.
+    ///
+    /// One at a time is the point: a predicate that only compared the flow, or
+    /// only the index, would satisfy a test that mutated all three together.
+    #[test]
+    fn the_packet_cross_check_answers_no_on_each_axis_alone() {
+        let packet = udp(&[0x01, 0x09, 0x3B, 0x11, 0x22, 0x33, 0x44]);
+        let file = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000_000, &packet), (0, 1_000_100, &packet)],
+        );
+        let parsed = wz_capture::pcapng::parse(&file).expect("the fixture parses");
+        let first = &parsed.packets[0];
+        let wz_capture::link::Transport::Udp(datagram) =
+            wz_capture::link::decapsulate(first.link_type, first.index, &first.data)
+                .expect("a UDP datagram")
+        else {
+            panic!("the fixture must decapsulate as UDP");
+        };
+        let travels = if datagram.from_low {
+            Direction::A
+        } else {
+            Direction::B
+        };
+
+        // The truthful call, which is what every real row makes.
+        assert!(
+            packet_agrees(&datagram, &datagram.flow, travels, datagram.packet_index),
+            "a packet must vouch for its own coordinates"
+        );
+        // WRONG DIRECTION, everything else right.
+        let other = match travels {
+            Direction::A => Direction::B,
+            Direction::B => Direction::A,
+        };
+        assert!(
+            !packet_agrees(&datagram, &datagram.flow, other, datagram.packet_index),
+            "the direction axis must be checked on its own"
+        );
+        // WRONG INDEX, everything else right.
+        assert!(
+            !packet_agrees(
+                &datagram,
+                &datagram.flow,
+                travels,
+                datagram.packet_index + 1
+            ),
+            "the index axis must be checked on its own"
+        );
+        // WRONG FLOW, everything else right: the same endpoints with the ports
+        // swapped is a different key and a real confusion to guard against.
+        let mut crossed = datagram.flow;
+        core::mem::swap(&mut crossed.low, &mut crossed.high);
+        assert!(
+            crossed != datagram.flow,
+            "the mutation must actually change the key, or the assertion below \
+             is about nothing"
+        );
+        assert!(
+            !packet_agrees(&datagram, &crossed, travels, datagram.packet_index),
+            "the flow axis must be checked on its own"
         );
     }
 }
