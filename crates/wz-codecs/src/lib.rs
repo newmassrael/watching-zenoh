@@ -65,6 +65,33 @@ extern crate std;
 // crate-level allow still covers it; rustc `warnings = "deny"` keeps it honest.
 pub mod whatami;
 
+/// R311y640 (§1.1w) — the runtime primitives a consumer needs to DRIVE the
+/// codecs this crate exposes, re-exported so driving one does not require a
+/// second dependency edge on the SCE runtime.
+///
+/// Every `decode` in this crate takes an `SceCursor` and every owned byte field
+/// is an `SceByteBuf`, so a caller that holds bytes and wants a typed value
+/// already needs both. `wz-capture` hit exactly that wall reading a `Query`'s
+/// value out of its ext body: the bytes were in hand and the codec that reads
+/// them was one module away, but the cursor to feed it was not nameable. Naming
+/// the two here rather than adding `sce-forge-runtime` to each consumer's
+/// manifest keeps the codec ABI and the means of driving it in ONE place —
+/// which is also the version the codecs were generated against, and so cannot
+/// drift from them the way an independently-pinned dependency could.
+///
+/// Deliberately NARROW: the four names that read or write a codec's own bytes,
+/// not the runtime. A consumer needing more of it has a different relationship
+/// with SCE than "reads and writes the wire", and should say so in its own
+/// manifest.
+pub use sce_forge_runtime::codec::{SceByteBuf, SceCursor, SceSink};
+
+/// The `alloc`-only append sink, beside the three above for the same reason:
+/// a caller assembling a nested body (an ext whose payload is itself a
+/// length-prefixed field) has to WRITE a VLE, and hand-rolling base-128 at the
+/// call site is the copy that drifts from the reader it must round-trip with.
+#[cfg(feature = "alloc")]
+pub use sce_forge_runtime::codec::VecSink;
+
 // Re-exposes the alloc-prelude items the SCE codegen emits without
 // fully-qualifying. Invoked at the head of every `pub mod` block so
 // the `include!()`-pasted generated code resolves `String` and

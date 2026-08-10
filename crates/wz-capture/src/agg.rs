@@ -793,6 +793,34 @@ fn measured_payload(
     }
 }
 
+/// R311y640 (§1.1w) — how many application bytes a `Query`'s VALUE ext holds.
+///
+/// The ext body is not opaque after all, which is what R311y637 recorded and
+/// this round measured instead of inheriting. Upstream lays it out as `encoding`
+/// then `pl: [u8;z32]` (`zenoh-protocol-1.5.0/src/zenoh/mod.rs:196-210`), so the
+/// application payload carries its OWN length prefix inside the ext: the number
+/// is literally on the wire, one sub-decode away, and reporting the record as
+/// unmeasurable was a limit of this reader rather than of the wire.
+///
+/// `None` keeps the R311y637 behaviour for every body this cannot resolve — a
+/// truncated ext, an encoding this build's codec cannot read, a declared length
+/// that disagrees with the bytes present. The last is deliberate and matches
+/// [`KeyexprCounts::payload_bytes`]'s own rule: a record whose z32 prefix claims
+/// more (or fewer) bytes than follow it is lying or truncated, and a total must
+/// not be inflated by a number no bytes back. Unmeasurable is the honest answer
+/// there, not the declared figure.
+#[cfg(feature = "network-codecs")]
+fn query_value_bytes(body: &[u8]) -> Option<u64> {
+    let mut cursor = wz_codecs::SceCursor::new(body);
+    // The encoding prefix is CONSUMED rather than inspected: its only job here
+    // is to move the cursor to the length prefix. Reading it through the codec
+    // instead of skipping a guessed width is what makes a schema-carrying
+    // encoding (`packed_id & 1`, a name of its own length) come out right.
+    let _encoding = wz_codecs::encoding::Encoding::decode(&mut cursor).ok()?;
+    let declared = cursor.read_vle_u64().ok()?;
+    (declared == cursor.remaining() as u64).then_some(declared)
+}
+
 /// R311y637 (§1.1w) — does this `Query`'s ext chain carry a VALUE?
 ///
 /// Matched on `(id, ZBUF body)` exactly as
@@ -801,17 +829,22 @@ fn measured_payload(
 /// header carried `ENC_ZBUF`, so no separate encoding test is needed. The id is
 /// read from the named constant rather than spelled `0x03` here, because `0x03`
 /// in this space is `Attachment` on a `Put` and this is a `Query`.
+/// R311y640 — it returns the ext's BODY BYTES now rather than a bool, because
+/// the presence and the size are one question asked at one place: a caller
+/// holding the body can measure it, and a caller holding only `true` had no
+/// choice but to report the record as unmeasurable.
 #[cfg(feature = "network-codecs")]
-fn query_body_present(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> bool {
-    let Some(chain) = extensions else {
-        return false;
-    };
-    chain.iter().any(|ext| {
-        ext.ext_id() == wz_session_core::ext_header::body_ext_id::QUERY_BODY
-            && matches!(
-                ext.body,
-                wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZbuf(_)
-            )
+fn query_body_bytes(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> Option<&[u8]> {
+    extensions?.iter().find_map(|ext| {
+        match (
+            ext.ext_id() == wz_session_core::ext_header::body_ext_id::QUERY_BODY,
+            &ext.body,
+        ) {
+            (true, wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZbuf(z)) => {
+                Some(wz_codecs::SceByteBuf::as_slice(&z.value))
+            }
+            _ => None,
+        }
     })
 }
 
@@ -874,8 +907,13 @@ pub(crate) fn classify(
                     // decoder cannot answer; asking the chain separates the
                     // query that carries nothing (a real zero) from the one
                     // whose payload this build cannot measure.
-                    if query_body_present(q.extensions.as_deref()) {
-                        counts.record_payload(None);
+                    // R311y640 (§1.1w) — the ext is asked for its BYTES, and
+                    // those bytes are then asked for their size. R311y637 could
+                    // only reach the first half and so reported every valued
+                    // query as unmeasurable; the payload's own z32 prefix was on
+                    // the wire inside the ext the whole time.
+                    if let Some(body) = query_body_bytes(q.extensions.as_deref()) {
+                        counts.record_payload(query_value_bytes(body));
                     }
                     RecordKind::Query
                 }
@@ -1144,8 +1182,54 @@ pub(crate) mod tests {
         .encode_to_vec()
     }
 
+    /// R311y640 (§1.1w) — the ext body zenoh actually puts on the wire for a
+    /// query's value: `encoding` then the payload as `[u8;z32]`
+    /// (`zenoh-protocol-1.5.0/src/zenoh/mod.rs:196-210`).
+    ///
+    /// THE FIXTURE THIS REPLACES AGREED WITH THE DEFECT. R311y637 wrote the raw
+    /// value bytes here as one opaque blob, because that round's reading was
+    /// that the body could not be decomposed — so the sub-decoder added in
+    /// R311y640 could never resolve it, and a test asserting "unmeasurable"
+    /// passed for a reason that had nothing to do with the wire. The fixture
+    /// must produce the shape the wire produces or the plane is being asked a
+    /// different question -> [[feedback_a_fixture_can_make_a_defect_unreachable]].
+    ///
+    /// The length prefix is written with the runtime's own VLE writer rather
+    /// than a hand-rolled byte, so the fixture and the reader cannot agree on a
+    /// non-canonical encoding that no sender would emit.
+    fn query_value_body(payload: &[u8]) -> alloc::vec::Vec<u8> {
+        query_value_body_encoded(payload, None)
+    }
+
+    /// The same body with `schema` on its encoding, which makes the encoding
+    /// prefix SEVERAL bytes wide.
+    ///
+    /// It exists because the bare form cannot tell a sub-decode from a guess:
+    /// `packed_id: 0` with no schema encodes to exactly ONE byte, so a reader
+    /// that skipped a hardcoded byte instead of decoding the encoding would land
+    /// on the length prefix anyway and every assertion would hold. Measured, not
+    /// argued -- that probe passed against the bare fixture alone
+    /// -> [[feedback_a_fixture_can_make_a_defect_unreachable]].
+    fn query_value_body_encoded(payload: &[u8], schema: Option<&str>) -> alloc::vec::Vec<u8> {
+        use wz_codecs::SceSink;
+        let mut body = wz_codecs::encoding::Encoding {
+            // `zenoh_bytes` (id 0) when no schema, the encoding a value carries
+            // when the application declared none. The LSB is the has-schema
+            // flag, so setting it shifts the id and adds the two schema fields.
+            packed_id: if schema.is_some() { 1 } else { 0 },
+            schema_len: schema.map(|s| s.len() as u64),
+            schema,
+        }
+        .encode_to_vec();
+        wz_codecs::VecSink::new(&mut body)
+            .write_vle_u64(payload.len() as u64)
+            .expect("a Vec sink cannot overflow");
+        body.extend_from_slice(payload);
+        body
+    }
+
     /// R311y637 (§1.1w) — a `Request` carrying a `Query`, optionally with the
-    /// VALUE ext that makes its payload real and unmeasurable.
+    /// VALUE ext that carries its payload.
     ///
     /// The ext is built from the named id and the ZBUF arm rather than a
     /// literal `0x03` and a hand-set encoding nibble, so the fixture and the
@@ -1158,6 +1242,51 @@ pub(crate) mod tests {
         rid: u64,
         keyexpr: Wireexpr<'static>,
         value: Option<&'static [u8]>,
+    ) -> Vec<u8> {
+        request_query_ext(rid, keyexpr, value.map(query_value_body))
+    }
+
+    /// R311y640 (§1.1w) — a query whose VALUE ext is there and whose body this
+    /// reader cannot resolve: the z32 prefix claims more bytes than follow it.
+    ///
+    /// The control the measurable case needs. Without it the axis would have
+    /// collapsed from three-valued back to two: R311y637's `None` has to stay
+    /// REACHABLE, or "unmeasurable" becomes a state nothing can produce and the
+    /// distinction it exists for stops being tested.
+    /// A valued query whose encoding carries a SCHEMA, so the prefix the
+    /// sub-decoder must walk is wider than one byte.
+    pub(crate) fn request_query_valued_with_schema(
+        rid: u64,
+        keyexpr: Wireexpr<'static>,
+        value: &[u8],
+    ) -> Vec<u8> {
+        request_query_ext(
+            rid,
+            keyexpr,
+            Some(query_value_body_encoded(value, Some("application/json"))),
+        )
+    }
+
+    pub(crate) fn request_query_truncated(rid: u64, keyexpr: Wireexpr<'static>) -> Vec<u8> {
+        use wz_codecs::SceSink;
+        let mut body = wz_codecs::encoding::Encoding {
+            packed_id: 0,
+            schema_len: None,
+            schema: None,
+        }
+        .encode_to_vec();
+        wz_codecs::VecSink::new(&mut body)
+            .write_vle_u64(99)
+            .expect("a Vec sink cannot overflow");
+        body.extend_from_slice(b"abc");
+        request_query_ext(rid, keyexpr, Some(body))
+    }
+
+    /// A `Request` carrying a `Query`, optionally with `body` on the VALUE ext.
+    fn request_query_ext(
+        rid: u64,
+        keyexpr: Wireexpr<'static>,
+        value: Option<alloc::vec::Vec<u8>>,
     ) -> Vec<u8> {
         use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
         use wz_session_core::ext_header::{body_ext_id, EXT_ENC_ZBUF};
@@ -1179,12 +1308,12 @@ pub(crate) mod tests {
         let mut owned: wz_codecs::query::QueryOwned = borrowed_default
             .try_into_owned_in()
             .expect("an empty query owns trivially");
-        if let Some(bytes) = value {
+        if let Some(body) = value {
             owned.extensions = Some(alloc::vec![ExtEntryOwned {
                 header: body_ext_id::QUERY_BODY | EXT_ENC_ZBUF,
                 body: ExtEntryOwnedVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbufOwned {
-                    value_len: bytes.len() as u64,
-                    value: wz_session_core::codec_owned::owned_bytes(bytes)
+                    value_len: body.len() as u64,
+                    value: wz_session_core::codec_owned::owned_bytes(&body)
                         .expect("the fixture value is within the owned bound"),
                 }),
             }]);
@@ -1220,28 +1349,66 @@ pub(crate) mod tests {
         assert_eq!(t.walked_records(), 1);
     }
 
-    /// §1.1w, THE DEFECT. A query whose value rides its ext chain was reported
-    /// as carrying zero application bytes — a confident answer to a question
-    /// this decoder cannot answer, and the one shape this crate refuses
-    /// everywhere else.
+    /// §1.1w. A query's value rides its ext chain, and R311y637 could see THAT
+    /// it was there without seeing HOW BIG it was, so it reported the record as
+    /// carrying an unmeasurable payload. R311y640 measures it: the ext body is
+    /// `encoding` then the payload as `[u8;z32]`, so the number was on the wire
+    /// the whole time, one sub-decode in.
     ///
-    /// The control leg is the whole test: a query with NO value keeps its
-    /// zero, and it keeps it as a MEASUREMENT. If the fix had been "every query
-    /// is unknown", this leg would fail.
+    /// THREE legs, because the axis is three-valued and each state has to be
+    /// reachable. A valued query is MEASURED. A bare query keeps its zero AS A
+    /// MEASUREMENT — had the fix been "every query is known now", nothing would
+    /// tell that zero from the one below. And a query whose body this reader
+    /// cannot resolve stays UNMEASURABLE, which is the state R311y637 added and
+    /// this round must not delete.
     #[test]
-    fn a_query_carrying_a_value_is_unsized_and_a_bare_one_is_a_measured_zero() {
+    fn a_querys_value_is_measured_and_an_unresolvable_body_still_is_not() {
         let valued = aggregate_datagrams(&[(
             true,
             request_query_valued(1, sender_space(0, Some("demo/q")), Some(b"payload")),
         )]);
-        assert_eq!(valued.unsized_payloads(), 1);
+        assert_eq!(
+            valued.unsized_payloads(),
+            0,
+            "the payload's own length prefix is inside the ext"
+        );
         assert_eq!(
             valued.total_payload_bytes(),
-            0,
-            "a floor, and `unsized_payloads` is what says so"
+            b"payload".len() as u64,
+            "and it is the application bytes, not the ext body"
         );
         let row = valued.row("demo/q").expect("the query has a row");
-        assert!(!row.totals().payload_is_complete());
+        assert!(row.totals().payload_is_complete());
+
+        // THE LEG THAT SEPARATES A DECODE FROM A GUESS. The encoding here is
+        // several bytes wide, so a reader that skipped a fixed width would read
+        // the length prefix out of the middle of the schema name.
+        let schema_valued = aggregate_datagrams(&[(
+            true,
+            request_query_valued_with_schema(3, sender_space(0, Some("demo/q")), b"payload"),
+        )]);
+        assert_eq!(schema_valued.unsized_payloads(), 0);
+        assert_eq!(
+            schema_valued.total_payload_bytes(),
+            b"payload".len() as u64,
+            "the encoding prefix is walked, not assumed to be one byte"
+        );
+
+        let truncated = aggregate_datagrams(&[(
+            true,
+            request_query_truncated(2, sender_space(0, Some("demo/q"))),
+        )]);
+        assert_eq!(
+            truncated.unsized_payloads(),
+            1,
+            "a body claiming more bytes than follow it is not measured from its claim"
+        );
+        assert_eq!(truncated.total_payload_bytes(), 0);
+        assert!(!truncated
+            .row("demo/q")
+            .expect("row")
+            .totals()
+            .payload_is_complete());
 
         let bare = aggregate_datagrams(&[(
             true,
@@ -1259,16 +1426,40 @@ pub(crate) mod tests {
             .payload_is_complete());
     }
 
-    /// The consequence for a selector: `bytes > 0` over the valued query is
-    /// UNDECIDABLE, not `no`. Before this it was `no` — the filter reported
-    /// that a query carrying seven bytes carried none.
+    /// The consequence for a selector, across all three states of the axis.
     ///
-    /// Both control legs matter. The bare query is decidably `no` (it really
-    /// does carry nothing), and a PUT of the same bytes is decidably `yes`, so
-    /// the unknown is scoped to the record whose size is genuinely unavailable.
+    /// `bytes > 0` over a query carrying seven bytes now decides YES. It said
+    /// `no` before R311y637 (a confident wrong answer) and `undecided` after it
+    /// (an honest one this reader no longer has to give). The undecided state
+    /// stays reachable through a body this reader genuinely cannot resolve, and
+    /// the bare query is still decidably `no` — so each of the three is
+    /// produced by a different record rather than asserted about the same one.
     #[test]
-    fn a_bytes_term_over_an_unsizable_payload_is_undecided_rather_than_false() {
+    fn a_bytes_term_decides_a_measured_query_and_declines_an_unresolvable_one() {
         let filter = Filter::parse("bytes > 0").expect("parses");
+        let truncated = {
+            let mut d = Dissection::new();
+            let wire = crate::datagram_tests::frame_carrying(&request_query_truncated(
+                9,
+                sender_space(0, Some("demo/q")),
+            ));
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                0,
+                &udp_packet(LOW, 43210, HIGH, 7447, &wire),
+            );
+            aggregate_where(&d, &filter).selection()
+        };
+        assert_eq!(
+            truncated,
+            Selection {
+                matched: 0,
+                rejected: 0,
+                undecided: 1
+            },
+            "a body this reader cannot resolve is still real and unmeasured"
+        );
+
         let valued = {
             let mut d = Dissection::new();
             let wire = crate::datagram_tests::frame_carrying(&request_query_valued(
@@ -1286,11 +1477,11 @@ pub(crate) mod tests {
         assert_eq!(
             valued,
             Selection {
-                matched: 0,
+                matched: 1,
                 rejected: 0,
-                undecided: 1
+                undecided: 0
             },
-            "the query's bytes are real and unmeasured"
+            "seven bytes, and the wire said so"
         );
 
         let bare = {

@@ -5462,8 +5462,8 @@ layer_c1bt_capture_no_default_features() {
         exchange::tests::moving_the_verdict_to_the_close_did_not_move_what_time_means \
         exchange::tests::the_throughput_plane_reports_an_outcome_term_as_undecided_not_empty \
         agg::tests::the_fixture_puts_a_valued_query_and_a_bare_one_on_the_wire \
-        agg::tests::a_query_carrying_a_value_is_unsized_and_a_bare_one_is_a_measured_zero \
-        agg::tests::a_bytes_term_over_an_unsizable_payload_is_undecided_rather_than_false \
+        agg::tests::a_querys_value_is_measured_and_an_unresolvable_body_still_is_not \
+        agg::tests::a_bytes_term_decides_a_measured_query_and_declines_an_unresolvable_one \
         report::tests::an_unsizable_payload_reaches_the_document_and_the_verdict \
         agg::tests::the_capture_origin_is_the_earliest_instant_over_every_packet \
         agg::tests::an_elapsed_window_selects_what_an_absolute_one_would_and_time_does_not \

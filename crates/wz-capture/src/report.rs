@@ -1115,14 +1115,16 @@ mod tests {
     fn an_unsizable_payload_reaches_the_document_and_the_verdict() {
         use crate::exchange::tests as fx;
 
+        // R311y640 — the record that carries an unsizable payload is now the
+        // TRUNCATED query body, not merely a valued one: a query's value became
+        // measurable this round, so a fixture that still used it would assert
+        // an incompleteness the capture no longer has. The floor and the way the
+        // document reports it are unchanged; only the record that produces one
+        // moved.
         let valued = fx::dissect(&[(
             true,
             Some(10),
-            crate::agg::tests::request_query_valued(
-                1,
-                fx::sender_space(0, Some("demo/q")),
-                Some(b"payload"),
-            ),
+            crate::agg::tests::request_query_truncated(1, fx::sender_space(0, Some("demo/q"))),
         )]);
         let throughput = crate::agg::aggregate(&valued);
         assert_eq!(
