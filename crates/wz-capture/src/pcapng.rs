@@ -274,6 +274,40 @@ pub struct PcapngFile {
     /// stepping over one and saying so. [`Self::carries_decryption_secrets`] is
     /// the case that motivated this.
     pub skipped_blocks: Vec<SkippedBlock>,
+    /// R311y658 (§1.2a) — the Decryption Secrets Blocks' payloads, in
+    /// first-seen order. Empty for a file that carried none.
+    pub decryption_secrets: Vec<DecryptionSecrets>,
+}
+
+/// R311y658 (§1.2a) — one Decryption Secrets Block's payload, KEPT.
+///
+/// R311y625 counted these blocks and dropped their bytes, which made the file's
+/// own answer to "can this capture be read" unreachable: the keys were in the
+/// capture, the reader knew a DSB was there, and it walked past the material.
+///
+/// The bytes are handed on UNPARSED. `secrets_type` says what they are (RFC
+/// draft-tuexen-opsawg-pcapng §4.7 registers `0x544c534b`, `"TLSK"`, for an NSS
+/// key log), and reading them is TLS vocabulary that does not belong in a file
+/// parser -- `wz-tls-record::keylog` is where that lives, on the far side of the
+/// same seam the cipher went over.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DecryptionSecrets {
+    /// The registered secrets type word, in host order.
+    pub secrets_type: u32,
+    /// The block's secrets data, exactly as the file carried it.
+    pub secrets: Vec<u8>,
+}
+
+impl core::fmt::Debug for DecryptionSecrets {
+    /// Prints the TYPE and the LENGTH and never the bytes. A capture tool that
+    /// spilled key material into a log would be worse than one that could not
+    /// read it at all.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DecryptionSecrets")
+            .field("secrets_type", &format_args!("{:#010x}", self.secrets_type))
+            .field("secrets", &format_args!("<{} byte(s)>", self.secrets.len()))
+            .finish()
+    }
 }
 
 /// R311y625 (§1.4d) — one block type this reader stepped over, and how often.
@@ -455,6 +489,7 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
     let mut interface_stats: Vec<InterfaceStats> = Vec::new();
     // R311y625 (§1.4d) — block types stepped over, counted rather than dropped.
     let mut skipped: Vec<SkippedBlock> = Vec::new();
+    let mut dsb: Vec<DecryptionSecrets> = Vec::new();
     // R311y607 — obsolete-Packet-Block drop counters, summed per interface.
     // A map rather than a Vec because the interface list is rebuilt at each
     // section boundary while these are accumulated across the whole file, and
@@ -679,6 +714,36 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
             // what this crate's own rule requires of anything it drops. A
             // reader that walks past a block silently reports the file it can
             // read as if it were the file it was given.
+            // R311y658 (§1.2a) — the one skipped type whose BYTES are worth
+            // more than its count. Still recorded as skipped, because this
+            // reader does not act on it: the count says "there were keys here"
+            // and the payload is what a decryptor needs, and dropping the
+            // skipped entry would make the file look fully understood.
+            BT_DSB => {
+                if body.len() >= 8 {
+                    let secrets_type = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+                    let len = u32::from_le_bytes([body[4], body[5], body[6], body[7]]) as usize;
+                    // The declared length is the file's claim; the block is the
+                    // evidence. A DSB whose secrets run past its own block is
+                    // truncated, and taking `min` keeps what is really there
+                    // rather than reading whatever follows in the buffer.
+                    let end = (8 + len).min(body.len());
+                    dsb.push(DecryptionSecrets {
+                        secrets_type,
+                        secrets: body[8..end].to_vec(),
+                    });
+                }
+                let entry = skipped
+                    .iter_mut()
+                    .find(|s: &&mut SkippedBlock| s.block_type == BT_DSB);
+                match entry {
+                    Some(e) => e.count += 1,
+                    None => skipped.push(SkippedBlock {
+                        block_type: BT_DSB,
+                        count: 1,
+                    }),
+                }
+            }
             other => {
                 let entry = skipped
                     .iter_mut()
@@ -722,6 +787,7 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
         sections,
         interface_stats,
         skipped_blocks: skipped,
+        decryption_secrets: dsb,
     })
 }
 
@@ -1012,6 +1078,78 @@ mod tests {
             parsed.skipped_blocks
         );
         assert_eq!(parsed.carries_name_resolution(), 0);
+    }
+
+    /// R311y658 (§1.2a) — and the BYTES are kept, not just the count.
+    ///
+    /// R311y625 counted the block and dropped its payload, which made the
+    /// file's own answer to "can this capture be read" unreachable: the keys
+    /// were in the capture, this reader knew a DSB was there, and it walked
+    /// past the material. The payload is handed on UNPARSED -- what an NSS key
+    /// log means is TLS vocabulary, and a pcapng parser that grew it would be
+    /// carrying a protocol it cannot use.
+    #[test]
+    fn a_decryption_secrets_blocks_payload_is_kept_for_a_decryptor() {
+        const TLSK: u32 = 0x544c_534b;
+        let body = b"CLIENT_TRAFFIC_SECRET_0 00 11\n";
+        let mut dsb = Vec::new();
+        dsb.extend_from_slice(&BT_DSB.to_le_bytes());
+        let total = 12 + 8 + body.len() + 2; // header/trailer + type + len + body + pad
+        dsb.extend_from_slice(&(total as u32).to_le_bytes());
+        dsb.extend_from_slice(&TLSK.to_le_bytes());
+        dsb.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        dsb.extend_from_slice(body);
+        dsb.extend_from_slice(&[0, 0]); // to a 4-byte boundary
+        dsb.extend_from_slice(&(total as u32).to_le_bytes());
+
+        let mut file = write(&[(1, 6)], &[(0, 1_000_000, &[0xAA; 4])]);
+        file.extend_from_slice(&dsb);
+        let parsed = parse(&file).expect("a DSB must not be fatal");
+
+        assert_eq!(
+            parsed.carries_decryption_secrets(),
+            1,
+            "the count R311y625 added must not have been traded away"
+        );
+        assert_eq!(parsed.decryption_secrets.len(), 1);
+        assert_eq!(parsed.decryption_secrets[0].secrets_type, TLSK);
+        assert_eq!(
+            parsed.decryption_secrets[0].secrets,
+            body.to_vec(),
+            "the payload must arrive byte for byte, without the padding"
+        );
+
+        // AND NO KEY MATERIAL IN THE DEBUG RENDERING: a capture tool that
+        // spilled secrets into a log would be worse than one that could not
+        // read them at all.
+        let shown = alloc::format!("{:?}", parsed.decryption_secrets[0]);
+        assert!(shown.contains("byte(s)"), "{shown}");
+        assert!(!shown.contains("CLIENT_TRAFFIC"), "{shown}");
+
+        // A TRUNCATED DSB: the block declares more secrets than it carries,
+        // which is the ordinary shape of a capture cut short while the writer
+        // was flushing. The DECLARED length is the file's claim and the block is
+        // the evidence, so what is really there is what arrives -- and not a
+        // panic, and not whatever bytes follow in the buffer. Without the clamp
+        // the leg above passes unchanged, because a well-formed DSB's two
+        // lengths agree; this is the only shape that separates them.
+        let mut cut = Vec::new();
+        cut.extend_from_slice(&BT_DSB.to_le_bytes());
+        let total = 12 + 8 + 4;
+        cut.extend_from_slice(&(total as u32).to_le_bytes());
+        cut.extend_from_slice(&TLSK.to_le_bytes());
+        cut.extend_from_slice(&999u32.to_le_bytes()); // the claim
+        cut.extend_from_slice(b"abcd"); // the evidence
+        cut.extend_from_slice(&(total as u32).to_le_bytes());
+        let mut file = write(&[(1, 6)], &[(0, 1_000_000, &[0xAA; 4])]);
+        file.extend_from_slice(&cut);
+        let parsed = parse(&file).expect("a truncated DSB must not be fatal");
+        assert_eq!(
+            parsed.decryption_secrets[0].secrets,
+            b"abcd".to_vec(),
+            "a DSB may not read past its own block on the strength of its own \
+             length field"
+        );
     }
 
     /// THE CONTROL: an ordinary capture reports nothing skipped. Without it a

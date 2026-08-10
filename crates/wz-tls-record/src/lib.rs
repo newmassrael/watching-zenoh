@@ -45,6 +45,8 @@
 //! which is what a keylog or a pcapng Decryption Secrets Block carries), key
 //! update, TLS 1.2, and QUIC. Each of those is its own decision.
 
+pub mod keylog;
+
 use ring::aead;
 use ring::hkdf;
 
