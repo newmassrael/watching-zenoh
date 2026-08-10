@@ -7,7 +7,7 @@
 
 use std::process::ExitCode;
 
-use wz_analyze::{analyze_with, parse, USAGE};
+use wz_analyze::{analyze_declaring_quic, parse, USAGE};
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -45,12 +45,17 @@ fn main() -> ExitCode {
         }
     };
 
-    let (rendered, outcome) = match analyze_with(
+    // R311y670 — every option the command line accepts reaches the analysis.
+    // The two added this round had to, or they would have been flags the parser
+    // read and nothing acted on.
+    let (rendered, outcome) = match analyze_declaring_quic(
         &capture,
         keylog.as_deref(),
         options.format,
         options.per_flow,
         options.per_message,
+        options.max_messages,
+        &options.quic_ports,
     ) {
         Ok(out) => out,
         Err(err) => {

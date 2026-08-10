@@ -468,7 +468,8 @@ impl<'a> CaptureReport<'a> {
             s.push_str(&format!(
                 ",\"quic\":{{\"flows\":{},\"packets\":{},\"bytes\":{},\"initial\":{},\
                  \"handshake\":{},\"zero_rtt\":{},\"one_rtt\":{},\"retry\":{},\
-                 \"version_negotiation\":{},\"unrecognised\":{},\"decrypted\":false}}",
+                 \"version_negotiation\":{},\"unrecognised\":{},\"declared_flows\":{},\
+                 \"decrypted\":false}}",
                 q.len(),
                 q.iter().map(|c| c.packets).sum::<usize>(),
                 q.iter().map(|c| c.bytes).sum::<u64>(),
@@ -479,6 +480,10 @@ impl<'a> CaptureReport<'a> {
                 q.iter().map(|c| c.retry).sum::<usize>(),
                 q.iter().map(|c| c.version_negotiation).sum::<usize>(),
                 q.iter().map(|c| c.unrecognised).sum::<usize>(),
+                // R311y670 — how many of those flows are a PREMISE rather than
+                // evidence. A consumer that treats a declared flow as a
+                // recognised one is treating someone's flag as a measurement.
+                q.iter().filter(|c| c.declared).count(),
             ));
         }
         s.push_str(&format!(
@@ -693,9 +698,17 @@ impl<'a> CaptureReport<'a> {
                 d.datagram_flows().iter().filter_map(|fl| fl.quic).collect();
             if !q.is_empty() {
                 s.push_str(&format!(
-                    "  QUIC: {} flow(s), {} packet(s), {} byte(s) -- NOT DECRYPTED \
+                    "  QUIC: {} flow(s){}, {} packet(s), {} byte(s) -- NOT DECRYPTED \
                      (this reader recognises QUIC and opens none of it)\n",
                     q.len(),
+                    // Named in the rendering and not only in the JSON: a person
+                    // reading this must know whether the classification came from
+                    // a header or from their own flag, because a wrong flag turns
+                    // real zenoh into an unopened QUIC flow.
+                    match q.iter().filter(|c| c.declared).count() {
+                        0 => alloc::string::String::new(),
+                        n => alloc::format!(" ({n} declared, not recognised)"),
+                    },
                     q.iter().map(|c| c.packets).sum::<usize>(),
                     q.iter().map(|c| c.bytes).sum::<u64>(),
                 ));

@@ -5223,7 +5223,8 @@ layer_c1bw_analyze_cli() {
         the_flows_option_names_which_connection_the_summary_cannot \
         the_json_rendering_is_a_single_document_even_with_flows \
         the_messages_option_lists_what_was_read_and_not_only_how_much \
-        the_json_listing_carries_the_messages_and_stays_one_document
+        the_json_listing_carries_the_messages_and_stays_one_document \
+        the_quic_and_max_message_options_reach_the_analysis
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bw FAIL: $name is absent from the binary test target"
@@ -5277,7 +5278,9 @@ layer_c1bw_analyze_cli() {
         tests::the_text_flow_row_has_a_pinned_shape_and_not_only_pinned_words \
         tests::the_message_listing_is_bounded_and_says_how_many_it_left_out \
         tests::a_datagram_flow_is_listed_and_its_scouting_messages_are_named \
-        tests::a_capture_with_both_transports_lists_them_in_one_separated_array
+        tests::a_capture_with_both_transports_lists_them_in_one_separated_array \
+        tests::a_mid_connection_quic_capture_needs_the_caller_to_say_so \
+        tests::a_declared_flow_is_marked_as_a_premise_and_a_recognised_one_is_not
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bw FAIL: $name is absent from the wz-analyze lib target"

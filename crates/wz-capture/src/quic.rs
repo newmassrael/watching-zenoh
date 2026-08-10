@@ -250,6 +250,16 @@ pub struct QuicCensus {
     /// seen. First one wins: a flow whose version changes mid-connection is a
     /// version negotiation, whose own packet carries `0` and does not overwrite.
     pub version: Option<u32>,
+    /// R311y670 (§1.2a) — this flow was DECLARED QUIC by the caller rather than
+    /// RECOGNISED from a long header.
+    ///
+    /// Carried because the two are different claims and a reader must be able to
+    /// tell which one it is reading. "I saw an Initial packet with version 1 on
+    /// this flow" is evidence; "someone told me port 4433 is QUIC" is a premise,
+    /// and a premise that is wrong makes every count below wrong with it — a
+    /// declared port carrying real zenoh would report that zenoh as unopened
+    /// QUIC, which is this round's own mirror-image hazard.
+    pub declared: bool,
 }
 
 impl QuicCensus {

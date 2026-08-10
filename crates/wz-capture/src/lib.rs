@@ -1645,6 +1645,19 @@ pub struct Dissection {
     limits: DissectionLimits,
     /// What the limits have cost so far.
     drops: DissectionDrops,
+    /// R311y670 (§1.2a) — UDP ports the CALLER declares to be QUIC.
+    ///
+    /// The discriminator that does not exist in the bytes, supplied by whoever
+    /// has it — exactly the role an external key log plays for TLS. MEASURED, and
+    /// the measurement is why this field exists rather than a cleverer rule: a
+    /// lone QUIC 1-RTT packet whose first byte is `0x46` decodes as a COMPLETE
+    /// zenoh Fragment with ZERO unaccounted bytes, and the capture reports
+    /// itself `complete`. No residue signal catches it, because `Fragment`
+    /// consumes to the end of the datagram by construction. A mid-connection
+    /// QUIC capture is genuinely indistinguishable from zenoh at the byte level,
+    /// so the only honest ways to settle it are a long header (which such a
+    /// capture lacks) or a caller who knows.
+    declared_quic_ports: alloc::vec::Vec<u16>,
     /// R311y605 (F5) — checksum verdicts, tallied as packets arrive. They must
     /// be counted here and not derived later: a `Checksums` rides on the
     /// `Segment` / `Datagram`, which is consumed by the assembler and gone.
@@ -1774,6 +1787,7 @@ impl Default for Dissection {
             datagram_flows: Vec::new(),
             skipped: Vec::new(),
             skip_census: SkipCensus::default(),
+            declared_quic_ports: Vec::new(),
             limits: DissectionLimits::default(),
             drops: DissectionDrops::default(),
             checksums: [0; 6],
@@ -2811,9 +2825,38 @@ impl Dissection {
                 return;
             }
             None => {
+                // Recognition first, declaration second, and the order matters
+                // for what gets RECORDED rather than for what happens: a
+                // declared flow whose long header this reader can also read is
+                // evidence as well as premise, and the census should say so.
                 if let Some(p) = quic::recognise_long(&d.payload) {
                     let mut census = quic::QuicCensus::default();
                     census.add(p);
+                    flow.quic = Some(census);
+                    self.evict_datagram_flows_beyond_cap();
+                    return;
+                }
+                // R311y670 — the caller DECLARED this port. Nothing in the bytes
+                // could have told us (measured: a 1-RTT packet decodes as a
+                // complete zenoh Fragment with no residue and the capture reports
+                // itself whole), so this is the only way such a flow is ever
+                // classified — and it is marked as a premise, not as evidence.
+                // `FlowKey`'s port is `u32` because a vsock port is; a declared
+                // UDP port is 16 bits and is widened rather than the key being
+                // narrowed, which would alias two vsock flows onto one.
+                if self
+                    .declared_quic_ports
+                    .iter()
+                    .any(|p| u32::from(*p) == d.flow.low.port || u32::from(*p) == d.flow.high.port)
+                {
+                    let mut census = quic::QuicCensus {
+                        declared: true,
+                        ..Default::default()
+                    };
+                    match quic::recognise_on_quic_flow(&d.payload) {
+                        Some(p) => census.add(p),
+                        None => census.add_unrecognised(d.payload.len()),
+                    }
                     flow.quic = Some(census);
                     self.evict_datagram_flows_beyond_cap();
                     return;
@@ -2914,8 +2957,21 @@ impl Dissection {
 
     /// Dissect a whole classic pcap file from memory.
     pub fn from_pcap(bytes: &[u8]) -> Result<Self, pcap::PcapError> {
+        Self::from_pcap_declaring_quic(bytes, &[])
+    }
+
+    /// R311y670 — [`Self::from_pcap`], told which UDP ports carry QUIC. See
+    /// [`Self::from_capture_declaring_quic`] for why a caller must be able to.
+    pub fn from_pcap_declaring_quic(
+        bytes: &[u8],
+        quic_udp_ports: &[u16],
+    ) -> Result<Self, pcap::PcapError> {
         let file = pcap::parse(bytes)?;
         let mut out = Self::new();
+        // Declared BEFORE the first packet, which is the whole point: a flow is
+        // established as QUIC by its first datagram, so a declaration arriving
+        // afterwards would have let that datagram through the zenoh decoder.
+        out.declared_quic_ports = quic_udp_ports.to_vec();
         for packet in &file.packets {
             out.push_packet_at(
                 file.link_type,
@@ -2937,8 +2993,19 @@ impl Dissection {
     /// carries interfaces with different link layers, and one link type applied
     /// to all of them decapsulates half the file as the wrong thing.
     pub fn from_pcapng(bytes: &[u8]) -> Result<Self, pcapng::PcapngError> {
+        Self::from_pcapng_declaring_quic(bytes, &[])
+    }
+
+    /// R311y670 — [`Self::from_pcapng`], told which UDP ports carry QUIC. See
+    /// [`Self::from_capture_declaring_quic`] for why a caller must be able to.
+    pub fn from_pcapng_declaring_quic(
+        bytes: &[u8],
+        quic_udp_ports: &[u16],
+    ) -> Result<Self, pcapng::PcapngError> {
         let file = pcapng::parse(bytes)?;
         let mut out = Self::new();
+        // See `from_pcap_declaring_quic`: before the first packet, not after.
+        out.declared_quic_ports = quic_udp_ports.to_vec();
         // R311y661 (§1.2a) — the file's own key material, carried instead of
         // discarded. See `Dissection::decryption_secrets`.
         out.decryption_secrets = file.decryption_secrets.clone();
@@ -2970,10 +3037,39 @@ impl Dissection {
     /// instance of the first, and "bad pcapng magic" is a useless diagnosis for
     /// a truncated classic pcap.
     pub fn from_capture(bytes: &[u8]) -> Result<Self, CaptureError> {
+        Self::from_capture_declaring_quic(bytes, &[])
+    }
+
+    /// R311y670 (§1.2a) — [`Self::from_capture`], told which UDP ports carry
+    /// QUIC.
+    ///
+    /// # Why a caller has to be able to say this
+    ///
+    /// R311y669 recognised QUIC by its LONG header, which is the only sound rule
+    /// available: a short header's first byte is a flagged zenoh MID, so no
+    /// byte-level test separates them. That leaves a capture which begins
+    /// mid-connection, and MEASURED, its output is the worst this crate produces:
+    /// one QUIC 1-RTT packet beginning `0x46` decoded as a complete zenoh
+    /// `Fragment`, left ZERO unaccounted bytes, and the report said `complete`.
+    /// Every counter agreed the capture had been read whole.
+    ///
+    /// Nothing in the bytes can fix that, and a heuristic would trade this
+    /// misread for its mirror image — real zenoh silently reported as an
+    /// unopened QUIC flow. So the fact comes from outside, the way an external
+    /// key log does for TLS: the person holding the capture knows which port
+    /// their QUIC endpoint listens on, and saying so is one flag.
+    ///
+    /// A declared flow is marked as DECLARED in its census, because "I recognised
+    /// this" and "I was told this" are different claims and a reader must be able
+    /// to tell which one they are reading.
+    pub fn from_capture_declaring_quic(
+        bytes: &[u8],
+        quic_udp_ports: &[u16],
+    ) -> Result<Self, CaptureError> {
         if pcapng::looks_like_pcapng(bytes) {
-            Self::from_pcapng(bytes).map_err(CaptureError::Pcapng)
+            Self::from_pcapng_declaring_quic(bytes, quic_udp_ports).map_err(CaptureError::Pcapng)
         } else {
-            Self::from_pcap(bytes).map_err(CaptureError::Pcap)
+            Self::from_pcap_declaring_quic(bytes, quic_udp_ports).map_err(CaptureError::Pcap)
         }
     }
 }

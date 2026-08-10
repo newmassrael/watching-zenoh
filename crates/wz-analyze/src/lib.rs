@@ -50,6 +50,18 @@ pub struct Options {
     pub per_flow: bool,
     /// R311y667 (§1.2a) — list the decoded MESSAGES, not just how many.
     pub per_message: bool,
+    /// R311y670 (§1.2a) — UDP ports the caller declares to be QUIC.
+    ///
+    /// The one fact about a mid-connection QUIC capture that cannot come from
+    /// the bytes; see
+    /// [`Dissection::from_capture_declaring_quic`](wz_capture::Dissection::from_capture_declaring_quic).
+    pub quic_ports: Vec<u16>,
+    /// R311y670 (§1.2a) — the ceiling on messages listed per flow.
+    ///
+    /// R311y669 added the ceiling to the library and left `wz-analyze` passing
+    /// `None` unconditionally, so the bound had no caller — the shape this crate
+    /// exists to correct, one argument deep.
+    pub max_messages: Option<usize>,
 }
 
 /// Why a command line was not accepted.
@@ -63,6 +75,11 @@ pub enum UsageError {
     TwoCaptures,
     /// A flag that takes a value was given none.
     MissingValue(&'static str),
+    /// R311y670 — a flag whose value is not the kind of thing it takes.
+    /// REFUSED rather than defaulted: `--quic htttp` silently ignored produces a
+    /// report claiming a mid-connection QUIC capture carried zenoh, which is the
+    /// exact wrong answer the flag exists to prevent.
+    BadValue(&'static str, String),
     /// An unrecognised flag. REFUSED rather than ignored: a misspelt
     /// `--keylog` that is silently dropped produces a report saying the capture
     /// could not be decrypted, which is a wrong answer that looks like a right
@@ -77,6 +94,7 @@ impl core::fmt::Display for UsageError {
             Self::TwoCaptures => write!(f, "more than one capture file given"),
             Self::MissingValue(flag) => write!(f, "{flag} needs a value"),
             Self::UnknownFlag(flag) => write!(f, "unknown option `{flag}`"),
+            Self::BadValue(flag, got) => write!(f, "{flag} does not take `{got}`"),
         }
     }
 }
@@ -99,6 +117,15 @@ OPTIONS:
                       with the direction, offset and namespace of each.
                       Implies --flows
     --json            render the report as JSON instead of text
+    --quic <port>     treat UDP traffic on this port as QUIC. Repeatable.
+                      A capture that begins mid-connection carries nothing that
+                      distinguishes a QUIC 1-RTT packet from a zenoh datagram --
+                      measured, one such packet decodes as a complete zenoh
+                      Fragment and the capture reports itself whole -- so this is
+                      the only way to settle it, and the report says which flows
+                      were declared rather than recognised
+    --max-messages <n>  list at most n messages per flow, saying how many more
+                      there were. Unbounded by default
     -h, --help        print this and exit
 ";
 
@@ -109,6 +136,8 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut format = Format::Text;
     let mut per_flow = false;
     let mut per_message = false;
+    let mut quic_ports: Vec<u16> = Vec::new();
+    let mut max_messages: Option<usize> = None;
     let mut at = 0usize;
     while at < args.len() {
         let arg = &args[at];
@@ -121,6 +150,24 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
                 // combination that has one sensible meaning.
                 per_flow = true;
                 per_message = true;
+            }
+            "--quic" => {
+                at += 1;
+                let raw = args.get(at).ok_or(UsageError::MissingValue("--quic"))?;
+                quic_ports.push(
+                    raw.parse::<u16>()
+                        .map_err(|_| UsageError::BadValue("--quic", raw.clone()))?,
+                );
+            }
+            "--max-messages" => {
+                at += 1;
+                let raw = args
+                    .get(at)
+                    .ok_or(UsageError::MissingValue("--max-messages"))?;
+                max_messages = Some(
+                    raw.parse::<usize>()
+                        .map_err(|_| UsageError::BadValue("--max-messages", raw.clone()))?,
+                );
             }
             "--keylog" => {
                 at += 1;
@@ -149,6 +196,8 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
         format,
         per_flow,
         per_message,
+        quic_ports,
+        max_messages,
     })
 }
 
@@ -220,7 +269,33 @@ pub fn analyze_with_limit(
     per_message: bool,
     messages_per_flow: Option<usize>,
 ) -> Result<(String, Outcome), CaptureError> {
-    let mut dissection = Dissection::from_capture(capture)?;
+    analyze_declaring_quic(
+        capture,
+        keylog,
+        format,
+        per_flow,
+        per_message,
+        messages_per_flow,
+        &[],
+    )
+}
+
+/// [`analyze_with_limit`], told which UDP ports carry QUIC.
+///
+/// R311y670 (§1.2a) — the one fact a mid-connection QUIC capture cannot supply
+/// about itself. See
+/// [`Dissection::from_capture_declaring_quic`](wz_capture::Dissection::from_capture_declaring_quic)
+/// for the measurement that makes a caller-supplied answer the only honest one.
+pub fn analyze_declaring_quic(
+    capture: &[u8],
+    keylog: Option<&[u8]>,
+    format: Format,
+    per_flow: bool,
+    per_message: bool,
+    messages_per_flow: Option<usize>,
+    quic_ports: &[u16],
+) -> Result<(String, Outcome), CaptureError> {
+    let mut dissection = Dissection::from_capture_declaring_quic(capture, quic_ports)?;
 
     // The capture's own keys first, then the external log folded in.
     let (mut opener, foreign) = CaptureOpener::from_secrets_blocks(dissection.decryption_secrets());
@@ -620,6 +695,8 @@ mod tests {
                 format: Format::Text,
                 per_flow: false,
                 per_message: false,
+                quic_ports: Vec::new(),
+                max_messages: None,
             })
         );
     }
@@ -642,6 +719,8 @@ mod tests {
                 // under their flow, so the pairing has one sensible meaning.
                 per_flow: true,
                 per_message: true,
+                quic_ports: Vec::new(),
+                max_messages: None,
             })
         );
     }
@@ -665,6 +744,42 @@ mod tests {
         assert_eq!(
             parse(&args(&["a.pcapng", "b.pcapng"])),
             Err(UsageError::TwoCaptures)
+        );
+    }
+
+    /// R311y670 — the two flags added this round are READ, and a value that is
+    /// not a number is REFUSED rather than defaulted.
+    ///
+    /// Refusal matters more here than for most flags: `--quic htttp` silently
+    /// dropped produces a report claiming a mid-connection QUIC capture carried
+    /// zenoh, which is the exact wrong answer the flag exists to prevent.
+    #[test]
+    fn the_quic_and_max_message_options_are_read_and_their_values_checked() {
+        let got = parse(&args(&[
+            "cap.pcapng",
+            "--quic",
+            "4433",
+            "--quic",
+            "7447",
+            "--max-messages",
+            "16",
+        ]))
+        .expect("accepted");
+        assert_eq!(got.quic_ports, vec![4433, 7447], "--quic is REPEATABLE");
+        assert_eq!(got.max_messages, Some(16));
+
+        assert_eq!(
+            parse(&args(&["cap.pcapng", "--quic", "htttp"])),
+            Err(UsageError::BadValue("--quic", "htttp".into()))
+        );
+        assert_eq!(
+            parse(&args(&["cap.pcapng", "--quic", "70000"])),
+            Err(UsageError::BadValue("--quic", "70000".into())),
+            "a port past 16 bits is not a port"
+        );
+        assert_eq!(
+            parse(&args(&["cap.pcapng", "--max-messages"])),
+            Err(UsageError::MissingValue("--max-messages"))
         );
     }
 
@@ -1177,6 +1292,130 @@ mod tests {
         let (all, _) = analyze_with(&file, None, Format::Text, true, true).expect("parses");
         assert_eq!(all.lines().filter(|l| l.contains("Scout")).count(), 6);
         assert!(!all.contains("more not listed"));
+    }
+
+    /// One UDP datagram carrying a QUIC 1-RTT packet, whose first byte is a
+    /// perfectly good flagged zenoh MID.
+    fn one_rtt_packet(first: u8) -> Vec<u8> {
+        let mut p = vec![first];
+        p.extend_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7]);
+        p.extend_from_slice(&[0x06]);
+        p.extend_from_slice(&[0xCC; 25]);
+        udp_to_zenoh_port(&p)
+    }
+
+    /// R311y670 (§1.2a) — A MID-CONNECTION QUIC CAPTURE NEEDS THE CALLER TO SAY
+    /// SO, and both halves of that are asserted here.
+    ///
+    /// THE MEASUREMENT THAT PRODUCED THIS ROUND: one QUIC 1-RTT packet beginning
+    /// `0x46` decodes as a COMPLETE zenoh `Fragment`, leaves ZERO unaccounted
+    /// bytes, and the report says `complete`. Every counter agrees the capture was
+    /// read whole. That is the worst output this crate can produce and it is the
+    /// shape `tls.rs` says the crate exists to end.
+    ///
+    /// R311y669's recognition cannot reach it: a short header carries no version,
+    /// no connection-id length, nothing to check — so the sound rule needs a long
+    /// header and this capture has none. A heuristic would trade the misread for
+    /// its mirror image, real zenoh reported as an unopened QUIC flow. So the fact
+    /// comes from outside, exactly as an external key log does for TLS.
+    ///
+    /// The FIRST half of this test records the limit rather than hiding it: with
+    /// no flag, the misread is still there. A round that asserted only the fixed
+    /// case would leave a reader believing QUIC was closed.
+    #[test]
+    fn a_mid_connection_quic_capture_needs_the_caller_to_say_so() {
+        let file = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000_000, &one_rtt_packet(0x46))],
+        );
+
+        // THE LIMIT, as a fact. Nothing in these bytes says QUIC.
+        let (blind, outcome) = analyze_with(&file, None, Format::Text, true, true).expect("parses");
+        assert!(
+            blind.contains("messages decoded: 1") && blind.contains("Fragment"),
+            "without the flag this is still read as zenoh, and saying so is the \
+             honest form -- the byte carries no answer: {blind}"
+        );
+        assert!(
+            outcome.complete,
+            "and the verdict still says whole, which is exactly why a caller must \
+             be able to correct it"
+        );
+
+        // THE ROUND: the caller supplies what the capture cannot.
+        let (told, outcome) =
+            analyze_declaring_quic(&file, None, Format::Text, true, true, None, &[7447])
+                .expect("parses");
+        assert!(
+            told.contains("messages decoded: 0"),
+            "not one zenoh message may survive the correction: {told}"
+        );
+        assert!(
+            !told.contains("Fragment"),
+            "and specifically not the name the misread produced: {told}"
+        );
+        assert!(
+            told.contains("QUIC: 1 flow(s) (1 declared, not recognised)"),
+            "the report must say the classification was a PREMISE and not \
+             evidence -- a wrong flag makes every count under it wrong: {told}"
+        );
+        assert!(
+            !outcome.complete,
+            "a capture whose zenoh is inside QUIC is not one this reader saw whole"
+        );
+    }
+
+    /// R311y670 (§1.2a) — a DECLARED flow and a RECOGNISED one are told apart,
+    /// including in JSON.
+    ///
+    /// The hazard the label exists for, stated: a declared port carrying real
+    /// zenoh reports that zenoh as an unopened QUIC flow. That is the accepted
+    /// cost of a premise, and it is only acceptable while the report says which
+    /// flows rest on one.
+    #[test]
+    fn a_declared_flow_is_marked_as_a_premise_and_a_recognised_one_is_not() {
+        // Recognised: a v1 long header, no flag given.
+        let mut initial = vec![0xC0u8];
+        initial.extend_from_slice(&1u32.to_be_bytes());
+        initial.push(8);
+        initial.extend_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7]);
+        initial.push(4);
+        initial.extend_from_slice(&[8, 9, 10, 11]);
+        initial.extend_from_slice(&[0x00, 0x29, 0x01]);
+        initial.extend_from_slice(&[0xAA; 40]);
+        let recognised = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000_000, &udp_to_zenoh_port(&initial))],
+        );
+        let (json, _) = analyze_declaring_quic(
+            &recognised,
+            None,
+            Format::Json,
+            true,
+            false,
+            None,
+            // Declared TOO, and still counted as recognised: evidence outranks a
+            // premise, because the long header is a fact about these bytes.
+            &[7447],
+        )
+        .expect("parses");
+        assert!(
+            json.contains("\"declared_flows\":0"),
+            "a flow whose long header was read is EVIDENCE, flag or no flag: {json}"
+        );
+
+        // Declared only.
+        let declared = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000_000, &one_rtt_packet(0x46))],
+        );
+        let (json, _) =
+            analyze_declaring_quic(&declared, None, Format::Json, true, false, None, &[7447])
+                .expect("parses");
+        assert!(
+            json.contains("\"declared_flows\":1") && json.contains("\"one_rtt\":1"),
+            "and one with nothing but a short header rests on the flag: {json}"
+        );
     }
 
     /// R311y664 — a file that is not a capture is an ERROR, not an empty

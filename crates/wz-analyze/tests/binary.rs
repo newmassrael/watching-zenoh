@@ -616,3 +616,111 @@ fn the_messages_option_lists_what_was_read_and_not_only_how_much() {
         "--flows counts them and does not name them: {flows_only}"
     );
 }
+
+/// R311y670 (§1.2a) — the two flags added this round REACH THE ANALYSIS.
+///
+/// The failure this gates is specific and this project has had it before: a flag
+/// the parser reads, stores in `Options`, and that nothing downstream acts on.
+/// The library test beside this one proves `parse` reads them; only the BINARY
+/// can prove `main` passes them on. R311y669 shipped the message ceiling with no
+/// caller at all -- `wz-analyze` passed `None` unconditionally -- which is that
+/// shape one argument deep.
+#[test]
+fn the_quic_and_max_message_options_reach_the_analysis() {
+    let scratch = Scratch::new("quic-flag");
+
+    // A QUIC 1-RTT packet on 7447, whose first byte is a flagged zenoh MID.
+    let mut one_rtt = vec![0x46u8];
+    one_rtt.extend_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7]);
+    one_rtt.push(0x06);
+    one_rtt.extend_from_slice(&[0xCC; 25]);
+    let mut udp = Vec::new();
+    udp.extend_from_slice(&50000u16.to_be_bytes());
+    udp.extend_from_slice(&7447u16.to_be_bytes());
+    udp.extend_from_slice(&((8 + one_rtt.len()) as u16).to_be_bytes());
+    udp.extend_from_slice(&0u16.to_be_bytes());
+    udp.extend_from_slice(&one_rtt);
+    let mut ip = vec![0x45u8, 0];
+    ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+    ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+    ip.extend_from_slice(&[10, 0, 0, 1]);
+    ip.extend_from_slice(&[10, 0, 0, 2]);
+    ip.extend_from_slice(&udp);
+    let mut eth = vec![0u8; 12];
+    eth.extend_from_slice(&[0x08, 0x00]);
+    eth.extend_from_slice(&ip);
+    while eth.len() < 60 {
+        eth.push(0);
+    }
+
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &eth)],
+    );
+    let capture = scratch.write("mid.pcapng", &file);
+
+    let run = |extra: &[&str]| -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--messages")
+            .args(extra)
+            .output()
+            .expect("runs");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // `--quic` reaches it: the zenoh reading disappears and the flow is named.
+    let told = run(&["--quic", "7447"]);
+    assert!(
+        told.contains("messages decoded: 0") && told.contains("1 declared, not recognised"),
+        "--quic must reach the analysis, not just the parser: {told}"
+    );
+    // And without it, the misread the flag exists for is present -- which is
+    // what makes the assertion above about the flag rather than about the bytes.
+    let blind = run(&[]);
+    assert!(
+        blind.contains("Fragment"),
+        "the discriminating half: unflagged, this capture still reads as zenoh, \
+         so the difference above is the flag's: {blind}"
+    );
+
+    // `--max-messages` reaches it too, on a capture with more than one message.
+    let scouts = scratch.write("scouts.pcapng", &scouting_capture());
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&scouts)
+        .arg("--messages")
+        .arg("--max-messages")
+        .arg("1")
+        .output()
+        .expect("runs");
+    let capped = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        capped.contains("... 2 more not listed"),
+        "--max-messages must reach the analysis and say what it cut: {capped}"
+    );
+}
+
+/// Three multicast SCOUTs, so a listing has something to cap.
+fn scouting_capture() -> Vec<u8> {
+    let scout = [0x01u8, 0x09, (3 << 4) | 0x08 | 0x03, 0x11, 0x22, 0x33, 0x44];
+    let mut udp = Vec::new();
+    udp.extend_from_slice(&43210u16.to_be_bytes());
+    udp.extend_from_slice(&7446u16.to_be_bytes());
+    udp.extend_from_slice(&((8 + scout.len()) as u16).to_be_bytes());
+    udp.extend_from_slice(&0u16.to_be_bytes());
+    udp.extend_from_slice(&scout);
+    let mut ip = vec![0x45u8, 0];
+    ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+    ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+    ip.extend_from_slice(&[192, 168, 1, 5]);
+    ip.extend_from_slice(&[224, 0, 0, 224]);
+    ip.extend_from_slice(&udp);
+    let mut eth = vec![0u8; 12];
+    eth.extend_from_slice(&[0x08, 0x00]);
+    eth.extend_from_slice(&ip);
+    while eth.len() < 60 {
+        eth.push(0);
+    }
+    let refs: Vec<(u32, u64, &[u8])> = (0..3).map(|i| (0u32, 1_000_000 + i, &eth[..])).collect();
+    wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs)
+}
