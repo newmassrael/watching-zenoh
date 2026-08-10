@@ -1237,6 +1237,19 @@ pub struct Dissection {
     /// default must be ENABLED, since a capture with a hole is not a policy
     /// choice a caller opts into.
     gap_patience: Option<usize>,
+    /// R311y638 (§1.1r) — the earliest capture instant this dissection was
+    /// shown, over every packet whatever it decoded to.
+    ///
+    /// The MINIMUM rather than the first one handed in: a pcapng holding two
+    /// interfaces can present packets out of order, and a "start" that a
+    /// later-arriving earlier packet could move would make one capture answer
+    /// `elapsed` two ways depending on read order.
+    ///
+    /// Over every PACKET and not over every decoded record, because the
+    /// capture's timeline began when the tool started writing — a file whose
+    /// first 200 packets are someone else's traffic did not start at record
+    /// one.
+    capture_origin_ms: Option<u64>,
 }
 
 /// Hand-written for ONE field: `gap_patience` defaults to
@@ -1259,6 +1272,7 @@ impl Default for Dissection {
             capture_reported_drops: None,
             scouts: ScoutingCorrelation::default(),
             gap_patience: Some(crate::tcp::DEFAULT_GAP_PATIENCE),
+            capture_origin_ms: None,
         }
     }
 }
@@ -1546,6 +1560,17 @@ impl Dissection {
     }
 
     /// The bounds in force.
+    /// R311y638 (§1.1r) — the earliest instant this capture carried, or `None`
+    /// when it carried no clock at all.
+    ///
+    /// The origin the filter language's `elapsed` term counts from. A consumer
+    /// that folds two captures into one table must decide which origin governs
+    /// rather than inheriting one silently, which is why this is exposed
+    /// instead of being applied inside the planes.
+    pub fn capture_origin_ms(&self) -> Option<u64> {
+        self.capture_origin_ms
+    }
+
     pub fn limits(&self) -> DissectionLimits {
         self.limits
     }
@@ -1650,6 +1675,18 @@ impl Dissection {
         ts_millis: Option<u64>,
         bytes: &[u8],
     ) {
+        // R311y638 (§1.1r) — recorded BEFORE decapsulation, so a packet this
+        // reader cannot decode still counts as part of the capture's timeline.
+        // It is the capture that started, not the zenoh traffic in it.
+        // R311y638 (§1.1r) — recorded BEFORE decapsulation, so a packet this
+        // reader cannot decode still counts as part of the capture's timeline.
+        // It is the capture that started, not the zenoh traffic in it.
+        if let Some(ts) = ts_millis {
+            self.capture_origin_ms = Some(match self.capture_origin_ms {
+                Some(earliest) => earliest.min(ts),
+                None => ts,
+            });
+        }
         let segment = match link::decapsulate(link_type, packet_index, bytes) {
             Ok(Transport::Tcp(s)) => s,
             // R311y597 — raweth joins the datagram path rather than getting

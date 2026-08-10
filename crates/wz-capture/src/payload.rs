@@ -582,6 +582,9 @@ pub struct PayloadCensus {
     descriptors: usize,
     gaps: crate::agg::ThroughputGaps,
     selection: crate::filter::Selection,
+    /// R311y638 (§1.1r) — where the capture began, for the `elapsed` term. Set
+    /// only by [`payloads_where`], the entry point that has the whole capture.
+    capture_origin_ms: Option<u64>,
 }
 
 #[cfg(feature = "network-codecs")]
@@ -739,6 +742,7 @@ impl PayloadCensus {
             kind,
             payload_bytes,
             observed_at_ms: frame.observed_at_ms,
+            elapsed_ms: crate::agg::elapsed_since(self.capture_origin_ms, frame.observed_at_ms),
             // R311y636 (§1.1v) — as in `agg`: this plane inspects one payload
             // and correlates nothing, so an outcome term over it is undecidable
             // rather than false.
@@ -944,6 +948,7 @@ pub fn payloads_where(
     filter: &crate::filter::Filter,
 ) -> PayloadCensus {
     let mut census = PayloadCensus::new();
+    census.capture_origin_ms = dissection.capture_origin_ms();
     for flow in dissection.flows() {
         census.observe_flow_where(&flow.frames, filter);
     }

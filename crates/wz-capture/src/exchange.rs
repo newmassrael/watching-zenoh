@@ -285,6 +285,9 @@ pub struct ExchangeTable {
     gaps: ExchangeGaps,
     unread: ThroughputGaps,
     selection: Selection,
+    /// R311y638 (§1.1r) — where the capture began, for the `elapsed` term. Set
+    /// only by [`exchanges_where`], the entry point that has the whole capture.
+    capture_origin_ms: Option<u64>,
 }
 
 impl ExchangeTable {
@@ -541,6 +544,10 @@ impl ExchangeTable {
             // "when it closed" would move every reader's window by the latency
             // they were trying to measure.
             observed_at_ms: entry.requested_at,
+            // R311y638 (§1.1r) — relative to the CAPTURE and taken at the same
+            // instant `time` is, so the two fields cannot name different
+            // moments of one exchange.
+            elapsed_ms: crate::agg::elapsed_since(self.capture_origin_ms, entry.requested_at),
             outcome: Some(OutcomeView {
                 replies: entry.replies as u64,
                 errs: entry.errs as u64,
@@ -738,6 +745,7 @@ pub fn exchanges(dissection: &crate::Dissection) -> ExchangeTable {
 /// and payloads, rather than learning a second vocabulary per plane.
 pub fn exchanges_where(dissection: &crate::Dissection, filter: &Filter) -> ExchangeTable {
     let mut table = ExchangeTable::new();
+    table.capture_origin_ms = dissection.capture_origin_ms();
     for flow in dissection.flows() {
         table.observe_flow_where(&flow.frames, filter);
     }

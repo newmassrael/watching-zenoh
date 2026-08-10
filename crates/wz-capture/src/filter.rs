@@ -47,6 +47,7 @@
 //! | `kind` | `put` `del` `query` `reply` `err` | `==` `!=` | never |
 //! | `bytes` | an integer | `==` `!=` `<` `<=` `>` `>=` | the record carries a payload this build cannot size |
 //! | `time` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | the capture carried no clock |
+//! | `elapsed` | an integer, ms since the capture began | `==` `!=` `<` `<=` `>` `>=` | no clock, or the plane was not told the origin |
 //! | `replies` | an integer | `==` `!=` `<` `<=` `>` `>=` | the plane does not correlate exchanges |
 //! | `errs` | an integer | `==` `!=` `<` `<=` `>` `>=` | as above |
 //! | `first_reply` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | as above, or nothing answered, or no clock |
@@ -79,6 +80,27 @@
 //! what happened: the question was well-formed and that plane cannot answer it.
 //! Answering `no` would have produced an empty table indistinguishable from a
 //! capture with no unanswered queries in it.
+//!
+//! ## R311y638 (§1.1r) — `elapsed` is the one a person can actually type
+//!
+//! `time` is the capture clock in absolute milliseconds, which is the right
+//! thing to compare two captures on and the wrong thing to write by hand: a
+//! reader wanting the first five seconds of a file has to look up its epoch
+//! first. `elapsed` counts from
+//! [`Dissection::capture_origin_ms`](crate::Dissection::capture_origin_ms), so
+//! `elapsed < 5000` means what it looks like.
+//!
+//! It is a SECOND FIELD and not a second syntax on `time`, because the two
+//! answer different questions and a reader must be able to see which one a
+//! selector asked. The origin is the capture's earliest instant over every
+//! PACKET, so a file that opens with traffic this reader cannot decode still
+//! starts when the capture tool started.
+//!
+//! The origin reaches a plane only through the whole-capture entry points
+//! ([`aggregate_where`](crate::agg::aggregate_where) and its siblings). A
+//! caller folding flows by hand has not said where the capture began, so
+//! `elapsed` is [`Truth::Unknown`] there — the same shape as a `time` term
+//! over a capture with no clock, and for the same reason.
 //!
 //! `dir` is `a` / `b` and not `a2b` / `b2a` because
 //! [`Direction`](wz_session_core::passive::Direction) is what the rest of the
@@ -210,6 +232,14 @@ pub struct RecordView<'a> {
     /// capture format carried no timestamp
     /// ([`PassiveFrame::observed_at_ms`](wz_session_core::passive::PassiveFrame::observed_at_ms)).
     pub observed_at_ms: Option<u64>,
+    /// R311y638 (§1.1r) — milliseconds from the capture's first instant to
+    /// this record's, or `None` when either end is unknown.
+    ///
+    /// `None` covers two different absences that a filter answers identically:
+    /// this record had no clock, or the plane was never told where the capture
+    /// began. Both mean the question cannot be decided HERE, which is the only
+    /// thing a predicate needs to know.
+    pub elapsed_ms: Option<u64>,
     /// R311y636 (§1.1v) — the outcome of the exchange this record opened, or
     /// `None` on a plane that does not correlate exchanges.
     ///
@@ -314,6 +344,12 @@ enum Term {
         op: Op,
         value: u64,
     },
+    /// R311y638 (§1.1r) — the same comparison against the capture-relative
+    /// clock.
+    Elapsed {
+        op: Op,
+        value: u64,
+    },
     /// R311y636 (§1.1v) — the outcome axis. One variant per field rather than a
     /// `field: OutcomeField` discriminant carried alongside, so a new outcome
     /// field cannot be added without the match below failing to compile.
@@ -372,6 +408,13 @@ impl Term {
                 // by keeping the clock an `Option` all the way up.
                 None => Truth::Unknown,
                 Some(at) => Truth::of(op.apply(at, *value)),
+            },
+            // R311y638 (§1.1r) — undecidable for either of two reasons, and
+            // deliberately not told apart: a record with no clock and a plane
+            // with no origin both leave this question unanswerable here.
+            Self::Elapsed { op, value } => match record.elapsed_ms {
+                None => Truth::Unknown,
+                Some(ms) => Truth::of(op.apply(ms, *value)),
             },
             // R311y636 (§1.1v). The third undecidable case, and the widest: a
             // plane with no exchange correlation carries no outcome at all, so
@@ -625,7 +668,7 @@ impl fmt::Display for FilterError {
             FilterErrorKind::UnknownField(name) => write!(
                 f,
                 "unknown field {name:?} (known: key, dir, kind, bytes, time, \
-                 replies, errs, first_reply, completion, closed)"
+                 elapsed, replies, errs, first_reply, completion, closed)"
             ),
             FilterErrorKind::UnknownValue { field, value } => {
                 write!(f, "{field} does not admit the value {value:?}")
@@ -967,6 +1010,10 @@ impl<'a> Parser<'a> {
                 op,
                 value: integer(&value, value_at)?,
             },
+            "elapsed" => Term::Elapsed {
+                op,
+                value: integer(&value, value_at)?,
+            },
             "replies" => Term::Replies {
                 op,
                 value: integer(&value, value_at)?,
@@ -1075,6 +1122,7 @@ fn static_field_name(field: &str) -> Option<&'static str> {
         "kind" => "kind",
         "bytes" => "bytes",
         "time" => "time",
+        "elapsed" => "elapsed",
         "replies" => "replies",
         "errs" => "errs",
         "first_reply" => "first_reply",
@@ -1101,6 +1149,9 @@ mod tests {
             kind,
             payload_bytes: Some(payload_bytes),
             observed_at_ms,
+            // The default is a plane that was never told the capture origin,
+            // so every pre-existing test below drives the undecidable arm.
+            elapsed_ms: None,
             // The default is the NON-correlating plane, so every pre-existing
             // test below drives the view the throughput plane builds.
             outcome: None,
@@ -1267,6 +1318,61 @@ mod tests {
         }
     }
 
+    /// R311y638 (§1.1r) — the capture-relative clock, and the point that it is
+    /// a DIFFERENT question from `time` rather than a nicer spelling of it.
+    #[test]
+    fn the_elapsed_axis_reads_the_capture_relative_clock() {
+        let mut r = view(
+            Direction::A,
+            Some("demo/a"),
+            RecordKind::Put,
+            10,
+            Some(1_700_000_005_000),
+        );
+        r.elapsed_ms = Some(5_000);
+        for (source, expected) in [
+            ("elapsed == 5000", Truth::Yes),
+            ("elapsed != 5000", Truth::No),
+            ("elapsed < 5000", Truth::No),
+            ("elapsed <= 5000", Truth::Yes),
+            ("elapsed > 4999", Truth::Yes),
+            ("elapsed >= 5001", Truth::No),
+            // Both axes over one record, which is the whole reason there are
+            // two: an absolute window AND an offset into the file.
+            ("time > 1700000000000 and elapsed < 6000", Truth::Yes),
+            ("time > 1700000000000 and elapsed < 4000", Truth::No),
+        ] {
+            assert_eq!(
+                Filter::parse(source).expect(source).matches(&r),
+                expected,
+                "{source}"
+            );
+        }
+
+        // A plane that was never told where the capture began cannot answer,
+        // and says so. The CONTROL is that `time` over the same record still
+        // decides — the unknown is scoped to the axis that needs the origin.
+        let no_origin = view(
+            Direction::A,
+            Some("demo/a"),
+            RecordKind::Put,
+            10,
+            Some(1_700_000_005_000),
+        );
+        assert_eq!(
+            Filter::parse("elapsed < 5000")
+                .expect("parses")
+                .matches(&no_origin),
+            Truth::Unknown
+        );
+        assert_eq!(
+            Filter::parse("time > 1700000000000")
+                .expect("parses")
+                .matches(&no_origin),
+            Truth::Yes
+        );
+    }
+
     /// R311y636 (§1.1v) — the outcome axis, driven the same way: every field,
     /// every operator, over an exchange whose outcome is fully known.
     ///
@@ -1429,13 +1535,22 @@ mod tests {
         assert!(matches!(err.kind, FilterErrorKind::NotAnInteger(_)));
         // The unknown-field message names the whole vocabulary, so a reader who
         // guessed `latency` is told what this language calls it.
+        let err = Filter::parse("elapsed == maybe").expect_err("not an integer");
+        assert!(matches!(err.kind, FilterErrorKind::NotAnInteger(_)));
         let err = Filter::parse("latency > 100").expect_err("no such field");
         assert_eq!(
             err.kind,
             FilterErrorKind::UnknownField("latency".to_string())
         );
         let rendered = err.to_string();
-        for field in ["replies", "errs", "first_reply", "completion", "closed"] {
+        for field in [
+            "elapsed",
+            "replies",
+            "errs",
+            "first_reply",
+            "completion",
+            "closed",
+        ] {
             assert!(
                 rendered.contains(field),
                 "{field} missing from {rendered:?}"

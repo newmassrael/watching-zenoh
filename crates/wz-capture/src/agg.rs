@@ -291,6 +291,11 @@ pub struct ThroughputTable {
     records: usize,
     unattributed: usize,
     unsized_payloads: usize,
+    /// R311y638 (§1.1r) — where the capture began, for the `elapsed` term.
+    /// Set only by the whole-capture entry points, because only they have seen
+    /// the whole capture; a caller folding flows by hand leaves it `None` and
+    /// an `elapsed` term is undecidable rather than counted from a guess.
+    capture_origin_ms: Option<u64>,
     gaps: ThroughputGaps,
     selection: Selection,
 }
@@ -477,6 +482,7 @@ impl ThroughputTable {
             kind,
             payload_bytes: sized_payload(&counts),
             observed_at_ms: frame.observed_at_ms,
+            elapsed_ms: elapsed_since(self.capture_origin_ms, frame.observed_at_ms),
             // R311y636 (§1.1v) — this plane folds RECORDS, so it has no
             // exchange outcome to offer and says so. An outcome term over it is
             // undecidable, which is what puts the records in
@@ -668,6 +674,17 @@ impl ThroughputTable {
 /// reply` against the payload plane must get the same answer the throughput
 /// plane would give for the same bytes, and the only way that cannot break is
 /// for there to be one function.
+/// R311y638 (§1.1r) — one record's capture-relative instant.
+///
+/// `None` when either end is missing, and the two absences are deliberately not
+/// told apart: a record with no clock and a plane with no origin are both
+/// "cannot be decided here". A record stamped BEFORE the origin would be a
+/// contradiction rather than a negative interval, so it answers `None` too
+/// instead of saturating to a confident zero.
+pub(crate) fn elapsed_since(origin: Option<u64>, at: Option<u64>) -> Option<u64> {
+    at?.checked_sub(origin?)
+}
+
 /// R311y637 (§1.1w) — one record's payload size as a filter must see it.
 ///
 /// The single place the two representations meet, so the rule cannot be spelled
@@ -820,6 +837,10 @@ pub fn aggregate(dissection: &crate::Dissection) -> ThroughputTable {
 /// never read without the count of records the selector could not judge.
 pub fn aggregate_where(dissection: &crate::Dissection, filter: &Filter) -> ThroughputTable {
     let mut table = ThroughputTable::new();
+    // R311y638 (§1.1r) — the origin comes from the DISSECTION, which is the
+    // only thing that has seen every packet. Set before the first fold, so no
+    // record is judged against a half-known capture.
+    table.capture_origin_ms = dissection.capture_origin_ms();
     for flow in dissection.flows() {
         table.observe_flow_where(&flow.frames, filter);
     }
@@ -1194,6 +1215,119 @@ pub(crate) mod tests {
         .selection();
         assert_eq!(put.matched, 1, "a sized payload still decides");
         assert!(put.is_decisive());
+    }
+
+    /// R311y638 (§1.1r) — the capture origin is the EARLIEST instant over every
+    /// packet, not the first one handed in and not the first that decoded.
+    ///
+    /// Both properties are driven, and each has a failure the other would not
+    /// catch: an out-of-order earlier packet must move the origin BACK, and a
+    /// packet this reader cannot decapsulate at all must still count as part of
+    /// the capture's timeline.
+    #[test]
+    fn the_capture_origin_is_the_earliest_instant_over_every_packet() {
+        let record = push(sender_space(0, Some("demo/a")), b"x");
+        let wire = crate::datagram_tests::frame_carrying(&record);
+        let pkt = udp_packet(LOW, 43210, HIGH, 7447, &wire);
+
+        let mut d = Dissection::new();
+        assert_eq!(d.capture_origin_ms(), None, "an empty capture has no start");
+        d.push_packet_at(LINKTYPE_ETHERNET, 0, Some(5_000), &pkt);
+        d.push_packet_at(LINKTYPE_ETHERNET, 1, Some(5_200), &pkt);
+        assert_eq!(d.capture_origin_ms(), Some(5_000));
+
+        // Out of order, which pcapng produces across interfaces: the origin
+        // moves BACK. A "first one handed in" origin would leave it at 5000 and
+        // one capture would answer `elapsed` two ways depending on read order.
+        d.push_packet_at(LINKTYPE_ETHERNET, 2, Some(4_900), &pkt);
+        assert_eq!(d.capture_origin_ms(), Some(4_900));
+
+        // A packet that decodes to NOTHING still started the clock. The control
+        // is that it really is undecodable: it lands in `skipped`.
+        let mut only_garbage = Dissection::new();
+        only_garbage.push_packet_at(LINKTYPE_ETHERNET, 0, Some(1_000), &[0u8; 6]);
+        assert_eq!(only_garbage.capture_origin_ms(), Some(1_000));
+        assert_eq!(only_garbage.skipped().len(), 1, "the control: undecodable");
+        assert!(only_garbage.datagram_flows().is_empty());
+    }
+
+    /// §1.1r, the point of the axis: `elapsed` is a window a person can type,
+    /// and it selects the same records an absolute `time` window would — while
+    /// `time` written with the SAME NUMBERS selects nothing.
+    #[test]
+    fn an_elapsed_window_selects_what_an_absolute_one_would_and_time_does_not() {
+        use crate::exchange::tests as fx;
+        // Three puts at 0ms, 100ms and 9000ms into a capture that begins at a
+        // realistic epoch instant.
+        const T0: u64 = 1_700_000_000_000;
+        let d = fx::dissect(&[
+            (
+                true,
+                Some(T0),
+                push(sender_space(0, Some("demo/early")), b"a"),
+            ),
+            (
+                true,
+                Some(T0 + 100),
+                push(sender_space(0, Some("demo/soon")), b"b"),
+            ),
+            (
+                true,
+                Some(T0 + 9_000),
+                push(sender_space(0, Some("demo/late")), b"c"),
+            ),
+        ]);
+        assert_eq!(d.capture_origin_ms(), Some(T0));
+
+        let relative = aggregate_where(&d, &Filter::parse("elapsed < 5000").expect("parses"));
+        let mut named: Vec<&str> = relative.rows().iter().map(|r| r.keyexpr.as_str()).collect();
+        named.sort_unstable();
+        assert_eq!(named, ["demo/early", "demo/soon"]);
+        assert!(relative.selection().is_decisive());
+
+        // The absolute window with the same shape picks the same two, which is
+        // what makes `elapsed` a spelling of a real question rather than a new
+        // one.
+        let absolute = aggregate_where(
+            &d,
+            &Filter::parse(&alloc::format!("time < {}", T0 + 5_000)).expect("parses"),
+        );
+        assert_eq!(absolute.rows().len(), 2);
+
+        // And the failure `elapsed` exists to end: the same NUMBERS read as an
+        // absolute clock select nothing at all, silently.
+        let naive = aggregate_where(&d, &Filter::parse("time < 5000").expect("parses"));
+        assert_eq!(naive.rows().len(), 0);
+        assert_eq!(naive.selection().rejected, 3);
+    }
+
+    /// A caller folding flows by hand never said where the capture began, so
+    /// the axis is UNDECIDABLE there rather than counted from a guessed zero.
+    ///
+    /// The control is the same frames through the whole-capture entry point,
+    /// which decides them — so this is the plane declining, not the term
+    /// failing.
+    #[test]
+    fn a_hand_folded_plane_cannot_decide_an_elapsed_term() {
+        use crate::exchange::tests as fx;
+        const T0: u64 = 1_700_000_000_000;
+        let d = fx::dissect(&[(
+            true,
+            Some(T0 + 10),
+            push(sender_space(0, Some("demo/a")), b"a"),
+        )]);
+        let filter = Filter::parse("elapsed < 5000").expect("parses");
+
+        let mut by_hand = ThroughputTable::new();
+        for flow in d.datagram_flows() {
+            by_hand.observe_flow_where(&flow.frames, &filter);
+        }
+        assert_eq!(by_hand.selection().undecided, 1);
+        assert_eq!(by_hand.rows().len(), 0);
+
+        let whole = aggregate_where(&d, &filter);
+        assert_eq!(whole.selection().matched, 1, "the control");
+        assert!(whole.selection().is_decisive());
     }
 
     /// Push a list of `(from_low, record)` through a real dissection, one

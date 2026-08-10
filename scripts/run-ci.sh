@@ -5368,6 +5368,7 @@ layer_c1bt_capture_no_default_features() {
         filter::tests::an_unanswered_exchange_and_a_slow_one_are_both_expressible \
         filter::tests::a_plane_that_does_not_correlate_exchanges_cannot_decide_an_outcome_term \
         filter::tests::the_outcome_fields_refuse_what_they_do_not_admit \
+        filter::tests::the_elapsed_axis_reads_the_capture_relative_clock \
         payload::tests::the_encoding_table_is_the_wire_table_and_the_index_is_the_id \
         payload::tests::an_id_outside_the_table_is_reported_rather_than_defaulted \
         payload::tests::a_payload_that_contradicts_its_declaration_is_a_finding_with_an_offset \
@@ -5450,7 +5451,10 @@ layer_c1bt_capture_no_default_features() {
         agg::tests::the_fixture_puts_a_valued_query_and_a_bare_one_on_the_wire \
         agg::tests::a_query_carrying_a_value_is_unsized_and_a_bare_one_is_a_measured_zero \
         agg::tests::a_bytes_term_over_an_unsizable_payload_is_undecided_rather_than_false \
-        report::tests::an_unsizable_payload_reaches_the_document_and_the_verdict
+        report::tests::an_unsizable_payload_reaches_the_document_and_the_verdict \
+        agg::tests::the_capture_origin_is_the_earliest_instant_over_every_packet \
+        agg::tests::an_elapsed_window_selects_what_an_absolute_one_would_and_time_does_not \
+        agg::tests::a_hand_folded_plane_cannot_decide_an_elapsed_term
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the network-codecs build"
