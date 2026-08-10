@@ -704,8 +704,10 @@ impl PayloadCensus {
             self.gaps.halted_batches += 1;
             self.gaps.unparsed_bytes += batch.unparsed_bytes;
         }
-        for message in &batch.messages {
-            self.observe_message(spaces, frame, message, filter);
+        // R311y641 (§1.1n) — paired with the bytes each record came from, so
+        // this plane can say WHERE a record was and not only that it was.
+        for (message, span) in batch.records() {
+            self.observe_message(spaces, frame, message, span, filter);
         }
     }
 
@@ -714,6 +716,7 @@ impl PayloadCensus {
         spaces: &mut crate::agg::KeyexprSpaces,
         frame: &wz_session_core::passive::PassiveFrame,
         message: &wz_session_core::network_message::NetworkMessage,
+        span: Option<(usize, usize)>,
         filter: &crate::filter::Filter,
     ) {
         use wz_session_core::network_message::NetworkMessage;
@@ -741,6 +744,7 @@ impl PayloadCensus {
             keyexpr: keyexpr.as_deref(),
             kind,
             payload_bytes,
+            unit_offset: span.map(|(o, _)| o as u64).unwrap_or(0),
             observed_at_ms: frame.observed_at_ms,
             elapsed_ms: crate::agg::elapsed_since(self.capture_origin_ms, frame.observed_at_ms),
             // R311y636 (§1.1v) — as in `agg`: this plane inspects one payload

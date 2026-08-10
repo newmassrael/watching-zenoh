@@ -250,6 +250,23 @@ pub enum BatchHalt {
 pub struct BatchParse {
     /// Every record decoded before the walk stopped, in wire order.
     pub messages: Vec<NetworkMessage>,
+    /// R311y641 (§1.1n) — `(offset, len)` within this payload for each entry of
+    /// [`Self::messages`], same index, same order.
+    ///
+    /// THE WALK ALREADY COMPUTED THIS AND KEPT IT ONLY FOR FAILURES. `offset`
+    /// is recomputed from the cursor on every iteration and, until this round,
+    /// was carried into [`BatchHalt`] and discarded for every record that
+    /// SUCCEEDED. So a batch reported where it stopped and never where anything
+    /// in it was, and a consumer holding a record could not point at the bytes
+    /// it came from.
+    ///
+    /// A parallel `Vec` rather than a field on `NetworkMessage`, because the
+    /// span is a fact about this PARSE and not about the message: the same
+    /// message re-encoded elsewhere sits at a different offset, and putting it
+    /// on the value would let a copy carry a coordinate that no longer refers to
+    /// anything. Pushed in lockstep in the ONE loop below, with
+    /// [`Self::span_of`] as the sanctioned paired read.
+    pub spans: Vec<(usize, usize)>,
     /// `None` when the whole payload decoded; otherwise where and why the
     /// walk stopped.
     pub halt: Option<BatchHalt>,
@@ -266,6 +283,25 @@ impl BatchParse {
     /// participant's strict parse also accepts.
     pub fn is_complete(&self) -> bool {
         self.halt.is_none()
+    }
+
+    /// R311y641 (§1.1n) — `(offset, len)` of the `i`th message within the
+    /// payload this batch was parsed from.
+    ///
+    /// `None` only when `i` is out of range. The two vectors are pushed
+    /// together in `parse_frame_payload_best_effort` and a lookup that fell
+    /// through would mean they had desynced, which is the one failure a
+    /// parallel vector can have — so it answers `None` rather than indexing.
+    pub fn span_of(&self, i: usize) -> Option<(usize, usize)> {
+        self.spans.get(i).copied()
+    }
+
+    /// Every record with the bytes it came from, in wire order.
+    pub fn records(&self) -> impl Iterator<Item = (&NetworkMessage, Option<(usize, usize)>)> {
+        self.messages
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m, self.span_of(i)))
     }
 }
 
@@ -286,14 +322,26 @@ impl BatchParse {
 pub fn parse_frame_payload_best_effort(bytes: &[u8]) -> BatchParse {
     let total = bytes.len();
     let mut messages = Vec::new();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
     let mut cursor = SceCursor::new(bytes);
     let mut halt = None;
     while cursor.remaining() > 0 {
         // The offset is recomputed per record rather than tracked, so it
         // cannot drift from the cursor the decoders actually advance.
         let offset = total - cursor.remaining();
+        // R311y641 — how many records this step appends is the decoder's
+        // business, not this loop's, so the spans are filled by DELTA rather
+        // than by assuming one. A step that pushed two would otherwise leave the
+        // vectors one apart for the rest of the walk.
+        let before = messages.len();
         match decode_one_record(&mut cursor, &mut messages) {
-            Ok(true) => {}
+            Ok(true) => {
+                let len = (total - cursor.remaining()) - offset;
+                spans.resize(before, (0, 0));
+                for _ in before..messages.len() {
+                    spans.push((offset, len));
+                }
+            }
             Ok(false) => {
                 // An unknown MID: absorb the rest verbatim (the strict
                 // parse's own behaviour) and stop, since the record's
@@ -312,6 +360,11 @@ pub fn parse_frame_payload_best_effort(bytes: &[u8]) -> BatchParse {
                     break;
                 }
                 messages.push(NetworkMessage::Unknown { mid, body });
+                // The absorbed remainder IS this record's extent: the strict
+                // parse treats an unknown MID as consuming the rest, so the
+                // span says so rather than leaving the one record a reader most
+                // wants to locate without a coordinate.
+                spans.push((offset, rem));
                 halt = Some(BatchHalt::UnknownMid { mid, offset });
                 break;
             }
@@ -327,8 +380,13 @@ pub fn parse_frame_payload_best_effort(bytes: &[u8]) -> BatchParse {
         }
         None => 0,
     };
+    // Every path that appends a message appends its span, so this holds by
+    // construction; it is asserted because a parallel vector's one failure mode
+    // is silent and a later arm could reintroduce it.
+    debug_assert_eq!(messages.len(), spans.len());
     BatchParse {
         messages,
+        spans,
         halt,
         unparsed_bytes,
     }

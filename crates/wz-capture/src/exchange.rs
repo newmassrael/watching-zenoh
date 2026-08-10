@@ -251,6 +251,12 @@ struct OpenExchange {
     /// `Query` whose value rides its ext chain (R311y637, §1.1w).
     payload_bytes: Option<u64>,
     requested_at: Option<u64>,
+    /// R311y641 (§1.1n) — the REQUEST's byte offset within its framing unit,
+    /// taken at the same instant `requested_at` is. An exchange is a pair of
+    /// records and only one of them can anchor the axis; the request is the one
+    /// `time` and `elapsed` already name, so a selector cannot end up with two
+    /// terms pointing at opposite ends of the same exchange.
+    requested_unit_offset: u64,
     first_reply_at: Option<u64>,
     replies: usize,
     errs: usize,
@@ -393,8 +399,10 @@ impl ExchangeTable {
             self.unread.halted_batches += 1;
             self.unread.unparsed_bytes += batch.unparsed_bytes;
         }
-        for message in &batch.messages {
-            self.observe_message(spaces, open, frame, message, filter);
+        // R311y641 (§1.1n) — paired with the bytes each record came from, so
+        // this plane can say WHERE a record was and not only that it was.
+        for (message, span) in batch.records() {
+            self.observe_message(spaces, open, frame, message, span, filter);
         }
     }
 
@@ -404,6 +412,7 @@ impl ExchangeTable {
         open: &mut BTreeMap<(usize, u64), OpenExchange>,
         frame: &PassiveFrame,
         message: &NetworkMessage,
+        span: Option<(usize, usize)>,
         filter: &Filter,
     ) {
         let direction = frame.direction;
@@ -433,6 +442,7 @@ impl ExchangeTable {
                     kind,
                     payload_bytes,
                     requested_at: at,
+                    requested_unit_offset: span.map(|(o, _)| o as u64).unwrap_or(0),
                     first_reply_at: None,
                     replies: 0,
                     errs: 0,
@@ -543,6 +553,7 @@ impl ExchangeTable {
             // R311y618 asked at the request. A `time` term that silently became
             // "when it closed" would move every reader's window by the latency
             // they were trying to measure.
+            unit_offset: entry.requested_unit_offset,
             observed_at_ms: entry.requested_at,
             // R311y638 (§1.1r) — relative to the CAPTURE and taken at the same
             // instant `time` is, so the two fields cannot name different

@@ -48,6 +48,7 @@
 //! | `bytes` | an integer | `==` `!=` `<` `<=` `>` `>=` | the record carries a payload this build cannot size |
 //! | `time` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | the capture carried no clock |
 //! | `elapsed` | an integer, ms since the capture began | `==` `!=` `<` `<=` `>` `>=` | no clock, or the plane was not told the origin |
+//! | `offset` | an integer, bytes into the framing unit | `==` `!=` `<` `<=` `>` `>=` | never — every record was walked out of a unit |
 //! | `replies` | an integer | `==` `!=` `<` `<=` `>` `>=` | the plane does not correlate exchanges |
 //! | `errs` | an integer | `==` `!=` `<` `<=` `>` `>=` | as above |
 //! | `first_reply` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | as above, or nothing answered, or no clock |
@@ -240,6 +241,19 @@ pub struct RecordView<'a> {
     /// began. Both mean the question cannot be decided HERE, which is the only
     /// thing a predicate needs to know.
     pub elapsed_ms: Option<u64>,
+    /// R311y641 (§1.1n) — byte offset of this record's message within the
+    /// framing unit that carried it
+    /// ([`PassiveFrame::unit_offset`](wz_session_core::passive::PassiveFrame::unit_offset)).
+    ///
+    /// Not an `Option`: every record this crate produces came out of a walked
+    /// unit, so the coordinate is always known. That is the difference between
+    /// it and `elapsed_ms` beside it, whose absence is a real state.
+    ///
+    /// `0` is the front of a unit. Anything above it is a record a reader that
+    /// treated a framing unit as ONE message would never have seen at all —
+    /// which is what R311y631 measured and, until now, could only report as an
+    /// ordinal.
+    pub unit_offset: u64,
     /// R311y636 (§1.1v) — the outcome of the exchange this record opened, or
     /// `None` on a plane that does not correlate exchanges.
     ///
@@ -350,6 +364,12 @@ enum Term {
         op: Op,
         value: u64,
     },
+    /// R311y641 (§1.1n) — the byte-offset axis: where in its framing unit the
+    /// record's message began.
+    Offset {
+        op: Op,
+        value: u64,
+    },
     /// R311y636 (§1.1v) — the outcome axis. One variant per field rather than a
     /// `field: OutcomeField` discriminant carried alongside, so a new outcome
     /// field cannot be added without the match below failing to compile.
@@ -416,6 +436,10 @@ impl Term {
                 None => Truth::Unknown,
                 Some(ms) => Truth::of(op.apply(ms, *value)),
             },
+            // R311y641 (§1.1n) — always decidable, unlike the two clock terms
+            // above: a record exists because a unit was walked, and the walk
+            // knows where in that unit it stood.
+            Self::Offset { op, value } => Truth::of(op.apply(record.unit_offset, *value)),
             // R311y636 (§1.1v). The third undecidable case, and the widest: a
             // plane with no exchange correlation carries no outcome at all, so
             // all five say so rather than guessing at a count of zero.
@@ -668,7 +692,8 @@ impl fmt::Display for FilterError {
             FilterErrorKind::UnknownField(name) => write!(
                 f,
                 "unknown field {name:?} (known: key, dir, kind, bytes, time, \
-                 elapsed, replies, errs, first_reply, completion, closed)"
+                 elapsed, offset, replies, errs, first_reply, completion, \
+                 closed)"
             ),
             FilterErrorKind::UnknownValue { field, value } => {
                 write!(f, "{field} does not admit the value {value:?}")
@@ -1014,6 +1039,10 @@ impl<'a> Parser<'a> {
                 op,
                 value: integer(&value, value_at)?,
             },
+            "offset" => Term::Offset {
+                op,
+                value: integer(&value, value_at)?,
+            },
             "replies" => Term::Replies {
                 op,
                 value: integer(&value, value_at)?,
@@ -1123,6 +1152,7 @@ fn static_field_name(field: &str) -> Option<&'static str> {
         "bytes" => "bytes",
         "time" => "time",
         "elapsed" => "elapsed",
+        "offset" => "offset",
         "replies" => "replies",
         "errs" => "errs",
         "first_reply" => "first_reply",
@@ -1152,6 +1182,7 @@ mod tests {
             // The default is a plane that was never told the capture origin,
             // so every pre-existing test below drives the undecidable arm.
             elapsed_ms: None,
+            unit_offset: 0,
             // The default is the NON-correlating plane, so every pre-existing
             // test below drives the view the throughput plane builds.
             outcome: None,

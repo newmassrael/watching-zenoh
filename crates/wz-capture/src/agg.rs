@@ -461,8 +461,10 @@ impl ThroughputTable {
             self.gaps.halted_batches += 1;
             self.gaps.unparsed_bytes += batch.unparsed_bytes;
         }
-        for message in &batch.messages {
-            self.observe_message(spaces, frame, anchor, message, filter);
+        // R311y641 (§1.1n) — paired with the bytes each record came from, so
+        // this plane can say WHERE a record was and not only that it was.
+        for (message, span) in batch.records() {
+            self.observe_message(spaces, frame, anchor, message, span, filter);
         }
     }
 
@@ -472,6 +474,7 @@ impl ThroughputTable {
         frame: &PassiveFrame,
         anchor: usize,
         message: &NetworkMessage,
+        span: Option<(usize, usize)>,
         filter: &Filter,
     ) {
         let direction = frame.direction;
@@ -524,6 +527,7 @@ impl ThroughputTable {
             keyexpr: resolved.as_ref().ok().map(|k| k.as_str()),
             kind,
             payload_bytes: sized_payload(&counts),
+            unit_offset: span.map(|(o, _)| o as u64).unwrap_or(0),
             observed_at_ms: frame.observed_at_ms,
             elapsed_ms: elapsed_since(self.capture_origin_ms, frame.observed_at_ms),
             // R311y636 (§1.1v) — this plane folds RECORDS, so it has no
@@ -2227,6 +2231,72 @@ pub(crate) mod tests {
         );
         assert_eq!(gaps.undecompressible_batches, 0);
         assert_eq!(gaps.unresolvable_fragments, 0);
+    }
+
+    /// R311y641 (§1.1n) — THE AXIS. A record's byte offset within its framing
+    /// unit reaches the selector, and the SECOND message of a batch carries a
+    /// non-zero one.
+    ///
+    /// The failure this ends: R311y631 taught this crate to walk a unit to its
+    /// end, and everything it walked past the front could be told apart only by
+    /// an ORDINAL (`batch_index`). A reader holding a record and the packet it
+    /// came from still could not point at the bytes, so a finding could name a
+    /// keyexpr and never a location. The walk had the number the whole time and
+    /// threw it away.
+    ///
+    /// Driven through the production entry point on real packet bytes, so a
+    /// build whose walk never produced a second record would fail the first
+    /// assertion rather than quietly agree with the rest.
+    #[test]
+    fn a_records_offset_in_its_unit_reaches_the_selector() {
+        // Two self-delimiting Pushes in ONE datagram: exactly the batch shape
+        // both reference implementations emit and R311y631 taught this reader
+        // to walk.
+        let first = push(sender_space(0, Some("batch/first")), &[0u8; 4]);
+        let second = push(sender_space(0, Some("batch/second")), &[0u8; 4]);
+        let boundary = first.len();
+        let mut unit = first;
+        unit.extend_from_slice(&second);
+
+        let all = aggregate_datagrams(&[(true, unit.clone())]);
+        assert_eq!(all.records(), 2, "the walk must reach the second message");
+
+        // ANTI-VACUITY: the boundary is a real number this test did not invent,
+        // and the second message really does begin past the front.
+        assert!(boundary > 0);
+
+        let at_front = aggregate_datagrams_where(&[(true, unit.clone())], "offset == 0");
+        assert_eq!(
+            at_front.selection(),
+            Selection {
+                matched: 1,
+                rejected: 1,
+                undecided: 0
+            },
+            "one record is at the front of the unit and one is not"
+        );
+        assert!(at_front.row("batch/first").is_some());
+        assert!(
+            at_front.row("batch/second").is_none(),
+            "the second message is not at offset zero"
+        );
+
+        // THE DECISIVE LEG: the offset is the message's own BOUNDARY, not an
+        // ordinal wearing a byte's name. `offset == 1` would hold for a field
+        // that merely counted messages, and it selects nothing.
+        let ordinal = aggregate_datagrams_where(&[(true, unit.clone())], "offset == 1");
+        assert_eq!(
+            ordinal.selection().matched,
+            0,
+            "an ordinal would have matched here; a byte offset does not"
+        );
+        let exact =
+            aggregate_datagrams_where(&[(true, unit)], &alloc::format!("offset == {boundary}"));
+        assert_eq!(exact.selection().matched, 1);
+        assert!(
+            exact.row("batch/second").is_some(),
+            "and it is the message that begins there"
+        );
     }
 
     /// THE CONTROL for the test above: an intact capture reports NO gap.
