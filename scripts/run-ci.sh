@@ -5264,6 +5264,28 @@ layer_c1bw_analyze_cli() {
     done
     [[ $missing -eq 0 ]] || return 1
 
+    # R311y669 — the LIBRARY-level witnesses too, pinned as a SET. The QUIC pair
+    # is the reason: one of them proves a QUIC capture is not read as zenoh and
+    # the other proves a zenoh datagram is not read as QUIC, and a round that
+    # dropped either would leave the mirror-image defect ungated while the suite
+    # stayed green.
+    listing="$(cd crates && cargo test -p wz-analyze --lib -- --list 2>/dev/null)" \
+        || { echo "  C1bw FAIL: the library tests did not list"; return 1; }
+    for name in \
+        tests::a_quic_capture_reports_quic_and_decodes_no_zenoh_from_it \
+        tests::a_zenoh_datagram_whose_first_byte_resembles_quic_is_still_read_as_zenoh \
+        tests::the_text_flow_row_has_a_pinned_shape_and_not_only_pinned_words \
+        tests::the_message_listing_is_bounded_and_says_how_many_it_left_out \
+        tests::a_datagram_flow_is_listed_and_its_scouting_messages_are_named \
+        tests::a_capture_with_both_transports_lists_them_in_one_separated_array
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1bw FAIL: $name is absent from the wz-analyze lib target"
+            missing=1
+        }
+    done
+    [[ $missing -eq 0 ]] || return 1
+
     echo "  C1bw: the analyzer builds as a program and its command line is gated"
 }
 

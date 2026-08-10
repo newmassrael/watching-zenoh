@@ -136,6 +136,19 @@ impl<'a> CaptureReport<'a> {
         if enc > opened {
             return false;
         }
+        // R311y669 (§1.2a) — a QUIC flow reaches the verdict on the same rule an
+        // undecrypted TLS flow does: the traffic was there, its zenoh is not in
+        // the totals, and this reader opens none of it. Unconditional rather
+        // than "unless opened", because unlike TLS there is no key path here at
+        // all — recognition is the whole of what this reader does with QUIC.
+        if self
+            .dissection
+            .datagram_flows()
+            .iter()
+            .any(|f| f.quic.is_some())
+        {
+            return false;
+        }
         // R311y624 (§1.1m) — the FRAMING witnesses reach the verdict, and until
         // now none of them did. A capture whose assembler gave up on a gap, or
         // whose direction lost the zenoh or WebSocket framing, or whose peer
@@ -442,6 +455,32 @@ impl<'a> CaptureReport<'a> {
                 .map(|fl| fl.scouting.len())
                 .sum::<usize>()
         ));
+        // R311y669 (§1.2a) — QUIC. STRUCTURAL, present with zeroes on a capture
+        // that carried none, for the reason `encrypted` is: a consumer must be
+        // able to learn that part of a capture was unreadable BY DESIGN without
+        // testing for a key. And the reason it is here at all is a measurement —
+        // before this round a QUIC capture reported four decoded zenoh messages
+        // that did not exist, so the alternative to this block is not silence,
+        // it is a wrong answer.
+        {
+            let q: alloc::vec::Vec<crate::quic::QuicCensus> =
+                d.datagram_flows().iter().filter_map(|fl| fl.quic).collect();
+            s.push_str(&format!(
+                ",\"quic\":{{\"flows\":{},\"packets\":{},\"bytes\":{},\"initial\":{},\
+                 \"handshake\":{},\"zero_rtt\":{},\"one_rtt\":{},\"retry\":{},\
+                 \"version_negotiation\":{},\"unrecognised\":{},\"decrypted\":false}}",
+                q.len(),
+                q.iter().map(|c| c.packets).sum::<usize>(),
+                q.iter().map(|c| c.bytes).sum::<u64>(),
+                q.iter().map(|c| c.initial).sum::<usize>(),
+                q.iter().map(|c| c.handshake).sum::<usize>(),
+                q.iter().map(|c| c.zero_rtt).sum::<usize>(),
+                q.iter().map(|c| c.one_rtt).sum::<usize>(),
+                q.iter().map(|c| c.retry).sum::<usize>(),
+                q.iter().map(|c| c.version_negotiation).sum::<usize>(),
+                q.iter().map(|c| c.unrecognised).sum::<usize>(),
+            ));
+        }
         s.push_str(&format!(
             ",\"drops\":{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\"flows\":{},\
              \"scouting\":{},\"scout_askers\":{}}}",
@@ -645,6 +684,22 @@ impl<'a> CaptureReport<'a> {
         let scouting: usize = d.datagram_flows().iter().map(|fl| fl.scouting.len()).sum();
         if scouting > 0 {
             s.push_str(&format!("  scouting: {scouting} message(s)\n"));
+        }
+        // R311y669 (§1.2a) — QUIC, and the sentence says what a reader must do
+        // with it: the zenoh is inside and this reader does not open it. Printed
+        // only when non-zero, like every other qualifier here.
+        {
+            let q: alloc::vec::Vec<crate::quic::QuicCensus> =
+                d.datagram_flows().iter().filter_map(|fl| fl.quic).collect();
+            if !q.is_empty() {
+                s.push_str(&format!(
+                    "  QUIC: {} flow(s), {} packet(s), {} byte(s) -- NOT DECRYPTED \
+                     (this reader recognises QUIC and opens none of it)\n",
+                    q.len(),
+                    q.iter().map(|c| c.packets).sum::<usize>(),
+                    q.iter().map(|c| c.bytes).sum::<u64>(),
+                ));
+            }
         }
 
         if let Some(t) = self.throughput {

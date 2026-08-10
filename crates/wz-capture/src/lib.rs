@@ -76,6 +76,15 @@ pub mod link;
 pub mod payload;
 pub mod pcap;
 pub mod pcapng;
+/// R311y669 (§1.2a) — RECOGNISING QUIC, so a QUIC capture stops being read as
+/// zenoh.
+///
+/// Not a symmetry with [`tls`] but a correction: measured before it existed, a
+/// QUIC exchange on a zenoh port reported four decoded messages including an
+/// `Init` and a `Fragment`, out of a capture holding no zenoh at all. A QUIC
+/// short header's first byte IS a flagged zenoh MID, so the module's whole
+/// design question is what may decide — see its own note.
+pub mod quic;
 /// R311y615 (§1.1f) — the EXPORT plane: the analysis tables rendered for
 /// something that is not a Rust caller, with their loss counters structurally
 /// attached.
@@ -247,6 +256,14 @@ pub struct DatagramDissection {
     /// is what makes "least recently active" answerable here as it already was
     /// for a stream flow.
     last_activity: usize,
+    /// R311y669 (§1.2a) — QUIC, once a long header has established that this
+    /// flow is QUIC. `None` until then, and never guessed: the recognition rule
+    /// requires a long header precisely because a short header's first byte is
+    /// indistinguishable from a flagged zenoh MID
+    /// ([`crate::quic`]). While it is `Some`, datagrams on this flow are COUNTED
+    /// and not handed to the zenoh observer — which is the whole correction, as
+    /// the alternative measured as four decoded messages that did not exist.
+    pub quic: Option<quic::QuicCensus>,
 }
 
 impl DatagramDissection {
@@ -257,6 +274,7 @@ impl DatagramDissection {
             frames: Vec::new(),
             scouting: Vec::new(),
             last_activity: 0,
+            quic: None,
         }
     }
 }
@@ -702,6 +720,7 @@ impl FlowDissection {
                     Some(outcome) => outcome,
                     None => Some(tls::NotDecrypted::NoKeysSupplied),
                 },
+                not_decrypted_per_direction: state.outcome_per_direction,
                 decrypted_records: state.opened,
                 client_direction: state.client_direction.map(|d| {
                     if d == 0 {
@@ -2208,6 +2227,11 @@ impl Dissection {
                 continue;
             }
             let mut refusal = None;
+            // R311y669 — and the reason PER DIRECTION beside it. `refusal` keeps
+            // the first, which is the flow's one-word summary; this keeps both, so
+            // a flow whose halves fail differently no longer names one of the two
+            // remedies a reader needs.
+            let mut per_direction: [Option<tls::NotDecrypted>; 2] = [None, None];
             // Per direction: the opened plaintext, and the map from a byte
             // offset within it back to the record that produced it.
             let mut plaintext: [Vec<u8>; 2] = [Vec::new(), Vec::new()];
@@ -2227,7 +2251,9 @@ impl Dissection {
                 // one-way flow would otherwise report a reason about a half that
                 // carried no ciphertext.
                 if !state.kept[index].is_empty() && !opener.has_keys(direction) {
-                    refusal.get_or_insert(tls::NotDecrypted::NoKeyForDirection { direction });
+                    let reason = tls::NotDecrypted::NoKeyForDirection { direction };
+                    refusal.get_or_insert(reason);
+                    per_direction[index] = Some(reason);
                     continue;
                 }
                 for record in &state.kept[index] {
@@ -2243,16 +2269,19 @@ impl Dissection {
                         }
                         None => {
                             // (2) above — this direction stops here.
-                            refusal.get_or_insert(tls::NotDecrypted::RecordRefusedKeys {
+                            let reason = tls::NotDecrypted::RecordRefusedKeys {
                                 direction,
                                 index: record.index,
-                            });
+                            };
+                            refusal.get_or_insert(reason);
+                            per_direction[index] = Some(reason);
                             break;
                         }
                     }
                 }
             }
             state.outcome = Some(refusal);
+            state.outcome_per_direction = per_direction;
             if refusal.is_none() {
                 summary.decrypted += 1;
             }
@@ -2759,6 +2788,39 @@ impl Dissection {
         self.advance_clock(idx, ts_millis, FlowKind::Datagram);
         let flow = &mut self.datagram_flows[idx];
         flow.last_activity = d.packet_index;
+
+        // R311y669 (§1.2a) — QUIC, BEFORE the scouting question and before the
+        // zenoh decode, because it is the question of whether either applies.
+        //
+        // Order is deliberate and asymmetric. An established QUIC flow takes
+        // every datagram; a flow not yet known to be QUIC is tested by the SOUND
+        // rule only. That is what keeps a zenoh datagram whose first byte
+        // resembles a short header (`T_MID_INIT | 0x40` = `0x41`) out of here:
+        // the sound rule needs a long header with a known version, which zenoh
+        // does not produce.
+        match &mut flow.quic {
+            Some(census) => {
+                match quic::recognise_on_quic_flow(&d.payload) {
+                    Some(p) => census.add(p),
+                    // Counted, not ignored. A QUIC flow carrying a datagram this
+                    // reader cannot name is a fact, and absorbing it into the
+                    // packet count would claim a packet that was never read.
+                    None => census.add_unrecognised(d.payload.len()),
+                }
+                self.evict_datagram_flows_beyond_cap();
+                return;
+            }
+            None => {
+                if let Some(p) = quic::recognise_long(&d.payload) {
+                    let mut census = quic::QuicCensus::default();
+                    census.add(p);
+                    flow.quic = Some(census);
+                    self.evict_datagram_flows_beyond_cap();
+                    return;
+                }
+            }
+        }
+
         if scouting.is_some() {
             // Decoded WITHOUT touching the session: a scouting message is not
             // part of any session, so folding it would let a pre-session
@@ -9077,6 +9139,67 @@ mod tls_flow_tests {
             "and the finding must reach the rendering, which is the only thing a \
              person running this ever sees: {json}"
         );
+    }
+
+    /// R311y669 (§1.2a) — a flow whose two halves fail DIFFERENTLY reports both.
+    ///
+    /// R311y668 carried this as a narrowing and it is one: the flow-level reason
+    /// is `Option::get_or_insert`, so it keeps the first refusal a pass meets and
+    /// direction A is walked first. A flow whose A hits an epoch boundary and
+    /// whose B has no key at all told a reader to go recapture the rotation and
+    /// said nothing about the missing secret -- one of the two remedies it needed.
+    ///
+    /// Nothing about the summary changed. What changed is that the summary is no
+    /// longer the only thing recorded.
+    #[test]
+    fn a_flow_whose_two_directions_fail_differently_reports_both_reasons() {
+        let random = [13u8; 32];
+        let mut d = Dissection::new();
+        // A: the hello and two records, the SECOND of which the opener refuses --
+        // the epoch shape.
+        let mut client = hello_with_random(&random);
+        for i in 0..2u8 {
+            client.extend_from_slice(&protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(i)));
+        }
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &client));
+        // B: one record, on a direction the opener holds no key for at all.
+        let server = protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(9));
+        d.push_packet(LINKTYPE_ETHERNET, 1, &tcp_packet(7447, 1111, 5000, &server));
+        d.finish();
+
+        let mut opener = FakeOpener::new();
+        opener.refuse[dir_index(Direction::A)].insert(1);
+        opener.keyless[dir_index(Direction::B)] = true;
+        d.decrypt_with(&mut opener);
+
+        let flow = &d.encrypted_flows()[0];
+        // The summary is unchanged: A is walked first, so A's reason is it.
+        assert_eq!(
+            flow.not_decrypted,
+            Some(crate::tls::NotDecrypted::RecordRefusedKeys {
+                direction: Direction::A,
+                index: 1
+            }),
+            "the one-word summary still answers with the first refusal met"
+        );
+        // THE ROUND: both halves are readable, and B's is the one the summary
+        // could never have carried.
+        assert_eq!(
+            flow.not_decrypted_per_direction,
+            [
+                Some(crate::tls::NotDecrypted::RecordRefusedKeys {
+                    direction: Direction::A,
+                    index: 1
+                }),
+                Some(crate::tls::NotDecrypted::NoKeyForDirection {
+                    direction: Direction::B
+                })
+            ],
+            "each direction's own reason must survive the summary"
+        );
+        // A's FIRST record still opened. A flow reported as wholly unread would
+        // be a third wrong answer.
+        assert_eq!(flow.decrypted_records, [1, 0]);
     }
 
     /// R311y666 (§1.2a) — the decoded-message count does not walk backwards

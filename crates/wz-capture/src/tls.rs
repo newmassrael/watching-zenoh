@@ -365,6 +365,15 @@ pub struct EncryptedFlow {
     /// the report's `"decrypted"` was a hard-coded `false` that no amount of key
     /// material could move.
     pub not_decrypted: Option<NotDecrypted>,
+    /// R311y669 (§1.2a) — why each direction's plaintext is absent, `[A, B]`.
+    ///
+    /// [`Self::not_decrypted`] is the flow's one-word summary and it is the FIRST
+    /// refusal met, which for a flow whose two halves fail differently names one
+    /// of two remedies. This field is both. `None` for a direction that opened,
+    /// and also for one that was never asked — a flow declined at `begin_flow`
+    /// has no per-direction answer, and inventing one would claim a record
+    /// attempt that never happened.
+    pub not_decrypted_per_direction: [Option<NotDecrypted>; 2],
     /// R311y661 — records opened per direction, `[A, B]`.
     ///
     /// Carried beside the reason rather than implied by it: a flow whose keys
@@ -771,6 +780,16 @@ pub struct TlsFlowState {
     /// how a dissection with no keys at all comes to claim plaintext.
     #[allow(clippy::option_option)]
     pub(crate) outcome: Option<Option<NotDecrypted>>,
+    /// R311y669 (§1.2a) — the reason PER DIRECTION, `[A, B]`.
+    ///
+    /// `outcome` above is one value for a flow with two halves, and it keeps the
+    /// FIRST refusal a pass met (`Option::get_or_insert`). R311y668 recorded that
+    /// as a narrowing and it is a real one: a flow whose direction A refuses a
+    /// record at an epoch boundary and whose direction B has no key at all
+    /// reported only A's, so the remedy a reader was given was one of the two it
+    /// needed. Nothing is lost now — the summary still answers in one word, and
+    /// the two halves are both readable beside it.
+    pub(crate) outcome_per_direction: [Option<NotDecrypted>; 2],
     /// R311y661 — records opened per direction by that pass.
     pub(crate) opened: [usize; 2],
     /// R311y666 (§1.2a) — bytes lost since the last KEPT record of each

@@ -194,6 +194,32 @@ pub fn analyze_with(
     per_flow: bool,
     per_message: bool,
 ) -> Result<(String, Outcome), CaptureError> {
+    analyze_with_limit(capture, keylog, format, per_flow, per_message, None)
+}
+
+/// [`analyze_with`], with a CEILING on how many messages one flow lists.
+///
+/// R311y669 (§1.2a) — R311y668 left the listing unbounded, and everything else
+/// in this reader is bounded: a flow may hold up to
+/// `wz_capture::tls::MAX_KEPT_RECORDS_PER_DIRECTION` records per direction, and
+/// rendering all of them into one string makes the output's size depend on how
+/// much traffic there was. That is the leak every `drops` counter in
+/// `wz-capture` exists to prevent, arriving one layer up in the renderer.
+///
+/// `None` is unbounded and stays the DEFAULT, because the ordinary use of
+/// `--messages` is a person reading a small capture and a ceiling they did not
+/// ask for is its own silent narrowing. What the bound must never do is bite
+/// quietly: where it cuts, the rendering says how many rows it left out --
+/// `... N more not listed` in text, `message_list_omitted` in JSON -- on the
+/// house rule that a bound reporting nothing reports itself as the wire.
+pub fn analyze_with_limit(
+    capture: &[u8],
+    keylog: Option<&[u8]>,
+    format: Format,
+    per_flow: bool,
+    per_message: bool,
+    messages_per_flow: Option<usize>,
+) -> Result<(String, Outcome), CaptureError> {
     let mut dissection = Dissection::from_capture(capture)?;
 
     // The capture's own keys first, then the external log folded in.
@@ -230,7 +256,12 @@ pub fn analyze_with(
         Format::Text => {
             let mut rendered = report.to_text();
             if per_flow {
-                rendered.push_str(&flow_lines(&dissection, format, per_message));
+                rendered.push_str(&flow_lines(
+                    &dissection,
+                    format,
+                    per_message,
+                    messages_per_flow,
+                ));
             }
             rendered
         }
@@ -239,7 +270,12 @@ pub fn analyze_with(
             report.json_fields(&mut rendered);
             if per_flow {
                 rendered.push(',');
-                rendered.push_str(&flow_lines(&dissection, format, per_message));
+                rendered.push_str(&flow_lines(
+                    &dissection,
+                    format,
+                    per_message,
+                    messages_per_flow,
+                ));
             }
             rendered.push('}');
             rendered
@@ -265,7 +301,7 @@ pub fn analyze_with(
 /// R311y668 — and the JSON carries the MESSAGES. `--messages` reached only the
 /// text branch, so `--json --messages` listed the flows and not their messages:
 /// a silent narrowing of exactly the kind R311y667 closed elsewhere.
-fn flow_lines(d: &Dissection, format: Format, per_message: bool) -> String {
+fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usize>) -> String {
     let mut out = String::new();
     if format == Format::Json {
         out.push_str("\"flows\":[");
@@ -282,10 +318,24 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool) -> String {
             wz_capture::Framing::Undecided => "undecided",
             wz_capture::Framing::OpeningLost => "opening-lost",
         };
-        let state = match encrypted.as_ref().map(|e| e.not_decrypted) {
+        // R311y669 — BOTH directions where they disagree. The flow-level reason
+        // is the FIRST refusal a pass met, so a flow whose direction A hit an
+        // epoch boundary and whose direction B had no key at all showed only A's
+        // -- one of the two remedies a reader needed. Rendered as `A's / B's` only
+        // when they differ, so the ordinary single-cause flow reads exactly as
+        // before and the extra words appear precisely where they carry something.
+        let state = match encrypted.as_ref() {
             None => "-".to_string(),
-            Some(None) => "decrypted".to_string(),
-            Some(Some(reason)) => format!("{reason:?}"),
+            Some(e) => match e.not_decrypted {
+                None => "decrypted".to_string(),
+                Some(reason) => {
+                    let [a, b] = e.not_decrypted_per_direction;
+                    match (a, b) {
+                        (Some(a), Some(b)) if a != b => format!("{a:?}+{b:?}"),
+                        _ => format!("{reason:?}"),
+                    }
+                }
+            },
         };
         let rows: Vec<MessageRow> = flow.frames.iter().map(MessageRow::transport).collect();
         push_flow(
@@ -302,6 +352,7 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool) -> String {
             0,
             &state,
             per_message.then_some(&rows[..]),
+            cap,
         );
     }
     // R311y668 — the DATAGRAM half. Absent from this listing until now, which
@@ -309,25 +360,38 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool) -> String {
     for flow in d.datagram_flows() {
         let mut rows: Vec<MessageRow> = flow.frames.iter().map(MessageRow::transport).collect();
         rows.extend(flow.scouting.iter().map(MessageRow::scouting));
-        push_flow(
-            &mut out,
-            format,
-            &mut emitted,
-            &flow.flow,
+        // R311y669 — a QUIC flow says so in the framing column and says NOT
+        // DECRYPTED in the state one. Both are load-bearing: before this round
+        // the row would have read `datagram   3 message(s)` for a flow whose
+        // three messages were QUIC packets misread as zenoh.
+        let (framing, state) = match &flow.quic {
+            Some(_) => ("quic", "QuicProtected"),
             // "datagram" sits in the FRAMING column because that column answers
             // "what did these bytes turn out to be", and for UDP the answer is
             // that there was no stream to frame -- one datagram is one unit.
             // `Framing` itself is a stream-only enum, so this is the one value
             // in this column that does not come from it.
-            "datagram",
+            //
+            // DTLS is still not recognised, so a plain datagram flow's state is
+            // not "decrypted" and not a refusal -- it is not applicable, and
+            // saying so is different from claiming either.
+            None => ("datagram", "-"),
+        };
+        push_flow(
+            &mut out,
+            format,
+            &mut emitted,
+            &flow.flow,
+            framing,
+            // A QUIC flow decodes NO zenoh messages, and its packet count is
+            // reported in the report's own `quic` block rather than folded in
+            // here: a `message(s)` column carrying packets is the shape of the
+            // misread this round removed.
             flow.frames.len(),
             flow.scouting.len(),
-            // Nothing carries a datagram flow over TLS in this reader: DTLS is
-            // not recognised and QUIC is untouched, so the state is not
-            // "decrypted" and not a refusal -- it is not applicable, and saying
-            // so is different from claiming either.
-            "-",
+            state,
             per_message.then_some(&rows[..]),
+            cap,
         );
     }
     if format == Format::Json {
@@ -358,6 +422,7 @@ fn push_flow(
     scouting: usize,
     state: &str,
     rows: Option<&[MessageRow]>,
+    cap: Option<usize>,
 ) {
     if format == Format::Json {
         if *emitted > 0 {
@@ -365,19 +430,24 @@ fn push_flow(
         }
         out.push_str(&format!(
             "{{\"low\":\"{}\",\"high\":\"{}\",\"framing\":\"{framing}\",\
-             \"messages\":{messages},\"scouting\":{scouting},\"tls\":\"{state}\"",
+             \"messages\":{messages},\"scouting\":{scouting},\"protection\":\"{state}\"",
             endpoint(&key.low),
             endpoint(&key.high),
         ));
         if let Some(rows) = rows {
+            let (shown, omitted) = split_at_cap(rows, cap);
             out.push_str(",\"message_list\":[");
-            for (i, row) in rows.iter().enumerate() {
+            for (i, row) in shown.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
                 row.push_json(out);
             }
             out.push(']');
+            // STRUCTURAL, present with a zero when nothing was cut: a consumer
+            // must never have to test for a key to learn whether the list it is
+            // reading is the whole one.
+            out.push_str(&format!(",\"message_list_omitted\":{omitted}"));
         }
         out.push('}');
     } else {
@@ -388,12 +458,28 @@ fn push_flow(
             endpoint(&key.high),
         ));
         if let Some(rows) = rows {
-            for row in rows {
+            let (shown, omitted) = split_at_cap(rows, cap);
+            for row in shown {
                 row.push_text(out);
+            }
+            if omitted > 0 {
+                out.push_str(&format!("      ... {omitted} more not listed\n"));
             }
         }
     }
     *emitted += 1;
+}
+
+/// R311y669 (§1.2a) — the rows a listing shows, and how many it did not.
+///
+/// One function for both formats so the two can never disagree about what was
+/// cut: a text rendering saying "4 more not listed" beside a JSON one reporting
+/// three would be a worse failure than no bound at all.
+fn split_at_cap(rows: &[MessageRow], cap: Option<usize>) -> (&[MessageRow], usize) {
+    match cap {
+        Some(n) if rows.len() > n => (&rows[..n], rows.len() - n),
+        _ => (rows, 0),
+    }
 }
 
 /// R311y668 (§1.2a) — one row of the message listing.
@@ -854,6 +940,243 @@ mod tests {
             !without.contains("message_list"),
             "--json --flows alone must not claim to have listed them: {without}"
         );
+    }
+
+    /// One UDP datagram to a zenoh port carrying `payload`.
+    fn udp_to_zenoh_port(payload: &[u8]) -> Vec<u8> {
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&50000u16.to_be_bytes());
+        udp.extend_from_slice(&7447u16.to_be_bytes());
+        udp.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(payload);
+
+        let mut ip = vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+        ip.extend_from_slice(&[10, 0, 0, 1]);
+        ip.extend_from_slice(&[10, 0, 0, 2]);
+        ip.extend_from_slice(&udp);
+
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// R311y669 (§1.2a) — A QUIC CAPTURE IS NOT READ AS ZENOH.
+    ///
+    /// THE MEASUREMENT THAT PRODUCED THIS ROUND, run through this very function
+    /// before the fix existed: this capture reported `messages decoded: 4`, with
+    /// an `Init` and a `Fragment` among them, out of bytes holding no zenoh at
+    /// all. A QUIC short header's first byte is a flagged zenoh MID -- `0x41` is
+    /// `T_MID_INIT | 0x40` -- so the transport decoder did not fail on it, it
+    /// SUCCEEDED. That is a misread, which this crate treats as strictly worse
+    /// than an un-read, and it was the last transport where one was still
+    /// happening.
+    #[test]
+    fn a_quic_capture_reports_quic_and_decodes_no_zenoh_from_it() {
+        // A v1 Initial (long header) and then a 1-RTT packet (short header), the
+        // ordinary opening of any QUIC connection.
+        let mut initial = vec![0xC0u8];
+        initial.extend_from_slice(&1u32.to_be_bytes());
+        initial.push(8);
+        initial.extend_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7]);
+        initial.push(4);
+        initial.extend_from_slice(&[8, 9, 10, 11]);
+        initial.extend_from_slice(&[0x00, 0x29, 0x01]);
+        initial.extend_from_slice(&[0xAA; 40]);
+        // `0x41` -- the byte that used to decode as a zenoh Init.
+        let mut one_rtt = vec![0x41u8];
+        one_rtt.extend_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7]);
+        one_rtt.extend_from_slice(&[0xBB; 30]);
+
+        let file = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[
+                (0, 1_000_000, &udp_to_zenoh_port(&initial)),
+                (0, 1_000_001, &udp_to_zenoh_port(&one_rtt)),
+            ],
+        );
+
+        let (text, outcome) = analyze_with(&file, None, Format::Text, true, true).expect("parses");
+        assert!(
+            text.contains("messages decoded: 0"),
+            "not one zenoh message may be claimed from a QUIC capture: {text}"
+        );
+        // The two names the pre-fix reading produced, asserted as ABSENT. The
+        // count alone would not catch a reading that produced them and counted
+        // them elsewhere.
+        assert!(
+            !text.contains("Init") && !text.contains("Fragment"),
+            "and specifically not the two the misread produced: {text}"
+        );
+        assert!(
+            text.contains("QUIC: 1 flow(s), 2 packet(s)"),
+            "the capture must SAY it carried QUIC -- silence here is the other \
+             half of the same defect: {text}"
+        );
+        assert!(
+            text.contains("NOT DECRYPTED"),
+            "and say that none of it was opened: {text}"
+        );
+        assert!(
+            text.contains("quic ") && text.contains("QuicProtected"),
+            "the flow row names the transport and its state: {text}"
+        );
+        assert!(
+            !outcome.complete,
+            "a capture whose zenoh is inside QUIC this reader does not open is \
+             not a capture it saw whole"
+        );
+
+        let (json, _) = analyze_with(&file, None, Format::Json, true, true).expect("parses");
+        assert!(
+            json.contains("\"quic\":{\"flows\":1,\"packets\":2,")
+                && json.contains("\"initial\":1")
+                && json.contains("\"one_rtt\":1")
+                && json.contains("\"decrypted\":false"),
+            "the JSON block names the packet kinds, which is what tells a reader \
+             WHERE the zenoh would be: {json}"
+        );
+        assert!(
+            json.contains("\"messages_decoded\":0"),
+            "and claims no messages: {json}"
+        );
+    }
+
+    /// R311y669 (§1.2a) — THE DISCRIMINATOR. A zenoh datagram whose first byte
+    /// looks like a QUIC short header is still read as zenoh.
+    ///
+    /// Without this, the round's fix could be "call every `0x40..=0x7F` datagram
+    /// QUIC", which closes the misread by creating its mirror image: real zenoh
+    /// traffic silently reported as an unopened QUIC flow. The recognition is
+    /// flow-scoped precisely so this capture is unaffected, and no assertion in
+    /// the test above can show that.
+    #[test]
+    fn a_zenoh_datagram_whose_first_byte_resembles_quic_is_still_read_as_zenoh() {
+        // A zenoh FRAGMENT whose first byte is in the SHORT-HEADER RANGE:
+        // `0x46` is `T_MID_FRAGMENT | FLAG_T_FRAGMENT_M`, so the high bit is
+        // clear and the next one set -- byte-for-byte what a QUIC 1-RTT header
+        // looks like. It is also the very name the pre-fix misread invented for
+        // a QUIC packet, which is why this is the right fixture: the two
+        // directions of the mistake meet on this byte.
+        //
+        // Two fixture facts learned by measurement rather than assumed: the
+        // datagram path takes the message with NO length prefix (an earlier
+        // version prefixed one and its `0x04` decoded as a KeepAlive, proving
+        // the framing instead of the byte), and `0x41` will not do because
+        // `T_MID_INIT | 0x40` sets INIT's S flag and demands more body.
+        let batch = [0x46u8, 0x07, 0xEE];
+
+        let file = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000_000, &udp_to_zenoh_port(&batch))],
+        );
+        let (text, _) = analyze_with(&file, None, Format::Text, true, true).expect("parses");
+        assert!(
+            text.contains("messages decoded: 1") && text.contains("Fragment"),
+            "a zenoh datagram must still be read as zenoh -- a rule deciding on \
+             that byte would silence real traffic: {text}"
+        );
+        assert!(
+            !text.contains("QUIC"),
+            "and must not be claimed as QUIC: {text}"
+        );
+    }
+
+    /// R311y669 (§1.2a) — the TEXT row's SHAPE, pinned as a whole line.
+    ///
+    /// R311y668 carried this: every assertion about the text listing matched a
+    /// SUBSTRING, so the column layout could drift without any gate noticing —
+    /// the same class the JSON document-count check closed for the other format.
+    /// R311y669 then added a column to every row (`quic` / `QuicProtected`),
+    /// which is exactly the change the carry predicted, and it went in with no
+    /// gate to fail.
+    ///
+    /// The whole line, byte for byte. A layout change now has to be a deliberate
+    /// edit here rather than a silent consequence somewhere else.
+    #[test]
+    fn the_text_flow_row_has_a_pinned_shape_and_not_only_pinned_words() {
+        let file = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[
+                (0, 1_000_000, &tls_packet()),
+                (0, 2_000_000, &scout_packet()),
+            ],
+        );
+        let (text, _) = analyze_with(&file, None, Format::Text, true, true).expect("parses");
+        let rows: Vec<&str> = text.lines().filter(|l| l.contains(" <-> ")).collect();
+        assert_eq!(
+            rows,
+            vec![
+                "  10.0.0.1:1111 <-> 10.0.0.2:7447  tls          0 message(s)  0 scouting  NoKeysSupplied",
+                "  192.168.1.5:43210 <-> 224.0.0.224:7446  datagram     0 message(s)  1 scouting  -",
+            ],
+            "the row layout is a pinned shape: endpoints, framing in a 12-wide \
+             column, the two counts, then the protection state"
+        );
+        // And the message row under it, which has its own shape.
+        let under: Vec<&str> = text.lines().filter(|l| l.starts_with("      ")).collect();
+        assert_eq!(
+            under,
+            vec!["      A @1 scouting  Scout"],
+            "a scouting row carries the namespace where a batch index would be"
+        );
+    }
+
+    /// R311y669 (§1.2a) — the message listing is BOUNDED, and says what it cut.
+    ///
+    /// R311y668 carried this: `message_list` rendered up to
+    /// `MAX_KEPT_RECORDS_PER_DIRECTION` rows per direction per flow into one
+    /// string with no cap at all. Everything else in this reader is bounded and
+    /// counts what the bound cost -- a rendering that is not is a rendering whose
+    /// size depends on how much traffic there was, which is the leak every
+    /// `drops` counter in `wz-capture` exists to prevent.
+    ///
+    /// The cut is REPORTED in the rendering itself, on the house rule: a bound
+    /// that bites without saying so reports itself as the wire.
+    #[test]
+    fn the_message_listing_is_bounded_and_says_how_many_it_left_out() {
+        // Six scouting datagrams, listed under a cap of two.
+        let mut packets: Vec<Vec<u8>> = Vec::new();
+        for _ in 0..6 {
+            packets.push(scout_packet());
+        }
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, 1_000_000 + i as u64, p.as_slice()))
+            .collect();
+        let file = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+
+        let (text, _) =
+            analyze_with_limit(&file, None, Format::Text, true, true, Some(2)).expect("parses");
+        assert_eq!(
+            text.lines().filter(|l| l.contains("Scout")).count(),
+            2,
+            "the cap must bite: {text}"
+        );
+        assert!(
+            text.contains("4 more not listed"),
+            "and the rendering must say what it left out, or the listing reads as \
+             the whole of what was decoded: {text}"
+        );
+
+        let (json, _) =
+            analyze_with_limit(&file, None, Format::Json, true, true, Some(2)).expect("parses");
+        assert!(
+            json.contains("\"message_list_omitted\":4"),
+            "the JSON says it structurally rather than in prose: {json}"
+        );
+        // Unbounded is still available and still the default -- the cap is a
+        // caller's choice, not a new silent ceiling on the ordinary path.
+        let (all, _) = analyze_with(&file, None, Format::Text, true, true).expect("parses");
+        assert_eq!(all.lines().filter(|l| l.contains("Scout")).count(), 6);
+        assert!(!all.contains("more not listed"));
     }
 
     /// R311y664 — a file that is not a capture is an ERROR, not an empty
