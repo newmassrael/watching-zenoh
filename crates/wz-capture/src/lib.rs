@@ -5078,6 +5078,41 @@ mod datagram_tests {
         }
         assert_eq!(d.flows().len(), 2, "the cap holds");
         assert_eq!(d.drops().flows, 1, "and the eviction is counted");
+
+        // R311y652 — THE LEG THIS TEST WAS NAMED FOR, and did not have. Found by
+        // falsification: neutering `last_activity` on the stream path left all
+        // 325 tests green, because three flows created in order are also three
+        // flows active in order, and an insertion-order table answers that
+        // fixture exactly as an LRU does. R311y594b's rule has been unwitnessed
+        // since it was written.
+        //
+        // These three separate the orders: the FIRST flow is spoken for again
+        // before the third arrives, so an LRU keeps it and a FIFO drops it.
+        let at = |port: u16, seq: u32| {
+            let mut pkt = tcp_packet(seq, &msg);
+            pkt[34..36].copy_from_slice(&port.to_be_bytes());
+            pkt
+        };
+        let mut e = Dissection::with_limits(DissectionLimits {
+            max_flows: Some(2),
+            ..DissectionLimits::default()
+        });
+        e.push_packet(LINKTYPE_ETHERNET, 0, &at(2221, 1000));
+        e.push_packet(LINKTYPE_ETHERNET, 1, &at(2222, 1000));
+        // Spoken for again, one message further along its own stream.
+        e.push_packet(LINKTYPE_ETHERNET, 2, &at(2221, 1000 + msg.len() as u32));
+        e.push_packet(LINKTYPE_ETHERNET, 3, &at(2223, 1000));
+        assert_eq!(e.flows().len(), 2);
+        let ports: Vec<u32> = e
+            .flows()
+            .iter()
+            .map(|f| f.flow.low.port.min(f.flow.high.port))
+            .collect();
+        assert_eq!(
+            ports,
+            alloc::vec![2221, 2223],
+            "the LEAST RECENTLY ACTIVE must go, not the first admitted"
+        );
     }
 
     /// R311y651 (§4.4) — the DATAGRAM flow table is bounded too.
@@ -6462,6 +6497,48 @@ mod vsock_flow_tests {
             2,
             "ports 0x00010001 and 0x00020001 share their low 16 bits; a u16 key \
              would interleave two sessions into one stream"
+        );
+    }
+
+    /// R311y652 — the vsock path's own LRU, which had no witness either.
+    ///
+    /// A third writer of `last_activity` and a third eviction decision resting
+    /// on it. Neutering this one left all 325 tests green, exactly as the stream
+    /// path's did: every vsock fixture creates its flows in activity order, and
+    /// a table that never orders anything answers that identically.
+    ///
+    /// AF_VSOCK is the case where it matters most sharply, because the synthesis
+    /// this module exists to test is per-flow: evicting the wrong flow throws
+    /// away the running byte count that IS this path's sequence number, and the
+    /// flow that comes back afterwards starts over at zero.
+    #[test]
+    fn the_vsock_flow_table_evicts_the_least_recently_active() {
+        let msg = framed_keepalive();
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows: Some(2),
+            ..DissectionLimits::default()
+        });
+        let at = |port: u32| vsockmon(3, port, 2, 7447, OP_PAYLOAD, &[], &msg);
+        d.push_packet(LINKTYPE_VSOCK, 0, &at(0x0001_0001));
+        d.push_packet(LINKTYPE_VSOCK, 1, &at(0x0002_0001));
+        // Spoken for again before the third arrives -- the only shape that
+        // separates "least recently active" from "first admitted".
+        d.push_packet(LINKTYPE_VSOCK, 2, &at(0x0001_0001));
+        d.push_packet(LINKTYPE_VSOCK, 3, &at(0x0003_0001));
+
+        assert_eq!(d.flows().len(), 2, "the cap holds");
+        assert_eq!(d.drops().flows, 1, "and the eviction is counted");
+        let ports: Vec<u32> = d
+            .flows()
+            .iter()
+            // MAX and not MIN: a vsock port is a 32-bit number far above the
+            // 7447 on the other end, which is the opposite of the TCP case.
+            .map(|f| f.flow.low.port.max(f.flow.high.port))
+            .collect();
+        assert_eq!(
+            ports,
+            alloc::vec![0x0001_0001, 0x0003_0001],
+            "the LEAST RECENTLY ACTIVE must go, not the first admitted"
         );
     }
 }
