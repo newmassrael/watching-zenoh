@@ -5395,7 +5395,11 @@ layer_c1bt_capture_no_default_features() {
         agg::no_codec_tests::a_build_without_the_network_codecs_reports_the_traffic_as_unread \
         agg::no_codec_tests::a_frame_carrying_nothing_is_not_reported_as_unread \
         datagram_tests::the_capture_clock_is_sticky_and_an_unstamped_packet_inherits_it \
-        datagram_tests::a_capture_with_no_stamp_anywhere_leaves_every_frame_timeless
+        datagram_tests::a_capture_with_no_stamp_anywhere_leaves_every_frame_timeless \
+        tls_flow_tests::a_tls_flow_is_named_as_encrypted_rather_than_reported_empty \
+        tls_flow_tests::a_zenoh_stream_that_opens_like_a_client_hello_is_still_a_zenoh_stream \
+        tls_flow_tests::a_chain_that_stops_being_tls_stops_the_census \
+        tls_flow_tests::a_plaintext_capture_carries_the_encrypted_fields_at_zero
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the --no-default-features build"

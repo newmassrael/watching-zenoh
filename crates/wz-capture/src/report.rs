@@ -100,6 +100,15 @@ impl<'a> CaptureReport<'a> {
         if self.dissection.health().packets_skipped > 0 || self.dissection.drops().any() {
             return false;
         }
+        // R311y648 (§1.2a) — an encrypted flow this reader could not decrypt is
+        // a shortfall in the ROWS, on exactly the rule `unsized_payloads`
+        // reaches this verdict by: the traffic was there, it is not in the
+        // totals, and a reader summing them would otherwise be told the sum is
+        // the whole capture. The strongest form of the defect this closes: the
+        // flow used to be silent AND the verdict used to say `complete`.
+        if !self.dissection.encrypted_flows().is_empty() {
+            return false;
+        }
         // R311y624 (§1.1m) — the FRAMING witnesses reach the verdict, and until
         // now none of them did. A capture whose assembler gave up on a gap, or
         // whose direction lost the zenoh or WebSocket framing, or whose peer
@@ -230,6 +239,29 @@ impl<'a> CaptureReport<'a> {
             ",\"ip_checksum_invalid\":{},\"transport_checksum_invalid\":{}",
             health.ip_checksum_invalid, health.transport_checksum_invalid
         ));
+        // R311y648 (§1.2a) — STRUCTURAL, like `skips` below: present with zeroes
+        // on a plaintext capture, so a consumer never has to test for the key to
+        // learn whether part of this capture was unreadable by design. The
+        // reason is a STRING and not a flag, because the decryption layer will
+        // add reasons a reader acts on differently (wrong session, one
+        // direction, mid-handshake start) and a boolean would have to be
+        // widened by whoever adds them.
+        let enc = d.encrypted_flows();
+        s.push_str(&format!(
+            ",\"encrypted\":{{\"flows\":{},\"records\":{},\"application_records\":{},\
+             \"application_bytes\":{},\"decrypted\":false,\"reason\":\"{}\"}}",
+            enc.len(),
+            enc.iter().map(|e| e.totals().records).sum::<usize>(),
+            enc.iter()
+                .map(|e| e.totals().application_records)
+                .sum::<usize>(),
+            enc.iter()
+                .map(|e| e.totals().application_bytes)
+                .sum::<u64>(),
+            match enc.first().map(|e| e.not_decrypted) {
+                None | Some(crate::tls::NotDecrypted::NoKeysSupplied) => "no_keys_supplied",
+            }
+        ));
         // R311y643 (§1.1e) — the skip count above is a number; this is what it
         // MEANS. Structural like `gaps`: present with zeroes on a clean capture,
         // so a consumer's field lookup never depends on this particular file
@@ -354,6 +386,23 @@ impl<'a> CaptureReport<'a> {
                 "  link type not read by this build: {} ({} packet(s)); \
                  this capture was not dissected\n",
                 dlts, sk.unsupported_link_type
+            ));
+        }
+        // R311y648 (§1.2a) — the line that stops an encrypted capture reading
+        // as an idle one. Printed only when there IS such a flow, like every
+        // other qualifier here; a plaintext capture is not told about a hazard
+        // it does not have.
+        let enc = d.encrypted_flows();
+        if !enc.is_empty() {
+            let records: usize = enc.iter().map(|e| e.totals().records).sum();
+            let bytes: u64 = enc.iter().map(|e| e.totals().application_bytes).sum();
+            s.push_str(&format!(
+                "  {} flow(s) carry zenoh inside TLS: {} record(s), {} byte(s) of \
+                 application data. NOT DECRYPTED (no keys supplied) -- the \
+                 session is there and this report cannot see into it\n",
+                enc.len(),
+                records,
+                bytes
             ));
         }
         // R311y624 (§1.1m) — printed ONLY when non-zero, unlike the JSON object

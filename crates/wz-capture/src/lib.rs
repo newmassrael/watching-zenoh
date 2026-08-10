@@ -81,6 +81,15 @@ pub mod pcapng;
 /// attached.
 pub mod report;
 pub mod tcp;
+/// R311y648 (§1.2a) — RECOGNISING TLS, and deliberately not decrypting it.
+///
+/// UNGATED and dependency-free, like every other module here: reading a 5-byte
+/// record header and walking the chain needs nothing but the bytes. The
+/// decryption that will consume this lives on the far side of this crate's own
+/// seam (a byte stream plus a direction), in a crate that may take the
+/// workspace's already-pinned crypto — `wz-capture` keeps its zero third-party
+/// dependencies.
+pub mod tls;
 pub mod ws;
 
 use alloc::collections::BTreeSet;
@@ -480,12 +489,34 @@ pub enum Framing {
         /// [`Direction::B`]'s deframer.
         b: alloc::boxed::Box<ws::WsDeframer>,
     },
+    /// R311y648 (§1.2a) — a TLS record stream. The zenoh session is inside it
+    /// and this build has no key material, so the bytes are COUNTED and not
+    /// fed to the observer.
+    ///
+    /// A state of its own rather than `Stream` with an error, because the two
+    /// are opposite findings: a stream that fails to decode is a wz defect or a
+    /// corrupt capture, and this is a capture working exactly as designed whose
+    /// contents are lawfully unavailable. Before this arm existed the flow was
+    /// classified `Stream`, the reader took the record header's first two bytes
+    /// as a little-endian length prefix, waited forever for bytes that never
+    /// satisfied it, and reported ZERO frames with ZERO desyncs, ZERO skips and
+    /// ZERO gaps — a healthy-looking flow with nothing in it, which reads as
+    /// "this deployment carried no zenoh traffic".
+    ///
+    /// BOXED for the reason the ws pair is: the per-direction pending buffers
+    /// would otherwise sit in every `Undecided` flow in the tree.
+    Encrypted(alloc::boxed::Box<tls::TlsFlowState>),
 }
 
 impl Framing {
     /// Is this flow carrying WebSocket?
     pub fn is_websocket(&self) -> bool {
         matches!(self, Framing::WebSocket { .. })
+    }
+
+    /// R311y648 — is this flow's zenoh session inside an encrypted transport?
+    pub fn is_encrypted(&self) -> bool {
+        matches!(self, Framing::Encrypted(_))
     }
 }
 
@@ -583,6 +614,23 @@ impl FlowDissection {
         &self.framing
     }
 
+    /// R311y648 (§1.2a) — this flow's encrypted-transport finding, or `None`
+    /// when its bytes are the zenoh session itself.
+    ///
+    /// `Some` is not a failure. It is the most this reader can honestly say
+    /// about a `tls/...` or `quic/...` deployment without key material, and it
+    /// is strictly more than the ZERO frames and perfect health the flow
+    /// reported before the finding existed.
+    pub fn encrypted(&self) -> Option<tls::EncryptedFlow> {
+        match &self.framing {
+            Framing::Encrypted(state) => Some(tls::EncryptedFlow {
+                per_direction: state.census(),
+                not_decrypted: tls::NotDecrypted::NoKeysSupplied,
+            }),
+            _ => None,
+        }
+    }
+
     /// The assembler for one direction.
     pub fn assembler(&self, direction: Direction) -> &StreamAssembler {
         match direction {
@@ -642,7 +690,20 @@ impl FlowDissection {
                     a: alloc::boxed::Box::new(ws::WsDeframer::new()),
                     b: alloc::boxed::Box::new(ws::WsDeframer::new()),
                 },
-                ws::UpgradeVerdict::No => Framing::Stream,
+                // R311y648 (§1.2a) — the ws question is asked FIRST and this one
+                // only where it answered `No`, which is not an ordering
+                // preference: a `wss://` flow opens with the HTTP upgrade in
+                // cleartext and becomes TLS afterwards, so a TLS test in front
+                // would take the upgrade's own bytes as the question. Where ws
+                // has settled `No`, a ClientHello is the next thing this reader
+                // can be sure of.
+                ws::UpgradeVerdict::No => {
+                    match tls::client_hello_verdict(&self.held[dir_index(direction)]) {
+                        tls::TlsVerdict::NeedMore => return,
+                        tls::TlsVerdict::Yes => Framing::Encrypted(alloc::boxed::Box::default()),
+                        tls::TlsVerdict::No => Framing::Stream,
+                    }
+                }
             };
             self.replay_held();
             return;
@@ -851,6 +912,16 @@ impl FlowDissection {
                 Direction::A => a.note_gap(bytes_missing),
                 Direction::B => b.note_gap(bytes_missing),
             },
+            // R311y648 — a hole breaks the record CHAIN, so the held tail is
+            // dropped rather than joined across it: the bytes after a gap begin
+            // wherever they begin, and treating them as the continuation of the
+            // record before it would count a record this reader invented.
+            // Counting stops for that direction, which is why the census is a
+            // FLOOR after a gap and the report says so through the same
+            // `gaps_forced` counter every other framing feeds.
+            Framing::Encrypted(state) => {
+                state.pending[dir_index(direction)].clear();
+            }
         }
     }
 
@@ -861,7 +932,19 @@ impl FlowDissection {
             Framing::Undecided | Framing::OpeningLost => {}
             Framing::Stream => self.feed_stream(direction, bytes),
             Framing::WebSocket { .. } => self.feed_websocket(direction, bytes),
+            // R311y648 — COUNTED and not decoded. Handing ciphertext to the
+            // observer is how the flow used to report zero frames and perfect
+            // health at the same time.
+            Framing::Encrypted(_) => self.feed_encrypted(direction, bytes),
         }
+    }
+
+    /// R311y648 (§1.2a) — walk one direction's records without reading them.
+    fn feed_encrypted(&mut self, direction: Direction, bytes: &[u8]) {
+        let Framing::Encrypted(state) = &mut self.framing else {
+            return;
+        };
+        state.push(dir_index(direction), bytes);
     }
 
     /// R311y602 — the ws half: deframe, then decode each message as a
@@ -1683,6 +1766,18 @@ impl Dissection {
     /// Every TCP flow seen, in first-appearance order.
     pub fn flows(&self) -> &[FlowDissection] {
         &self.flows
+    }
+
+    /// R311y648 (§1.2a) — every flow whose zenoh session is inside an
+    /// encrypted transport, with what this reader could count of it.
+    ///
+    /// The capture-wide answer to "is this report empty because nothing
+    /// happened, or because it happened where I cannot see it". A reader who
+    /// never looks at an individual flow still gets it, because
+    /// [`CaptureReport`](report::CaptureReport) carries the total and the
+    /// verdict.
+    pub fn encrypted_flows(&self) -> Vec<tls::EncryptedFlow> {
+        self.flows.iter().filter_map(|f| f.encrypted()).collect()
     }
 
     /// Every UDP flow seen, in first-appearance order. Where scouting,
@@ -5899,5 +5994,300 @@ mod vsock_flow_tests {
             "ports 0x00010001 and 0x00020001 share their low 16 bits; a u16 key \
              would interleave two sessions into one stream"
         );
+    }
+}
+
+// ── R311y648 (§1.2a) — the ENCRYPTED-FLOW path. A zenoh deployment over
+//    `tls/...` or `quic/...` is the ordinary production shape, and a capture of
+//    one has to say what it is rather than what it failed to be. ──
+#[cfg(test)]
+mod tls_flow_tests {
+    use super::*;
+    use crate::link::LINKTYPE_ETHERNET;
+
+    /// One TLS record: content type, legacy version, big-endian length.
+    fn record(content_type: u8, version: [u8; 2], payload: &[u8]) -> Vec<u8> {
+        let mut out = alloc::vec![content_type, version[0], version[1]];
+        out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn tcp_packet(sport: u16, dport: u16, seq: u32, payload: &[u8]) -> Vec<u8> {
+        let (src, dst) = if sport == 1111 {
+            ([10u8, 0, 0, 1], [10u8, 0, 0, 2])
+        } else {
+            ([10u8, 0, 0, 2], [10u8, 0, 0, 1])
+        };
+        let mut tcp = Vec::new();
+        tcp.extend_from_slice(&sport.to_be_bytes());
+        tcp.extend_from_slice(&dport.to_be_bytes());
+        tcp.extend_from_slice(&seq.to_be_bytes());
+        tcp.extend_from_slice(&0u32.to_be_bytes());
+        tcp.push(5 << 4);
+        tcp.push(0x10);
+        tcp.extend_from_slice(&64u16.to_be_bytes());
+        tcp.extend_from_slice(&0u16.to_be_bytes());
+        tcp.extend_from_slice(&0u16.to_be_bytes());
+        tcp.extend_from_slice(payload);
+
+        let mut ip = alloc::vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
+        ip.extend_from_slice(&src);
+        ip.extend_from_slice(&dst);
+        ip.extend_from_slice(&tcp);
+
+        let mut eth = alloc::vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// A TLS 1.3 connection as it appears on the wire: a ClientHello, the
+    /// server's flight, then application data both ways.
+    fn tls_dissection() -> Dissection {
+        let hello = record(0x16, [0x03, 0x01], &[0x01, 0x00, 0x00, 0x30]);
+        let server = record(0x16, [0x03, 0x03], &[0x02, 0x00, 0x00, 0x28]);
+        let ccs = record(0x14, [0x03, 0x03], &[0x01]);
+        let app_a = record(0x17, [0x03, 0x03], &[0xAB; 40]);
+        // 800 bytes ON PURPOSE. Read as a zenoh stream this record's first two
+        // bytes are a LITTLE-endian length prefix of 0x0317 = 791, and the unit
+        // that follows opens with 0x03 -- `T_MID_CLOSE`. So a reader that let
+        // ciphertext reach the observer does not merely get confused: it decodes
+        // a Close nobody sent. `frames == 0` below is what holds that shut.
+        let app_b = record(0x17, [0x03, 0x03], &[0xCD; 800]);
+
+        let mut d = Dissection::new();
+        let mut a_seq = 1000u32;
+        let mut b_seq = 5000u32;
+        let mut i = 0usize;
+        let mut push = |d: &mut Dissection, from_a: bool, bytes: &[u8], seq: &mut u32| {
+            let pkt = if from_a {
+                tcp_packet(1111, 7447, *seq, bytes)
+            } else {
+                tcp_packet(7447, 1111, *seq, bytes)
+            };
+            d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+            *seq += bytes.len() as u32;
+            i += 1;
+        };
+        push(&mut d, true, &hello, &mut a_seq);
+        let mut flight = server.clone();
+        flight.extend_from_slice(&ccs);
+        flight.extend_from_slice(&app_b);
+        push(&mut d, false, &flight, &mut b_seq);
+        push(&mut d, true, &app_a, &mut a_seq);
+        d
+    }
+
+    /// R311y648 (§1.2a) — THE DEFECT. A capture of a `tls/...` deployment used
+    /// to report a flow with ZERO frames and PERFECT health, which reads as
+    /// "this deployment carried no zenoh traffic".
+    ///
+    /// Measured before the fix and recorded here so the shape is not lost:
+    /// `frames=0 desyncs=0 recoveries=0 skipped=0`, every framing-health field
+    /// zero, and `complete: true`. Not one counter in the report disagreed with
+    /// "nothing happened". That is the worst output this crate can produce --
+    /// worse than a decode error, which at least points at itself.
+    ///
+    /// The flow is now NAMED, and the assertions are about what a reader can
+    /// act on: which flows, how many records, how many bytes, and why the
+    /// plaintext is absent.
+    #[test]
+    fn a_tls_flow_is_named_as_encrypted_rather_than_reported_empty() {
+        let d = tls_dissection();
+        assert_eq!(d.flows().len(), 1);
+        assert!(
+            d.flows()[0].framing().is_encrypted(),
+            "the flow must not be classified as a zenoh byte stream"
+        );
+
+        let enc = d.encrypted_flows();
+        assert_eq!(enc.len(), 1);
+        let totals = enc[0].totals();
+        // The fixture is ClientHello / ServerHello / CCS / two application
+        // records -- five records, two of them application data.
+        assert_eq!(totals.records, 5, "{:?}", enc[0]);
+        assert_eq!(totals.application_records, 2);
+        assert_eq!(
+            totals.application_bytes,
+            40 + 800,
+            "the ciphertext bytes, which bound the zenoh session inside"
+        );
+        // THE LEG THAT KEEPS CIPHERTEXT OUT OF THE DECODER. This fixture's
+        // application record decodes as a zenoh Close if it ever reaches the
+        // observer, so a build that counted the records AND fed them onward
+        // would report a message no peer sent -- the same confident-wrong-answer
+        // class the empty flow was, pointing the other way.
+        assert_eq!(
+            d.flows()[0].frames.len(),
+            0,
+            "ciphertext must never reach the zenoh decoder"
+        );
+        assert_eq!(
+            enc[0].not_decrypted,
+            crate::tls::NotDecrypted::NoKeysSupplied
+        );
+        // Both directions are counted, not just the one that settled the
+        // question: a census of the client alone would report half a session.
+        assert_eq!(
+            enc[0].per_direction[0].records, 2,
+            "the client sent a ClientHello and one application record"
+        );
+        assert_eq!(
+            enc[0].per_direction[1].records, 3,
+            "the server sent ServerHello, CCS and one application record"
+        );
+
+        // AND THE VERDICT MOVES. The old report said `complete` about a
+        // capture it could not see into, which is the half that makes the
+        // silence dangerous rather than merely unhelpful.
+        let report = crate::report::CaptureReport::of(&d);
+        assert!(!report.is_complete(), "{}", report.to_text());
+        assert!(
+            report
+                .to_text()
+                .contains("NOT DECRYPTED (no keys supplied)"),
+            "the text must say why: {}",
+            report.to_text()
+        );
+        let json = report.to_json();
+        assert!(
+            json.contains("\"flows\":1")
+                && json.contains("\"application_bytes\":840")
+                && json.contains("\"decrypted\":false")
+                && json.contains("\"reason\":\"no_keys_supplied\""),
+            "the export must carry the finding: {json}"
+        );
+    }
+
+    /// R311y648 — the census counts RECORDS, and stops counting when the chain
+    /// breaks rather than inventing one out of the bytes that broke it.
+    ///
+    /// A recognised flow keeps being walked, and what follows a TLS handshake
+    /// is not guaranteed to be TLS: a gap, a mid-capture splice, or a
+    /// misrecognition puts bytes there that open no record. The walk refuses
+    /// them and the census stays where it was -- which is the difference
+    /// between "5 records" and "5 records and one I made up".
+    ///
+    /// Driven with bytes that pass the VERSION check and fail the content-type
+    /// one, so the leg under test is the content type and not the pair.
+    #[test]
+    fn a_chain_that_stops_being_tls_stops_the_census() {
+        let d = tls_dissection();
+        let before = d.encrypted_flows()[0].per_direction[0].records;
+
+        let mut d = tls_dissection();
+        // `0xFF` is no content type; `0x03 0x03` is a legal version, and the
+        // length that follows is well-formed. Only the first byte refuses it.
+        let junk = alloc::vec![0xFFu8, 0x03, 0x03, 0x00, 0x05, 1, 2, 3, 4, 5];
+        // CONTIGUOUS with what the client already sent (9-byte ClientHello +
+        // 45-byte application record from seq 1000), so this drives the chain
+        // walk and not the gap path -- a hole would clear the pending tail for
+        // a different reason and the leg would prove nothing.
+        d.push_packet(LINKTYPE_ETHERNET, 9, &tcp_packet(1111, 7447, 1054, &junk));
+
+        assert_eq!(
+            d.encrypted_flows()[0].per_direction[0].records,
+            before,
+            "bytes that open no record must not become one"
+        );
+    }
+
+    /// THE CONTROL, and the leg that makes the recogniser a measurement rather
+    /// than a prefix match.
+    ///
+    /// A zenoh stream frames every unit with a 2-byte LITTLE-endian length, so
+    /// a 790-byte unit whose first message is an `INIT` is `[0x16, 0x03, 0x01,
+    /// ..]` -- byte for byte the opening of a TLS 1.0 ClientHello record. A
+    /// detector that matched those three bytes would classify a real zenoh flow
+    /// as encrypted and produce exactly the silence it exists to end, pointing
+    /// the other way.
+    ///
+    /// Driven with the ambiguous prefix ON PURPOSE, so the test fails if the
+    /// discriminator is ever weakened to a prefix.
+    #[test]
+    fn a_zenoh_stream_that_opens_like_a_client_hello_is_still_a_zenoh_stream() {
+        // A 790-byte unit: the length prefix is [0x16, 0x03] little-endian.
+        let mut unit = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE; 790];
+        unit[0] = wz_session_core::wire_const::T_MID_INIT;
+        let mut framed = alloc::vec![0x16u8, 0x03];
+        framed.extend_from_slice(&unit);
+        // ANTI-VACUITY: the bytes really are the ambiguous shape.
+        assert_eq!(&framed[..3], &[0x16, 0x03, 0x01]);
+        assert_eq!(
+            crate::tls::client_hello_verdict(&framed),
+            crate::tls::TlsVerdict::No,
+            "a zenoh unit must not answer Yes to the ClientHello question"
+        );
+
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &framed));
+        assert_eq!(d.flows().len(), 1);
+        assert!(
+            !d.flows()[0].framing().is_encrypted(),
+            "a zenoh stream was classified as TLS -- the recogniser is a prefix match"
+        );
+        assert!(
+            d.encrypted_flows().is_empty(),
+            "and it must not reach the report"
+        );
+
+        // THE SECOND LEG, and it earned its place by falsification: the fixture
+        // above is refused at the handshake-TYPE check, so the length-consistency
+        // rule beside it was never driven -- removing that rule left all 312
+        // tests green. These two drive it and nothing else: every other check
+        // passes for both, and they differ only in whether the ClientHello's own
+        // 3-byte length accounts for the record it sits in.
+        //
+        // Record length 0x0404 = 1028, handshake type 0x01.
+        let head = |hs_len: [u8; 3]| {
+            let mut v = alloc::vec![0x16u8, 0x03, 0x01, 0x04, 0x04, 0x01];
+            v.extend_from_slice(&hs_len);
+            v.resize(5 + 1028, 0);
+            v
+        };
+        assert_eq!(
+            crate::tls::client_hello_verdict(&head([0x00, 0x00, 0x00])),
+            crate::tls::TlsVerdict::No,
+            "a handshake claiming 0 bytes inside a 1028-byte record is not a ClientHello"
+        );
+        assert_eq!(
+            crate::tls::client_hello_verdict(&head([0x00, 0x04, 0x00])),
+            crate::tls::TlsVerdict::Yes,
+            "and one that accounts for the whole record is -- so the leg decides, \
+             rather than refusing everything"
+        );
+    }
+
+    /// The other control: a PLAINTEXT capture says nothing about encryption in
+    /// the text and still carries the structural zeroes in the export, so a
+    /// consumer never tests for a key's presence to learn the capture was
+    /// readable.
+    #[test]
+    fn a_plaintext_capture_carries_the_encrypted_fields_at_zero() {
+        let keepalive = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let mut framed = (keepalive.len() as u16).to_le_bytes().to_vec();
+        framed.extend_from_slice(&keepalive);
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &framed));
+        assert_eq!(d.flows()[0].frames.len(), 1, "the control really decodes");
+
+        let report = crate::report::CaptureReport::of(&d);
+        assert!(
+            !report.to_text().contains("NOT DECRYPTED"),
+            "{}",
+            report.to_text()
+        );
+        assert!(
+            report.to_json().contains("\"encrypted\":{\"flows\":0"),
+            "the field is structural: {}",
+            report.to_json()
+        );
+        assert!(report.is_complete(), "{}", report.to_text());
     }
 }
