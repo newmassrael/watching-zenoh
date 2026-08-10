@@ -5415,7 +5415,8 @@ layer_c1bt_capture_no_default_features() {
         datagram_tests::the_flow_table_evicts_the_least_recently_active \
         vsock_flow_tests::the_vsock_flow_table_evicts_the_least_recently_active \
         datagram_tests::the_stream_paths_frame_cap_keeps_the_most_recent \
-        datagram_tests::frames_are_capped_per_flow_and_the_loss_is_counted
+        datagram_tests::frames_are_capped_per_flow_and_the_loss_is_counted \
+        datagram_tests::a_capture_that_abandoned_nothing_carries_the_field_at_zero
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the --no-default-features build"

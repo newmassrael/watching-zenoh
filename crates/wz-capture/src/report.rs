@@ -126,6 +126,16 @@ impl<'a> CaptureReport<'a> {
         // `reserved_headers` is deliberately NOT here. It counts what ARRIVED
         // and should not have — a peer on a different wire-spec vintage — which
         // is a fact about the sender, not a shortfall in the rows.
+        // R311y654 (§1.1f) — a chain this reader ABANDONED on its own deadline
+        // is a message the capture carried and the totals do not, which is the
+        // definition every witness above reaches this verdict by. The counter
+        // was written in R311y594 with the words "COUNTED rather than silent"
+        // and then reached no surface at all: not this verdict, not the export,
+        // not one test. A capture holding an abandoned chain reported
+        // `complete: true` and did not mention it.
+        if self.dissection.expired_chains() > 0 {
+            return false;
+        }
         let framing = self.dissection.framing_health();
         //
         // R311y631 (§1.2b) — `unaccounted_batch_bytes` DOES reach the verdict,
@@ -358,6 +368,13 @@ impl<'a> CaptureReport<'a> {
         // The figure the CAPTURE FILE reports about itself, which is a
         // different claim from anything this reader counted: `null` when the
         // format carried none, never 0.
+        // R311y654 (§1.1f) — STRUCTURAL like `skips` and `encrypted`: present
+        // with a zero on a build that reassembles nothing, so a consumer's
+        // field lookup never depends on which features this binary carries.
+        s.push_str(&format!(
+            ",\"reassembly\":{{\"expired_chains\":{}}}",
+            d.expired_chains()
+        ));
         s.push_str(",\"capture_reported_drops\":");
         s.push_str(&opt_u64(d.capture_reported_drops()));
         s.push('}');
@@ -419,6 +436,19 @@ impl<'a> CaptureReport<'a> {
                  application data. NOT DECRYPTED (no keys supplied) -- the \
                  session is there and this report cannot see into it\n",
                 enc.flows, enc.census.records, enc.census.application_bytes
+            ));
+        }
+        // R311y654 (§1.1f) — and the bound this reader applied to ITSELF, which
+        // no other line here reports. Every other qualifier names something the
+        // wire or the capture tool did; this one names a message the analyzer
+        // gave up on, and a reader who is not told cannot distinguish it from a
+        // message that was never sent.
+        if d.expired_chains() > 0 {
+            s.push_str(&format!(
+                "  {} reassembly chain(s) ABANDONED on this reader's own \
+                 deadline; the messages they carried are absent from the totals \
+                 below\n",
+                d.expired_chains()
             ));
         }
         // R311y624 (§1.1m) — printed ONLY when non-zero, unlike the JSON object

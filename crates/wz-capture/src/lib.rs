@@ -1925,9 +1925,21 @@ impl Dissection {
     }
 
     /// How many chains have been aborted for missing their deadline.
-    #[cfg(feature = "reassembly")]
+    ///
+    /// R311y654 (§1.1f) — UNCONDITIONAL, where the field it reads is not. A
+    /// build without `reassembly` reassembles nothing and therefore expires
+    /// nothing, so `0` is the true answer and not a stub — and a consumer
+    /// asking "was anything abandoned here" must not have to know which
+    /// features this binary was built with to ask.
     pub fn expired_chains(&self) -> usize {
-        self.expired_chains
+        #[cfg(feature = "reassembly")]
+        {
+            self.expired_chains
+        }
+        #[cfg(not(feature = "reassembly"))]
+        {
+            0
+        }
     }
 
     /// Every TCP flow seen, in first-appearance order.
@@ -5392,6 +5404,121 @@ mod datagram_tests {
                 && d.datagram_flows().iter().all(|f| f.frames.is_empty()),
             "the fixture must drive the SCOUTING branch"
         );
+    }
+
+    /// R311y654 (§1.1f) — a chain this reader ABANDONED on its own deadline
+    /// reaches the verdict, the export and the page.
+    ///
+    /// Measured before the fix: `expired_chains()` read 1, `is_complete()`
+    /// answered TRUE, and the number appeared nowhere in the JSON or the text.
+    /// The counter was added in R311y594 with the words "COUNTED rather than
+    /// silent" and had, in the whole workspace, NO consumer at all -- not the
+    /// verdict, not the export, not one test. A capture whose message the
+    /// analyzer gave up waiting for reported itself complete and did not
+    /// mention it, which is a bound reporting itself as the wire's: the exact
+    /// statement the counter's own doc says it exists to prevent.
+    ///
+    /// The clock is what makes this reachable and it is the CAPTURE's, not the
+    /// host's: the last packet is stamped 9 s into a 1 s window.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_chain_abandoned_on_this_readers_deadline_reaches_the_verdict() {
+        let fragment = |sn: u8, more: bool, piece: &[u8]| {
+            let mut wire = alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAGMENT
+                    | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
+                    | if more {
+                        wz_codecs::wire_const::FLAG_T_FRAGMENT_M
+                    } else {
+                        0
+                    },
+                sn,
+            ];
+            wire.extend_from_slice(piece);
+            wire
+        };
+        let keepalive = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let mut d = Dissection::with_limits(DissectionLimits {
+            reassembly_window_ms: Some(1_000),
+            ..DissectionLimits::default()
+        });
+        // A handshake, so the session has an SN resolution and the chain is
+        // TRACKED rather than refused -- without it the fragment is
+        // `FragmentWithoutResolution` and nothing ever opens to expire.
+        for (i, (from_low, ts, message)) in [
+            (true, 0u64, init_datagram(false, &[])),
+            (false, 0, init_datagram(true, &[])),
+            (true, 0, open_datagram(false)),
+            (false, 0, open_datagram(true)),
+            // The chain opens and its second piece never comes.
+            (true, 10, fragment(0, true, &[0xDE, 0xAD])),
+            // Nine seconds later, on the same flow: the sweep runs.
+            (true, 9_000, keepalive.clone()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let packet = if from_low {
+                udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &message)
+            } else {
+                udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 43210, &message)
+            };
+            d.push_packet_at(LINKTYPE_ETHERNET, i, Some(ts), &packet);
+        }
+        assert_eq!(
+            d.expired_chains(),
+            1,
+            "the fixture must actually abandon a chain, or every assertion \
+             below is about a capture that had nothing to report"
+        );
+
+        let rep = crate::report::CaptureReport::of(&d);
+        assert!(
+            !rep.is_complete(),
+            "a capture missing a message this reader gave up on is not complete: \
+             {}",
+            rep.to_text()
+        );
+        assert!(
+            rep.to_json()
+                .contains("\"reassembly\":{\"expired_chains\":1}"),
+            "{}",
+            rep.to_json()
+        );
+        assert!(
+            rep.to_text()
+                .contains("ABANDONED on this reader's own deadline"),
+            "{}",
+            rep.to_text()
+        );
+    }
+
+    /// The CONTROL, and the leg that keeps the field structural: a capture that
+    /// abandoned nothing still carries the field, at zero, and stays complete.
+    ///
+    /// Without it a consumer would have to test for the key's presence to learn
+    /// whether this build reassembles -- the same rule R311y648's encrypted
+    /// object is structural for.
+    #[test]
+    fn a_capture_that_abandoned_nothing_carries_the_field_at_zero() {
+        let keepalive = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let mut d = Dissection::new();
+        d.push_packet_at(
+            LINKTYPE_ETHERNET,
+            0,
+            Some(0),
+            &udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &keepalive),
+        );
+        assert_eq!(d.expired_chains(), 0);
+        let rep = crate::report::CaptureReport::of(&d);
+        assert!(
+            rep.to_json()
+                .contains("\"reassembly\":{\"expired_chains\":0}"),
+            "the field is structural, in every feature arm: {}",
+            rep.to_json()
+        );
+        assert!(!rep.to_text().contains("ABANDONED"), "{}", rep.to_text());
+        assert!(rep.is_complete(), "{}", rep.to_text());
     }
 
     /// R311y594 — a pcap replay carries the FILE's clock into the observer.
