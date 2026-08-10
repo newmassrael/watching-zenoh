@@ -1609,6 +1609,14 @@ pub struct Dissection {
     /// verb it counts is: a build that reassembles nothing abandons nothing and
     /// answers `0`.
     abandoned_chains: usize,
+    /// R311y656 (§4.4) — chains still open on a flow the FLOW CAP evicted.
+    ///
+    /// The third cause and the third number, on the rule that separated the
+    /// first two: what a reader DOES about it differs. A chain past its deadline
+    /// asks for a wider window, a chain still open when the file ended asks for
+    /// nothing, and this one asks for a larger `max_flows` — advice about the
+    /// wrong knob is worse than none, which is why they are not one field.
+    evicted_chains: usize,
 }
 
 /// Hand-written for ONE field: `gap_patience` defaults to
@@ -1635,6 +1643,7 @@ impl Default for Dissection {
             gap_patience: Some(crate::tcp::DEFAULT_GAP_PATIENCE),
             capture_origin_ms: None,
             abandoned_chains: 0,
+            evicted_chains: 0,
         }
     }
 }
@@ -1962,6 +1971,12 @@ impl Dissection {
     /// ended. See [`Self::expired_chains`] for why the two are counted apart.
     pub fn abandoned_chains(&self) -> usize {
         self.abandoned_chains
+    }
+
+    /// R311y656 (§4.4) — how many chains were still open on flows the cap
+    /// evicted. See [`Self::expired_chains`] for why the three are apart.
+    pub fn evicted_chains(&self) -> usize {
+        self.evicted_chains
     }
 
     /// Every TCP flow seen, in first-appearance order.
@@ -2295,6 +2310,13 @@ impl Dissection {
             // two ways to leave holding its bytes, and the carries below can
             // only carry what the flow has already accounted for.
             gone.settle_on_exit();
+            // R311y656 (§4.4) — and the chains it was holding, which
+            // `settle_on_exit` does not reach: the framing decision and the
+            // reassembler are two different things the flow was in the middle
+            // of. Measured before this line: an evicted flow's open chain was
+            // counted by nothing at all, so the report said a flow had been
+            // dropped and never that a half-assembled message went with it.
+            self.evicted_chains += gone.session.abandon_open_chains();
             // R311y650 (§1.2a) — and the ENCRYPTED census carries, on exactly
             // the rule the three carries below exist for. Without it the report
             // said a flow was dropped and never said it carried zenoh inside
@@ -2527,7 +2549,10 @@ impl Dissection {
             else {
                 break;
             };
-            let gone = self.datagram_flows.remove(oldest);
+            let mut gone = self.datagram_flows.remove(oldest);
+            // R311y656 (§4.4) — the same, on the table where fragments actually
+            // arrive.
+            self.evicted_chains += gone.session.abandon_open_chains();
             // The same four the stream path carries, minus the two a datagram
             // flow cannot have. `resync_accounting` is deliberately absent: a
             // datagram flow has no framing to lose, which is the reason
@@ -5556,7 +5581,9 @@ mod datagram_tests {
         );
         assert!(
             rep.to_json()
-                .contains("\"reassembly\":{\"expired_chains\":1,\"abandoned_at_end\":0}"),
+                .contains(
+                    "\"reassembly\":{\"expired_chains\":1,\"abandoned_at_end\":0,\"abandoned_on_eviction\":0}"
+                ),
             "{}",
             rep.to_json()
         );
@@ -5588,7 +5615,9 @@ mod datagram_tests {
         let rep = crate::report::CaptureReport::of(&d);
         assert!(
             rep.to_json()
-                .contains("\"reassembly\":{\"expired_chains\":0,\"abandoned_at_end\":0}"),
+                .contains(
+                    "\"reassembly\":{\"expired_chains\":0,\"abandoned_at_end\":0,\"abandoned_on_eviction\":0}"
+                ),
             "the field is structural, in every feature arm: {}",
             rep.to_json()
         );
@@ -5680,8 +5709,9 @@ mod datagram_tests {
         let rep = crate::report::CaptureReport::of(&d);
         assert!(!rep.is_complete(), "{}", rep.to_text());
         assert!(
-            rep.to_json()
-                .contains("\"expired_chains\":0,\"abandoned_at_end\":1"),
+            rep.to_json().contains(
+                "\"expired_chains\":0,\"abandoned_at_end\":1,\"abandoned_on_eviction\":0"
+            ),
             "{}",
             rep.to_json()
         );
@@ -5742,6 +5772,159 @@ mod datagram_tests {
             e.abandoned_chains(),
             1,
             "a TCP capture ends on an open chain exactly as a UDP one does"
+        );
+    }
+
+    /// R311y656 (§4.4) — a half-assembled message that leaves with an evicted
+    /// flow is counted, and counted as its own cause.
+    ///
+    /// R311y655's carry stated this as a HYPOTHESIS reasoned from the code, and
+    /// this is the measurement: before the fix an evicted flow holding an open
+    /// chain moved neither `expired_chains` nor `abandoned_chains`. The capture
+    /// was already marked incomplete by `drops.flows`, so the shortfall was
+    /// visible — as a dropped FLOW. That a partially reassembled MESSAGE went
+    /// with it was in no number anywhere, which is the R311y650 shape exactly:
+    /// the loss counter carried and the finding did not.
+    ///
+    /// Its own field rather than a share of the other two because the ACTION
+    /// differs: this one asks for a larger `max_flows`, and telling a reader to
+    /// widen a reassembly window would be advice about the wrong knob.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_chain_that_leaves_with_an_evicted_flow_is_counted_as_its_own_cause() {
+        let fragment = |sn: u8, more: bool, piece: &[u8]| {
+            let mut wire = alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAGMENT
+                    | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
+                    | if more {
+                        wz_codecs::wire_const::FLAG_T_FRAGMENT_M
+                    } else {
+                        0
+                    },
+                sn,
+            ];
+            wire.extend_from_slice(piece);
+            wire
+        };
+        let mut d = Dissection::with_limits(DissectionLimits {
+            // Far longer than the capture, so the deadline sweep can rescue
+            // nothing and the number below is the eviction's alone.
+            reassembly_window_ms: Some(600_000),
+            max_flows: Some(1),
+            ..DissectionLimits::default()
+        });
+        for (i, (from_low, message)) in [
+            (true, init_datagram(false, &[])),
+            (false, init_datagram(true, &[])),
+            (true, open_datagram(false)),
+            (false, open_datagram(true)),
+            (true, fragment(0, true, &[0xDE, 0xAD])),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let packet = if from_low {
+                udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &message)
+            } else {
+                udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 43210, &message)
+            };
+            d.push_packet_at(LINKTYPE_ETHERNET, i, Some(10), &packet);
+        }
+        assert_eq!(d.evicted_chains(), 0, "nothing has been evicted yet");
+
+        // A second 5-tuple takes the only slot.
+        let keepalive = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        d.push_packet_at(
+            LINKTYPE_ETHERNET,
+            9,
+            Some(11),
+            &udp_packet([10, 0, 0, 9], 43211, [10, 0, 0, 2], 7447, &keepalive),
+        );
+        assert_eq!(d.datagram_flows().len(), 1, "the cap must have evicted");
+        assert_eq!(d.drops().flows, 1);
+
+        assert_eq!(
+            (d.evicted_chains(), d.abandoned_chains(), d.expired_chains()),
+            (1, 0, 0),
+            "the chain left with the flow and only ONE of the three causes may \
+             claim it"
+        );
+        let rep = crate::report::CaptureReport::of(&d);
+        assert!(!rep.is_complete());
+        assert!(
+            rep.to_json().contains("\"abandoned_on_eviction\":1"),
+            "{}",
+            rep.to_json()
+        );
+        assert!(
+            rep.to_text()
+                .contains("raising max_flows is what would have kept"),
+            "the reader must be pointed at the knob that would have helped: {}",
+            rep.to_text()
+        );
+
+        // AND `finish` MUST NOT COUNT IT AGAIN: the flow is gone, so there is
+        // nothing left to abandon and the three numbers stand.
+        d.finish();
+        assert_eq!(
+            (d.evicted_chains(), d.abandoned_chains()),
+            (1, 0),
+            "a chain counted once must not be counted twice by the exit after it"
+        );
+
+        // THE STREAM LEG, and it earned its place the same way R311y655's did:
+        // with only the datagram fixture, dropping the STREAM eviction's
+        // abandonment left every test green. Two tables, two evictions, two
+        // witnesses.
+        let framed = |wire: &[u8]| {
+            let mut out = (wire.len() as u16).to_le_bytes().to_vec();
+            out.extend_from_slice(wire);
+            out
+        };
+        let mut e = Dissection::with_limits(DissectionLimits {
+            reassembly_window_ms: Some(600_000),
+            max_flows: Some(1),
+            ..DissectionLimits::default()
+        });
+        let mut seq_low = 1000u32;
+        let mut seq_high = 5000u32;
+        for (i, (from_low, wire)) in [
+            (true, init_datagram(false, &[])),
+            (false, init_datagram(true, &[])),
+            (true, open_datagram(false)),
+            (false, open_datagram(true)),
+            (true, fragment(0, true, &[0xDE, 0xAD])),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bytes = framed(&wire);
+            let pkt = if from_low {
+                let s = seq_low;
+                seq_low += bytes.len() as u32;
+                tcp_packet(s, &bytes)
+            } else {
+                let s = seq_high;
+                seq_high += bytes.len() as u32;
+                tcp_packet_reverse(s, &bytes)
+            };
+            e.push_packet_at(LINKTYPE_ETHERNET, i, Some(10), &pkt);
+        }
+        assert_eq!(e.flows().len(), 1, "the fixture must be a STREAM flow");
+        assert_eq!(e.evicted_chains(), 0);
+        // A second 5-tuple, by source ADDRESS since the helper fixes the ports.
+        let mut other = tcp_packet(
+            9000,
+            &framed(&[wz_session_core::wire_const::T_MID_KEEP_ALIVE]),
+        );
+        other[26] = 99;
+        e.push_packet_at(LINKTYPE_ETHERNET, 9, Some(11), &other);
+        assert_eq!(e.flows().len(), 1, "the cap must have evicted");
+        assert_eq!(
+            e.evicted_chains(),
+            1,
+            "a TCP flow leaves with its half-assembled message exactly as a UDP \
+             one does"
         );
     }
 

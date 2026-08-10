@@ -133,6 +133,13 @@ impl<'a> CaptureReport<'a> {
         // and then reached no surface at all: not this verdict, not the export,
         // not one test. A capture holding an abandoned chain reported
         // `complete: true` and did not mention it.
+        //
+        // R311y656 — `evicted_chains` is deliberately NOT a third disjunct here,
+        // and that is a measurement rather than an oversight: a chain can only
+        // be counted there by an eviction, and every eviction increments
+        // `drops.flows`, which the first line of this function already reads. A
+        // disjunct nothing can reach is a claim no test can hold, so the number
+        // reaches the reader through the export and the page instead.
         if self.dissection.expired_chains() > 0 || self.dissection.abandoned_chains() > 0 {
             return false;
         }
@@ -372,9 +379,11 @@ impl<'a> CaptureReport<'a> {
         // with a zero on a build that reassembles nothing, so a consumer's
         // field lookup never depends on which features this binary carries.
         s.push_str(&format!(
-            ",\"reassembly\":{{\"expired_chains\":{},\"abandoned_at_end\":{}}}",
+            ",\"reassembly\":{{\"expired_chains\":{},\"abandoned_at_end\":{},\
+             \"abandoned_on_eviction\":{}}}",
             d.expired_chains(),
-            d.abandoned_chains()
+            d.abandoned_chains(),
+            d.evicted_chains()
         ));
         s.push_str(",\"capture_reported_drops\":");
         s.push_str(&opt_u64(d.capture_reported_drops()));
@@ -444,6 +453,13 @@ impl<'a> CaptureReport<'a> {
         // wire or the capture tool did; this one names a message the analyzer
         // gave up on, and a reader who is not told cannot distinguish it from a
         // message that was never sent.
+        if d.evicted_chains() > 0 {
+            s.push_str(&format!(
+                "  {} reassembly chain(s) went with a flow the flow cap evicted; \
+                 raising max_flows is what would have kept them\n",
+                d.evicted_chains()
+            ));
+        }
         if d.abandoned_chains() > 0 {
             s.push_str(&format!(
                 "  {} reassembly chain(s) still OPEN when the capture ended; the \
