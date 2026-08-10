@@ -240,7 +240,7 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # so is INIT, their extension spaces differ (none versus eight), and this is
 # the measurement that `ExtCarrier` tells them apart against the REAL decoder
 # rather than against wz's opinion of itself.
-FOREIGN_ADJUDICATOR_LINKS = 811
+FOREIGN_ADJUDICATOR_LINKS = 815
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

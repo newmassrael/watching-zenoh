@@ -1225,3 +1225,169 @@ fn the_two_agree_on_where_a_message_ends() {
 /// If this moves, read the sample the assertion prints: a new kind of
 /// disagreement fails the shape loop first and never reaches this line.
 const BOUNDARY_DIVERGENCES: usize = 5;
+
+/// R311y635 (§14.11) — one self-delimiting message per MID, built from the
+/// hand-laid minimal bodies, for composing into batches.
+///
+/// FRAME and FRAGMENT are absent by construction: they read to the end of their
+/// unit, so a batch can hold one only as its LAST message, and a batch that
+/// began with one would be a shape no conforming sender can write.
+fn self_delimiting_messages() -> Vec<(&'static str, Vec<u8>)> {
+    use wz_session_core::wire_const as w;
+    [
+        ("InitSyn", w::T_MID_INIT),
+        ("OpenSyn", w::T_MID_OPEN),
+        ("Close", w::T_MID_CLOSE),
+        ("KeepAlive", w::T_MID_KEEP_ALIVE),
+    ]
+    .into_iter()
+    .filter_map(|(name, mid)| minimal_body(mid).map(|body| (name, alloc_wire(mid, &body))))
+    .collect()
+}
+
+/// The boundary a decoder claims for the message at the front, and whether that
+/// message ENDS the unit.
+#[derive(Debug, PartialEq, Eq)]
+enum Step {
+    /// Consumed this many bytes; another message may follow.
+    Consumed(usize),
+    /// The message reads to the end of its unit, so the walk stops.
+    Terminal,
+    /// Neither decoder can say where this ends.
+    Stop,
+}
+
+/// wz's walk over `bytes`, as the sequence of boundary claims it makes.
+fn wz_steps(bytes: &[u8]) -> Vec<Step> {
+    use wz_session_core::inbound::{parse_inbound_consuming, InboundFrame};
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        match parse_inbound_consuming(&bytes[pos..]) {
+            Ok((InboundFrame::Frame { .. } | InboundFrame::Fragment { .. }, _)) => {
+                out.push(Step::Terminal);
+                return out;
+            }
+            Ok((_, consumed)) if consumed > 0 => {
+                out.push(Step::Consumed(consumed));
+                pos += consumed;
+            }
+            _ => {
+                out.push(Step::Stop);
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// pico's walk over the same bytes, driven the way pico drives its own: decode,
+/// advance by the read position, decode again out of the residue
+/// (`vendor/zenoh-pico/src/transport/multicast/rx.c:68-77` and `:99`).
+///
+/// # Safety
+///
+/// As [`pico_consumed`].
+unsafe fn pico_steps(lib: &Library, bytes: &[u8]) -> Vec<Step> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let rest = &bytes[pos..];
+        // A Frame hands its buffer over rather than consuming it, so pico's read
+        // position is not a boundary there — it is the payload start, and the
+        // payload runs to the end of the unit. The MID is what says so, exactly
+        // as it does on the wz side above.
+        let mid = rest[0] & 0x1f;
+        if mid == wz_session_core::wire_const::T_MID_FRAME
+            || mid == wz_session_core::wire_const::T_MID_FRAGMENT
+        {
+            // Only counted as terminal if pico ACCEPTS it; otherwise it is a stop.
+            if unsafe { pico_accepts(lib, rest) } {
+                out.push(Step::Terminal);
+            } else {
+                out.push(Step::Stop);
+            }
+            return out;
+        }
+        match unsafe { pico_consumed(lib, rest) } {
+            Some(consumed) if consumed > 0 => {
+                out.push(Step::Consumed(consumed));
+                pos += consumed;
+            }
+            _ => {
+                out.push(Step::Stop);
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// R311y635 (§14.11) — THE END-TO-END FORM: two decoders walking the SAME
+/// multi-message unit must land on the same boundaries, in the same order.
+///
+/// # Why one message at a time was not enough
+///
+/// R311y634 compared where each decoder thinks a single message ends. That is
+/// the per-step claim; this is the WALK, and a walk can diverge in ways a step
+/// cannot: a boundary that is right for message one and wrong for message two
+/// puts the two implementations on different messages from there on, with both
+/// still reporting success. Batching is the only reason either of them walks
+/// (`zenoh-transport-1.5.0/src/common/pipeline.rs:318` keeps a batch open by
+/// default), so this is the shape real traffic takes.
+///
+/// The corpus is every ordered PAIR of self-delimiting messages plus each pair
+/// with a data frame appended — the shape a beacon-or-keepalive followed by a
+/// publish actually has on the wire.
+// wz-proves: codec-init-body codec-parity partial
+// wz-proves: codec-open-body codec-parity partial
+// wz-proves: codec-close codec-parity partial
+// wz-proves: codec-keep-alive codec-parity partial
+#[test]
+#[ignore = "needs libzenohpico.so (CMake build product); Layer E runs via --ignored"]
+fn the_two_walk_a_batch_to_the_same_boundaries() {
+    let pico = unsafe { open(&zenoh_pico_shared_library()) };
+    let singles = self_delimiting_messages();
+    assert!(
+        singles.len() >= 4,
+        "the batch corpus needs its building blocks: {}",
+        singles.len()
+    );
+    // A minimal data frame: header, VLE sn, and a two-byte tail.
+    let frame = alloc_wire(
+        wz_session_core::wire_const::T_MID_FRAME,
+        &[0x01, 0xAA, 0xBB],
+    );
+
+    let mut units: Vec<(String, Vec<u8>)> = Vec::new();
+    for (a, first) in &singles {
+        for (b, second) in &singles {
+            let mut unit = first.clone();
+            unit.extend_from_slice(second);
+            units.push((format!("[{a}][{b}]"), unit.clone()));
+            unit.extend_from_slice(&frame);
+            units.push((format!("[{a}][{b}][Frame]"), unit));
+        }
+    }
+
+    let mut walked_two_or_more = 0usize;
+    for (name, unit) in &units {
+        let ours = wz_steps(unit);
+        let theirs = unsafe { pico_steps(&pico, unit) };
+        assert_eq!(
+            ours, theirs,
+            "{name}: the two walks diverge -- from the first difference on, the \
+             implementations are reading different messages out of the same bytes"
+        );
+        if ours.iter().filter(|s| !matches!(s, Step::Stop)).count() >= 2 {
+            walked_two_or_more += 1;
+        }
+    }
+
+    assert!(
+        walked_two_or_more >= units.len() / 2,
+        "most units must actually be WALKED past their first message, or this \
+         test agrees about nothing: {walked_two_or_more} of {}",
+        units.len()
+    );
+}
