@@ -404,6 +404,21 @@ impl<'a> CaptureReport<'a> {
                     row.keyexpr
                 ));
             }
+            // R311y642 (§1.1t) — the line the ranking above cannot produce. A
+            // topic split across a key per entity is N small rows here and one
+            // heavy subtree there, and only the second is a statement about
+            // where the capture's traffic is. Printed only when a shared prefix
+            // exists at all, so a flat key space says nothing rather than
+            // repeating its own root.
+            if let Some(sub) = t.subtrees().heaviest_shared() {
+                s.push_str(&format!(
+                    "  {:>12} B  {:>6} msg  {}/** ({} keys)\n",
+                    sub.totals.payload_bytes,
+                    sub.totals.messages(),
+                    sub.prefix,
+                    sub.rows
+                ));
+            }
         }
 
         #[cfg(feature = "network-codecs")]
@@ -515,6 +530,32 @@ fn describe(l: &crate::exchange::LatencySamples) -> String {
     }
 }
 
+/// R311y642 (§1.1t) — one subtree node and everything under it.
+///
+/// Recursive, and the recursion is bounded by the deepest keyexpr in the
+/// capture rather than by anything this function chooses: a document that
+/// truncated the tree would be a different claim about the capture than the
+/// rows beside it.
+fn subtree_json(node: &crate::agg::KeyexprSubtree, s: &mut String) {
+    s.push_str("{\"prefix\":");
+    quote_into(&node.prefix, s);
+    s.push_str(&format!(
+        ",\"rows\":{},\"messages\":{},\"payload_bytes\":{},\"unsized_payloads\":{}",
+        node.rows,
+        node.totals.messages(),
+        node.totals.payload_bytes,
+        node.totals.unsized_payloads
+    ));
+    s.push_str(",\"children\":[");
+    for (i, c) in node.children.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        subtree_json(c, s);
+    }
+    s.push_str("]}");
+}
+
 fn throughput_json(t: &ThroughputTable, s: &mut String) {
     let (declared, undeclared) = t.declarations();
     s.push_str("\"throughput\":{");
@@ -543,6 +584,11 @@ fn throughput_json(t: &ThroughputTable, s: &mut String) {
     gaps_json(t.gaps(), s);
     s.push_str(",\"selection\":");
     selection_json(t.selection(), s);
+    // R311y642 (§1.1t) — the hierarchy beside the flat list, not instead of it.
+    // The two answer different questions and a consumer that wants "which key"
+    // must not have to walk a tree to get it back.
+    s.push_str(",\"tree\":");
+    subtree_json(&t.subtrees(), s);
     s.push_str(",\"rows\":[");
     for (i, row) in t.rows().iter().enumerate() {
         if i > 0 {
@@ -1225,6 +1271,78 @@ mod tests {
         assert!(
             !unfiltered.contains("selection:"),
             "an unfiltered report must not carry a line that says nothing: {unfiltered}"
+        );
+    }
+
+    /// R311y642 (§1.1t) — the hierarchy reaches BOTH renderings, and it says
+    /// something the flat list beside it does not.
+    ///
+    /// The text leg is the sharper one: the ranking there names `logs`, the
+    /// heaviest single key, and the rollup line names `robot/**`, which is
+    /// heavier and appears nowhere else in the document. A reader of the text
+    /// alone was previously being pointed at the wrong topic.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_keyexpr_hierarchy_reaches_both_renderings() {
+        use crate::datagram_tests::{push, sender_space};
+
+        let mut records = alloc::vec::Vec::new();
+        for key in ["robot/1/pose", "robot/2/pose", "robot/3/pose"] {
+            records.push((
+                true,
+                Some(1u64),
+                push(sender_space(0, Some(key)), &[0u8; 10]),
+            ));
+        }
+        records.push((
+            true,
+            Some(1u64),
+            push(sender_space(0, Some("logs")), &[0u8; 25]),
+        ));
+        let d = crate::exchange::tests::dissect(&records);
+        let t = crate::agg::aggregate(&d);
+        let r = CaptureReport::of(&d).with_throughput(&t);
+
+        let text = r.to_text();
+        assert!(
+            text.contains("robot/** (3 keys)"),
+            "the rollup line must name the subtree and how many keys it stands for: {text}"
+        );
+        assert!(
+            text.contains("logs"),
+            "and the flat ranking must still be there: {text}"
+        );
+
+        let json = r.to_json();
+        assert!(
+            json.contains("\"tree\":"),
+            "the hierarchy must reach the export: {json}"
+        );
+        assert!(
+            json.contains("\"prefix\":\"robot\",\"rows\":3,\"messages\":3,\"payload_bytes\":30"),
+            "with inclusive totals for the node the text names: {json}"
+        );
+
+        // THE CONTROL: a flat key space emits a tree with no shared node, and
+        // NO rollup line — so the line above is a decision about this capture
+        // and not a banner the renderer always prints.
+        let flat = crate::exchange::tests::dissect(&[
+            (
+                true,
+                Some(1u64),
+                push(sender_space(0, Some("alpha")), &[0u8; 4]),
+            ),
+            (
+                true,
+                Some(1u64),
+                push(sender_space(0, Some("beta")), &[0u8; 4]),
+            ),
+        ]);
+        let ft = crate::agg::aggregate(&flat);
+        let ftext = CaptureReport::of(&flat).with_throughput(&ft).to_text();
+        assert!(
+            !ftext.contains("/**"),
+            "a flat key space has no subtree to report: {ftext}"
         );
     }
 

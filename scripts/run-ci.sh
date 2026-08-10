@@ -5469,6 +5469,9 @@ layer_c1bt_capture_no_default_features() {
         agg::tests::an_elapsed_window_selects_what_an_absolute_one_would_and_time_does_not \
         agg::tests::a_hand_folded_plane_cannot_decide_an_elapsed_term \
         agg::tests::a_records_offset_in_its_unit_reaches_the_selector \
+        agg::tests::a_topic_split_across_keys_is_invisible_to_the_flat_ranking \
+        agg::tests::a_flat_key_space_names_no_subtree \
+        report::tests::the_keyexpr_hierarchy_reaches_both_renderings \
         agg::tests::each_carrier_puts_three_distinct_records_on_the_wire \
         agg::tests::a_descriptor_slot_is_unsized_on_every_carrier_and_a_plain_one_is_measured \
         agg::tests::a_body_ext_sharing_the_markers_id_field_leaves_the_payload_measured \

@@ -181,6 +181,129 @@ impl KeyexprCounts {
     }
 }
 
+/// R311y642 (§1.1t) — one node of the keyexpr hierarchy, with the totals of
+/// everything at or beneath it.
+///
+/// Built by [`ThroughputTable::subtrees`]. The root names the empty prefix and
+/// carries the whole capture, so a consumer walking down from it never has to
+/// special-case "no common prefix".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyexprSubtree {
+    /// The full prefix this node names — `robot/1` for the node holding
+    /// `robot/1/pose` and `robot/1/twist`. Empty at the root.
+    pub prefix: String,
+    /// Every record at or beneath this node.
+    pub totals: KeyexprCounts,
+    /// How many LITERAL keyexprs fold into it.
+    ///
+    /// The field that makes a node's weight readable: `rows == 1` is a leaf
+    /// wearing a prefix's name and says nothing a row did not, while a heavy
+    /// node with many rows is exactly the finding the flat list cannot show.
+    pub rows: usize,
+    /// Ordered as [`ThroughputTable::rows`] is: heaviest first, then by record
+    /// count, then by prefix.
+    pub children: Vec<KeyexprSubtree>,
+}
+
+impl KeyexprSubtree {
+    fn new(prefix: String) -> Self {
+        Self {
+            prefix,
+            totals: KeyexprCounts::default(),
+            rows: 0,
+            children: Vec::new(),
+        }
+    }
+
+    /// Add one literal keyexpr's totals along its whole path from the root.
+    ///
+    /// Split on `/` and on nothing else. A zenoh keyexpr's separator is the one
+    /// this crate resolves suffixes with, and inventing a second notion of
+    /// "part of a key" here is how a rollup starts disagreeing with the rows it
+    /// was folded from.
+    fn insert(&mut self, keyexpr: &str, totals: &KeyexprCounts) {
+        self.totals.add(totals);
+        self.rows += 1;
+        let Some((head, tail)) = split_segment(keyexpr) else {
+            return;
+        };
+        let prefix = if self.prefix.is_empty() {
+            head.to_string()
+        } else {
+            alloc::format!("{}/{}", self.prefix, head)
+        };
+        let child = match self.children.iter().position(|c| c.prefix == prefix) {
+            Some(i) => &mut self.children[i],
+            None => {
+                self.children.push(KeyexprSubtree::new(prefix));
+                self.children.last_mut().expect("just pushed")
+            }
+        };
+        match tail {
+            Some(rest) => child.insert(rest, totals),
+            None => {
+                child.totals.add(totals);
+                child.rows += 1;
+            }
+        }
+    }
+
+    fn sort(&mut self) {
+        self.children.sort_by(|a, b| {
+            b.totals
+                .payload_bytes
+                .cmp(&a.totals.payload_bytes)
+                .then_with(|| b.totals.messages().cmp(&a.totals.messages()))
+                .then_with(|| a.prefix.cmp(&b.prefix))
+        });
+        for c in &mut self.children {
+            c.sort();
+        }
+    }
+
+    /// The heaviest node that stands for MORE THAN ONE literal keyexpr.
+    ///
+    /// The one line a reader of the flat ranking is missing: a node with a
+    /// single row is a row they can already see, and the deepest such node is
+    /// the most specific true statement about where the traffic is. `None` when
+    /// every key in the capture is its own subtree, which is the honest answer
+    /// for a flat key space rather than a root node dressed up as a finding.
+    pub fn heaviest_shared(&self) -> Option<&KeyexprSubtree> {
+        let mut best: Option<&KeyexprSubtree> = None;
+        let mut stack = alloc::vec![self];
+        while let Some(node) = stack.pop() {
+            if !node.prefix.is_empty() && node.rows > 1 {
+                let better = match best {
+                    None => true,
+                    Some(b) => {
+                        (node.totals.payload_bytes, node.prefix.len())
+                            > (b.totals.payload_bytes, b.prefix.len())
+                    }
+                };
+                if better {
+                    best = Some(node);
+                }
+            }
+            for c in &node.children {
+                stack.push(c);
+            }
+        }
+        best
+    }
+}
+
+/// `("robot", Some("1/pose"))` for `robot/1/pose`, `("pose", None)` for the
+/// last segment, `None` for an empty key.
+fn split_segment(keyexpr: &str) -> Option<(&str, Option<&str>)> {
+    if keyexpr.is_empty() {
+        return None;
+    }
+    Some(match keyexpr.split_once('/') {
+        Some((head, rest)) => (head, Some(rest)),
+        None => (keyexpr, None),
+    })
+}
+
 /// One resolved keyexpr's row in the table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyexprRow {
@@ -587,6 +710,37 @@ impl ThroughputTable {
                 .then_with(|| a.keyexpr.cmp(&b.keyexpr))
         });
         rows
+    }
+
+    /// R311y642 (§1.1t) — the rows folded into the HIERARCHY their keyexprs
+    /// already are, each node carrying the totals of everything beneath it.
+    ///
+    /// # The question a flat list cannot answer
+    ///
+    /// [`Self::rows`] totals per LITERAL keyexpr and orders by weight, which is
+    /// the right answer to "which key carried the most" and the wrong one to
+    /// "which part of the key space did". A publisher that splits one logical
+    /// topic across a key per entity — `robot/1/pose`, `robot/2/pose`, ... , the
+    /// ordinary zenoh idiom that `**` exists for — appears as N small rows and
+    /// never as one large one. The subtree carrying most of the capture can
+    /// therefore be absent from every ranking the report prints, and no amount
+    /// of reading that ranking reveals it.
+    ///
+    /// A reader could group the flat list themselves. What they could not do is
+    /// group it the way THIS crate splits a keyexpr, which is the reason the
+    /// fold belongs here rather than in each consumer.
+    ///
+    /// Totals are INCLUSIVE: a node holds its own row (if a record was
+    /// published on exactly that key) plus every descendant's. Children are
+    /// ordered exactly as [`Self::rows`] is, so a reader moving between the two
+    /// views does not have to hold two orderings in mind.
+    pub fn subtrees(&self) -> KeyexprSubtree {
+        let mut root = KeyexprSubtree::new(String::new());
+        for row in self.rows.values() {
+            root.insert(&row.keyexpr, &row.totals());
+        }
+        root.sort();
+        root
     }
 
     /// One resolved keyexpr's row, if it has one.
@@ -2296,6 +2450,98 @@ pub(crate) mod tests {
         assert!(
             exact.row("batch/second").is_some(),
             "and it is the message that begins there"
+        );
+    }
+
+    /// R311y642 (§1.1t) — THE DEFECT. A topic split across a key per entity is
+    /// invisible to a ranking of literal keys, however heavy it is in total.
+    ///
+    /// The fixture is the ordinary zenoh idiom `**` exists for: four small keys
+    /// under one prefix, and one unrelated key that is individually the biggest
+    /// thing in the capture. The flat ranking therefore names the WRONG topic —
+    /// not by a bug, but because it is answering "which key" when the reader
+    /// asked "which part of the key space". Both numbers are asserted, so the
+    /// test says what the two views disagree about rather than only that a tree
+    /// exists.
+    #[test]
+    fn a_topic_split_across_keys_is_invisible_to_the_flat_ranking() {
+        let mut records = alloc::vec::Vec::new();
+        for i in 0..4u8 {
+            let key: &'static str = match i {
+                0 => "robot/1/pose",
+                1 => "robot/2/pose",
+                2 => "robot/3/pose",
+                _ => "robot/4/pose",
+            };
+            records.push((true, push(sender_space(0, Some(key)), &[0u8; 10])));
+        }
+        records.push((true, push(sender_space(0, Some("logs")), &[0u8; 25])));
+        let t = aggregate_datagrams(&records);
+
+        // THE FLAT VIEW, asserted rather than assumed: the heaviest single key
+        // is the unrelated one, and every `robot` key is below it.
+        assert_eq!(
+            t.rows().first().expect("rows").keyexpr,
+            "logs",
+            "the flat ranking's answer"
+        );
+        assert_eq!(
+            t.row("robot/1/pose").expect("row").totals().payload_bytes,
+            10
+        );
+
+        // THE HIERARCHY. `robot` carries 40 bytes over four keys, which no row
+        // reports and no ordering of rows can surface.
+        let tree = t.subtrees();
+        let heavy = tree.heaviest_shared().expect("a shared prefix exists");
+        assert_eq!(heavy.prefix, "robot");
+        assert_eq!(heavy.totals.payload_bytes, 40);
+        assert_eq!(heavy.rows, 4, "four literal keys fold into it");
+        assert!(
+            heavy.totals.payload_bytes > t.rows()[0].totals().payload_bytes,
+            "the subtree outweighs the key the flat ranking names"
+        );
+
+        // THE ROOT IS THE WHOLE CAPTURE, so a consumer walking down never has to
+        // special-case "no common prefix".
+        assert_eq!(tree.totals.payload_bytes, 65);
+        assert_eq!(tree.rows, 5);
+
+        // A NODE STANDING FOR ONE KEY IS NOT A FINDING: `robot/1` holds exactly
+        // one literal key and `heaviest_shared` must not name it, or the answer
+        // would be a row the reader already had.
+        assert!(
+            tree.children.iter().any(|c| c.prefix == "robot"),
+            "the prefix node exists"
+        );
+        let inner = tree
+            .children
+            .iter()
+            .find(|c| c.prefix == "robot")
+            .expect("robot node")
+            .children
+            .iter()
+            .find(|c| c.prefix == "robot/1")
+            .expect("robot/1 node");
+        assert_eq!(inner.rows, 1);
+    }
+
+    /// THE CONTROL for the test above: a FLAT key space has no shared prefix to
+    /// report, and must say nothing rather than dress its own root up as one.
+    ///
+    /// Without this leg a `heaviest_shared` that always answered `Some(root)`
+    /// would satisfy every assertion above.
+    #[test]
+    fn a_flat_key_space_names_no_subtree() {
+        let t = aggregate_datagrams(&[
+            (true, push(sender_space(0, Some("alpha")), &[0u8; 4])),
+            (true, push(sender_space(0, Some("beta")), &[0u8; 4])),
+        ]);
+        let tree = t.subtrees();
+        assert_eq!(tree.rows, 2, "both keys are in the tree");
+        assert!(
+            tree.heaviest_shared().is_none(),
+            "two unrelated keys share no prefix worth reporting"
         );
     }
 
