@@ -3175,6 +3175,16 @@ mod datagram_tests {
         }
         assert_eq!(d.skipped().len(), 1, "the list really is capped");
         assert_eq!(d.drops().skipped, 4, "and the overflow really was dropped");
+        // R311y653 — and it is the LAST one, not the first. The five records
+        // differ only in their packet index, so until this line a list that
+        // kept the oldest passed exactly as one that kept the newest, and
+        // `skipped()` is the list a reader scrolls to see what just went wrong.
+        assert_eq!(
+            d.skipped()[0].packet_index,
+            4,
+            "the surviving record must be the most recent: {:?}",
+            d.skipped()
+        );
         assert_eq!(
             d.skip_census().unsupported_link_type,
             5,
@@ -5057,6 +5067,58 @@ mod datagram_tests {
         }
         assert_eq!(d.datagram_flows()[0].frames.len(), 3);
         assert_eq!(d.drops().frames, 7);
+        // R311y653 — WHICH three, which is what "oldest first" MEANS and what
+        // this test could not see: every packet here is the same keepalive, so
+        // a cap that kept the FIRST three answered identically. The anchor is
+        // the packet index each frame carries -- on a datagram flow the offset
+        // IS that index, because there is no stream for it to be an offset
+        // into. Falsified: `truncate(cap)` in place of the drain reds this.
+        let kept: Vec<usize> = d.datagram_flows()[0]
+            .frames
+            .iter()
+            .map(|f| f.stream_offset)
+            .collect();
+        assert_eq!(
+            kept,
+            alloc::vec![7, 8, 9],
+            "a live viewer is looking at what JUST happened, so the oldest go"
+        );
+    }
+
+    /// R311y653 — the STREAM path's frame cap, which had no test of its own at
+    /// all: the only `frames_per_flow` fixture in this file drives a DATAGRAM
+    /// flow, and the two paths trim in different functions.
+    ///
+    /// The order is the claim. `frames_per_flow`'s doc says "Beyond it the
+    /// OLDEST go — a live viewer is looking at what just happened", and until
+    /// this test a trim that kept the oldest instead passed every one of the
+    /// 326. The anchor is each frame's stream offset, which on a stream flow is
+    /// a real position and not a stand-in.
+    #[test]
+    fn the_stream_paths_frame_cap_keeps_the_most_recent() {
+        let msg = framed_keepalive();
+        let mut d = Dissection::with_limits(DissectionLimits {
+            frames_per_flow: Some(3),
+            ..DissectionLimits::default()
+        });
+        for i in 0..10u32 {
+            let pkt = tcp_packet(1000 + i * msg.len() as u32, &msg);
+            d.push_packet(LINKTYPE_ETHERNET, i as usize, &pkt);
+        }
+        assert_eq!(d.flows()[0].frames.len(), 3);
+        assert_eq!(d.drops().frames, 7);
+        let kept: Vec<usize> = d.flows()[0]
+            .frames
+            .iter()
+            .map(|f| f.stream_offset)
+            .collect();
+        let unit = msg.len();
+        assert_eq!(
+            kept,
+            alloc::vec![7 * unit, 8 * unit, 9 * unit],
+            "the OLDEST must go, which is the half of this bound that decides \
+             what a live viewer sees"
+        );
     }
 
     /// The flow TABLE is bounded too, which the other bounds cannot do: a
@@ -5254,6 +5316,16 @@ mod datagram_tests {
         }
         assert_eq!(d.datagram_flows().len(), 1, "one 5-tuple, one flow");
         assert_eq!(d.datagram_flows()[0].scouting.len(), 3);
+        // R311y653 — and the three are the LAST three. R311y651 wrote this
+        // bound with the same blind spot it had just closed elsewhere: thirty
+        // identical SCOUTs make a cap that keeps the first three
+        // indistinguishable from one that keeps the last.
+        let kept: Vec<usize> = d.datagram_flows()[0]
+            .scouting
+            .iter()
+            .map(|s| s.packet_index)
+            .collect();
+        assert_eq!(kept, alloc::vec![27, 28, 29]);
         assert_eq!(
             d.drops().scouting,
             27,
