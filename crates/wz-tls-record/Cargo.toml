@@ -31,6 +31,15 @@ publish = false
 ring = "0.17"
 
 [dev-dependencies]
+# R311y660 (§1.2a) — the capture side, for the END-TO-END test and nothing else.
+#
+# A DEV-dependency, which the constraint decides rather than a preference:
+# `wz-capture` may not gain a third-party dependency (its decode path builds for
+# the MCU profiles), so the edge cannot point that way. A dev-dependency creates
+# no runtime edge at all, and it is the only place the whole chain can be
+# exercised: a capture's records, a capture's key log, and this crate's key
+# schedule opening one with the other.
+wz-capture = { path = "../wz-capture" }
 # THE ORACLE, and never a dependency: rustls seals what this crate opens, and
 # derives what this crate derives. Two independent implementations agreeing is
 # the claim; one implementation agreeing with itself is not.

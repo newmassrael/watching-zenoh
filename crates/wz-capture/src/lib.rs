@@ -632,6 +632,8 @@ impl FlowDissection {
                 per_direction: state.census(),
                 not_decrypted: tls::NotDecrypted::NoKeysSupplied,
                 client_random: state.client_random,
+                kept_records: state.kept.clone(),
+                records_dropped: state.dropped,
             }),
             _ => None,
         }
@@ -7410,6 +7412,102 @@ mod tls_flow_tests {
             d.encrypted_flows()[0].client_random,
             None,
             "a mid-session capture has no ClientHello in it"
+        );
+    }
+
+    /// R311y660 (§1.2a) — what the kept records are NUMBERED by, and what is
+    /// not kept at all.
+    ///
+    /// Three legs, and all three earned their place by falsification: with the
+    /// end-to-end fixture alone, keeping ChangeCipherSpec records, numbering
+    /// from `kept.len()`, and handing a half-record on all passed.
+    #[test]
+    fn the_kept_records_are_numbered_by_what_is_protected() {
+        let app = |n: u8| record(0x17, [0x03, 0x03], &[n; 20]);
+        let ccs = record(0x14, [0x03, 0x03], &[0x01]);
+
+        // LEG 1 -- a ChangeCipherSpec consumes no number. It is plaintext
+        // middlebox compatibility (RFC 8446 §5) and is not protected, so
+        // counting it would put every later record one place too far along and
+        // every later record would fail to open.
+        let mut stream = app(0xA0);
+        stream.extend_from_slice(&ccs);
+        stream.extend_from_slice(&app(0xA1));
+        stream.extend_from_slice(&app(0xA2));
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &stream));
+        d.finish();
+        let flow = &d.encrypted_flows()[0];
+        assert_eq!(
+            flow.kept_records[0]
+                .iter()
+                .map(|r| r.index)
+                .collect::<Vec<_>>(),
+            alloc::vec![0, 1, 2],
+            "the CCS between them must not consume a sequence number"
+        );
+        assert_eq!(flow.kept_records[0].len(), 3, "and must not be kept");
+        assert_eq!(
+            flow.per_direction[0].records, 4,
+            "the CENSUS still counts it -- it was on the wire"
+        );
+
+        // LEG 2 -- a record the capture stopped INSIDE is not handed on. Half a
+        // record cannot be opened, and handing it to a decryptor would make its
+        // failure look like a wrong key.
+        // TWO whole records and then a partial one: the recogniser needs
+        // `TLS_CHAIN_DEPTH` complete records before it will call the flow
+        // encrypted at all, so a fixture with one would be measuring the
+        // recogniser rather than the keeper.
+        let mut cut = app(0xB0);
+        let whole = cut.len();
+        cut.extend_from_slice(&app(0xB1));
+        cut.extend_from_slice(&app(0xB2)[..10]);
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &cut));
+        d.finish();
+        let flow = &d.encrypted_flows()[0];
+        assert_eq!(flow.kept_records[0].len(), 2, "only the whole ones");
+        assert_eq!(flow.kept_records[0][0].bytes.len(), whole);
+        assert_eq!(
+            flow.per_direction[0].trailing_bytes, 5,
+            "and the shortfall is still named -- as the PAYLOAD bytes present, \
+             which is what `carries_tls_records` has always counted: the header \
+             was read, and 10 bytes of a 25-byte record leaves 5 behind it"
+        );
+
+        // LEG 3 -- past the bound the OLDEST goes, and the survivors keep the
+        // numbers they were given. Numbering from the kept list's length would
+        // renumber every record each time one was dropped, and every one of
+        // them would then open at the wrong sequence.
+        let mut d = Dissection::new();
+        let mut seq = 1000u32;
+        for i in 0..(crate::tls::MAX_KEPT_RECORDS_PER_DIRECTION + 4) {
+            let r = app((i % 251) as u8);
+            d.push_packet(LINKTYPE_ETHERNET, i, &tcp_packet(1111, 7447, seq, &r));
+            seq += r.len() as u32;
+        }
+        d.finish();
+        let flow = &d.encrypted_flows()[0];
+        assert_eq!(
+            flow.kept_records[0].len(),
+            crate::tls::MAX_KEPT_RECORDS_PER_DIRECTION
+        );
+        assert_eq!(flow.records_dropped[0], 4, "and the loss is counted");
+        assert_eq!(
+            flow.kept_records[0][0].index, 4,
+            "the first SURVIVOR keeps the number it was given, which is what a \
+             decryptor opens it at"
+        );
+        // AND THE LAST ONE, which is the leg that separates a running counter
+        // from the kept list's length. The first survivor was numbered before
+        // the bound ever bit, so it cannot tell them apart -- every record
+        // after the first drop can.
+        assert_eq!(
+            flow.kept_records[0].last().expect("the list is full").index,
+            (crate::tls::MAX_KEPT_RECORDS_PER_DIRECTION + 3) as u64,
+            "a record numbered from the LIST would restart at the cap and every \
+             record after the first drop would open at the wrong sequence"
         );
     }
 

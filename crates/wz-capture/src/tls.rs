@@ -189,6 +189,22 @@ pub fn client_hello_random(bytes: &[u8]) -> Option<[u8; 32]> {
 /// cannot. `None` when the walk runs out mid-record — which is not `false`,
 /// because a captured direction ends wherever the capture stopped.
 pub fn carries_tls_records(bytes: &[u8]) -> Option<RecordCensus> {
+    walk_records(bytes, &mut |_, _| {})
+}
+
+/// R311y660 (§1.2a) — the walk itself, with each COMPLETE record handed to
+/// `on_record` as `(whole_record_including_header, content_type)`.
+///
+/// One walk and not two. [`carries_tls_records`] is this function with an empty
+/// observer, so a census and a decryptor can never come to disagree about where
+/// a record starts — the failure `prelude_verdict` was extracted in R311y649 to
+/// prevent, one layer up.
+///
+/// The record is handed on WHOLE, header included, because the header is the
+/// AEAD's additional data: a consumer given the fragment alone would have to
+/// rebuild five bytes it already had, and a rebuild that disagrees with the
+/// wire authenticates nothing.
+fn walk_records(bytes: &[u8], on_record: &mut impl FnMut(&[u8], u8)) -> Option<RecordCensus> {
     let mut census = RecordCensus::default();
     let mut at = 0usize;
     while at < bytes.len() {
@@ -216,12 +232,17 @@ pub fn carries_tls_records(bytes: &[u8]) -> Option<RecordCensus> {
         }
         match rest.len().checked_sub(RECORD_HEADER + len) {
             // The record's payload is not all here yet: the capture stopped
-            // inside it. Counted, and the shortfall named.
+            // inside it. Counted, and the shortfall named. NOT handed to the
+            // observer: half a record cannot be opened, and handing it on would
+            // make a decryptor's failure look like a wrong key.
             None => {
                 census.trailing_bytes = rest.len() - RECORD_HEADER;
                 return Some(census);
             }
-            Some(_) => at += RECORD_HEADER + len,
+            Some(_) => {
+                on_record(&rest[..RECORD_HEADER + len], rest[0]);
+                at += RECORD_HEADER + len;
+            }
         }
     }
     Some(census)
@@ -279,6 +300,14 @@ pub struct EncryptedFlow {
     pub per_direction: [RecordCensus; 2],
     /// Why its plaintext is absent from this report.
     pub not_decrypted: NotDecrypted,
+    /// R311y660 (§1.2a) — the encrypted records this flow kept, `[A, B]`, each
+    /// numbered within its direction. What a decryptor opens.
+    pub kept_records: [Vec<EncryptedRecord>; 2],
+    /// R311y660 — encrypted records dropped per direction to stay inside
+    /// [`MAX_KEPT_RECORDS_PER_DIRECTION`]. A decryptor handed this flow cannot
+    /// produce the plaintext of a record that is not here, and a report that
+    /// did not say so would be short by exactly the traffic a bound consumed.
+    pub records_dropped: [usize; 2],
     /// R311y659 (§1.2a) — the ClientHello `Random` this flow opened with, which
     /// is the key a capture's own key log is indexed by.
     ///
@@ -423,6 +452,56 @@ fn read_len(bytes: &[u8], at: usize) -> Option<usize> {
     Some(((hi as usize) << 8) | lo as usize)
 }
 
+/// R311y660 (§1.2a) — one ENCRYPTED record, kept so it can be opened later.
+///
+/// Only `application_data` records are kept, and in TLS 1.3 that is every
+/// record that carries ciphertext: the true content type moves inside the
+/// protected payload and the outer type reads `application_data` even for the
+/// handshake messages after the ServerHello.
+#[derive(Clone, PartialEq, Eq)]
+pub struct EncryptedRecord {
+    /// This record's index among the encrypted records of its direction,
+    /// counting from zero.
+    ///
+    /// ## What this is NOT, stated because the number is easy to misuse
+    ///
+    /// It is not, by itself, the AEAD sequence number. TLS 1.3 restarts that
+    /// sequence at zero every time the keys change, and the boundary is not
+    /// visible on the wire: the `Finished` that ends the handshake epoch is
+    /// itself encrypted, so a reader without keys cannot see where one epoch
+    /// stops. A consumer holding handshake AND application secrets finds the
+    /// boundary by TRIAL — the first index that refuses the handshake keys and
+    /// accepts the application ones — and the base for each epoch is that
+    /// index. Reporting the index and naming the gap is honest; inventing an
+    /// epoch boundary this reader cannot see would not be.
+    ///
+    /// A `ChangeCipherSpec` record never consumes one, which is why the count
+    /// is over `application_data` records and not over all of them: CCS is
+    /// plaintext middlebox compatibility (RFC 8446 §5) and is not protected.
+    pub index: u64,
+    /// The record, header included, exactly as the wire carried it. The header
+    /// is the AEAD's additional data.
+    pub bytes: Vec<u8>,
+}
+
+impl core::fmt::Debug for EncryptedRecord {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EncryptedRecord")
+            .field("index", &self.index)
+            .field("bytes", &format_args!("<{} byte(s)>", self.bytes.len()))
+            .finish()
+    }
+}
+
+/// R311y660 — the most encrypted records kept per DIRECTION of a flow.
+///
+/// A bound because everything in this crate is bounded, and this one holds
+/// CIPHERTEXT: a busy TLS flow produces records for as long as it runs, and
+/// keeping them all would make the memory a capture uses depend on how much of
+/// it this reader cannot read. What the bound drops is counted, in the same
+/// direction every other loss counter in this crate moves.
+pub const MAX_KEPT_RECORDS_PER_DIRECTION: usize = 4096;
+
 /// The running record census of one encrypted flow.
 ///
 /// `pub` because [`crate::Framing::Encrypted`] carries it and that enum is the
@@ -433,6 +512,16 @@ pub struct TlsFlowState {
     pub(crate) per_direction: [RecordCensus; 2],
     /// Bytes held for a direction whose last record was incomplete.
     pub(crate) pending: [Vec<u8>; 2],
+    /// R311y660 (§1.2a) — the encrypted records this flow kept, per direction,
+    /// numbered as they were walked.
+    pub(crate) kept: [Vec<EncryptedRecord>; 2],
+    /// How many encrypted records each direction has walked, which is what the
+    /// NEXT one is numbered with — a counter and not `kept.len()`, because the
+    /// bound below drops records and the numbering must not shift when it does.
+    pub(crate) next_index: [u64; 2],
+    /// Records dropped per direction to stay inside
+    /// [`MAX_KEPT_RECORDS_PER_DIRECTION`].
+    pub(crate) dropped: [usize; 2],
     /// R311y659 (§1.2a) — the ClientHello `Random`, where this flow was
     /// recognised BY its ClientHello.
     ///
@@ -455,7 +544,15 @@ impl TlsFlowState {
     pub(crate) fn push(&mut self, index: usize, bytes: &[u8]) {
         let mut run = core::mem::take(&mut self.pending[index]);
         run.extend_from_slice(bytes);
-        let Some(census) = carries_tls_records(&run) else {
+        let mut kept = Vec::new();
+        let Some(census) = walk_records(&run, &mut |record, content_type| {
+            // Only the protected ones. A `ChangeCipherSpec` is plaintext and
+            // consumes no sequence number, so keeping it would put every later
+            // record one place too far along.
+            if content_type == CT_APPLICATION_DATA {
+                kept.push(record.to_vec());
+            }
+        }) else {
             // The chain broke. Nothing is counted for this run, and the state
             // keeps no tail -- a direction that stopped being TLS is not a
             // direction whose next bytes continue a record.
@@ -465,6 +562,26 @@ impl TlsFlowState {
         let mut counted = census;
         counted.trailing_bytes = 0;
         self.per_direction[index].add(&counted);
+        for bytes in kept {
+            // The bound is made room for FIRST, and that ordering is what makes
+            // the numbering testable rather than merely stated: with the drop
+            // taken afterwards, `next_index` and `kept.len()` agree in every
+            // reachable state and a numbering read off the LIST would pass
+            // every test. Here they diverge the moment the bound bites, and the
+            // survivors' numbers are what a decryptor opens them at.
+            //
+            // The OLDEST goes, on the rule `frames_per_flow` states: a reader
+            // looking at a live flow is looking at what just happened.
+            if self.kept[index].len() >= MAX_KEPT_RECORDS_PER_DIRECTION {
+                self.kept[index].remove(0);
+                self.dropped[index] += 1;
+            }
+            self.kept[index].push(EncryptedRecord {
+                index: self.next_index[index],
+                bytes,
+            });
+            self.next_index[index] += 1;
+        }
         self.pending[index] = run[consumed..].to_vec();
     }
 
