@@ -47,6 +47,7 @@
 
 pub mod capture;
 pub mod keylog;
+pub mod quic;
 
 use ring::aead;
 use ring::hkdf;
@@ -107,6 +108,34 @@ impl Suite {
     /// The AEAD key length in bytes.
     pub fn key_len(self) -> usize {
         self.aead_algorithm().key_len()
+    }
+
+    /// R311y694 — the HASH length in bytes, which is the width of a traffic
+    /// secret this suite produces.
+    ///
+    /// Distinct from [`Self::key_len`] and worth its own accessor for the one
+    /// suite where they differ: AES-256-GCM-SHA384 has a 32-byte key and a
+    /// 48-byte secret, so a caller sizing a secret by the key length derives
+    /// two thirds of one and gets a confident failure to decrypt.
+    pub fn hash_len(self) -> usize {
+        match self {
+            Self::Aes128GcmSha256 | Self::Chacha20Poly1305Sha256 => 32,
+            Self::Aes256GcmSha384 => 48,
+        }
+    }
+
+    /// R311y694 — the header-protection algorithm QUIC uses with this suite
+    /// (RFC 9001 §5.4.3).
+    ///
+    /// A SEPARATE algorithm family from the AEAD: header protection is a raw
+    /// block operation (AES-ECB, or a ChaCha20 block) rather than an
+    /// authenticated one, and `ring` models it as such.
+    fn quic_hp_algorithm(self) -> &'static aead::quic::Algorithm {
+        match self {
+            Self::Aes128GcmSha256 => &aead::quic::AES_128,
+            Self::Aes256GcmSha384 => &aead::quic::AES_256,
+            Self::Chacha20Poly1305Sha256 => &aead::quic::CHACHA20,
+        }
     }
 }
 
