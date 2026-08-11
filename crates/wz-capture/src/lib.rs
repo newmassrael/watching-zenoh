@@ -277,6 +277,9 @@ pub struct DatagramDissection {
     residue: ByteResidue,
     /// R311y713 (§B6) — chains THIS flow lost, and how much was in them.
     chain_loss: ChainLoss,
+    /// R311y713 (§B4) — the CAPTURE INSTANT of the last packet on this flow,
+    /// where the source had one. See [`Dissection::least_recently_active`].
+    last_seen_ms: Option<u64>,
 }
 
 impl DatagramDissection {
@@ -290,6 +293,7 @@ impl DatagramDissection {
             quic: None,
             residue: ByteResidue::default(),
             chain_loss: ChainLoss::default(),
+            last_seen_ms: None,
         }
     }
 
@@ -764,6 +768,8 @@ pub struct FlowDissection {
     residue: ByteResidue,
     /// R311y713 (§B6) — chains THIS flow lost, and how much was in them.
     chain_loss: ChainLoss,
+    /// R311y713 (§B4) — the CAPTURE INSTANT of the last packet on this flow.
+    last_seen_ms: Option<u64>,
 }
 
 /// R311y612 (§4.1) — post-hole bytes held per direction while deciding whether
@@ -808,6 +814,7 @@ impl FlowDissection {
             ws_resyncs: Vec::new(),
             residue: ByteResidue::default(),
             chain_loss: ChainLoss::default(),
+            last_seen_ms: None,
         }
     }
 
@@ -1747,6 +1754,44 @@ impl DroppedFrameCensus {
             + self.unknown
             + self.undecodable
     }
+}
+
+/// R311y713 (§B4) — pick the flow to evict: the LEAST RECENTLY ACTIVE, by the
+/// capture's own clock where every candidate has one.
+///
+/// `last_activity` is a PACKET INDEX, which is file order and not time order.
+/// The two agree on a single-interface capture and part company on a pcapng
+/// written by `dumpcap -i any`, where each interface's packets are contiguous
+/// in the file and interleaved in time: the flow whose last packet came LATER
+/// on the wire can sit EARLIER in the file, so the index picks the wrong flow
+/// to throw away. Measured on exactly that shape before this function existed
+/// (`an_eviction_follows_the_captures_clock_when_it_has_one`).
+///
+/// The clock is used only when EVERY candidate has one. A capture with no
+/// timestamps at all — which is why the index exists — keeps the index, and a
+/// half-stamped table does too rather than ordering a `None` against a `Some`:
+/// there is no honest answer to "is a flow with no clock older than one with",
+/// and inventing one would decide an eviction on a coin toss dressed as a
+/// rule.
+fn least_recently_active<F>(
+    rows: &[F],
+    clock: impl Fn(&F) -> Option<u64>,
+    index: impl Fn(&F) -> usize,
+) -> Option<usize> {
+    if rows.is_empty() {
+        return None;
+    }
+    if rows.iter().all(|f| clock(f).is_some()) {
+        return rows
+            .iter()
+            .enumerate()
+            .min_by_key(|(i, f)| (clock(f).unwrap_or(0), index(f), *i))
+            .map(|(i, _)| i);
+    }
+    rows.iter()
+        .enumerate()
+        .min_by_key(|(_, f)| index(f))
+        .map(|(i, _)| i)
 }
 
 /// R311y594b — what the LIMITS cost, so a bound is never silent.
@@ -3026,6 +3071,10 @@ impl Dissection {
         };
         flow.deliver_from(direction, before);
         flow.last_activity = packet_index;
+        // R311y713 (§B4) — and the CAPTURE INSTANT beside the file position.
+        // `or` and not assignment: a source that stamps some packets and not
+        // others must not un-know a time it was told.
+        flow.last_seen_ms = ts_millis.or(flow.last_seen_ms);
         self.enforce_flow_limits(idx);
         self.evict_flows_beyond_cap();
     }
@@ -3105,12 +3154,8 @@ impl Dissection {
             return;
         };
         while self.flows.len() > cap {
-            let Some(oldest) = self
-                .flows
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, f)| f.last_activity)
-                .map(|(i, _)| i)
+            let Some(oldest) =
+                least_recently_active(&self.flows, |f| f.last_seen_ms, |f| f.last_activity)
             else {
                 break;
             };
@@ -3196,6 +3241,7 @@ impl Dissection {
         };
         flow.deliver_from(direction, before);
         flow.last_activity = record.packet_index;
+        flow.last_seen_ms = ts_millis.or(flow.last_seen_ms);
         // Counted on this path too, even though both verdicts are `None` here:
         // a path that skipped the tally would make the six buckets disagree
         // about how many packets the dissection saw.
@@ -3250,6 +3296,7 @@ impl Dissection {
         self.advance_clock(idx, ts_millis, FlowKind::Datagram);
         let flow = &mut self.datagram_flows[idx];
         flow.last_activity = d.packet_index;
+        flow.last_seen_ms = ts_millis.or(flow.last_seen_ms);
         // R311y709 — THE recovery point for a datagram flow. Before the QUIC
         // branch on purpose: a datagram counted as QUIC was recovered exactly as
         // much as one that is decoded, and the branch that follows is precisely
@@ -3416,13 +3463,11 @@ impl Dissection {
             return;
         };
         while self.datagram_flows.len() > cap {
-            let Some(oldest) = self
-                .datagram_flows
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, f)| f.last_activity)
-                .map(|(i, _)| i)
-            else {
+            let Some(oldest) = least_recently_active(
+                &self.datagram_flows,
+                |f| f.last_seen_ms,
+                |f| f.last_activity,
+            ) else {
                 break;
             };
             // R311y713 (§B1) — the same act, on the table where fragments
@@ -6053,6 +6098,70 @@ mod datagram_tests {
             evicted.byte_residue().recovered,
             ended.byte_residue().recovered + msg.len() as u64,
             "and the retired flow's recovered bytes must not leave with it"
+        );
+    }
+
+    /// R311y713 (§B4) — an eviction follows the CAPTURE'S CLOCK, not the order
+    /// the packets happen to sit in the file.
+    ///
+    /// `last_activity` is a packet index. On a `dumpcap -i any` pcapng each
+    /// interface's packets are contiguous in the file and interleaved in time,
+    /// so the flow whose last packet arrived LATER can sit EARLIER in it —
+    /// and "least recently active" then throws away the wrong flow. This
+    /// fixture is that shape: flow B's packet is later in the file and EARLIER
+    /// on the clock, so an index-ordered eviction drops flow A. Measured
+    /// exactly that way before the fix; the register carried it as a decision
+    /// that rested on an unmeasured assumption.
+    #[test]
+    fn an_eviction_follows_the_captures_clock_when_it_has_one() {
+        let msg = framed_keepalive();
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows_per_table: Some(1),
+            ..DissectionLimits::default()
+        });
+        // Flow A: file position 0, clock 9000 — the RECENT one.
+        let a = tcp_packet(1000, &msg);
+        d.push_packet_at(LINKTYPE_ETHERNET, 0, Some(9_000), &a);
+        // Flow B: file position 1, clock 1000 — older on the wire, newer in
+        // the file. A second interface's traffic, as a merged capture holds it.
+        let mut b = tcp_packet(2000, &msg);
+        b[26] = 99;
+        d.push_packet_at(LINKTYPE_ETHERNET, 1, Some(1_000), &b);
+        assert_eq!(d.drops().flows, 1, "the cap must have evicted one of them");
+        assert_eq!(d.flows().len(), 1);
+        assert_eq!(
+            d.flows()[0].flow.low.port,
+            1111,
+            "the flow kept must be the one active LATEST on the capture's own \
+             clock, not the one latest in file order"
+        );
+    }
+
+    /// R311y713 (§B4) — and a capture with NO clock keeps the packet index,
+    /// which is the reason the index is there at all.
+    ///
+    /// The fallback is not decoration: a source with no timestamps is what
+    /// `last_activity` was written for, and a rule that ordered `None` against
+    /// `Some` would decide an eviction on nothing.
+    #[test]
+    fn an_eviction_falls_back_to_file_order_without_a_clock() {
+        let msg = framed_keepalive();
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows_per_table: Some(1),
+            ..DissectionLimits::default()
+        });
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1000, &msg));
+        let mut b = tcp_packet(2000, &msg);
+        b[26] = 99;
+        d.push_packet(LINKTYPE_ETHERNET, 1, &b);
+        assert_eq!(d.drops().flows, 1);
+        // `FlowKey` sorts its endpoints, so the second flow's 99.0.0.1 is its
+        // HIGH end — naming the address rather than a side is what keeps this
+        // assertion about the eviction rather than about the sort.
+        assert_eq!(
+            d.flows()[0].flow.high.addr(),
+            &[99, 0, 0, 1],
+            "with no clock the later packet's flow is the one kept"
         );
     }
 
