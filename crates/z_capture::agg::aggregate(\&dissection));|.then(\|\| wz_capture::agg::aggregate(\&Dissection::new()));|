@@ -1,3 +1,0 @@
-        || wz_capture::agg::aggregate(&dissection));
-        || wz_capture::exchange::exchanges(&dissection));
-        || wz_capture::payload::payloads(&dissection));
