@@ -5541,6 +5541,29 @@ layer_c1bx_tls_record_oracle() {
         return 1
     }
 
+    # R311y708 — AND THE OTHER SIDE OF THE ISOLATION THIS LANE CHOSE. The lane
+    # above builds `-p` on purpose, so its feature resolution is the crate's own.
+    # That is exactly one of the two resolutions this crate is compiled under,
+    # and the other one BREAKS DIFFERENTLY: rustls's `SupportedCipherSuite` grows
+    # a `Tls12` variant when anything in the build turns on rustls's `tls12`
+    # feature, which `wz-runtime-tokio/transport-link-tls` does through
+    # tokio-rustls. A pattern that is irrefutable here is E0005 there.
+    #
+    # MEASURED, not reasoned: that is the shape that reached hosted CI as the
+    # `Layer C1 — cargo test --workspace` red on `4cb913a1`, having survived
+    # every local lane -- including this one, four rounds running. `lib.rs`
+    # already carried the fix and its reason from R311y657; the QUIC half, added
+    # later, did not inherit it, because no lane a developer runs could ask.
+    #
+    # So the feature is named RATHER THAN INHERITED (this workspace's own rule
+    # for lanes), and it costs seconds because only rustls and this crate rebuild
+    # -- the workspace lane that would otherwise be the only witness costs
+    # minutes and lives on a runner.
+    (cd crates && cargo test -p wz-tls-record --features rustls/tls12 --all-targets --quiet) || {
+        echo "  C1bx FAIL: wz-tls-record does not build where the workspace's rustls has tls12"
+        return 1
+    }
+
     echo "  C1bx: the decryptor is checked against rustls and the SET is pinned"
 }
 

@@ -628,7 +628,7 @@ mod tests {
     use super::*;
     use rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256;
     use rustls::quic::{Keys, Version};
-    use rustls::{Side, SupportedCipherSuite};
+    use rustls::Side;
 
     /// The connection ID RFC 9001's own worked example uses, which is also what
     /// rustls's `initial_test_vector` tests derive from.
@@ -636,7 +636,17 @@ mod tests {
 
     /// rustls's Initial keys for one side of that connection.
     fn oracle(side: Side) -> Keys {
-        let SupportedCipherSuite::Tls13(suite) = TLS13_AES_128_GCM_SHA256;
+        // The accessor, not a pattern on `SupportedCipherSuite` -- for the
+        // reason `lib.rs::oracle` already records (R311y657): how many variants
+        // that enum has depends on whether ANYTHING in the build turned on
+        // rustls's `tls12` feature, and in this workspace something does
+        // (`wz-runtime-tokio/transport-link-tls` -> tokio-rustls with `tls12`).
+        // Alone the enum is one variant and the binding is irrefutable; under
+        // the workspace lane it is two and the same line is E0005. Only the
+        // accessor -- which rustls cfgs internally -- is right in both.
+        let suite = TLS13_AES_128_GCM_SHA256
+            .tls13()
+            .expect("TLS13_AES_128_GCM_SHA256 is a TLS 1.3 suite");
         Keys::initial(
             Version::V1,
             suite,
