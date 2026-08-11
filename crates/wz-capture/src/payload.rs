@@ -943,7 +943,11 @@ pub fn payloads_where(
         census.observe_flow_where(&flow.frames, filter);
     }
     for flow in dissection.datagram_flows() {
-        census.observe_flow_where(&flow.frames, filter);
+        // R311y718 — see `agg::aggregate_where`: every list this flow holds,
+        // which now includes the zenoh recovered out of its QUIC streams.
+        for frames in flow.frame_lists() {
+            census.observe_flow_where(frames, filter);
+        }
     }
     census
 }

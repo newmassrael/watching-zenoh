@@ -284,6 +284,102 @@ pub struct DatagramDissection {
     /// R311y713 (§B4) — the CAPTURE INSTANT of the last packet on this flow,
     /// where the source had one. See [`Dissection::least_recently_active`].
     last_seen_ms: Option<u64>,
+    /// R311y718 (§1.2a) — the zenoh sessions recovered OUT of this flow's QUIC
+    /// streams, one per stream id.
+    ///
+    /// # Why a list beside `frames` rather than more entries in it
+    ///
+    /// [`PassiveFrame::stream_offset`] means a different thing on each of the
+    /// two lists, and nothing in a frame says which. On [`Self::frames`] it is
+    /// the index of the PACKET that carried the message, because a datagram has
+    /// no stream to be an offset into; on a recovered QUIC stream it is a byte
+    /// offset within that stream, exactly as it is on a TCP flow. Folding the
+    /// two would put a third meaning into a field two consumers already resolve
+    /// (`packet_for`, the run map) with no discriminator to branch on — which is
+    /// R311y713's coordinate defect, one list over.
+    ///
+    /// # Why one session per stream id
+    ///
+    /// zenoh's QUIC link is STREAMED (`is_streamed()` is `true`,
+    /// `zenoh-link-quic/src/unicast.rs:184`) and opens ONE bidirectional stream
+    /// per link (`open_bi()`, `:330`; the acceptor's `accept_bi()`, `:524`), so
+    /// the bytes inside it are the ordinary length-prefixed batch stream this
+    /// crate already frames. Both halves of a bidi stream share one id, which is
+    /// why the id keys a whole [`PassiveSession`] rather than one direction of
+    /// one: the zenoh handshake is an exchange, and splitting the two halves
+    /// into separate sessions would leave each looking at a monologue.
+    ///
+    /// A LIST and not one session, because "one stream per link" is a property
+    /// of today's zenoh and not of QUIC: a second stream on the same connection
+    /// is a second independent byte stream, and feeding it into the first one's
+    /// framer would lay one length prefix over another's payload.
+    pub quic_streams: Vec<QuicStreamDissection>,
+}
+
+/// R311y718 (§1.2a) — one recovered QUIC stream, framed as zenoh.
+///
+/// The QUIC half of it — packet protection, frame walking, reassembly — is a
+/// caller's job (`wz-capture` carries no cipher, see [`crate::quic`]). What
+/// arrives here is the contiguous byte prefix that came out of that work, and
+/// what happens to it here is precisely what happens to a `tcp/...` flow's
+/// reassembled bytes.
+#[derive(Debug)]
+pub struct QuicStreamDissection {
+    /// The QUIC stream id these bytes were recovered from.
+    pub id: u64,
+    /// The zenoh-level observer over both directions of that stream.
+    pub session: PassiveSession,
+    /// Decoded transport messages. `stream_offset` is a byte offset within the
+    /// RECOVERED stream of its own direction — see [`DatagramDissection`] on
+    /// why that cannot share a list with the packet-indexed ones.
+    pub frames: Vec<PassiveFrame>,
+    /// Bytes handed to the framer, per direction.
+    fed: [u64; 2],
+}
+
+impl QuicStreamDissection {
+    /// Bytes this stream's framer was given, per direction.
+    ///
+    /// The denominator for "how much of what QUIC recovered turned into zenoh":
+    /// a stream whose messages are zero and whose `fed` is large is a framing
+    /// disagreement, and one where both are zero is a stream that carried
+    /// nothing. Without this they are the same row.
+    pub fn fed(&self) -> [u64; 2] {
+        self.fed
+    }
+
+    /// R311y718 — bytes this stream was given that NO message came out of.
+    ///
+    /// # Why the count exists, and why it is not `fed - messages`
+    ///
+    /// Feeding a framer is not reading. A recovered stream carrying bytes that
+    /// are not zenoh — or a zenoh stream cut short by a hole QUIC could not
+    /// recover — is pushed in, waits for a length prefix that never completes,
+    /// and yields nothing. A report that counted the offer as the read would
+    /// call such a capture whole, which is the over-report R311y716 shipped in
+    /// the alert path and R311y705 caught one layer up.
+    ///
+    /// So the measure is what the framer CONSUMED: each direction's last frame
+    /// ends at `stream_offset + prefix_width + unit_len`, and everything past
+    /// that is still pending. Taking the last frame's end rather than summing
+    /// the frames is deliberate — the sum would be wrong the moment a framing
+    /// unit is skipped, and the offsets are the session's own coordinates
+    /// rather than this function's arithmetic.
+    pub fn undecoded_bytes(&self) -> u64 {
+        let mut left = 0u64;
+        for (index, fed) in self.fed.iter().enumerate() {
+            let direction = idx_direction(index);
+            let consumed = self
+                .frames
+                .iter()
+                .filter(|f| f.direction == direction)
+                .map(|f| (f.stream_offset + f.prefix_width + f.unit_len) as u64)
+                .max()
+                .unwrap_or(0);
+            left += fed.saturating_sub(consumed);
+        }
+        left
+    }
 }
 
 impl DatagramDissection {
@@ -298,7 +394,41 @@ impl DatagramDissection {
             residue: ByteResidue::default(),
             chain_loss: ChainLoss::default(),
             last_seen_ms: None,
+            quic_streams: Vec::new(),
         }
+    }
+
+    /// R311y718 — transport messages decoded on this flow, over BOTH of the
+    /// lists that hold them.
+    ///
+    /// Every capture-wide count goes through this rather than through
+    /// `frames.len()`, so that a plane taught about the datagram half is taught
+    /// about the QUIC half with it. The lesson is R311y700's: a new list that
+    /// reaches one row producer reports the rest as empty.
+    pub fn decoded_messages(&self) -> usize {
+        self.frame_lists().map(<[_]>::len).sum()
+    }
+
+    /// R311y718 — every list of decoded transport messages this flow holds.
+    ///
+    /// # Why the planes iterate this instead of naming `frames`
+    ///
+    /// Four census planes walk the datagram table — throughput, exchanges,
+    /// payloads, nodes — and each named `flow.frames` directly. A second list
+    /// therefore reached whichever plane its author remembered, and the rest
+    /// reported the flow as if the list were not there. That has happened four
+    /// times in this workspace (R311y668, y678, y699, y700), and the last two
+    /// were consecutive rounds.
+    ///
+    /// So the enumeration is a method rather than a convention: a plane that
+    /// walks this is right for lists that do not exist yet, and a list added
+    /// here reaches every plane at once. The rows keep their own coordinate
+    /// meanings — see [`Self::quic_streams`] — so this is deliberately an
+    /// iterator of SLICES and not a flattened frame iterator, which would fuse
+    /// two offset spaces into one sequence.
+    pub fn frame_lists(&self) -> impl Iterator<Item = &[PassiveFrame]> {
+        core::iter::once(self.frames.as_slice())
+            .chain(self.quic_streams.iter().map(|s| s.frames.as_slice()))
     }
 
     /// R311y713 (§B6) — the chains this flow lost, whatever the cause.
@@ -1524,6 +1654,21 @@ pub struct DissectionLimits {
     /// not a flow either: one host scouting on a schedule keeps a single slot
     /// for the life of the tap while its flows come and go.
     pub max_scout_askers: Option<usize>,
+    /// R311y718 (§1.2a) — recovered QUIC streams framed as zenoh, PER DATAGRAM
+    /// FLOW. Beyond it a new stream id is REFUSED, and
+    /// [`quic::QuicStreamFeed::streams_refused`] says so.
+    ///
+    /// Refusal rather than eviction, and the asymmetry with every other bound
+    /// here is deliberate: the streams already held carry the zenoh session
+    /// state of this connection, so admitting a newcomer by dropping the oldest
+    /// would discard the handshake and leave the survivor decoding a stream it
+    /// has no session for. A bound that trades a readable half for an
+    /// unreadable one is worse than the growth it prevents.
+    ///
+    /// Its own bound rather than a share of `max_flows_per_table` for the reason
+    /// the two above it are: a stream is not a flow, and one QUIC connection can
+    /// open many while occupying a single slot in the datagram table.
+    pub quic_streams_per_flow: Option<usize>,
 }
 
 impl DissectionLimits {
@@ -1561,6 +1706,15 @@ impl DissectionLimits {
             // `max_flows_per_table` and each entry is an `Endpoint`, so the whole set is
             // smaller than a single flow's frame list.
             max_scout_askers: Some(1_024),
+            // zenoh opens ONE bidirectional stream per QUIC link
+            // (`zenoh-link-quic/src/unicast.rs:330`), so 16 is an order above
+            // what the traffic this tool watches produces, and each entry costs
+            // a `PassiveSession` plus its frame list — the same order as a flow.
+            // Set well above the expected one rather than at it, because the
+            // bound REFUSES: sizing it tight would make a peer that opens a
+            // second stream lose it, and the point of the ceiling is the
+            // runaway case, not the second case.
+            quic_streams_per_flow: Some(16),
         }
     }
 }
@@ -1598,6 +1752,7 @@ mod live_tap_tests {
             max_flows_per_table,
             max_pending_fragments,
             max_scout_askers,
+            quic_streams_per_flow,
         } = DissectionLimits::for_live_tap();
 
         for (name, bound) in [
@@ -1611,6 +1766,7 @@ mod live_tap_tests {
             ("max_flows_per_table", max_flows_per_table),
             ("max_pending_fragments", max_pending_fragments),
             ("max_scout_askers", max_scout_askers),
+            ("quic_streams_per_flow", quic_streams_per_flow),
         ] {
             let Some(v) = bound else {
                 panic!("{name} is unbounded in the live-tap preset");
@@ -2643,7 +2799,7 @@ impl Dissection {
             + self
                 .datagram_flows
                 .iter()
-                .map(|f| f.frames.len())
+                .map(|f| f.decoded_messages())
                 .sum::<usize>()
     }
 
@@ -2841,6 +2997,167 @@ impl Dissection {
             }
         }
         summary
+    }
+
+    /// R311y718 (§1.2a) — frame one recovered QUIC stream's bytes as zenoh.
+    ///
+    /// # The seam, and why it points this way
+    ///
+    /// This is the QUIC twin of [`Self::decrypt_with`], and it is inverted
+    /// because the two layers are: TLS records arrive INSIDE a byte stream this
+    /// crate already reassembles, so the loop belongs here and the cipher is a
+    /// caller's trait ([`tls::RecordOpener`]). A QUIC stream is the other way
+    /// round — reassembly happens after decryption, both of them behind a cipher
+    /// this crate may not carry, so the caller owns the loop and hands the
+    /// RESULT back. What the caller cannot own is the framing: the bytes inside
+    /// zenoh's QUIC link are the ordinary length-prefixed batch stream
+    /// (`is_streamed()` is `true`, `zenoh-link-quic/src/unicast.rs:184`), and a
+    /// second framer for them would be a second implementation of the one thing
+    /// this crate exists to do.
+    ///
+    /// # What a caller must hand over
+    ///
+    /// `bytes` is the CONTIGUOUS PREFIX of one direction of one stream, from
+    /// offset zero, and the whole of it each time — the same contract a
+    /// reassembler's `stream()` already meets. Feeding a suffix, or feeding
+    /// across a hole, would push bytes into a length-prefixed framer at the
+    /// wrong offset, and that does not fail loudly: it decodes garbage that
+    /// looks like data, which is the failure `Framing::OpeningLost` exists to
+    /// prevent one transport over. A caller re-offering a stream that has grown
+    /// must therefore offer only the NEW tail; this method appends.
+    ///
+    /// Handshake bytes are the caller's to withhold, and offering them is
+    /// counted rather than framed
+    /// ([`quic::QuicStreamFeed::handshake_offers`]) — CRYPTO carries the TLS
+    /// exchange, which has no length-prefixed zenoh in it at all.
+    ///
+    /// # What it refuses
+    ///
+    /// An offer for a flow this dissection does not hold is counted, not
+    /// created: a QUIC flow the datagram table evicted is gone, and
+    /// resurrecting it here would make the flow count depend on which pass ran
+    /// last. An offer past [`DissectionLimits::quic_streams_per_flow`] is
+    /// refused rather than admitted by eviction — see that field for why the
+    /// asymmetry is deliberate.
+    pub fn feed_quic_stream(
+        &mut self,
+        flow: FlowKey,
+        direction: Direction,
+        stream_id: u64,
+        handshake: bool,
+        bytes: &[u8],
+    ) -> quic::QuicStreamFeed {
+        self.feed_quic_stream_with_sink(flow, direction, stream_id, handshake, bytes, &mut ())
+    }
+
+    /// R311y718 (§1.2a) — [`Self::feed_quic_stream`], offering the recovered
+    /// bytes to a sink as well as to the framer.
+    ///
+    /// The QUIC twin of [`Self::decrypt_with_sink`], and it exists for the same
+    /// reason: the field layer needs the BYTES and the FRAMES at once, and the
+    /// only moment both exist is inside this call. Without it a `--fields` run
+    /// over a `quic/...` capture prints nothing and says nothing about why —
+    /// the flow decodes messages, and the walk that turns a message into named
+    /// fields never sees them.
+    ///
+    /// # The one offer it will not hand on
+    ///
+    /// A frame's `stream_offset` is absolute within its direction's recovered
+    /// stream, while `bytes` is what THIS offer added. The two agree only while
+    /// the offer starts at zero, which is every offer the analyzer's own pass
+    /// makes (one per direction per stream) and not a guarantee of the
+    /// contract. So an offer that APPENDS is framed as usual and not walked,
+    /// counted in [`quic::QuicStreamFeed::appends_not_walked`]. Handing it on
+    /// anyway would slice the tail at an offset into the whole, which does not
+    /// fail loudly -- it names the wrong bytes as a message's fields, and a
+    /// field layer that can be quietly wrong is worse than one that is quietly
+    /// absent.
+    pub fn feed_quic_stream_with_sink(
+        &mut self,
+        flow: FlowKey,
+        direction: Direction,
+        stream_id: u64,
+        handshake: bool,
+        bytes: &[u8],
+        sink: &mut impl PlaintextSink,
+    ) -> quic::QuicStreamFeed {
+        let mut feed = quic::QuicStreamFeed::default();
+        if handshake {
+            feed.handshake_offers += 1;
+            return feed;
+        }
+        let cap = self.limits.quic_streams_per_flow;
+        let Some(dg) = self.datagram_flows.iter_mut().find(|f| f.flow == flow) else {
+            feed.flow_absent += 1;
+            return feed;
+        };
+        let index = match dg.quic_streams.iter().position(|s| s.id == stream_id) {
+            Some(index) => index,
+            None => {
+                if cap.is_some_and(|n| dg.quic_streams.len() >= n) {
+                    feed.streams_refused += 1;
+                    return feed;
+                }
+                dg.quic_streams.push(QuicStreamDissection {
+                    id: stream_id,
+                    session: new_session(self.limits.reassembly_window_ms),
+                    frames: Vec::new(),
+                    fed: [0, 0],
+                });
+                dg.quic_streams.len() - 1
+            }
+        };
+        let stream = &mut dg.quic_streams[index];
+        // Read BEFORE the offer is added: this is what says whether the frames
+        // about to be produced are offset into `bytes` or into a longer stream
+        // `bytes` is only the tail of.
+        let from_zero = stream.fed[dir_index(direction)] == 0;
+        stream.fed[dir_index(direction)] += bytes.len() as u64;
+        feed.bytes_fed += bytes.len();
+        let before = stream.frames.len();
+        stream.session.push(direction, bytes);
+        loop {
+            let mut progressed = false;
+            for dir in [Direction::A, Direction::B] {
+                loop {
+                    match stream.session.next_frame(dir) {
+                        Ok(frame) => {
+                            stream.frames.push(frame);
+                            progressed = true;
+                        }
+                        Err(PassiveStall::NeedMoreBytes) => break,
+                        Err(PassiveStall::Desynchronised { .. }) => break,
+                    }
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+        feed.messages += stream.frames.len() - before;
+        // OFFERED here, for the same reason the TLS half offers where it does:
+        // this is the one window in which the bytes, the frames and the frames'
+        // coordinates into those bytes all exist together. No remap follows --
+        // a recovered QUIC stream has no ciphertext record to point back at, so
+        // the offsets stay in the space the caller can resolve them in.
+        if from_zero {
+            sink.on_plaintext(DecryptedStream {
+                flow,
+                direction,
+                plaintext: bytes,
+                frames: &stream.frames[before..],
+                record_origins: &[],
+            });
+        } else if stream.frames.len() > before {
+            feed.appends_not_walked += 1;
+        }
+        // R311y709 — the flow's recovered/fed ledger. A QUIC flow's `fed` was
+        // zero for the life of every capture until this method existed, which
+        // was the accurate statement then and would be a false one now: these
+        // bytes came out of datagrams this flow counted as recovered, and they
+        // have now reached a decoder.
+        dg.residue.fed += bytes.len() as u64;
+        feed
     }
 
     /// R311y650 (§1.2a) — how much of this capture was encrypted, over every

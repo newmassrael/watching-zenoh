@@ -1578,7 +1578,13 @@ pub fn aggregate_where(dissection: &crate::Dissection, filter: &Filter) -> Throu
         table.observe_flow_where(&flow.frames, filter);
     }
     for flow in dissection.datagram_flows() {
-        table.observe_flow_where(&flow.frames, filter);
+        // R311y718 — EVERY list, via the flow's own enumeration. A datagram
+        // flow now holds the zenoh recovered out of its QUIC streams beside the
+        // messages read straight off the wire, and naming `frames` here would
+        // leave this plane censusing the pre-QUIC half.
+        for frames in flow.frame_lists() {
+            table.observe_flow_where(frames, filter);
+        }
     }
     table
 }

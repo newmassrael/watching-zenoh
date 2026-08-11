@@ -764,7 +764,11 @@ pub fn exchanges_where(dissection: &crate::Dissection, filter: &Filter) -> Excha
         table.observe_flow_where(&flow.frames, filter);
     }
     for flow in dissection.datagram_flows() {
-        table.observe_flow_where(&flow.frames, filter);
+        // R311y718 — see `agg::aggregate_where`: every list this flow holds,
+        // which now includes the zenoh recovered out of its QUIC streams.
+        for frames in flow.frame_lists() {
+            table.observe_flow_where(frames, filter);
+        }
     }
     table
 }

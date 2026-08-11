@@ -60,6 +60,33 @@ fn document_only_versions(q: &[crate::quic::QuicCensus]) -> alloc::vec::Vec<u32>
     v
 }
 
+/// R311y718 (§1.2a) — application bytes a decryptor recovered that no zenoh
+/// message came out of.
+///
+/// # Why one function for two callers
+///
+/// The verdict decides WHETHER to report a shortfall and the rendering says HOW
+/// BIG it is, and until this round each computed it: both read
+/// `stream_bytes + datagram_bytes`, which agreed only because nothing subtracted
+/// anything. The moment a seam exists that reads some of those bytes, two copies
+/// of the subtraction is two chances to forget a term — and a verdict that says
+/// "whole" over a rendering that names 25 unread bytes is worse than either
+/// alone. R311y715 measured that shape five times over in one round: the same
+/// fact rendered twice, agreeing by luck.
+///
+/// # The two terms
+///
+/// `bytes_fed` is what reached a framer. Everything recovered and not fed is
+/// unread because nothing offered it: an RFC 9221 DATAGRAM frame (which carries
+/// a batch, not a stream, and has no seam yet), a stream the per-flow bound
+/// refused, or a flow the datagram table had already evicted. `bytes_undecoded`
+/// is what was fed and stalled — offered is not read, and a capture whose bytes
+/// went into a framer that produced nothing is short by them just the same.
+fn quic_application_unread(k: &crate::quic::QuicDecryption) -> usize {
+    (k.stream_bytes + k.datagram_bytes).saturating_sub(k.framing.bytes_fed)
+        + k.framing.bytes_undecoded
+}
+
 /// One capture's findings, ready to render.
 ///
 /// Planes are OPTIONAL and named individually rather than recomputed here: a
@@ -386,10 +413,17 @@ impl<'a> CaptureReport<'a> {
         // (`Dissection::decrypt_with` + `PlaintextSink`), never a second walk of
         // the zenoh stream framing here -- R311y678 measured what a third
         // opinion about where the messages are costs.
-        if self
-            .quic
-            .is_some_and(|q| q.stream_bytes > 0 || q.datagram_bytes > 0)
-        {
+        //
+        // R311y718 — THE SEAM ARRIVED, exactly where the paragraph above said it
+        // would have to (`Dissection::feed_quic_stream`, the QUIC twin of
+        // `decrypt_with`), so this now measures what is STILL unread instead of
+        // assuming everything is. Two subtractions and not one: bytes nobody
+        // offered a framer, plus bytes a framer took and decoded nothing out of.
+        // Dropping the second would let this verdict call a capture whole
+        // because its bytes reached a stall -- offering is not reading, and a
+        // rule that cannot tell those apart is the one this line has already
+        // been wrong under once.
+        if self.quic.is_some_and(|q| quic_application_unread(q) > 0) {
             out.push(VerdictReason::QuicBytesNobodyDecodes);
         }
         // R311y624 (§1.1m) — the FRAMING witnesses reach the verdict, and until
@@ -798,7 +832,11 @@ impl<'a> CaptureReport<'a> {
                          \"packets_no_keys\":{},\"packets_refused\":{},\
                          \"crypto_bytes\":{},\"stream_bytes\":{},\
                          \"datagram_bytes\":{},\"walks_stopped\":{},\
-                         \"flows_identity_adopted\":{}}}",
+                         \"flows_identity_adopted\":{},\
+                         \"framing\":{{\"bytes_fed\":{},\"messages\":{},\
+                         \"bytes_undecoded\":{},\"streams_refused\":{},\
+                         \"flow_absent\":{},\"handshake_offers\":{}}},\
+                         \"application_unread\":{}}}",
                         k.flows_opened > 0 && k.flows_opened == k.flows_offered,
                         k.flows_offered,
                         k.flows_opened,
@@ -811,6 +849,22 @@ impl<'a> CaptureReport<'a> {
                         k.datagram_bytes,
                         k.walks_stopped,
                         k.flows_identity_adopted,
+                        // R311y718 — what happened to the recovered bytes once a
+                        // framer had them. Emitted rather than left inside the
+                        // verdict, because "25 bytes recovered" and "25 bytes
+                        // recovered, read, and yielding nothing" are different
+                        // findings with different remedies and the byte counter
+                        // above cannot tell them apart.
+                        k.framing.bytes_fed,
+                        k.framing.messages,
+                        k.framing.bytes_undecoded,
+                        k.framing.streams_refused,
+                        k.framing.flow_absent,
+                        k.framing.handshake_offers,
+                        // The number the verdict itself consults, emitted so a
+                        // consumer branching on `complete` can see WHY without
+                        // re-deriving a subtraction this file owns.
+                        quic_application_unread(k),
                     ),
                 },
             ));
@@ -1255,13 +1309,31 @@ impl<'a> CaptureReport<'a> {
                 // about the DECRYPTION and this is about what happened next --
                 // and the answer is nothing.
                 if let Some(k) = self.quic {
-                    let unread = k.stream_bytes + k.datagram_bytes;
+                    let unread = quic_application_unread(k);
                     if unread > 0 {
+                        // R311y718 — the sentence now names WHICH of the two
+                        // ways bytes go unread, because the remedies are
+                        // opposite. Bytes nothing was offered are a seam
+                        // question (a DATAGRAM frame, a refused stream, an
+                        // evicted flow); bytes a framer took and decoded
+                        // nothing from are a CONTENT question -- the stream was
+                        // not zenoh, or it is cut short. Until this round only
+                        // the first existed, so the sentence could state its
+                        // cause as a fact.
+                        let (offered, stalled) = (k.framing.bytes_fed, k.framing.bytes_undecoded);
+                        let cause = if stalled >= unread {
+                            "a zenoh framer read them and decoded no message out \
+                             of them -- the stream is not zenoh, or it is cut short"
+                        } else if offered == 0 {
+                            "nothing in this run offered them to a zenoh framer"
+                        } else {
+                            "part of them reached a zenoh framer and the rest \
+                             reached none"
+                        };
                         undecoded = alloc::format!(
                             "\n  QUIC: {unread} application byte(s) were recovered \
-                             and NOT decoded -- no reader in this build takes \
-                             plaintext out of a QUIC stream, so the zenoh inside \
-                             them is not in any total above"
+                             and NOT decoded -- {cause}, so the zenoh inside them \
+                             is not in any total above"
                         );
                     }
                 }
@@ -3495,6 +3567,7 @@ mod tests {
             datagram_bytes: 0,
             walks_stopped: 0,
             flows_identity_adopted: 0,
+            framing: crate::quic::QuicStreamFeed::default(),
         };
         let r = CaptureReport::of(&d).with_quic_decryption(&shut);
         assert!(!r.is_complete(), "a flow offered and not opened is a floor");

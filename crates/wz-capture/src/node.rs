@@ -440,7 +440,12 @@ pub fn nodes(dissection: &crate::Dissection) -> NodeCensus {
         census.observe_flow(&flow.flow, &flow.frames);
     }
     for flow in dissection.datagram_flows() {
-        census.observe_flow(&flow.flow, &flow.frames);
+        // R311y718 — every frame list, not `frames` alone: a `quic/...` peer's
+        // Init is inside a QUIC stream, so a census that named one list would
+        // report a whole QUIC deployment as having no nodes in it.
+        for frames in flow.frame_lists() {
+            census.observe_flow(&flow.flow, frames);
+        }
         // The scouting list, which is where a discovery-only capture's nodes
         // all are. Both producers of this table, not one.
         census.observe_scouting(&flow.flow, &flow.scouting);

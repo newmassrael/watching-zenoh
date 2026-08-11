@@ -672,6 +672,49 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     // dissection does not hold: the epochs are the opener's state, and until this
     // round the `KeyUpdate` messages announcing them were opened and read past.
     let epochs = opener.epoch_witness();
+    // R311y698 (§1.2a) — THE QUIC PASS, which is the item this crate was
+    // created to make unnecessary and which had never been written.
+    //
+    // `wz-tls-record::quic` could open a QUIC packet since R311y694 and nothing
+    // called it: the register's whole §QUIC section reduced to "there is no
+    // caller". It runs unconditionally rather than behind a flag, because the
+    // Initial packet space needs NO key at all -- a capture with QUIC in it and
+    // no key log still yields its handshake, its version, its connection ID and
+    // its ClientHello, which is exactly what tells a reader whether the key log
+    // they are about to fetch is the right one.
+    //
+    // R311y718 — MOVED ABOVE THE CENSUS PLANES, and the move is the round's
+    // point rather than a tidy-up. The pass now FRAMES what it recovers
+    // (`feed_quic_stream`), so a QUIC flow carries decoded zenoh messages the
+    // moment it returns -- and every plane below is built by walking the
+    // dissection once. Left where it was, throughput, exchanges, payloads and
+    // the node census would each have censused the pre-QUIC view and reported a
+    // floor as a total, which is the defect the comment two blocks up records
+    // for the DECRYPTION pass in the same words. R311y716 shipped that exact
+    // mistake in the alert path; this is the same seam and the same order rule.
+    //
+    // R311y718 — and the FIELD SINK goes with it, on the same argument the TLS
+    // half makes two blocks up: the recovered bytes exist only inside the call,
+    // so a `--fields` run over a `quic/...` capture had no window in which to
+    // walk them. The no-op `()` when fields were not asked for is what
+    // `decrypt_with` passes for the same reason.
+    let (quic, quic_flows) = if per_field {
+        quic_pass(
+            capture,
+            &mut dissection,
+            opener.log(),
+            quic_cid_len,
+            &mut fields,
+        )
+    } else {
+        quic_pass(
+            capture,
+            &mut dissection,
+            opener.log(),
+            quic_cid_len,
+            &mut (),
+        )
+    };
     let flows = dissection.encrypted_flows();
     let decrypted_flows = flows.iter().filter(|f| f.not_decrypted.is_none()).count();
     // R311y673 — the three OBSERVER PLANES, built only where asked for.
@@ -702,17 +745,6 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     // named by a handshake that has no keyexpr, kind or payload for them to
     // read. Same reason the QUIC pass below states, one plane over.
     let node_census = census.nodes.then(|| wz_capture::node::nodes(&dissection));
-    // R311y698 (§1.2a) — THE QUIC PASS, which is the item this crate was
-    // created to make unnecessary and which had never been written.
-    //
-    // `wz-tls-record::quic` could open a QUIC packet since R311y694 and nothing
-    // called it: the register's whole §QUIC section reduced to "there is no
-    // caller". It runs unconditionally rather than behind a flag, because the
-    // Initial packet space needs NO key at all -- a capture with QUIC in it and
-    // no key log still yields its handshake, its version, its connection ID and
-    // its ClientHello, which is exactly what tells a reader whether the key log
-    // they are about to fetch is the right one.
-    let (quic, quic_flows) = quic_pass(capture, &dissection, opener.log(), quic_cid_len);
     // R311y706 (Y5) — and the report SAYS the selector did not reach this pass.
     //
     // The register carried this as "--select does not reach the QUIC pass", and
@@ -1002,9 +1034,10 @@ pub struct QuicFlowOutcome {
 /// that HAS a QUIC flow -- the early return sits above it.
 fn quic_pass(
     capture: &[u8],
-    dissection: &Dissection,
+    dissection: &mut Dissection,
     log: &KeyLog,
     cid_len: Option<usize>,
+    sink: &mut impl wz_capture::PlaintextSink,
 ) -> (wz_capture::quic::QuicDecryption, Vec<QuicFlowOutcome>) {
     use wz_session_core::passive::Direction;
 
@@ -1094,6 +1127,36 @@ fn quic_pass(
         for direction in [Direction::A, Direction::B] {
             for (key, reassembler) in opener.sequences(direction) {
                 sequences.push((direction, key, reassembler.stream().len()));
+                // R311y718 (§1.2a) — AND THE BYTES GO ON TO A ZENOH FRAMER.
+                //
+                // Until this round the recovered stream was MEASURED and never
+                // read: this loop pushed its LENGTH into a listing and dropped
+                // the bytes, so a QUIC capture whose keys were all present
+                // reported `stream_bytes: 25` and `messages decoded: 0`. That is
+                // the "recovered and never read" shape R311y705 named for the
+                // TLS floor, still open on the transport underneath it.
+                //
+                // CRYPTO is offered too, and refused by the seam rather than
+                // filtered out here. The distinction belongs on the far side
+                // because it is the FRAMER's rule -- handshake bytes are a TLS
+                // exchange with no zenoh in them -- and a caller that quietly
+                // skipped them would leave `handshake_offers` at zero and make
+                // a capture whose every stream is CRYPTO indistinguishable from
+                // one that recovered nothing at all.
+                let (stream_id, handshake) = match key {
+                    SequenceKey::Stream(id) => (id, false),
+                    SequenceKey::Crypto(space) => (space.index() as u64, true),
+                };
+                summary
+                    .framing
+                    .absorb(dissection.feed_quic_stream_with_sink(
+                        flow,
+                        direction,
+                        stream_id,
+                        handshake,
+                        reassembler.stream(),
+                        sink,
+                    ));
             }
         }
         flows.push(QuicFlowOutcome {
@@ -1108,6 +1171,16 @@ fn quic_pass(
             sequences_dropped: opener.sequences_dropped(),
         });
     }
+    // R311y718 — the stall, measured from the FINISHED dissection rather than
+    // folded per offer. A stream fed twice has one leftover and not two, and a
+    // sum over offers would report the first offer's pending bytes again after
+    // the second offer consumed them. See `QuicStreamFeed::bytes_undecoded`.
+    summary.framing.bytes_undecoded = dissection
+        .datagram_flows()
+        .iter()
+        .flat_map(|f| f.quic_streams.iter())
+        .map(|s| s.undecoded_bytes() as usize)
+        .sum();
     (summary, flows)
 }
 
@@ -1562,7 +1635,7 @@ fn field_lines(
                 spaces.absorb_frame(frame);
             }
         }
-        for (f, direction, origin, row) in &decrypted.rows {
+        for (f, direction, origin, space, row) in &decrypted.rows {
             if *f != flow.flow {
                 continue;
             }
@@ -1577,7 +1650,7 @@ fn field_lines(
                     flow: flow.flow,
                     direction: *direction,
                     origin: *origin,
-                    space: OffsetSpace::CiphertextRecord,
+                    space: *space,
                 },
                 row,
                 PayloadLens {
@@ -1632,12 +1705,15 @@ fn field_lines(
     // twice costs a walk that only a reader who asked for `--fields` pays.
     datagram_field_rows(
         capture,
-        dissection,
-        format,
-        messages_per_flow,
+        DatagramWalk {
+            dissection,
+            decrypted,
+            format,
+            messages_per_flow,
+            payload_formats,
+        },
         &mut emitted,
         &mut listings,
-        payload_formats,
     );
     render_listings(&listings, format)
 }
@@ -1985,10 +2061,20 @@ struct FieldSink {
     /// the listing. It was dropped by an `if let Ok`, which is the silence this
     /// whole track exists to end, arriving inside the one transport where a
     /// reader cannot check by eye.
+    /// R311y718 — and the COORDINATE SPACE that offset is in, carried rather
+    /// than assumed by the renderer.
+    ///
+    /// It was `CiphertextRecord` at every render site while TLS was the only
+    /// producer. A recovered QUIC stream has no ciphertext record to point back
+    /// at — its offsets are bytes into the reassembled stream — so a renderer
+    /// that stated the space itself would label one producer's rows with the
+    /// other's, in a field whose whole purpose is telling three small numbers
+    /// apart (see [`OffsetSpace`]).
     rows: Vec<(
         wz_capture::link::FlowKey,
         wz_session_core::passive::Direction,
         usize,
+        OffsetSpace,
         FieldRow,
     )>,
     /// Messages the bound left out, per flow.
@@ -2053,7 +2139,16 @@ impl wz_capture::PlaintextSink for FieldSink {
             // record this message's bytes came out of. The spans INSIDE the tree
             // stay message-relative, which is the one space they mean anything
             // in -- a field's byte range is a range of the message.
-            let origin = stream.record_origin(at).unwrap_or(at);
+            // R311y718 — the offset AND the space it is in. A remap to a
+            // ciphertext record is what makes the number a record offset; its
+            // ABSENCE means the offsets are still bytes into the stream that was
+            // handed in, which is the QUIC case. The producer decides here,
+            // where the answer is a fact, instead of each render site deciding
+            // by which loop it happens to sit in.
+            let (origin, space) = match stream.record_origin(at) {
+                Some(origin) => (origin, OffsetSpace::CiphertextRecord),
+                None => (at, MessageRow::stream_byte(frame)),
+            };
             // R311y683 — walked and CHECKED against the session that framed it,
             // the same way the cleartext path is. R311y682 closed that half and
             // its own carry named this one: these coordinates come from the
@@ -2063,6 +2158,7 @@ impl wz_capture::PlaintextSink for FieldSink {
                 stream.flow,
                 stream.direction,
                 origin,
+                space,
                 walk_plaintext(message, frame),
             ));
         }
@@ -2581,15 +2677,32 @@ impl Reread {
 /// than a panic: it was parsed once already to produce the dissection, so a
 /// failure here would be a disagreement between two reads of one file, and the
 /// listing says how many flows it could not cover.
+struct DatagramWalk<'a> {
+    /// The dissection whose datagram table is being walked.
+    dissection: &'a Dissection,
+    /// Rows the decryption and QUIC passes took while their bytes existed.
+    decrypted: &'a FieldSink,
+    /// Which rendering the rows are for.
+    format: Format,
+    /// The per-flow row ceiling, `None` for unbounded.
+    messages_per_flow: Option<usize>,
+    /// Payload-format rules in force for this run.
+    payload_formats: &'a wz_capture::payload::formats::FormatMap<'a>,
+}
+
 fn datagram_field_rows(
     capture: &[u8],
-    dissection: &Dissection,
-    format: Format,
-    messages_per_flow: Option<usize>,
+    walk: DatagramWalk<'_>,
     emitted: &mut usize,
     listings: &mut Vec<FlowListing>,
-    payload_formats: &wz_capture::payload::formats::FormatMap<'_>,
 ) {
+    let DatagramWalk {
+        dissection,
+        decrypted,
+        format,
+        messages_per_flow,
+        payload_formats,
+    } = walk;
     if dissection.datagram_flows().is_empty() {
         return;
     }
@@ -2765,6 +2878,47 @@ fn datagram_field_rows(
                     space: OffsetSpace::Packet,
                 },
                 &FieldRow::Walked(field),
+                PayloadLens {
+                    formats: payload_formats,
+                    spaces: &spaces,
+                },
+            );
+        }
+        // R311y718 — and the QUIC-recovered rows, which come from the SINK.
+        //
+        // A third producer on this flow, and it cannot be walked from the file
+        // the way the two above are: the bytes these messages were framed out
+        // of never existed on the wire in that form -- they were decrypted and
+        // reassembled -- so there is no packet to re-read them from. That is
+        // exactly the situation the sink exists for, and it is why the walk
+        // happens inside `feed_quic_stream_with_sink` while the recovered bytes
+        // are still alive. The origin is a byte offset into the recovered
+        // stream, which is the space the STREAM listing reports in.
+        for (f, direction, origin, space, row) in &decrypted.rows {
+            if *f != flow.flow {
+                continue;
+            }
+            if let Some(cap) = messages_per_flow {
+                if shown >= cap {
+                    omitted += 1;
+                    continue;
+                }
+            }
+            shown += 1;
+            if format == Format::Json && *emitted > 0 {
+                out.push(',');
+            }
+            *emitted += 1;
+            render_sink_row(
+                &mut out,
+                format,
+                RowAt {
+                    flow: flow.flow,
+                    direction: *direction,
+                    origin: *origin,
+                    space: *space,
+                },
+                row,
                 PayloadLens {
                     formats: payload_formats,
                     spaces: &spaces,
@@ -3645,6 +3799,22 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
             .map(|f| MessageRow::transport(f, OffsetSpace::Packet))
             .collect();
         rows.extend(flow.scouting.iter().map(MessageRow::scouting));
+        // R311y718 — and the zenoh recovered out of this flow's QUIC streams.
+        //
+        // Their offsets are STREAM BYTES, not packet indices: a recovered QUIC
+        // stream is a byte stream and its frames are offset into it exactly as
+        // a `tcp/...` flow's are. Rendering them in the packet space beside the
+        // rows above would print a byte offset under a column heading a reader
+        // resolves against a packet number, which is R311y713's coordinate
+        // defect in the one place both spaces meet.
+        for stream in &flow.quic_streams {
+            rows.extend(
+                stream
+                    .frames
+                    .iter()
+                    .map(|f| MessageRow::transport(f, MessageRow::stream_byte(f))),
+            );
+        }
         // R311y669 — a QUIC flow says so in the framing column and says NOT
         // DECRYPTED in the state one. Both are load-bearing: before this round
         // the row would have read `datagram   3 message(s)` for a flow whose
@@ -3655,6 +3825,11 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
             // reader identified. It identified none, and the row is the line a
             // person scans for which connection to look at.
             Some(c) if c.declaration_unsupported() => ("quic", "QuicDeclaredUnsupported"),
+            // R311y718 — a QUIC flow whose streams DECODED is no longer merely
+            // protected: its zenoh is in the rows. The two states are kept
+            // apart because the remedy differs — `QuicProtected` sends a reader
+            // to find a key log, and this one has nothing left to fetch.
+            Some(_) if !flow.quic_streams.is_empty() => ("quic", "QuicDecoded"),
             Some(_) => ("quic", "QuicProtected"),
             // "datagram" sits in the FRAMING column because that column answers
             // "what did these bytes turn out to be", and for UDP the answer is
@@ -3673,11 +3848,15 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
             &mut emitted,
             &flow.flow,
             framing,
-            // A QUIC flow decodes NO zenoh messages, and its packet count is
-            // reported in the report's own `quic` block rather than folded in
-            // here: a `message(s)` column carrying packets is the shape of the
-            // misread this round removed.
-            flow.frames.len(),
+            // A QUIC flow's PACKET count is reported in the report's own `quic`
+            // block rather than folded in here: a `message(s)` column carrying
+            // packets is the shape of the misread R311y669 removed.
+            //
+            // R311y718 — what a QUIC flow DOES contribute here is the zenoh
+            // decoded out of its streams, and it is counted through the flow's
+            // own enumeration so that the number and the rows above cannot
+            // disagree about which lists exist.
+            flow.decoded_messages(),
             flow.scouting.len(),
             state,
             per_message.then_some(&rows[..]),
@@ -5918,6 +6097,79 @@ mod quic_pass_tests {
         (capture, log_text(random, 1), STREAM)
     }
 
+    /// R311y718 (§1.2a) — the same connection, carrying REAL ZENOH.
+    ///
+    /// # Why a second fixture rather than a change to the first
+    ///
+    /// [`quic_capture`]'s stream is the literal `a zenoh session over quic`,
+    /// which is not zenoh: its first two bytes read as a little-endian length
+    /// prefix of 8 289, so a framer takes them and waits forever. That makes it
+    /// the NEGATIVE arm this round needs — recovered bytes that reach a framer
+    /// and yield nothing — and it is only worth keeping while something else
+    /// shows the positive one.
+    ///
+    /// So this is the positive one: the same four packets, with zenoh's own
+    /// length-prefixed batch framing inside the STREAM frames. Two messages
+    /// from the client and one back, on QUIC stream 0 — which is the stream
+    /// zenoh's link actually uses, since it opens exactly one bidirectional
+    /// stream per link (`zenoh-link-quic/src/unicast.rs:330`) and a
+    /// client-initiated bidi stream is id 0.
+    ///
+    /// Returned as (capture, key log text, messages the fixture sent).
+    fn zenoh_over_quic_capture(random: &[u8; 32]) -> (Vec<u8>, String, usize) {
+        /// A framed unit: `u16` little-endian length, then the message. The
+        /// same shape `framed` builds one module over, written out here so the
+        /// fixture does not borrow the reader's own opinion of the framing.
+        fn unit(message: &[u8]) -> Vec<u8> {
+            let mut out = (message.len() as u16).to_le_bytes().to_vec();
+            out.extend_from_slice(message);
+            out
+        }
+
+        let (client_initial, server_initial) = QuicKeys::initial(QuicVersion::V1, &ICID);
+        let hello = client_hello(random);
+
+        let first = crypto_frame(0, &hello);
+        let (h, o) = long_header(0, &ICID, &[], first.len(), 0);
+        let client_initial_packet = protect(&client_initial, 0, &h, o, &first);
+
+        let reply = crypto_frame(0, b"\x02\x00\x00\x04....");
+        let (h, o) = long_header(0, &[], &SCID, reply.len(), 0);
+        let server_initial_packet = protect(&server_initial, 0, &h, o, &reply);
+
+        // `0x04` is the KeepAlive MID with every flag clear. Two of them from
+        // the client so the test can tell "the framer ran" from "the framer
+        // decoded the one message that happened to start at offset zero".
+        let mut client_stream = unit(&[0x04]);
+        client_stream.extend_from_slice(&unit(&[0x04]));
+        let client_keys = QuicKeys::derive(Suite::Aes128GcmSha256, &application_secret(false, 0));
+        let payload = stream_frame(0, 0, &client_stream);
+        let (h, o) = short_header(&SCID, 1);
+        let client_one_rtt = protect(&client_keys, 1, &h, o, &payload);
+
+        let server_stream = unit(&[0x04]);
+        let server_keys = QuicKeys::derive(Suite::Aes128GcmSha256, &application_secret(true, 0));
+        // The SAME stream id in the other direction: one bidirectional stream
+        // is one id, and the two halves are what make it an exchange.
+        let payload = stream_frame(0, 0, &server_stream);
+        let (h, o) = short_header(&[], 1);
+        let server_one_rtt = protect(&server_keys, 1, &h, o, &payload);
+
+        let packets = [
+            udp(true, &client_initial_packet),
+            udp(false, &server_initial_packet),
+            udp(true, &client_one_rtt),
+            udp(false, &server_one_rtt),
+        ];
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+        (capture, log_text(random, 1), 3)
+    }
+
     /// R311y709 (Y2) — the same connection, captured AFTER its handshake.
     ///
     /// The two Initial packets are simply absent, which is what a tap started
@@ -6180,6 +6432,237 @@ mod quic_pass_tests {
             handshake_only.stream_bytes == 0 && handshake_only.datagram_bytes == 0,
             "the control must differ from the case above in the application \
              bytes and nothing else"
+        );
+    }
+
+    /// R311y718 (§1.2a) — THE ZENOH INSIDE A QUIC STREAM IS DECODED, and the
+    /// verdict stops calling the capture short by bytes it has now read.
+    ///
+    /// ## What was open, in the words of the code that was wrong
+    ///
+    /// `report.rs`'s verdict carried the paragraph "the pass reassembles the
+    /// streams, records their LENGTHS, and drops the bytes. Nothing in this
+    /// workspace decodes zenoh out of them", and the register carried the seam
+    /// as needing a `wz-capture` structural change. Both were accurate: the
+    /// analyzer recovered 25 application bytes out of the QUIC fixture and
+    /// reported `messages decoded: 0` beside them.
+    ///
+    /// ## The three legs, and why each is here
+    ///
+    /// 1. ANTI-VACUITY FIRST. The fixture must be QUIC to the RECOGNISER, not
+    ///    merely to its author — R311y698 shipped a fixture no recogniser
+    ///    accepted and nine unit tests passed over it while the capture layer
+    ///    decoded the whole connection as zenoh. So the QUIC sentence is
+    ///    asserted before anything is claimed about what came out of it.
+    /// 2. THE MESSAGES. Three, from two directions of ONE bidirectional stream,
+    ///    which is the arrangement zenoh's link produces.
+    /// 3. THE VERDICT REASON, BY NAME. `complete` alone would pass on any
+    ///    capture with no shortfall at all; naming `QuicBytesNobodyDecodes` is
+    ///    what ties this test to the leg it closes, and it is the shape
+    ///    R311y716 made possible by turning the verdict into a set of reasons.
+    #[test]
+    fn the_zenoh_inside_a_quic_stream_is_decoded_and_no_longer_counts_as_unread() {
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(9).wrapping_add(4));
+        let (capture, keylog, sent) = zenoh_over_quic_capture(&random);
+
+        let (rendered, outcome) = analyze(&capture, Some(keylog.as_bytes())).expect("it reads");
+
+        // (1) The capture is QUIC to the reader, and every packet opened. Both
+        // halves matter: a fixture the recogniser refused would be read as
+        // zenoh straight off the wire and leg (2) would pass for the wrong
+        // reason entirely.
+        assert!(
+            rendered.contains("4 of 4 packet(s) opened"),
+            "the fixture is QUIC and it opens: {rendered}"
+        );
+
+        // (2) THE ROUND: the zenoh inside the stream reached a decoder.
+        assert_eq!(sent, 3, "the fixture sent three messages");
+        assert!(
+            rendered.contains("messages decoded: 3"),
+            "all three, over both directions of stream 0: {rendered}"
+        );
+
+        // (3) And the floor lifted for the right reason, named.
+        assert!(
+            !outcome
+                .reasons
+                .contains(&wz_capture::report::VerdictReason::QuicBytesNobodyDecodes),
+            "the bytes were decoded, so this reason must be gone -- reasons: {:?}",
+            outcome.reasons
+        );
+        assert!(
+            !rendered.contains("were recovered and NOT decoded"),
+            "and the sentence with it: {rendered}"
+        );
+
+        // THE CONTROL, and it is the fixture one function up: the same four
+        // packets carrying bytes that are NOT zenoh. They reach the same framer
+        // through the same seam and decode nothing, and the verdict must still
+        // say so -- otherwise leg (3) would be passing because the seam counts
+        // an OFFER as a read.
+        let (control, control_log, control_stream) = quic_capture(&random);
+        let (control_rendered, control_outcome) =
+            analyze(&control, Some(control_log.as_bytes())).expect("it reads");
+        assert!(
+            control_outcome
+                .reasons
+                .contains(&wz_capture::report::VerdictReason::QuicBytesNobodyDecodes),
+            "bytes fed to a framer that decoded nothing are still a floor: \
+             {control_rendered}"
+        );
+        // BY NUMBER, and this is the assertion that pins "an offer is not a
+        // read": the control's stream reached a framer in full, so `bytes_fed`
+        // covers it -- and every one of those bytes is still unread, so
+        // `bytes_undecoded` covers it too. A seam that counted the offer would
+        // leave the second at zero and the capture would report itself whole.
+        let control_json = analyze_request(&Request {
+            capture: &control,
+            keylog: Some(control_log.as_bytes()),
+            format: Format::Json,
+            per_flow: false,
+            per_message: false,
+            messages_per_flow: None,
+            quic_ports: &[],
+            quic_cid_len: None,
+            payload_rules: &[],
+            census: Census::default(),
+            per_field: false,
+            select: None,
+        })
+        .expect("the capture reads")
+        .0;
+        assert!(
+            control_json.contains(&format!(
+                "\"bytes_fed\":{},\"messages\":0,\"bytes_undecoded\":{}",
+                control_stream.len(),
+                control_stream.len()
+            )),
+            "every offered byte, and every one of them still unread: \
+             {control_json}"
+        );
+    }
+
+    /// R311y718 (§1.2a / [REDACTED-REQ]) — A NODE INSIDE A QUIC STREAM IS NAMED BY ITS
+    /// ZID, which is the plane wiring driven rather than merely written.
+    ///
+    /// ## Why this test and not a second message-count assertion
+    ///
+    /// Four census planes walk the datagram table — throughput, exchanges,
+    /// payloads, nodes — and each named `flow.frames` directly, so a new list
+    /// reached whichever the author remembered. This workspace has shipped that
+    /// exact omission four times (R311y668, y678, y699, y700), twice in
+    /// consecutive rounds, and the lesson recorded each time was the same: WIRED
+    /// IS NOT DRIVEN. So the round closes with a plane driven end to end, and
+    /// the node census is the one worth driving — a `quic/...` deployment is
+    /// precisely the case where every node identity is inside the encryption,
+    /// and a census that missed it would report a whole fleet as having no
+    /// participants.
+    #[test]
+    fn a_node_whose_init_is_inside_a_quic_stream_is_named_by_the_census() {
+        /// One length-prefixed INIT naming `zid`, in zenoh's own wire shape.
+        fn framed_init(zid: &[u8]) -> Vec<u8> {
+            let mut wire = vec![
+                wz_session_core::wire_const::T_MID_INIT,
+                0x09,
+                (((zid.len() as u8) - 1) << 4) | 0x02,
+            ];
+            wire.extend_from_slice(zid);
+            let mut out = (wire.len() as u16).to_le_bytes().to_vec();
+            out.extend_from_slice(&wire);
+            out
+        }
+
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(11).wrapping_add(6));
+        const ZID: &[u8] = &[0x51, 0x52, 0x53, 0x54];
+
+        let (client_initial, server_initial) = QuicKeys::initial(QuicVersion::V1, &ICID);
+        let hello = client_hello(&random);
+        let first = crypto_frame(0, &hello);
+        let (h, o) = long_header(0, &ICID, &[], first.len(), 0);
+        let client_initial_packet = protect(&client_initial, 0, &h, o, &first);
+
+        let reply = crypto_frame(0, b"\x02\x00\x00\x04....");
+        let (h, o) = long_header(0, &[], &SCID, reply.len(), 0);
+        let server_initial_packet = protect(&server_initial, 0, &h, o, &reply);
+
+        let client_keys = QuicKeys::derive(Suite::Aes128GcmSha256, &application_secret(false, 0));
+        let payload = stream_frame(0, 0, &framed_init(ZID));
+        let (h, o) = short_header(&SCID, 1);
+        let client_one_rtt = protect(&client_keys, 1, &h, o, &payload);
+
+        let packets = [
+            udp(true, &client_initial_packet),
+            udp(false, &server_initial_packet),
+            udp(true, &client_one_rtt),
+        ];
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+        let keylog = log_text(&random, 1);
+
+        let rendered = analyze_request(&Request {
+            capture: &capture,
+            keylog: Some(keylog.as_bytes()),
+            format: Format::Text,
+            per_flow: false,
+            per_message: false,
+            messages_per_flow: None,
+            quic_ports: &[],
+            quic_cid_len: None,
+            payload_rules: &[],
+            census: Census {
+                nodes: true,
+                ..Census::default()
+            },
+            per_field: false,
+            select: None,
+        })
+        .expect("the capture reads")
+        .0;
+
+        // ANTI-VACUITY: the fixture is QUIC to the recogniser and its packets
+        // opened. Without this the assertion below could pass off a capture
+        // read as plain zenoh straight from the wire, which is the misread
+        // R311y669 closed and R311y698 nearly reintroduced through a fixture.
+        assert!(
+            rendered.contains("3 of 3 packet(s) opened"),
+            "the fixture is QUIC and it opens: {rendered}"
+        );
+        // THE PLANE: the zid the Init carried, reached through the QUIC stream.
+        assert!(
+            rendered.contains("51525354"),
+            "the node census names the zid that was inside the QUIC stream: \
+             {rendered}"
+        );
+
+        // AND THE FIELD LAYER, which is a SECOND plane with a second seam --
+        // the sink, not the frame lists -- so it needs its own drive. A
+        // `--fields` run over a QUIC capture printed nothing before this round
+        // and said nothing about why.
+        let fields = analyze_request(&Request {
+            capture: &capture,
+            keylog: Some(keylog.as_bytes()),
+            format: Format::Text,
+            per_flow: false,
+            per_message: false,
+            messages_per_flow: None,
+            quic_ports: &[],
+            quic_cid_len: None,
+            payload_rules: &[],
+            census: Census::default(),
+            per_field: true,
+            select: None,
+        })
+        .expect("the capture reads")
+        .0;
+        assert!(
+            fields.contains("Init"),
+            "the field walk names the message it found inside the QUIC \
+             stream: {fields}"
         );
     }
 

@@ -433,6 +433,92 @@ pub struct QuicDecryption {
     /// reports the consequence of a premise without reporting the premise
     /// invites the reader to treat it as evidence.
     pub flows_identity_adopted: usize,
+    /// R311y718 (§1.2a) — what became of the recovered bytes once a zenoh
+    /// framer saw them.
+    ///
+    /// Beside the byte counters rather than replacing them, because they answer
+    /// different questions and the gap between the two is the finding:
+    /// [`Self::stream_bytes`] is how much QUIC gave back, and this is how much
+    /// of it turned into messages. A round that recovered 25 bytes and decoded
+    /// nothing from them looks identical to a working one in the byte counter
+    /// alone -- which is the state this field ends.
+    pub framing: QuicStreamFeed,
+}
+
+/// R311y718 (§1.2a) — what [`crate::Dissection::feed_quic_stream`] did with one
+/// offer of recovered stream bytes.
+///
+/// Counts and not a bool, because the four ways an offer can end are four
+/// different findings and only one of them is "nothing happened": bytes may be
+/// refused by the per-flow stream bound, offered to a flow this dissection does
+/// not hold, framed into messages, or framed into none because the recovered
+/// prefix stops mid-message. A caller that could only see success would report
+/// the last two identically.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct QuicStreamFeed {
+    /// Bytes handed to a zenoh framer.
+    pub bytes_fed: usize,
+    /// Transport messages that came out of them.
+    pub messages: usize,
+    /// Offers whose flow this dissection does not hold — an evicted flow, or a
+    /// caller feeding a key that was never in the datagram table.
+    pub flow_absent: usize,
+    /// Offers refused because the flow already holds
+    /// [`crate::DissectionLimits::quic_streams_per_flow`] streams.
+    ///
+    /// A REFUSAL and not an eviction: the streams already being framed hold
+    /// session state (the zenoh handshake is on one of them), so dropping the
+    /// oldest to admit a new one would throw away the decoded half of the
+    /// connection to make room for its tail. The bound therefore stops
+    /// admitting rather than starts discarding, and this counter is what keeps
+    /// that from being silent.
+    pub streams_refused: usize,
+    /// Offers whose bytes were CRYPTO rather than an application stream, and so
+    /// were never zenoh to begin with.
+    ///
+    /// Nonzero is not an error — it is a caller handing on the TLS handshake,
+    /// which belongs to the key schedule and not to a zenoh framer. Counted so
+    /// that "no messages" can be told apart from "no application bytes".
+    pub handshake_offers: usize,
+    /// Bytes a framer was given and decoded no message out of, over every
+    /// stream, once the pass has finished.
+    ///
+    /// NOT a sum of per-offer leftovers — a stream fed twice has one leftover,
+    /// not two — so a caller computes this from the FINAL state
+    /// ([`crate::QuicStreamDissection::undecoded_bytes`]) and sets it once.
+    /// [`Self::absorb`] therefore takes the larger rather than adding, which
+    /// keeps a per-offer fold from double counting a stream it saw twice.
+    ///
+    /// Load-bearing for the verdict: feeding a framer is not reading, and a
+    /// capture whose recovered bytes were pushed into a stall is short by them
+    /// exactly as one nobody offered at all is.
+    pub bytes_undecoded: usize,
+    /// Offers that APPENDED to a stream and whose messages were therefore
+    /// framed but not offered to the field sink.
+    ///
+    /// Zero for the analyzer's own pass, which offers each direction of each
+    /// stream exactly once. Nonzero says a `--fields` listing is short by those
+    /// messages, and it is a count rather than a silence because the
+    /// alternative — walking a tail at an offset into the whole — names the
+    /// wrong bytes as a message's fields. See
+    /// [`crate::Dissection::feed_quic_stream_with_sink`].
+    pub appends_not_walked: usize,
+}
+
+impl QuicStreamFeed {
+    /// Fold another offer's counts into this one.
+    pub fn absorb(&mut self, other: QuicStreamFeed) {
+        self.bytes_fed += other.bytes_fed;
+        self.messages += other.messages;
+        self.flow_absent += other.flow_absent;
+        self.streams_refused += other.streams_refused;
+        self.handshake_offers += other.handshake_offers;
+        self.appends_not_walked += other.appends_not_walked;
+        // See the field: a stream's leftover is a property of its final state,
+        // so folding it must not accumulate. `max` keeps a fold over offers
+        // agreeing with a single set from the finished dissection.
+        self.bytes_undecoded = self.bytes_undecoded.max(other.bytes_undecoded);
+    }
 }
 
 #[cfg(test)]
