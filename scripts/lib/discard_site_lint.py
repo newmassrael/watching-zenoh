@@ -53,7 +53,22 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SRC = ROOT / "crates" / "wz-capture" / "src"
+
+# R311y717 (§C G3) — the scan's REACH, which was the other half of the register
+# entry. G5 asked whether other multi-exit sites look like the flow table's; G3
+# asked whether a sweep confined to one crate can answer that. It cannot: the
+# planes above `wz-capture` hold their own bounded collections, and a discard in
+# `wz-capi-dissect` loses exactly as much evidence as one here.
+#
+# `wz-tls-record` is deliberately absent: it is a record layer with no bounded
+# retention of its own, and adding it would be scope by reflex rather than by a
+# collection that can lose something.
+SRCS = [
+    ROOT / "crates" / "wz-capture" / "src",
+    ROOT / "crates" / "wz-capi-dissect" / "src",
+    ROOT / "crates" / "wz-analyze" / "src",
+    ROOT / "crates" / "wz-replay" / "src",
+]
 
 REMOVAL = re.compile(r"\.(drain|remove|pop|pop_front|swap_remove|retain)\s*\(")
 
@@ -79,30 +94,33 @@ ACCOUNTING = (
     "self.base +=",
 )
 
-# (file, the exact source line, why it owes nothing). Matched on the STRIPPED
-# line so indentation drift does not silently retire an entry.
+# (crate/file, the exact source line, why it owes nothing). Matched on the
+# STRIPPED line so indentation drift does not silently retire an entry, and on
+# the CRATE-QUALIFIED name because widening the scan to four crates put three
+# `lib.rs` in the population -- a bare file name would let one crate's entry
+# excuse another crate's site.
 ALLOWED = [
     (
-        "agg.rs",
+        "wz-capture/agg.rs",
         "while let Some(node) = stack.pop() {",
         "a traversal's own work list, built and consumed inside one call; "
         "nothing captured is in it",
     ),
     (
-        "agg.rs",
+        "wz-capture/agg.rs",
         "self.tables[dir_index(direction)].remove(&u.id);",
         "an UNDECLARE ending a keyexpr binding. The BINDING is removed, not "
         "evidence -- the records it named are already in their rows, and the "
         "id becoming unresolved again is the point (R311y622)",
     ),
     (
-        "exchange.rs",
+        "wz-capture/exchange.rs",
         "let Some(entry) = open.remove(&key) else {",
         "an exchange leaving the OPEN set because it completed; the entry is "
         "folded into the totals on the next line rather than dropped",
     ),
     (
-        "exit.rs",
+        "wz-capture/exit.rs",
         "Exiting(Some(self.rows.remove(idx)))",
         "THE DOOR ITSELF (R311y713 B1). This is the one removal `FlowTable` "
         "has, and what it returns is the obligation: a `#[must_use] Exiting` "
@@ -110,36 +128,49 @@ ALLOWED = [
         "second opinion about the flow the caller is about to account for",
     ),
     (
-        "lib.rs",
+        "wz-capture/lib.rs",
         "self.askers.drain(..cut);",
         "returns the count to its caller, which adds it to "
         "`drops.scout_askers` (lib.rs:3313). The accounting is one frame up "
         "because the bound is enforced by a helper that owns no counters",
     ),
     (
-        "filter.rs",
+        "wz-capture/filter.rs",
         'nodes.pop().expect("just checked length")',
         "the expression parser's own operand stack, built and consumed inside "
         "one parse; nothing captured is in it",
     ),
     (
-        "frag.rs",
+        "wz-capture/frag.rs",
         'let done = self.pending.remove(&key).expect("present");',
         "a chain COMPLETING. The reassembled message is returned to the "
         "caller on the next line -- the opposite of a discard",
     ),
     (
-        "tcp.rs",
+        "wz-capture/tcp.rs",
         "let (seq, packet_index, payload, _) = self.pending.remove(i);",
         "a held segment being DELIVERED into the stream now that the bytes "
         "before it have arrived; it leaves the pending list because it is no "
         "longer pending",
     ),
     (
-        "ws.rs",
+        "wz-capture/ws.rs",
         "self.pending_resync.pop_front()",
         "a resync marker being handed to the reader that asked for it. The "
         "marker IS the accounting; consuming it is how it reaches a report",
+    ),
+    (
+        "wz-replay/lib.rs",
+        "out.pop();",
+        "one character off a rendered STRING -- the trailing newline, so a "
+        "timing note can be appended to the line. Nothing captured is in it",
+    ),
+    (
+        "wz-replay/live.rs",
+        "writer_handle.drain().await;",
+        "the WRITER flushing on teardown, which is the opposite of a discard: "
+        "it is what makes sure everything queued reached the wire before the "
+        "session closes. Named `drain` for the same reason a buffer is",
     ),
 ]
 
@@ -197,25 +228,30 @@ def windows(text):
 
 
 def main():
-    if not SRC.is_dir():
-        print(f"discard-site: {SRC} is not a directory", file=sys.stderr)
+    missing = [str(d) for d in SRCS if not d.is_dir()]
+    if missing:
+        # A scan whose subject moved must FAIL rather than report zero: an
+        # empty population is the shape a gate goes quiet in.
+        print(f"discard-site: not a directory: {missing}", file=sys.stderr)
         return 2
     findings = []
     seen_allowed = set()
     total = 0
-    for path in sorted(SRC.rglob("*.rs")):
+    paths = sorted(p for d in SRCS for p in d.rglob("*.rs"))
+    for path in paths:
         text = path.read_text(encoding="utf-8")
         for line_no, stripped, window in windows(text):
             total += 1
+            qualified = f"{path.parents[1].name}/{path.name}"
             allowed = [
-                a for a in ALLOWED if a[0] == path.name and a[1] == stripped
+                a for a in ALLOWED if a[0] == qualified and a[1] == stripped
             ]
             if allowed:
                 seen_allowed.add((allowed[0][0], allowed[0][1]))
                 continue
             if any(token in window for token in ACCOUNTING):
                 continue
-            findings.append(f"{path.name}:{line_no}: {stripped}")
+            findings.append(f"{qualified}:{line_no}: {stripped}")
 
     # A registered site that no longer exists is a stale claim, and a stale
     # allow-list is how a gate quietly stops gating.
@@ -246,7 +282,7 @@ def main():
         return 1
 
     print(
-        f"discard-site OK: {total} removal site(s) in wz-capture, "
+        f"discard-site OK: {total} removal site(s) across {len(SRCS)} crate(s), "
         f"{len(ALLOWED)} registered as owing nothing"
     )
     return 0

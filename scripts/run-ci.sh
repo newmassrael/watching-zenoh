@@ -1541,6 +1541,12 @@ PY
     # this scan -- a sibling block's counter excused one, a COMMENT excused
     # another -- which is why the window is the removal's own block with the
     # comments stripped out.
+    #
+    # R311y717 (§C G3) — and its REACH is the other half of the same register
+    # entry: a sweep confined to `wz-capture` cannot answer whether the planes
+    # ABOVE it hold the same invariant. Four crates now, and the allow-list is
+    # crate-qualified because widening it put three `lib.rs` in the population.
+    # MEASURED: a fresh unaccounted `drain` planted in `wz-analyze` reds.
     python3 scripts/lib/discard_site_lint.py || return 1
     # R311y639 (§4.30) — the PAYLOAD-MEASUREMENT gate. Two rounds in a row a
     # carrier arm of `agg::classify` wrote a byte total with a bare assignment
