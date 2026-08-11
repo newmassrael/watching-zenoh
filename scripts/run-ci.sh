@@ -15,27 +15,15 @@
 # finding is structural rather than a defect to fix. Scoped to this file
 # deliberately: SC2329 stays live for the other 17 shell files, none of which
 # dispatch indirectly.
-# R311y707 — and SC2317 beside it, for the SAME dispatch and a different
-# reason: the LOCAL shellcheck is not the pinned one.
+# R311y710 — the SC2317 half of this directive is RETIRED. R311y707 added it
+# because shellcheck 0.9.0 (a developer's apt) emits SC2317 across this file's
+# dispatch while 0.11.0 (the pin ci.yml installs) does not, and a permanently
+# red lane is a lane nobody reads. Measured at the pin this round: SC2317 fires
+# ZERO times here, so the directive was suppressing nothing and costing a live
+# check. What replaces it is `scripts/install-shellcheck.sh` plus the version
+# NOTE Layer 0 now prints -- the disagreement named rather than silenced.
 #
-# `#!/usr/bin/env bash` scripts are linted by whatever shellcheck is on the
-# developer's PATH, which here is 0.9.0 while CI runs 0.11.0. 0.9.0 reports
-# SC2317 ("command appears to be unreachable") on the bodies of every
-# dispatch-invoked function in this file -- the identical false positive
-# SC2329 above documents, under an older code that 0.11.0 no longer emits.
-#
-# WHY THIS IS WORTH A DIRECTIVE RATHER THAN A KNOWN-NOISE NOTE. It was a
-# known-noise note, in agent memory, reading "local Layer 0 red is a
-# pre-existing condition". The consequence was measured: Layer 0 is the lane
-# that owns `run-ci.sh` itself, this session edited that file in SIX
-# consecutive rounds, and the lane was never once run -- because a lane that is
-# permanently red teaches you to stop reading it. A real SC2043 sat in it for
-# four rounds and reached hosted CI. The finding a gate cannot report is the
-# finding it does not have.
-#
-# Scoped to this file, like SC2329: SC2317 stays live for the other 17 shell
-# files, none of which dispatch indirectly.
-# shellcheck disable=SC2329,SC2317
+# shellcheck disable=SC2329
 #
 # run-ci.sh — CI-equivalent local check.
 #
@@ -803,6 +791,33 @@ layer_0_preflight_lints() {
         fi
         have_shellcheck=0
         echo "  shellcheck absent — 0.2 SKIP, and actionlint SC* checks will be skipped"
+    fi
+
+    # R311y710 — WHICH shellcheck, said out loud when it is not the pinned one.
+    #
+    # The version gap is what cost R311y707 a round: 0.9.0 on the developer's
+    # PATH emits SC2317 across this file's dispatch and 0.11.0 does not, so the
+    # lane was permanently red locally, nobody read it, and a real SC2043
+    # reached hosted CI. That round SUPPRESSED the code with a file-scoped
+    # directive and recorded that suppressing is not closing.
+    #
+    # This closes it in the only way that keeps the check surface: the pinned
+    # binary is now installable (`scripts/install-shellcheck.sh`, which reads
+    # the version out of ci.yml), the SC2317 directive is GONE -- measured at
+    # the pin, it suppressed exactly zero findings -- and a developer running
+    # some other version is TOLD SO, here, instead of being left to infer it
+    # from noise and write it down in a private note.
+    if [[ $have_shellcheck -eq 1 ]]; then
+        local pinned_sc have_sc
+        pinned_sc="$(grep -oE '^[[:space:]]*SHELLCHECK_VERSION:[[:space:]]*"[^"]+"' \
+            "$repo_root/.github/workflows/ci.yml" 2>/dev/null |
+            head -1 | grep -oE '"[^"]+"' | tr -d '"')"
+        have_sc="$(shellcheck --version 2>/dev/null | awk '/^version:/ {print $2}')"
+        if [[ -n "$pinned_sc" && -n "$have_sc" && "$pinned_sc" != "$have_sc" ]]; then
+            echo "  Layer0 NOTE: shellcheck $have_sc on PATH, CI installs $pinned_sc." \
+                "Findings below may differ from hosted. Run" \
+                "\`bash scripts/install-shellcheck.sh\` to match."
+        fi
     fi
 
     # 0.2 shellcheck over the repo's OWN shell — the surface actionlint does
