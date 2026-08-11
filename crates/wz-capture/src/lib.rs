@@ -1084,6 +1084,7 @@ impl FlowDissection {
                 client_random: state.client_random,
                 kept_records: state.kept.clone(),
                 records_dropped: state.dropped,
+                negotiated_suite: state.suite,
             }),
             _ => None,
         }
@@ -6688,6 +6689,17 @@ mod datagram_tests {
                 expected > 0,
                 "{name}: the text rendering prints it only when non-zero"
             );
+            // R311y725 (N2) — and the leg is named, not merely counted. A
+            // witness that asserts `is_complete` alone cannot say WHICH leg it
+            // trips, which is the state `verdict_reason_lint` measured.
+            assert_eq!(
+                report
+                    .reasons()
+                    .contains(&crate::report::VerdictReason::UnaccountedBatchBytes),
+                expected > 0,
+                "{name}: the batch shortfall is this fixture's own leg: {:?}",
+                report.reasons()
+            );
             assert_eq!(
                 report.is_complete(),
                 expected == 0,
@@ -7835,6 +7847,16 @@ mod datagram_tests {
             "the cap must hold on this table"
         );
         assert_eq!(d.drops().flows, 38, "and every eviction must be counted");
+        // R311y725 (N2) — a bound that discarded reaches the VERDICT, by name.
+        // The counter alone says a flow went; this says the capture's totals
+        // are a floor because of it.
+        assert!(
+            crate::report::CaptureReport::of(&d)
+                .reasons()
+                .contains(&crate::report::VerdictReason::BoundsDiscarded),
+            "{:?}",
+            crate::report::CaptureReport::of(&d).reasons()
+        );
 
         // THE SECOND LEG, and it earned its place by falsification: never
         // writing `last_activity` at all leaves the sweep above green, because
@@ -7863,6 +7885,119 @@ mod datagram_tests {
             ports(&e),
             alloc::vec![7000, 7002],
             "the LEAST RECENTLY ACTIVE must go, not the first admitted"
+        );
+    }
+
+    /// R311y725 (N7) — THE QUIC PER-FLOW STREAM BOUND HAS A WITNESS, and the
+    /// witness binds the bound to the VERDICT rather than to the counter.
+    ///
+    /// `QuicStreamFeed::streams_refused` has been exported in the JSON since
+    /// R311y718 and no fixture in this workspace had ever crossed the bound, so
+    /// the number was a field nothing could move. That is the shape R311y715
+    /// measured across the verdict's own legs: a guard that binds nothing leaves
+    /// every test green when it is severed.
+    ///
+    /// Two legs, and the second is the one worth having. The first is that the
+    /// bound REFUSES — `quic_streams_per_flow` streams are admitted and the next
+    /// offer is turned away rather than evicting one of them. The second is that
+    /// the refused offer's bytes are then MISSING from the report: they were
+    /// recovered by a decryption pass and no framer ever saw them, so
+    /// `quic_bytes_nobody_decodes` must fire. A refusal the verdict cannot see
+    /// would be a capture reporting `complete` while a whole stream's traffic sat
+    /// outside every row.
+    ///
+    /// The control at the end is what keeps this from being vacuous: at exactly
+    /// the bound, nothing is refused and — with every recovered byte fed and
+    /// decoded — the verdict is silent. Without it, a `feed` that refused
+    /// EVERYTHING would satisfy both assertions above.
+    ///
+    /// MEASURED while writing this, and it is why the fixture uses
+    /// [`DissectionLimits::for_live_tap`] rather than the default: the default
+    /// preset leaves `quic_streams_per_flow` at `None`, so a file replay admits
+    /// streams without end and this counter is unreachable there. The bound is a
+    /// live-tap fact, and a witness built on the default limits would have been
+    /// the second kind of vacuous test — one whose subject never exists.
+    #[test]
+    fn the_quic_stream_bound_refuses_and_the_refusal_reaches_the_verdict() {
+        let unit = framed_keepalive();
+        // The flow has to exist before a stream can be offered to it: a QUIC
+        // stream is recovered FROM a datagram flow's packets, and an offer for a
+        // flow this dissection does not hold is a different finding
+        // (`flow_absent`) that this test must not accidentally measure.
+        let open_flow = |d: &mut Dissection| {
+            let pkt = udp_packet([10, 0, 0, 1], 4433, [10, 0, 0, 2], 7447, &[]);
+            d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
+            d.datagram_flows()[0].flow
+        };
+
+        let mut d = Dissection::with_limits(DissectionLimits::for_live_tap());
+        let flow = open_flow(&mut d);
+        let cap = d
+            .limits()
+            .quic_streams_per_flow
+            .expect("the live-tap preset bounds this table");
+
+        let mut feed = quic::QuicStreamFeed::default();
+        for id in 0..=(cap as u64) {
+            feed.absorb(d.feed_quic_stream(flow, Direction::A, id, false, &unit));
+        }
+        assert_eq!(
+            feed.streams_refused, 1,
+            "one offer past the bound must be REFUSED, not admitted by evicting \
+             a stream that already carries session state"
+        );
+        assert_eq!(
+            d.datagram_flows()[0].quic_streams.len(),
+            cap,
+            "the table must hold exactly the bound"
+        );
+        // The VALUE and not the flag: the refused offer's bytes must be absent
+        // from what a framer was given, which is what makes them unread below.
+        assert_eq!(
+            feed.bytes_fed,
+            cap * unit.len(),
+            "a refused offer's bytes must not be counted as fed"
+        );
+        assert_eq!(feed.messages, cap, "each admitted stream decoded its unit");
+
+        // What a decryptor recovered: every offer's bytes, including the one the
+        // bound turned away. This is the premise the verdict reads.
+        let quic = quic::QuicDecryption {
+            stream_bytes: (cap + 1) * unit.len(),
+            framing: feed,
+            ..quic::QuicDecryption::default()
+        };
+        let report = report::CaptureReport::of(&d).with_quic_decryption(&quic);
+        assert!(
+            report
+                .reasons()
+                .contains(&report::VerdictReason::QuicBytesNobodyDecodes),
+            "bytes a bound refused are bytes nobody decodes: {:?}",
+            report.reasons()
+        );
+
+        // THE CONTROL. At exactly the bound nothing is refused, and with every
+        // recovered byte fed and framed the same verdict is silent -- so the
+        // reason above followed the refusal and not the fixture.
+        let mut e = Dissection::with_limits(DissectionLimits::for_live_tap());
+        let flow = open_flow(&mut e);
+        let mut ok = quic::QuicStreamFeed::default();
+        for id in 0..(cap as u64) {
+            ok.absorb(e.feed_quic_stream(flow, Direction::A, id, false, &unit));
+        }
+        assert_eq!(ok.streams_refused, 0, "the bound itself must be admitted");
+        let quic = quic::QuicDecryption {
+            stream_bytes: ok.bytes_fed,
+            framing: ok,
+            ..quic::QuicDecryption::default()
+        };
+        let report = report::CaptureReport::of(&e).with_quic_decryption(&quic);
+        assert!(
+            !report
+                .reasons()
+                .contains(&report::VerdictReason::QuicBytesNobodyDecodes),
+            "ANTI-VACUITY: an unrefused capture must not raise it: {:?}",
+            report.reasons()
         );
     }
 
@@ -8100,6 +8235,16 @@ mod datagram_tests {
              {}",
             rep.to_text()
         );
+        // R311y725 (N2) — BY NAME. `!is_complete()` is satisfied by any leg, so
+        // a witness that only asserts it cannot tell its own reason from a
+        // neighbour's; `verdict_reason_lint` reads this naming and refuses a
+        // variant no test names.
+        assert!(
+            rep.reasons()
+                .contains(&crate::report::VerdictReason::ExpiredChains),
+            "the deadline is the leg this fixture trips: {:?}",
+            rep.reasons()
+        );
         assert!(
             rep.to_json()
                 .contains(
@@ -8221,6 +8366,15 @@ mod datagram_tests {
 
         d.finish();
         assert_eq!(d.abandoned_chains(), 1);
+        // R311y725 (N2) — and the verdict NAMES it, which the pre-`finish`
+        // assertion above cannot: that one is about `is_complete` alone.
+        assert!(
+            crate::report::CaptureReport::of(&d)
+                .reasons()
+                .contains(&crate::report::VerdictReason::AbandonedChains),
+            "a chain still open at the end is its own leg: {:?}",
+            crate::report::CaptureReport::of(&d).reasons()
+        );
         // R311y713 (§B7/§B6) — and WHAT WAS IN IT, and WHOSE it was. Three
         // rounds recorded that the bytes of a lost chain were counted by
         // nothing; the fragment above carries two, and the sweep is the only
@@ -9785,6 +9939,166 @@ mod tls_flow_tests {
         d
     }
 
+    /// R311y725 (N4) — a PLAINTEXT ServerHello naming `suite`, with
+    /// `session_id_len` bytes of `legacy_session_id_echo` in front of the field.
+    ///
+    /// The echo length is a parameter because it is the one variable-length
+    /// field before the suite, so it is the only thing that can turn the offset
+    /// into a walk. A fixture that only ever used one length would pass against
+    /// a reader that had hard-coded the offset for it.
+    fn server_hello(suite: u16, session_id_len: usize) -> Vec<u8> {
+        let mut hs = alloc::vec![0x03, 0x03];
+        hs.extend_from_slice(&[0x5A; 32]);
+        hs.push(session_id_len as u8);
+        hs.extend(core::iter::repeat_n(0x11, session_id_len));
+        hs.extend_from_slice(&suite.to_be_bytes());
+        // `legacy_compression_method`, then an empty extensions vector. Neither
+        // is read; they are here so the handshake length is the real one.
+        hs.push(0);
+        hs.extend_from_slice(&[0x00, 0x00]);
+        let mut body = alloc::vec![0x02];
+        body.extend_from_slice(&(hs.len() as u32).to_be_bytes()[1..]);
+        body.extend_from_slice(&hs);
+        record(0x16, [0x03, 0x03], &body)
+    }
+
+    /// [`tls_dissection`] with the server's flight opening on `hello` — the
+    /// same five records and the same two application records, so every figure
+    /// but the AEAD overhead is unchanged between the variants.
+    fn tls_dissection_with(hello_record: &[u8]) -> Dissection {
+        let hello = record(0x16, [0x03, 0x01], &[0x01, 0x00, 0x00, 0x30]);
+        let ccs = record(0x14, [0x03, 0x03], &[0x01]);
+        let app_a = record(0x17, [0x03, 0x03], &[0xAB; 40]);
+        let app_b = record(0x17, [0x03, 0x03], &[0xCD; 800]);
+
+        let mut d = Dissection::new();
+        let mut a_seq = 1000u32;
+        let mut b_seq = 5000u32;
+        let mut i = 0usize;
+        let mut push = |d: &mut Dissection, from_a: bool, bytes: &[u8], seq: &mut u32| {
+            let pkt = if from_a {
+                tcp_packet(1111, 7447, *seq, bytes)
+            } else {
+                tcp_packet(7447, 1111, *seq, bytes)
+            };
+            d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+            *seq += bytes.len() as u32;
+            i += 1;
+        };
+        push(&mut d, true, &hello, &mut a_seq);
+        let mut flight = hello_record.to_vec();
+        flight.extend_from_slice(&ccs);
+        flight.extend_from_slice(&app_b);
+        push(&mut d, false, &flight, &mut b_seq);
+        push(&mut d, true, &app_a, &mut a_seq);
+        d
+    }
+
+    /// R311y725 (N4) — THE PLAINTEXT FLOOR IS MEASURED AGAINST THE NEGOTIATED
+    /// SUITE, not against the widest tag any suite could have used.
+    ///
+    /// ## What the register carried
+    ///
+    /// N4: "the TLS plaintext floor is measured WITHOUT the suite -- the
+    /// handshake carries a cipher suite and this reader does not pull it out;
+    /// pulling it out tightens the floor by 8 bytes per record on CCM_8".
+    /// R311y716 wrote the floor and said so in its own doc comment: 16 is the
+    /// largest tag, subtracting it can only understate the plaintext, and that
+    /// is what a floor must do. True, and loose — the suite is on the wire, in
+    /// the clear, in the one handshake message TLS 1.3 does not protect.
+    ///
+    /// ## The four legs
+    ///
+    /// 1. A `TLS_AES_128_CCM_8_SHA256` connection is READ as one, and its
+    ///    overhead is 9 bytes per record rather than 17.
+    /// 2. THE VALUE, not the flag: the floor rises by exactly 8 bytes per
+    ///    application record against the same capture negotiating AES-GCM.
+    /// 3. The suite survives a variable-length `legacy_session_id_echo`, which
+    ///    is the only field that makes the offset a walk.
+    /// 4. ANTI-VACUITY: a capture with no readable ServerHello reports `None`
+    ///    and keeps the widest tag, so leg 2's difference followed the SUITE and
+    ///    not the fixture.
+    #[test]
+    fn the_plaintext_floor_is_measured_against_the_negotiated_cipher_suite() {
+        // The fixture's two application records, whose declared lengths are what
+        // the census counts.
+        const APPLICATION_BYTES: u64 = 40 + 800;
+        const APPLICATION_RECORDS: u64 = 2;
+
+        let census = |d: &Dissection| d.encrypted_flows()[0].totals();
+
+        // (1) CCM_8, whose whole point is the truncated tag.
+        let ccm = tls_dissection_with(&server_hello(0x1305, 32));
+        assert_eq!(
+            ccm.encrypted_flows()[0].negotiated_suite,
+            Some(0x1305),
+            "the ServerHello names the suite in the clear and this reader must \
+             read it"
+        );
+        assert_eq!(
+            crate::tls::suite_name(0x1305),
+            Some("TLS_AES_128_CCM_8_SHA256")
+        );
+        assert_eq!(
+            census(&ccm).aead_overhead_bytes,
+            APPLICATION_RECORDS * (8 + 1),
+            "an 8-byte tag plus the inner content type, per application record"
+        );
+        assert_eq!(
+            census(&ccm).application_bytes,
+            APPLICATION_BYTES,
+            "the ciphertext count is untouched -- only what is subtracted moved"
+        );
+
+        // (2) THE VALUE. The same capture under AES-128-GCM, whose tag is 16.
+        let gcm = tls_dissection_with(&server_hello(0x1301, 32));
+        assert_eq!(gcm.encrypted_flows()[0].negotiated_suite, Some(0x1301));
+        assert_eq!(
+            census(&gcm).aead_overhead_bytes,
+            APPLICATION_RECORDS * (16 + 1)
+        );
+        assert_eq!(
+            census(&ccm).application_bytes_at_least() - census(&gcm).application_bytes_at_least(),
+            APPLICATION_RECORDS * 8,
+            "reading the suite is worth exactly 8 bytes per record on CCM_8, \
+             which is the number the register carried"
+        );
+
+        // (3) The echo length is the only variable-length field in front of the
+        // suite. A reader that had hard-coded the offset passes leg (1) and
+        // fails here.
+        for echo in [0usize, 1, 32] {
+            let d = tls_dissection_with(&server_hello(0x1305, echo));
+            assert_eq!(
+                d.encrypted_flows()[0].negotiated_suite,
+                Some(0x1305),
+                "a {echo}-byte legacy_session_id_echo must not move the suite"
+            );
+        }
+
+        // (4) ANTI-VACUITY. The original fixture's ServerHello is a handshake
+        // header with no body, so there is no suite to read and the floor must
+        // stay exactly where R311y716 left it.
+        let unknown = tls_dissection();
+        assert_eq!(
+            unknown.encrypted_flows()[0].negotiated_suite,
+            None,
+            "a truncated ServerHello must not be read as a suite"
+        );
+        assert_eq!(
+            census(&unknown).aead_overhead_bytes,
+            APPLICATION_RECORDS * (crate::tls::AEAD_TAG_UNKNOWN + 1),
+            "not knowing keeps the WIDEST tag, which is the only direction a \
+             floor may be wrong in"
+        );
+        assert_eq!(
+            census(&unknown).application_bytes_at_least(),
+            census(&gcm).application_bytes_at_least(),
+            "and it agrees with the 16-byte suite, which is what makes the \
+             pre-R311y725 number the unknown case rather than a regression"
+        );
+    }
+
     /// R311y648 (§1.2a) — THE DEFECT. A capture of a `tls/...` deployment used
     /// to report a flow with ZERO frames and PERFECT health, which reads as
     /// "this deployment carried no zenoh traffic".
@@ -10448,12 +10762,17 @@ mod tls_flow_tests {
         let report = crate::report::CaptureReport::of(&d);
         let text = report.to_text();
         let json = report.to_json();
+        // R311y725 (N4) — the sentence now names what the floor was subtracted
+        // against, and this fixture has no readable ServerHello, so it says so.
+        // The RANGE is unchanged, which is the point: not knowing the suite
+        // keeps the widest tag and therefore the number this test already had.
         assert!(
             text.contains(
                 "23-40 byte(s) of application data (the upper figure \
-                 is ciphertext)"
+                 is ciphertext; the lower subtracts 17 byte(s) of AEAD \
+                 overhead, suite unknown)"
             ),
-            "the page must state the RANGE: {text}"
+            "the page must state the RANGE and its basis: {text}"
         );
         assert!(
             json.contains("\"application_bytes\":40,\"application_bytes_at_least\":23"),
@@ -10462,6 +10781,15 @@ mod tls_flow_tests {
         assert!(
             json.contains("\"lost_bytes\":0"),
             "with the gap loss present and zero, not absent: {json}"
+        );
+        // R311y725 (N2) — an encrypted flow nobody opened is its OWN leg of the
+        // verdict, and this is the only fixture in the crate that produces one
+        // in isolation. Named rather than left to `is_complete`, which any leg
+        // satisfies.
+        assert_eq!(
+            report.reasons(),
+            alloc::vec![crate::report::VerdictReason::EncryptedFlowsUnopened],
+            "{text}"
         );
         assert!(
             !text.contains("went with a gap"),

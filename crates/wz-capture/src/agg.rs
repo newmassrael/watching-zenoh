@@ -2616,6 +2616,17 @@ pub(crate) mod tests {
         }
         assert_eq!(by_hand.selection().undecided, 1);
         assert_eq!(by_hand.rows().len(), 0);
+        // R311y725 (N2) — a plane that could not judge a record reaches the
+        // VERDICT under its own name. `verdict_reason_lint` refuses a leg no
+        // test names, on R311y715's measurement that an unnamed leg can be
+        // severed with every test still green.
+        assert_eq!(
+            crate::report::CaptureReport::of(&d)
+                .with_throughput(&by_hand)
+                .reasons(),
+            alloc::vec![crate::report::VerdictReason::ThroughputUndecided],
+            "the undecided selection is the only shortfall in this fixture"
+        );
 
         let whole = aggregate_where(&d, &filter);
         assert_eq!(whole.selection().matched, 1, "the control");

@@ -4856,10 +4856,161 @@ fn a_declared_field_name_reaches_the_rendering_and_an_undeclared_one_does_not() 
         "--payload-name",
         "other/**:1=temperature",
     ]);
+    // R311y725 (N8) — the bare-word form of this assertion was
+    // `!elsewhere.contains("temperature")`, and it stopped meaning what it says
+    // the moment an unbound declaration began to be REPORTED: the note names the
+    // declaration, so the word is in the output while no field carries it. The
+    // rendering is what leg (3) is about, so the rendering is what it asserts.
     assert!(
-        elsewhere.contains("1 = varint 150") && !elsewhere.contains("temperature"),
+        elsewhere.contains("1 = varint 150") && !elsewhere.contains("1 (temperature)"),
         "a declaration whose pattern does not cover `demo/a` names nothing: \
          {elsewhere}"
+    );
+    assert!(
+        elsewhere.contains("BOUND NOTHING"),
+        "and R311y725 says so rather than leaving the reader to notice: \
+         {elsewhere}"
+    );
+}
+
+/// R311y725 (N8) — A PAYLOAD DECLARATION THAT BINDS NOTHING SAYS SO, and one
+/// that cannot bind anything is refused before the run.
+///
+/// ## What was silent
+///
+/// R311y720 shipped `--payload-name` with the honest note that a declaration
+/// may run ahead of the traffic, and left the consequence unstated: a
+/// declaration that met no traffic renders EXACTLY like no declaration at all.
+/// Every field prints as a bare number, the run exits clean, and a reader whose
+/// pattern is wrong concludes their schema is. The register carried it as N8
+/// with `demo/**:7=humidity` against a six-field message — the case where the
+/// keyexpr matches and only the PATH misses, which no amount of staring at the
+/// pattern explains.
+///
+/// ## The two halves, because the silences are different
+///
+/// A declaration can fail to apply in two ways and they need different answers.
+/// It can be CONSULTED and match nothing, which is a fact about the capture and
+/// so a note in the output; or it can never be consulted at all, because the
+/// listing that renders it was not asked for, which is a fact about the command
+/// line and so a refusal — the rule `SelectWithoutPlane` already states for
+/// `--select`.
+///
+/// ## Anti-vacuity
+///
+/// The last leg is a run where every declaration binds, and it must carry NO
+/// note. Without it a build that reported every declaration unbound
+/// unconditionally would pass all three legs above.
+#[test]
+fn a_payload_declaration_that_binds_nothing_is_reported_and_one_that_cannot_is_refused() {
+    let scratch = Scratch::new("payload-unbound");
+    let capture = scratch.write("pb.pcapng", &protobuf_capture());
+
+    let run = |args: &[&str]| -> (String, bool) {
+        let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .args(args)
+            .output()
+            .expect("runs");
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned()
+                + &String::from_utf8_lossy(&out.stderr),
+            out.status.success(),
+        )
+    };
+
+    // (1) The register's own case: the keyexpr matches and the PATH does not.
+    // `demo/a` carries fields 1 and 2, so 7 names nothing.
+    let (missed_path, _) = run(&[
+        "--fields",
+        "--payload-format",
+        "demo/**=protobuf",
+        "--payload-name",
+        "demo/**:7=humidity",
+    ]);
+    assert!(
+        missed_path.contains("--payload-name `demo/**:7=humidity` was installed and BOUND NOTHING"),
+        "a declaration that named no field must say so: {missed_path}"
+    );
+    assert!(
+        !missed_path.contains("--payload-format `demo/**` was installed and BOUND NOTHING"),
+        "the FORMAT rule did bind -- only the name missed, and conflating the \
+         two sends a reader to check a pattern that is right: {missed_path}"
+    );
+
+    // The same fact in JSON, on the rule R311y681 states: a consumer must not
+    // have to parse the sentence a person reads.
+    let (json, _) = run(&[
+        "--fields",
+        "--json",
+        "--payload-format",
+        "demo/**=protobuf",
+        "--payload-name",
+        "demo/**:7=humidity",
+    ]);
+    assert!(
+        json.contains("\"kind\":\"payload_name_unbound\""),
+        "the note reaches the export: {json}"
+    );
+
+    // (2) The pattern misses the topic entirely: BOTH the format rule and the
+    // name are unbound, and the two are named apart.
+    let (missed_topic, _) = run(&[
+        "--fields",
+        "--payload-format",
+        "other/**=protobuf",
+        "--payload-name",
+        "other/**:1=temperature",
+    ]);
+    assert!(
+        missed_topic.contains("--payload-format `other/**` was installed and BOUND NOTHING"),
+        "a rule no keyexpr matched must say so: {missed_topic}"
+    );
+    assert!(
+        missed_topic.contains(
+            "--payload-name `other/**:1=temperature` was installed and BOUND \
+                               NOTHING"
+        ),
+        "and so must the name under it: {missed_topic}"
+    );
+
+    // (3) A declaration with no listing to render it is REFUSED, not run. Both
+    // flags, because a check written for one of two doors is the shape this
+    // workspace has paid for repeatedly.
+    for flag in [
+        ["--payload-format", "demo/**=protobuf"],
+        ["--payload-name", "demo/**:1=temperature"],
+    ] {
+        let (out, ok) = run(&flag);
+        assert!(
+            !ok,
+            "{} without --fields must not exit clean: {out}",
+            flag[0]
+        );
+        assert!(
+            out.contains(&format!("{} is rendered by the field listing", flag[0])),
+            "and it must say why: {out}"
+        );
+    }
+
+    // (4) ANTI-VACUITY. Field 1 exists under `demo/a`, so this declaration
+    // binds and NOTHING is reported unbound.
+    let (bound, ok) = run(&[
+        "--fields",
+        "--payload-format",
+        "demo/**=protobuf",
+        "--payload-name",
+        "demo/**:1=temperature",
+    ]);
+    assert!(ok, "a binding run stays clean: {bound}");
+    assert!(
+        !bound.contains("BOUND NOTHING"),
+        "ANTI-VACUITY: a declaration that named a field must not be reported \
+         unbound: {bound}"
+    );
+    assert!(
+        bound.contains("1 (temperature)"),
+        "and the binding is what makes leg (4) mean anything: {bound}"
     );
 }
 

@@ -1629,6 +1629,18 @@ PY
     # Static for the same reason the count-guard gate is: both halves are in the
     # source. Enforcement MEASURED by re-introducing the y568 line verbatim.
     python3 scripts/lib/unsequenced_probe_lint.py || return 1
+    # R311y725 (N2) — the VERDICT-REASON gate. `VerdictReason` is the SSOT for
+    # what `complete: false` means, its `name()` is a wire format the export and
+    # `wz-replay --alert` publish, and until this round nothing required a new
+    # variant to carry a name, a doc or a test. R311y715 measured the cost of an
+    # unbound leg by severing one: every test stayed green.
+    #
+    # Static for the reason `solo_plane_page_lint` is: the invariant is "a test
+    # naming this variant EXISTS", which is a fact about the source that no
+    # assertion can observe about its own absence. Its first run MEASURED
+    # thirteen of twenty-three legs exercised and none of them named; all
+    # thirteen were bound in the same round.
+    python3 scripts/lib/verdict_reason_lint.py || return 1
     return 0
 }
 

@@ -1261,6 +1261,12 @@ pub mod formats {
         /// path, name). See [`FormatMap::name_field`] for why they are
         /// declared rather than derived.
         names: Vec<(String, String, String)>,
+        /// R311y725 (N8) — whether each rule in [`Self::rules`] has ever been
+        /// SELECTED for a keyexpr this capture carried, parallel to that list.
+        rules_bound: Vec<core::cell::Cell<bool>>,
+        /// R311y725 (N8) — whether each declaration in [`Self::names`] has ever
+        /// NAMED a field this capture decoded, parallel to that list.
+        names_bound: Vec<core::cell::Cell<bool>>,
     }
 
     impl<'a> FormatMap<'a> {
@@ -1269,6 +1275,8 @@ pub mod formats {
             Self {
                 rules: Vec::new(),
                 names: Vec::new(),
+                rules_bound: Vec::new(),
+                names_bound: Vec::new(),
             }
         }
 
@@ -1285,6 +1293,7 @@ pub mod formats {
                 return Err(FormatMapError::WildcardUnsupported(pattern.to_owned()));
             }
             self.rules.push((pattern.to_owned(), format));
+            self.rules_bound.push(core::cell::Cell::new(false));
             Ok(())
         }
 
@@ -1295,15 +1304,17 @@ pub mod formats {
         /// `**` at exactly the interesting cases, which is the argument
         /// [`crate::filter`] already makes for the selector language.
         pub fn for_keyexpr(&self, keyexpr: &str) -> Option<&'a dyn PayloadFormat> {
-            self.rules
-                .iter()
-                .find(|(pattern, _)| {
-                    // The matcher takes CHUNKS, which is the same split
-                    // `filter::compile_pattern` performs for the same function.
-                    let chunks: Vec<&str> = pattern.split('/').collect();
-                    wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
-                })
-                .map(|(_, format)| *format)
+            let at = self.rules.iter().position(|(pattern, _)| {
+                // The matcher takes CHUNKS, which is the same split
+                // `filter::compile_pattern` performs for the same function.
+                let chunks: Vec<&str> = pattern.split('/').collect();
+                wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
+            })?;
+            // R311y725 (N8) — the rule is now KNOWN to cover traffic this
+            // capture carried. `position` rather than `find` for exactly this:
+            // the answer and the bookkeeping need the same index.
+            self.rules_bound[at].set(true);
+            Some(self.rules[at].1)
         }
 
         /// Whether any rule was installed. A caller renders nothing for an
@@ -1356,6 +1367,7 @@ pub mod formats {
             }
             self.names
                 .push((pattern.to_owned(), path.to_owned(), name.to_owned()));
+            self.names_bound.push(core::cell::Cell::new(false));
             Ok(())
         }
 
@@ -1365,15 +1377,56 @@ pub mod formats {
         /// later, more specific declaration cannot quietly override an earlier
         /// one, so the order a reader typed is the order that applies.
         pub fn field_name(&self, keyexpr: &str, path: &str) -> Option<&str> {
+            let at = self.names.iter().position(|(pattern, p, _)| {
+                p == path && {
+                    let chunks: Vec<&str> = pattern.split('/').collect();
+                    wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
+                }
+            })?;
+            // R311y725 (N8) — this declaration has now named a real field.
+            self.names_bound[at].set(true);
+            Some(self.names[at].2.as_str())
+        }
+
+        /// R311y725 (N8) — the format rules that were installed and then
+        /// SELECTED FOR NOTHING in this capture.
+        ///
+        /// # Why a declaration that binds nothing must not be silent
+        ///
+        /// A rule and a name are both the deployment TELLING this reader
+        /// something it cannot derive (`name_field` above states why), and the
+        /// failure mode of a declaration is not that it is refused — that is
+        /// checked at parse time and reported — but that it is accepted and then
+        /// never applies. `demo/**:7=humidity` typed against messages whose
+        /// fields stop at 6 renders exactly like no declaration at all: every
+        /// field prints as a bare number and nothing says the mapping missed.
+        /// The reader concludes their schema is wrong when their PATTERN is.
+        ///
+        /// Reported and not refused, because "no traffic matched" is not an
+        /// error: a reader may be declaring ahead of traffic that has not
+        /// arrived, which is the case `name_field`'s own doc admits. What is
+        /// wrong is saying nothing.
+        ///
+        /// Answerable only AFTER a pass, since it is a fact about what the
+        /// capture turned out to hold. A caller that asks before walking gets
+        /// every declaration back, which is the honest answer to a question
+        /// asked too early rather than a bug.
+        pub fn unbound_rules(&self) -> impl Iterator<Item = &str> {
+            self.rules
+                .iter()
+                .zip(&self.rules_bound)
+                .filter(|(_, bound)| !bound.get())
+                .map(|((pattern, _), _)| pattern.as_str())
+        }
+
+        /// R311y725 (N8) — the field-name declarations that named nothing, as
+        /// `(pattern, path, name)`. See [`Self::unbound_rules`].
+        pub fn unbound_names(&self) -> impl Iterator<Item = (&str, &str, &str)> {
             self.names
                 .iter()
-                .find(|(pattern, p, _)| {
-                    p == path && {
-                        let chunks: Vec<&str> = pattern.split('/').collect();
-                        wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
-                    }
-                })
-                .map(|(_, _, name)| name.as_str())
+                .zip(&self.names_bound)
+                .filter(|(_, bound)| !bound.get())
+                .map(|((pattern, path, name), _)| (pattern.as_str(), path.as_str(), name.as_str()))
         }
 
         /// Whether any field name was declared. A caller that renders the

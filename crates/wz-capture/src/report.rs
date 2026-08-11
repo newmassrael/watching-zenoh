@@ -118,6 +118,32 @@ fn hex_zid(zid: &[u8]) -> String {
     out
 }
 
+/// R311y725 (N4) — the cipher suite a capture's encrypted flows negotiated, as
+/// one word.
+///
+/// Three answers and not two, on the rule `reason` states beside its own caller:
+/// a capture whose flows agree names the suite, a capture whose flows disagree
+/// says `mixed` rather than naming one of them as the capture's, and a capture
+/// that holds no ServerHello says `unknown`. A suite this build does not have a
+/// registry name for renders as its hex value — a finding about the capture,
+/// where an invented name would be a confident zero.
+///
+/// A flow with no suite does not make the answer `mixed`: not knowing is not
+/// disagreeing, and folding the two would say "these flows negotiated different
+/// suites" about a capture that simply started mid-session.
+fn encrypted_suites(flows: &[crate::tls::EncryptedFlow]) -> String {
+    let seen: alloc::collections::BTreeSet<u16> =
+        flows.iter().filter_map(|f| f.negotiated_suite).collect();
+    let mut it = seen.iter();
+    match (it.next(), it.next()) {
+        (None, _) => String::from("unknown"),
+        (Some(&one), None) => crate::tls::suite_name(one)
+            .map(String::from)
+            .unwrap_or_else(|| alloc::format!("0x{one:04x}")),
+        (Some(_), Some(_)) => String::from("mixed"),
+    }
+}
+
 /// The handshake's 2-bit role, named.
 ///
 /// Unknown values are printed as themselves rather than mapped to a default:
@@ -674,9 +700,17 @@ impl<'a> CaptureReport<'a> {
             // would name one flow's problem as the capture's.
             _ => "mixed",
         };
+        // R311y725 (N4) — the suite the plaintext floor was measured against,
+        // reconciled to one string by exactly the rule `reason` above uses: it
+        // belongs to a FLOW, the census is capture-wide, and presenting the
+        // first flow's suite as the capture's is wrong the moment two differ.
+        // "unknown" is the honest word for a capture with no ServerHello in it,
+        // and it is the state in which the floor stays at its widest.
+        let suites = encrypted_suites(&flows);
         s.push_str(&format!(
             ",\"encrypted\":{{\"flows\":{},\"records\":{},\"application_records\":{},\
              \"application_bytes\":{},\"application_bytes_at_least\":{},\
+             \"aead_overhead_bytes\":{},\"cipher_suite\":\"{}\",\
              \"lost_bytes\":{},\"decrypted\":{},\"flows_decrypted\":{},\
              \"records_decrypted\":{},\"reason\":\"{}\"}}",
             enc.flows,
@@ -690,6 +724,8 @@ impl<'a> CaptureReport<'a> {
             // learn whether a total is whole will not.
             enc.census.application_bytes,
             enc.census.application_bytes_at_least(),
+            enc.census.aead_overhead_bytes,
+            suites,
             enc.census.lost_bytes,
             // The capture-wide claim, and it is deliberately the STRONG one:
             // "this capture was decrypted" must not be true while part of it
@@ -1176,15 +1212,24 @@ impl<'a> CaptureReport<'a> {
             // is ciphertext: the AEAD tag and the inner content type are inside
             // it, so stating it alone told a reader they were missing more
             // zenoh than they are. The floor is what remains once this reader
-            // subtracts the overhead it can account for without knowing the
-            // suite.
+            // subtracts the per-record overhead.
+            //
+            // R311y725 (N4) — and the sentence now says WHAT that overhead was
+            // measured against. It used to end "without knowing the suite",
+            // which was true and is no longer: a capture holding a plaintext
+            // ServerHello has the suite on the wire, and a reader shown a
+            // tightened floor with nothing naming its basis has a number they
+            // cannot check.
             s.push_str(&format!(
                 "  {} flow(s) carry zenoh inside TLS: {} record(s), {}-{} byte(s) \
-                 of application data (the upper figure is ciphertext).",
+                 of application data (the upper figure is ciphertext; the lower \
+                 subtracts {} byte(s) of AEAD overhead, suite {}).",
                 enc.flows,
                 enc.census.records,
                 enc.census.application_bytes_at_least(),
-                enc.census.application_bytes
+                enc.census.application_bytes,
+                enc.census.aead_overhead_bytes,
+                encrypted_suites(&live),
             ));
             // R311y716 (§E 8.14) — and what a gap took, printed only when it
             // happened: a census short by a hole is a floor, and until this
@@ -2461,6 +2506,13 @@ mod tests {
             "a byte total that is a floor is not a complete capture: {}",
             r.to_text()
         );
+        // R311y725 (N2) — BY NAME, which `!is_complete()` cannot say.
+        assert_eq!(
+            r.reasons(),
+            alloc::vec![VerdictReason::UnsizedPayloads],
+            "the unsizable payload is the only leg here: {}",
+            r.to_text()
+        );
         assert!(
             r.to_json().contains("\"unsized_payloads\":1"),
             "the JSON must qualify the total beside it: {}",
@@ -2680,9 +2732,18 @@ mod tests {
         assert!(t.selection().is_decisive());
         assert_verdict_rests_on(&d, VerdictLeg::None);
 
+        let r = CaptureReport::of(&d).with_throughput(&t);
         assert!(
-            !CaptureReport::of(&d).with_throughput(&t).is_complete(),
+            !r.is_complete(),
             "a record in no row is a row total that is short"
+        );
+        // R311y725 (N2) — and WHICH leg. The isolation above already proves no
+        // other counter moved; this makes the test say so.
+        assert_eq!(
+            r.reasons(),
+            alloc::vec![VerdictReason::UnresolvedRecords],
+            "{}",
+            r.to_text()
         );
     }
 
@@ -3321,6 +3382,19 @@ mod tests {
             .with_payloads(&all_payloads);
         assert_eq!(all_exchanges.requests(), 3, "the fixture must be wide");
         assert_eq!(all_exchanges.unclosed(), 1);
+        // R311y725 (N2) — the unanswered query is a leg of the verdict, and it
+        // is named here because nothing else named it. The exchange plane is
+        // attached ALONE so the reason cannot be another plane's.
+        assert!(
+            CaptureReport::of(&d)
+                .with_exchanges(&all_exchanges)
+                .reasons()
+                .contains(&VerdictReason::ExchangesUnclosed),
+            "{:?}",
+            CaptureReport::of(&d)
+                .with_exchanges(&all_exchanges)
+                .reasons()
+        );
         assert_eq!(all_payloads.payloads(), 2);
         assert!(all.to_text().contains("other/drop"));
 
@@ -3408,19 +3482,33 @@ mod tests {
             exchanges.gaps()
         );
         assert_eq!(exchanges.unclosed(), 0);
+        let r = CaptureReport::of(&d).with_exchanges(&exchanges);
         assert!(
-            !CaptureReport::of(&d)
-                .with_exchanges(&exchanges)
-                .is_complete(),
+            !r.is_complete(),
             "an exchange the selector could not judge is missing from the rows"
+        );
+        // R311y725 (N2) — named. The assertions above establish that the
+        // selection is the plane's ONLY shortfall, so the list is exactly one.
+        assert_eq!(
+            r.reasons(),
+            alloc::vec![VerdictReason::ExchangeUndecided],
+            "{}",
+            r.to_text()
         );
 
         let payloads = crate::payload::payloads_where(&d, &filter);
         assert_eq!(payloads.selection().undecided, 1);
         assert!(payloads.gaps().is_clean());
+        let r = CaptureReport::of(&d).with_payloads(&payloads);
         assert!(
-            !CaptureReport::of(&d).with_payloads(&payloads).is_complete(),
+            !r.is_complete(),
             "a payload the selector could not judge is missing from the census"
+        );
+        assert_eq!(
+            r.reasons(),
+            alloc::vec![VerdictReason::PayloadUndecided],
+            "{}",
+            r.to_text()
         );
 
         // The control: unfiltered, NOTHING is undecided on either plane — the
@@ -3638,6 +3726,17 @@ mod tests {
         };
         let r = CaptureReport::of(&d).with_quic_decryption(&shut);
         assert!(!r.is_complete(), "a flow offered and not opened is a floor");
+        // R311y725 (N2) — BY NAME. `!is_complete()` is satisfied by any leg, so
+        // a witness that only asserts it cannot tell its own reason from a
+        // neighbour's, which is the state `verdict_reason_lint` measured this
+        // enum into: thirteen of twenty-three legs were exercised and none of
+        // them named.
+        assert_eq!(
+            r.reasons(),
+            alloc::vec![VerdictReason::QuicFlowsUnopened],
+            "the flow's own leg, and no other: {}",
+            r.to_text()
+        );
         assert!(
             r.to_text().contains("1 had no key for their space"),
             "and the reason a person acts on is the key log, not the capture: {}",
@@ -3721,6 +3820,14 @@ mod tests {
             r.to_json().contains("\"walks_stopped\":1"),
             "{}",
             r.to_json()
+        );
+        // R311y725 (N2) — named, and ALONE: `open` opened every flow and
+        // decoded every byte it recovered, so the walk is the only shortfall.
+        assert_eq!(
+            r.reasons(),
+            alloc::vec![VerdictReason::QuicWalkStopped],
+            "a stopped walk is its own leg: {}",
+            r.to_text()
         );
     }
 

@@ -204,6 +204,17 @@ pub enum UsageError {
     /// the output, and a flag that silently does nothing is the shape this
     /// workspace turns into a refusal wherever a person typed the input.
     SelectWithoutPlane,
+    /// R311y725 (N8) — a payload declaration was given and `--fields` was not.
+    ///
+    /// REFUSED on exactly the rule [`Self::SelectWithoutPlane`] states, and
+    /// found by asking that rule's question of a neighbouring flag: the payload
+    /// decoding is rendered by the FIELD listing and by nothing else, so
+    /// `--payload-format demo/**=protobuf` alone changes not one byte of the
+    /// output. It is the worse half of the silence R311y725 closed -- the
+    /// run-time note tells a reader their declaration met no traffic, and this
+    /// covers the case where the declaration was never consulted at all, so
+    /// there was nothing for that note to be computed from.
+    PayloadWithoutFields(&'static str),
 }
 
 impl core::fmt::Display for UsageError {
@@ -219,6 +230,11 @@ impl core::fmt::Display for UsageError {
                 f,
                 "--select narrows the census planes and none was asked for; \
                  add --census (or --throughput / --exchanges / --payloads)"
+            ),
+            Self::PayloadWithoutFields(flag) => write!(
+                f,
+                "{flag} is rendered by the field listing and it was not asked \
+                 for; add --fields"
             ),
         }
     }
@@ -457,6 +473,18 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
             }
         }
         at += 1;
+    }
+    // R311y725 (N8) — a declaration the output has no place to render.
+    // Checked before the literal below because that literal MOVES the vectors,
+    // and the same rule `SelectWithoutPlane` applies: where a person typed the
+    // input, a flag that silently does nothing becomes a refusal.
+    if !per_field {
+        if !payload_formats.is_empty() {
+            return Err(UsageError::PayloadWithoutFields("--payload-format"));
+        }
+        if !payload_field_names.is_empty() {
+            return Err(UsageError::PayloadWithoutFields("--payload-name"));
+        }
     }
     Ok(Options {
         capture: capture.ok_or(UsageError::NoCapture)?,
@@ -1816,6 +1844,39 @@ fn field_lines(
         &mut emitted,
         &mut listings,
     );
+    // R311y725 (N8) — AFTER every row producer, because this is a fact about
+    // what the capture turned out to hold and not about the declaration itself.
+    //
+    // Placed here rather than beside the refusals at the top for the reason the
+    // ordering matters at all: both producers above consult the map while they
+    // walk (`decode_payload`), and a listing built before `datagram_field_rows`
+    // would report a declaration as unbound because the flow that binds it had
+    // not been walked yet. That is the R311y700 shape -- a new plane reaching
+    // one row producer -- and the placement is what avoids it rather than a
+    // second traversal.
+    let unbound: Vec<FieldNote> = payload_formats
+        .unbound_rules()
+        .map(|pattern| FieldNote::PayloadDeclarationUnbound {
+            declaration: pattern.to_string(),
+            door: PayloadDoor::FormatRule,
+        })
+        .chain(
+            payload_formats
+                .unbound_names()
+                .map(
+                    |(pattern, path, name)| FieldNote::PayloadDeclarationUnbound {
+                        declaration: format!("{pattern}:{path}={name}"),
+                        door: PayloadDoor::FieldName,
+                    },
+                ),
+        )
+        .collect();
+    if !unbound.is_empty() {
+        listings.push(FlowListing {
+            rows: String::new(),
+            notes: unbound,
+        });
+    }
     render_listings(&listings, format)
 }
 
@@ -1870,6 +1931,20 @@ enum FieldNote {
     /// refuses these at parse time; this covers a library caller, which is the
     /// path that would otherwise be silent.
     PayloadRuleRefused { rule: String, why: String },
+    /// R311y725 (N8) — a payload declaration this reader INSTALLED and then
+    /// applied to nothing.
+    ///
+    /// Capture-wide, and the counterpart to `PayloadRuleRefused`: that one says
+    /// a declaration never took effect because it was rejected, this one says it
+    /// took effect and met no traffic. The two failures look identical in the
+    /// rows — every field renders unnamed — and send a reader to opposite
+    /// places, which is why they are separate notes rather than one.
+    PayloadDeclarationUnbound {
+        /// The declaration in the syntax the reader typed it in.
+        declaration: String,
+        /// Which flag it arrived through.
+        door: PayloadDoor,
+    },
     /// The `--max-messages` bound left messages out of this flow's listing.
     Omitted {
         flow: wz_capture::link::FlowKey,
@@ -1890,6 +1965,51 @@ enum FieldNote {
         /// and a reader given only "3 skipped" cannot tell which to go look at.
         named: Vec<Disagreed>,
     },
+}
+
+/// R311y725 (N8) — which flag a payload declaration arrived through.
+///
+/// The two are reported apart because the remedy differs: a format rule that
+/// bound nothing means the PATTERN missed every topic, while a name declaration
+/// that bound nothing may have matched the topic and missed the PATH. A single
+/// "declaration unused" note would send a reader to check the pattern in both
+/// cases, and in the second the pattern is right.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PayloadDoor {
+    /// `--payload-format <keyexpr>=<format>`.
+    FormatRule,
+    /// `--payload-name <keyexpr>:<path>=<name>`.
+    FieldName,
+}
+
+impl PayloadDoor {
+    /// The flag, as the help text spells it.
+    fn flag(self) -> &'static str {
+        match self {
+            Self::FormatRule => "--payload-format",
+            Self::FieldName => "--payload-name",
+        }
+    }
+
+    /// The machine-readable note kind. Spelled out rather than derived, on the
+    /// rule [`wz_capture::report::VerdictReason::name`] states: these go out in
+    /// the export and a consumer matches on them.
+    fn kind(self) -> &'static str {
+        match self {
+            Self::FormatRule => "payload_rule_unbound",
+            Self::FieldName => "payload_name_unbound",
+        }
+    }
+
+    /// What a reader should look at, which is the half that differs.
+    fn remedy(self) -> &'static str {
+        match self {
+            Self::FormatRule => "no key expression in this capture matched the pattern",
+            Self::FieldName => {
+                "no field this reader decoded sat at that path under a matching key expression"
+            }
+        }
+    }
 }
 
 /// One message whose packet did not vouch for it, and why.
@@ -1974,7 +2094,9 @@ impl FieldNote {
             | Self::NothingWalkable { flow }
             | Self::Omitted { flow, .. }
             | Self::Disagreement { flow, .. } => Some(flow),
-            Self::CaptureNotReread | Self::PayloadRuleRefused { .. } => None,
+            Self::CaptureNotReread
+            | Self::PayloadRuleRefused { .. }
+            | Self::PayloadDeclarationUnbound { .. } => None,
         }
     }
 
@@ -1985,6 +2107,7 @@ impl FieldNote {
             Self::NothingWalkable { .. } => "nothing_walkable",
             Self::CaptureNotReread => "capture_not_reread",
             Self::PayloadRuleRefused { .. } => "payload_rule_refused",
+            Self::PayloadDeclarationUnbound { door, .. } => door.kind(),
             Self::Omitted { .. } => "omitted",
             Self::Disagreement { .. } => "disagreement",
         }
@@ -2007,6 +2130,11 @@ impl FieldNote {
             Self::PayloadRuleRefused { rule, why } => {
                 format!("payload-format rule `{rule}` was NOT installed -- {why}")
             }
+            Self::PayloadDeclarationUnbound { declaration, door } => format!(
+                "{} `{declaration}` was installed and BOUND NOTHING -- {}",
+                door.flag(),
+                door.remedy()
+            ),
             Self::Omitted { count, .. } => format!("{count} more not listed"),
             Self::Disagreement { count, .. } => format!(
                 "{count} message(s) skipped -- this reader's two reads of the file \
@@ -2023,7 +2151,9 @@ impl FieldNote {
                 format!("  {} : {sentence}\n", endpoint(&flow.low))
             }
             Self::CaptureNotReread => format!("  datagram flow(s): {sentence}\n"),
-            Self::PayloadRuleRefused { .. } => format!("  {sentence}\n"),
+            Self::PayloadRuleRefused { .. } | Self::PayloadDeclarationUnbound { .. } => {
+                format!("  {sentence}\n")
+            }
             Self::Omitted { .. } => format!("    ... {sentence}\n"),
             Self::Disagreement { named, .. } => {
                 let mut out = format!("    {sentence}\n");

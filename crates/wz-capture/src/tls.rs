@@ -66,6 +66,103 @@ pub const CT_APPLICATION_DATA: u8 = 23;
 /// The handshake message type of a ClientHello (RFC 8446 §4.1.2).
 const HS_CLIENT_HELLO: u8 = 1;
 
+/// The handshake message type of a ServerHello (RFC 8446 §4.1.3).
+const HS_SERVER_HELLO: u8 = 2;
+
+/// R311y725 (N4) — the NEGOTIATED cipher suite, read out of a ServerHello.
+///
+/// # Why this is read at all
+///
+/// [`RecordCensus::application_bytes_at_least`] subtracts each record's AEAD
+/// overhead to turn a ciphertext count into a plaintext floor, and until this
+/// round it subtracted the LARGEST tag any RFC 8446 suite uses, because the
+/// suite was not read. That is a valid floor and a loose one: it understates the
+/// plaintext of a `TLS_AES_128_CCM_8_SHA256` connection by 8 bytes per record.
+/// The suite is on the wire, in the clear, in the ServerHello — the one
+/// handshake message TLS 1.3 leaves unprotected — so this is a measurement
+/// rather than an assumption, which is the whole distinction the register
+/// carried N4 for.
+///
+/// # What it deliberately does not do
+///
+/// It does not decide anything about the flow, on the rule
+/// [`client_hello_random`] states for the same reason: recognition is
+/// [`client_hello_verdict`]'s job and stays narrow. This reads a field out of a
+/// record the caller has already walked.
+///
+/// `None` for any record that is not a plaintext ServerHello, and for one that
+/// is truncated before the field. A ServerHello split across records is legal
+/// and rare, and a partial read would report a suite assembled from the wrong
+/// bytes — worse than not knowing, because the floor would then be tightened on
+/// a guess.
+pub fn server_hello_suite(record: &[u8]) -> Option<u16> {
+    if *record.first()? != CT_HANDSHAKE {
+        return None;
+    }
+    if *record.get(RECORD_HEADER)? != HS_SERVER_HELLO {
+        return None;
+    }
+    // Everything before the session id is fixed-width (RFC 8446 §4.1.3): the
+    // record header, the 4-byte handshake header, `legacy_version`, and the
+    // 32-byte random. The session id is the first variable-length field, so
+    // this is the last offset that can be arithmetic.
+    const SESSION_ID_LEN_AT: usize = RECORD_HEADER + 4 + 2 + 32;
+    let session_id_len = usize::from(*record.get(SESSION_ID_LEN_AT)?);
+    // RFC 8446 §4.1.3 caps `legacy_session_id_echo` at 32 bytes. A longer one
+    // is not a ServerHello this reader can walk, and reading past it would take
+    // two bytes of something else as a suite.
+    if session_id_len > 32 {
+        return None;
+    }
+    let at = SESSION_ID_LEN_AT + 1 + session_id_len;
+    let hi = *record.get(at)?;
+    let lo = *record.get(at + 1)?;
+    Some((u16::from(hi) << 8) | u16::from(lo))
+}
+
+/// R311y725 (N4) — how many bytes of AEAD tag a negotiated suite spends per
+/// record.
+///
+/// 16 for every suite RFC 8446 §B.4 defines except
+/// `TLS_AES_128_CCM_8_SHA256`, whose whole point is the truncated tag. An
+/// UNKNOWN value also answers 16, and that direction is deliberate: this number
+/// is SUBTRACTED to produce a floor, so over-stating it understates the
+/// plaintext, which is what a floor must do. Answering 8 for a suite this reader
+/// does not know would tighten the floor on a guess.
+pub fn aead_tag_bytes(suite: u16) -> u64 {
+    match suite {
+        // `TLS_AES_128_CCM_8_SHA256`.
+        0x1305 => 8,
+        _ => 16,
+    }
+}
+
+/// R311y725 (N4) — what to subtract per record when the suite is NOT known.
+///
+/// The value [`RecordCensus::application_bytes_at_least`] used unconditionally
+/// before the suite was read, kept as a named constant so the two states — a
+/// measured suite and no ServerHello in the capture — are the same expression
+/// with a different input rather than two formulas.
+pub const AEAD_TAG_UNKNOWN: u64 = 16;
+
+/// R311y725 (N4) — the suite's registry name, for a report that shows what the
+/// floor was measured against.
+///
+/// Spelled out rather than derived, and unknown values render as their hex:
+/// a suite this build does not know is a finding about the capture, and a name
+/// invented for it would be the confident-zero shape this crate refuses
+/// elsewhere.
+pub fn suite_name(suite: u16) -> Option<&'static str> {
+    Some(match suite {
+        0x1301 => "TLS_AES_128_GCM_SHA256",
+        0x1302 => "TLS_AES_256_GCM_SHA384",
+        0x1303 => "TLS_CHACHA20_POLY1305_SHA256",
+        0x1304 => "TLS_AES_128_CCM_SHA256",
+        0x1305 => "TLS_AES_128_CCM_8_SHA256",
+        _ => return None,
+    })
+}
+
 /// A record's fixed header width: type, version major/minor, length.
 const RECORD_HEADER: usize = 5;
 
@@ -194,7 +291,12 @@ pub fn client_hello_random(bytes: &[u8]) -> Option<[u8; 32]> {
 /// cannot. `None` when the walk runs out mid-record — which is not `false`,
 /// because a captured direction ends wherever the capture stopped.
 pub fn carries_tls_records(bytes: &[u8]) -> Option<RecordCensus> {
-    walk_records(bytes, &mut |_, _| {})
+    // R311y725 (N4) — a suite this run learns for itself and then discards. The
+    // FLOW keeps one across pushes (`TlsFlowState::suite`); this entry point
+    // answers about one buffer and has nowhere to keep it, which is the honest
+    // shape: a run holding no ServerHello measures its overhead against the
+    // widest tag, exactly as this function always did.
+    walk_records(bytes, &mut None, &mut |_, _| {})
 }
 
 /// R311y660 (§1.2a) — the walk itself, with each COMPLETE record handed to
@@ -209,7 +311,16 @@ pub fn carries_tls_records(bytes: &[u8]) -> Option<RecordCensus> {
 /// AEAD's additional data: a consumer given the fragment alone would have to
 /// rebuild five bytes it already had, and a rebuild that disagrees with the
 /// wire authenticates nothing.
-fn walk_records(bytes: &[u8], on_record: &mut impl FnMut(&[u8], u8)) -> Option<RecordCensus> {
+/// R311y725 (N4) — `suite` is READ AND WRITTEN: the walk learns the negotiated
+/// cipher suite from a ServerHello it passes and charges every application
+/// record after it the tag that suite actually spends. In and out rather than
+/// out alone, because a flow's ServerHello is in one direction and its records
+/// are in both, so the caller holds the fact across pushes.
+fn walk_records(
+    bytes: &[u8],
+    suite: &mut Option<u16>,
+    on_record: &mut impl FnMut(&[u8], u8),
+) -> Option<RecordCensus> {
     let mut census = RecordCensus::default();
     let mut at = 0usize;
     while at < bytes.len() {
@@ -234,6 +345,14 @@ fn walk_records(bytes: &[u8], on_record: &mut impl FnMut(&[u8], u8)) -> Option<R
         if rest[0] == CT_APPLICATION_DATA {
             census.application_records += 1;
             census.application_bytes += len as u64;
+            // R311y725 (N4) — charged HERE, against whatever the walk knows by
+            // now, and not recomputed from the record count at read time: a
+            // capture whose ServerHello sits in the middle of a direction has
+            // records on both sides of it, and only a running total can charge
+            // each one what it actually spent. The `+ 1` is the inner content
+            // type, which every TLS 1.3 record carries inside the protection.
+            let tag = suite.map_or(AEAD_TAG_UNKNOWN, aead_tag_bytes);
+            census.aead_overhead_bytes += tag + 1;
         }
         match rest.len().checked_sub(RECORD_HEADER + len) {
             // The record's payload is not all here yet: the capture stopped
@@ -245,7 +364,17 @@ fn walk_records(bytes: &[u8], on_record: &mut impl FnMut(&[u8], u8)) -> Option<R
                 return Some(census);
             }
             Some(_) => {
-                on_record(&rest[..RECORD_HEADER + len], rest[0]);
+                let record = &rest[..RECORD_HEADER + len];
+                // R311y725 (N4) — only a WHOLE record can be read for a suite,
+                // which is why this sits in the complete arm. First one wins: a
+                // HelloRetryRequest carries the selected suite and the
+                // ServerHello that follows carries the same one, so a later
+                // read cannot correct an earlier one and could only be a second
+                // connection's answer applied to this one.
+                if suite.is_none() {
+                    *suite = server_hello_suite(record);
+                }
+                on_record(record, rest[0]);
                 at += RECORD_HEADER + len;
             }
         }
@@ -283,6 +412,17 @@ pub struct RecordCensus {
     /// it read as a total. A reader summing `application_bytes` against the
     /// capture's own byte count has to be told when the sum cannot add up.
     pub lost_bytes: u64,
+    /// R311y725 (N4) — the AEAD overhead this direction's application records
+    /// carry, MEASURED against the negotiated suite where the capture holds a
+    /// ServerHello and against the widest tag where it does not.
+    ///
+    /// Accumulated per record rather than derived from
+    /// [`Self::application_records`] at read time, because the two cannot be
+    /// derived from one another once censuses are FOLDED: two flows in one
+    /// capture may negotiate different suites, and a single tag width applied
+    /// to the sum would be wrong for at least one of them. A running total of
+    /// what each record actually spent adds correctly across any mix.
+    pub aead_overhead_bytes: u64,
 }
 
 impl RecordCensus {
@@ -293,21 +433,19 @@ impl RecordCensus {
     /// the zenoh underneath is smaller by both. The report said "N byte(s) of
     /// application data" and meant "at most N", which is a different claim.
     ///
-    /// 16 is the LARGEST AEAD tag among the TLS 1.3 suites (both AES-GCMs and
-    /// ChaCha20-Poly1305 use it; only the CCM_8 suite is smaller), so
-    /// subtracting it without knowing the suite can only understate the
-    /// plaintext -- which is what a floor must do. Plus one byte per record for
-    /// the inner content type.
+    /// R311y725 (N4) — the tag is now MEASURED where the capture says what it
+    /// is. [`AEAD_TAG_UNKNOWN`] (16) is the largest tag among the TLS 1.3
+    /// suites, so a capture with no ServerHello in it subtracts the same amount
+    /// this function always did — but a capture that carries one subtracts what
+    /// that connection actually spends, which for `TLS_AES_128_CCM_8_SHA256` is
+    /// 8 bytes per record less. See [`server_hello_suite`].
     ///
     /// Saturating: a direction whose records are all shorter than their own
     /// overhead is a capture this reader misparsed, and a floor of zero is the
     /// honest answer there rather than a wrap.
     pub fn application_bytes_at_least(&self) -> u64 {
-        const AEAD_TAG_MAX: u64 = 16;
-        const INNER_CONTENT_TYPE: u64 = 1;
-        self.application_bytes.saturating_sub(
-            (self.application_records as u64).saturating_mul(AEAD_TAG_MAX + INNER_CONTENT_TYPE),
-        )
+        self.application_bytes
+            .saturating_sub(self.aead_overhead_bytes)
     }
 
     pub(crate) fn add(&mut self, other: &RecordCensus) {
@@ -316,6 +454,7 @@ impl RecordCensus {
         self.application_bytes += other.application_bytes;
         self.trailing_bytes += other.trailing_bytes;
         self.lost_bytes += other.lost_bytes;
+        self.aead_overhead_bytes += other.aead_overhead_bytes;
     }
 }
 
@@ -439,6 +578,19 @@ pub struct EncryptedFlow {
     /// a ClientHello -- a mid-session capture or a server-half one -- because
     /// there is no ClientHello in those to read one from.
     pub client_random: Option<[u8; 32]>,
+    /// R311y725 (N4) — the cipher suite this flow's ServerHello negotiated, as
+    /// the 2-byte registry value on the wire.
+    ///
+    /// Carried beside the census rather than folded into it, because the two
+    /// answer different questions: the census says how tight the plaintext floor
+    /// is and this says WHY it is that tight. A reader shown a floor 8 bytes per
+    /// record above the old one, with nothing saying which suite bought that,
+    /// has a number they cannot check.
+    ///
+    /// `None` where the capture holds no plaintext ServerHello — the same two
+    /// shapes [`Self::client_random`] is `None` for, and for the same reason.
+    /// See [`server_hello_suite`] and [`suite_name`].
+    pub negotiated_suite: Option<u16>,
 }
 
 impl EncryptedFlow {
@@ -834,6 +986,15 @@ pub struct TlsFlowState {
     /// between records: what it costs a decryptor is a jump in the sequence of
     /// the NEXT record, and that record is where the fact has to arrive.
     pub(crate) pending_gap_bytes: [u64; 2],
+    /// R311y725 (N4) — the cipher suite this flow's ServerHello negotiated.
+    ///
+    /// One per FLOW and not per direction, which is the only place it can live:
+    /// the ServerHello travels in the server's direction and the tag it names is
+    /// spent by the records of both. `None` for a capture that holds no
+    /// ServerHello — a mid-session capture, or one whose handshake was in a
+    /// segment nobody saw — and the census then measures its overhead against
+    /// the widest tag, which is what it always did.
+    pub(crate) suite: Option<u16>,
 }
 
 impl TlsFlowState {
@@ -855,7 +1016,7 @@ impl TlsFlowState {
         let run_base = self.stream_at[index];
         let mut kept = Vec::new();
         let mut walked = 0usize;
-        let Some(census) = walk_records(&run, &mut |record, content_type| {
+        let Some(census) = walk_records(&run, &mut self.suite, &mut |record, content_type| {
             // Only the protected ones. A `ChangeCipherSpec` is plaintext and
             // consumes no sequence number, so keeping it would put every later
             // record one place too far along.
