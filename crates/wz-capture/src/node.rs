@@ -658,6 +658,83 @@ mod tests {
         );
     }
 
+    /// R311y715 (§C G6) — the share a READER sees, in both renderings at once.
+    ///
+    /// The census's own denominator has been pinned since R311y714; the
+    /// CONVERSION that turns its basis points into the percentage a person
+    /// reads had nothing on it. Changing the text render's divisor from 100 to
+    /// 1000 left all 392 tests green — a figure ten times wrong on the page,
+    /// while the JSON beside it stayed right, which is the two-renderings
+    /// disagreement R311y664 measured the hard way.
+    ///
+    /// The existing CLI test could not catch it: its capture is scouting-only,
+    /// so every share is `null` and the text prints a zero that is zero under
+    /// any divisor. A share must be NON-ZERO for its conversion to be visible.
+    #[test]
+    fn the_printed_percentage_and_the_exported_basis_points_are_one_figure() {
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &tcp_packet(1000, &framed_init(&[0xA1; 4])),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &crate::datagram_tests::tcp_packet_reverse(2000, &framed_init(&[0xB2; 4])),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            2,
+            &tcp_packet(
+                1000 + framed_init(&[0xA1; 4]).len() as u32,
+                &framed_keepalive(),
+            ),
+        );
+        d.finish();
+
+        let census = nodes(&d);
+        let report = crate::report::CaptureReport::of(&d).with_nodes(&census);
+        let text = report.to_text();
+        let json = report.to_json();
+
+        // ANTI-VACUITY: a share of zero is zero under any divisor, so the
+        // fixture must state a real one before anything below means anything.
+        for i in 0..census.nodes().len() {
+            let bp = census
+                .share_bp(i)
+                .expect("every direction on this flow has an owner");
+            assert!(bp > 0, "node {i} must carry traffic: {text}");
+            assert!(
+                json.contains(&alloc::format!("\"share_bp\":{bp}")),
+                "the export states the basis points as they are: {json}"
+            );
+            assert!(
+                text.contains(&alloc::format!("share {}.{:02}%", bp / 100, bp % 100)),
+                "and the page states the SAME figure as a percentage: {text}"
+            );
+        }
+
+        // Read back what the page actually prints, rather than recomputing it:
+        // the percentages a reader sees must add up to the capture.
+        let printed: alloc::vec::Vec<u32> = text
+            .split("-- share ")
+            .skip(1)
+            .filter_map(|rest| rest.split('%').next())
+            .filter_map(|p| {
+                let (whole, frac) = p.split_once('.')?;
+                Some(whole.parse::<u32>().ok()? * 100 + frac.parse::<u32>().ok()?)
+            })
+            .collect();
+        assert_eq!(printed.len(), census.nodes().len(), "one line each: {text}");
+        let sum: u32 = printed.iter().sum();
+        assert!(
+            (9_998..=10_000).contains(&sum),
+            "the printed percentages are the whole capture, less truncation: \
+             {printed:?}"
+        );
+    }
+
     /// R311y714 (§1.1f) — THE DENOMINATOR. A share is of the whole capture,
     /// not of the part this reader could attribute.
     ///

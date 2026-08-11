@@ -1529,6 +1529,17 @@ fn throughput_json(t: &ThroughputTable, s: &mut String) {
             totals.payloads_unresolved,
             totals.payload_bytes + totals.unresolved_at_most_bytes
         ));
+        // R311y715 (§C G6, [REDACTED-REQ]) — the row's OCCUPANCY, which the text
+        // rendering has printed since R311y714 and the export did not carry at
+        // all. The consumer that has to draw the figure reads this document,
+        // so a share only a person can see is a share the requirement's
+        // audience never gets. `null` and not `0` where the plane has no
+        // denominator, matching both the node plane's export and the dash the
+        // text prints there.
+        s.push_str(&match t.share_bp(&row.keyexpr) {
+            Some(bp) => format!(",\"share_bp\":{bp}"),
+            None => ",\"share_bp\":null".to_string(),
+        });
         s.push_str(&format!(
             ",\"first_anchor\":{},\"last_anchor\":{}}}",
             row.first_anchor, row.last_anchor
@@ -2294,6 +2305,74 @@ mod tests {
         );
     }
 
+    /// R311y715 (§C G6, [REDACTED-REQ]) — the TOPIC occupancy, in both renderings at
+    /// once, and the export half is new here.
+    ///
+    /// Two defects met at this line. The percentage the text prints was bound
+    /// by nothing — `bp / 1000` in place of `bp / 100` left 393 crate tests and
+    /// 62 CLI tests green, a figure ten times wrong on the page. And the JSON
+    /// row did not carry the share AT ALL, so the reader who has to draw the
+    /// occupancy this requirement asks for could not read it: the figure
+    /// existed only in the rendering a person looks at.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_topics_occupancy_reaches_both_renderings_as_one_figure() {
+        use crate::exchange::tests as fx;
+
+        let d = fx::dissect(&[
+            (
+                true,
+                Some(10),
+                crate::agg::tests::record_with_body_ext(
+                    crate::agg::tests::Carrier::Push,
+                    "demo/heavy",
+                    &[0u8; 30],
+                    crate::agg::tests::BodyExt::None,
+                ),
+            ),
+            (
+                true,
+                Some(11),
+                crate::agg::tests::record_with_body_ext(
+                    crate::agg::tests::Carrier::Push,
+                    "demo/light",
+                    &[0u8; 10],
+                    crate::agg::tests::BodyExt::None,
+                ),
+            ),
+        ]);
+        let t = crate::agg::aggregate(&d);
+        // ANTI-VACUITY: a share of zero is zero under any divisor.
+        assert_eq!(t.total_payload_bytes(), 40, "the denominator");
+        assert_eq!(t.share_bp("demo/heavy"), Some(7_500));
+
+        let report = CaptureReport::of(&d).with_throughput(&t);
+        let text = report.to_text();
+        let json = report.to_json();
+
+        assert!(
+            text.contains("75.00%") && text.contains("25.00%"),
+            "the page states the occupancy as a percentage: {text}"
+        );
+        let row_of = |key: &str| {
+            let at = json
+                .find(&alloc::format!("\"keyexpr\":\"{key}\""))
+                .expect(key);
+            let end = json[at..].find('}').expect("the row closes") + at;
+            json[at..end].to_string()
+        };
+        // Sliced per row, so neither assertion can be satisfied by the other's
+        // figure.
+        assert!(
+            row_of("demo/heavy").contains("\"share_bp\":7500"),
+            "and the export states the SAME figure in basis points: {json}"
+        );
+        assert!(
+            row_of("demo/light").contains("\"share_bp\":2500"),
+            "for every row and not just the heaviest: {json}"
+        );
+    }
+
     /// R311y616 — a filtered report carries what the selector could NOT judge,
     /// and that shortfall reaches the completeness verdict.
     ///
@@ -2826,6 +2905,53 @@ mod tests {
             "no fabricated zero: {json}"
         );
         assert!(r.to_text().contains("unmeasured"), "{}", r.to_text());
+    }
+
+    /// R311y715 (§C G6) — and its MEASURED counterpart, which is where the
+    /// denominator lives.
+    ///
+    /// A mean is a ratio, and the test above pins only the case where there is
+    /// none. The population it was taken over is printed beside it ("over N")
+    /// for exactly the reason this workspace states denominators at all — and
+    /// nothing bound that N: rendering `l.count() + 1` left all 394 tests
+    /// green, so the page could tell a reader a two-sample mean was taken over
+    /// three while the JSON beside it said two.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_measured_latency_states_the_population_it_was_taken_over() {
+        use crate::exchange::tests as fx;
+
+        // Two exchanges, 20ms and 40ms: a mean of 30 over a count of 2, and
+        // every figure distinct from every other so no assertion can be
+        // satisfied by the wrong one.
+        let d = fx::dissect(&[
+            (
+                true,
+                Some(1_000),
+                fx::request_query(1, fx::sender_space(0, Some("q/one"))),
+            ),
+            (false, Some(1_020), fx::response_final(1)),
+            (
+                true,
+                Some(2_000),
+                fx::request_query(2, fx::sender_space(0, Some("q/two"))),
+            ),
+            (false, Some(2_040), fx::response_final(2)),
+        ]);
+        let exchanges = crate::exchange::exchanges(&d);
+        assert_eq!(exchanges.completed(), 2, "both correlated");
+
+        let r = CaptureReport::of(&d).with_exchanges(&exchanges);
+        let text = r.to_text();
+        let json = r.to_json();
+        assert!(
+            text.contains("30ms mean over 2 (min 20, max 40)"),
+            "the page states the mean WITH the population it is of: {text}"
+        );
+        assert!(
+            json.contains("\"completion\":{\"count\":2,\"min_ms\":20,\"max_ms\":40,\"mean_ms\":30,\"total_ms\":60}"),
+            "and the export states the same five figures: {json}"
+        );
     }
 
     /// R311y668 (§1.2a) — THE COMPOSITION SEAM. `to_json` is exactly its own

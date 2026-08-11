@@ -3900,13 +3900,32 @@ pub(crate) mod tests {
     /// account for all of it, less the truncation each share loses. A share
     /// computed against a per-row denominator would give every row 100% and
     /// pass any single-row test.
+    ///
+    /// R311y715 (§C G6) — and the fixture carries a THIRD record whose payload
+    /// this build can only bound, because without one the two candidate
+    /// denominators are the same number. `total_payload_bytes` is the sized
+    /// floor and `payload_bytes_ceiling` adds what is merely unseparated; the
+    /// doc above `share_bp` argues at length for the floor, and swapping the
+    /// call to the ceiling left all 391 tests green. Three unresolved bytes is
+    /// all it takes to make the argument a measurement.
     #[test]
     fn topic_shares_are_of_the_whole_and_sum_to_it() {
         let table = aggregate_datagrams(&[
             (true, push(sender_space(0, Some("home/temp")), &[0u8; 30])),
             (true, push(sender_space(0, Some("home/light")), &[0u8; 10])),
+            (
+                true,
+                request_query_truncated(2, sender_space(0, Some("home/ask"))),
+            ),
         ]);
+        // ANTI-VACUITY: the two denominators must actually DIFFER here, or the
+        // assertions below hold for either and pin neither.
         assert_eq!(table.total_payload_bytes(), 40, "the denominator");
+        assert_eq!(
+            table.payload_bytes_ceiling(),
+            43,
+            "and the ceiling this share is deliberately NOT taken against"
+        );
         let shares: Vec<u32> = table
             .rows()
             .iter()
@@ -3916,7 +3935,11 @@ pub(crate) mod tests {
                     .expect("a sized capture has a total")
             })
             .collect();
-        assert_eq!(shares, alloc::vec![7_500, 2_500], "30 and 10 of 40");
+        assert_eq!(
+            shares,
+            alloc::vec![7_500, 2_500, 0],
+            "30 and 10 of 40, and the bounded record sizes nothing"
+        );
         let sum: u32 = shares.iter().sum();
         assert!(
             (9_998..=10_000).contains(&sum),

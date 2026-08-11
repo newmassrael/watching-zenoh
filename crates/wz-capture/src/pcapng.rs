@@ -1062,6 +1062,59 @@ mod tests {
         assert_eq!(parsed.ts_millis(&parsed.packets[0]), Some(1_000));
     }
 
+    /// R311y715 (§C G6) — and the resolution a file does NOT declare.
+    ///
+    /// `if_tsresol` is OPTIONAL; its absence means microseconds. Beside the
+    /// test above rather than in a module of its own, because the two are one
+    /// rule read from two directions and the declared half had a witness while
+    /// the default half had none: changing `DEFAULT_TSRESOL` from 6 to 3 left
+    /// all 391 tests green. That is not a small silence — every time this
+    /// reader states about such a file (elapsed, exchange latency, the flow
+    /// clock eviction orders by) would be out by 1000x, and a capture carries
+    /// no second clock to disagree with it.
+    ///
+    /// The IDB is hand-laid because [`write`] always emits the option, and a
+    /// fixture that cannot omit it cannot test the omission.
+    #[test]
+    fn an_interface_that_declares_no_resolution_is_microseconds() {
+        let mut file = Vec::new();
+        file.extend_from_slice(&BT_SHB.to_le_bytes());
+        file.extend_from_slice(&28u32.to_le_bytes());
+        file.extend_from_slice(&BOM.to_le_bytes());
+        file.extend_from_slice(&1u16.to_le_bytes());
+        file.extend_from_slice(&0u16.to_le_bytes());
+        file.extend_from_slice(&(-1i64).to_le_bytes());
+        file.extend_from_slice(&28u32.to_le_bytes());
+        // IDB with NO options: linktype, reserved, snaplen, and nothing else.
+        file.extend_from_slice(&BT_IDB.to_le_bytes());
+        file.extend_from_slice(&20u32.to_le_bytes());
+        file.extend_from_slice(&1u16.to_le_bytes());
+        file.extend_from_slice(&0u16.to_le_bytes());
+        file.extend_from_slice(&0u32.to_le_bytes());
+        file.extend_from_slice(&20u32.to_le_bytes());
+        // EPB: the same 2_000_000 ticks the declared-resolution test uses.
+        file.extend_from_slice(&BT_EPB.to_le_bytes());
+        file.extend_from_slice(&36u32.to_le_bytes());
+        file.extend_from_slice(&0u32.to_le_bytes());
+        file.extend_from_slice(&0u32.to_le_bytes());
+        file.extend_from_slice(&2_000_000u32.to_le_bytes());
+        file.extend_from_slice(&4u32.to_le_bytes());
+        file.extend_from_slice(&4u32.to_le_bytes());
+        file.extend_from_slice(&[0xAA; 4]);
+        file.extend_from_slice(&36u32.to_le_bytes());
+
+        let parsed = parse(&file).expect("an IDB may carry no options at all");
+        assert_eq!(
+            parsed.interfaces[0].ts_resol, 6,
+            "the pcapng default, and the assertion that keeps it one"
+        );
+        assert_eq!(
+            parsed.ts_millis(&parsed.packets[0]),
+            Some(2_000),
+            "2_000_000 microseconds is two seconds, not two thousand"
+        );
+    }
+
     /// The 64-bit timestamp is ONE count, high word first — not the
     /// seconds/fraction pair the classic format uses.
     #[test]
