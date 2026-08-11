@@ -1425,6 +1425,63 @@ mod tests {
     /// failure arrives as a wrong packet number — so it reads as a bad key
     /// rather than a bad rule, which is the kind of mistake that survives.
     #[test]
+    fn two_key_updates_on_the_second_suite_walk_every_rung() {
+        // R311y711 — the SWEEP's gate, and the reason it walks TWO updates.
+        //
+        // R311y710 fixed one instance of "the first candidate is the settled
+        // one": the base collapsed to the suite the AEAD picked and the
+        // generation ladder did not. A one-update test proves the FIRST rung
+        // collapsed. It cannot tell that apart from a fix that collapsed only
+        // the rung it happened to reach, which is exactly the shape a
+        // loop-vs-single-statement slip produces.
+        //
+        // The workspace sweep this round ran found no second instance: the only
+        // other trial-settles structure is `capture::EpochState`, which stores
+        // its settled keys in the SAME struct it consults, so it cannot drift.
+        // This test is what keeps that true of QUIC.
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(5));
+        let mut opener =
+            QuicFlowOpener::new(log_for(&random, 3)).declaring_short_connection_id_len(SCID.len());
+        assert!(opener.identity_adopted(), "the log holds one connection");
+
+        let suite = Suite::Chacha20Poly1305Sha256;
+        let generation0 = QuicKeys::derive(suite, &application_secret(false, 0));
+        let rungs = [
+            QuicKeys::derive(suite, &application_secret(false, 1))
+                .with_header_protection_of(&generation0),
+            QuicKeys::derive(suite, &application_secret(false, 2))
+                .with_header_protection_of(&generation0),
+        ];
+
+        let payload = stream_frame(0, 0, b"zero ");
+        let (h, o) = short_header(&SCID, 0);
+        let first = opener.push_datagram(Direction::A, &protect(&generation0, 0, &h, o, &payload));
+        assert!(
+            matches!(first.as_slice(), [PacketOutcome::Opened { .. }]),
+            "the population: generation 0 opens on the second suite: {first:?}"
+        );
+
+        for (index, keys) in rungs.iter().enumerate() {
+            let number = index as u32 + 1;
+            let payload = stream_frame(0, 5 + index as u8 * 4, b"next");
+            let (h, o) = short_header(&SCID, number);
+            let outcomes =
+                opener.push_datagram(Direction::A, &protect(keys, number as u64, &h, o, &payload));
+            assert!(
+                matches!(outcomes.as_slice(), [PacketOutcome::Opened { .. }]),
+                "rung {} must open, which a collapse that reached only the first \
+                 rung would fail: {outcomes:?}",
+                index + 1
+            );
+        }
+        assert_eq!(
+            opener.census()[0].stream_bytes,
+            13,
+            "and all three packets' bytes came out"
+        );
+    }
+
+    #[test]
     fn a_rekeyed_connection_on_the_second_suite_is_followed_too() {
         // R311y710 — the same shape as the test below, on the OTHER suite.
         //
