@@ -418,29 +418,7 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLO
     }
 }
 
-/// R311y713 (§B7) — what a sweep gave up on: how many chains, and how much of
-/// them had already arrived.
-///
-/// Two numbers rather than one because they answer different questions and a
-/// reader needs both: the count says how many messages will never be seen, and
-/// the bytes say how much of the capture went with them. A count alone cannot
-/// distinguish four chains lost at one fragment each from four lost at a
-/// megabyte each, and the second is a capture worth re-taking.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ChainLoss {
-    /// Chains abandoned.
-    pub chains: usize,
-    /// Bytes staged into them and now unreachable.
-    pub bytes: u64,
-}
-
-impl ChainLoss {
-    /// Fold another sweep's loss in.
-    pub fn absorb(&mut self, other: Self) {
-        self.chains += other.chains;
-        self.bytes += other.bytes;
-    }
-}
+pub use crate::chain_loss::ChainLoss;
 
 /// The reassembly Router: a fixed pool of `SLOTS` slot FSMs, each able to
 /// reassemble a fragment chain of up to `CAP` bytes. See the module docs

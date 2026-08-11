@@ -1289,6 +1289,16 @@ pub mod reassembly_slot {
 #[cfg(feature = "reassembly")]
 pub mod chain_staging;
 
+/// R311y713 (§B7) — what a reassembly sweep gave up on, as a value.
+///
+/// UNGATED, unlike the Router it describes: the verbs that return it
+/// (`PassiveSession::observe_at_counting` and friends) are ungated on the
+/// R311y655 rule that a caller must not have to know which features this
+/// binary carries, and a return type gated more narrowly than its function
+/// breaks precisely the feature arm between the two — measured, on
+/// `--features dissect` without `reassembly`.
+pub mod chain_loss;
+
 #[cfg(feature = "reassembly")]
 pub mod reassembly_dispatch;
 

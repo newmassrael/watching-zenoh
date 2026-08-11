@@ -49,6 +49,7 @@
 
 use alloc::vec::Vec;
 
+use crate::chain_loss::ChainLoss;
 use crate::ext_header::{establishment_ext_id as est_ext, ext_eid};
 use crate::inbound::{parse_inbound_consuming, InboundFrame};
 #[cfg(feature = "codec-frame")]
@@ -57,7 +58,7 @@ use crate::parse_error::InboundParseError;
 use crate::peer_init_caps::PeerInitCaps;
 #[cfg(feature = "reassembly")]
 use crate::reassembly_dispatch::{
-    ChainLoss, Fragment as ReasmFragment, IngestOutcome, ReassemblyConfig, ReassemblyDispatcher,
+    Fragment as ReasmFragment, IngestOutcome, ReassemblyConfig, ReassemblyDispatcher,
 };
 use wz_codecs::ext_entry::ExtEntryOwned;
 
@@ -2687,7 +2688,14 @@ mod tests {
     /// R311y585 (A4) — the tables are FOLDED by the observer, not merely
     /// available to it. Without this leg `KeyexprTables` would be a library
     /// with no caller, which is the exact criticism A2 was written for.
-    #[cfg(feature = "codec-declare")]
+    ///
+    /// R311y713 — gated on BOTH features it uses, not on one of them. The
+    /// tables are `all(dissect, codec-declare)` and this asked for
+    /// `codec-declare` alone, so any selection carrying the second without the
+    /// first failed to compile the test build. Found by `cargo clippy -p
+    /// wz-capture -p wz-session-core`, a selection no lane makes: the arms
+    /// C1bn does make each happened to carry both or neither.
+    #[cfg(all(feature = "dissect", feature = "codec-declare"))]
     #[test]
     fn a_declare_inside_a_frame_populates_the_keyexpr_tables() {
         use crate::passive_keyexpr::Resolved;

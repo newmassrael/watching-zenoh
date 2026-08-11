@@ -6144,6 +6144,21 @@ layer_c1bn_passive_dissection_features() {
         --features dissect --all-targets --quiet -- -D warnings) || return 1
     (cd crates && cargo clippy -p wz-session-core --no-default-features \
         --features transport-link-raweth --all-targets --quiet -- -D warnings) || return 1
+    # R311y713 — THE CONSUMER-AND-DEPENDENCY SELECTION, which is a third
+    # feature resolution and not a shorthand for the two single-package lanes
+    # above. Selecting wz-capture and wz-session-core together unifies
+    # wz-capture's choices INTO wz-session-core's own test build: that turns on
+    # `codec-declare` while leaving `dissect` off, and a test gated on the
+    # first alone then reaches for the observer keyexpr tables, which are
+    # `all(dissect, codec-declare)`. Every arm above carried both or neither,
+    # so all of them were green while this failed to compile.
+    #
+    # The first attempt at this arm was `--features alloc,codec-declare`, and
+    # it PROBED GREEN with the defect restored: `codec-declare` does not put
+    # `passive` in the build at all, so the lane had no population to check.
+    # This spelling was probed the same way and reds.
+    (cd crates && cargo clippy -p wz-capture -p wz-session-core \
+        --all-targets --quiet -- -D warnings) || return 1
     # R311y605 — `codec-join`, in BOTH shapes, and the second one is the one
     # that earned its place. `codec-join` alone leaves `inbound` out (the module
     # is alloc-gated), so it proves only that `join_decode` composes;
