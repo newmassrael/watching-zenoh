@@ -1644,6 +1644,30 @@ PY
     return 0
 }
 
+# ─── Layer C0mut — every leg of the verdict is LOAD-BEARING ─────────
+#
+# R311y726 (N14) — the behavioural half of the `VerdictReason` discipline, and
+# the half a static scan cannot express. Layer C0's `verdict_reason_lint` asks
+# whether a test NAMES each leg; this severs each leg in turn and requires a
+# test to REDDEN. R311y715 ran exactly this sweep by hand and found nine guards
+# binding nothing; R311y725 bound thirteen unnamed legs and still proved only
+# that they are mentioned.
+#
+# Its own layer rather than a line in C0 because the cost is a different order:
+# C0 is 18s of static scanning and this compiles and runs the suite once per
+# leg. MEASURED locally at 2m16s over 23 legs with a warm cache, which is the
+# shape of a lane, not of a lint.
+layer_c0mut_verdict_legs() {
+    # A gate that cannot read its input must not report green -- the rule Layer
+    # C0 already applies to python3, and this lane IS a python program.
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "  Layer C0mut FAIL: python3 not on PATH — the leg sweep cannot run" >&2
+        return 1
+    fi
+    python3 scripts/lib/verdict_leg_mutation.py || return 1
+    return 0
+}
+
 # ─── Layer C1 — cargo test --workspace ──────────────────────────────
 layer_c1_cargo_test() {
     # Stage 4b — exclude wz-session-lwip: it forces wz-session-core/no_std
@@ -11259,6 +11283,7 @@ run_layer A5 layer_a5_apfull_membership || overall=1
 run_layer B layer_b_verify_codegen || overall=1
 run_layer B2 layer_b2_regen_diff || overall=1
 run_layer C0 layer_c0_test_discipline || overall=1
+run_layer C0mut layer_c0mut_verdict_legs || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1

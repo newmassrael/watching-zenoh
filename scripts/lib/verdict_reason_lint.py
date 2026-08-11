@@ -23,14 +23,26 @@ THE POPULATION IS READ, NEVER LISTED. The variants come from the enum's own
 declaration, so a new one is IN SCOPE the moment it is declared. A hand-kept
 list here would have to be updated by whoever forgot the test.
 
-WHAT "BOUND BY A TEST" MEANS, AND WHAT IT DOES NOT. A variant is bound when it
-is NAMED inside some `#[test]` body in this workspace — either as
-`VerdictReason::Variant` in code, or as its wire name in a string literal, which
-is how the export's own tests assert it. That is a NECESSARY condition and not a
-sufficient one: a test that names a variant and asserts nothing about it would
-satisfy this gate, exactly as `solo_plane_page_lint` does not claim its solo page
-is a good page. The shape is what makes an assertion capable of gating; the
-assertion is the author's.
+WHAT "BOUND BY A TEST" MEANS, AND WHAT IT DOES NOT. A variant is bound when
+`VerdictReason::Variant` appears inside some `#[test]` body in this workspace.
+That is a NECESSARY condition and not a sufficient one: a test that names a
+variant and asserts nothing about it would satisfy this gate, exactly as
+`solo_plane_page_lint` does not claim its solo page is a good page. The shape is
+what makes an assertion capable of gating; the assertion is the author's.
+
+THE SUFFICIENT CONDITION IS A DIFFERENT GATE, and it exists:
+`verdict_leg_mutation.py` severs each leg in turn and requires a test to redden.
+This one is the cheap structural half that runs in Layer C0 on every commit; that
+one is the expensive behavioural half. Keep both — the mutation sweep cannot tell
+an undocumented variant from a documented one, and this cannot tell a naming test
+from an asserting one.
+
+R311y726 REMOVED a second binding path this gate used to accept — the variant's
+wire name appearing as a string literal in a verdict-ish test. MEASURED before
+removing it: all 23 variants were bound by the code form and NOT ONE relied on
+the string form, so the path bound nothing and could only ever have bound
+something by accident. A test quoting an unrelated snake_case word would have
+satisfied it.
 
 COMMENTS DO NOT COUNT, and that rule is R311y717's, learned the hard way: the
 first `discard_site_lint` was satisfied by the word "censused" appearing in a
@@ -74,13 +86,6 @@ QUALIFIED = re.compile(rf"{ENUM_NAME}::(\w+)")
 
 # Below these the scan read the wrong tree and must not report OK — the failure
 # mode `duplicate_module_lint` shipped with on its first run (0 files, exit 0).
-# What makes a test one that is ABOUT the verdict, for the wire-name binding
-# below. Any of these in the body means the test reached the verdict surface.
-VERDICT_MARKERS = ("reasons(", "is_complete", ENUM_NAME)
-
-# A wire name as an assertion would spell it.
-WIRE_STRING = re.compile(r"\"([a-z0-9_]+)\"")
-
 MIN_FILES = 40
 MIN_VARIANTS = 20
 
@@ -90,17 +95,14 @@ def blank(seg: str) -> str:
     return "".join(c if c == "\n" else " " for c in seg)
 
 
-def mask(text: str, *, strings: bool) -> str:
-    """Blank comment content, and string-literal content when asked.
+def mask(text: str) -> str:
+    """Blank comment and string-literal content, keeping line structure.
 
-    Two masks over one walk, because the two matches this gate makes want
-    opposite things and neither wants comments. The brace walk that finds a test
-    body needs strings blanked, or a `{` inside `"\\"gaps\\":{"` runs the body
-    past its own end. The wire-name match needs them KEPT, because a test that
-    asserts `"sn_missing"` in the export is binding that variant.
-
-    Doing it in one function keeps the two masks from disagreeing about where a
-    comment ends, which they would if written twice.
+    Comments go because a gate a comment can satisfy is a gate that scores prose
+    (R311y717). String literals go because the brace walk that finds a test body
+    would otherwise run past its own end on a `{` inside `"\\"gaps\\":{"` — the
+    defect `solo_plane_page_lint` records having been bitten by, where one
+    literal swallowed 436 lines and every test behind them.
     """
     out: list[str] = []
     i, n = 0, len(text)
@@ -124,7 +126,7 @@ def mask(text: str, *, strings: bool) -> str:
                 close = '"' + "#" * (k - i - 1)
                 j = text.find(close, k + 1)
                 j = n if j < 0 else j + len(close)
-                out.append(blank(text[i:j]) if strings else text[i:j])
+                out.append(blank(text[i:j]))
                 i = j
             else:
                 out.append(c)
@@ -139,7 +141,7 @@ def mask(text: str, *, strings: bool) -> str:
                     j += 1
                     break
                 j += 1
-            out.append(blank(text[i:j]) if strings else text[i:j])
+            out.append(blank(text[i:j]))
             i = j
         else:
             out.append(c)
@@ -195,8 +197,7 @@ def test_bindings(root: Path) -> tuple[dict[str, list[str]], int, int]:
             continue
         scanned += 1
         raw = path.read_text(encoding="utf-8", errors="replace")
-        walkable = mask(raw, strings=True).splitlines()
-        readable = mask(raw, strings=False).splitlines()
+        walkable = mask(raw).splitlines()
         i = 0
         while i < len(walkable):
             if not TEST_ATTR.match(walkable[i]):
@@ -220,19 +221,10 @@ def test_bindings(root: Path) -> tuple[dict[str, list[str]], int, int]:
                 k += 1
             tests_seen += 1
             body_code = "\n".join(walkable[j : k + 1])
-            body_text = "\n".join(readable[j : k + 1])
             i = k + 1
+            rel = path.relative_to(root).as_posix()
             for variant in QUALIFIED.findall(body_code):
-                bound.setdefault(variant, []).append(f"{path.name}::{name}")
-            # A test may bind a reason through the EXPORT instead, asserting the
-            # wire name in the rendered JSON. That counts -- it is the consumer's
-            # own view of the same fact -- but only in a test that is ABOUT the
-            # verdict. Without that qualifier `"desyncs"` in an unrelated framing
-            # test would bind `Desyncs`, and a gate satisfied by a coincidence of
-            # spelling is the shape R311y717 had to fix once already.
-            if any(marker in body_code for marker in VERDICT_MARKERS):
-                for wire in WIRE_STRING.findall(body_text):
-                    bound.setdefault(f"wire:{wire}", []).append(f"{path.name}::{name}")
+                bound.setdefault(variant, []).append(f"{rel}::{name}")
     return bound, tests_seen, scanned
 
 
@@ -306,13 +298,10 @@ def main() -> int:
     for v in variants:
         if v in bound:
             continue
-        if f"wire:{wire.get(v)}" in bound:
-            continue
         failures.append(
-            f"  `{ENUM_NAME}::{v}` is named by no test — neither as "
-            f"`{ENUM_NAME}::{v}` in code nor as `\"{wire.get(v, '?')}\"` in an "
-            "assertion. R311y715 measured what an unbound leg costs: severing "
-            "it left every test green"
+            f"  `{ENUM_NAME}::{v}` is named by no test — no `#[test]` body "
+            f"mentions `{ENUM_NAME}::{v}`. R311y715 measured what an unbound "
+            "leg costs: severing it left every test green"
         )
 
     if failures:

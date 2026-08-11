@@ -1261,12 +1261,61 @@ pub mod formats {
         /// path, name). See [`FormatMap::name_field`] for why they are
         /// declared rather than derived.
         names: Vec<(String, String, String)>,
-        /// R311y725 (N8) — whether each rule in [`Self::rules`] has ever been
-        /// SELECTED for a keyexpr this capture carried, parallel to that list.
-        rules_bound: Vec<core::cell::Cell<bool>>,
-        /// R311y725 (N8) — whether each declaration in [`Self::names`] has ever
-        /// NAMED a field this capture decoded, parallel to that list.
-        names_bound: Vec<core::cell::Cell<bool>>,
+    }
+
+    /// R311y726 — a handle to ONE declaration installed in a [`FormatMap`].
+    ///
+    /// # Why a handle and not an index
+    ///
+    /// R311y725 needed to answer "which declarations applied to this capture"
+    /// and recorded it INSIDE the map, as a `Cell<bool>` beside each rule. That
+    /// made a type which is pure configuration carry state belonging to one RUN
+    /// — two analyses sharing a map would have seen each other's marks, and a
+    /// map consulted once could never be consulted again as if it were fresh.
+    ///
+    /// The fix is not to move the flags somewhere else and keep the arithmetic:
+    /// a bare `usize` handed out here would be a positional index into a private
+    /// `Vec`, which a caller can compute with, compare against `patterns()`, or
+    /// hold past a mutation that shifts it. This is opaque — it can be stored,
+    /// compared and looked up, and nothing else — so the ONE thing a caller may
+    /// do with it is remember it and hand it back.
+    ///
+    /// Ordered, because the natural ledger of "which of these were used" is a
+    /// set, and a set wants an order.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct DeclarationId(usize);
+
+    /// R311y726 — which flag a declaration was installed through.
+    ///
+    /// Named here rather than in the reader, because the DISTINCTION is a
+    /// property of the map: a rule says which decoder reads a topic's payload
+    /// and a name says what one path inside it is called, and the two fail to
+    /// apply for different reasons. What each one is SPELLED as on a command
+    /// line belongs to the reader, and stays there.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum DeclarationKind {
+        /// A keyexpr pattern mapped to a payload format.
+        FormatRule,
+        /// A field path under a keyexpr pattern given a name.
+        FieldName,
+    }
+
+    /// R311y726 — one installed declaration, as a reader would have to see it
+    /// to be told anything about it.
+    ///
+    /// `text` is the declaration in the syntax it was DECLARED in, rendered by
+    /// the map rather than rebuilt by every caller that wants to name one. A
+    /// caller that assembled `"{pattern}:{path}={name}"` for itself would be a
+    /// second opinion about how a declaration is spelled, which drifts from the
+    /// parser that accepted it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Declaration {
+        /// The handle, for a ledger of what was used.
+        pub id: DeclarationId,
+        /// Which flag installed it.
+        pub kind: DeclarationKind,
+        /// How the reader wrote it.
+        pub text: String,
     }
 
     impl<'a> FormatMap<'a> {
@@ -1275,9 +1324,32 @@ pub mod formats {
             Self {
                 rules: Vec::new(),
                 names: Vec::new(),
-                rules_bound: Vec::new(),
-                names_bound: Vec::new(),
             }
+        }
+
+        /// R311y726 — every declaration installed, rules first, each with the
+        /// handle it answers to.
+        ///
+        /// The population a caller's own "which of these applied" ledger is
+        /// diffed against. Rules and names share ONE id space so that ledger is
+        /// one set rather than two that can disagree about which is which.
+        pub fn declarations(&self) -> Vec<Declaration> {
+            let mut out = Vec::with_capacity(self.rules.len() + self.names.len());
+            for (at, (pattern, _)) in self.rules.iter().enumerate() {
+                out.push(Declaration {
+                    id: DeclarationId(at),
+                    kind: DeclarationKind::FormatRule,
+                    text: pattern.clone(),
+                });
+            }
+            for (at, (pattern, path, name)) in self.names.iter().enumerate() {
+                out.push(Declaration {
+                    id: DeclarationId(self.rules.len() + at),
+                    kind: DeclarationKind::FieldName,
+                    text: alloc::format!("{pattern}:{path}={name}"),
+                });
+            }
+            out
         }
 
         /// Map every keyexpr matching `pattern` to `format`.
@@ -1293,7 +1365,6 @@ pub mod formats {
                 return Err(FormatMapError::WildcardUnsupported(pattern.to_owned()));
             }
             self.rules.push((pattern.to_owned(), format));
-            self.rules_bound.push(core::cell::Cell::new(false));
             Ok(())
         }
 
@@ -1303,18 +1374,16 @@ pub mod formats {
         /// written here — a second dialect would disagree with the router about
         /// `**` at exactly the interesting cases, which is the argument
         /// [`crate::filter`] already makes for the selector language.
-        pub fn for_keyexpr(&self, keyexpr: &str) -> Option<&'a dyn PayloadFormat> {
+        /// R311y726 — the handle rides along, so a caller that wants to know
+        /// which rules applied records it instead of asking a second time.
+        pub fn for_keyexpr(&self, keyexpr: &str) -> Option<(DeclarationId, &'a dyn PayloadFormat)> {
             let at = self.rules.iter().position(|(pattern, _)| {
                 // The matcher takes CHUNKS, which is the same split
                 // `filter::compile_pattern` performs for the same function.
                 let chunks: Vec<&str> = pattern.split('/').collect();
                 wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
             })?;
-            // R311y725 (N8) — the rule is now KNOWN to cover traffic this
-            // capture carried. `position` rather than `find` for exactly this:
-            // the answer and the bookkeeping need the same index.
-            self.rules_bound[at].set(true);
-            Some(self.rules[at].1)
+            Some((DeclarationId(at), self.rules[at].1))
         }
 
         /// Whether any rule was installed. A caller renders nothing for an
@@ -1367,7 +1436,6 @@ pub mod formats {
             }
             self.names
                 .push((pattern.to_owned(), path.to_owned(), name.to_owned()));
-            self.names_bound.push(core::cell::Cell::new(false));
             Ok(())
         }
 
@@ -1376,57 +1444,19 @@ pub mod formats {
         /// First match wins, on the same rule [`Self::for_keyexpr`] states: a
         /// later, more specific declaration cannot quietly override an earlier
         /// one, so the order a reader typed is the order that applies.
-        pub fn field_name(&self, keyexpr: &str, path: &str) -> Option<&str> {
+        /// R311y726 — the handle rides along, for the reason
+        /// [`Self::for_keyexpr`] states.
+        pub fn field_name(&self, keyexpr: &str, path: &str) -> Option<(DeclarationId, &str)> {
             let at = self.names.iter().position(|(pattern, p, _)| {
                 p == path && {
                     let chunks: Vec<&str> = pattern.split('/').collect();
                     wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
                 }
             })?;
-            // R311y725 (N8) — this declaration has now named a real field.
-            self.names_bound[at].set(true);
-            Some(self.names[at].2.as_str())
-        }
-
-        /// R311y725 (N8) — the format rules that were installed and then
-        /// SELECTED FOR NOTHING in this capture.
-        ///
-        /// # Why a declaration that binds nothing must not be silent
-        ///
-        /// A rule and a name are both the deployment TELLING this reader
-        /// something it cannot derive (`name_field` above states why), and the
-        /// failure mode of a declaration is not that it is refused — that is
-        /// checked at parse time and reported — but that it is accepted and then
-        /// never applies. `demo/**:7=humidity` typed against messages whose
-        /// fields stop at 6 renders exactly like no declaration at all: every
-        /// field prints as a bare number and nothing says the mapping missed.
-        /// The reader concludes their schema is wrong when their PATTERN is.
-        ///
-        /// Reported and not refused, because "no traffic matched" is not an
-        /// error: a reader may be declaring ahead of traffic that has not
-        /// arrived, which is the case `name_field`'s own doc admits. What is
-        /// wrong is saying nothing.
-        ///
-        /// Answerable only AFTER a pass, since it is a fact about what the
-        /// capture turned out to hold. A caller that asks before walking gets
-        /// every declaration back, which is the honest answer to a question
-        /// asked too early rather than a bug.
-        pub fn unbound_rules(&self) -> impl Iterator<Item = &str> {
-            self.rules
-                .iter()
-                .zip(&self.rules_bound)
-                .filter(|(_, bound)| !bound.get())
-                .map(|((pattern, _), _)| pattern.as_str())
-        }
-
-        /// R311y725 (N8) — the field-name declarations that named nothing, as
-        /// `(pattern, path, name)`. See [`Self::unbound_rules`].
-        pub fn unbound_names(&self) -> impl Iterator<Item = (&str, &str, &str)> {
-            self.names
-                .iter()
-                .zip(&self.names_bound)
-                .filter(|(_, bound)| !bound.get())
-                .map(|((pattern, path, name), _)| (pattern.as_str(), path.as_str(), name.as_str()))
+            Some((
+                DeclarationId(self.rules.len() + at),
+                self.names[at].2.as_str(),
+            ))
         }
 
         /// Whether any field name was declared. A caller that renders the
@@ -1488,17 +1518,17 @@ mod format_map_tests {
         map.insert("demo/**", &subtree).expect("a wildcard");
 
         assert_eq!(
-            map.for_keyexpr("demo/temperature").map(|f| f.name()),
+            map.for_keyexpr("demo/temperature").map(|(_, f)| f.name()),
             Some("specific"),
             "the specific rule is ahead of the subtree that also covers it"
         );
         assert_eq!(
-            map.for_keyexpr("demo/pressure").map(|f| f.name()),
+            map.for_keyexpr("demo/pressure").map(|(_, f)| f.name()),
             Some("subtree"),
             "and `**` matches a sibling, which a literal comparison would not"
         );
         assert_eq!(
-            map.for_keyexpr("other/thing").map(|f| f.name()),
+            map.for_keyexpr("other/thing").map(|(_, f)| f.name()),
             None,
             "a keyexpr no rule covers has no format"
         );
@@ -1519,7 +1549,7 @@ mod format_map_tests {
         map.insert("demo/temperature", &first).expect("a literal");
         map.insert("demo/temperature", &second).expect("a literal");
         assert_eq!(
-            map.for_keyexpr("demo/temperature").map(|f| f.name()),
+            map.for_keyexpr("demo/temperature").map(|(_, f)| f.name()),
             Some("first"),
             "two rules covering one keyexpr resolve to the earlier"
         );

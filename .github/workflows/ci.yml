@@ -400,6 +400,22 @@ jobs:
         # "binary not found" downstream.
         run: bash scripts/run-ci.sh --layer C0
 
+      - name: Layer C0mut — every verdict leg is load-bearing
+        # R311y726 (N14) — severs each `VerdictReason` leg in turn and requires
+        # a test to redden. The sufficient condition Layer C0's static
+        # `verdict_reason_lint` cannot express: that gate proves a leg is
+        # NAMED by a test, this proves one DEPENDS on it.
+        #
+        # Placed here, before the workspace test run, because it is the cheaper
+        # of the two ways to learn the suite is broken: it compiles and runs
+        # only the crates that bind a leg, and a tree whose baseline is red
+        # fails this lane by design rather than measuring nothing.
+        #
+        # MEASURED locally at 2m16s over 23 legs (warm cache). It mutates
+        # `report.rs` in place and restores it byte for byte on every exit
+        # path; a hosted runner's checkout is discarded either way.
+        run: bash scripts/run-ci.sh --layer C0mut
+
       - name: Layer C1 — cargo test --workspace
         run: bash scripts/run-ci.sh --layer C1
 

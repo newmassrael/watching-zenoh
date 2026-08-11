@@ -741,6 +741,11 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
             });
         }
     }
+    // R311y726 — the map is COMPLETE from here on, and this run's ledger of
+    // which declarations applied is a separate value that borrows it. Declared
+    // at the point the map stops changing, because a ledger over a map still
+    // being filled would be a set of handles into a moving list.
+    let payload_declarations = Declarations::new(&payload_formats);
     let mut dissection = Dissection::from_capture_declaring(capture, quic_ports, serial_linktypes)?;
 
     // The capture's own keys first, then the external log folded in.
@@ -922,7 +927,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
                     &fields,
                     format,
                     messages_per_flow,
-                    &payload_formats,
+                    &payload_declarations,
                     &payload_refusals,
                 ));
             }
@@ -955,7 +960,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
                     &fields,
                     format,
                     messages_per_flow,
-                    &payload_formats,
+                    &payload_declarations,
                     &payload_refusals,
                 ));
             }
@@ -1673,7 +1678,7 @@ fn field_lines(
     decrypted: &FieldSink,
     format: Format,
     messages_per_flow: Option<usize>,
-    payload_formats: &wz_capture::payload::formats::FormatMap<'_>,
+    payload_formats: &Declarations<'_>,
     payload_refusals: &[FieldNote],
 ) -> String {
     use wz_session_core::dissect::to_json;
@@ -1855,21 +1860,12 @@ fn field_lines(
     // one row producer -- and the placement is what avoids it rather than a
     // second traversal.
     let unbound: Vec<FieldNote> = payload_formats
-        .unbound_rules()
-        .map(|pattern| FieldNote::PayloadDeclarationUnbound {
-            declaration: pattern.to_string(),
-            door: PayloadDoor::FormatRule,
+        .unused()
+        .into_iter()
+        .map(|d| FieldNote::PayloadDeclarationUnbound {
+            declaration: d.text,
+            kind: d.kind,
         })
-        .chain(
-            payload_formats
-                .unbound_names()
-                .map(
-                    |(pattern, path, name)| FieldNote::PayloadDeclarationUnbound {
-                        declaration: format!("{pattern}:{path}={name}"),
-                        door: PayloadDoor::FieldName,
-                    },
-                ),
-        )
         .collect();
     if !unbound.is_empty() {
         listings.push(FlowListing {
@@ -1940,10 +1936,11 @@ enum FieldNote {
     /// rows — every field renders unnamed — and send a reader to opposite
     /// places, which is why they are separate notes rather than one.
     PayloadDeclarationUnbound {
-        /// The declaration in the syntax the reader typed it in.
+        /// The declaration in the syntax the reader typed it in, spelled by the
+        /// map that accepted it rather than reassembled here.
         declaration: String,
         /// Which flag it arrived through.
-        door: PayloadDoor,
+        kind: wz_capture::payload::formats::DeclarationKind,
     },
     /// The `--max-messages` bound left messages out of this flow's listing.
     Omitted {
@@ -1967,47 +1964,110 @@ enum FieldNote {
     },
 }
 
-/// R311y725 (N8) — which flag a payload declaration arrived through.
+/// R311y726 — THE DECLARATIONS IN FORCE FOR ONE RUN, and which of them applied.
 ///
-/// The two are reported apart because the remedy differs: a format rule that
-/// bound nothing means the PATTERN missed every topic, while a name declaration
-/// that bound nothing may have matched the topic and missed the PATH. A single
-/// "declaration unused" note would send a reader to check the pattern in both
-/// cases, and in the second the pattern is right.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PayloadDoor {
-    /// `--payload-format <keyexpr>=<format>`.
-    FormatRule,
-    /// `--payload-name <keyexpr>:<path>=<name>`.
-    FieldName,
+/// # Why this is not on the map
+///
+/// R311y725 answered "which declarations bound nothing" by putting a
+/// `Cell<bool>` beside every rule inside `FormatMap`. It worked and it put the
+/// wrong fact in the wrong place: a `FormatMap` is what the reader DECLARED,
+/// which does not change while a capture is walked, and "was this rule ever
+/// selected" is a fact about ONE walk. Merged, the two mean a map cannot be
+/// consulted twice as if it were fresh, and two analyses sharing declarations
+/// would read each other's marks.
+///
+/// So the map went back to being configuration and this type owns the run. It
+/// borrows the map, forwards the two questions the field layer asks, and
+/// remembers the handle each answer came back with. `RefCell` and not `&mut`
+/// because the field layer's rendering path is threaded with shared borrows
+/// several calls deep — a `&mut` would have to be carried through every row
+/// renderer, and the row renderers have nothing to do with this.
+struct Declarations<'a> {
+    map: &'a wz_capture::payload::formats::FormatMap<'a>,
+    used: core::cell::RefCell<
+        std::collections::BTreeSet<wz_capture::payload::formats::DeclarationId>,
+    >,
 }
 
-impl PayloadDoor {
-    /// The flag, as the help text spells it.
-    fn flag(self) -> &'static str {
-        match self {
-            Self::FormatRule => "--payload-format",
-            Self::FieldName => "--payload-name",
+impl<'a> Declarations<'a> {
+    fn new(map: &'a wz_capture::payload::formats::FormatMap<'a>) -> Self {
+        Self {
+            map,
+            used: core::cell::RefCell::new(std::collections::BTreeSet::new()),
         }
     }
 
-    /// The machine-readable note kind. Spelled out rather than derived, on the
-    /// rule [`wz_capture::report::VerdictReason::name`] states: these go out in
-    /// the export and a consumer matches on them.
-    fn kind(self) -> &'static str {
-        match self {
-            Self::FormatRule => "payload_rule_unbound",
-            Self::FieldName => "payload_name_unbound",
-        }
+    /// Whether any rule was installed — the map's own question, forwarded so a
+    /// caller holding this type does not have to reach past it.
+    fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 
-    /// What a reader should look at, which is the half that differs.
-    fn remedy(self) -> &'static str {
-        match self {
-            Self::FormatRule => "no key expression in this capture matched the pattern",
-            Self::FieldName => {
-                "no field this reader decoded sat at that path under a matching key expression"
-            }
+    /// The format for this keyexpr, RECORDING that the rule applied.
+    fn for_keyexpr(
+        &self,
+        keyexpr: &str,
+    ) -> Option<&'a dyn wz_capture::payload::formats::PayloadFormat> {
+        let (id, format) = self.map.for_keyexpr(keyexpr)?;
+        self.used.borrow_mut().insert(id);
+        Some(format)
+    }
+
+    /// The declared name for this path, RECORDING that the declaration applied.
+    fn field_name(&self, keyexpr: &str, path: &str) -> Option<String> {
+        let (id, name) = self.map.field_name(keyexpr, path)?;
+        self.used.borrow_mut().insert(id);
+        Some(name.to_string())
+    }
+
+    /// The declarations this run never applied.
+    ///
+    /// Answerable only after a walk, and that is a property of the question
+    /// rather than a caveat: before one, nothing has applied and the honest
+    /// answer is "all of them".
+    fn unused(&self) -> Vec<wz_capture::payload::formats::Declaration> {
+        let used = self.used.borrow();
+        self.map
+            .declarations()
+            .into_iter()
+            .filter(|d| !used.contains(&d.id))
+            .collect()
+    }
+}
+
+/// R311y725 (N8) — the CLI's half of a declaration kind: the flag it was typed
+/// as, the note kind a consumer branches on, and where the remedy lies.
+///
+/// R311y726 moved the KIND itself into `wz-capture`, where the distinction
+/// between a rule and a name lives, and left these three here, where the
+/// command line is. A flag name is not a property of the map.
+fn declaration_flag(kind: wz_capture::payload::formats::DeclarationKind) -> &'static str {
+    match kind {
+        wz_capture::payload::formats::DeclarationKind::FormatRule => "--payload-format",
+        wz_capture::payload::formats::DeclarationKind::FieldName => "--payload-name",
+    }
+}
+
+/// The machine-readable note kind. Spelled out rather than derived, on the rule
+/// [`wz_capture::report::VerdictReason::name`] states: these go out in the
+/// export and a consumer matches on them.
+fn declaration_note_kind(kind: wz_capture::payload::formats::DeclarationKind) -> &'static str {
+    match kind {
+        wz_capture::payload::formats::DeclarationKind::FormatRule => "payload_rule_unbound",
+        wz_capture::payload::formats::DeclarationKind::FieldName => "payload_name_unbound",
+    }
+}
+
+/// What a reader should look at, which is the half that differs: a rule that
+/// bound nothing means the PATTERN missed every topic, while a name that bound
+/// nothing may have matched the topic and missed the PATH.
+fn declaration_remedy(kind: wz_capture::payload::formats::DeclarationKind) -> &'static str {
+    match kind {
+        wz_capture::payload::formats::DeclarationKind::FormatRule => {
+            "no key expression in this capture matched the pattern"
+        }
+        wz_capture::payload::formats::DeclarationKind::FieldName => {
+            "no field this reader decoded sat at that path under a matching key expression"
         }
     }
 }
@@ -2107,7 +2167,7 @@ impl FieldNote {
             Self::NothingWalkable { .. } => "nothing_walkable",
             Self::CaptureNotReread => "capture_not_reread",
             Self::PayloadRuleRefused { .. } => "payload_rule_refused",
-            Self::PayloadDeclarationUnbound { door, .. } => door.kind(),
+            Self::PayloadDeclarationUnbound { kind, .. } => declaration_note_kind(*kind),
             Self::Omitted { .. } => "omitted",
             Self::Disagreement { .. } => "disagreement",
         }
@@ -2130,10 +2190,10 @@ impl FieldNote {
             Self::PayloadRuleRefused { rule, why } => {
                 format!("payload-format rule `{rule}` was NOT installed -- {why}")
             }
-            Self::PayloadDeclarationUnbound { declaration, door } => format!(
+            Self::PayloadDeclarationUnbound { declaration, kind } => format!(
                 "{} `{declaration}` was installed and BOUND NOTHING -- {}",
-                door.flag(),
-                door.remedy()
+                declaration_flag(*kind),
+                declaration_remedy(*kind)
             ),
             Self::Omitted { count, .. } => format!("{count} more not listed"),
             Self::Disagreement { count, .. } => format!(
@@ -2949,7 +3009,7 @@ struct DatagramWalk<'a> {
     /// The per-flow row ceiling, `None` for unbounded.
     messages_per_flow: Option<usize>,
     /// Payload-format rules in force for this run.
-    payload_formats: &'a wz_capture::payload::formats::FormatMap<'a>,
+    payload_formats: &'a Declarations<'a>,
 }
 
 fn datagram_field_rows(
@@ -3705,7 +3765,7 @@ struct KeyexprAt<'a> {
 /// pass a rule set with nothing to resolve against.
 #[derive(Clone, Copy)]
 struct PayloadLens<'a> {
-    formats: &'a wz_capture::payload::formats::FormatMap<'a>,
+    formats: &'a Declarations<'a>,
     spaces: &'a wz_capture::agg::KeyexprSpaces,
 }
 
@@ -3799,7 +3859,7 @@ fn subtree_payload_bytes(
 /// Apply the mapping to one walked message.
 fn decode_payload(
     field: &wz_session_core::dissect::Field,
-    map: &wz_capture::payload::formats::FormatMap<'_>,
+    map: &Declarations<'_>,
     at: KeyexprAt<'_>,
 ) -> PayloadDecoding {
     use wz_session_core::dissect::FieldValue;
@@ -3836,7 +3896,7 @@ fn decode_payload(
                 // because this is the one place that holds both the resolved
                 // keyexpr and the decoded paths; the decoder has the paths and
                 // no keyexpr, and the map has neither until now.
-                f.name = map.field_name(&keyexpr, &f.path).map(str::to_string);
+                f.name = map.field_name(&keyexpr, &f.path);
             }
             PayloadDecoding::Decoded {
                 keyexpr,
@@ -4431,6 +4491,89 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// R311y726 — A DECLARATION LEDGER BELONGS TO ITS RUN, NOT TO THE MAP.
+    ///
+    /// ## The property, and why it needed a witness
+    ///
+    /// R311y725 answered "which declarations bound nothing" with a `Cell<bool>`
+    /// beside every rule INSIDE `FormatMap`, and it worked. What it also did was
+    /// put a fact about one walk into a value that describes what the reader
+    /// declared: the marks outlived the walk, so a map could never be consulted
+    /// a second time as if it were fresh, and two analyses sharing one map would
+    /// have read each other's answers.
+    ///
+    /// That is not a hypothetical about a threaded future — it is what the type
+    /// MEANT, and this test is the difference in one run. The second ledger over
+    /// the SAME map reports both declarations unused, because the first ledger's
+    /// walk was the first ledger's. Under the R311y725 shape this assertion
+    /// fails, which is what makes it a witness rather than a restatement.
+    ///
+    /// ## Not a `Sync` test, and that is a correction
+    ///
+    /// The carry this pays said the `Cell` had cost `FormatMap` its `Sync`.
+    /// MEASURED, and false: `FormatMap` holds `&dyn PayloadFormat`, a trait
+    /// object with no auto-trait bounds, so it was never `Sync` and the `Cell`
+    /// changed nothing about that. The real cost was the one above.
+    #[test]
+    fn a_declaration_ledger_belongs_to_its_run_and_not_to_the_map() {
+        use wz_capture::payload::formats::FormatMap;
+
+        let format = payload_formats::builtin("protobuf").expect("a built-in decoder");
+        // Literal patterns, so this runs in every feature build: `demo/**`
+        // is REFUSED where `filter-wildcards` is off, which is this map's own
+        // rule and not a fact this test is about.
+        let mut map = FormatMap::new();
+        map.insert("demo/a", format).expect("installs");
+        map.name_field("demo/a", "1", "temperature")
+            .expect("installs");
+
+        let first = Declarations::new(&map);
+        assert_eq!(
+            first.unused().len(),
+            2,
+            "before a walk NOTHING has applied, which is the honest answer to \
+             the question asked too early"
+        );
+        assert!(first.for_keyexpr("demo/a").is_some(), "the rule covers it");
+        assert_eq!(
+            first.field_name("demo/a", "1").as_deref(),
+            Some("temperature"),
+            "and the declaration names that path"
+        );
+        assert!(
+            first.unused().is_empty(),
+            "both declarations applied in this run: {:?}",
+            first.unused()
+        );
+
+        // THE PROPERTY. A second run over the same declarations starts clean --
+        // the marks were never on the map.
+        let second = Declarations::new(&map);
+        let unused = second.unused();
+        assert_eq!(
+            unused.len(),
+            2,
+            "a second run must not inherit the first run's answers: {unused:?}"
+        );
+        assert_eq!(
+            unused.iter().map(|d| d.kind).collect::<Vec<_>>(),
+            alloc_vec_kinds(),
+            "rules are listed before names, in the order they were installed"
+        );
+        assert_eq!(
+            unused.iter().map(|d| d.text.as_str()).collect::<Vec<_>>(),
+            vec!["demo/a", "demo/a:1=temperature"],
+            "and each is spelled by the map that accepted it, not reassembled \
+             by whoever renders it"
+        );
+    }
+
+    /// The two kinds, in the order [`Declarations::unused`] yields them.
+    fn alloc_vec_kinds() -> Vec<wz_capture::payload::formats::DeclarationKind> {
+        use wz_capture::payload::formats::DeclarationKind;
+        vec![DeclarationKind::FormatRule, DeclarationKind::FieldName]
     }
 
     #[test]
