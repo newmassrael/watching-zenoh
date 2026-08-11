@@ -5250,6 +5250,7 @@ layer_c1bw_analyze_cli() {
     for name in \
         the_binary_decrypts_a_capture_given_a_key_log_on_the_command_line \
         two_key_logs_are_both_read_and_the_earlier_one_is_not_dropped \
+        a_key_log_for_another_connection_names_what_each_side_holds \
         the_exit_code_separates_an_incomplete_capture_from_a_failed_run \
         an_unreadable_key_log_fails_instead_of_reporting_the_capture_as_encrypted \
         the_flows_option_names_which_connection_the_summary_cannot \

@@ -686,6 +686,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
         Format::Text => {
             let mut rendered = report.to_text();
             rendered.push_str(&pass_lines(&pass, format));
+            rendered.push_str(&key_mismatch_lines(&dissection, opener.log(), format));
             rendered.push_str(&epoch_lines(&epochs, format));
             rendered.push_str(&quic_lines(&quic_flows, format, messages_per_flow));
             if quic_unselected {
@@ -721,6 +722,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
             let mut rendered = String::from("{");
             report.json_fields(&mut rendered);
             rendered.push_str(&pass_lines(&pass, format));
+            rendered.push_str(&key_mismatch_lines(&dissection, opener.log(), format));
             rendered.push_str(&epoch_lines(&epochs, format));
             rendered.push_str(&quic_lines(&quic_flows, format, messages_per_flow));
             // ONE FACT, TWO RENDERINGS (R311y681): a consumer branching on
@@ -803,6 +805,75 @@ fn pass_lines(pass: &wz_capture::DecryptionSummary, format: Format) -> String {
         "  pass: {} flow(s) were already opened by an earlier pass and were \
          skipped -- their plaintext was not offered again\n",
         pass.already_opened
+    )
+}
+
+/// R311y708 (G2) — WHEN THE KEYS ARE FOR ANOTHER CONNECTION, NAME BOTH SIDES.
+///
+/// ## What was measured
+///
+/// `NotDecrypted::NoKeyForSession` means "keys were supplied, this flow has a
+/// `Random`, and nothing supplied is for that session". Its doc says the remedy
+/// is "find the right key log" — and the report gave a reader NOTHING to find it
+/// with. They saw `"reason":"no_key_for_session"` and a `key_log_connections`
+/// COUNT, so the two facts that decide what to do next — which connection this
+/// capture is, and which connections their log holds — were both computed and
+/// both unreachable.
+///
+/// `KeyLog::client_randoms` existed for exactly this and had ZERO callers in the
+/// workspace (R311y708's zero-consumer sweep, the R311y673 class). So this is not
+/// a new capability; it is the one already built, connected.
+///
+/// ## Why both lists rather than a verdict
+///
+/// The reader is shown the two SETS and left to compare them. A tool that said
+/// "wrong key log" would be guessing between two very different situations that
+/// produce the identical enum: the operator grabbed the wrong file, or they
+/// grabbed the right file from the wrong one of two capture runs. The sets
+/// distinguish those; a verdict does not.
+fn key_mismatch_lines(dissection: &Dissection, log: &KeyLog, format: Format) -> String {
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    let wanted: Vec<[u8; 32]> = dissection
+        .encrypted_flows()
+        .iter()
+        .filter(|f| f.not_decrypted == Some(wz_capture::tls::NotDecrypted::NoKeyForSession))
+        .filter_map(|f| f.client_random)
+        .collect();
+    let held: Vec<String> = log.client_randoms().map(|r| hex(r)).collect();
+
+    if format == Format::Json {
+        // Emitted UNCONDITIONALLY, unlike the text line: a consumer branching on
+        // this must be able to tell "no mismatch" from "this build predates the
+        // field", and an absent key cannot say the first.
+        return format!(
+            ",\"key_mismatch\":{{\"unopened_sessions\":[{}],\"log_holds\":[{}]}}",
+            wanted
+                .iter()
+                .map(|r| format!("\"{}\"", hex(r)))
+                .collect::<Vec<_>>()
+                .join(","),
+            held.iter()
+                .map(|r| format!("\"{r}\""))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+    if wanted.is_empty() {
+        return String::new();
+    }
+    format!(
+        "  key log: {} flow(s) name a session the supplied keys do not cover.\n    \
+         this capture wants: {}\n    the key log holds: {}\n",
+        wanted.len(),
+        wanted.iter().map(|r| hex(r)).collect::<Vec<_>>().join(", "),
+        if held.is_empty() {
+            String::from("(nothing this reader could parse)")
+        } else {
+            held.join(", ")
+        }
     )
 }
 

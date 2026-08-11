@@ -272,6 +272,88 @@ impl Drop for Scratch {
     }
 }
 
+/// R311y708 (G2) — A KEY LOG FOR ANOTHER CONNECTION NAMES BOTH SIDES.
+///
+/// `no_key_for_session` tells a reader their keys are for a different session
+/// and gives them nothing to check that against. Both facts that decide what to
+/// do next were already computed — the capture's own client random, and the
+/// randoms the log holds, the latter through a `KeyLog::client_randoms` with
+/// zero callers anywhere in the workspace.
+///
+/// BOTH AXES, because a rendering that printed this unconditionally would pass
+/// the mismatch arm on its own: the second half runs the same capture with keys
+/// that DO fit and requires the sentence to be absent and the set to be empty.
+#[test]
+fn a_key_log_for_another_connection_names_what_each_side_holds() {
+    let scratch = Scratch::new("key-mismatch");
+    let (file, log, random) = capture_and_key_log();
+    let capture = scratch.write("session.pcapng", &file);
+
+    let other_random: [u8; 32] =
+        core::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(9));
+    let other_secret: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(5).wrapping_add(1))
+        .collect();
+    let wrong = scratch.write(
+        "wrong.txt",
+        format!(
+            "CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+            hex(&other_random),
+            hex(&other_secret)
+        )
+        .as_bytes(),
+    );
+    let right = scratch.write("right.txt", log.as_bytes());
+
+    let run = |keys: &std::path::Path, json: bool| -> String {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_wz-analyze"));
+        cmd.arg(&capture).arg("--keylog").arg(keys);
+        if json {
+            cmd.arg("--json");
+        }
+        String::from_utf8_lossy(&cmd.output().expect("the binary runs").stdout).into_owned()
+    };
+
+    // THE MISMATCH ARM.
+    let text = run(&wrong, false);
+    assert!(
+        text.contains("1 flow(s) name a session the supplied keys do not cover"),
+        "the reader must be told the keys are for another session: {text}"
+    );
+    assert!(
+        text.contains(&hex(&random)),
+        "and WHICH session this capture is, or they cannot find the right log: {text}"
+    );
+    assert!(
+        text.contains(&hex(&other_random)),
+        "and which one their log holds, which is the half that says whether they \
+         grabbed the wrong file or the wrong capture: {text}"
+    );
+
+    let json = run(&wrong, true);
+    assert!(
+        json.contains(&format!(
+            "\"key_mismatch\":{{\"unopened_sessions\":[\"{}\"],\"log_holds\":[\"{}\"]}}",
+            hex(&random),
+            hex(&other_random)
+        )),
+        "and the machine-facing rendering carries the same two SETS: {json}"
+    );
+
+    // THE OTHER AXIS: keys that fit.
+    let ok_text = run(&right, false);
+    assert!(
+        !ok_text.contains("do not cover"),
+        "a capture whose keys fit must not carry the mismatch sentence: {ok_text}"
+    );
+    let ok_json = run(&right, true);
+    assert!(
+        ok_json.contains("\"key_mismatch\":{\"unopened_sessions\":[],\"log_holds\":["),
+        "the JSON key stays present with an empty set -- absent cannot say \
+         'no mismatch': {ok_json}"
+    );
+}
+
 /// R311y708 (Y4) — TWO `--keylog` FILES, AND THE FIRST ONE STILL COUNTS.
 ///
 /// ## What was measured before this test existed
