@@ -5305,6 +5305,7 @@ layer_c1bw_analyze_cli() {
         quic_pass_tests::without_keys_the_initial_space_still_opens_and_the_rest_says_why \
         quic_pass_tests::the_json_reports_the_decryption_rather_than_a_literal_false \
         quic_pass_tests::a_key_log_for_one_direction_opens_that_half_and_names_the_other \
+        quic_pass_tests::the_quic_listing_takes_the_bound_and_says_the_selector_did_not_reach_it \
         payload_formats::tests::a_nested_message_is_walked_and_its_paths_name_the_route \
         payload_formats::tests::a_span_two_layers_in_is_still_in_the_outer_payloads_coordinates \
         payload_formats::tests::a_length_field_that_is_not_a_message_falls_back_to_its_byte_count \

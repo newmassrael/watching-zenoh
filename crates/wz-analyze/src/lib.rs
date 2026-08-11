@@ -631,6 +631,21 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     // its ClientHello, which is exactly what tells a reader whether the key log
     // they are about to fetch is the right one.
     let (quic, quic_flows) = quic_pass(capture, &dissection, opener.log());
+    // R311y706 (Y5) — and the report SAYS the selector did not reach this pass.
+    //
+    // The register carried this as "--select does not reach the QUIC pass", and
+    // measuring narrowed it: `Filter`'s terms are ALL record-level -- key, dir,
+    // kind, bytes, time, elapsed, offset, delay, replies, errs, first_reply,
+    // completion -- and not one of them can be evaluated against a flow whose
+    // records this reader has never decoded. So the selector is not UNWIRED
+    // here, it is INAPPLICABLE, and wiring it would mean inventing a predicate
+    // over bytes nobody has read.
+    //
+    // What was missing is therefore a SENTENCE, not a filter. A reader who
+    // typed `--select` and saw QUIC rows had every reason to read them as
+    // selected ones -- the same silence R311y667 closed for the planes that CAN
+    // answer a selector and could not judge some of their records.
+    let quic_unselected = select.is_some() && !quic_flows.is_empty();
     let mut report = CaptureReport::of(&dissection);
     report = report.with_quic_decryption(&quic);
     if let Some(table) = &throughput {
@@ -659,7 +674,14 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
             let mut rendered = report.to_text();
             rendered.push_str(&pass_lines(&pass, format));
             rendered.push_str(&epoch_lines(&epochs, format));
-            rendered.push_str(&quic_lines(&quic_flows, format));
+            rendered.push_str(&quic_lines(&quic_flows, format, messages_per_flow));
+            if quic_unselected {
+                rendered.push_str(
+                    "  QUIC: the --select expression did not narrow these flows -- \
+                     every one of its terms is about a decoded record, and this \
+                     reader has decoded none of theirs\n",
+                );
+            }
             if per_field {
                 rendered.push_str("fields:\n");
                 rendered.push_str(&field_lines(
@@ -687,7 +709,11 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
             report.json_fields(&mut rendered);
             rendered.push_str(&pass_lines(&pass, format));
             rendered.push_str(&epoch_lines(&epochs, format));
-            rendered.push_str(&quic_lines(&quic_flows, format));
+            rendered.push_str(&quic_lines(&quic_flows, format, messages_per_flow));
+            // ONE FACT, TWO RENDERINGS (R311y681): a consumer branching on
+            // whether their selector reached these flows must not have to parse
+            // the sentence a person reads.
+            rendered.push_str(&format!(",\"quic_unselected\":{quic_unselected}"));
             if per_field {
                 rendered.push(',');
                 rendered.push_str(&field_lines(
@@ -904,7 +930,7 @@ fn quic_pass(
 /// gets no line -- and absent from JSON on the same condition, because the
 /// capture-wide `quic` object the report already emits is the structural one a
 /// consumer branches on. This is the LISTING beside it.
-fn quic_lines(flows: &[QuicFlowOutcome], format: Format) -> String {
+fn quic_lines(flows: &[QuicFlowOutcome], format: Format, per_flow: Option<usize>) -> String {
     use wz_session_core::passive::Direction;
 
     if flows.is_empty() {
@@ -956,7 +982,8 @@ fn quic_lines(flows: &[QuicFlowOutcome], format: Format) -> String {
                 ));
             }
             out.push_str("],\"sequences\":[");
-            for (index, (direction, key, bytes)) in flow.sequences.iter().enumerate() {
+            let shown = per_flow.unwrap_or(flow.sequences.len());
+            for (index, (direction, key, bytes)) in flow.sequences.iter().take(shown).enumerate() {
                 if index > 0 {
                     out.push(',');
                 }
@@ -1015,7 +1042,15 @@ fn quic_lines(flows: &[QuicFlowOutcome], format: Format) -> String {
                 ));
             }
         }
-        for (direction, key, bytes) in &flow.sequences {
+        // R311y706 (Y5) — the SAME bound every other listing in this tool takes.
+        // `--max-messages` reached the field rows, the message listing and the
+        // datagram rows and stopped here, so a capture with many QUIC streams
+        // printed all of them under a flag that said otherwise. And the bound
+        // REPORTS ITSELF, which is this crate's rule for every bound that
+        // bites: a listing short by rows nobody accounted for is a listing that
+        // looks whole.
+        let shown = per_flow.unwrap_or(flow.sequences.len());
+        for (direction, key, bytes) in flow.sequences.iter().take(shown) {
             out.push_str(&format!(
                 "    {} {}: {bytes} byte(s)\n",
                 match direction {
@@ -1024,6 +1059,9 @@ fn quic_lines(flows: &[QuicFlowOutcome], format: Format) -> String {
                 },
                 sequence_name(*key),
             ));
+        }
+        if let Some(omitted) = flow.sequences.len().checked_sub(shown).filter(|n| *n > 0) {
+            out.push_str(&format!("    ... {omitted} more sequence(s) not listed\n"));
         }
         if flow.sequences_dropped.iter().any(|n| *n > 0) {
             out.push_str(&format!(
@@ -5740,6 +5778,92 @@ mod quic_pass_tests {
             "the control must differ from the case above in the application \
              bytes and nothing else"
         );
+    }
+
+    /// R311y706 (Y5) — THE TWO THINGS THE QUIC LISTING DID NOT DO, both driven
+    /// through the analyzer over a real capture.
+    ///
+    /// ## The bound
+    ///
+    /// `--max-messages` reached the field rows, the message listing and the
+    /// datagram rows and stopped at this one, so a capture with many QUIC
+    /// streams printed all of them under a flag that said otherwise. It now
+    /// takes the same ceiling, and the ceiling REPORTS ITSELF — this crate's
+    /// rule for every bound that bites, because a listing short by rows nobody
+    /// accounted for is a listing that looks whole.
+    ///
+    /// ## The selector
+    ///
+    /// The register carried "--select does not reach the QUIC pass" and
+    /// measuring narrowed it: every `Filter` term is about a DECODED RECORD,
+    /// and this reader has decoded none of a QUIC flow's. So the selector is
+    /// inapplicable rather than unwired, and what was missing is a sentence — a
+    /// reader who typed `--select` and saw QUIC rows had every reason to read
+    /// them as selected ones.
+    #[test]
+    fn the_quic_listing_takes_the_bound_and_says_the_selector_did_not_reach_it() {
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(7));
+        let (capture, keylog, _) = quic_capture(&random);
+
+        let request = |messages_per_flow, select| Request {
+            capture: &capture,
+            keylog: Some(keylog.as_bytes()),
+            format: Format::Text,
+            per_flow: false,
+            per_message: false,
+            messages_per_flow,
+            quic_ports: &[],
+            payload_rules: &[],
+            census: Census::default(),
+            per_field: false,
+            select,
+        };
+
+        // UNBOUNDED: the fixture's flow carries more than one sequence, or the
+        // bound below would have nothing to bite on and the claim would be
+        // about a listing that was already short.
+        let (whole, _) = analyze_request(&request(None, None)).expect("it reads");
+        let sequences = whole
+            .lines()
+            .filter(|l| l.contains(" byte(s)") && l.contains(": "))
+            .count();
+        assert!(
+            sequences >= 2,
+            "the fixture must list at least two sequences: {whole}"
+        );
+        assert!(
+            !whole.contains("not listed"),
+            "and say nothing about omissions when there are none: {whole}"
+        );
+
+        // BOUNDED at one, and the bound says what it took.
+        let (capped, _) = analyze_request(&request(Some(1), None)).expect("it reads");
+        assert!(
+            capped.contains("more sequence(s) not listed"),
+            "the ceiling reaches this listing and reports itself: {capped}"
+        );
+
+        // THE SELECTOR, which cannot narrow these flows and now says so.
+        let filter = wz_capture::filter::Filter::parse("key == demo/**").expect("compiles");
+        let (selected, _) = analyze_request(&request(None, Some(&filter))).expect("it reads");
+        assert!(
+            selected.contains("the --select expression did not narrow these flows"),
+            "a reader who selected must be told these rows were not selected: {selected}"
+        );
+        assert!(
+            !whole.contains("did not narrow these flows"),
+            "ANTI-VACUITY: unselected runs say nothing about a selector: {whole}"
+        );
+
+        // ONE FACT, TWO RENDERINGS: a consumer branches on the field rather
+        // than parsing the sentence.
+        let (json, _) = analyze_request(&Request {
+            format: Format::Json,
+            ..request(None, Some(&filter))
+        })
+        .expect("it reads");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("one valid document");
+        assert_eq!(parsed["quic_unselected"], serde_json::json!(true));
     }
 
     /// R311y698 (§1.2a) — WITHOUT the key log, the same capture opens its
