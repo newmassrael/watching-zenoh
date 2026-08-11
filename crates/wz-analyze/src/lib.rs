@@ -1877,9 +1877,14 @@ fn datagram_field_rows(
                     continue;
                 }
             }
-            let Ok(field) = wz_session_core::dissect::dissect_transport_message(message, 0) else {
-                continue;
-            };
+            // R311y689 — CHECKED against the frame the session decoded, which is
+            // what the other two row producers have done since R311y682 and
+            // R311y683 and this one did not. The argument for taking it is
+            // R311y687: the equivalent check found a live misread on the
+            // cleartext path -- a batched unit's second message walked as its
+            // first -- and this path indexes its payload by the same kind of
+            // inherited coordinate.
+            let row = walk_plaintext(message, frame);
             shown += 1;
             if format == Format::Json && *emitted > 0 {
                 out.push(',');
@@ -1894,7 +1899,7 @@ fn datagram_field_rows(
                     origin: frame.stream_offset,
                     space: OffsetSpace::Packet,
                 },
-                &FieldRow::Walked(field),
+                &row,
             );
         }
         // R311y679 — the SCOUTING list, which is where a discovery capture's
@@ -2190,7 +2195,22 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
                 }
             },
         };
-        let rows: Vec<MessageRow> = flow.frames.iter().map(MessageRow::transport).collect();
+        // R311y689 — a DECRYPTED flow's frame offsets were remapped to the
+        // ciphertext record they came out of, so they are not byte offsets into
+        // anything a reader can add a span to. The two spaces are told apart
+        // here because this is where the flow's own state is in hand.
+        let rows: Vec<MessageRow> = flow
+            .frames
+            .iter()
+            .map(|f| {
+                let space = if encrypted.is_some() {
+                    OffsetSpace::CiphertextRecord
+                } else {
+                    MessageRow::stream_byte(f)
+                };
+                MessageRow::transport(f, space)
+            })
+            .collect();
         push_flow(
             &mut out,
             format,
@@ -2211,7 +2231,11 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
     // R311y668 — the DATAGRAM half. Absent from this listing until now, which
     // made a scouting-only capture report its flow count above an empty list.
     for flow in d.datagram_flows() {
-        let mut rows: Vec<MessageRow> = flow.frames.iter().map(MessageRow::transport).collect();
+        let mut rows: Vec<MessageRow> = flow
+            .frames
+            .iter()
+            .map(|f| MessageRow::transport(f, OffsetSpace::Packet))
+            .collect();
         rows.extend(flow.scouting.iter().map(MessageRow::scouting));
         // R311y669 — a QUIC flow says so in the framing column and says NOT
         // DECRYPTED in the state one. Both are load-bearing: before this round
@@ -2353,6 +2377,19 @@ struct MessageRow {
     /// -- which is what `PassiveFrame::stream_offset` already carries there,
     /// because a datagram has no stream to be an offset into.
     offset: usize,
+    /// R311y689 (§1.1n) — WHICH of those two (or three) it is, on the row.
+    ///
+    /// The line above has said "byte offset here, packet index there" since
+    /// R311y668 and the OUTPUT said neither: `@12` on one row and `@12` on the
+    /// next counted different things and looked identical. R311y688 closed this
+    /// for the field listing and left it standing one listing over -- the same
+    /// ambiguity, in the listing a reader reaches for first.
+    ///
+    /// Decided by the CALLER, because only the loop knows which transport it is
+    /// walking: `MessageRow::transport` is called from both, and an encrypted
+    /// stream flow's offsets are remapped to the ciphertext record they came
+    /// out of (`remap_decrypted_offsets`), which is a third space again.
+    offset_space: OffsetSpace,
     /// Which framing unit inside the record it came out of, or `None` for a
     /// scouting datagram, which is not inside one.
     batch: Option<usize>,
@@ -2366,13 +2403,23 @@ struct MessageRow {
 }
 
 impl MessageRow {
-    fn transport(f: &wz_session_core::passive::PassiveFrame) -> Self {
+    fn transport(f: &wz_session_core::passive::PassiveFrame, offset_space: OffsetSpace) -> Self {
         Self {
             direction: f.direction,
             offset: f.stream_offset,
+            offset_space,
             batch: Some(f.batch_index),
             space: "transport",
             name: message_name(f),
+        }
+    }
+
+    /// The space a CLEARTEXT stream frame's offset is in, message offset and
+    /// all. Separate from the constructor because the caller decides whether
+    /// this is the right space at all.
+    fn stream_byte(f: &wz_session_core::passive::PassiveFrame) -> OffsetSpace {
+        OffsetSpace::StreamByte {
+            message_at: f.stream_offset + f.prefix_width + f.unit_offset,
         }
     }
 
@@ -2380,6 +2427,9 @@ impl MessageRow {
         Self {
             direction: s.direction,
             offset: s.packet_index,
+            // A scouting datagram's offset is its packet's index, like every
+            // other datagram coordinate in this crate.
+            offset_space: OffsetSpace::Packet,
             batch: None,
             space: "scouting",
             name: match &s.frame {
@@ -2398,20 +2448,25 @@ impl MessageRow {
             None => "null".to_string(),
         };
         out.push_str(&format!(
-            "{{\"space\":\"{}\",\"direction\":\"{:?}\",\"offset\":{},\
+            "{{\"space\":\"{}\",\"direction\":\"{:?}\",\"offset\":{}{},\
              \"batch\":{batch},\"name\":\"{}\"}}",
-            self.space, self.direction, self.offset, self.name
+            self.space,
+            self.direction,
+            self.offset,
+            self.offset_space.json(),
+            self.name
         ));
     }
 
     fn push_text(&self, out: &mut String) {
+        let space = self.offset_space.note();
         match self.batch {
             Some(b) => out.push_str(&format!(
-                "      {:?} @{} #{b}  {}\n",
+                "      {:?} @{}{space} #{b}  {}\n",
                 self.direction, self.offset, self.name
             )),
             None => out.push_str(&format!(
-                "      {:?} @{} {}  {}\n",
+                "      {:?} @{}{space} {}  {}\n",
                 self.direction, self.offset, self.space, self.name
             )),
         }
@@ -3027,8 +3082,10 @@ mod tests {
         let under: Vec<&str> = text.lines().filter(|l| l.starts_with("      ")).collect();
         assert_eq!(
             under,
-            vec!["      A @1 scouting  Scout"],
-            "a scouting row carries the namespace where a batch index would be"
+            vec!["      A @1 [packet index] scouting  Scout"],
+            "a scouting row carries the namespace where a batch index would be, \
+             and R311y689 put the OFFSET's space beside the offset -- `@1` was a \
+             packet index that looked exactly like a byte offset"
         );
     }
 

@@ -2990,6 +2990,15 @@ fn a_datagram_carrying_several_messages_walks_each_of_them() {
         "and the SECOND one is walked too, from its own offset -- a reader \
          ignoring unit_offset would print the first message twice: {text}"
     );
+    // R311y689 — and NEITHER row is declined, which is the positive form of the
+    // check this path took that round: a datagram row is now compared against
+    // the frame the session decoded, like the other two producers. A reader
+    // ignoring `unit_offset` no longer prints the first message twice -- it
+    // prints one row and one decline naming both verdicts.
+    assert!(
+        !text.contains("NO FIELDS"),
+        "the two readers agree about both messages: {text}"
+    );
 }
 
 /// A TLS capture whose plaintext carries one good KeepAlive and one framing
@@ -3872,4 +3881,77 @@ fn the_message_offset_a_stream_row_reports_lands_on_the_message() {
          byte apart -- the same number twice is the R311y687 defect wearing a \
          new label: {json}"
     );
+}
+
+/// R311y689 (§1.1n) — the FLOW listing's per-message offsets name their space
+/// too, and a decrypted flow's are a third space again.
+///
+/// R311y688 closed this for the field listing and left it standing one listing
+/// over -- in the one a reader reaches for first. `MessageRow`'s own doc has
+/// said "byte offset for a stream flow, packet index for a datagram one" since
+/// R311y668 and the output said neither, so `@12` and `@12` counted different
+/// things and looked identical.
+///
+/// A decrypted flow is the third case and is driven here because it is the one
+/// that cannot be reasoned out from the transport: `remap_decrypted_offsets`
+/// puts a decrypted frame's offset back to the CIPHERTEXT RECORD it came out
+/// of, so it is not a byte offset a reader may add a span to.
+#[test]
+fn the_flow_listing_says_which_space_each_message_offset_is_in() {
+    let scratch = Scratch::new("flows-spaces");
+    let cleartext = scratch.write("plain.pcapng", &exchange_capture());
+    let datagram = scratch.write("scout.pcapng", &scouting_capture());
+    let (tls_file, log) = capture_and_key_log_pair();
+    let tls = scratch.write("tls.pcapng", &tls_file);
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+
+    for (space, args) in [
+        ("stream_byte", vec![cleartext.clone()]),
+        ("packet", vec![datagram.clone()]),
+        (
+            "ciphertext_record",
+            vec![tls.clone(), "--keylog".into(), keylog.clone()],
+        ),
+    ] {
+        let run = |extra: &[&str]| {
+            String::from_utf8_lossy(
+                &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                    .args(&args)
+                    .args(["--flows", "--messages"])
+                    .args(extra)
+                    .output()
+                    .expect("runs")
+                    .stdout,
+            )
+            .into_owned()
+        };
+        let json = run(&["--json"]);
+        let json = json.trim();
+        assert_one_document(json);
+        // ANTI-VACUITY: there must be message rows at all.
+        assert!(
+            json.contains("\"name\":\""),
+            "{space}: the listing must carry messages: {json}"
+        );
+        assert!(
+            json.contains(&format!("\"offset_space\":\"{space}\"")),
+            "{space}: every message row must name its space: {json}"
+        );
+        for other in ["stream_byte", "packet", "ciphertext_record"] {
+            if other != space {
+                assert!(
+                    !json.contains(&format!("\"offset_space\":\"{other}\"")),
+                    "{space}: no row of this capture may be labelled {other}: \
+                     {json}"
+                );
+            }
+        }
+    }
+}
+
+/// The TLS fixture of `capture_and_key_log`, as a pair -- the third value is
+/// the client random, which this test does not need.
+fn capture_and_key_log_pair() -> (Vec<u8>, String) {
+    let (file, log, _) = capture_and_key_log();
+    (file, log)
 }
