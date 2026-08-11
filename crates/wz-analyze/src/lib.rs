@@ -803,7 +803,7 @@ fn field_lines(
             render_field_row(&mut rows, format, flow, frame, &row, &to_json);
         }
         // R311y677 — the sink's rows for this flow, if it was a decrypted one.
-        for (f, direction, origin, field) in &decrypted.rows {
+        for (f, direction, origin, row) in &decrypted.rows {
             if *f != flow.flow {
                 continue;
             }
@@ -811,9 +811,7 @@ fn field_lines(
                 rows.push(',');
             }
             emitted += 1;
-            render_sink_row(
-                &mut rows, format, flow.flow, *direction, *origin, field, true,
-            );
+            render_sink_row(&mut rows, format, flow.flow, *direction, *origin, row, true);
         }
         if let Some((_, n)) = decrypted.omitted.iter().find(|(f, _)| *f == flow.flow) {
             omitted += n;
@@ -1189,12 +1187,19 @@ enum FieldRow {
 /// itself as the wire.
 #[derive(Default)]
 struct FieldSink {
-    /// `(flow, direction, stream offset of the record, tree)`, in wire order.
+    /// `(flow, direction, stream offset of the record, what the walk made of
+    /// it)`, in wire order.
+    ///
+    /// R311y683 — a [`FieldRow`] and no longer a bare tree, so a message the
+    /// walker refuses inside TLS is DECLINED by name instead of vanishing from
+    /// the listing. It was dropped by an `if let Ok`, which is the silence this
+    /// whole track exists to end, arriving inside the one transport where a
+    /// reader cannot check by eye.
     rows: Vec<(
         wz_capture::link::FlowKey,
         wz_session_core::passive::Direction,
         usize,
-        wz_session_core::dissect::Field,
+        FieldRow,
     )>,
     /// Messages the bound left out, per flow.
     omitted: Vec<(wz_capture::link::FlowKey, usize)>,
@@ -1265,10 +1270,17 @@ impl wz_capture::PlaintextSink for FieldSink {
             // stay message-relative, which is the one space they mean anything
             // in -- a field's byte range is a range of the message.
             let origin = stream.record_origin(at).unwrap_or(at);
-            if let Ok(field) = wz_session_core::dissect::dissect_transport_message(message, 0) {
-                self.rows
-                    .push((stream.flow, stream.direction, origin, field));
-            }
+            // R311y683 — walked and CHECKED against the session that framed it,
+            // the same way the cleartext path is. R311y682 closed that half and
+            // its own carry named this one: these coordinates come from the
+            // same frame, the frame is right here in the loop, and nothing was
+            // comparing the two readers.
+            self.rows.push((
+                stream.flow,
+                stream.direction,
+                origin,
+                walk_plaintext(message, frame),
+            ));
         }
     }
 }
@@ -1563,6 +1575,70 @@ fn note_disagreement(
     }
 }
 
+/// R311y683 (§1.1n) — the capture, read a second time, in EITHER format.
+///
+/// # What was narrower than the tool's own input surface
+///
+/// R311y679 walked datagram flows by calling `pcapng::parse` directly, and
+/// `Dissection::from_capture` accepts both formats. So a classic `.pcap` holding
+/// datagram traffic was dissected, counted, and then told that its packets
+/// "could not be re-read to walk them" — a notice that was true about the code
+/// and false about the file. R311y679's own carry recorded it and R311y680 left
+/// it standing.
+///
+/// The dispatch here is the SAME question `from_capture_declaring_quic` asks
+/// (`pcapng::looks_like_pcapng`), and it is asked the same way rather than
+/// inferred from a parse failure: a pcapng this reader genuinely cannot re-read
+/// must reach the notice, not be retried as a classic pcap and reach it by a
+/// second, wronger route.
+///
+/// # Why an enum and not one packet list
+///
+/// A pcapng packet carries its own link type (its interface's) and a classic
+/// pcap has ONE for the whole file. Flattening them here would mean copying
+/// every packet's bytes to attach a number that the file already answers for.
+enum Reread {
+    Ng(wz_capture::pcapng::PcapngFile),
+    Classic(wz_capture::pcap::PcapFile),
+}
+
+/// The two things this walk needs of a packet, in either format.
+struct RereadPacket<'a> {
+    link_type: u32,
+    index: usize,
+    data: &'a [u8],
+}
+
+impl Reread {
+    /// The capture, parsed a second time, or `None` if this reader cannot.
+    fn of(capture: &[u8]) -> Option<Self> {
+        if wz_capture::pcapng::looks_like_pcapng(capture) {
+            wz_capture::pcapng::parse(capture).ok().map(Self::Ng)
+        } else {
+            wz_capture::pcap::parse(capture).ok().map(Self::Classic)
+        }
+    }
+
+    /// The packet at `index` in file order.
+    fn packet(&self, index: usize) -> Option<RereadPacket<'_>> {
+        match self {
+            Self::Ng(file) => file.packets.get(index).map(|p| RereadPacket {
+                link_type: p.link_type,
+                index: p.index,
+                data: &p.data,
+            }),
+            Self::Classic(file) => file.packets.get(index).map(|p| RereadPacket {
+                // One link type for the whole file, which is what a classic
+                // pcap's header says and the reason this is not a field on the
+                // packet.
+                link_type: file.link_type,
+                index: p.index,
+                data: &p.data,
+            }),
+        }
+    }
+}
+
 /// R311y679 (§1.1n) — the field rows of every DATAGRAM flow.
 ///
 /// # Why this needed nothing added anywhere
@@ -1593,9 +1669,9 @@ fn datagram_field_rows(
     if dissection.datagram_flows().is_empty() {
         return;
     }
-    let Ok(file) = wz_capture::pcapng::parse(capture) else {
-        // Not a pcapng, or unreadable on the second pass. Said rather than
-        // silently skipped, which is the whole point of this round's sibling.
+    let Some(file) = Reread::of(capture) else {
+        // Unreadable on the second pass. Said rather than silently skipped,
+        // which is the whole point of this round's sibling.
         listings.push(FlowListing {
             rows: String::new(),
             notes: vec![FieldNote::CaptureNotReread],
@@ -1619,7 +1695,7 @@ fn datagram_field_rows(
             // disagreement the two parses can have. Silent `continue`s here
             // would drop rows and leave the listing looking whole, which is the
             // failure this whole check exists for.
-            let Some(packet) = file.packets.get(frame.stream_offset) else {
+            let Some(packet) = file.packet(frame.stream_offset) else {
                 note_disagreement(
                     &mut named,
                     &mut disagreed,
@@ -1630,7 +1706,7 @@ fn datagram_field_rows(
                 continue;
             };
             let Ok(wz_capture::link::Transport::Udp(datagram)) =
-                wz_capture::link::decapsulate(packet.link_type, packet.index, &packet.data)
+                wz_capture::link::decapsulate(packet.link_type, packet.index, packet.data)
             else {
                 note_disagreement(
                     &mut named,
@@ -1677,7 +1753,7 @@ fn datagram_field_rows(
                 flow.flow,
                 frame.direction,
                 frame.stream_offset,
-                &field,
+                &FieldRow::Walked(field),
                 false,
             );
         }
@@ -1689,7 +1765,7 @@ fn datagram_field_rows(
         // walk of `frames` alone produces an empty listing over a capture that
         // is nothing but discovery traffic.
         for datagram in &flow.scouting {
-            let Some(packet) = file.packets.get(datagram.packet_index) else {
+            let Some(packet) = file.packet(datagram.packet_index) else {
                 note_disagreement(
                     &mut named,
                     &mut disagreed,
@@ -1700,7 +1776,7 @@ fn datagram_field_rows(
                 continue;
             };
             let Ok(wz_capture::link::Transport::Udp(udp)) =
-                wz_capture::link::decapsulate(packet.link_type, packet.index, &packet.data)
+                wz_capture::link::decapsulate(packet.link_type, packet.index, packet.data)
             else {
                 note_disagreement(
                     &mut named,
@@ -1745,7 +1821,7 @@ fn datagram_field_rows(
                 flow.flow,
                 datagram.direction,
                 datagram.packet_index,
-                &field,
+                &FieldRow::Walked(field),
                 false,
             );
         }
@@ -1791,7 +1867,7 @@ fn render_sink_row(
     flow: wz_capture::link::FlowKey,
     direction: wz_session_core::passive::Direction,
     origin: usize,
-    field: &wz_session_core::dissect::Field,
+    row: &FieldRow,
     // R311y679 — whether these bytes came out of a DECRYPTION. Not a constant:
     // this renderer took its second caller this round and the datagram rows it
     // produces are cleartext, so a hardcoded `(decrypted)` is a label that is
@@ -1803,16 +1879,58 @@ fn render_sink_row(
         wz_session_core::passive::Direction::A => ("A", endpoint(&flow.low), endpoint(&flow.high)),
         wz_session_core::passive::Direction::B => ("B", endpoint(&flow.high), endpoint(&flow.low)),
     };
-    match format {
-        Format::Json => out.push_str(&format!(
+    match (format, row) {
+        (Format::Json, FieldRow::Walked(field)) => out.push_str(&format!(
             "{{\"from\":\"{from}\",\"to\":\"{to}\",\"direction\":\"{dir}\",\
              \"stream_offset\":{origin},\"decrypted\":{decrypted},\"field\":{}}}",
             wz_session_core::dissect::to_json(field)
         )),
-        Format::Text => {
+        // R311y683 — a row the walker refused is still a row, in both formats.
+        // The key is `declined`, the same one the cleartext path uses, because
+        // a consumer branching on the reason must not have to know which
+        // transport produced it.
+        (Format::Json, FieldRow::Declined(why)) => out.push_str(&format!(
+            "{{\"from\":\"{from}\",\"to\":\"{to}\",\"direction\":\"{dir}\",\
+             \"stream_offset\":{origin},\"decrypted\":{decrypted},\"declined\":\"{}\"}}",
+            escape(why)
+        )),
+        (Format::Text, FieldRow::Walked(field)) => {
             let how = if decrypted { " (decrypted)" } else { "" };
             out.push_str(&format!("  {from} -> {to} {dir} @{origin}{how}\n"));
             push_field_text(out, field, 2);
+        }
+        (Format::Text, FieldRow::Declined(why)) => {
+            let how = if decrypted { " (decrypted)" } else { "" };
+            out.push_str(&format!(
+                "  {from} -> {to} {dir} @{origin}{how}: NO FIELDS -- {why}\n"
+            ));
+        }
+    }
+}
+
+/// R311y683 (§1.1n) — the DECRYPTED row: walked from plaintext, checked against
+/// the frame the session decoded out of that same plaintext.
+///
+/// The sibling of [`walk_message`], and separate from it for one reason: that
+/// one slices the bytes out of a retained stream and this one is handed them.
+/// What they share is the check, and they share it by calling the same
+/// [`walk_agrees`] -- a second copy of that rule would be a second place for the
+/// cfg asymmetry to be got wrong.
+fn walk_plaintext(message: &[u8], frame: &wz_session_core::passive::PassiveFrame) -> FieldRow {
+    match wz_session_core::dissect::dissect_transport_message(message, 0) {
+        Err(err) => FieldRow::Declined(format!("the field walker refused these bytes: {err:?}")),
+        Ok(field) => {
+            let framed = message_name(frame);
+            if walk_agrees(&field.name, &framed) {
+                FieldRow::Walked(field)
+            } else {
+                FieldRow::Declined(format!(
+                    "the session read this record as {framed} and the field \
+                     walker reads its plaintext as {}, so the offset this row \
+                     was sliced at does not name the message the session framed",
+                    field.name
+                ))
+            }
         }
     }
 }
@@ -3185,6 +3303,66 @@ mod message_name_tests {
                     "the decline must name both readers' verdicts: {why}"
                 );
             }
+        }
+    }
+
+    /// R311y683 (§1.1n) — the DECRYPTED row gets the same witness, and a
+    /// message the walker refuses inside TLS is no longer dropped.
+    ///
+    /// ## The two defects, both measured on this path
+    ///
+    /// R311y682 closed the cleartext half and its carry named this one: the
+    /// sink slices the plaintext at `frame.stream_offset + prefix_width` and
+    /// walked it with nothing comparing the result against the frame those
+    /// coordinates came from. Worse than the cleartext case was already, in
+    /// fact — a failed walk was dropped by an `if let Ok`, so a record the
+    /// walker could not read simply left the listing, in the one transport
+    /// where a reader cannot check the bytes by eye.
+    #[test]
+    fn a_decrypted_row_is_checked_against_its_frame_and_never_dropped() {
+        let keepalive = [0x04u8];
+        let honest = frame_at(
+            0,
+            Ok(wz_session_core::inbound::InboundFrame::KeepAlive {
+                has_ext: false,
+                extensions: Vec::new(),
+            }),
+        );
+        // The truthful pairing FIRST: a check that refused everything would
+        // pass the negative leg on its own.
+        match walk_plaintext(&keepalive, &honest) {
+            FieldRow::Walked(field) => assert_eq!(field.name, "KeepAlive"),
+            FieldRow::Declined(why) => panic!("an agreeing decrypted row must be rendered: {why}"),
+        }
+
+        let crossed = frame_at(
+            0,
+            Ok(wz_session_core::inbound::InboundFrame::Close {
+                reason: 0,
+                has_ext: false,
+                extensions: Vec::new(),
+            }),
+        );
+        match walk_plaintext(&keepalive, &crossed) {
+            FieldRow::Walked(field) => panic!(
+                "plaintext the session read as Close must not be rendered as a \
+                 confident {} tree",
+                field.name
+            ),
+            FieldRow::Declined(why) => assert!(
+                why.contains("as Close") && why.contains("as KeepAlive"),
+                "the decline names both readers: {why}"
+            ),
+        }
+
+        // AND A WALK THAT FAILS IS A ROW. Empty bytes are what the walker
+        // refuses; before this round they became no row at all.
+        match walk_plaintext(&[], &honest) {
+            FieldRow::Walked(_) => panic!("empty bytes are not a message"),
+            FieldRow::Declined(why) => assert!(
+                why.contains("the field walker refused these bytes"),
+                "a refused walk is declined by name, not dropped: {why}"
+            ),
         }
     }
 

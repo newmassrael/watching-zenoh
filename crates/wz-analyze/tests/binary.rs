@@ -2834,3 +2834,249 @@ fn under_a_cap_the_rows_and_the_omission_still_add_up_to_the_whole() {
         );
     }
 }
+
+/// One Ethernet/IPv4/UDP packet from `src:sport` to `dst:dport` carrying `body`.
+fn udp_packet(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, body: &[u8]) -> Vec<u8> {
+    let mut udp = Vec::new();
+    udp.extend_from_slice(&sport.to_be_bytes());
+    udp.extend_from_slice(&dport.to_be_bytes());
+    udp.extend_from_slice(&((8 + body.len()) as u16).to_be_bytes());
+    udp.extend_from_slice(&0u16.to_be_bytes());
+    udp.extend_from_slice(body);
+    let mut ip = vec![0x45u8, 0];
+    ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+    ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+    ip.extend_from_slice(&src);
+    ip.extend_from_slice(&dst);
+    ip.extend_from_slice(&udp);
+    let mut eth = vec![0u8; 12];
+    eth.extend_from_slice(&[0x08, 0x00]);
+    eth.extend_from_slice(&ip);
+    while eth.len() < 60 {
+        eth.push(0);
+    }
+    eth
+}
+
+/// R311y683 (§1.1n) — a CLASSIC `.pcap` datagram capture gets its fields, and
+/// R311y679 told it its packets could not be re-read.
+///
+/// ## The notice that was true about the code and false about the file
+///
+/// `Dissection::from_capture` dispatches on `looks_like_pcapng` and reads both
+/// formats. The field walk called `pcapng::parse` unconditionally, so a classic
+/// pcap was dissected and counted and then handed a notice saying its packets
+/// were unreadable — narrower than the tool's own input surface, recorded in
+/// R311y679's carry and left standing by R311y680.
+///
+/// ## The discriminator
+///
+/// The SAME packet bytes are written in both container formats and the two runs
+/// must produce the same rows. A build that re-read only one of them would show
+/// the difference here as a notice on one side and fields on the other.
+#[test]
+fn a_classic_pcap_datagram_capture_is_walked_like_a_pcapng_one() {
+    let scratch = Scratch::new("fields-classic-pcap");
+    let scout = [0x01u8, 0x09, (3 << 4) | 0x08 | 0x03, 0x11, 0x22, 0x33, 0x44];
+    let packet = udp_packet([192, 168, 1, 5], [224, 0, 0, 224], 43210, 7446, &scout);
+
+    let ng = scratch.write(
+        "scout.pcapng",
+        &wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000_000, &packet)],
+        ),
+    );
+    let classic = scratch.write(
+        "scout.pcap",
+        &wz_capture::pcap::write(wz_capture::link::LINKTYPE_ETHERNET, &[(0, 1_000, &packet)]),
+    );
+
+    let run = |path: &std::path::Path| {
+        String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                .arg(path)
+                .arg("--fields")
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned()
+    };
+    let from_ng = run(&ng);
+    let from_classic = run(&classic);
+
+    // ANTI-VACUITY: the pcapng side must actually produce a row, or "the same
+    // as the pcapng" is a comparison of two empty listings.
+    assert!(
+        from_ng.contains("] Scout"),
+        "the pcapng side must walk the message: {from_ng}"
+    );
+    assert!(
+        from_classic.contains("] Scout"),
+        "and so must the classic pcap, which carries the same packet: \
+         {from_classic}"
+    );
+    assert!(
+        !from_classic.contains("could not be re-read"),
+        "a file this tool just dissected must not be reported as unreadable: \
+         {from_classic}"
+    );
+    // The FIELDS, to the byte, on the classic side too -- same packet, same
+    // answer, and not merely "some row appeared".
+    assert!(
+        from_classic.contains("[3..7] zid = Bytes([17, 34, 51, 68])"),
+        "the walked fields must be the same ones: {from_classic}"
+    );
+}
+
+/// R311y683 (§1.1n) — a datagram carrying SEVERAL messages produces one row per
+/// message.
+///
+/// R311y679 used `frame.unit_offset` as the message's start within the datagram
+/// and its own carry recorded that the batch case was untested: every fixture in
+/// the tree carries one message per packet. `Dissection::push_datagram` folds
+/// "one datagram, every message it batched" (R311y631) into the frame list, so
+/// the coordinate has to be right for the second and later messages, where a
+/// reader that ignored `unit_offset` would print the FIRST message N times.
+#[test]
+fn a_datagram_carrying_several_messages_walks_each_of_them() {
+    let scratch = Scratch::new("fields-datagram-batch");
+    // Two transport messages in one datagram: a KeepAlive (MID 0x04, empty
+    // body) and a Close (MID 0x03, one reason byte). Different kinds on
+    // purpose -- two of the same would not tell a walk of the second from a
+    // second walk of the first.
+    let batch = [0x04u8, 0x03, 0x00];
+    let packet = udp_packet([192, 168, 1, 5], [192, 168, 1, 9], 41000, 41001, &batch);
+    let capture = scratch.write(
+        "batch.pcapng",
+        &wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000_000, &packet)],
+        ),
+    );
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--fields")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+
+    // ANTI-VACUITY: one datagram flow, and the session must have found BOTH
+    // messages in it -- otherwise this tests the walk against a batch that was
+    // never batched.
+    assert!(
+        text.contains("flows: 0 stream, 1 datagram"),
+        "the fixture must be one datagram flow: {text}"
+    );
+    assert!(
+        text.contains("messages decoded: 2"),
+        "and the session must have decoded both messages of the batch: {text}"
+    );
+    assert_eq!(
+        text.matches("] KeepAlive").count(),
+        1,
+        "the first message is walked exactly once: {text}"
+    );
+    assert_eq!(
+        text.matches("] Close").count(),
+        1,
+        "and the SECOND one is walked too, from its own offset -- a reader \
+         ignoring unit_offset would print the first message twice: {text}"
+    );
+}
+
+/// A TLS capture whose plaintext carries one good KeepAlive and one framing
+/// unit the FIELD WALKER cannot read: an Init MID with its body missing.
+fn capture_with_an_unwalkable_unit() -> (Vec<u8>, String) {
+    let secret: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(13).wrapping_add(5))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(29));
+
+    let mut stream = client_hello(&random);
+    let mut enc = sealer(&secret);
+    for (i, body) in [vec![0x04u8], vec![0x01u8]].into_iter().enumerate() {
+        let mut framed = (body.len() as u16).to_le_bytes().to_vec();
+        framed.extend_from_slice(&body);
+        stream.extend_from_slice(
+            &enc.encrypt(
+                OutboundPlainMessage {
+                    typ: rustls::ContentType::ApplicationData,
+                    version: rustls::ProtocolVersion::TLSv1_2,
+                    payload: rustls::crypto::cipher::OutboundChunks::Single(&framed),
+                },
+                i as u64,
+            )
+            .expect("seal")
+            .encode(),
+        );
+    }
+
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &stream))],
+    );
+    let log = format!(
+        "CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+        hex(&random),
+        hex(&secret)
+    );
+    (file, log)
+}
+
+/// R311y683 (§1.1n) — a DECRYPTED record the field walker cannot read is a row
+/// saying so, and it used to be no row at all.
+///
+/// ## Why this fixture had to exist
+///
+/// Measured by probe: putting the drop back -- `if let Ok(field)`, which is what
+/// the sink did until this round -- left all 62 tests in the crate green. A
+/// guard with no gate is a comment, and this is the transport where the silence
+/// costs most: a reader looking at a decrypted listing cannot check the bytes by
+/// eye, so a record that quietly left the listing is a record they will never
+/// know about.
+///
+/// The unwalkable unit is an Init MID with its body missing. The session cannot
+/// decode it either, which is the point: `walk_agrees` treats an undecodable
+/// frame as silence rather than contradiction, so what is under test here is the
+/// walker's own refusal and not the cross-check.
+#[test]
+fn a_decrypted_record_the_walker_cannot_read_is_still_a_row() {
+    let scratch = Scratch::new("fields-tls-unwalkable");
+    let (file, log) = capture_with_an_unwalkable_unit();
+    let capture = scratch.write("bad.pcapng", &file);
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .arg("--fields")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+
+    // ANTI-VACUITY, both halves: the flow must have been opened, and the good
+    // message must be there -- a listing that failed entirely would satisfy a
+    // "the bad one is named" assertion for the wrong reason.
+    assert!(
+        text.contains("DECRYPTED: 1 flow(s)"),
+        "the fixture must actually decrypt: {text}"
+    );
+    assert!(
+        text.contains("[0..1] KeepAlive"),
+        "the walkable message must still be walked: {text}"
+    );
+    assert!(
+        text.contains("(decrypted): NO FIELDS -- the field walker refused these bytes"),
+        "and the one the walker refused must be a row that says so, not a row \
+         that is missing: {text}"
+    );
+}
