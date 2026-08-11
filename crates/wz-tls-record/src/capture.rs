@@ -230,6 +230,14 @@ struct DirectionState {
     /// kept because "how many records of this direction opened" is a fact the
     /// witness may want next and a bool throws it away.
     records_opened: usize,
+    /// R311y686 (§1.2a) — handshake bytes held for a message whose rest is in a
+    /// record that has not arrived.
+    ///
+    /// Per DIRECTION, because a handshake stream is: the two sides' messages
+    /// are independent and a fragment of one never completes the other. Bounded
+    /// by [`MAX_HANDSHAKE_CARRY`], with what the bound let go of counted on the
+    /// witness.
+    handshake_carry: alloc::vec::Vec<u8>,
 }
 
 /// R311y671 (§1.2a) — one direction's epoch changes, observed against inferred.
@@ -333,6 +341,26 @@ pub struct EpochWitness {
     /// reader**, which is why the three are not one number: the first two are
     /// facts about the capture and were being summed with it.
     pub advances_unexplained: usize,
+    /// R311y686 (§1.2a) — of [`Self::key_updates`], the ones whose bytes began
+    /// in an EARLIER record.
+    ///
+    /// TLS may split a handshake message across records, and until this round
+    /// the scan gave up at the first message it could not complete: a
+    /// `KeyUpdate` behind a `NewSessionTicket` big enough to fill a record was
+    /// invisible, and the boundary it announced was counted as unwitnessed. The
+    /// figure exists because "this reader found it" and "this reader had to
+    /// reassemble it to find it" are different claims about the same message.
+    pub key_updates_reassembled: usize,
+    /// R311y686 (§1.2a) — handshake bytes this reader held for a message that
+    /// never completed, and then let go of.
+    ///
+    /// Two causes, both counted here rather than being silent: a tail past the
+    /// carry's bound, and a record of another content type arriving while a
+    /// handshake message was still open (RFC 8446 §5.1 forbids that
+    /// interleaving, so it means a record was lost). A carry that is dropped
+    /// without saying so is an announcement this reader silently stopped
+    /// looking for.
+    pub handshake_bytes_abandoned: usize,
 }
 
 impl EpochWitness {
@@ -352,6 +380,9 @@ impl EpochWitness {
                 + other.advances_before_first_record,
             advances_after_hole: self.advances_after_hole + other.advances_after_hole,
             advances_unexplained: self.advances_unexplained + other.advances_unexplained,
+            key_updates_reassembled: self.key_updates_reassembled + other.key_updates_reassembled,
+            handshake_bytes_abandoned: self.handshake_bytes_abandoned
+                + other.handshake_bytes_abandoned,
         }
     }
 }
@@ -377,6 +408,10 @@ struct KeyUpdateScan {
     seen: usize,
     /// Of those, ones carrying `update_requested`.
     requested: usize,
+    /// R311y686 — of those, ones whose bytes began in an earlier record.
+    reassembled: usize,
+    /// R311y686 — handshake bytes let go of without completing a message.
+    abandoned: usize,
 }
 
 /// Walk the handshake messages of one decrypted record and report its
@@ -399,29 +434,75 @@ struct KeyUpdateScan {
 /// records, and this crate does not reassemble them — a limit worth naming
 /// (a `KeyUpdate` is 5 bytes and is never split in practice, but a large
 /// `NewSessionTicket` in front of one may be).
-fn scan_key_updates(plaintext: &[u8]) -> KeyUpdateScan {
+/// R311y686 (§1.2a) — the widest handshake tail this reader will hold waiting
+/// for the rest of its message.
+///
+/// A TLS record's plaintext is at most 2^14 bytes and a handshake message may
+/// declare 2^24-1, so a message CAN legally need more than this. The bound is
+/// this crate's standing rule rather than the protocol's ceiling: an
+/// accumulation that grows with the input needs a bound, and a bound that bites
+/// needs a counter — which [`EpochWitness::handshake_bytes_abandoned`] is. A
+/// `NewSessionTicket` or a `KeyUpdate`, which are what this scan is walking
+/// past and looking for, are orders of magnitude under it.
+const MAX_HANDSHAKE_CARRY: usize = 16 * 1024;
+
+/// R311y686 (§1.2a) — walk the handshake stream of ONE DIRECTION, across the
+/// records it is split over.
+///
+/// # What was lost, and how much
+///
+/// R311y672 made this scan read the RFC's framing rather than the first byte,
+/// which found a `KeyUpdate` hiding behind a `NewSessionTicket` in the same
+/// record. Its own note recorded what it still could not do -- "fragmented or
+/// truncated: the rest of this message is in another record this walk does not
+/// have" -- and `break` there discards not only that message but EVERY message
+/// after it in the stream. A ticket large enough to fill a record therefore hid
+/// the `KeyUpdate` behind it completely, and the boundary it announced was
+/// counted as an unwitnessed rekey: this reader blaming a coincidence for a
+/// message it had in its hand, one record later.
+///
+/// # Why a carry and not a bigger look
+///
+/// The bytes of the second half simply are not in this record. The only reader
+/// that can see the whole message is one that holds the tail until the next
+/// record of the same direction arrives, which is what this does — and holds it
+/// under a bound, with the count of what the bound let go of.
+fn scan_key_updates(carry: &mut alloc::vec::Vec<u8>, plaintext: &[u8]) -> KeyUpdateScan {
     let mut scan = KeyUpdateScan::default();
+    // How much of the buffer below came from EARLIER records. A message
+    // beginning under this line is one that needed the carry to be found.
+    let carried = carry.len();
+    carry.extend_from_slice(plaintext);
     let mut at = 0usize;
-    while at + HS_HEADER_LEN <= plaintext.len() {
-        let msg_type = plaintext[at];
-        let len = u32::from_be_bytes([0, plaintext[at + 1], plaintext[at + 2], plaintext[at + 3]])
-            as usize;
+    while at + HS_HEADER_LEN <= carry.len() {
+        let msg_type = carry[at];
+        let len = u32::from_be_bytes([0, carry[at + 1], carry[at + 2], carry[at + 3]]) as usize;
         let body = at + HS_HEADER_LEN;
         let Some(end) = body.checked_add(len) else {
             break;
         };
-        if end > plaintext.len() {
-            // Fragmented or truncated: the rest of this message is in another
-            // record this walk does not have.
+        if end > carry.len() {
+            // The rest of this message is in a record that has not arrived.
+            // Everything from here is held rather than discarded, which is the
+            // whole of this round.
             break;
         }
         if msg_type == HS_KEY_UPDATE && len == KEY_UPDATE_BODY_LEN {
             scan.seen += 1;
-            if plaintext[body] == KEY_UPDATE_REQUESTED {
+            if carry[body] == KEY_UPDATE_REQUESTED {
                 scan.requested += 1;
+            }
+            if at < carried {
+                scan.reassembled += 1;
             }
         }
         at = end;
+    }
+    // Consumed messages go; the incomplete tail stays.
+    carry.drain(..at);
+    if carry.len() > MAX_HANDSHAKE_CARRY {
+        scan.abandoned = carry.len();
+        carry.clear();
     }
     scan
 }
@@ -473,6 +554,7 @@ impl DirectionState {
             witness: EpochWitness::default(),
             pending_key_update: false,
             records_opened: 0,
+            handshake_carry: alloc::vec::Vec::new(),
         })
     }
 
@@ -591,18 +673,34 @@ impl DirectionState {
                     // `CT_APPLICATION_DATA` onward -- a KeyUpdate's inner type is
                     // `handshake`, so nothing downstream ever sees one.
                     let scan = if opened.content_type == wz_capture::tls::CT_HANDSHAKE {
-                        scan_key_updates(&opened.plaintext)
+                        scan_key_updates(&mut self.handshake_carry, &opened.plaintext)
                     } else {
-                        KeyUpdateScan::default()
+                        // R311y686 — RFC 8446 §5.1 forbids interleaving a
+                        // handshake message's fragments with another content
+                        // type, so a record of another type arriving while one
+                        // is still open means a record went missing. The tail is
+                        // let go of and SAID, rather than being held against a
+                        // continuation that is never coming.
+                        let mut scan = KeyUpdateScan::default();
+                        if !self.handshake_carry.is_empty() {
+                            scan.abandoned = self.handshake_carry.len();
+                            self.handshake_carry.clear();
+                        }
+                        scan
                     };
                     // R311y685 — counted at the COMMIT, like everything else on
                     // this path: a walk that authenticated under nothing leaves
                     // no state behind, which is the R311y667 rule this loop
                     // already keeps.
                     self.records_opened += 1;
+                    // R311y686 — counted whether or not a message completed:
+                    // the bytes this reader let go of are a fact about what it
+                    // could no longer be looking for.
+                    self.witness.handshake_bytes_abandoned += scan.abandoned;
                     if scan.seen > 0 {
                         self.witness.key_updates += scan.seen;
                         self.witness.updates_requested += scan.requested;
+                        self.witness.key_updates_reassembled += scan.reassembled;
                         // R311y672 — the peer asked for this one. At most one
                         // reply discharges at most one request, so this counts a
                         // record, not a message.

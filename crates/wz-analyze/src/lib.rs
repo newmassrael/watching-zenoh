@@ -673,6 +673,10 @@ fn epoch_lines(witness: &[wz_tls_record::capture::EpochWitness; 2], format: Form
     let before_first = a.advances_before_first_record + b.advances_before_first_record;
     let after_hole = a.advances_after_hole + b.advances_after_hole;
     let unexplained = a.advances_unexplained + b.advances_unexplained;
+    // R311y686 — of the KeyUpdates read, the ones that took reassembling, and
+    // the handshake bytes this reader had to let go of.
+    let reassembled = a.key_updates_reassembled + b.key_updates_reassembled;
+    let abandoned = a.handshake_bytes_abandoned + b.handshake_bytes_abandoned;
     let updates = a.key_updates + b.key_updates;
     let requested = a.updates_requested + b.updates_requested;
     let answering = a.updates_answering + b.updates_answering;
@@ -685,7 +689,9 @@ fn epoch_lines(witness: &[wz_tls_record::capture::EpochWitness; 2], format: Form
              \"advances_after_hole\":{after_hole},\
              \"advances_unexplained\":{unexplained},\
              \"key_updates\":{updates},\"updates_requested\":{requested},\
-             \"updates_answering\":{answering},\"requests_unanswered\":{unanswered}}}"
+             \"updates_answering\":{answering},\"requests_unanswered\":{unanswered},\
+             \"key_updates_reassembled\":{reassembled},\
+             \"handshake_bytes_abandoned\":{abandoned}}}"
         );
     }
     if advances == 0 && updates == 0 {
@@ -744,6 +750,22 @@ fn epoch_lines(witness: &[wz_tls_record::capture::EpochWitness; 2], format: Form
         out.push_str(&format!(
             "    {unanswered} request(s) still unanswered when the capture ended \
              -- an expected key change on the other direction did not arrive\n"
+        ));
+    }
+    // R311y686 — a KeyUpdate found only because its bytes were held across
+    // records. Said because the alternative reading of the same capture is the
+    // one this reader used to give: an unexplained rekey.
+    if reassembled > 0 {
+        out.push_str(&format!(
+            "    {reassembled} of them began in an earlier record and were read \
+             by holding the tail across records\n"
+        ));
+    }
+    if abandoned > 0 {
+        out.push_str(&format!(
+            "    {abandoned} handshake byte(s) were let go of without \
+             completing a message -- an announcement this reader stopped being \
+             able to look for\n"
         ));
     }
     out

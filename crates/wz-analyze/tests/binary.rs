@@ -917,7 +917,8 @@ fn the_epoch_line_reaches_the_rendering() {
              \"advances_before_first_record\":0,\"advances_after_hole\":0,\
              \"advances_unexplained\":0,\
              \"key_updates\":1,\"updates_requested\":0,\
-             \"updates_answering\":0,\"requests_unanswered\":0}"
+             \"updates_answering\":0,\"requests_unanswered\":0,\
+             \"key_updates_reassembled\":0,\"handshake_bytes_abandoned\":0}"
         ),
         "and the JSON must agree with the text, in one document: {json}"
     );
@@ -3421,5 +3422,207 @@ fn two_requests_before_a_reply_are_two_obligations_and_not_one() {
     assert!(
         text.contains("2 request(s) still unanswered"),
         "and the person reading the text sees the same two: {text}"
+    );
+}
+
+/// R311y686 (§1.2a) — a `KeyUpdate` SPLIT ACROSS TWO RECORDS is found, and the
+/// round before this one would have blamed a coincidence for it.
+///
+/// ## What the scan gave up on
+///
+/// R311y672 made the scan read the RFC's framing rather than the first byte,
+/// which found a `KeyUpdate` hiding behind a `NewSessionTicket` in the SAME
+/// record. Its own note recorded the rest: "fragmented or truncated -- the rest
+/// of this message is in another record this walk does not have", and `break`
+/// there discards that message and every message after it. TLS may split a
+/// handshake message across records, so a ticket large enough to fill one hid
+/// the announcement completely.
+///
+/// ## The discriminator, which R311y685 sharpened
+///
+/// The same capture read by the old scan does not merely lose a count: the
+/// boundary the hidden message announced becomes an UNWITNESSED advance, and
+/// R311y685 attributes an unwitnessed advance with no hole and records already
+/// open to `advances_unexplained` -- this reader saying it was watching and saw
+/// nothing. So the test asserts BOTH ways round: the update is found AND
+/// reassembled, and the advance is confirmed rather than unexplained.
+#[test]
+fn a_key_update_split_across_two_records_is_still_read() {
+    let scratch = Scratch::new("epoch-split");
+    let c0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(83).wrapping_add(1))
+        .collect();
+    let c1: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(89).wrapping_add(2))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(19).wrapping_add(7));
+
+    // A NewSessionTicket (type 4, three body bytes) and then a KeyUpdate
+    // (type 24, one body byte) whose five bytes are CUT after the second.
+    let ticket = [0x04u8, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00];
+    let key_update = [0x18u8, 0x00, 0x00, 0x01, 0x01];
+    let mut head = ticket.to_vec();
+    head.extend_from_slice(&key_update[..2]);
+    let tail = &key_update[2..];
+
+    let mut client = client_hello(&random);
+    let mut g0 = sealer(&c0);
+    client.extend_from_slice(&seal_at(&mut g0, rustls::ContentType::Handshake, &head, 0));
+    client.extend_from_slice(&seal_at(&mut g0, rustls::ContentType::Handshake, tail, 1));
+    // And the record under the NEXT key, which is the boundary the message
+    // announced.
+    client.extend_from_slice(&seal_at(
+        &mut sealer(&c1),
+        rustls::ContentType::ApplicationData,
+        &unit(1),
+        0,
+    ));
+
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &client))],
+    );
+    let capture = scratch.write("split.pcapng", &file);
+    let keylog = scratch.write(
+        "keys.txt",
+        format!(
+            "CLIENT_TRAFFIC_SECRET_0 {} {}\nCLIENT_TRAFFIC_SECRET_1 {} {}\n",
+            hex(&random),
+            hex(&c0),
+            hex(&random),
+            hex(&c1)
+        )
+        .as_bytes(),
+    );
+
+    let json = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .arg("--json")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert_one_document(json.trim());
+
+    // ANTI-VACUITY: there must BE an advance to attribute, or "confirmed" and
+    // "unexplained" are both zero and the assertion below is about nothing.
+    assert!(
+        json.contains("\"advances\":1"),
+        "the fixture must cross exactly one boundary: {json}"
+    );
+    assert!(
+        json.contains("\"key_updates\":1"),
+        "the split message must be READ, which is the whole round: {json}"
+    );
+    assert!(
+        json.contains("\"key_updates_reassembled\":1"),
+        "and it must be marked as one that began in an earlier record -- a \
+         message found without the carry would not be: {json}"
+    );
+    // BOTH WAYS ROUND: found, and the advance it announces attributed to it.
+    assert!(
+        json.contains("\"advances_confirmed\":1"),
+        "the boundary it announces is confirmed by it: {json}"
+    );
+    assert!(
+        json.contains("\"advances_unexplained\":0"),
+        "and is NOT the residue this reader blames itself for -- which is \
+         exactly what the old scan produced for this capture: {json}"
+    );
+    // Nothing was let go of: the tail arrived.
+    assert!(
+        json.contains("\"handshake_bytes_abandoned\":0"),
+        "the carry was consumed, not dropped: {json}"
+    );
+
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        text.contains("began in an earlier record"),
+        "and the person reading the text is told the same thing: {text}"
+    );
+}
+
+/// R311y686 (§1.2a) — a handshake message left open when a record of ANOTHER
+/// content type arrives is let go of, and SAID.
+///
+/// RFC 8446 §5.1 forbids interleaving a handshake message's fragments with
+/// another content type, so this shape means a record went missing. Holding the
+/// tail against a continuation that is never coming would be a carry that grows
+/// for the life of the flow; dropping it silently would be an announcement this
+/// reader quietly stopped looking for.
+#[test]
+fn a_handshake_tail_interrupted_by_another_record_is_let_go_of_and_counted() {
+    let scratch = Scratch::new("epoch-interrupted");
+    let c0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(97).wrapping_add(1))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(13).wrapping_add(3));
+
+    let key_update = [0x18u8, 0x00, 0x00, 0x01, 0x01];
+    let mut client = client_hello(&random);
+    let mut g0 = sealer(&c0);
+    // Half a KeyUpdate...
+    client.extend_from_slice(&seal_at(
+        &mut g0,
+        rustls::ContentType::Handshake,
+        &key_update[..2],
+        0,
+    ));
+    // ...and then application data, which the RFC says cannot happen.
+    client.extend_from_slice(&seal_at(
+        &mut g0,
+        rustls::ContentType::ApplicationData,
+        &unit(1),
+        1,
+    ));
+
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &client))],
+    );
+    let capture = scratch.write("interrupted.pcapng", &file);
+    let keylog = scratch.write(
+        "keys.txt",
+        format!("CLIENT_TRAFFIC_SECRET_0 {} {}\n", hex(&random), hex(&c0)).as_bytes(),
+    );
+
+    let json = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .arg("--json")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert_one_document(json.trim());
+    // ANTI-VACUITY: the flow must have opened both records, or nothing was
+    // carried and nothing could be abandoned.
+    assert!(
+        json.contains("\"records_decrypted\":2"),
+        "both records must open: {json}"
+    );
+    assert!(
+        json.contains("\"key_updates\":0"),
+        "the half message is not a message: {json}"
+    );
+    assert!(
+        json.contains("\"handshake_bytes_abandoned\":2"),
+        "and the two bytes held for it are counted when they are let go: {json}"
     );
 }
