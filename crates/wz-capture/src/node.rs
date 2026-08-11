@@ -793,6 +793,36 @@ mod tests {
         assert!(asker.locators.is_empty(), "{asker:?}");
     }
 
+    /// R311y714 — the node plane ALONE on a report page.
+    ///
+    /// Required by the solo-plane-page lint, and the lint's reason is measured
+    /// history: R311y618 severed one leg of `is_complete` and 229 tests stayed
+    /// green, because every page carrying that plane also carried another one
+    /// that produced the verdict. A plane that has never been alone on a page
+    /// is a plane whose own contribution nothing checks.
+    #[test]
+    fn the_node_plane_alone_on_a_page_still_reports() {
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet([192, 168, 1, 5], 43210, SCOUT_GROUP, 7446, &scout_message()),
+        );
+        d.finish();
+        let census = nodes(&d);
+        let report = crate::report::CaptureReport::of(&d).with_nodes(&census);
+        assert!(
+            report.is_complete(),
+            "a scouting capture with nothing missing is complete: {}",
+            report.to_text()
+        );
+        assert!(
+            report.to_text().contains("nodes: 1"),
+            "and the plane reaches the page it is alone on: {}",
+            report.to_text()
+        );
+    }
+
     /// One length-prefixed INIT naming `zid`.
     fn framed_init(zid: &[u8]) -> Vec<u8> {
         let wire = init_wire(zid);
