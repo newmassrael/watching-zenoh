@@ -180,6 +180,36 @@ impl<'a> CaptureReport<'a> {
         if self.quic.is_some_and(|q| q.walks_stopped > 0) {
             return false;
         }
+        // R311y705 (§1.2a) — AND THE APPLICATION BYTES A DECRYPTOR RECOVERED AND
+        // NOBODY READ.
+        //
+        // THE DEFECT THIS CLOSES, and it was asserted as correct behaviour.
+        // R311y698 moved this verdict on the argument that "a flow whose every
+        // packet opened IS the rows -- its messages ARE the rows". That is true
+        // of the TLS half, where `PlaintextSink` hands the recovered plaintext
+        // to the session and the rows exist. It is FALSE of QUIC: the pass
+        // reassembles the streams, records their LENGTHS, and drops the bytes.
+        // Nothing in this workspace decodes zenoh out of them. So the round
+        // transplanted a rule to a half that had not earned it, and its own
+        // test asserted `complete` over a capture holding 25 recovered
+        // application bytes and zero decoded messages.
+        //
+        // `crypto_bytes` is deliberately NOT here. Those are the TLS handshake
+        // inside QUIC -- they carry no zenoh, they are what the key schedule
+        // was derived from, and a capture whose handshake was read is not
+        // short by them.
+        //
+        // This is a FLOOR, and it lifts when a decoder exists rather than when
+        // someone edits this line: the fix is the seam the TLS half already has
+        // (`Dissection::decrypt_with` + `PlaintextSink`), never a second walk of
+        // the zenoh stream framing here -- R311y678 measured what a third
+        // opinion about where the messages are costs.
+        if self
+            .quic
+            .is_some_and(|q| q.stream_bytes > 0 || q.datagram_bytes > 0)
+        {
+            return false;
+        }
         // R311y624 (§1.1m) — the FRAMING witnesses reach the verdict, and until
         // now none of them did. A capture whose assembler gave up on a gap, or
         // whose direction lost the zenoh or WebSocket framing, or whose peer
@@ -763,6 +793,7 @@ impl<'a> CaptureReport<'a> {
                 // "this reader recognises QUIC and opens none of it" was true of
                 // this crate on its own and false of a run whose caller opened
                 // it, and a person reads this line rather than the JSON.
+                let mut undecoded = alloc::string::String::new();
                 let verdict = match self.quic {
                     None => alloc::string::String::from(
                         "NOT DECRYPTED (this reader recognises QUIC and opens \
@@ -784,8 +815,24 @@ impl<'a> CaptureReport<'a> {
                         k.datagram_bytes
                     ),
                 };
+                // R311y705 — and the sentence a reader ACTS on: bytes this
+                // workspace recovered and did not decode. Printed after the
+                // line above rather than folded into it, because that line is
+                // about the DECRYPTION and this is about what happened next --
+                // and the answer is nothing.
+                if let Some(k) = self.quic {
+                    let unread = k.stream_bytes + k.datagram_bytes;
+                    if unread > 0 {
+                        undecoded = alloc::format!(
+                            "\n  QUIC: {unread} application byte(s) were recovered \
+                             and NOT decoded -- no reader in this build takes \
+                             plaintext out of a QUIC stream, so the zenoh inside \
+                             them is not in any total above"
+                        );
+                    }
+                }
                 s.push_str(&format!(
-                    "  QUIC: {} flow(s){}, {} packet(s), {} byte(s) -- {verdict}\n",
+                    "  QUIC: {} flow(s){}, {} packet(s), {} byte(s) -- {verdict}{undecoded}\n",
                     q.len(),
                     // Named in the rendering and not only in the JSON: a person
                     // reading this must know whether the classification came from
@@ -2629,6 +2676,39 @@ mod tests {
             "{}",
             r.to_text()
         );
+
+        // R311y705 — THE THIRD LEG, and the one this page existed to make
+        // gateable: the flow opened, the walk finished, and the application
+        // bytes it recovered were never decoded. `open` above carries only
+        // `crypto_bytes` -- the TLS handshake inside QUIC, which carries no
+        // zenoh -- which is exactly why it is still whole; add ONE application
+        // byte and it is not.
+        let unread = crate::quic::QuicDecryption {
+            stream_bytes: 25,
+            ..open
+        };
+        let r = CaptureReport::of(&d).with_quic_decryption(&unread);
+        assert!(
+            !r.is_complete(),
+            "bytes a decryptor recovered and nothing read are a floor: {}",
+            r.to_text()
+        );
+        assert!(
+            r.to_text()
+                .contains("25 application byte(s) were recovered and NOT decoded"),
+            "and the reader is told in the rendering: {}",
+            r.to_text()
+        );
+        // The RFC 9221 half reaches the same verdict by the same rule -- zenoh's
+        // quic-datagram link puts application bytes there and no reader takes
+        // them out either.
+        let unread = crate::quic::QuicDecryption {
+            datagram_bytes: 7,
+            ..open
+        };
+        assert!(!CaptureReport::of(&d)
+            .with_quic_decryption(&unread)
+            .is_complete());
 
         // And the SECOND leg, which `flows_opened` alone cannot carry: the flow
         // opened, and the walk stopped at a frame type this reader does not

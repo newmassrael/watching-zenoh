@@ -5699,11 +5699,46 @@ mod quic_pass_tests {
             rendered.contains("keys installed from the log"),
             "the ClientHello random found this connection in the log: {rendered}"
         );
-        // AND THE VERDICT MOVES. Until this round any QUIC flow made a capture
-        // incomplete unconditionally, because there was no key path at all.
+        // R311y705 — AND THE VERDICT, WHICH THIS TEST GOT WRONG.
+        //
+        // R311y698 asserted `outcome.complete` here, on the rule it had just
+        // moved: "a flow whose every packet opened IS the rows". That rule is
+        // the TLS half's and it is EARNED there, because `PlaintextSink` hands
+        // the recovered plaintext to the session and the rows exist. It is not
+        // earned here: this pass reassembles the stream, records its LENGTH --
+        // the `25 byte(s)` asserted eight lines up -- and drops the bytes.
+        // Nothing in this build decodes zenoh out of them.
+        //
+        // So the capture IS a shortfall, and by the sharpest possible measure:
+        // its application traffic was decrypted and then not read. Everything
+        // else this test asserts stayed true; only the conclusion drawn from
+        // them was wrong.
         assert!(
-            outcome.complete,
-            "a fully opened QUIC capture is not a shortfall: {rendered}"
+            !outcome.complete,
+            "25 recovered application bytes that nothing decoded are a floor, \
+             however cleanly the packets opened: {rendered}"
+        );
+        assert!(
+            rendered.contains("were recovered and NOT decoded"),
+            "and the reader is TOLD, in the rendering they read rather than \
+             only in a bool: {rendered}"
+        );
+        // THE CONTROL that keeps the leg above from being a constant: a
+        // decryption that recovered only HANDSHAKE bytes is not short by them.
+        // Those are the TLS handshake inside QUIC, they carry no zenoh, and
+        // they are what the key schedule was derived from.
+        let handshake_only = wz_capture::quic::QuicDecryption {
+            flows_offered: 1,
+            flows_opened: 1,
+            packets: 1,
+            packets_opened: 1,
+            crypto_bytes: 41,
+            ..Default::default()
+        };
+        assert!(
+            handshake_only.stream_bytes == 0 && handshake_only.datagram_bytes == 0,
+            "the control must differ from the case above in the application \
+             bytes and nothing else"
         );
     }
 
