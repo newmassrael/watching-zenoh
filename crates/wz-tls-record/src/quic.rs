@@ -135,6 +135,11 @@ pub enum QuicOpenError {
     /// R311y695 — the version this packet declares is one this reader has no
     /// salt for, and it says which rather than deriving the wrong keys.
     UnsupportedVersion(u32),
+    /// R311y696 — a frame type this walk does not know, NAMED. QUIC frames are
+    /// not length-prefixed as a genre, so a reader that does not know a type
+    /// does not know where it ends: the walk stops rather than producing
+    /// pieces at offsets nobody sent.
+    UnknownFrame(u64),
 }
 
 /// One direction's QUIC packet-protection keys, for one packet space.
@@ -817,5 +822,369 @@ mod header_tests {
         assert_eq!(reconstruct_packet_number(Some(0xff), 0x01, 1), 0x101);
         // BACKWARD: a reordered packet from just before the boundary.
         assert_eq!(reconstruct_packet_number(Some(0x101), 0xff, 1), 0xff);
+    }
+}
+
+/// R311y696 (§1.2a) — the FRAMES inside an opened packet, and the byte stream
+/// they carry.
+///
+/// # Why this is where the track stops being about cryptography
+///
+/// R311y694 and R311y695 turn a protected packet into plaintext. That plaintext
+/// is not a byte stream: it is a sequence of QUIC frames, most of which carry
+/// no application data at all, and the two that do -- `CRYPTO` during the
+/// handshake and `STREAM` after it -- each carry an OFFSET, because QUIC
+/// delivers a stream in whatever order the packets arrive. Only once those are
+/// ordered does anything this workspace already owns apply.
+pub mod frames {
+    use super::QuicOpenError;
+    use std::collections::BTreeMap;
+
+    /// One piece of a byte stream, as a frame delivered it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct StreamPiece<'a> {
+        /// `None` for a `CRYPTO` frame, which has no stream identity: the
+        /// handshake is its own space.
+        pub stream_id: Option<u64>,
+        /// Where these bytes belong in that stream.
+        pub offset: u64,
+        /// The bytes.
+        pub data: &'a [u8],
+        /// Whether this frame closed its stream.
+        pub fin: bool,
+    }
+
+    /// Walk one packet's plaintext into the stream pieces it carries.
+    ///
+    /// Frames that carry no stream bytes are SKIPPED and not reported: padding,
+    /// pings and acknowledgements are the majority of a real capture and a
+    /// reader of a byte stream has nothing to do with them. A frame type this
+    /// walk does not know ENDS the walk rather than being stepped over --
+    /// QUIC frames are not length-prefixed as a genre, so a reader that does
+    /// not know a type does not know where it ends, and guessing produces
+    /// pieces at offsets nobody sent.
+    pub fn walk(plaintext: &[u8]) -> Result<Vec<StreamPiece<'_>>, QuicOpenError> {
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        while at < plaintext.len() {
+            let ty = super::take_varint(plaintext, &mut at)?;
+            match ty {
+                // PADDING and PING carry nothing and are one byte each.
+                0x00 | 0x01 => {}
+                // ACK, with and without ECN counts.
+                0x02 | 0x03 => {
+                    let _largest = super::take_varint(plaintext, &mut at)?;
+                    let _delay = super::take_varint(plaintext, &mut at)?;
+                    let ranges = super::take_varint(plaintext, &mut at)?;
+                    let _first = super::take_varint(plaintext, &mut at)?;
+                    for _ in 0..ranges {
+                        let _gap = super::take_varint(plaintext, &mut at)?;
+                        let _len = super::take_varint(plaintext, &mut at)?;
+                    }
+                    if ty == 0x03 {
+                        for _ in 0..3 {
+                            let _ecn = super::take_varint(plaintext, &mut at)?;
+                        }
+                    }
+                }
+                // CRYPTO: the handshake's own stream, which has no identity.
+                0x06 => {
+                    let offset = super::take_varint(plaintext, &mut at)?;
+                    let len = super::take_varint(plaintext, &mut at)? as usize;
+                    let data = slice(plaintext, at, len)?;
+                    at += len;
+                    out.push(StreamPiece {
+                        stream_id: None,
+                        offset,
+                        data,
+                        fin: false,
+                    });
+                }
+                // STREAM, whose three low bits say which of its fields are
+                // present. A reader that assumed all three would walk into the
+                // next frame's bytes.
+                0x08..=0x0f => {
+                    let stream_id = super::take_varint(plaintext, &mut at)?;
+                    let offset = if ty & 0x04 != 0 {
+                        super::take_varint(plaintext, &mut at)?
+                    } else {
+                        0
+                    };
+                    let len = if ty & 0x02 != 0 {
+                        super::take_varint(plaintext, &mut at)? as usize
+                    } else {
+                        // No length means "to the end of the packet", which is
+                        // legal and is why this walk cannot be a simple loop
+                        // over sized frames.
+                        plaintext.len() - at
+                    };
+                    let data = slice(plaintext, at, len)?;
+                    at += len;
+                    out.push(StreamPiece {
+                        stream_id: Some(stream_id),
+                        offset,
+                        data,
+                        fin: ty & 0x01 != 0,
+                    });
+                }
+                _ => return Err(QuicOpenError::UnknownFrame(ty)),
+            }
+        }
+        Ok(out)
+    }
+
+    fn slice(bytes: &[u8], at: usize, len: usize) -> Result<&[u8], QuicOpenError> {
+        bytes
+            .get(at..at + len)
+            .ok_or(QuicOpenError::TruncatedHeader)
+    }
+
+    /// R311y696 — one stream's bytes, put back in order.
+    ///
+    /// # The bound, and why it has a counter
+    ///
+    /// A piece that arrives ahead of a hole cannot be delivered and has to be
+    /// held, which is an accumulation that grows with the input -- the shape
+    /// this workspace bounds everywhere. `max_buffered` is that bound and
+    /// [`Self::dropped`] is what it cost, because a reassembler that silently
+    /// discards is a reader that reports a stream shorter than the one that was
+    /// sent.
+    #[derive(Debug, Default)]
+    pub struct StreamReassembler {
+        /// Bytes delivered so far, in order.
+        ready: Vec<u8>,
+        /// Pieces held for a hole ahead of them, keyed by their offset.
+        held: BTreeMap<u64, Vec<u8>>,
+        /// How many bytes are held.
+        held_bytes: usize,
+        /// The ceiling on held bytes; `None` is unbounded.
+        max_buffered: Option<usize>,
+        /// Bytes the bound refused, which is what the bound cost.
+        dropped: usize,
+        /// Whether a frame said the stream ended.
+        finished: bool,
+    }
+
+    impl StreamReassembler {
+        /// A reassembler holding at most `max_buffered` out-of-order bytes.
+        pub fn new(max_buffered: Option<usize>) -> Self {
+            Self {
+                max_buffered,
+                ..Default::default()
+            }
+        }
+
+        /// Offer one piece. Returns how many bytes became deliverable.
+        pub fn push(&mut self, piece: &StreamPiece<'_>) -> usize {
+            if piece.fin {
+                self.finished = true;
+            }
+            let before = self.ready.len();
+            let start = piece.offset;
+            let end = start + piece.data.len() as u64;
+            if end <= self.ready.len() as u64 {
+                // Wholly retransmitted: QUIC may resend, and a reader that
+                // appended it again would invent bytes nobody sent.
+                return 0;
+            }
+            if start <= self.ready.len() as u64 {
+                let skip = (self.ready.len() as u64 - start) as usize;
+                self.ready.extend_from_slice(&piece.data[skip..]);
+                self.drain_held();
+            } else if self
+                .max_buffered
+                .is_none_or(|cap| self.held_bytes + piece.data.len() <= cap)
+            {
+                self.held_bytes += piece.data.len();
+                self.held.insert(start, piece.data.to_vec());
+            } else {
+                self.dropped += piece.data.len();
+            }
+            self.ready.len() - before
+        }
+
+        /// Move whatever the new bytes unblocked out of the hold.
+        fn drain_held(&mut self) {
+            while let Some((&offset, _)) = self.held.iter().next() {
+                if offset > self.ready.len() as u64 {
+                    break;
+                }
+                let piece = self.held.remove(&offset).expect("just seen");
+                self.held_bytes -= piece.len();
+                let end = offset + piece.len() as u64;
+                if end > self.ready.len() as u64 {
+                    let skip = (self.ready.len() as u64 - offset) as usize;
+                    self.ready.extend_from_slice(&piece[skip..]);
+                }
+            }
+        }
+
+        /// The contiguous bytes delivered so far.
+        pub fn stream(&self) -> &[u8] {
+            &self.ready
+        }
+
+        /// Bytes held for a hole ahead of them.
+        pub fn buffered(&self) -> usize {
+            self.held_bytes
+        }
+
+        /// Bytes the bound refused.
+        pub fn dropped(&self) -> usize {
+            self.dropped
+        }
+
+        /// Whether a frame said this stream ended.
+        pub fn finished(&self) -> bool {
+            self.finished
+        }
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::frames::{walk, StreamReassembler};
+    use super::QuicOpenError;
+
+    /// One STREAM frame: type bits for OFF and LEN, the id, the offset, the
+    /// length, then the bytes.
+    fn stream_frame(id: u8, offset: u8, data: &[u8], fin: bool) -> Vec<u8> {
+        let mut f = vec![0x08 | 0x04 | 0x02 | u8::from(fin)];
+        f.push(id);
+        f.push(offset);
+        f.push(data.len() as u8);
+        f.extend_from_slice(data);
+        f
+    }
+
+    /// R311y696 (§1.2a) — an opened packet's plaintext is walked into the
+    /// stream pieces it carries, and the frames that carry nothing are stepped
+    /// over rather than reported.
+    #[test]
+    fn a_packets_plaintext_is_walked_into_the_stream_it_carries() {
+        let mut plaintext = vec![0x00, 0x00, 0x01]; // two PADDING and a PING
+        plaintext.extend_from_slice(&[0x06, 0x00, 0x04]); // CRYPTO at offset 0
+        plaintext.extend_from_slice(b"hi\x00\x01");
+        plaintext.extend_from_slice(&stream_frame(4, 0, b"zenoh", true));
+
+        let pieces = walk(&plaintext).expect("the walk reads every frame");
+        // ANTI-VACUITY: the padding and the ping must have been walked past,
+        // not stopped at -- a walk that gave up at the first frame would also
+        // produce "only the ones that carry bytes".
+        assert_eq!(pieces.len(), 2, "two frames carry stream bytes: {pieces:?}");
+        assert_eq!(pieces[0].stream_id, None, "CRYPTO has no stream identity");
+        assert_eq!(pieces[0].data, b"hi\x00\x01");
+        assert_eq!(pieces[1].stream_id, Some(4));
+        assert_eq!(pieces[1].data, b"zenoh");
+        assert!(pieces[1].fin, "the FIN bit is read from the type");
+    }
+
+    /// R311y696 (§1.2a) — a STREAM frame WITHOUT the OFF bit begins at zero,
+    /// and its absence is read from the type rather than assumed.
+    ///
+    /// ## Why this test exists
+    ///
+    /// Measured: a probe that read an offset varint unconditionally -- ignoring
+    /// the type bit that says whether one is present -- passed every test in
+    /// this module, because every fixture set the bit. A build with that defect
+    /// consumes the first byte of the DATA as an offset and reports a stream
+    /// that is shifted by one and short by one, which is a scrambled stream
+    /// reported as a whole one.
+    #[test]
+    fn a_stream_frame_without_an_offset_field_begins_at_zero() {
+        // 0x08 | LEN, and no OFF: id, length, bytes.
+        let plaintext = vec![0x0a, 0x04, 0x05, b'z', b'e', b'n', b'o', b'h'];
+        let pieces = walk(&plaintext).expect("the walk reads it");
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].stream_id, Some(4), "the id is the first varint");
+        assert_eq!(
+            pieces[0].offset, 0,
+            "a frame with no OFF bit starts at zero, and the byte after the id \
+             is the LENGTH rather than an offset"
+        );
+        assert_eq!(
+            pieces[0].data, b"zenoh",
+            "so the data begins where the length says and not one byte later"
+        );
+    }
+
+    /// R311y696 (§1.2a) — a frame type this walk does not know STOPS it.
+    ///
+    /// QUIC frames are not length-prefixed as a genre, so a reader that does
+    /// not know a type does not know where it ends. Stepping over it by a
+    /// guessed width would produce pieces at offsets nobody sent -- bytes that
+    /// look like a stream and are not one.
+    #[test]
+    fn an_unknown_frame_type_stops_the_walk_by_name() {
+        // 0x1e is HANDSHAKE_DONE in RFC 9000 and this walk does not carry it.
+        let plaintext = vec![0x1e, 0x00];
+        assert_eq!(
+            walk(&plaintext).err(),
+            Some(QuicOpenError::UnknownFrame(0x1e))
+        );
+    }
+
+    /// R311y696 (§1.2a) — pieces are put back in ORDER, and a hole holds the
+    /// bytes behind it rather than delivering them early.
+    ///
+    /// This is the property the whole module exists for: QUIC delivers a stream
+    /// in whatever order the packets arrive, so a reader that appended in
+    /// arrival order would hand this workspace's framing a stream that is
+    /// scrambled -- and every message in it would decode as garbage with no
+    /// indication why.
+    #[test]
+    fn pieces_are_reassembled_in_order_and_a_hole_holds_the_rest() {
+        let mut r = StreamReassembler::new(None);
+        let tail = super::frames::StreamPiece {
+            stream_id: Some(0),
+            offset: 5,
+            data: b" world",
+            fin: false,
+        };
+        let head = super::frames::StreamPiece {
+            stream_id: Some(0),
+            offset: 0,
+            data: b"hello",
+            fin: true,
+        };
+
+        assert_eq!(r.push(&tail), 0, "a piece behind a hole delivers nothing");
+        assert_eq!(r.buffered(), 6, "and is held, counted");
+        assert_eq!(r.stream(), b"", "nothing is delivered early");
+
+        assert_eq!(r.push(&head), 11, "the hole filling releases both");
+        assert_eq!(r.stream(), b"hello world");
+        assert_eq!(r.buffered(), 0, "and the hold is empty again");
+        assert!(
+            r.finished(),
+            "the FIN is remembered whichever order it came in"
+        );
+
+        // A RETRANSMISSION adds nothing: QUIC may resend, and a reader that
+        // appended it again would invent bytes nobody sent.
+        assert_eq!(r.push(&head), 0);
+        assert_eq!(r.stream(), b"hello world");
+    }
+
+    /// R311y696 (§1.2a) — the hold is BOUNDED and what the bound cost is
+    /// counted.
+    ///
+    /// An out-of-order piece is an accumulation that grows with the input,
+    /// which this workspace bounds everywhere; a reassembler that silently
+    /// discarded would report a stream shorter than the one that was sent.
+    #[test]
+    fn the_hold_is_bounded_and_says_what_it_refused() {
+        let mut r = StreamReassembler::new(Some(4));
+        let far = super::frames::StreamPiece {
+            stream_id: Some(0),
+            offset: 100,
+            data: b"12345",
+            fin: false,
+        };
+        assert_eq!(r.push(&far), 0);
+        // ANTI-VACUITY: nothing was held, so the drop is the bound biting and
+        // not an empty hold reporting itself.
+        assert_eq!(r.buffered(), 0, "the piece did not fit");
+        assert_eq!(r.dropped(), 5, "and what did not fit is counted");
     }
 }
