@@ -1678,6 +1678,77 @@ impl ByteResidue {
     }
 }
 
+/// R311y713 (§B10) — what the transport messages a BOUND discarded had said.
+///
+/// [`DissectionDrops::frames`] counts them and nothing names them, so a
+/// dissection that trimmed a busy flow could not answer the one question the
+/// trim raises: was that a hundred keepalives, or the `Close` that explains
+/// why the session ended. The count says a bound bit; this says what it bit.
+///
+/// TRANSPORT messages only. A scouting datagram discarded by the same limit is
+/// counted in [`DissectionDrops::scouting`] and is not censused here, because
+/// it is a different message space (`ScoutingFrame`) and folding the two would
+/// produce a total that belongs to neither.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DroppedFrameCensus {
+    /// Session establishment, both halves.
+    pub init: usize,
+    /// Session opening, both halves.
+    pub open: usize,
+    /// Session teardown — the one whose loss changes what a reader concludes.
+    pub close: usize,
+    /// Keepalives, which is what a long trim is usually made of.
+    pub keep_alive: usize,
+    /// Data frames.
+    pub frame: usize,
+    /// Fragments of one.
+    pub fragment: usize,
+    /// R311y608 — the multicast JOIN, which is how a peer announces itself on
+    /// a group and therefore the one whose loss changes what a LATER message
+    /// on that group is read as.
+    pub join: usize,
+    /// Messages whose MID this reader does not know. Not an error: an unknown
+    /// message is a fact about the wire, and a bound discarding one is worth
+    /// telling apart from a bound discarding a keepalive.
+    pub unknown: usize,
+    /// Messages this reader had already failed to decode. Kept apart from the
+    /// rest: a bound discarding garbage and a bound discarding a `Close` are
+    /// different findings.
+    pub undecodable: usize,
+}
+
+impl DroppedFrameCensus {
+    /// Fold one discarded frame in.
+    fn add(&mut self, f: &PassiveFrame) {
+        match &f.frame {
+            Ok(wz_session_core::inbound::InboundFrame::Init { .. }) => self.init += 1,
+            Ok(wz_session_core::inbound::InboundFrame::Open { .. }) => self.open += 1,
+            Ok(wz_session_core::inbound::InboundFrame::Close { .. }) => self.close += 1,
+            Ok(wz_session_core::inbound::InboundFrame::KeepAlive { .. }) => self.keep_alive += 1,
+            Ok(wz_session_core::inbound::InboundFrame::Frame { .. }) => self.frame += 1,
+            Ok(wz_session_core::inbound::InboundFrame::Fragment { .. }) => self.fragment += 1,
+            Ok(wz_session_core::inbound::InboundFrame::Join { .. }) => self.join += 1,
+            Ok(wz_session_core::inbound::InboundFrame::Unknown { .. }) => self.unknown += 1,
+            Err(_) => self.undecodable += 1,
+        }
+    }
+
+    /// Every discarded message this censused — the figure that must equal
+    /// [`DissectionDrops::frames`], and the assertion that keeps the two from
+    /// drifting into two different stories about one trim.
+    pub fn total(&self) -> usize {
+        self.init
+            + self.open
+            + self.close
+            + self.keep_alive
+            + self.frame
+            + self.fragment
+            + self.join
+            + self.unknown
+            + self.undecodable
+    }
+}
+
 /// R311y594b — what the LIMITS cost, so a bound is never silent.
 ///
 /// A dissection that drops to stay inside its budget and does not say so
@@ -2050,6 +2121,8 @@ pub struct Dissection {
     /// verb it counts is: a build that reassembles nothing abandons nothing and
     /// answers `0`.
     abandoned_chains: usize,
+    /// R311y713 (§B10) — what the frames the bounds discarded had said.
+    dropped_frames: DroppedFrameCensus,
     /// R311y713 (§B7) — bytes that had already arrived into chains this reader
     /// gave up on, over every cause and every flow.
     ///
@@ -2111,6 +2184,7 @@ impl Default for Dissection {
             gap_patience: Some(crate::tcp::DEFAULT_GAP_PATIENCE),
             capture_origin_ms: None,
             abandoned_chains: 0,
+            dropped_frames: DroppedFrameCensus::default(),
             chain_bytes_lost: 0,
             decryption_secrets: Vec::new(),
         }
@@ -2446,6 +2520,16 @@ impl Dissection {
     /// ended. See [`Self::expired_chains`] for why the two are counted apart.
     pub fn abandoned_chains(&self) -> usize {
         self.abandoned_chains
+    }
+
+    /// R311y713 (§B10) — what the messages `frames_per_flow` discarded said.
+    ///
+    /// Reported beside [`Self::drops`] rather than inside it because the two
+    /// are read at different moments: the count answers "did a bound bite",
+    /// which every reader must ask, and this answers "does it matter", which
+    /// only a reader whose bound bit needs.
+    pub fn dropped_frame_census(&self) -> DroppedFrameCensus {
+        self.dropped_frames
     }
 
     /// R311y713 (§B7) — bytes lost with every chain this reader gave up on,
@@ -2996,7 +3080,11 @@ impl Dissection {
         if let Some(cap) = self.limits.frames_per_flow {
             if flow.frames.len() > cap {
                 let cut = flow.frames.len() - cap;
-                flow.frames.drain(..cut);
+                // R311y713 (§B10) — censused BEFORE the drain, which is the
+                // only moment the messages still exist to be read.
+                for f in flow.frames.drain(..cut) {
+                    self.dropped_frames.add(&f);
+                }
                 self.drops.frames += cut;
             }
         }
@@ -3303,7 +3391,8 @@ impl Dissection {
                 flow.scouting.remove(0);
                 self.drops.scouting += 1;
             } else {
-                flow.frames.remove(0);
+                let gone = flow.frames.remove(0);
+                self.dropped_frames.add(&gone);
                 self.drops.frames += 1;
             }
         }
@@ -5964,6 +6053,64 @@ mod datagram_tests {
             evicted.byte_residue().recovered,
             ended.byte_residue().recovered + msg.len() as u64,
             "and the retired flow's recovered bytes must not leave with it"
+        );
+    }
+
+    /// R311y713 (§B10) — a bound that discards messages must say WHAT it
+    /// discarded, not only how many.
+    ///
+    /// `drops.frames` has counted them since R311y594b and nothing named them,
+    /// so a trimmed capture could not answer whether the bound took a hundred
+    /// keepalives or the `Close` that explains why the session ended. Both
+    /// renderings are asserted in this one run: a fact rendered in two places
+    /// is a fact that can drift, and this workspace has measured that drift.
+    #[test]
+    fn a_bound_that_discards_frames_says_what_they_were() {
+        const CAP: usize = 2;
+        let mut d = Dissection::with_limits(DissectionLimits {
+            frames_per_flow: Some(CAP),
+            ..DissectionLimits::default()
+        });
+        // A close early in the stream and keepalives after it, on one TCP
+        // flow. The close is what the bound takes, which is the whole point:
+        // the count cannot tell that apart from a keepalive going.
+        let close = {
+            let wire = alloc::vec![wz_session_core::wire_const::T_MID_CLOSE, 0x00];
+            let mut out = (wire.len() as u16).to_le_bytes().to_vec();
+            out.extend_from_slice(&wire);
+            out
+        };
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&framed_keepalive());
+        stream.extend_from_slice(&close);
+        for _ in 0..5 {
+            stream.extend_from_slice(&framed_keepalive());
+        }
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1000, &stream));
+
+        let c = d.dropped_frame_census();
+        assert_eq!(
+            c.total(),
+            d.drops().frames,
+            "the census and the count must be two views of one trim"
+        );
+        assert!(c.total() > 0, "the fixture must actually trip the bound");
+        assert_eq!(c.close, 1, "and the CLOSE must be named as gone: {c:?}");
+        assert_eq!(c.keep_alive, c.total() - 1, "the rest were keepalives");
+
+        let rep = crate::report::CaptureReport::of(&d);
+        assert!(
+            rep.to_text()
+                .contains("frames discarded by frames_per_flow")
+                && rep.to_text().contains("close 1"),
+            "the text must name it: {}",
+            rep.to_text()
+        );
+        assert!(
+            rep.to_json().contains("\"dropped_frames\":{\"total\":")
+                && rep.to_json().contains("\"close\":1"),
+            "and so must the export: {}",
+            rep.to_json()
         );
     }
 

@@ -636,6 +636,27 @@ impl<'a> CaptureReport<'a> {
             drops.scouting,
             drops.scout_askers
         ));
+        // R311y713 (§B10) — the same census the text renders, in the export.
+        // One fact rendered in two places is one fact that can drift, so the
+        // test asserts BOTH in one run.
+        {
+            let c = d.dropped_frame_census();
+            s.push_str(&alloc::format!(
+                ",\"dropped_frames\":{{\"total\":{},\"init\":{},\"open\":{},\
+                 \"close\":{},\"keep_alive\":{},\"frame\":{},\"fragment\":{},\
+                 \"join\":{},\"unknown\":{},\"undecodable\":{}}}",
+                c.total(),
+                c.init,
+                c.open,
+                c.close,
+                c.keep_alive,
+                c.frame,
+                c.fragment,
+                c.join,
+                c.unknown,
+                c.undecodable
+            ));
+        }
         // The figure the CAPTURE FILE reports about itself, which is a
         // different claim from anything this reader counted: `null` when the
         // format carried none, never 0.
@@ -681,6 +702,31 @@ impl<'a> CaptureReport<'a> {
         // holding three decoded messages. That is R311y648's silence in the one
         // place it had not been closed: the summary of what WAS read.
         s.push_str(&format!("  messages decoded: {}\n", decoded_messages(d)));
+        // R311y713 (§B10) — and WHAT the per-flow bound discarded, when it
+        // discarded anything. A count alone leaves a reader unable to tell a
+        // trim of a hundred keepalives from one that took the `Close` the
+        // capture is being read to explain. Printed only when the bound bit,
+        // for the reason the skip line above is: a zero here is furniture.
+        {
+            let c = d.dropped_frame_census();
+            if c.total() > 0 {
+                s.push_str(&format!(
+                    "  frames discarded by frames_per_flow: {} \
+                     (init {}, open {}, close {}, keepalive {}, frame {}, \
+                     fragment {}, join {}, unknown {}, undecodable {})\n",
+                    c.total(),
+                    c.init,
+                    c.open,
+                    c.close,
+                    c.keep_alive,
+                    c.frame,
+                    c.fragment,
+                    c.join,
+                    c.unknown,
+                    c.undecodable
+                ));
+            }
+        }
         // R311y643 (§1.1e) — the line that turns a skip COUNT into a
         // diagnosis, and it leads with the link types because that is the one
         // reason a reader can act on: every other skip is furniture in an
