@@ -2466,6 +2466,15 @@ jobs:
       - name: Layer C1bx — the TLS decryptor vs rustls (R311y668)
         run: bash scripts/run-ci.sh --layer C1bx
 
+      # R311y701 — the REPLAY engine's lane, which R311y700 wrote into
+      # run-ci.sh and never wired here. Found by C0's own unwired-lane gate on
+      # the very next round, which is the third time that gate has caught a lane
+      # that ran only in a local full sweep. `wz-replay` is the one crate in
+      # this workspace that can put packets on a network, so an ungated one is
+      # the worst candidate for coverage nobody runs.
+      - name: Layer C1by — the replay engine (R311y700)
+        run: bash scripts/run-ci.sh --layer C1by
+
   capi-c-arms:
     name: §5.27 api-compat-c — the ABI arms and the SHM oracle (C1ce + arms gate)
     runs-on: ubuntu-22.04

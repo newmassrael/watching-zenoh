@@ -2518,4 +2518,136 @@ mod tests {
              in which appending nothing is also valid: {body}"
         );
     }
+
+    /// R311y701 (§1.1f) — THE QUIC DECRYPTION PLANE, ON A PAGE BY ITSELF.
+    ///
+    /// R311y698 attached this plane and gave it two legs of the completeness
+    /// verdict, and put neither on a page of its own. `solo_plane_page_lint`
+    /// said so on hosted CI and nowhere else, which is exactly the gate's
+    /// purpose: a page carrying a second plane produces the verdict from the
+    /// other one, and either leg could be severed with every test still green.
+    ///
+    /// So the ONLY plane here is `with_quic_decryption`, and each leg is moved
+    /// on its own: a flow nobody opened, the same flow opened, and a walk that
+    /// stopped inside a flow that DID open — the last being the one a
+    /// `flows_opened`-only verdict would call whole.
+    #[test]
+    fn a_quic_decryption_plane_alone_moves_the_verdict_and_both_renderings() {
+        // A v1 Initial: a long header is EVIDENCE, so this flow needs no
+        // `--quic` declaration and the population below is a measurement.
+        let mut initial = alloc::vec![0xC0u8];
+        initial.extend_from_slice(&1u32.to_be_bytes());
+        initial.push(8);
+        initial.extend_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7]);
+        initial.push(4);
+        initial.extend_from_slice(&[8, 9, 10, 11]);
+        initial.extend_from_slice(&[0x00, 0x29, 0x01]);
+        initial.extend_from_slice(&[0xAA; 40]);
+
+        let mut d = crate::Dissection::new();
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &crate::datagram_tests::udp_packet([10, 0, 0, 1], 50000, [10, 0, 0, 2], 7447, &initial),
+        );
+
+        // THE POPULATION, asserted before anything is asked of it. A capture
+        // holding no QUIC flow would satisfy every `is_complete` claim below
+        // vacuously — the "population of zero is green" shape this workspace
+        // has measured more than once.
+        assert_eq!(
+            d.datagram_flows()
+                .iter()
+                .filter(|f| f.quic.is_some())
+                .count(),
+            1,
+            "the long header must have established exactly one QUIC flow"
+        );
+        assert!(
+            d.health().packets_skipped == 0 && !d.drops().any(),
+            "and NOTHING else about this capture may be short, or the verdict \
+             below would be produced by a cause this page is not about"
+        );
+
+        // No decryptor ran: the flow's zenoh is not in the totals.
+        let bare = CaptureReport::of(&d);
+        assert!(!bare.is_complete());
+        assert!(
+            bare.to_json().contains("\"decrypted\":false"),
+            "{}",
+            bare.to_json()
+        );
+        assert!(
+            bare.to_text().contains("NOT DECRYPTED"),
+            "{}",
+            bare.to_text()
+        );
+
+        // A decryptor ran and opened nothing — same verdict, different sentence.
+        let shut = crate::quic::QuicDecryption {
+            flows_offered: 1,
+            flows_opened: 0,
+            packets: 1,
+            packets_opened: 0,
+            packets_no_keys: 1,
+            packets_refused: 0,
+            crypto_bytes: 0,
+            stream_bytes: 0,
+            datagram_bytes: 0,
+            walks_stopped: 0,
+        };
+        let r = CaptureReport::of(&d).with_quic_decryption(&shut);
+        assert!(!r.is_complete(), "a flow offered and not opened is a floor");
+        assert!(
+            r.to_text().contains("1 had no key for their space"),
+            "and the reason a person acts on is the key log, not the capture: {}",
+            r.to_text()
+        );
+
+        // Opened. THE LEG R311y698 ADDED: before it, this said incomplete.
+        let open = crate::quic::QuicDecryption {
+            flows_opened: 1,
+            packets_opened: 1,
+            packets_no_keys: 0,
+            crypto_bytes: 41,
+            ..shut
+        };
+        let r = CaptureReport::of(&d).with_quic_decryption(&open);
+        assert!(
+            r.is_complete(),
+            "a flow whose every packet opened IS the rows: {}",
+            r.to_text()
+        );
+        assert!(
+            r.to_json().contains("\"decrypted\":true")
+                && r.to_json().contains("\"flows_opened\":1"),
+            "{}",
+            r.to_json()
+        );
+        assert!(
+            r.to_text().contains("1 of 1 packet(s) opened"),
+            "{}",
+            r.to_text()
+        );
+
+        // And the SECOND leg, which `flows_opened` alone cannot carry: the flow
+        // opened, and the walk stopped at a frame type this reader does not
+        // know, so the stream is short by an unknown amount.
+        let stopped = crate::quic::QuicDecryption {
+            walks_stopped: 1,
+            ..open
+        };
+        let r = CaptureReport::of(&d).with_quic_decryption(&stopped);
+        assert!(
+            !r.is_complete(),
+            "a walk that stopped mid-packet is a shortfall in the rows even \
+             where every flow opened: {}",
+            r.to_text()
+        );
+        assert!(
+            r.to_json().contains("\"walks_stopped\":1"),
+            "{}",
+            r.to_json()
+        );
+    }
 }
