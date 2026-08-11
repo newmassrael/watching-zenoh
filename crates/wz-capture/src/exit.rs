@@ -44,6 +44,8 @@ use core::ops::{Deref, DerefMut};
 
 use alloc::vec::Vec;
 
+use wz_session_core::reassembly_dispatch::ChainLoss;
+
 use crate::{
     add_sn, add_ws, tls, ByteResidue, DatagramDissection, Direction, FlowDissection, FramingHealth,
     StreamTally,
@@ -61,8 +63,8 @@ use crate::{
 pub(crate) struct ExitTally {
     /// Gaps stepped over because no further packet is coming.
     pub(crate) gaps_forced: usize,
-    /// Half-assembled message chains given up on.
-    pub(crate) chains_abandoned: usize,
+    /// Half-assembled message chains given up on, and the bytes in them.
+    pub(crate) chains: ChainLoss,
 }
 
 /// A flow that can be told no further byte of it will be read.
@@ -112,7 +114,11 @@ impl ExitingFlow for FlowDissection {
         // 3. THE OPEN CHAINS. The framing decision and the reassembler are two
         //    different things the flow was in the middle of, and settling the
         //    first does not reach the second.
-        tally.chains_abandoned = self.session.abandon_open_chains();
+        tally.chains = self.session.abandon_open_chains_counting();
+        // R311y713 (§B6) — on the flow's own ledger as well as the caller's.
+        // A flow that leaves is the last moment anything can say it was THIS
+        // flow that was mid-message.
+        self.chain_loss.absorb(tally.chains);
         tally
     }
 }
@@ -123,9 +129,11 @@ impl ExitingFlow for DatagramDissection {
         // obligations above are not skipped here, they do not exist. What it
         // does have is chains, because a datagram flow is where fragments
         // actually arrive.
+        let chains = self.session.abandon_open_chains_counting();
+        self.chain_loss.absorb(chains);
         ExitTally {
             gaps_forced: 0,
-            chains_abandoned: self.session.abandon_open_chains(),
+            chains,
         }
     }
 }
@@ -234,7 +242,7 @@ pub(crate) struct ExitCarry {
     sessions: FramingHealth,
     encrypted: tls::EncryptedTotals,
     residue: ByteResidue,
-    chains: usize,
+    chains: ChainLoss,
     messages: usize,
     flows: usize,
 }
@@ -248,7 +256,7 @@ impl ExitCarry {
         // first would carry the numbers the flow had before it finished
         // leaving.
         let tally = flow.perform_exit();
-        self.chains += tally.chains_abandoned;
+        self.chains.absorb(tally.chains);
         // The ENCRYPTED census, which is a finding and not a loss tally: an
         // evicted encrypted flow otherwise took the whole "this capture is
         // unreadable and here is how much of it" statement with it.
@@ -285,7 +293,7 @@ impl ExitCarry {
     /// Retire a datagram flow. Fewer counters, same rule.
     pub(crate) fn absorb_datagram(&mut self, mut gone: Exiting<DatagramDissection>) {
         let mut flow = gone.0.take().expect("an Exiting is consumed once");
-        self.chains += flow.perform_exit().chains_abandoned;
+        self.chains.absorb(flow.perform_exit().chains);
         // R311y713 — the datagram table's frames were counted by nobody: the
         // stream path has carried `messages` since R311y666 and this one never
         // did, so `decoded_messages` walked backwards whenever a MULTICAST
@@ -327,7 +335,12 @@ impl ExitCarry {
 
     /// Chains they were still assembling when they left.
     pub(crate) fn chains(&self) -> usize {
-        self.chains
+        self.chains.chains
+    }
+
+    /// R311y713 (§B7) — and the bytes those chains had already gathered.
+    pub(crate) fn chain_bytes(&self) -> u64 {
+        self.chains.bytes
     }
 
     /// Transport messages they had decoded.

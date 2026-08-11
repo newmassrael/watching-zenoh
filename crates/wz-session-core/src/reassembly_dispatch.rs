@@ -418,6 +418,30 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLO
     }
 }
 
+/// R311y713 (§B7) — what a sweep gave up on: how many chains, and how much of
+/// them had already arrived.
+///
+/// Two numbers rather than one because they answer different questions and a
+/// reader needs both: the count says how many messages will never be seen, and
+/// the bytes say how much of the capture went with them. A count alone cannot
+/// distinguish four chains lost at one fragment each from four lost at a
+/// megabyte each, and the second is a capture worth re-taking.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChainLoss {
+    /// Chains abandoned.
+    pub chains: usize,
+    /// Bytes staged into them and now unreachable.
+    pub bytes: u64,
+}
+
+impl ChainLoss {
+    /// Fold another sweep's loss in.
+    pub fn absorb(&mut self, other: Self) {
+        self.chains += other.chains;
+        self.bytes += other.bytes;
+    }
+}
+
 /// The reassembly Router: a fixed pool of `SLOTS` slot FSMs, each able to
 /// reassemble a fragment chain of up to `CAP` bytes. See the module docs
 /// for the division of labour with the engine-free slot FSM.
@@ -600,8 +624,25 @@ where
     /// `now_ms`, raising `reassembly.timeout` into only the live slots
     /// (a reused slot's stale deadline cannot fire — released slots are
     /// `is_free`). Returns the number of chains timed out.
+    ///
+    /// R311y713 (§B7) — see [`Self::sweep_counting`] for the same act
+    /// reporting the BYTES it dropped. This spelling remains for the callers
+    /// that only ever wanted the count.
     pub fn sweep(&mut self, now_ms: u64) -> usize {
-        let mut timed_out = 0;
+        self.sweep_counting(now_ms).chains
+    }
+
+    /// R311y713 (§B7) — the same sweep, reporting how much was IN the chains
+    /// it gave up on.
+    ///
+    /// A count of lost chains cannot answer the question a reader actually
+    /// has — how much of this capture is missing — and the staged bytes are in
+    /// hand at exactly this instant and nowhere else: `release` hands them back
+    /// to the arena, so a caller asking afterwards is asking a buffer that has
+    /// been reused. Three rounds recorded that this number had no witness while
+    /// the only place able to take it was this loop.
+    pub fn sweep_counting(&mut self, now_ms: u64) -> ChainLoss {
+        let mut loss = ChainLoss::default();
         // Split the borrow: `release` hands the chain's staging back to the
         // arena, and both live behind `&mut self`.
         let Self { slots, staging, .. } = self;
@@ -611,10 +652,15 @@ where
             }
             slot.engine
                 .process_event(ReassemblySlotEvent::ReassemblyTimeout);
+            // BEFORE the release, which is what makes the number takeable at
+            // all: the handle is the arena's again the moment after.
+            if let Some(chain) = slot.chain.as_ref() {
+                loss.bytes += staging.bytes(chain).len() as u64;
+            }
             slot.release(staging);
-            timed_out += 1;
+            loss.chains += 1;
         }
-        timed_out
+        loss
     }
 
     fn find_active(&self, peer_key: &[u8], reliable: bool, priority: Priority) -> Option<usize> {

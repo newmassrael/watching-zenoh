@@ -57,7 +57,7 @@ use crate::parse_error::InboundParseError;
 use crate::peer_init_caps::PeerInitCaps;
 #[cfg(feature = "reassembly")]
 use crate::reassembly_dispatch::{
-    Fragment as ReasmFragment, IngestOutcome, ReassemblyConfig, ReassemblyDispatcher,
+    ChainLoss, Fragment as ReasmFragment, IngestOutcome, ReassemblyConfig, ReassemblyDispatcher,
 };
 use wz_codecs::ext_entry::ExtEntryOwned;
 
@@ -1115,14 +1115,26 @@ impl PassiveSession {
     /// consumer measuring latency needs it whether or not this build can
     /// reassemble.
     pub fn observe_at(&mut self, now_ms: u64) -> usize {
+        self.observe_at_counting(now_ms).chains
+    }
+
+    /// R311y713 (§B7) — the same sweep, reporting the BYTES that went with the
+    /// chains as well as their number.
+    ///
+    /// The staged bytes exist only until the slot is released, so this is the
+    /// one instant they can be counted; see
+    /// [`crate::reassembly_dispatch::ReassemblyDispatcher::sweep_counting`].
+    pub fn observe_at_counting(&mut self, now_ms: u64) -> ChainLoss {
         self.observed_at = Some(now_ms);
         #[cfg(feature = "reassembly")]
         {
-            self.reasm[0].sweep(now_ms) + self.reasm[1].sweep(now_ms)
+            let mut loss = self.reasm[0].sweep_counting(now_ms);
+            loss.absorb(self.reasm[1].sweep_counting(now_ms));
+            loss
         }
         #[cfg(not(feature = "reassembly"))]
         {
-            0
+            ChainLoss::default()
         }
     }
 
@@ -1144,17 +1156,25 @@ impl PassiveSession {
     /// the same slots and would leave every later frame stamped at the end of
     /// time.
     pub fn abandon_open_chains(&mut self) -> usize {
+        self.abandon_open_chains_counting().chains
+    }
+
+    /// R311y713 (§B7) — the same, reporting the bytes the abandoned chains had
+    /// already gathered.
+    pub fn abandon_open_chains_counting(&mut self) -> ChainLoss {
         #[cfg(feature = "reassembly")]
         {
             // `u64::MAX` is what makes the deadline unreachable-in-reverse: a
             // slot is kept when `now < deadline`, so the largest instant there
             // is expires every open slot including the ones built with no
             // window at all, whose deadline is that same value.
-            self.reasm[0].sweep(u64::MAX) + self.reasm[1].sweep(u64::MAX)
+            let mut loss = self.reasm[0].sweep_counting(u64::MAX);
+            loss.absorb(self.reasm[1].sweep_counting(u64::MAX));
+            loss
         }
         #[cfg(not(feature = "reassembly"))]
         {
-            0
+            ChainLoss::default()
         }
     }
 

@@ -113,6 +113,7 @@ use wz_session_core::parse_error::InboundParseError;
 use wz_session_core::passive::{
     Direction, FlowContext, PassiveFrame, PassiveSession, PassiveStall,
 };
+use wz_session_core::reassembly_dispatch::ChainLoss;
 use wz_session_core::scouting_message::{parse_scouting, ScoutingFrame};
 
 use crate::link::{FlowKey, SkipReason, Transport};
@@ -274,6 +275,8 @@ pub struct DatagramDissection {
     /// On a QUIC flow `fed` stays zero for the life of the capture, which is
     /// R311y705's finding expressed as a count rather than as a paragraph.
     residue: ByteResidue,
+    /// R311y713 (§B6) — chains THIS flow lost, and how much was in them.
+    chain_loss: ChainLoss,
 }
 
 impl DatagramDissection {
@@ -286,7 +289,17 @@ impl DatagramDissection {
             last_activity: 0,
             quic: None,
             residue: ByteResidue::default(),
+            chain_loss: ChainLoss::default(),
         }
+    }
+
+    /// R311y713 (§B6) — the chains this flow lost, whatever the cause.
+    ///
+    /// The capture-wide counters say how much was lost and never WHERE, which
+    /// is the first thing a reader diagnosing one asks. Per flow, the answer is
+    /// a 5-tuple away.
+    pub fn chain_loss(&self) -> ChainLoss {
+        self.chain_loss
     }
 
     /// R311y709 — this flow's recovered-against-fed counts.
@@ -749,6 +762,8 @@ pub struct FlowDissection {
     ws_resyncs: Vec<(Direction, ws::WsResync)>,
     /// R311y709 (§1.2a) — bytes recovered for this flow against bytes handed on.
     residue: ByteResidue,
+    /// R311y713 (§B6) — chains THIS flow lost, and how much was in them.
+    chain_loss: ChainLoss,
 }
 
 /// R311y612 (§4.1) — post-hole bytes held per direction while deciding whether
@@ -768,6 +783,16 @@ impl FlowDissection {
         self.residue
     }
 
+    /// R311y713 (§B6) — the chains this flow lost, whatever the cause.
+    ///
+    /// The three capture-wide counters — expired, abandoned, evicted — say how
+    /// many and, since R311y713, how much; none of them says WHICH FLOW, which
+    /// is the first thing a reader diagnosing a loss asks. A capture with one
+    /// bad link and nine good ones reads as uniformly lossy without this.
+    pub fn chain_loss(&self) -> ChainLoss {
+        self.chain_loss
+    }
+
     fn new(flow: FlowKey, window_ms: Option<u64>, gap_patience: Option<usize>) -> Self {
         Self {
             flow,
@@ -782,6 +807,7 @@ impl FlowDissection {
             opening_gap: [None, None],
             ws_resyncs: Vec::new(),
             residue: ByteResidue::default(),
+            chain_loss: ChainLoss::default(),
         }
     }
 
@@ -2024,6 +2050,16 @@ pub struct Dissection {
     /// verb it counts is: a build that reassembles nothing abandons nothing and
     /// answers `0`.
     abandoned_chains: usize,
+    /// R311y713 (§B7) — bytes that had already arrived into chains this reader
+    /// gave up on, over every cause and every flow.
+    ///
+    /// The number three rounds recorded as having no witness at all. Counted
+    /// where the fragments still exist — the sweep — because the staging is
+    /// handed back to the arena the instant after, so nothing downstream can
+    /// derive it. `expired_chains` says four messages are missing; this says
+    /// whether that was four fragments or four megabytes, and only the second
+    /// is a capture worth taking again.
+    chain_bytes_lost: u64,
     /// R311y656 (§4.4) — chains still open on a flow the FLOW CAP evicted.
     ///
     /// The third cause and the third number, on the rule that separated the
@@ -2075,6 +2111,7 @@ impl Default for Dissection {
             gap_patience: Some(crate::tcp::DEFAULT_GAP_PATIENCE),
             capture_origin_ms: None,
             abandoned_chains: 0,
+            chain_bytes_lost: 0,
             decryption_secrets: Vec::new(),
         }
     }
@@ -2411,6 +2448,17 @@ impl Dissection {
         self.abandoned_chains
     }
 
+    /// R311y713 (§B7) — bytes lost with every chain this reader gave up on,
+    /// whichever of the three causes took it.
+    ///
+    /// ONE number across the three causes on purpose, where the counts are
+    /// three: the counts are read to decide which knob to turn, and this is
+    /// read to decide whether the capture is worth reading at all. Per flow,
+    /// [`FlowDissection::chain_loss`] answers where it went.
+    pub fn chain_bytes_lost(&self) -> u64 {
+        self.chain_bytes_lost + self.carry.chain_bytes()
+    }
+
     /// R311y656 (§4.4) — how many chains were still open on flows the cap
     /// evicted. See [`Self::expired_chains`] for why the three are apart.
     pub fn evicted_chains(&self) -> usize {
@@ -2742,18 +2790,20 @@ impl Dissection {
         for idx in 0..self.flows.len() {
             let tally = self.flows[idx].perform_exit();
             forced += tally.gaps_forced;
-            self.abandoned_chains += tally.chains_abandoned;
+            self.abandoned_chains += tally.chains.chains;
+            self.chain_bytes_lost += tally.chains.bytes;
             self.enforce_flow_limits(idx);
         }
         // Both flow tables, because both hold sessions and a datagram flow is
         // where fragments actually arrive. A chain opened by the LAST fragment
         // on a flow is never swept — the sweep runs when the NEXT packet
         // advances that flow's clock, and there is no next packet.
-        let mut abandoned = 0usize;
+        let mut abandoned = ChainLoss::default();
         for flow in self.datagram_flows.iter_mut() {
-            abandoned += flow.perform_exit().chains_abandoned;
+            abandoned.absorb(flow.perform_exit().chains);
         }
-        self.abandoned_chains += abandoned;
+        self.abandoned_chains += abandoned.chains;
+        self.chain_bytes_lost += abandoned.bytes;
         forced
     }
 
@@ -2909,13 +2959,26 @@ impl Dissection {
         let Some(ms) = ts_millis else {
             return;
         };
+        // R311y713 (§B6/§B7) — the sweep reports what it dropped, and the flow
+        // it dropped it FROM records its own share on the way past. The
+        // capture-wide counter below cannot answer "which link is losing", and
+        // the sweep is the only place that knows.
         let expired = match kind {
-            FlowKind::Stream => self.flows[idx].session.observe_at(ms),
-            FlowKind::Datagram => self.datagram_flows[idx].session.observe_at(ms),
+            FlowKind::Stream => {
+                let loss = self.flows[idx].session.observe_at_counting(ms);
+                self.flows[idx].chain_loss.absorb(loss);
+                loss
+            }
+            FlowKind::Datagram => {
+                let loss = self.datagram_flows[idx].session.observe_at_counting(ms);
+                self.datagram_flows[idx].chain_loss.absorb(loss);
+                loss
+            }
         };
         #[cfg(feature = "reassembly")]
         {
-            self.expired_chains += expired;
+            self.expired_chains += expired.chains;
+            self.chain_bytes_lost += expired.bytes;
         }
         #[cfg(not(feature = "reassembly"))]
         {
@@ -6675,6 +6738,23 @@ mod datagram_tests {
 
         d.finish();
         assert_eq!(d.abandoned_chains(), 1);
+        // R311y713 (§B7/§B6) — and WHAT WAS IN IT, and WHOSE it was. Three
+        // rounds recorded that the bytes of a lost chain were counted by
+        // nothing; the fragment above carries two, and the sweep is the only
+        // moment they can be counted because the staging goes back to the
+        // arena immediately after.
+        assert_eq!(
+            d.chain_bytes_lost(),
+            2,
+            "the abandoned chain's two staged bytes must be reported"
+        );
+        let lost_by = &d.datagram_flows()[0];
+        assert_eq!(
+            (lost_by.chain_loss().chains, lost_by.chain_loss().bytes),
+            (1, 2),
+            "and the FLOW that lost them must be able to say so — a \
+             capture-wide counter cannot name the link that is losing"
+        );
         assert_eq!(
             d.expired_chains(),
             0,
