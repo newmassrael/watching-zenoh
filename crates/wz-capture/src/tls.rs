@@ -273,14 +273,49 @@ pub struct RecordCensus {
     /// Bytes at the end of the direction that do not complete a record —
     /// where the capture stopped, not a decode failure.
     pub trailing_bytes: usize,
+    /// R311y716 (§E 8.14) — bytes a GAP took out of this direction: what the
+    /// hole swallowed, plus the partial record this reader was holding when it
+    /// arrived, which goes with it.
+    ///
+    /// Recorded since R311y666 and, until this round, reaching nothing: the
+    /// number was carried onto the next kept record and never left this
+    /// module, so the census silently became a floor and every figure beside
+    /// it read as a total. A reader summing `application_bytes` against the
+    /// capture's own byte count has to be told when the sum cannot add up.
+    pub lost_bytes: u64,
 }
 
 impl RecordCensus {
+    /// R311y716 (§E 8.13) — the FLOOR under [`Self::application_bytes`].
+    ///
+    /// That figure is ciphertext: every TLS 1.3 record's fragment carries an
+    /// AEAD tag and the true inner content type inside the protected bytes, so
+    /// the zenoh underneath is smaller by both. The report said "N byte(s) of
+    /// application data" and meant "at most N", which is a different claim.
+    ///
+    /// 16 is the LARGEST AEAD tag among the TLS 1.3 suites (both AES-GCMs and
+    /// ChaCha20-Poly1305 use it; only the CCM_8 suite is smaller), so
+    /// subtracting it without knowing the suite can only understate the
+    /// plaintext -- which is what a floor must do. Plus one byte per record for
+    /// the inner content type.
+    ///
+    /// Saturating: a direction whose records are all shorter than their own
+    /// overhead is a capture this reader misparsed, and a floor of zero is the
+    /// honest answer there rather than a wrap.
+    pub fn application_bytes_at_least(&self) -> u64 {
+        const AEAD_TAG_MAX: u64 = 16;
+        const INNER_CONTENT_TYPE: u64 = 1;
+        self.application_bytes.saturating_sub(
+            (self.application_records as u64).saturating_mul(AEAD_TAG_MAX + INNER_CONTENT_TYPE),
+        )
+    }
+
     pub(crate) fn add(&mut self, other: &RecordCensus) {
         self.records += other.records;
         self.application_records += other.application_records;
         self.application_bytes += other.application_bytes;
         self.trailing_bytes += other.trailing_bytes;
+        self.lost_bytes += other.lost_bytes;
     }
 }
 
@@ -843,6 +878,12 @@ impl TlsFlowState {
         let consumed = run.len() - census.trailing_bytes;
         let mut counted = census;
         counted.trailing_bytes = 0;
+        // R311y716 (§E 8.14) — the gap loss is accumulated HERE, before the
+        // line below hands it to one record. `pending_gap_bytes` is `take`n
+        // when the first record after the hole is kept, so a census that read
+        // only the pending amount reported ZERO for every capture whose gap was
+        // followed by anything -- which is every capture where it matters.
+        counted.lost_bytes = self.pending_gap_bytes[index];
         self.per_direction[index].add(&counted);
         for (stream_offset, bytes) in kept {
             // The bound is made room for FIRST, and that ordering is what makes
@@ -905,6 +946,12 @@ impl TlsFlowState {
         // byte count is not short by a partial record.
         out[0].trailing_bytes = self.pending[0].len();
         out[1].trailing_bytes = self.pending[1].len();
+        // R311y716 (§E 8.14) — and what a gap took. `pending_gap_bytes` is the
+        // amount still WAITING to be attached to a kept record; anything
+        // already attached is in `per_direction`, so the two are added rather
+        // than one replacing the other.
+        out[0].lost_bytes += self.pending_gap_bytes[0];
+        out[1].lost_bytes += self.pending_gap_bytes[1];
         out
     }
 }

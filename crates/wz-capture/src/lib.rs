@@ -9408,6 +9408,121 @@ mod tls_flow_tests {
         );
     }
 
+    /// R311y716 (§E 8.13 / 8.14) — the encrypted census states a RANGE and
+    /// says what a gap took.
+    ///
+    /// Two findings this crate has carried since R311y648, both of the same
+    /// kind: a number that claims more than it knows. `application_bytes` is
+    /// CIPHERTEXT -- every TLS 1.3 record hides an AEAD tag and the true inner
+    /// content type inside the protected fragment -- and the page printed it as
+    /// "N byte(s) of application data", which told a reader they were missing
+    /// more zenoh than they are. And a hole in an encrypted direction drops the
+    /// partial record this reader was holding; the loss was recorded in
+    /// R311y666 and reached NOTHING, so the census quietly became a floor while
+    /// every figure beside it read as a total.
+    ///
+    /// That the old text was pinned by nothing is itself measured: changing it
+    /// to a range left all 401 tests green.
+    #[test]
+    fn the_encrypted_census_states_its_ceiling_as_one_and_names_what_a_gap_took() {
+        let hello = record(0x16, [0x03, 0x01], &[0x01, 0x00, 0x00, 0x30]);
+        let app = record(0x17, [0x03, 0x03], &[0xAB; 40]);
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &hello));
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &tcp_packet(1111, 7447, 1000 + hello.len() as u32, &app),
+        );
+        d.finish();
+
+        let enc = d.encrypted_census();
+        assert_eq!(
+            (enc.census.application_records, enc.census.application_bytes),
+            (1, 40),
+            "the fixture must carry ONE application record of forty bytes, or \
+             the arithmetic below is about something else"
+        );
+        // 40 ciphertext bytes less one record's AEAD tag (16, the largest any
+        // TLS 1.3 suite uses) and its inner content type byte.
+        assert_eq!(enc.census.application_bytes_at_least(), 23);
+
+        let report = crate::report::CaptureReport::of(&d);
+        let text = report.to_text();
+        let json = report.to_json();
+        assert!(
+            text.contains(
+                "23-40 byte(s) of application data (the upper figure \
+                 is ciphertext)"
+            ),
+            "the page must state the RANGE: {text}"
+        );
+        assert!(
+            json.contains("\"application_bytes\":40,\"application_bytes_at_least\":23"),
+            "and the export must carry both figures: {json}"
+        );
+        assert!(
+            json.contains("\"lost_bytes\":0"),
+            "with the gap loss present and zero, not absent: {json}"
+        );
+        assert!(
+            !text.contains("went with a gap"),
+            "and the page must not mention a gap this capture did not have: \
+             {text}"
+        );
+
+        // AND THE GAP ARM. A hole in the encrypted direction takes the partial
+        // record with it, and both renderings have to say so.
+        let mut holed = Dissection::new();
+        holed.set_gap_patience(Some(1));
+        holed.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &hello));
+        // A segment 200 bytes further along than the previous one ends: the
+        // bytes between are a hole this capture does not contain.
+        holed.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &tcp_packet(1111, 7447, 1000 + hello.len() as u32 + 200, &app),
+        );
+        holed.push_packet(
+            LINKTYPE_ETHERNET,
+            2,
+            &tcp_packet(
+                1111,
+                7447,
+                1000 + hello.len() as u32 + 200 + app.len() as u32,
+                &app,
+            ),
+        );
+        holed.finish();
+        assert!(
+            holed.framing_health().gaps_forced > 0,
+            "the assembler must have STEPPED OVER the hole, or nothing ever \
+             told the TLS walk there was one: {:?}",
+            holed.framing_health()
+        );
+        let lost = holed.encrypted_census().census.lost_bytes;
+        assert!(
+            lost > 0,
+            "the fixture must lose bytes to the hole: {:?}",
+            holed.encrypted_census().census
+        );
+        let holed_report = crate::report::CaptureReport::of(&holed);
+        assert!(
+            holed_report
+                .to_text()
+                .contains(&alloc::format!("{lost} byte(s) of it went with a gap")),
+            "the page must name what the hole took: {}",
+            holed_report.to_text()
+        );
+        assert!(
+            holed_report
+                .to_json()
+                .contains(&alloc::format!("\"lost_bytes\":{lost}")),
+            "and so must the export: {}",
+            holed_report.to_json()
+        );
+    }
+
     /// R311y650 (§1.2a) — an encrypted flow the FLOW CAP evicted is still an
     /// encrypted flow, and the report has to say so.
     ///

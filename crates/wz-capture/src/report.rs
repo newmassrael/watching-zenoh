@@ -642,12 +642,21 @@ impl<'a> CaptureReport<'a> {
         };
         s.push_str(&format!(
             ",\"encrypted\":{{\"flows\":{},\"records\":{},\"application_records\":{},\
-             \"application_bytes\":{},\"decrypted\":{},\"flows_decrypted\":{},\
+             \"application_bytes\":{},\"application_bytes_at_least\":{},\
+             \"lost_bytes\":{},\"decrypted\":{},\"flows_decrypted\":{},\
              \"records_decrypted\":{},\"reason\":\"{}\"}}",
             enc.flows,
             enc.census.records,
             enc.census.application_records,
+            // R311y716 (§E 8.13 / 8.14) — the key keeps its name and its
+            // meaning: it always was the ceiling. What it gains is a FLOOR
+            // beside it and the gap loss that makes both of them short,
+            // UNCONDITIONALLY, on the rule this document already follows for
+            // `unsized_payloads` -- a consumer that has to test for a key to
+            // learn whether a total is whole will not.
             enc.census.application_bytes,
+            enc.census.application_bytes_at_least(),
+            enc.census.lost_bytes,
             // The capture-wide claim, and it is deliberately the STRONG one:
             // "this capture was decrypted" must not be true while part of it
             // was not. `flows_decrypted` beside it carries the partial state.
@@ -1087,11 +1096,30 @@ impl<'a> CaptureReport<'a> {
                 .iter()
                 .map(|f| f.decrypted_records[0] + f.decrypted_records[1])
                 .sum();
+            // R311y716 (§E 8.13) — a RANGE, not a figure. `application_bytes`
+            // is ciphertext: the AEAD tag and the inner content type are inside
+            // it, so stating it alone told a reader they were missing more
+            // zenoh than they are. The floor is what remains once this reader
+            // subtracts the overhead it can account for without knowing the
+            // suite.
             s.push_str(&format!(
-                "  {} flow(s) carry zenoh inside TLS: {} record(s), {} byte(s) of \
-                 application data.",
-                enc.flows, enc.census.records, enc.census.application_bytes
+                "  {} flow(s) carry zenoh inside TLS: {} record(s), {}-{} byte(s) \
+                 of application data (the upper figure is ciphertext).",
+                enc.flows,
+                enc.census.records,
+                enc.census.application_bytes_at_least(),
+                enc.census.application_bytes
             ));
+            // R311y716 (§E 8.14) — and what a gap took, printed only when it
+            // happened: a census short by a hole is a floor, and until this
+            // round it said so nowhere.
+            if enc.census.lost_bytes > 0 {
+                s.push_str(&format!(
+                    " {} byte(s) of it went with a gap and are not in those \
+                     figures.",
+                    enc.census.lost_bytes
+                ));
+            }
             if opened == 0 {
                 s.push_str(
                     " NOT DECRYPTED -- the session is there and this report \
