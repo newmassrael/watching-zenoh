@@ -105,6 +105,104 @@ fn role_name(w: u8) -> &'static str {
     }
 }
 
+/// R311y716 (§C G1) — one reason a capture's totals are a floor.
+///
+/// The SSOT for what `complete: false` means. Every leg of the verdict is a
+/// variant here, so a leg cannot be added, removed or silently absorbed by a
+/// neighbour without this enumeration saying so — which is exactly what
+/// R311y715 measured going wrong: nine of the twenty-four guards bound nothing,
+/// and a severed one left every test green.
+///
+/// The names are a WIRE FORMAT: they go out in the export and, through
+/// `wz-replay --alert`, onto a live deployment's own bus. Renaming one is a
+/// consumer-visible change, not a tidy-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VerdictReason {
+    /// Packets the reader walked past: traffic in the file and in no row.
+    PacketsSkipped,
+    /// A bound discarded something rather than the wire losing it.
+    BoundsDiscarded,
+    /// An encrypted flow this reader could not open.
+    EncryptedFlowsUnopened,
+    /// A QUIC flow this reader could not open.
+    QuicFlowsUnopened,
+    /// A QUIC walk that stopped mid-packet, so the frames behind it went
+    /// unread.
+    QuicWalkStopped,
+    /// Application bytes a QUIC decryption pass recovered and nothing decodes.
+    QuicBytesNobodyDecodes,
+    /// A reassembly chain given up on at this reader's own deadline.
+    ExpiredChains,
+    /// A chain still open when the capture ended.
+    AbandonedChains,
+    /// A hole the assembler stepped over rather than waiting on forever.
+    GapsForced,
+    /// The zenoh framing lost and found again.
+    Desyncs,
+    /// The WebSocket framing lost and found again.
+    WsDesyncs,
+    /// Frames the SENDER numbered that this capture does not hold. The wire's
+    /// own accounting, which survives a capture with no holes of its own.
+    SnMissing,
+    /// Bytes of a framing unit that reached no message.
+    UnaccountedBatchBytes,
+    /// Traffic the throughput plane could not READ.
+    ThroughputGaps,
+    /// Records read under a keyexpr this capture never saw declared.
+    UnresolvedRecords,
+    /// Records whose payload this build cannot size.
+    UnsizedPayloads,
+    /// Records a selector could not judge either way.
+    ThroughputUndecided,
+    /// Exchanges the query plane could not read.
+    ExchangeGaps,
+    /// Messages the query plane reached and did not read.
+    ExchangeUnread,
+    /// Queries this capture never saw answered.
+    ExchangesUnclosed,
+    /// Exchanges a selector could not judge either way.
+    ExchangeUndecided,
+    /// Payloads the payload plane could not read.
+    PayloadGaps,
+    /// Payloads a selector could not judge either way.
+    PayloadUndecided,
+}
+
+impl VerdictReason {
+    /// The name this reason is rendered and exported under.
+    ///
+    /// Spelled out rather than derived from the variant, so a rename of the
+    /// Rust identifier does not silently become a rename of the wire name a
+    /// consumer matches on.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::PacketsSkipped => "packets_skipped",
+            Self::BoundsDiscarded => "bounds_discarded",
+            Self::EncryptedFlowsUnopened => "encrypted_flows_unopened",
+            Self::QuicFlowsUnopened => "quic_flows_unopened",
+            Self::QuicWalkStopped => "quic_walk_stopped",
+            Self::QuicBytesNobodyDecodes => "quic_bytes_nobody_decodes",
+            Self::ExpiredChains => "expired_chains",
+            Self::AbandonedChains => "abandoned_chains",
+            Self::GapsForced => "gaps_forced",
+            Self::Desyncs => "desyncs",
+            Self::WsDesyncs => "ws_desyncs",
+            Self::SnMissing => "sn_missing",
+            Self::UnaccountedBatchBytes => "unaccounted_batch_bytes",
+            Self::ThroughputGaps => "throughput_gaps",
+            Self::UnresolvedRecords => "unresolved_records",
+            Self::UnsizedPayloads => "unsized_payloads",
+            Self::ThroughputUndecided => "throughput_undecided",
+            Self::ExchangeGaps => "exchange_gaps",
+            Self::ExchangeUnread => "exchange_unread",
+            Self::ExchangesUnclosed => "exchanges_unclosed",
+            Self::ExchangeUndecided => "exchange_undecided",
+            Self::PayloadGaps => "payload_gaps",
+            Self::PayloadUndecided => "payload_undecided",
+        }
+    }
+}
+
 impl<'a> CaptureReport<'a> {
     /// A report over the dissection alone.
     pub fn of(dissection: &'a crate::Dissection) -> Self {
@@ -166,8 +264,38 @@ impl<'a> CaptureReport<'a> {
     /// field rather than a walk over three structs the caller would have to
     /// know about.
     pub fn is_complete(&self) -> bool {
-        if self.dissection.health().packets_skipped > 0 || self.dissection.drops().any() {
-            return false;
+        self.reasons().is_empty()
+    }
+
+    /// R311y716 (§C G1) — EVERY reason this capture's totals are a floor, not
+    /// just whether there is one.
+    ///
+    /// # Why an enumeration replaced the conjunction
+    ///
+    /// `is_complete` was 24 `return false` guards, and R311y715 severed each in
+    /// turn: NINE bound nothing. Two were payable and seven were not, for one
+    /// structural reason — the legs are COUPLED. A forced gap desynchronises
+    /// the framing behind it, so no fixture trips `gaps_forced` alone, and a
+    /// test whose fixture trips two legs proves neither: sever one and the
+    /// other still fails the assertion.
+    ///
+    /// Answering with the SET dissolves that. A fixture that trips two legs
+    /// asserts both are named, and severing either one reds — no fixture has to
+    /// be surgically isolated, which is what made seven of them unpayable.
+    ///
+    /// It is also the content an ALERT needs. `false` tells an operator
+    /// something is wrong and not what, and a notification that says only
+    /// "incomplete" sends them back to the tool they were trying not to run.
+    ///
+    /// Collected rather than short-circuited: the first reason is not the only
+    /// one worth telling, and the cost is a walk over counters already in hand.
+    pub fn reasons(&self) -> alloc::vec::Vec<VerdictReason> {
+        let mut out = alloc::vec::Vec::new();
+        if self.dissection.health().packets_skipped > 0 {
+            out.push(VerdictReason::PacketsSkipped);
+        }
+        if self.dissection.drops().any() {
+            out.push(VerdictReason::BoundsDiscarded);
         }
         // R311y648 (§1.2a) — an encrypted flow this reader could not decrypt is
         // a shortfall in the ROWS, on exactly the rule `unsized_payloads`
@@ -203,7 +331,7 @@ impl<'a> CaptureReport<'a> {
             .filter(|f| f.not_decrypted.is_none())
             .count();
         if enc > opened {
-            return false;
+            out.push(VerdictReason::EncryptedFlowsUnopened);
         }
         // R311y669 (§1.2a) — a QUIC flow reaches the verdict on the same rule an
         // undecrypted TLS flow does: the traffic was there, its zenoh is not in
@@ -226,13 +354,13 @@ impl<'a> CaptureReport<'a> {
             .filter(|f| f.quic.is_some())
             .count();
         if quic_flows > self.quic.map_or(0, |q| q.flows_opened) {
-            return false;
+            out.push(VerdictReason::QuicFlowsUnopened);
         }
         // A walk that stopped mid-packet is a shortfall in the rows even where
         // every packet opened: the frames after the stop were not read, so a
         // stream cut short there is reported as one that ended.
         if self.quic.is_some_and(|q| q.walks_stopped > 0) {
-            return false;
+            out.push(VerdictReason::QuicWalkStopped);
         }
         // R311y705 (§1.2a) — AND THE APPLICATION BYTES A DECRYPTOR RECOVERED AND
         // NOBODY READ.
@@ -262,7 +390,7 @@ impl<'a> CaptureReport<'a> {
             .quic
             .is_some_and(|q| q.stream_bytes > 0 || q.datagram_bytes > 0)
         {
-            return false;
+            out.push(VerdictReason::QuicBytesNobodyDecodes);
         }
         // R311y624 (§1.1m) — the FRAMING witnesses reach the verdict, and until
         // now none of them did. A capture whose assembler gave up on a gap, or
@@ -290,8 +418,11 @@ impl<'a> CaptureReport<'a> {
         // `drops.flows`, which the first line of this function already reads. A
         // disjunct nothing can reach is a claim no test can hold, so the number
         // reaches the reader through the export and the page instead.
-        if self.dissection.expired_chains() > 0 || self.dissection.abandoned_chains() > 0 {
-            return false;
+        if self.dissection.expired_chains() > 0 {
+            out.push(VerdictReason::ExpiredChains);
+        }
+        if self.dissection.abandoned_chains() > 0 {
+            out.push(VerdictReason::AbandonedChains);
         }
         let framing = self.dissection.framing_health();
         //
@@ -301,17 +432,27 @@ impl<'a> CaptureReport<'a> {
         // message, which is a shortfall in the rows and not a fact about the
         // sender. A capture whose batches were walked only part way is a
         // capture whose totals are a floor.
-        if framing.gaps_forced > 0
-            || framing.desyncs > 0
-            || framing.ws_desyncs > 0
-            || framing.sn_missing > 0
-            || framing.unaccounted_batch_bytes > 0
-        {
-            return false;
+        if framing.gaps_forced > 0 {
+            out.push(VerdictReason::GapsForced);
+        }
+        if framing.desyncs > 0 {
+            out.push(VerdictReason::Desyncs);
+        }
+        if framing.ws_desyncs > 0 {
+            out.push(VerdictReason::WsDesyncs);
+        }
+        if framing.sn_missing > 0 {
+            out.push(VerdictReason::SnMissing);
+        }
+        if framing.unaccounted_batch_bytes > 0 {
+            out.push(VerdictReason::UnaccountedBatchBytes);
         }
         if let Some(t) = self.throughput {
-            if !t.gaps().is_clean() || t.unresolved_records() > 0 {
-                return false;
+            if !t.gaps().is_clean() {
+                out.push(VerdictReason::ThroughputGaps);
+            }
+            if t.unresolved_records() > 0 {
+                out.push(VerdictReason::UnresolvedRecords);
             }
             // R311y637 (§1.1w) — a record whose payload this build cannot size
             // makes `total_payload_bytes` a floor, so it reaches the verdict on
@@ -320,7 +461,7 @@ impl<'a> CaptureReport<'a> {
             // contribution is unknown. A reader who sums the table still has
             // to be told the sum is short.
             if t.unsized_payloads() > 0 {
-                return false;
+                out.push(VerdictReason::UnsizedPayloads);
             }
             // R311y616 — a selector that could not judge part of the capture
             // makes the rows under it a floor, exactly as an unread batch does.
@@ -329,20 +470,26 @@ impl<'a> CaptureReport<'a> {
             // same verdict. An unfiltered report is unaffected: the identity
             // filter leaves nothing undecided.
             if !t.selection().is_decisive() {
-                return false;
+                out.push(VerdictReason::ThroughputUndecided);
             }
         }
         #[cfg(feature = "network-codecs")]
         if let Some(e) = self.exchanges {
-            if !e.gaps().is_clean() || !e.unread().is_clean() || e.unclosed() > 0 {
-                return false;
+            if !e.gaps().is_clean() {
+                out.push(VerdictReason::ExchangeGaps);
+            }
+            if !e.unread().is_clean() {
+                out.push(VerdictReason::ExchangeUnread);
+            }
+            if e.unclosed() > 0 {
+                out.push(VerdictReason::ExchangesUnclosed);
             }
             // R311y618 — the same rule the throughput plane got in R311y616,
             // reached one plane later: an exchange the selector could not judge
             // is an exchange missing from the rows, and a reader summing them
             // has to be told.
             if !e.selection().is_decisive() {
-                return false;
+                out.push(VerdictReason::ExchangeUndecided);
             }
         }
         // R311y617 — the payload plane's own unread counters. A CONTRADICTION
@@ -353,13 +500,13 @@ impl<'a> CaptureReport<'a> {
         #[cfg(feature = "network-codecs")]
         if let Some(p) = self.payloads {
             if !p.gaps().is_clean() {
-                return false;
+                out.push(VerdictReason::PayloadGaps);
             }
             if !p.selection().is_decisive() {
-                return false;
+                out.push(VerdictReason::PayloadUndecided);
             }
         }
-        true
+        out
     }
 
     /// Render as JSON.
@@ -413,8 +560,24 @@ impl<'a> CaptureReport<'a> {
             s.push(',');
             payloads_json(p, s);
         }
+        // R311y716 (§C G1) — the verdict AND its reasons, computed once and
+        // rendered from the one value. `complete` alone tells a consumer that
+        // something is wrong and not what, which is the question it goes on to
+        // ask; and reading the bool from one call and the list from another
+        // would let the two disagree about one capture.
+        let reasons = self.reasons();
         s.push_str(",\"complete\":");
-        s.push_str(if self.is_complete() { "true" } else { "false" });
+        s.push_str(if reasons.is_empty() { "true" } else { "false" });
+        s.push_str(",\"reasons\":[");
+        for (i, r) in reasons.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push('"');
+            s.push_str(r.name());
+            s.push('"');
+        }
+        s.push(']');
     }
 
     fn capture_json(&self, s: &mut String) {
@@ -776,10 +939,23 @@ impl<'a> CaptureReport<'a> {
         let mut s = String::new();
         let d = self.dissection;
         let health = d.health();
-        if self.is_complete() {
+        // R311y716 (§C G1) — the reasons ride on the same line as the verdict.
+        // A reader told only "INCOMPLETE" has to walk every plane below to find
+        // out which one is short, and the walk is the work this line exists to
+        // save them.
+        let reasons = self.reasons();
+        if reasons.is_empty() {
             s.push_str("capture: complete\n");
         } else {
-            s.push_str("capture: INCOMPLETE -- totals below are a floor, not the whole capture\n");
+            s.push_str(&format!(
+                "capture: INCOMPLETE -- totals below are a floor, not the whole \
+                 capture ({})\n",
+                reasons
+                    .iter()
+                    .map(|r| r.name())
+                    .collect::<alloc::vec::Vec<_>>()
+                    .join(", ")
+            ));
         }
         s.push_str(&format!(
             "  flows: {} stream, {} datagram; packets skipped: {}\n",
@@ -2340,6 +2516,119 @@ mod tests {
         assert!(
             !CaptureReport::of(&d).with_throughput(&t).is_complete(),
             "a record in no row is a row total that is short"
+        );
+    }
+
+    /// R311y716 (§C G1) — the reasons reach BOTH renderings, from one
+    /// computation.
+    ///
+    /// The rule this workspace measured at R311y664: a fact rendered in two
+    /// places must be asserted in both IN ONE RUN, or the two drift. Here the
+    /// hazard is sharper than drift -- `complete` and `reasons` are the same
+    /// judgement, and a page saying INCOMPLETE beside an empty reason list
+    /// would send a reader looking for a fault the document declines to name.
+    #[test]
+    fn the_verdicts_reasons_reach_the_page_and_the_export_together() {
+        let mut d = crate::Dissection::new();
+        let mut arp = alloc::vec![0u8; 12];
+        arp.extend_from_slice(&[0x08, 0x06]);
+        arp.extend_from_slice(&[0u8; 46]);
+        d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &arp);
+        d.finish();
+
+        let report = CaptureReport::of(&d);
+        let reasons = report.reasons();
+        assert_eq!(
+            reasons,
+            alloc::vec![VerdictReason::PacketsSkipped],
+            "the fixture must state exactly one reason, or neither assertion \
+             below distinguishes the list from a substring of it"
+        );
+        let text = report.to_text();
+        let json = report.to_json();
+        assert!(
+            text.contains("(packets_skipped)"),
+            "the page names what is short: {text}"
+        );
+        assert!(
+            json.contains("\"complete\":false,\"reasons\":[\"packets_skipped\"]"),
+            "and the export carries the same name beside the same verdict: \
+             {json}"
+        );
+
+        // THE CLEAN CASE, in the same run: an empty list and `true` must agree
+        // too, and an export whose key vanished when there was nothing to say
+        // would make a consumer test for presence to learn absence.
+        let clean = crate::Dissection::new();
+        let clean = CaptureReport::of(&clean);
+        assert!(clean.reasons().is_empty() && clean.is_complete());
+        assert!(clean.to_json().contains("\"complete\":true,\"reasons\":[]"));
+        assert!(clean.to_text().contains("capture: complete"));
+    }
+
+    /// R311y716 (§C G1) — the three PLANE legs that bound nothing, and the
+    /// point at which isolation stopped being required.
+    ///
+    /// R311y715 could not pay these: a capture whose batch will not decompress
+    /// is short on the exchange plane AND the payload plane AND the throughput
+    /// plane at once, so no fixture trips one alone. The verdict answering with
+    /// a SET is what makes them individually bindable -- each leg is asserted
+    /// by NAME, and severing any one of them reds this test on that name while
+    /// the others still hold.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_batch_that_will_not_decompress_names_every_plane_it_shortens() {
+        let d = crate::datagram_tests::compressed_session_dissection();
+        let exchanges = crate::exchange::exchanges(&d);
+        let payloads = crate::payload::payloads(&d);
+        let throughput = crate::agg::aggregate(&d);
+        let reasons = CaptureReport::of(&d)
+            .with_exchanges(&exchanges)
+            .with_payloads(&payloads)
+            .with_throughput(&throughput)
+            .reasons();
+
+        for leg in [
+            VerdictReason::ExchangeUnread,
+            VerdictReason::PayloadGaps,
+            VerdictReason::ThroughputGaps,
+        ] {
+            assert!(
+                reasons.contains(&leg),
+                "{} must be named: {reasons:?}",
+                leg.name()
+            );
+        }
+    }
+
+    /// R311y716 (§C G1) — a reply whose request this capture never saw.
+    ///
+    /// The exchange plane's own GAPS leg, distinct from its `unread` above: the
+    /// message was read perfectly and there is nothing to attribute it to.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn an_orphan_reply_names_the_exchange_planes_gap() {
+        use crate::exchange::tests as fx;
+
+        let d = fx::dissect(&[
+            (
+                false,
+                Some(10),
+                fx::response_reply(9, fx::sender_space(0, Some("mid/session")), b"x"),
+            ),
+            (false, Some(20), fx::response_final(9)),
+        ]);
+        let exchanges = crate::exchange::exchanges(&d);
+        assert_eq!(
+            exchanges.gaps().orphan_responses,
+            2,
+            "the fixture must orphan the reply AND its close"
+        );
+        let reasons = CaptureReport::of(&d).with_exchanges(&exchanges).reasons();
+        assert!(
+            reasons.contains(&VerdictReason::ExchangeGaps),
+            "a reply attributable to nothing is a row this page does not hold: \
+             {reasons:?}"
         );
     }
 

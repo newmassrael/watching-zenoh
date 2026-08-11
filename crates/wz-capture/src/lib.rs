@@ -4362,6 +4362,20 @@ mod datagram_tests {
             "one gap, and it names the bytes the capture does not contain"
         );
         assert_eq!((fh.desyncs, fh.recoveries), (1, 1));
+        // R311y716 (§C G1) — AND BOTH REACH THE VERDICT BY NAME. R311y715
+        // severed each of the verdict's legs and found `gaps_forced` and
+        // `desyncs` among the nine that bound nothing; they were unpayable
+        // while the verdict was a bool, because they are COUPLED -- a forced
+        // gap desynchronises the framing behind it, so no fixture trips one
+        // alone and a fixture tripping both proves neither. Answering with the
+        // SET is what makes this assertion possible: sever either leg and this
+        // line reds on the one that went missing.
+        let reasons = crate::report::CaptureReport::of(&d).reasons();
+        assert!(
+            reasons.contains(&crate::report::VerdictReason::GapsForced)
+                && reasons.contains(&crate::report::VerdictReason::Desyncs),
+            "the hole and the splice it caused must BOTH be named: {reasons:?}"
+        );
         let resync = f.session.resync_accounting(Direction::A);
         assert_eq!(resync.desyncs, 1, "the splice is DETECTED, not decoded");
         assert_eq!(resync.recoveries, 1, "and the framing is found again");
@@ -6176,6 +6190,66 @@ mod datagram_tests {
             evicted.byte_residue().recovered,
             ended.byte_residue().recovered + msg.len() as u64,
             "and the retired flow's recovered bytes must not leave with it"
+        );
+    }
+
+    /// R311y716 (§C G1) — the WIRE'S OWN accounting of what it sent reaches
+    /// the verdict.
+    ///
+    /// The last of the nine legs R311y715 found bound by nothing, and the one
+    /// that needed a fixture rather than a redesign: R311y715 tried three
+    /// numbered datagrams and got `sn_without_resolution`, because a reader
+    /// with no handshake cannot judge a sequence number at all -- it does not
+    /// know the resolution the peers negotiated, so a jump from 1 to 4 might be
+    /// a wrap. The handshake is the missing ingredient, not a bigger gap.
+    ///
+    /// `sn_missing` is the sharpest witness the page has: it survives a capture
+    /// with no holes of its own, because the SENDER numbered what it sent.
+    #[test]
+    fn frames_the_sender_numbered_and_this_capture_lacks_reach_the_verdict() {
+        let frame = |sn: u8| {
+            alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAME
+                    | wz_session_core::wire_const::FLAG_T_FRAME_R,
+                sn,
+                0x1F,
+                0x00,
+                0x00,
+                0x00,
+            ]
+        };
+        let mut d = Dissection::new();
+        let mut at = 0usize;
+        let feed = |d: &mut Dissection, from_low: bool, message: &[u8], at: &mut usize| {
+            let packet = if from_low {
+                udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, message)
+            } else {
+                udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 43210, message)
+            };
+            d.push_packet(LINKTYPE_ETHERNET, *at, &packet);
+            *at += 1;
+        };
+        // The handshake FIRST: it is what publishes the sn resolution, and
+        // without it every frame below is unjudged rather than judged fine.
+        feed(&mut d, true, &init_datagram(false, &[]), &mut at);
+        feed(&mut d, false, &init_datagram(true, &[]), &mut at);
+        feed(&mut d, true, &open_datagram(false), &mut at);
+        feed(&mut d, false, &open_datagram(true), &mut at);
+        for sn in [0u8, 1, 4] {
+            feed(&mut d, true, &frame(sn), &mut at);
+        }
+        d.finish();
+
+        let fh = d.framing_health();
+        assert_eq!(
+            fh.sn_without_resolution, 0,
+            "the handshake must have resolved the numbering, or this fixture              measures the reader instead of the wire: {fh:?}"
+        );
+        assert_eq!(fh.sn_missing, 2, "frames 2 and 3: {fh:?}");
+        let reasons = crate::report::CaptureReport::of(&d).reasons();
+        assert!(
+            reasons.contains(&crate::report::VerdictReason::SnMissing),
+            "two frames the sender numbered are not in this capture, and the              page must say so: {reasons:?}"
         );
     }
 
@@ -8023,6 +8097,17 @@ mod ws_flow_tests {
             ws::WsDesyncReason::ReservedOpcode { opcode: 0x3 }
         );
         assert_eq!(flow.ws_accounting().recoveries, 1);
+        // R311y716 (§C G1) — AND IT REACHES THE VERDICT BY NAME. One of the
+        // nine legs R311y715 found bound by nothing, and unpayable while the
+        // verdict was a bool: a ws desync is detected by stepping over bytes,
+        // so the same fixture shortens the rows more than one way. The SET is
+        // what lets this line name its own leg without having to isolate it.
+        let reasons = crate::report::CaptureReport::of(&d).reasons();
+        assert!(
+            reasons.contains(&crate::report::VerdictReason::WsDesyncs),
+            "the WebSocket framing was lost and found, and the page must say \
+             so: {reasons:?}"
+        );
     }
 
     /// One zenoh batch in one unmasked ws BINARY frame — the flow-level twin of
