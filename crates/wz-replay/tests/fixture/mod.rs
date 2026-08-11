@@ -167,6 +167,66 @@ pub fn two_sample_capture() -> Vec<u8> {
     )
 }
 
+/// R311y704 — one reply under a keyexpr named by NUMERIC ID, optionally
+/// preceded by the `DeclKexpr` that binds it.
+///
+/// The two captures differ by ONE message, which is what makes the difference
+/// in the plan attributable to the declaration rather than to anything else.
+pub fn aliased_capture(with_declaration: bool) -> Vec<u8> {
+    let mut body = Vec::new();
+    if with_declaration {
+        body.extend_from_slice(&framed_frame(&declare_kexpr(5, "demo/sensor")));
+    }
+    body.extend_from_slice(&framed_frame(&aliased_reply(7, 5, b"first")));
+    wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet_reverse(1000, &body))],
+    )
+}
+
+/// `DeclKexpr`: bind `id` to the literal `base` in the sender's space.
+fn declare_kexpr(id: u64, base: &'static str) -> Vec<u8> {
+    wz_codecs::declare::Declare {
+        body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
+            wz_codecs::decl_kexpr::DeclKexpr {
+                header: wz_session_core::wire_const::D_MID_KEXPR
+                    | wz_session_core::wire_const::FLAG_D_N,
+                id,
+                keyexpr: keyexpr(base),
+            },
+        ),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+/// A reply whose keyexpr is the bare numeric `id`, with no suffix at all.
+fn aliased_reply(request_id: u64, id: u64, payload: &'static [u8]) -> Vec<u8> {
+    wz_codecs::response::Response {
+        header: wz_codecs::response::Response::default().header,
+        request_id,
+        keyexpr: wz_codecs::wireexpr::Wireexpr {
+            body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
+                wz_codecs::wireexpr_local::WireexprLocal {
+                    id,
+                    suffix_len: None,
+                    suffix: None,
+                },
+            ),
+        },
+        body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
+            body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                payload_len: payload.len() as u64,
+                payload,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
 /// R311y703 (RP4) — two replies in SEPARATE PACKETS, 350 ms apart.
 ///
 /// `two_sample_capture` batches both into one TCP segment, so both samples

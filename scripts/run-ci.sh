@@ -1481,6 +1481,17 @@ PY
     # page, a solo page that gains a second plane, and a builder set the scan
     # cannot read — each reds, and the revert returns OK.
     python3 scripts/lib/solo_plane_page_lint.py || return 1
+    # R311y704 (§1.1n) — the DATAGRAM-HALF gate. `Dissection::flows()` is the
+    # TCP half and `datagram_flows()` is the other one; a reader that walks the
+    # first and forgets the second produces an EMPTY result over a multicast or
+    # scouting capture, which is indistinguishable from a capture that carried
+    # nothing. That has shipped FOUR times -- R311y668 (`--flows`), R311y678
+    # (the field layer), R311y699 (`--payload-format`), R311y700 (`samples`) --
+    # every one found by a person reading code, every one after the fact. The
+    # rule lived only in an agent note, and a note is not a gate. Enforcement
+    # MEASURED: reverting `samples` to its R311y700 shape reds and names the
+    # function; the restore returns OK.
+    python3 scripts/lib/datagram_half_lint.py || return 1
     # R311y639 (§4.30) — the PAYLOAD-MEASUREMENT gate. Two rounds in a row a
     # carrier arm of `agg::classify` wrote a byte total with a bare assignment
     # and so had no way to say "unknown": R311y637's query carries its value in
@@ -5362,7 +5373,9 @@ layer_c1by_replay_engine() {
         tests::a_refusal_stops_the_replay_at_the_emission_that_failed \
         tests::a_capture_timed_schedule_uses_the_recorded_interval_and_names_the_pairs_it_could_not \
         tests::a_selector_that_drops_a_sample_widens_the_gap_the_capture_recorded \
-        tests::a_clock_that_steps_backwards_is_a_zero_gap_and_not_an_eternity
+        tests::a_clock_that_steps_backwards_is_a_zero_gap_and_not_an_eternity \
+        tests::a_plan_over_the_whole_run_ceiling_is_refused_and_says_what_to_change \
+        tests::a_capture_paced_plan_says_the_clock_is_the_taps_and_not_the_senders
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1by FAIL: $name is absent from the wz-replay lib target"
@@ -5381,7 +5394,9 @@ layer_c1by_replay_engine() {
         a_datagram_capture_yields_its_samples \
         the_side_selector_takes_one_half_of_the_conversation_and_says_what_it_left \
         the_connect_flag_dials_where_live_is_on_and_is_refused_where_it_is_off \
-        the_timing_option_replays_the_pace_the_capture_recorded
+        the_timing_option_replays_the_pace_the_capture_recorded \
+        the_max_total_option_refuses_a_plan_that_would_run_too_long \
+        a_declaration_moves_a_message_out_of_the_floor_and_into_the_plan
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1by FAIL: $name is absent from the wz-replay binary target"

@@ -45,6 +45,8 @@ OPTIONS:
                       Under --timing capture this is the fallback
     --speed <factor>  play faster (>1) or slower (<1). Must be positive
     --max-gap <ms>    ceiling on any one delay (default 10000)
+    --max-total <ms>  ceiling on the WHOLE plan. A plan over it is REFUSED
+                      after being printed, never truncated
     --fuzz <spec>     mutate each payload before sending. One of:
                         flip:<bit>      flip one bit
                         truncate:<n>    keep the first n bytes
@@ -122,6 +124,10 @@ fn main() -> ExitCode {
                 Some(v) => schedule.max_gap_millis = Some(v),
                 None => return bad("--max-gap needs a whole number of milliseconds"),
             },
+            "--max-total" => match value().and_then(|v| v.parse().ok()) {
+                Some(v) => schedule.max_total_millis = Some(v),
+                None => return bad("--max-total needs a whole number of milliseconds"),
+            },
             "--speed" => match value().and_then(|v| v.parse().ok()) {
                 Some(v) => schedule.speed = v,
                 None => return bad("--speed needs a number"),
@@ -179,6 +185,13 @@ fn main() -> ExitCode {
     // the value they read is the one that plays -- not a second rendering of a
     // second computation.
     print!("{}", render(&plan));
+    // R311y704 — the whole-plan ceiling, checked AFTER the plan is printed and
+    // BEFORE anything is sent. An operator who hits this must be able to see
+    // the plan that was too long, which is the same reason `--dry-run` exists.
+    if let Err(why) = plan.within(schedule) {
+        eprintln!("wz-replay: {why}");
+        return ExitCode::from(2);
+    }
     let Some(connect) = connect else {
         return ExitCode::SUCCESS;
     };

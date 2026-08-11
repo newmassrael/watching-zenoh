@@ -371,6 +371,7 @@ fn a_capture_timed_schedule_uses_the_recorded_interval_and_names_the_pairs_it_co
         gap_millis: 100,
         speed: 1.0,
         max_gap_millis: None,
+        ..Schedule::default()
     };
 
     let measured = plan(&input, schedule, Mutation::None, Selection::default());
@@ -496,4 +497,125 @@ fn a_clock_that_steps_backwards_is_a_zero_gap_and_not_an_eternity() {
     );
     assert_eq!(out.emissions[1].delay_millis, 0);
     assert_eq!(out.emissions[1].timing, TimingSource::Measured);
+}
+
+/// R311y704 — A PLAN THAT WOULD RUN TOO LONG IS REFUSED, NOT TRUNCATED.
+///
+/// ## Why this became a gap only in R311y703
+///
+/// `max_gap_millis` caps ONE delay, which was the whole bound while every gap
+/// was a number the caller typed. Capture pacing made a replay take as long as
+/// the capture did, so a large file now runs for hours and `duration_millis`
+/// reported that and nothing refused it.
+///
+/// ## Why refusing beats truncating
+///
+/// A plan silently cut to fit would send a PREFIX of the traffic under a name
+/// that promised all of it, and the operator would read a partial replay as a
+/// whole one — the failure this crate's gap counters exist to prevent, arriving
+/// at the schedule.
+#[test]
+fn a_plan_over_the_whole_run_ceiling_is_refused_and_says_what_to_change() {
+    let input = samples(vec![
+        sample("demo/a", b"one"),
+        sample("demo/b", b"two"),
+        sample("demo/c", b"three"),
+    ]);
+    let schedule = Schedule {
+        gap_millis: 100,
+        max_total_millis: Some(150),
+        ..Schedule::default()
+    };
+    let out = plan(&input, schedule, Mutation::None, Selection::default());
+    assert_eq!(out.duration_millis(), 200, "two gaps of 100");
+
+    let why = out.within(schedule).expect_err("200 is over 150");
+    assert_eq!(why.total_millis, 200);
+    assert_eq!(why.limit_millis, 150);
+    assert_eq!(
+        why.emissions, 3,
+        "the count an operator narrows with --select is in the refusal"
+    );
+    let text = why.to_string();
+    assert!(
+        text.contains("--select") && text.contains("--speed"),
+        "{text}"
+    );
+
+    // THE PLAN IS STILL WHOLE. A builder that refused to produce one would
+    // leave the operator with a number and no listing to act on.
+    assert_eq!(out.emissions.len(), 3);
+
+    // The controls, so "refused" is a difference rather than a constant: under
+    // the ceiling it passes, and with no ceiling at all it passes.
+    let roomy = Schedule {
+        max_total_millis: Some(200),
+        ..schedule
+    };
+    assert!(
+        plan(&input, roomy, Mutation::None, Selection::default())
+            .within(roomy)
+            .is_ok(),
+        "exactly at the ceiling is within it"
+    );
+    let unbounded = Schedule {
+        max_total_millis: None,
+        ..schedule
+    };
+    assert!(
+        plan(&input, unbounded, Mutation::None, Selection::default())
+            .within(unbounded)
+            .is_ok()
+    );
+}
+
+/// R311y704 — the rendering says WHOSE clock a measured gap came from.
+///
+/// A packet's timestamp is when the CAPTURING host saw it, not when the
+/// publisher sent it. R311y703 built the pacing and said nothing about that at
+/// the point a reader chooses it, which leaves them reproducing a tap's view of
+/// a cadence and calling it the application's.
+#[test]
+fn a_capture_paced_plan_says_the_clock_is_the_taps_and_not_the_senders() {
+    let input = samples(vec![
+        sample_at("demo/a", b"one", 1_000),
+        sample_at("demo/b", b"two", 1_350),
+    ]);
+    let measured = render(&plan(
+        &input,
+        Schedule {
+            timing: Timing::Capture,
+            ..Schedule::default()
+        },
+        Mutation::None,
+        Selection::default(),
+    ));
+    assert!(
+        measured.contains("when it SAW each packet rather than when the publisher sent it"),
+        "{measured}"
+    );
+
+    // NOT printed when no gap used that clock: a reader who did not ask for
+    // capture pacing is not told about a caveat that does not apply to them.
+    let declared = render(&plan(
+        &input,
+        Schedule::default(),
+        Mutation::None,
+        Selection::default(),
+    ));
+    assert!(!declared.contains("CAPTURING host"), "{declared}");
+
+    // And not printed when capture pacing was ASKED FOR and never applied --
+    // the emission is `Unmeasurable`, so there is no measured interval to
+    // caveat and saying otherwise would describe a clock nothing read.
+    let unmeasured = render(&plan(
+        &samples(vec![sample("demo/a", b"one"), sample("demo/b", b"two")]),
+        Schedule {
+            timing: Timing::Capture,
+            ..Schedule::default()
+        },
+        Mutation::None,
+        Selection::default(),
+    ));
+    assert!(!unmeasured.contains("CAPTURING host"), "{unmeasured}");
 }

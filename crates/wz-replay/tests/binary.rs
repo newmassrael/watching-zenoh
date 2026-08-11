@@ -397,4 +397,101 @@ fn the_timing_option_replays_the_pace_the_capture_recorded() {
     assert!(String::from_utf8_lossy(&bad.stderr).contains("`declared` or `capture`"));
 }
 
+/// R311y704 — `--max-total` REFUSES a plan that would run too long, at the
+/// command line, after printing it.
+///
+/// The engine proves the arithmetic and the message; this proves the flag is
+/// wired to a real exit code, and that the plan is still PRINTED — an operator
+/// who hits the ceiling must be able to see what was too long, or the refusal
+/// leaves them with a number and nothing to narrow.
+#[test]
+fn the_max_total_option_refuses_a_plan_that_would_run_too_long() {
+    let scratch = Scratch::new("max-total");
+    let capture = scratch.write("two.pcapng", &fixture::two_sample_capture());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+        .arg(&capture)
+        .arg("--gap")
+        .arg("500")
+        .arg("--max-total")
+        .arg("100")
+        .output()
+        .expect("runs");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+
+    assert_eq!(out.status.code(), Some(2), "{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("2 emission(s)") && stdout.contains("500 ms total"),
+        "the plan is PRINTED before it is refused: {stdout}"
+    );
+    assert!(
+        stderr.contains("over the --max-total of 100 ms"),
+        "and the refusal names both numbers: {stderr}"
+    );
+
+    // THE CONTROL. The same capture and gap without the ceiling exits clean, so
+    // the refusal is the ceiling rather than anything else about this run.
+    let ok = Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+        .arg(&capture)
+        .arg("--gap")
+        .arg("500")
+        .output()
+        .expect("runs");
+    assert_eq!(ok.status.code(), Some(0));
+}
+
+/// R311y704 (PF2 follow-up) — THE REPLAYABLE FRACTION OF A CAPTURE, measured.
+///
+/// R311y701 taught the extraction to resolve a keyexpr named by numeric id, and
+/// its own carry recorded that this moves an unknown number of messages out of
+/// `Samples::unresolved` and into the plan — with no witness to how many. A
+/// capability whose effect nobody measures is one a later round can silently
+/// undo.
+///
+/// So: the SAME capture, with and without the declaration its aliases resolve
+/// through. Without it the message is honestly refused and counted; with it,
+/// it is in the plan under the name the declaration bound.
+#[test]
+fn a_declaration_moves_a_message_out_of_the_floor_and_into_the_plan() {
+    let scratch = Scratch::new("floor");
+
+    let undeclared = scratch.write("undeclared.pcapng", &fixture::aliased_capture(false));
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+            .arg(&undeclared)
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        text.contains("0 emission(s)"),
+        "an id this capture never bound is not replayable under any name: {text}"
+    );
+    assert!(
+        text.contains("1 message(s) carried a payload whose keyexpr is a numeric id"),
+        "and the plan states that floor rather than being silently short: {text}"
+    );
+
+    let declared = scratch.write("declared.pcapng", &fixture::aliased_capture(true));
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+            .arg(&declared)
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        text.contains("1 emission(s)") && text.contains("`demo/sensor`"),
+        "with the declaration the capture carried, the same message replays \
+         under the name that declaration bound: {text}"
+    );
+    assert!(
+        !text.contains("numeric id"),
+        "and the floor it was in is gone: {text}"
+    );
+}
+
 mod fixture;

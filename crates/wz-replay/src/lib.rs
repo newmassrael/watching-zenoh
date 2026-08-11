@@ -84,6 +84,19 @@ pub struct Schedule {
     /// A ceiling on any one delay, so a large gap and a slow speed cannot
     /// produce a replay that appears to hang.
     pub max_gap_millis: Option<u64>,
+    /// R311y704 — a ceiling on the WHOLE plan, which nothing bounded.
+    ///
+    /// [`Self::max_gap_millis`] caps ONE delay. R311y703 made the live run's
+    /// wall-clock real -- at capture pace a replay takes as long as the capture
+    /// did -- and a ten-thousand-sample file at that pace runs for hours with
+    /// no surface saying so before it starts. [`Plan::duration_millis`] reported
+    /// the number and nothing refused it.
+    ///
+    /// REFUSES rather than truncates, which is this crate's rule for every
+    /// bound a person types: a plan silently cut to fit would send a prefix of
+    /// the traffic under a name that promised all of it, and the operator would
+    /// be reading a partial replay as a whole one.
+    pub max_total_millis: Option<u64>,
 }
 
 /// R311y703 (RP4) — which clock a gap comes from.
@@ -137,6 +150,9 @@ impl Default for Schedule {
             gap_millis: 100,
             speed: 1.0,
             max_gap_millis: Some(10_000),
+            // No whole-plan ceiling by default: a bound nobody asked for that
+            // refuses their capture is worse than one they can reach for.
+            max_total_millis: None,
         }
     }
 }
@@ -150,6 +166,34 @@ pub enum ScheduleError {
     SpeedNotPositive,
     /// A speed that is not a number at all.
     SpeedNotFinite,
+}
+
+/// R311y704 — why a PLAN was refused, as opposed to a schedule.
+///
+/// Separate from [`ScheduleError`] because the two are answerable at different
+/// times: a speed of zero is wrong the moment it is typed, and a plan that runs
+/// too long is only knowable once the samples are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanTooLong {
+    /// What the plan would take.
+    pub total_millis: u64,
+    /// The ceiling it exceeded.
+    pub limit_millis: u64,
+    /// How many emissions it holds -- the number an operator changes with
+    /// `--select` or `--side` when they meet this.
+    pub emissions: usize,
+}
+
+impl core::fmt::Display for PlanTooLong {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "this plan would take {} ms ({} emission(s)), over the \
+             --max-total of {} ms. Narrow it with --select / --side, raise \
+             --speed, or raise --max-total",
+            self.total_millis, self.emissions, self.limit_millis
+        )
+    }
 }
 
 impl core::fmt::Display for ScheduleError {
@@ -402,6 +446,27 @@ impl Plan {
     pub fn mutated(&self) -> usize {
         self.emissions.iter().filter(|e| e.mutated).count()
     }
+
+    /// R311y704 — this plan, if it fits the schedule's whole-plan ceiling.
+    ///
+    /// Asked of the PLAN rather than enforced inside `plan()` for the reason
+    /// `--dry-run` exists: an operator who hits this must be able to SEE the
+    /// plan that was too long, and a builder that refused to produce one would
+    /// leave them with a number and no listing.
+    pub fn within(&self, schedule: Schedule) -> Result<(), PlanTooLong> {
+        let Some(limit) = schedule.max_total_millis else {
+            return Ok(());
+        };
+        let total = self.duration_millis();
+        if total <= limit {
+            return Ok(());
+        }
+        Err(PlanTooLong {
+            total_millis: total,
+            limit_millis: limit,
+            emissions: self.emissions.len(),
+        })
+    }
 }
 
 /// R311y701 (RP3) — WHICH of a capture's samples a replay takes.
@@ -520,6 +585,27 @@ pub fn render(plan: &Plan) -> String {
         plan.duration_millis(),
         plan.mutated()
     );
+    // R311y704 — WHOSE clock the measured gaps came from, said once at the top
+    // and only when at least one gap actually used it.
+    //
+    // A packet's timestamp is when the CAPTURING host saw it, not when the
+    // publisher sent it. On a loopback or same-host capture the two are close;
+    // across a link they are a network apart, and a reader reproducing "the
+    // application's cadence" from a tap several hops away is reproducing the
+    // tap's view of it. R311y703 built this pacing and nothing said so at the
+    // point a reader chooses it -- the same shape as a report printing a total
+    // without saying it is a floor.
+    if plan
+        .emissions
+        .iter()
+        .any(|e| e.timing == TimingSource::Measured)
+    {
+        out.push_str(
+            "  gaps marked (capture) are intervals the CAPTURING host recorded, \
+             which is when it SAW each packet rather than when the publisher \
+             sent it\n",
+        );
+    }
     if plan.unresolved > 0 {
         out.push_str(&format!(
             "  {} message(s) carried a payload whose keyexpr is a numeric id \
