@@ -5,7 +5,10 @@
 //!
 //! # Why its own module rather than beside the dispatcher
 //!
-//! [`crate::reassembly_dispatch`] is `#[cfg(feature = "reassembly")]`, and the
+//! The `reassembly_dispatch` module is `#[cfg(feature = "reassembly")]` — so
+//! this doc NAMES it rather than linking it, because a link from an ungated
+//! page to a gated item is unresolved in exactly the build this module exists
+//! to keep compiling — and the
 //! verbs that RETURN this type are not: `PassiveSession::observe_at_counting`
 //! and `abandon_open_chains_counting` answer honestly on a build that
 //! reassembles nothing (no chains, so nothing lost) for the same reason their
