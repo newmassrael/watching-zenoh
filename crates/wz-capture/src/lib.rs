@@ -84,6 +84,16 @@ pub mod link;
 /// `Init` and a `Fragment`, out of a capture holding no zenoh at all. A QUIC
 /// short header's first byte IS a flagged zenoh MID, so the module's whole
 /// design question is what may decide — see its own note.
+pub mod quic;
+// R311y724 — DELIBERATELY UNDOCUMENTED HERE, and the reason is a trap this
+// round paid for. An outer `///` on a `mod` declaration is CONCATENATED with
+// the module's own `//!` docs, and the merged block then resolves its
+// intra-doc links in THIS module's scope -- so every link the module makes to
+// its own items (`MessageList`, `Discarded`, the `Deref` it imports) becomes
+// `no item named ... in scope` and C1bz reds with a broken-link budget of
+// zero. Measured: four broken links appeared the moment this line gained a
+// doc comment and vanished when it lost one. The module's note is in
+// `messages.rs`, which is where it belongs.
 pub mod messages;
 /// R311y617 (§1.1f) — the PAYLOAD sub-decoder: what is INSIDE a Put, judged
 /// against the encoding the sender declared rather than rendered on its word.
@@ -94,7 +104,6 @@ pub mod messages;
 pub mod payload;
 pub mod pcap;
 pub mod pcapng;
-pub mod quic;
 /// R311y615 (§1.1f) — the EXPORT plane: the analysis tables rendered for
 /// something that is not a Rust caller, with their loss counters structurally
 /// attached.
