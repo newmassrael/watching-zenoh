@@ -318,4 +318,83 @@ fn the_connect_flag_dials_where_live_is_on_and_is_refused_where_it_is_off() {
     }
 }
 
+/// R311y703 (RP4) — `--timing capture` REPLAYS THE PACE THE CAPTURE RECORDED,
+/// driven through the binary against a real two-packet capture.
+///
+/// ## What the engine's own tests cannot reach
+///
+/// They build `Sample`s with capture times by hand, which proves the
+/// arithmetic. This proves the EXTRACTION: that a real pcapng's per-packet
+/// clock reaches a stream sample at all. Two rounds said it could not --
+/// R311y700 in a doc and R311y702 in a carry -- on the argument that a stream
+/// message's anchor is a byte offset. `FlowDissection::packet_for` maps that
+/// offset to the packet that carried it, and this is the run that says so.
+///
+/// ## Anti-vacuity
+///
+/// The same capture is replayed under the DECLARED schedule, which must print
+/// the flat gap. Without that control, `350` would be a number this test
+/// asserts about a build that reads no timestamps at all -- it would only have
+/// to print the default 100 for both, and 350 would never appear.
+#[test]
+fn the_timing_option_replays_the_pace_the_capture_recorded() {
+    let scratch = Scratch::new("timing");
+    let capture = scratch.write("two-packets.pcapng", &fixture::two_packet_capture());
+
+    let run = |args: &[&str]| {
+        String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+                .arg(&capture)
+                .args(args)
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned()
+    };
+
+    let declared = run(&[]);
+    assert!(
+        declared.contains("2 emission(s)"),
+        "the fixture must yield both samples, or the pacing claim is about an \
+         empty plan: {declared}"
+    );
+    assert!(
+        declared.contains("1: +100 ms") && !declared.contains("(capture)"),
+        "ANTI-VACUITY: the default is still the declared gap, unnamed: {declared}"
+    );
+
+    let measured = run(&["--timing", "capture"]);
+    assert!(
+        measured.contains("1: +350 ms"),
+        "the two packets are 1_000_000 and 1_350_000 microseconds apart, and \
+         that interval is what the replay reproduces: {measured}"
+    );
+    assert!(
+        measured.contains("(capture)"),
+        "and the row SAYS which clock it used, because a plan that mixed the \
+         two silently would report a timing it did not reproduce: {measured}"
+    );
+    assert!(
+        measured.contains("350 ms total"),
+        "the total an operator checks follows the same clock: {measured}"
+    );
+
+    // SPEED scales the measured gap, which is what makes it a schedule rather
+    // than a recording.
+    let fast = run(&["--timing", "capture", "--speed", "2"]);
+    assert!(fast.contains("1: +175 ms"), "{fast}");
+
+    // A mode this tool does not know is a usage error, not a silent fallback to
+    // the declared gaps -- the rule `--side` and `--payload-format` settled.
+    let bad = Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+        .arg(&capture)
+        .arg("--timing")
+        .arg("real")
+        .output()
+        .expect("runs");
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("`declared` or `capture`"));
+}
+
 mod fixture;

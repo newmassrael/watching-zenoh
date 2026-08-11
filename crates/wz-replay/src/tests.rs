@@ -30,6 +30,15 @@ fn sample(keyexpr: &str, payload: &[u8]) -> Sample {
         payload: payload.to_vec(),
         direction: Direction::A,
         origin: 0,
+        captured_at_millis: None,
+    }
+}
+
+/// R311y703 (RP4) — the same sample, with a capture time on it.
+fn sample_at(keyexpr: &str, payload: &[u8], at: u64) -> Sample {
+    Sample {
+        captured_at_millis: Some(at),
+        ..sample(keyexpr, payload)
     }
 }
 
@@ -85,6 +94,7 @@ fn the_speed_control_scales_the_gaps_and_never_the_first_one() {
         gap_millis: 200,
         speed: 1.0,
         max_gap_millis: None,
+        ..Schedule::default()
     };
     assert_eq!(base.delay_before(0), 0);
     assert_eq!(base.delay_before(1), 200);
@@ -106,6 +116,7 @@ fn the_speed_control_scales_the_gaps_and_never_the_first_one() {
         gap_millis: 60_000,
         speed: 0.001,
         max_gap_millis: Some(5_000),
+        ..Schedule::default()
     };
     assert_eq!(capped.delay_before(1), 5_000);
 }
@@ -316,6 +327,7 @@ fn the_dry_run_rendering_is_the_plan_itself() {
             gap_millis: 50,
             speed: 1.0,
             max_gap_millis: None,
+            ..Schedule::default()
         },
         Mutation::Truncate { to: 2 },
         Selection::default(),
@@ -327,4 +339,161 @@ fn the_dry_run_rendering_is_the_plan_itself() {
         rendered.contains("0: +0 ms `demo/a` 2 byte(s) MUTATED (was 5)"),
         "the row carries the mutated length AND the captured one: {rendered}"
     );
+}
+
+/// R311y703 (RP4) — THE SCHEDULE CAN COME FROM THE CAPTURE, and it says per
+/// emission when it could not.
+///
+/// ## The claim two earlier rounds made about this
+///
+/// R311y700 wrote that a capture's own per-message timing was out of reach and
+/// R311y702 repeated it in a carry. Both were wrong:
+/// `FlowDissection::packet_for` maps a stream offset to the packet that carried
+/// it, and the file carries that packet's time.
+///
+/// ## Why the fallback is a THIRD state and not the declared one
+///
+/// A pair of samples with no resolvable time falls back to the declared gap,
+/// and a reader who asked for capture timing must be able to see that it
+/// happened. `Declared` and `Unmeasurable` produce the same NUMBER and mean
+/// opposite things: one is the caller's choice, the other is a measurement that
+/// was wanted and missing.
+#[test]
+fn a_capture_timed_schedule_uses_the_recorded_interval_and_names_the_pairs_it_could_not() {
+    let input = samples(vec![
+        sample_at("demo/a", b"one", 1_000),
+        sample_at("demo/b", b"two", 1_350),
+        // No capture time: the pair ending here cannot be measured.
+        sample("demo/c", b"three"),
+    ]);
+    let schedule = Schedule {
+        timing: Timing::Capture,
+        gap_millis: 100,
+        speed: 1.0,
+        max_gap_millis: None,
+    };
+
+    let measured = plan(&input, schedule, Mutation::None, Selection::default());
+    assert_eq!(
+        measured
+            .emissions
+            .iter()
+            .map(|e| (e.delay_millis, e.timing))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, TimingSource::Declared),
+            (350, TimingSource::Measured),
+            (100, TimingSource::Unmeasurable),
+        ],
+        "the recorded interval, then the fallback, each named"
+    );
+
+    // THE CONTROL. The same samples under the declared schedule produce the
+    // flat gap throughout, so `350` above is a measurement and not a constant
+    // this build would print either way.
+    let declared = plan(
+        &input,
+        Schedule {
+            timing: Timing::Declared,
+            ..schedule
+        },
+        Mutation::None,
+        Selection::default(),
+    );
+    assert_eq!(
+        declared
+            .emissions
+            .iter()
+            .map(|e| (e.delay_millis, e.timing))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, TimingSource::Declared),
+            (100, TimingSource::Declared),
+            (100, TimingSource::Declared),
+        ]
+    );
+
+    // SPEED scales a measured gap exactly as it scales a declared one -- that
+    // is what a speed means -- and the ceiling applies to both.
+    let fast = plan(
+        &input,
+        Schedule {
+            speed: 2.0,
+            ..schedule
+        },
+        Mutation::None,
+        Selection::default(),
+    );
+    assert_eq!(fast.emissions[1].delay_millis, 175);
+    let capped = plan(
+        &input,
+        Schedule {
+            max_gap_millis: Some(50),
+            ..schedule
+        },
+        Mutation::None,
+        Selection::default(),
+    );
+    assert_eq!(capped.emissions[1].delay_millis, 50);
+}
+
+/// R311y703 (RP4) — the measured gap is between the samples the plan KEEPS.
+///
+/// A selector that drops the message between two kept ones widens the real
+/// interval, and reproducing the narrower one would play a conversation at a
+/// pace it never had. Measured against the alternative: taking the previous
+/// SAMPLE's time rather than the previous TAKEN one would print 350 here.
+#[test]
+fn a_selector_that_drops_a_sample_widens_the_gap_the_capture_recorded() {
+    let input = samples(vec![
+        sample_at("demo/a", b"one", 1_000),
+        sample_at("other/b", b"skipped", 1_350),
+        sample_at("demo/c", b"three", 1_900),
+    ]);
+    let narrowed = plan(
+        &input,
+        Schedule {
+            timing: Timing::Capture,
+            max_gap_millis: None,
+            ..Schedule::default()
+        },
+        Mutation::None,
+        Selection {
+            keyexpr: Some("demo/**"),
+            ..Default::default()
+        },
+    );
+    assert_eq!(narrowed.emissions.len(), 2);
+    assert_eq!(
+        narrowed.emissions[1].delay_millis, 900,
+        "1_900 - 1_000, the interval between the two the plan actually sends"
+    );
+    assert_eq!(narrowed.emissions[1].timing, TimingSource::Measured);
+}
+
+/// R311y703 (RP4) — a capture whose clock steps BACKWARDS yields zero rather
+/// than an enormous gap from a wrapped subtraction.
+///
+/// Merged and re-timestamped capture files do this. A `u64` subtraction that
+/// underflowed would produce a delay of nearly forever, which is the failure
+/// mode `delay_before`'s saturating arithmetic already exists to prevent one
+/// layer up.
+#[test]
+fn a_clock_that_steps_backwards_is_a_zero_gap_and_not_an_eternity() {
+    let input = samples(vec![
+        sample_at("demo/a", b"one", 2_000),
+        sample_at("demo/b", b"two", 1_000),
+    ]);
+    let out = plan(
+        &input,
+        Schedule {
+            timing: Timing::Capture,
+            max_gap_millis: None,
+            ..Schedule::default()
+        },
+        Mutation::None,
+        Selection::default(),
+    );
+    assert_eq!(out.emissions[1].delay_millis, 0);
+    assert_eq!(out.emissions[1].timing, TimingSource::Measured);
 }

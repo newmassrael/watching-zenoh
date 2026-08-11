@@ -40,20 +40,42 @@ pub mod live;
 
 /// R311y700 ([REDACTED-REQ]) — how fast the plan is played back.
 ///
-/// # Why a capture's own timing is not simply reused
+/// # The claim this doc used to make, and the measurement that refuted it
 ///
-/// A capture records when a packet was SEEN, and this crate's samples carry a
-/// framing coordinate rather than a clock: on a stream link a message's anchor
-/// is a byte offset, so there is no per-message time to scale. Pretending
-/// otherwise would produce a schedule that looks precise and is invented.
+/// It said a capture's own per-message timing could not be reused: a sample
+/// carries a framing coordinate rather than a clock, and on a stream link that
+/// coordinate is a byte offset, so there was said to be no per-message time to
+/// scale. The reasoning is sound and the conclusion was FALSE.
+/// [`wz_capture::FlowDissection::packet_for`] is public, answers "which capture
+/// packet carried the byte at this stream offset", and its own doc names
+/// `PassiveFrame::stream_offset` as the thing to compose it with. R311y700
+/// wrote the claim, R311y702 repeated it in a carry, and R311y703 refuted it by
+/// reading that surface instead of re-deriving the argument.
 ///
-/// So the schedule is DECLARED: a gap between samples, scaled by a speed. A
-/// caller who wants the capture's own timing supplies the gap they measured;
-/// one who wants a burst asks for zero. Both are honest, and neither claims to
-/// reproduce a clock the input did not carry.
+/// # So the schedule has a SOURCE
+///
+/// [`Timing::Declared`] is a gap this caller chose, scaled by a speed, and it
+/// remains the default: the plan is this tool's contract and what an existing
+/// invocation does is not changed silently. [`Timing::Capture`] uses the
+/// interval the capture recorded, falling back to the declared gap where a pair
+/// of samples has no resolvable time -- and every emission SAYS which it got,
+/// because a run that mixed the two without saying so would report a timing it
+/// did not reproduce.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Schedule {
+    /// R311y703 (RP4) — where each gap COMES FROM.
+    ///
+    /// R311y700 wrote the doc above and R311y702 repeated it: a capture's own
+    /// per-message timing was said to be out of reach. It is not, and the
+    /// correction is recorded on [`wz_analyze::Sample::captured_at_millis`].
+    /// So the schedule now has a source, and a plan says per emission which one
+    /// it used -- because a run that silently mixed measured and declared gaps
+    /// would report a timing it did not reproduce.
+    pub timing: Timing,
     /// Milliseconds between consecutive samples at speed 1.0.
+    ///
+    /// Under [`Timing::Capture`] this is the FALLBACK, used for a pair of
+    /// samples whose capture times this reader could not resolve.
     pub gap_millis: u64,
     /// The multiplier. 2.0 plays twice as fast (half the gaps); 0.5 half as
     /// fast. Zero and below are refused by [`Self::checked`] rather than
@@ -64,10 +86,54 @@ pub struct Schedule {
     pub max_gap_millis: Option<u64>,
 }
 
+/// R311y703 (RP4) — which clock a gap comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Timing {
+    /// Every gap is [`Schedule::gap_millis`]. The DEFAULT, and it stays the
+    /// default deliberately: the plan is this tool's contract, and changing
+    /// what an existing invocation does is not a change to make silently.
+    Declared,
+    /// Use the interval the CAPTURE recorded between consecutive samples,
+    /// falling back to the declared gap for a pair this reader could not
+    /// resolve. Which one each emission got is [`PlannedEmission::timing`].
+    Capture,
+}
+
+/// R311y703 (RP4) — which clock ONE emission's delay came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimingSource {
+    /// The declared gap.
+    Declared,
+    /// The interval between this sample's capture time and the previous one's.
+    Measured,
+    /// The capture was asked for and could not answer: one of the two samples
+    /// carried no resolvable capture time, so the declared gap was used.
+    ///
+    /// Distinct from [`Self::Declared`] on the rule this workspace applies to
+    /// every gap counter: a fallback that reads like a choice hides the fact
+    /// that a measurement was wanted and missing.
+    Unmeasurable,
+}
+
+impl TimingSource {
+    /// The word a rendering prints for this source, or nothing for the
+    /// ordinary declared case -- which is what a reader who did not ask for
+    /// capture timing should not have to read on every row.
+    fn note(self) -> &'static str {
+        match self {
+            Self::Declared => "",
+            Self::Measured => " (capture)",
+            Self::Unmeasurable => " (declared -- no capture time for this pair)",
+        }
+    }
+}
+
 impl Default for Schedule {
-    /// One sample every 100 ms at speed 1.0, capped at ten seconds.
+    /// One sample every 100 ms at speed 1.0, capped at ten seconds, from the
+    /// DECLARED gap.
     fn default() -> Self {
         Self {
+            timing: Timing::Declared,
             gap_millis: 100,
             speed: 1.0,
             max_gap_millis: Some(10_000),
@@ -113,10 +179,35 @@ impl Schedule {
     /// caller can type must not be able to produce a delay of nearly forever
     /// through an arithmetic edge.
     pub fn delay_before(&self, index: usize) -> u64 {
+        self.delay_from(index, None).0
+    }
+
+    /// R311y703 (RP4) — the delay before the sample at `index`, and WHERE it
+    /// came from.
+    ///
+    /// `measured_gap` is the interval the capture recorded between this sample
+    /// and the previous one, when both carried a resolvable time. The SPEED
+    /// scales a measured gap exactly as it scales a declared one -- that is
+    /// what a speed means -- and the ceiling applies to both, so a capture with
+    /// an hour of silence in it cannot produce a replay that appears to hang.
+    pub fn delay_from(&self, index: usize, measured_gap: Option<u64>) -> (u64, TimingSource) {
         if index == 0 {
-            return 0;
+            // The first emission waits for nothing, whichever clock is in
+            // play: a plan that slept before its first sample would add a gap
+            // no capture contained.
+            return (0, TimingSource::Declared);
         }
-        let scaled = (self.gap_millis as f64) / self.speed;
+        let (base, source) = match (self.timing, measured_gap) {
+            (Timing::Declared, _) => (self.gap_millis, TimingSource::Declared),
+            (Timing::Capture, Some(gap)) => (gap, TimingSource::Measured),
+            (Timing::Capture, None) => (self.gap_millis, TimingSource::Unmeasurable),
+        };
+        (self.scale(base), source)
+    }
+
+    /// A gap, scaled and capped.
+    fn scale(&self, base: u64) -> u64 {
+        let scaled = (base as f64) / self.speed;
         let millis = if scaled.is_finite() && scaled >= 0.0 {
             // `as u64` saturates at the type's bounds for an out-of-range
             // float, which is the behaviour wanted here and is worth naming
@@ -267,6 +358,8 @@ pub struct PlannedEmission {
     pub captured_len: usize,
     /// Whether the mutation changed anything.
     pub mutated: bool,
+    /// R311y703 (RP4) — which clock [`Self::delay_millis`] came from.
+    pub timing: TimingSource,
 }
 
 /// What a whole replay will do.
@@ -367,18 +460,33 @@ pub fn plan(
 ) -> Plan {
     let mut emissions = Vec::new();
     let mut excluded = 0usize;
+    // R311y703 (RP4) — the previous TAKEN sample's capture time, not the
+    // previous sample's. A selector that drops the message between two kept
+    // ones widens the real interval, and reproducing the narrower one would
+    // play a conversation that never happened at that pace.
+    let mut previous_at: Option<u64> = None;
     for sample in &samples.items {
         if !selection.takes(sample) {
             excluded += 1;
             continue;
         }
+        // Saturating: a capture whose clock steps BACKWARDS between two
+        // packets -- which a merged or re-timestamped file can -- yields zero
+        // rather than an enormous gap from a wrapped subtraction.
+        let measured = match (previous_at, sample.captured_at_millis) {
+            (Some(prev), Some(now)) => Some(now.saturating_sub(prev)),
+            _ => None,
+        };
+        let (delay_millis, timing) = schedule.delay_from(emissions.len(), measured);
+        previous_at = sample.captured_at_millis.or(previous_at);
         let outcome = mutation.apply(&sample.payload);
         emissions.push(PlannedEmission {
-            delay_millis: schedule.delay_before(emissions.len()),
+            delay_millis,
             keyexpr: sample.keyexpr.clone(),
             payload: outcome.payload,
             captured_len: sample.payload.len(),
             mutated: outcome.changed,
+            timing,
         });
     }
     Plan {
@@ -456,6 +564,15 @@ pub fn render(plan: &Plan) -> String {
                 String::new()
             }
         ));
+        // R311y703 (RP4) — appended rather than folded into the line above so
+        // the declared case reads exactly as it always did: a reader who did
+        // not ask for capture timing gets no new words on any row.
+        let note = emission.timing.note();
+        if !note.is_empty() {
+            out.pop();
+            out.push_str(note);
+            out.push('\n');
+        }
     }
     out
 }

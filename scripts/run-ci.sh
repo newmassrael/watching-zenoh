@@ -5359,7 +5359,10 @@ layer_c1by_replay_engine() {
         tests::a_seeded_mutation_repeats_and_two_seeds_differ \
         tests::a_selector_narrows_the_plan_by_zenohs_keyexpr_dialect \
         tests::a_plan_says_what_the_capture_held_and_it_will_not_send \
-        tests::a_refusal_stops_the_replay_at_the_emission_that_failed
+        tests::a_refusal_stops_the_replay_at_the_emission_that_failed \
+        tests::a_capture_timed_schedule_uses_the_recorded_interval_and_names_the_pairs_it_could_not \
+        tests::a_selector_that_drops_a_sample_widens_the_gap_the_capture_recorded \
+        tests::a_clock_that_steps_backwards_is_a_zero_gap_and_not_an_eternity
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1by FAIL: $name is absent from the wz-replay lib target"
@@ -5377,7 +5380,8 @@ layer_c1by_replay_engine() {
         a_speed_of_zero_is_refused_at_the_command_line \
         a_datagram_capture_yields_its_samples \
         the_side_selector_takes_one_half_of_the_conversation_and_says_what_it_left \
-        the_connect_flag_dials_where_live_is_on_and_is_refused_where_it_is_off
+        the_connect_flag_dials_where_live_is_on_and_is_refused_where_it_is_off \
+        the_timing_option_replays_the_pace_the_capture_recorded
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1by FAIL: $name is absent from the wz-replay binary target"

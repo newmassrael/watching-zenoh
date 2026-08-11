@@ -167,6 +167,34 @@ pub fn two_sample_capture() -> Vec<u8> {
     )
 }
 
+/// R311y703 (RP4) — two replies in SEPARATE PACKETS, 350 ms apart.
+///
+/// `two_sample_capture` batches both into one TCP segment, so both samples
+/// resolve to the same packet and the capture's own interval between them is
+/// genuinely zero. That is a correct measurement and a useless discriminator:
+/// a build that resolved no timestamps at all would produce the same number.
+/// These two arrive at 1_000_000 and 1_350_000 microseconds (the writer's
+/// interface declares `if_tsresol` 6), so the measured gap is 350 ms and
+/// nothing else in this crate produces that number.
+pub fn two_packet_capture() -> Vec<u8> {
+    let first = framed_frame(&reply(7, "demo/a", b"first"));
+    let second = framed_frame(&reply(8, "demo/b", b"second"));
+    wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[
+            (0, 1_000_000, &tcp_packet_reverse(1000, &first)),
+            // The second segment continues the stream, so its sequence number
+            // is the first's plus its length -- a gap here would make the
+            // assembler hold the bytes and the second sample would not exist.
+            (
+                0,
+                1_350_000,
+                &tcp_packet_reverse(1000 + first.len() as u32, &second),
+            ),
+        ],
+    )
+}
+
 /// R311y701 (RP2) — the same reply over a DATAGRAM link. No length prefix:
 /// a datagram is its own framing unit.
 pub fn datagram_capture() -> Vec<u8> {

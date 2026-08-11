@@ -16,7 +16,7 @@
 
 use std::process::ExitCode;
 
-use wz_replay::{plan, render, Mutation, Schedule, Selection};
+use wz_replay::{plan, render, Mutation, Schedule, Selection, Timing};
 
 const USAGE: &str = "\
 wz-replay -- re-publish a capture's samples into a new session
@@ -37,7 +37,12 @@ OPTIONS:
                       to high); B is the reply half. Without it BOTH halves are
                       replayed, which re-publishes the peer's answers as though
                       this node had said them
-    --gap <ms>        milliseconds between samples at speed 1.0 (default 100)
+    --timing <mode>   `declared` (default) spaces samples by --gap;
+                      `capture` uses the interval the CAPTURE recorded, and
+                      falls back to --gap for a pair with no capture time,
+                      saying so per emission
+    --gap <ms>        milliseconds between samples at speed 1.0 (default 100).
+                      Under --timing capture this is the fallback
     --speed <factor>  play faster (>1) or slower (<1). Must be positive
     --max-gap <ms>    ceiling on any one delay (default 10000)
     --fuzz <spec>     mutate each payload before sending. One of:
@@ -99,6 +104,15 @@ fn main() -> ExitCode {
             "--side" => match value().as_deref().and_then(parse_side) {
                 Some(v) => side = Some(v),
                 None => return bad("--side needs A or B"),
+            },
+            // REFUSED for an unknown mode, on the rule `--side` and
+            // `--payload-format` already settled: a reader who typed
+            // `--timing real` and silently got the declared gaps would believe
+            // they were replaying the capture's own pace.
+            "--timing" => match value().as_deref() {
+                Some("declared") => schedule.timing = Timing::Declared,
+                Some("capture") => schedule.timing = Timing::Capture,
+                _ => return bad("--timing needs `declared` or `capture`"),
             },
             "--gap" => match value().and_then(|v| v.parse().ok()) {
                 Some(v) => schedule.gap_millis = v,

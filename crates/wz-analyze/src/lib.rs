@@ -2291,6 +2291,23 @@ impl Reread {
         }
     }
 
+    /// R311y703 (RP4) — when the packet at `index` was CAPTURED, in
+    /// milliseconds since the Unix epoch.
+    ///
+    /// `None` for a block that carried no timestamp at all, which pcapng
+    /// permits and which this reader must not turn into a zero: an invented
+    /// arrival time is exactly the fabricated measurement the throughput
+    /// plane's `unmeasured` state exists to refuse one layer down.
+    fn ts_millis(&self, index: usize) -> Option<u64> {
+        match self {
+            Self::Ng(file) => file.packets.get(index).and_then(|p| file.ts_millis(p)),
+            Self::Classic(file) => file
+                .packets
+                .get(index)
+                .map(|p| p.ts_millis(file.timestamp_unit)),
+        }
+    }
+
     /// The packet at `index` in file order.
     fn packet(&self, index: usize) -> Option<RereadPacket<'_>> {
         match self {
@@ -2739,6 +2756,26 @@ pub struct Sample {
     /// the packet index; on a stream it is a byte offset. Carried because it is
     /// the only ordering key a sample has — the capture's own arrival order.
     pub origin: usize,
+    /// R311y703 (RP4) — when the capture recorded the packet this message
+    /// arrived in, in milliseconds since the Unix epoch.
+    ///
+    /// # What R311y700 and R311y702 both said about this, and why it was wrong
+    ///
+    /// Both rounds recorded that a stream flow has no per-message time, on the
+    /// argument that its anchor is a byte offset rather than a packet. The
+    /// argument is sound and the conclusion is false:
+    /// [`wz_capture::FlowDissection::packet_for`] is public, answers exactly
+    /// "which capture packet carried the byte at this stream offset", and its
+    /// own doc names `PassiveFrame::stream_offset` as the thing to compose it
+    /// with. Measured by reading that surface rather than re-deriving the
+    /// argument — the discipline this workspace adopted after three such notes
+    /// turned out to be claims.
+    ///
+    /// `None` is still a real answer and there are three ways to reach it: a
+    /// capture block that carried no timestamp, a stream offset whose bytes the
+    /// assembler had already discarded, and a capture this reader could not
+    /// parse a second time. A consumer must not read `None` as zero.
+    pub captured_at_millis: Option<u64>,
 }
 
 /// R311y700 ([REDACTED-REQ]) — every sample a capture carried, in capture order.
@@ -2787,6 +2824,11 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
     if !opener.log().is_empty() {
         dissection.decrypt_with(&mut opener);
     }
+    // R311y703 (RP4) — ONE second read, serving both halves. The datagram walk
+    // already needed it for the bytes; the stream half needs it only for the
+    // clock, and a second parse for that would read the same immutable slice
+    // twice for one field.
+    let file = Reread::of(capture);
     let mut out = Samples::default();
     for flow in dissection.flows() {
         // R311y701 (PF2) — folded in frame order, the same rule the field
@@ -2796,10 +2838,10 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
         let mut spaces = wz_capture::agg::KeyexprSpaces::new();
         for frame in &flow.frames {
             spaces.absorb_frame(frame);
-            collect_sample(flow, frame, &spaces, &mut out);
+            collect_sample(flow, frame, &spaces, file.as_ref(), &mut out);
         }
     }
-    collect_datagram_samples(capture, &dissection, &mut out);
+    collect_datagram_samples(&dissection, file.as_ref(), &mut out);
     Ok(out)
 }
 
@@ -2808,12 +2850,12 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
 /// Scouting datagrams are deliberately NOT walked: a Scout or a Hello is
 /// discovery, carries no key expression and no application payload, and a
 /// replay of one would be a claim about traffic the application never sent.
-fn collect_datagram_samples(capture: &[u8], dissection: &Dissection, out: &mut Samples) {
+fn collect_datagram_samples(dissection: &Dissection, file: Option<&Reread>, out: &mut Samples) {
     let flows = dissection.datagram_flows();
     if flows.is_empty() {
         return;
     }
-    let Some(file) = Reread::of(capture) else {
+    let Some(file) = file else {
         // Every datagram message is out of reach, and the count says so rather
         // than the plan quietly holding only the stream half.
         out.unreachable += flows.iter().map(|f| f.frames.len()).sum::<usize>();
@@ -2851,7 +2893,16 @@ fn collect_datagram_samples(capture: &[u8], dissection: &Dissection, out: &mut S
                 out.undecodable += 1;
                 continue;
             };
-            push_sample(&field, frame.direction, frame.stream_offset, &spaces, out);
+            // The datagram coordinate IS the packet index, so the clock is a
+            // direct lookup rather than a run-map question.
+            push_sample(
+                &field,
+                frame.direction,
+                frame.stream_offset,
+                file.ts_millis(frame.stream_offset),
+                &spaces,
+                out,
+            );
         }
     }
 }
@@ -2882,6 +2933,7 @@ fn collect_sample(
     flow: &wz_capture::FlowDissection,
     frame: &wz_session_core::passive::PassiveFrame,
     spaces: &wz_capture::agg::KeyexprSpaces,
+    file: Option<&Reread>,
     out: &mut Samples,
 ) {
     let assembler = flow.assembler(frame.direction);
@@ -2891,7 +2943,21 @@ fn collect_sample(
         out.undecodable += 1;
         return;
     };
-    push_sample(&field, frame.direction, frame.stream_offset, spaces, out);
+    // R311y703 (RP4) — the composition `FlowDissection::packet_for`'s own doc
+    // prescribes: a stream offset names a byte, the run map names the packet
+    // that carried it, and the file names when that packet arrived.
+    let captured_at = file.and_then(|f| {
+        flow.packet_for(frame.direction, frame.stream_offset)
+            .and_then(|index| f.ts_millis(index))
+    });
+    push_sample(
+        &field,
+        frame.direction,
+        frame.stream_offset,
+        captured_at,
+        spaces,
+        out,
+    );
 }
 
 /// R311y701 (RP2) — the sample inside ONE walked message, whichever half of the
@@ -2905,6 +2971,7 @@ fn push_sample(
     field: &wz_session_core::dissect::Field,
     direction: wz_session_core::passive::Direction,
     origin: usize,
+    captured_at_millis: Option<u64>,
     spaces: &wz_capture::agg::KeyexprSpaces,
     out: &mut Samples,
 ) {
@@ -2923,6 +2990,7 @@ fn push_sample(
                 payload: bytes.clone(),
                 direction,
                 origin,
+                captured_at_millis,
             });
         }
         None => {
