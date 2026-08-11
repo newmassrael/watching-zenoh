@@ -5331,6 +5331,22 @@ layer_c1by_replay_engine() {
     (cd crates && cargo test -p wz-replay --quiet) || {
         echo "  C1by FAIL: wz-replay does not pass in isolation"; return 1; }
 
+    # R311y702 — the OTHER build, BY NAME. `live` carries the session runtime,
+    # and with it off `--connect` must REFUSE rather than print a plan and exit
+    # zero. That refusal exists in no other build, so a lane that only ran the
+    # default one would be checking a population of zero -- the shape R311y668
+    # measured. The difference is one test that asserts BOTH halves
+    # (`the_connect_flag_dials_where_live_is_on_and_is_refused_where_it_is_off`),
+    # so each build checks the leg that is real in it.
+    (cd crates && cargo build -p wz-replay --no-default-features --bins --quiet) || {
+        echo "  C1by FAIL: wz-replay does not build without the live feature"
+        return 1; }
+    (cd crates && cargo test -p wz-replay --no-default-features --quiet) || {
+        echo "  C1by FAIL: wz-replay does not pass without the live feature"
+        return 1; }
+    (cd crates && cargo clippy -p wz-replay --no-default-features --all-targets \
+        --quiet -- -D warnings) || return 1
+
     listing="$(cd crates && cargo test -p wz-replay --lib -- --list 2>/dev/null)" \
         || { echo "  C1by FAIL: the engine tests did not list"; return 1; }
     missing=0
@@ -5360,7 +5376,8 @@ layer_c1by_replay_engine() {
         the_fuzz_option_mutates_the_payload_and_the_plan_says_so \
         a_speed_of_zero_is_refused_at_the_command_line \
         a_datagram_capture_yields_its_samples \
-        the_side_selector_takes_one_half_of_the_conversation_and_says_what_it_left
+        the_side_selector_takes_one_half_of_the_conversation_and_says_what_it_left \
+        the_connect_flag_dials_where_live_is_on_and_is_refused_where_it_is_off
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1by FAIL: $name is absent from the wz-replay binary target"
@@ -5369,7 +5386,23 @@ layer_c1by_replay_engine() {
     done
     [[ $missing -eq 0 ]] || return 1
 
-    echo "  C1by: the replay plan is gated, and a real capture feeds it"
+    # R311y702 — the LIVE leg's own target, pinned as a SET like every other.
+    # This is the only test in the workspace that puts an application Push on a
+    # real socket from a tool a person runs, so a round that dropped it would
+    # take [REDACTED-REQ]'s whole claim with it while the suite stayed green.
+    listing="$(cd crates && cargo test -p wz-replay --test live -- --list 2>/dev/null)" \
+        || { echo "  C1by FAIL: the live tests did not list"; return 1; }
+    for name in \
+        the_binary_dials_a_peer_and_that_peer_decodes_the_captured_samples
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1by FAIL: $name is absent from the wz-replay live target"
+            missing=1
+        }
+    done
+    [[ $missing -eq 0 ]] || return 1
+
+    echo "  C1by: the replay plan is gated, a real capture feeds it, and a real peer receives it"
 }
 
 # ── R311y668 (§1.2a) — Layer C1bx: the TLS DECRYPTOR's oracle suite.

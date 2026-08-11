@@ -25,6 +25,9 @@ USAGE:
     wz-replay <capture> [options]
 
 OPTIONS:
+    --connect <locator>
+                      DIAL this peer and actually publish the plan, e.g.
+                      `tcp/127.0.0.1:7447`. Without it nothing is sent
     --keylog <file>   an NSS key log, so encrypted flows contribute samples
     --select <keyexpr>
                       replay only samples whose keyexpr matches. zenoh's own
@@ -62,6 +65,7 @@ fn main() -> ExitCode {
     let mut select: Option<String> = None;
     let mut side: Option<wz_session_core::passive::Direction> = None;
     let mut keylog: Option<String> = None;
+    let mut connect: Option<String> = None;
 
     let mut at = 1usize;
     while at < argv.len() {
@@ -79,6 +83,10 @@ fn main() -> ExitCode {
             "--keylog" => match value() {
                 Some(v) => keylog = Some(v),
                 None => return bad("--keylog needs a file"),
+            },
+            "--connect" => match value() {
+                Some(v) => connect = Some(v),
+                None => return bad("--connect needs a locator, e.g. tcp/127.0.0.1:7447"),
             },
             "--select" => match value() {
                 Some(v) => select = Some(v),
@@ -151,8 +159,50 @@ fn main() -> ExitCode {
             side,
         },
     );
+    // R311y702 ([REDACTED-REQ]) — the plan is printed FIRST, whether or not it is
+    // about to be played. An operator who is about to put captured traffic on a
+    // live deployment should see exactly what is going out before it does, and
+    // the value they read is the one that plays -- not a second rendering of a
+    // second computation.
     print!("{}", render(&plan));
-    ExitCode::SUCCESS
+    let Some(connect) = connect else {
+        return ExitCode::SUCCESS;
+    };
+    run_live(&connect, plan)
+}
+
+/// R311y702 — dial and play.
+#[cfg(feature = "live")]
+fn run_live(connect: &str, plan: wz_replay::Plan) -> ExitCode {
+    let total = plan.emissions.len();
+    match wz_replay::live::run(connect, plan) {
+        Ok(sent) => {
+            println!("replay: {sent} of {total} emission(s) sent to {connect}");
+            ExitCode::SUCCESS
+        }
+        Err(why) => {
+            eprintln!("wz-replay: {why}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// A build without the session runtime REFUSES rather than printing the plan
+/// and exiting zero.
+///
+/// The rule this workspace settled after measuring the alternative: a lower
+/// layer that degrades silently when a feature is absent must be turned into a
+/// REFUSAL at the layer a person types into. An operator who ran `--connect`
+/// against a build with `live` off and got exit 0 plus a plan would have every
+/// reason to believe their replay went out.
+#[cfg(not(feature = "live"))]
+fn run_live(connect: &str, _plan: wz_replay::Plan) -> ExitCode {
+    eprintln!(
+        "wz-replay: --connect {connect} needs the `live` feature, and this \
+         binary was built without it. Nothing was sent. Rebuild with \
+         `--features live` (it is on by default)."
+    );
+    ExitCode::from(2)
 }
 
 /// `A` / `B`, in either case. The letters the field listing prints.

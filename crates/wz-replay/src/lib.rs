@@ -28,6 +28,16 @@
 
 use wz_analyze::{Sample, Samples};
 
+/// R311y702 ([REDACTED-REQ]) — the LIVE sink, behind the `live` feature.
+///
+/// The trait above is the seam and this is its production implementation: a
+/// dialled session and a real Put per emission. Feature-gated so the plan half
+/// stays buildable without the session runtime's dependency graph; see this
+/// crate's `Cargo.toml` for why the CLI REFUSES `--connect` when it is off
+/// rather than falling back to a dry run.
+#[cfg(feature = "live")]
+pub mod live;
+
 /// R311y700 ([REDACTED-REQ]) — how fast the plan is played back.
 ///
 /// # Why a capture's own timing is not simply reused

@@ -2650,9 +2650,13 @@ dependencies = [
 name = "wz-replay"
 version = "0.1.0"
 dependencies = [
+ "log",
+ "tokio",
+ "wz",
  "wz-analyze",
  "wz-capture",
  "wz-codecs",
+ "wz-runtime-tokio-test-support",
  "wz-session-core",
 ]
 

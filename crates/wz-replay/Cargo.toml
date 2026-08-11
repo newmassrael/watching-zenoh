@@ -25,6 +25,21 @@ publish = false
 name = "wz-replay"
 path = "src/main.rs"
 
+[features]
+# R311y702 ([REDACTED-REQ]) — the LIVE half: `--connect`, a real session, real Pushes.
+#
+# ON by default because a replay tool that cannot replay is not the tool the
+# requirement asks for. A feature at all because the plan half -- schedule,
+# mutation, selection, extraction -- is a pure value that must stay buildable
+# and testable without the session runtime's dependency graph, which is the
+# separation this crate's header already argues for.
+#
+# THE RULE THAT MAKES THE FEATURE SAFE: with `live` off, `--connect` is
+# REFUSED at the command line and names the feature. A build that silently
+# printed the plan instead would tell an operator their replay ran.
+default = ["live"]
+live = ["dep:wz", "dep:tokio", "dep:log"]
+
 [dependencies]
 # The SOURCE of a replay: `samples` pairs a keyexpr with the payload underneath
 # it, using the same walk the field layer uses. A second extraction here would
@@ -33,9 +48,58 @@ wz-analyze = { path = "../wz-analyze" }
 wz-capture = { path = "../wz-capture" }
 wz-session-core = { path = "../wz-session-core", features = ["dissect"] }
 
+# R311y702 — the smallest coherent facade subset that DIALS a peer and
+# PUBLISHES, which is verbatim the subset `wz-e2e-pubsub` pins for the same
+# planes plus `session-unicast-accept` (this crate's own e2e stands up the peer
+# in-process, and the acceptor half is that feature). `default-features = false`
+# so no other plane leaks into a tool that emits.
+wz = { path = "../wz", default-features = false, optional = true, features = [
+    "runtime-tokio",
+    "transport-unicast",
+    "transport-link-tcp",
+    "transport-keepalive",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "codec-push",
+    "pubsub-put",
+    "pubsub-delete",
+] }
+# The runtime the session is driven on. `rt-multi-thread` is not decoration:
+# the emission loop runs on a BLOCKING thread so its per-sample wait cannot
+# stall the writer task, which needs a worker of its own.
+tokio = { version = "1", optional = true, features = [
+    "rt",
+    "rt-multi-thread",
+    "macros",
+] }
+log = { version = "0.4", optional = true }
+
 [dev-dependencies]
 # The fixtures build REAL zenoh messages, which means encoding them with the
 # codec that owns their wire form -- the same argument `wz-analyze` makes for
 # its own fixtures. A hand-written byte string would be a second opinion about
 # the wire.
 wz-codecs = { path = "../wz-codecs" }
+# R311y702 — the e2e stands a REAL wz acceptor up in-process and asserts what
+# its subscriber callback received. `wz-runtime-tokio-test-support` is where the
+# interop-shaped `SessionInitParams` fixture lives, which is the same one every
+# other in-process handshake test opens with.
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
+# `process` for spawning the binary under test and `net` for the in-process
+# peer's listener -- both are the TEST's needs, not the tool's, so they live
+# here rather than widening the binary's own tokio.
+tokio = { version = "1", features = [
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "process",
+    "net",
+    "time",
+] }
