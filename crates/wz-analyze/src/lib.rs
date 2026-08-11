@@ -1097,7 +1097,12 @@ fn quic_pass(
         } else {
             Direction::B
         };
-        opener.push_datagram(direction, &datagram.payload);
+        // R311y719 — the CAPTURE PACKET INDEX travels with the offer. It is the
+        // only coordinate that survives decryption for an RFC 9221 datagram: a
+        // recovered batch has no stream to be an offset into, and the ordinal
+        // of the datagram within this pass is a number that would read as a
+        // capture coordinate and is not one.
+        opener.push_datagram(direction, packet.index, &datagram.payload);
     }
 
     let mut flows = Vec::new();
@@ -1157,6 +1162,21 @@ fn quic_pass(
                         reassembler.stream(),
                         sink,
                     ));
+            }
+            // R311y719 — AND THE RFC 9221 DATAGRAMS, which is how zenoh's
+            // `transport-link-quic-datagram` sends a batch. R311y718 closed the
+            // stream half and left these counted in the unread floor, correctly
+            // and visibly; this is the other half of the same seam.
+            //
+            // Each carries the index of the capture packet it came out of, and
+            // that index is the coordinate the decoded messages are anchored
+            // by -- the same anchor a cleartext datagram's messages use, and
+            // the only one that survives decryption.
+            for (origin, payload) in opener.datagrams(direction) {
+                summary.framing.absorb(
+                    dissection
+                        .feed_quic_datagram_with_sink(flow, direction, *origin, payload, sink),
+                );
             }
         }
         flows.push(QuicFlowOutcome {
@@ -2159,6 +2179,37 @@ impl wz_capture::PlaintextSink for FieldSink {
                 stream.direction,
                 origin,
                 space,
+                walk_plaintext(message, frame),
+            ));
+        }
+    }
+
+    /// R311y719 — the same walk over a recovered RFC 9221 datagram.
+    ///
+    /// The ONE difference from the stream case, and it is the reason this is a
+    /// separate method: the message is sliced out of the PAYLOAD by the frame's
+    /// unit coordinates, and the row is reported at the PACKET the datagram came
+    /// out of. Using `stream_offset` to slice here would index the payload by a
+    /// packet number.
+    fn on_recovered_datagram(&mut self, datagram: wz_capture::RecoveredDatagram<'_>) {
+        for frame in datagram.frames {
+            let Some(message) = datagram
+                .payload
+                .get(frame.unit_offset..frame.unit_offset + frame.unit_len)
+            else {
+                continue;
+            };
+            if let Some(cap) = self.cap {
+                if self.kept_for(&datagram.flow) >= cap {
+                    self.note_omitted(datagram.flow);
+                    continue;
+                }
+            }
+            self.rows.push((
+                datagram.flow,
+                datagram.direction,
+                datagram.packet_index,
+                OffsetSpace::Packet,
                 walk_plaintext(message, frame),
             ));
         }
@@ -6533,12 +6584,11 @@ mod quic_pass_tests {
         .expect("the capture reads")
         .0;
         assert!(
-            control_json.contains(&format!(
-                "\"bytes_fed\":{},\"messages\":0,\"bytes_undecoded\":{}",
-                control_stream.len(),
-                control_stream.len()
-            )),
-            "every offered byte, and every one of them still unread: \
+            control_json.contains(&format!("\"bytes_undecoded\":{}", control_stream.len()))
+                && control_json
+                    .contains(&format!("\"application_unread\":{}", control_stream.len())),
+            "every byte of the control's stream reached a framer and every one \
+             of them is still unread, and the verdict's own number says so: \
              {control_json}"
         );
     }
@@ -6663,6 +6713,135 @@ mod quic_pass_tests {
             fields.contains("Init"),
             "the field walk names the message it found inside the QUIC \
              stream: {fields}"
+        );
+    }
+
+    /// R311y719 (§1.2a) — THE RFC 9221 DATAGRAM HALF, which R311y718 closed the
+    /// stream half beside and left in the unread floor.
+    ///
+    /// ## Why this is a second seam and not the same one
+    ///
+    /// zenoh has TWO QUIC links and they are different transports, read out of
+    /// the reference rather than inferred: `transport-link-quic` is streamed
+    /// (`zenoh-link-quic/src/unicast.rs:184`) and `transport-link-quic-datagram`
+    /// is not (`zenoh-link-quic_datagram/src/unicast.rs:164`). The first needs a
+    /// framer with memory across offers; the second sends one whole batch per
+    /// RFC 9221 frame, unordered and never retransmitted, which is why the
+    /// opener does not reassemble those and why they take the datagram path
+    /// through this crate exactly as a multicast batch does.
+    ///
+    /// ## The trap this test also pins
+    ///
+    /// The decoded messages land in `quic_datagrams` and NOT beside the
+    /// cleartext ones, even though the two share a coordinate. One consumer
+    /// resolves that coordinate by re-reading the packet from the file, and for
+    /// these the packet holds CIPHERTEXT -- so folding the lists would have the
+    /// field walk print names read out of protected bytes. The last assertion
+    /// here is that the walk names the message from the SINK instead.
+    #[test]
+    fn a_zenoh_batch_inside_an_rfc_9221_datagram_is_decoded() {
+        use wz_tls_record::quic::fixture::datagram_frame;
+
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(3));
+        const ZID: &[u8] = &[0x61, 0x62, 0x63, 0x64];
+
+        // An INIT as a datagram link carries it: NO length prefix, because the
+        // datagram IS the framing unit. Getting this wrong is the difference
+        // between one decoded message and none.
+        let init = {
+            let mut wire = vec![
+                wz_session_core::wire_const::T_MID_INIT,
+                0x09,
+                (((ZID.len() as u8) - 1) << 4) | 0x02,
+            ];
+            wire.extend_from_slice(ZID);
+            wire
+        };
+
+        let (client_initial, server_initial) = QuicKeys::initial(QuicVersion::V1, &ICID);
+        let hello = client_hello(&random);
+        let first = crypto_frame(0, &hello);
+        let (h, o) = long_header(0, &ICID, &[], first.len(), 0);
+        let client_initial_packet = protect(&client_initial, 0, &h, o, &first);
+
+        let reply = crypto_frame(0, b"\x02\x00\x00\x04....");
+        let (h, o) = long_header(0, &[], &SCID, reply.len(), 0);
+        let server_initial_packet = protect(&server_initial, 0, &h, o, &reply);
+
+        let client_keys = QuicKeys::derive(Suite::Aes128GcmSha256, &application_secret(false, 0));
+        let payload = datagram_frame(&init);
+        let (h, o) = short_header(&SCID, 1);
+        let client_one_rtt = protect(&client_keys, 1, &h, o, &payload);
+
+        let packets = [
+            udp(true, &client_initial_packet),
+            udp(false, &server_initial_packet),
+            udp(true, &client_one_rtt),
+        ];
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+        let keylog = log_text(&random, 1);
+
+        let run = |per_field, census| {
+            analyze_request(&Request {
+                capture: &capture,
+                keylog: Some(keylog.as_bytes()),
+                format: Format::Text,
+                per_flow: false,
+                per_message: false,
+                messages_per_flow: None,
+                quic_ports: &[],
+                quic_cid_len: None,
+                payload_rules: &[],
+                census,
+                per_field,
+                select: None,
+            })
+            .expect("the capture reads")
+            .0
+        };
+
+        let rendered = run(
+            false,
+            Census {
+                nodes: true,
+                ..Census::default()
+            },
+        );
+        // ANTI-VACUITY: QUIC to the recogniser, and opened.
+        assert!(
+            rendered.contains("3 of 3 packet(s) opened"),
+            "the fixture is QUIC and it opens: {rendered}"
+        );
+        // THE ROUND: the batch inside the DATAGRAM frame decoded.
+        assert!(
+            rendered.contains("messages decoded: 1"),
+            "the zenoh inside the RFC 9221 datagram is decoded: {rendered}"
+        );
+        // And it reached a plane, by the identity only that message carries.
+        assert!(
+            rendered.contains("61626364"),
+            "the node census names the zid the datagram carried: {rendered}"
+        );
+        // The floor lifted, by name.
+        let (_, outcome) = analyze(&capture, Some(keylog.as_bytes())).expect("it reads");
+        assert!(
+            !outcome
+                .reasons
+                .contains(&wz_capture::report::VerdictReason::QuicBytesNobodyDecodes),
+            "the datagram bytes were read, so this reason must be gone: {:?}",
+            outcome.reasons
+        );
+        // AND THE FIELD WALK reads the SINK's copy rather than re-reading the
+        // packet, which holds the QUIC ciphertext.
+        let fields = run(true, Census::default());
+        assert!(
+            fields.contains("Init"),
+            "the field walk names the message, not the protected bytes: {fields}"
         );
     }
 

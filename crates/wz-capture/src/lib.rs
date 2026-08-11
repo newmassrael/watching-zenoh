@@ -314,6 +314,25 @@ pub struct DatagramDissection {
     /// is a second independent byte stream, and feeding it into the first one's
     /// framer would lay one length prefix over another's payload.
     pub quic_streams: Vec<QuicStreamDissection>,
+    /// R311y719 (§1.2a) — messages decoded out of this flow's recovered RFC
+    /// 9221 DATAGRAM frames, which is how zenoh's
+    /// `transport-link-quic-datagram` sends a batch.
+    ///
+    /// # Why not [`Self::frames`], whose coordinate these share
+    ///
+    /// They really do share it — a recovered datagram's anchor is the index of
+    /// the QUIC packet that carried it, exactly as a cleartext datagram's is —
+    /// so folding them in would be sound for every consumer that only READS the
+    /// coordinate. One consumer RESOLVES it: the field walk re-reads the packet
+    /// out of the capture file and dissects its payload. For a cleartext
+    /// datagram that payload is the message; for one of these it is the QUIC
+    /// packet's CIPHERTEXT, and the walk would report field names read out of
+    /// protected bytes. A confidently wrong row is the failure this crate
+    /// exists to prevent, and the discriminator that avoids it is the list.
+    ///
+    /// Their fields come from the sink instead, taken while the recovered
+    /// plaintext was alive — the same route [`Self::quic_streams`] uses.
+    pub quic_datagrams: Vec<PassiveFrame>,
 }
 
 /// R311y718 (§1.2a) — one recovered QUIC stream, framed as zenoh.
@@ -395,6 +414,7 @@ impl DatagramDissection {
             chain_loss: ChainLoss::default(),
             last_seen_ms: None,
             quic_streams: Vec::new(),
+            quic_datagrams: Vec::new(),
         }
     }
 
@@ -429,6 +449,7 @@ impl DatagramDissection {
     pub fn frame_lists(&self) -> impl Iterator<Item = &[PassiveFrame]> {
         core::iter::once(self.frames.as_slice())
             .chain(self.quic_streams.iter().map(|s| s.frames.as_slice()))
+            .chain(core::iter::once(self.quic_datagrams.as_slice()))
     }
 
     /// R311y713 (§B6) — the chains this flow lost, whatever the cause.
@@ -717,10 +738,51 @@ pub trait PlaintextSink {
     /// bytes the session will see. It borrows: nothing here obliges a sink to
     /// keep any of it, and a sink that does keep some owns that bound itself.
     fn on_plaintext(&mut self, stream: DecryptedStream<'_>);
+
+    /// R311y719 — one recovered RFC 9221 DATAGRAM and the messages in it.
+    ///
+    /// A SECOND method rather than a `DecryptedStream` with a flag, because the
+    /// coordinate contract differs and that is the whole reason a sink needs
+    /// telling apart. In [`DecryptedStream`] a frame's `stream_offset` is an
+    /// offset INTO `plaintext`, which is what lets a sink slice the message out
+    /// of it. On a datagram it is the index of the capture PACKET, and a sink
+    /// that sliced with it would take bytes from an arbitrary place in the
+    /// payload and call them a message. Same shape as the split between the two
+    /// lists this feeds ([`DatagramDissection::quic_datagrams`]).
+    ///
+    /// REQUIRED rather than defaulted: a defaulted no-op would let a sink
+    /// silently miss a producer, which is the omission this workspace has
+    /// shipped four times (R311y668, y678, y699, y700). `()` opts out
+    /// explicitly below.
+    fn on_recovered_datagram(&mut self, datagram: RecoveredDatagram<'_>);
+}
+
+/// R311y719 (§1.2a) — one RFC 9221 datagram a decryptor recovered, with the
+/// messages this crate framed out of it.
+///
+/// The datagram twin of [`DecryptedStream`], and its fields say the difference:
+/// there is one PAYLOAD rather than a stream, and one PACKET INDEX rather than
+/// a map back into a ciphertext record — a recovered datagram came out of
+/// exactly one capture packet, so the anchor is a number and not a lookup.
+#[derive(Debug)]
+pub struct RecoveredDatagram<'a> {
+    /// The flow it belongs to.
+    pub flow: FlowKey,
+    /// Which way it travelled.
+    pub direction: Direction,
+    /// The capture packet the QUIC packet carrying it was in.
+    pub packet_index: usize,
+    /// The recovered batch, whole.
+    pub payload: &'a [u8],
+    /// The messages framed out of it. Their `unit_offset` and `unit_len` are
+    /// offsets into [`Self::payload`]; their `stream_offset` is
+    /// [`Self::packet_index`] and must not be used to slice it.
+    pub frames: &'a [PassiveFrame],
 }
 
 impl PlaintextSink for () {
     fn on_plaintext(&mut self, _stream: DecryptedStream<'_>) {}
+    fn on_recovered_datagram(&mut self, _datagram: RecoveredDatagram<'_>) {}
 }
 
 /// R311y661 (§1.2a) — what one [`Dissection::decrypt_with`] pass did.
@@ -3135,6 +3197,21 @@ impl Dissection {
             }
         }
         feed.messages += stream.frames.len() - before;
+        // R311y719 — and the list is BOUNDED, against the same ceiling every
+        // other decoded-message list on this flow answers to. Its own loop
+        // rather than a share of `enforce_datagram_message_cap` because the
+        // coordinate spaces differ: those three lists are packet-indexed and
+        // these frames are offset in stream bytes, so "which is oldest" is only
+        // answerable within each group. Accounted exactly as the others are —
+        // a bound that discards decoded messages and does not say so is the
+        // defect `DissectionDrops` exists to prevent.
+        if let Some(cap) = self.limits.frames_per_flow {
+            while stream.frames.len() > cap {
+                let gone = stream.frames.remove(0);
+                self.dropped_frames.add(&gone);
+                self.drops.frames += 1;
+            }
+        }
         // OFFERED here, for the same reason the TLS half offers where it does:
         // this is the one window in which the bytes, the frames and the frames'
         // coordinates into those bytes all exist together. No remap follows --
@@ -3157,6 +3234,91 @@ impl Dissection {
         // bytes came out of datagrams this flow counted as recovered, and they
         // have now reached a decoder.
         dg.residue.fed += bytes.len() as u64;
+        feed
+    }
+
+    /// R311y719 (§1.2a) — decode one recovered RFC 9221 DATAGRAM as zenoh.
+    ///
+    /// The datagram twin of [`Self::feed_quic_stream`], and the two differ in
+    /// exactly the way the transports do. A stream is a byte stream and needs a
+    /// framer with memory across offers; an RFC 9221 datagram is WHOLE,
+    /// unordered and never retransmitted, which is why the opener does not
+    /// reassemble it and why this needs no per-stream state at all. It is the
+    /// same shape a cleartext multicast datagram takes through this crate: one
+    /// unit, walked to its end, every message in it kept.
+    ///
+    /// `packet_index` is the capture packet the QUIC packet carrying it was in
+    /// — the caller's, because it is the only coordinate that survives
+    /// decryption and this crate cannot recover it from the bytes.
+    ///
+    /// The messages land in [`DatagramDissection::quic_datagrams`] rather than
+    /// beside the cleartext ones; that field says why.
+    pub fn feed_quic_datagram(
+        &mut self,
+        flow: FlowKey,
+        direction: Direction,
+        packet_index: usize,
+        bytes: &[u8],
+    ) -> quic::QuicStreamFeed {
+        self.feed_quic_datagram_with_sink(flow, direction, packet_index, bytes, &mut ())
+    }
+
+    /// R311y719 — [`Self::feed_quic_datagram`], offering the recovered batch to
+    /// a sink as well as to the observer.
+    ///
+    /// Same reason its stream twin has one: the recovered bytes exist only
+    /// inside this call, and the field layer cannot get them back afterwards --
+    /// the capture packet holds the QUIC ciphertext, not this.
+    pub fn feed_quic_datagram_with_sink(
+        &mut self,
+        flow: FlowKey,
+        direction: Direction,
+        packet_index: usize,
+        bytes: &[u8],
+        sink: &mut impl PlaintextSink,
+    ) -> quic::QuicStreamFeed {
+        let mut feed = quic::QuicStreamFeed::default();
+        let Some(dg) = self.datagram_flows.iter_mut().find(|f| f.flow == flow) else {
+            feed.flow_absent += 1;
+            return feed;
+        };
+        feed.bytes_fed += bytes.len();
+        // HANDSHAKE PRESENT, read out of the reference implementation rather
+        // than inferred from the word "datagram": zenoh's
+        // `transport-link-quic-datagram` is a UNICAST link
+        // (`zenoh-link-quic_datagram/src/unicast.rs`, and `is_streamed()` is
+        // `false` at :164, which is why these bytes arrive here and not through
+        // `feed_quic_stream`). A unicast zenoh link establishes its session
+        // with INIT and OPEN, so those messages are meaningful on this path.
+        // `Absent` is the multicast-capability answer -- UDP multicast and
+        // pico's raweth -- and claiming it here would have this reader discard
+        // the very exchange that names the peers.
+        let batch = dg.session.next_datagram_on(
+            direction,
+            bytes,
+            packet_index,
+            wz_session_core::passive::LinkHandshake::Present,
+        );
+        feed.messages += batch.len();
+        let before = dg.quic_datagrams.len();
+        dg.quic_datagrams.extend(batch);
+        // OFFERED with the payload still in hand, which is the only moment it
+        // exists: the capture packet this came out of holds the QUIC
+        // ciphertext, so a later walk of the file cannot recover it.
+        sink.on_recovered_datagram(RecoveredDatagram {
+            flow,
+            direction,
+            packet_index,
+            payload: bytes,
+            frames: &dg.quic_datagrams[before..],
+        });
+        dg.residue.fed += bytes.len() as u64;
+        let idx = self
+            .datagram_flows
+            .iter()
+            .position(|f| f.flow == flow)
+            .expect("the flow found above");
+        self.enforce_datagram_message_cap(idx);
         feed
     }
 
@@ -3757,26 +3919,54 @@ impl Dissection {
         };
         loop {
             let flow = &self.datagram_flows[idx];
-            if flow.frames.len() + flow.scouting.len() <= cap {
+            // R311y719 — THREE lists, not two. `quic_datagrams` holds messages
+            // decoded out of recovered RFC 9221 batches and is bounded here
+            // with the other two, because it answers the same question: how
+            // many decoded messages of this flow are kept. A list outside this
+            // sum is a list that grows without limit on a live tap, which is
+            // the defect R311y713 closed for the pair and would have reopened
+            // for the trio.
+            //
+            // All three are in the PACKET coordinate space, which is what makes
+            // "oldest" answerable across them. `quic_streams` deliberately is
+            // not in this sum: its frames are offset in stream bytes, and a
+            // comparison across the two spaces would evict by a number that
+            // means different things in each. That list is bounded where it is
+            // fed, against the same ceiling.
+            if flow.frames.len() + flow.scouting.len() + flow.quic_datagrams.len() <= cap {
                 return;
             }
-            let scout_is_older = match (flow.frames.first(), flow.scouting.first()) {
-                (Some(f), Some(s)) => s.packet_index <= f.stream_offset,
-                (None, Some(_)) => true,
-                (Some(_), None) => false,
-                // Unreachable while the sum exceeds a cap, and a `return`
-                // rather than a panic: a bound that cannot be met must not take
-                // the capture down with it.
-                (None, None) => return,
+            // The oldest of the three, by the one coordinate they share.
+            let oldest = [
+                flow.frames.first().map(|f| (f.stream_offset, 0u8)),
+                flow.scouting.first().map(|s| (s.packet_index, 1u8)),
+                flow.quic_datagrams.first().map(|f| (f.stream_offset, 2u8)),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+            // Unreachable while the sum exceeds a cap, and a `return` rather
+            // than a panic: a bound that cannot be met must not take the
+            // capture down with it.
+            let Some((_, which)) = oldest else {
+                return;
             };
             let flow = &mut self.datagram_flows[idx];
-            if scout_is_older {
-                flow.scouting.remove(0);
-                self.drops.scouting += 1;
-            } else {
-                let gone = flow.frames.remove(0);
-                self.dropped_frames.add(&gone);
-                self.drops.frames += 1;
+            match which {
+                1 => {
+                    flow.scouting.remove(0);
+                    self.drops.scouting += 1;
+                }
+                2 => {
+                    let gone = flow.quic_datagrams.remove(0);
+                    self.dropped_frames.add(&gone);
+                    self.drops.frames += 1;
+                }
+                _ => {
+                    let gone = flow.frames.remove(0);
+                    self.dropped_frames.add(&gone);
+                    self.drops.frames += 1;
+                }
             }
         }
     }

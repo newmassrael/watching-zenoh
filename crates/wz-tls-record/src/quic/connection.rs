@@ -240,8 +240,21 @@ pub struct QuicFlowOpener {
     sequences: [BTreeMap<SequenceKey, StreamReassembler>; 2],
     /// Sequences the table's bound refused.
     sequences_dropped: [usize; 2],
-    /// RFC 9221 datagrams, whole and in arrival order.
-    datagrams: [Vec<Vec<u8>>; 2],
+    /// R311y719 — the capture packet index the offer being walked came from.
+    ///
+    /// A field rather than a parameter threaded through `open_short` /
+    /// `open_long` / `file_piece`, because every one of those would have to
+    /// carry it and only the last uses it. Set once per `push_datagram` and
+    /// read only while that call is on the stack.
+    origin: usize,
+    /// RFC 9221 datagrams, whole and in arrival order, each with the index of
+    /// the CAPTURE PACKET it was carried in.
+    ///
+    /// R311y719 — the origin is kept because a consumer that decodes these as
+    /// zenoh needs a coordinate a reader can resolve, and the only one that
+    /// survives decryption is the packet. Synthesising an ordinal here would
+    /// hand out a number that looks like a capture coordinate and is not.
+    datagrams: [Vec<(usize, Vec<u8>)>; 2],
     /// Frame types seen, for a reader that wants to know a connection closed.
     frame_types: [Vec<u64>; 2],
     census: [DirectionCensus; 2],
@@ -292,6 +305,7 @@ impl QuicFlowOpener {
             sequences: [BTreeMap::new(), BTreeMap::new()],
             sequences_dropped: [0, 0],
             datagrams: [Vec::new(), Vec::new()],
+            origin: 0,
             frame_types: [Vec::new(), Vec::new()],
             census: [DirectionCensus::default(); 2],
             identity_adopted: false,
@@ -436,8 +450,14 @@ impl QuicFlowOpener {
     /// coalesces several: a client's first flight is an Initial and a Handshake
     /// packet in one datagram, and a reader that stopped at the first would hold
     /// half a handshake.
-    pub fn push_datagram(&mut self, direction: Direction, payload: &[u8]) -> Vec<PacketOutcome> {
+    pub fn push_datagram(
+        &mut self,
+        direction: Direction,
+        origin: usize,
+        payload: &[u8],
+    ) -> Vec<PacketOutcome> {
         let d = dir_index(direction);
+        self.origin = origin;
         let mut out = Vec::new();
         let mut at = 0usize;
         while at < payload.len() {
@@ -754,7 +774,7 @@ impl QuicFlowOpener {
                 // the second one look like a resend of the first.
                 self.census[d].datagrams += 1;
                 self.census[d].datagram_bytes += piece.data.len();
-                self.datagrams[d].push(piece.data.to_vec());
+                self.datagrams[d].push((self.origin, piece.data.to_vec()));
                 return;
             }
         };
@@ -896,8 +916,9 @@ impl QuicFlowOpener {
             .map(|r| r.stream())
     }
 
-    /// The RFC 9221 datagrams one direction carried, whole and in arrival order.
-    pub fn datagrams(&self, direction: Direction) -> &[Vec<u8>] {
+    /// The RFC 9221 datagrams one direction carried, whole and in arrival
+    /// order, each with the capture packet index it came out of.
+    pub fn datagrams(&self, direction: Direction) -> &[(usize, Vec<u8>)] {
         &self.datagrams[dir_index(direction)]
     }
 
@@ -1032,7 +1053,7 @@ mod tests {
         );
 
         let mut opener = QuicFlowOpener::new(log_for(&random, 1));
-        let outcomes = opener.push_datagram(Direction::A, &packet);
+        let outcomes = opener.push_datagram(Direction::A, 0, &packet);
         assert!(
             matches!(
                 outcomes.as_slice(),
@@ -1062,7 +1083,7 @@ mod tests {
         let reply = crypto_frame(0, b"\x02\x00\x00\x04....");
         let (header, pn_offset) = long_header(LongHeader::INITIAL, &[], &SCID, reply.len(), 0);
         let packet = protect(&server_initial, 0, &header, pn_offset, &reply);
-        let outcomes = opener.push_datagram(Direction::B, &packet);
+        let outcomes = opener.push_datagram(Direction::B, 0, &packet);
         assert!(
             matches!(outcomes.as_slice(), [PacketOutcome::Opened { .. }]),
             "the server Initial opens with the other half of the same derivation: {outcomes:?}"
@@ -1074,7 +1095,7 @@ mod tests {
         let payload = stream_frame(0, 0, b"a zenoh session");
         let (header, pn_offset) = short_header(&SCID, 1);
         let packet = protect(&keys, 1, &header, pn_offset, &payload);
-        let outcomes = opener.push_datagram(Direction::A, &packet);
+        let outcomes = opener.push_datagram(Direction::A, 0, &packet);
         assert!(
             matches!(
                 outcomes.as_slice(),
@@ -1125,7 +1146,7 @@ mod tests {
         let packet = protect(&keys, 0, &header, pn_offset, &payload);
 
         let mut cold = QuicFlowOpener::new(log_for(&random, 1));
-        let outcomes = cold.push_datagram(Direction::A, &packet);
+        let outcomes = cold.push_datagram(Direction::A, 0, &packet);
         assert_eq!(
             outcomes,
             alloc::vec![PacketOutcome::Refused {
@@ -1141,12 +1162,12 @@ mod tests {
         let first = crypto_frame(0, &hello);
         let (h, o) = long_header(LongHeader::INITIAL, &ICID, &[], first.len(), 0);
         let (client_initial, server_initial) = QuicKeys::initial(QuicVersion::V1, &ICID);
-        warm.push_datagram(Direction::A, &protect(&client_initial, 0, &h, o, &first));
+        warm.push_datagram(Direction::A, 0, &protect(&client_initial, 0, &h, o, &first));
         let reply = crypto_frame(0, b"\x02\x00\x00\x04....");
         let (h, o) = long_header(LongHeader::INITIAL, &[], &SCID, reply.len(), 0);
-        warm.push_datagram(Direction::B, &protect(&server_initial, 0, &h, o, &reply));
+        warm.push_datagram(Direction::B, 0, &protect(&server_initial, 0, &h, o, &reply));
 
-        let outcomes = warm.push_datagram(Direction::A, &packet);
+        let outcomes = warm.push_datagram(Direction::A, 0, &packet);
         assert!(
             matches!(outcomes.as_slice(), [PacketOutcome::Opened { .. }]),
             "and the same bytes open once the length is known: {outcomes:?}"
@@ -1180,7 +1201,7 @@ mod tests {
         // 1. THE BASELINE.
         let mut undeclared = QuicFlowOpener::new(log_for(&random, 1));
         assert_eq!(
-            undeclared.push_datagram(Direction::A, &packet),
+            undeclared.push_datagram(Direction::A, 0, &packet),
             alloc::vec![PacketOutcome::Refused {
                 space: Some(PacketSpace::OneRtt),
                 why: QuicOpenError::UnknownConnectionIdLength,
@@ -1199,7 +1220,7 @@ mod tests {
             declared.identity_adopted(),
             "a log holding one connection identifies this one"
         );
-        let outcomes = declared.push_datagram(Direction::A, &packet);
+        let outcomes = declared.push_datagram(Direction::A, 0, &packet);
         assert!(
             matches!(
                 outcomes.as_slice(),
@@ -1231,7 +1252,7 @@ mod tests {
             !ambiguous.identity_adopted(),
             "two connections and no way to tell which -- so none is adopted"
         );
-        let outcomes = ambiguous.push_datagram(Direction::A, &packet);
+        let outcomes = ambiguous.push_datagram(Direction::A, 0, &packet);
         assert!(
             matches!(
                 outcomes.as_slice(),
@@ -1271,7 +1292,8 @@ mod tests {
 
         let payload = stream_frame(0, 0, b"before ");
         let (h, o) = short_header(&SCID, 0);
-        let before = opener.push_datagram(Direction::A, &protect(&generation0, 0, &h, o, &payload));
+        let before =
+            opener.push_datagram(Direction::A, 0, &protect(&generation0, 0, &h, o, &payload));
         assert!(
             matches!(before.as_slice(), [PacketOutcome::Opened { .. }]),
             "the population: the pre-update packet opens: {before:?}"
@@ -1279,7 +1301,8 @@ mod tests {
 
         let payload = stream_frame(0, 7, b"after");
         let (h, o) = short_header(&SCID, 1);
-        let after = opener.push_datagram(Direction::A, &protect(&generation1, 1, &h, o, &payload));
+        let after =
+            opener.push_datagram(Direction::A, 0, &protect(&generation1, 1, &h, o, &payload));
         assert!(
             matches!(after.as_slice(), [PacketOutcome::Opened { .. }]),
             "and so does the one past the key update, which R311y709 refused: \
@@ -1322,7 +1345,7 @@ mod tests {
         datagram.extend_from_slice(&protect(&handshake_keys, 0, &h, o, &second_payload));
 
         let mut opener = QuicFlowOpener::new(log);
-        let outcomes = opener.push_datagram(Direction::A, &datagram);
+        let outcomes = opener.push_datagram(Direction::A, 0, &datagram);
         assert_eq!(
             outcomes.len(),
             2,
@@ -1382,7 +1405,7 @@ mod tests {
         // that makes a keyless capture worth reading at all.
         let mut opener = QuicFlowOpener::new(KeyLog::default());
         assert!(matches!(
-            opener.push_datagram(Direction::A, &initial).as_slice(),
+            opener.push_datagram(Direction::A, 0, &initial).as_slice(),
             [PacketOutcome::Opened { .. }]
         ));
         assert!(
@@ -1394,7 +1417,7 @@ mod tests {
         let (h, o) = long_header(LongHeader::HANDSHAKE, &ICID, &SCID, 4, 0);
         let packet = protect(&keys, 0, &h, o, b"abcd");
         assert_eq!(
-            opener.push_datagram(Direction::A, &packet),
+            opener.push_datagram(Direction::A, 0, &packet),
             alloc::vec![PacketOutcome::Refused {
                 space: Some(PacketSpace::Handshake),
                 why: QuicOpenError::NoKeysForSpace(PacketSpace::Handshake),
@@ -1404,8 +1427,8 @@ mod tests {
 
         // AND WITH A KEY that is simply the wrong one, the AEAD refuses.
         let mut wrong = QuicFlowOpener::new(log_for(&random, 1));
-        wrong.push_datagram(Direction::A, &initial);
-        let outcomes = wrong.push_datagram(Direction::A, &packet);
+        wrong.push_datagram(Direction::A, 0, &initial);
+        let outcomes = wrong.push_datagram(Direction::A, 0, &packet);
         assert_eq!(
             outcomes,
             alloc::vec![PacketOutcome::Refused {
@@ -1455,7 +1478,8 @@ mod tests {
 
         let payload = stream_frame(0, 0, b"zero ");
         let (h, o) = short_header(&SCID, 0);
-        let first = opener.push_datagram(Direction::A, &protect(&generation0, 0, &h, o, &payload));
+        let first =
+            opener.push_datagram(Direction::A, 0, &protect(&generation0, 0, &h, o, &payload));
         assert!(
             matches!(first.as_slice(), [PacketOutcome::Opened { .. }]),
             "the population: generation 0 opens on the second suite: {first:?}"
@@ -1465,8 +1489,11 @@ mod tests {
             let number = index as u32 + 1;
             let payload = stream_frame(0, 5 + index as u8 * 4, b"next");
             let (h, o) = short_header(&SCID, number);
-            let outcomes =
-                opener.push_datagram(Direction::A, &protect(keys, number as u64, &h, o, &payload));
+            let outcomes = opener.push_datagram(
+                Direction::A,
+                0,
+                &protect(keys, number as u64, &h, o, &payload),
+            );
             assert!(
                 matches!(outcomes.as_slice(), [PacketOutcome::Opened { .. }]),
                 "rung {} must open, which a collapse that reached only the first \
@@ -1505,10 +1532,14 @@ mod tests {
         let hello = client_hello(&random);
         let payload = crypto_frame(0, &hello);
         let (h, o) = long_header(LongHeader::INITIAL, &ICID, &[], payload.len(), 0);
-        opener.push_datagram(Direction::A, &protect(&client_initial, 0, &h, o, &payload));
+        opener.push_datagram(
+            Direction::A,
+            0,
+            &protect(&client_initial, 0, &h, o, &payload),
+        );
         let reply = crypto_frame(0, b"\x02\x00\x00\x04....");
         let (h, o) = long_header(LongHeader::INITIAL, &[], &SCID, reply.len(), 0);
-        opener.push_datagram(Direction::B, &protect(&server_initial, 0, &h, o, &reply));
+        opener.push_datagram(Direction::B, 0, &protect(&server_initial, 0, &h, o, &reply));
 
         let generation0 =
             QuicKeys::derive(Suite::Chacha20Poly1305Sha256, &application_secret(false, 0));
@@ -1518,7 +1549,8 @@ mod tests {
 
         let payload = stream_frame(0, 0, b"before ");
         let (h, o) = short_header(&SCID, 0);
-        let first = opener.push_datagram(Direction::A, &protect(&generation0, 0, &h, o, &payload));
+        let first =
+            opener.push_datagram(Direction::A, 0, &protect(&generation0, 0, &h, o, &payload));
         assert!(
             matches!(first.as_slice(), [PacketOutcome::Opened { .. }]),
             "the population: generation 0 must open on the second suite: {first:?}"
@@ -1527,7 +1559,7 @@ mod tests {
         let payload = stream_frame(0, 7, b"after");
         let (h, o) = short_header(&SCID, 1);
         let outcomes =
-            opener.push_datagram(Direction::A, &protect(&generation1, 1, &h, o, &payload));
+            opener.push_datagram(Direction::A, 0, &protect(&generation1, 1, &h, o, &payload));
         assert!(
             matches!(outcomes.as_slice(), [PacketOutcome::Opened { .. }]),
             "the ladder must follow the suite that was SETTLED, not the first \
@@ -1544,10 +1576,14 @@ mod tests {
         let hello = client_hello(&random);
         let payload = crypto_frame(0, &hello);
         let (h, o) = long_header(LongHeader::INITIAL, &ICID, &[], payload.len(), 0);
-        opener.push_datagram(Direction::A, &protect(&client_initial, 0, &h, o, &payload));
+        opener.push_datagram(
+            Direction::A,
+            0,
+            &protect(&client_initial, 0, &h, o, &payload),
+        );
         let reply = crypto_frame(0, b"\x02\x00\x00\x04....");
         let (h, o) = long_header(LongHeader::INITIAL, &[], &SCID, reply.len(), 0);
-        opener.push_datagram(Direction::B, &protect(&server_initial, 0, &h, o, &reply));
+        opener.push_datagram(Direction::B, 0, &protect(&server_initial, 0, &h, o, &reply));
 
         // Generation 0, then generation 1 with the FIRST generation's header
         // protection key — which is what a conforming sender does.
@@ -1557,12 +1593,12 @@ mod tests {
 
         let payload = stream_frame(0, 0, b"before ");
         let (h, o) = short_header(&SCID, 0);
-        opener.push_datagram(Direction::A, &protect(&generation0, 0, &h, o, &payload));
+        opener.push_datagram(Direction::A, 0, &protect(&generation0, 0, &h, o, &payload));
 
         let payload = stream_frame(0, 7, b"after");
         let (h, o) = short_header(&SCID, 1);
         let outcomes =
-            opener.push_datagram(Direction::A, &protect(&generation1, 1, &h, o, &payload));
+            opener.push_datagram(Direction::A, 0, &protect(&generation1, 1, &h, o, &payload));
         assert!(
             matches!(outcomes.as_slice(), [PacketOutcome::Opened { .. }]),
             "the packet under the new key opens: {outcomes:?}"
@@ -1595,10 +1631,14 @@ mod tests {
         let hello = client_hello(&random);
         let payload = crypto_frame(0, &hello);
         let (h, o) = long_header(LongHeader::INITIAL, &ICID, &[], payload.len(), 0);
-        opener.push_datagram(Direction::A, &protect(&client_initial, 0, &h, o, &payload));
+        opener.push_datagram(
+            Direction::A,
+            0,
+            &protect(&client_initial, 0, &h, o, &payload),
+        );
         let reply = crypto_frame(0, b"\x02\x00\x00\x04....");
         let (h, o) = long_header(LongHeader::INITIAL, &[], &SCID, reply.len(), 0);
-        opener.push_datagram(Direction::B, &protect(&server_initial, 0, &h, o, &reply));
+        opener.push_datagram(Direction::B, 0, &protect(&server_initial, 0, &h, o, &reply));
 
         // The Initial CRYPTO stream is already one of the client's two.
         let keys = QuicKeys::derive(Suite::Aes128GcmSha256, &application_secret(false, 0));
@@ -1607,7 +1647,7 @@ mod tests {
             let (h, o) = short_header(&SCID, index as u32);
             let packet = protect(&keys, index as u64, &h, o, &payload);
             assert!(matches!(
-                opener.push_datagram(Direction::A, &packet).as_slice(),
+                opener.push_datagram(Direction::A, 0, &packet).as_slice(),
                 [PacketOutcome::Opened { .. }]
             ));
         }
@@ -1695,7 +1735,7 @@ mod tests {
 
         let mut opener = QuicFlowOpener::new(KeyLog::default());
         assert_eq!(
-            opener.push_datagram(Direction::A, &packet),
+            opener.push_datagram(Direction::A, 0, &packet),
             alloc::vec![PacketOutcome::Refused {
                 space: None,
                 why: QuicOpenError::RetryNotRead,
@@ -1721,7 +1761,7 @@ mod tests {
 
         let mut opener = QuicFlowOpener::new(KeyLog::default());
         assert_eq!(
-            opener.push_datagram(Direction::A, &packet),
+            opener.push_datagram(Direction::A, 0, &packet),
             alloc::vec![PacketOutcome::Refused {
                 space: None,
                 why: QuicOpenError::UnsupportedVersion(0),
