@@ -60,6 +60,60 @@ const NONCE_LEN: usize = 12;
 const SAMPLE_LEN: usize = 16;
 const SAMPLE_OFFSET: usize = 4;
 
+/// R311y695 (§1.2a) — the QUIC version a packet declares, as far as this
+/// reader can act on it.
+///
+/// # Why an unknown version is a REFUSAL and not a default
+///
+/// Every version has its own Initial salt and its own key labels, so a reader
+/// that assumed version 1 for a version-2 packet would derive keys that open
+/// nothing -- and the failure would be indistinguishable from a wrong
+/// connection ID or a corrupt capture. Naming the version it could not act on
+/// is the difference between a diagnosis and a shrug.
+///
+/// The numbers are read from `quinn-proto-0.11.16/src/crypto/rustls.rs::
+/// interpret_version` and the salts from
+/// `rustls-0.23.43/src/quic.rs::Version::initial_salt`, both of which cite
+/// their sources. Version 2 is deliberately ABSENT: rustls carries its salt and
+/// labels, and neither of the two crates on this machine states its wire
+/// number, so it would have to be remembered -- and a constant this module
+/// cannot check is one it must not carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuicVersion {
+    /// The first stable RFC: 0x00000001, and the two `ff00002x` drafts that
+    /// share its salt.
+    V1,
+    /// Drafts 29 through 32, which have their own salt.
+    V1Draft,
+}
+
+impl QuicVersion {
+    /// The version a wire number names, or `None` for one this reader cannot
+    /// derive keys for.
+    pub fn from_wire(version: u32) -> Option<Self> {
+        match version {
+            0x0000_0001 | 0xff00_0021..=0xff00_0022 => Some(Self::V1),
+            0xff00_001d..=0xff00_0020 => Some(Self::V1Draft),
+            _ => None,
+        }
+    }
+
+    /// RFC 9001 §5.2 — this version's Initial salt.
+    fn initial_salt(self) -> &'static [u8; 20] {
+        match self {
+            Self::V1 => &INITIAL_SALT_V1,
+            Self::V1Draft => &INITIAL_SALT_V1_DRAFT,
+        }
+    }
+}
+
+/// The salt of drafts 29-32, read from the same rustls table as
+/// [`INITIAL_SALT_V1`].
+const INITIAL_SALT_V1_DRAFT: [u8; 20] = [
+    0xaf, 0xbf, 0xec, 0x28, 0x99, 0x93, 0xd2, 0x4c, 0x9e, 0x97, 0x86, 0xf1, 0x9c, 0x61, 0x11, 0xe0,
+    0x43, 0x90, 0xa8, 0x99,
+];
+
 /// Why a packet could not be opened.
 ///
 /// Separate variants for the two halves because they send a reader to different
@@ -76,6 +130,11 @@ pub enum QuicOpenError {
     NotAuthenticated,
     /// There is no room in the packet for an authentication tag.
     NoTag,
+    /// R311y695 — the packet's header ran off the end of the bytes.
+    TruncatedHeader,
+    /// R311y695 — the version this packet declares is one this reader has no
+    /// salt for, and it says which rather than deriving the wrong keys.
+    UnsupportedVersion(u32),
 }
 
 /// One direction's QUIC packet-protection keys, for one packet space.
@@ -128,6 +187,163 @@ pub struct UnprotectedHeader {
     pub payload_offset: usize,
 }
 
+/// R311y695 (§1.2a) — a QUIC long header, walked far enough to protect it.
+///
+/// # What the caller had to do before this
+///
+/// [`QuicKeys::unprotect_header`] takes the offset the packet number begins at,
+/// and R311y694 left finding it entirely to the caller: past the version, both
+/// connection IDs, the token and the length, each of which is a variable-length
+/// field and two of which are QUIC varints. That is not an offset a reader can
+/// be asked to compute by hand, and `wz-capture::quic` -- which already walks
+/// these fields to RECOGNISE the packet -- does not report it.
+///
+/// So the walk is here, beside the thing that needs it, and it stops exactly
+/// where protection begins. Nothing past the packet number can be read before
+/// the mask comes off, which is why this type has no payload and no frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LongHeader {
+    /// The version the packet declares, unmapped: a caller may want to report
+    /// the number even where this reader has no salt for it.
+    pub version: u32,
+    /// The DESTINATION connection ID, which for a client Initial is what the
+    /// Initial keys are derived from.
+    pub destination_connection_id: Vec<u8>,
+    /// The SOURCE connection ID.
+    pub source_connection_id: Vec<u8>,
+    /// Where the packet number field begins.
+    pub packet_number_offset: usize,
+    /// The length the header declared: the packet number plus the payload,
+    /// tag included.
+    pub remainder_len: usize,
+    /// The packet type from the first byte's two type bits, unmasked only
+    /// insofar as those bits are NOT protected.
+    pub packet_type: u8,
+}
+
+impl LongHeader {
+    /// The long-header packet types of version 1 (RFC 9000 §17.2).
+    pub const INITIAL: u8 = 0;
+    pub const ZERO_RTT: u8 = 1;
+    pub const HANDSHAKE: u8 = 2;
+    pub const RETRY: u8 = 3;
+
+    /// Walk one long header. `packet` is the whole UDP payload.
+    ///
+    /// Refuses rather than guesses on every truncation, because a header this
+    /// reader mis-walks produces a packet number offset that is wrong, and a
+    /// wrong offset produces a mask taken from the wrong bytes -- which fails
+    /// as an authentication error, blaming the key for a parse.
+    pub fn parse(packet: &[u8]) -> Result<Self, QuicOpenError> {
+        let first = *packet.first().ok_or(QuicOpenError::TruncatedHeader)?;
+        if first & 0x80 == 0 {
+            return Err(QuicOpenError::TruncatedHeader);
+        }
+        let packet_type = (first >> 4) & 0x03;
+        let version = u32::from_be_bytes(
+            packet
+                .get(1..5)
+                .ok_or(QuicOpenError::TruncatedHeader)?
+                .try_into()
+                .expect("four bytes"),
+        );
+        let mut at = 5usize;
+        let dcid = take_cid(packet, &mut at)?;
+        let scid = take_cid(packet, &mut at)?;
+        // A Retry packet has neither a length nor a packet number: its tail is
+        // a token and an integrity tag. Refused here rather than half-walked,
+        // because there is no packet number offset to report.
+        if packet_type == Self::RETRY {
+            return Err(QuicOpenError::TruncatedHeader);
+        }
+        if packet_type == Self::INITIAL {
+            let token_len = take_varint(packet, &mut at)? as usize;
+            at = at
+                .checked_add(token_len)
+                .ok_or(QuicOpenError::TruncatedHeader)?;
+            if at > packet.len() {
+                return Err(QuicOpenError::TruncatedHeader);
+            }
+        }
+        let remainder_len = take_varint(packet, &mut at)? as usize;
+        Ok(Self {
+            version,
+            destination_connection_id: dcid,
+            source_connection_id: scid,
+            packet_number_offset: at,
+            remainder_len,
+            packet_type,
+        })
+    }
+}
+
+/// One length-prefixed connection ID, advancing `at` past it.
+fn take_cid(packet: &[u8], at: &mut usize) -> Result<Vec<u8>, QuicOpenError> {
+    let len = usize::from(*packet.get(*at).ok_or(QuicOpenError::TruncatedHeader)?);
+    let start = *at + 1;
+    let end = start
+        .checked_add(len)
+        .ok_or(QuicOpenError::TruncatedHeader)?;
+    let cid = packet
+        .get(start..end)
+        .ok_or(QuicOpenError::TruncatedHeader)?
+        .to_vec();
+    *at = end;
+    Ok(cid)
+}
+
+/// One QUIC variable-length integer (RFC 9000 §16), advancing `at` past it.
+///
+/// The two high bits of the first byte give the encoding's length, and the
+/// remaining six are the value's most significant bits -- which is why the
+/// prefix cannot simply be skipped.
+fn take_varint(packet: &[u8], at: &mut usize) -> Result<u64, QuicOpenError> {
+    let first = *packet.get(*at).ok_or(QuicOpenError::TruncatedHeader)?;
+    let len = 1usize << (first >> 6);
+    let bytes = packet
+        .get(*at..*at + len)
+        .ok_or(QuicOpenError::TruncatedHeader)?;
+    let mut value = u64::from(first & 0x3f);
+    for b in &bytes[1..] {
+        value = (value << 8) | u64::from(*b);
+    }
+    *at += len;
+    Ok(value)
+}
+
+/// R311y695 (§1.2a) — RFC 9000 §A.3: the full packet number, from the
+/// truncated one on the wire.
+///
+/// # Why this is not the reader's guess
+///
+/// A sender writes only the low bits and expects the receiver to pick the
+/// candidate nearest the number it expects next. A passive reader's "expected"
+/// is the largest it has already opened on this direction, which is state it
+/// keeps rather than state on the wire -- so this takes it as an argument and
+/// invents nothing. The first packet of a flow has no such state and its
+/// truncated number IS the number, which is what passing `None` means.
+pub fn reconstruct_packet_number(
+    largest_opened: Option<u64>,
+    truncated: u64,
+    packet_number_len: usize,
+) -> u64 {
+    let Some(largest) = largest_opened else {
+        return truncated;
+    };
+    let bits = packet_number_len * 8;
+    let window = 1u64 << bits;
+    let half = window / 2;
+    let expected = largest + 1;
+    let candidate = (expected & !(window - 1)) | truncated;
+    if candidate + half <= expected && candidate + window < (1u64 << 62) {
+        candidate + window
+    } else if candidate > expected + half && candidate >= window {
+        candidate - window
+    } else {
+        candidate
+    }
+}
+
 impl QuicKeys {
     /// RFC 9001 §5.1 — derive one direction's keys from its traffic secret.
     ///
@@ -159,12 +375,12 @@ impl QuicKeys {
     ///
     /// Returned as `(client, server)` because the labels differ and nothing
     /// else does; a caller holding one of the two would have to remember which.
-    pub fn initial(client_destination_connection_id: &[u8]) -> (Self, Self) {
+    pub fn initial(version: QuicVersion, client_destination_connection_id: &[u8]) -> (Self, Self) {
         // Initial packets are protected with AES-128-GCM-SHA256 in every QUIC
         // version this reader knows: RFC 9001 §5.2 names the suite rather than
         // negotiating it, because the negotiation has not happened yet.
         let suite = Suite::Aes128GcmSha256;
-        let initial_secret = ring_extract(&INITIAL_SALT_V1, client_destination_connection_id);
+        let initial_secret = ring_extract(version.initial_salt(), client_destination_connection_id);
         let mut client = vec![0u8; suite.hash_len()];
         expand_label(suite, &initial_secret, b"client in", &[], &mut client);
         let mut server = vec![0u8; suite.hash_len()];
@@ -290,7 +506,7 @@ mod tests {
 
     /// The connection ID RFC 9001's own worked example uses, which is also what
     /// rustls's `initial_test_vector` tests derive from.
-    const ICID: [u8; 8] = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
+    pub(super) const ICID: [u8; 8] = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
 
     /// rustls's Initial keys for one side of that connection.
     fn oracle(side: Side) -> Keys {
@@ -310,7 +526,7 @@ mod tests {
     /// Built by hand rather than captured: what is under test is whether this
     /// module can undo what a conforming sender did, and a hand-built packet is
     /// the only way to know what the plaintext was.
-    fn protected_initial(pn: u32, plaintext: &[u8]) -> (Vec<u8>, usize) {
+    pub(super) fn protected_initial(pn: u32, plaintext: &[u8]) -> (Vec<u8>, usize) {
         let mut packet = Vec::new();
         // Long header, Initial, four-byte packet number.
         packet.push(0xC3);
@@ -381,7 +597,7 @@ mod tests {
             "the plaintext must not be lying in the packet in the clear"
         );
 
-        let (client, _server) = QuicKeys::initial(&ICID);
+        let (client, _server) = QuicKeys::initial(QuicVersion::V1, &ICID);
         let header = client
             .unprotect_header(&mut packet, pn_offset)
             .expect("the header unmasks");
@@ -415,7 +631,7 @@ mod tests {
 
         let mut wrong = ICID;
         wrong[0] ^= 0x01;
-        let (client, _server) = QuicKeys::initial(&wrong);
+        let (client, _server) = QuicKeys::initial(QuicVersion::V1, &wrong);
         // A mask is not authenticated, so the header may unmask into something
         // plausible; the assertion is on the AEAD, which is.
         let opened = match client.unprotect_header(&mut packet, pn_offset) {
@@ -445,7 +661,7 @@ mod tests {
         let plaintext = b"a zenoh session begins somewhere in here";
         let (mut packet, pn_offset) = protected_initial(7, plaintext);
 
-        let (client, server) = QuicKeys::initial(&ICID);
+        let (client, server) = QuicKeys::initial(QuicVersion::V1, &ICID);
         // The client's keys open it, asserted FIRST so a build where neither
         // works cannot pass this test.
         let mut copy = packet.clone();
@@ -471,5 +687,135 @@ mod tests {
             Some(QuicOpenError::NotAuthenticated),
             "the other direction's keys must not open this packet"
         );
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    /// R311y695 (§1.2a) — the long header is WALKED to the packet number, and
+    /// R311y694 left that offset entirely to the caller.
+    ///
+    /// The fixture is the same packet the protection tests use, so the offset
+    /// this walk reports is checked against the one that packet was BUILT with
+    /// — two ways of knowing the same number, which is what makes this more
+    /// than a restatement of the parser.
+    #[test]
+    fn a_long_header_is_walked_to_where_protection_begins() {
+        let plaintext = b"a zenoh session begins somewhere in here";
+        let (packet, built_at) = super::tests::protected_initial(7, plaintext);
+        let header = LongHeader::parse(&packet).expect("the header walks");
+
+        assert_eq!(header.version, 1, "the version is read, not assumed");
+        assert_eq!(header.packet_type, LongHeader::INITIAL);
+        assert_eq!(
+            header.destination_connection_id,
+            super::tests::ICID.to_vec(),
+            "the connection ID the Initial keys come from is the one on the wire"
+        );
+        assert!(header.source_connection_id.is_empty());
+        assert_eq!(
+            header.packet_number_offset, built_at,
+            "the walked offset must be the offset the packet was built with"
+        );
+        assert_eq!(
+            header.remainder_len,
+            4 + plaintext.len() + 16,
+            "the declared length covers the packet number, the payload and the tag"
+        );
+
+        // AND THE WALK IS ENOUGH TO OPEN THE PACKET, which is the point: keys
+        // from the walked connection ID, offset from the walked header.
+        let mut packet = packet;
+        let (client, _) = QuicKeys::initial(QuicVersion::V1, &header.destination_connection_id);
+        let h = client
+            .unprotect_header(&mut packet, header.packet_number_offset)
+            .expect("unmasks");
+        let (aad, payload) = packet.split_at_mut(h.payload_offset);
+        assert_eq!(
+            client.open(7, aad, payload).expect("opens"),
+            &plaintext[..],
+            "a caller now needs nothing but the packet"
+        );
+    }
+
+    /// R311y695 (§1.2a) — every truncation refuses instead of reporting an
+    /// offset it guessed.
+    ///
+    /// A header this reader mis-walks yields a packet number offset that is
+    /// wrong, and a wrong offset takes the mask from the wrong bytes -- which
+    /// surfaces as an authentication error, blaming the key for a parse.
+    #[test]
+    fn a_truncated_long_header_is_refused_at_every_field() {
+        let plaintext = b"a zenoh session begins somewhere in here";
+        let (packet, _) = super::tests::protected_initial(7, plaintext);
+        // ANTI-VACUITY: the whole packet walks, so a refusal below is about the
+        // truncation and not about the fixture.
+        assert!(LongHeader::parse(&packet).is_ok());
+        // Up to the header's own length: a slice that ENDS exactly where the
+        // packet number begins is a complete header and walks correctly, which
+        // is what the assertion above already says. Measured -- the first
+        // version of this loop ran to 24 and failed at 18, which is this
+        // header's length.
+        let header_len = LongHeader::parse(&packet)
+            .expect("walks")
+            .packet_number_offset;
+        for cut in 1..header_len {
+            assert_eq!(
+                LongHeader::parse(&packet[..cut]).err(),
+                Some(QuicOpenError::TruncatedHeader),
+                "a header cut at {cut} must be refused"
+            );
+        }
+    }
+
+    /// R311y695 (§1.2a) — a version this reader has no salt for is NAMED.
+    #[test]
+    fn an_unknown_version_is_named_rather_than_treated_as_version_one() {
+        assert_eq!(QuicVersion::from_wire(0x0000_0001), Some(QuicVersion::V1));
+        assert_eq!(
+            QuicVersion::from_wire(0xff00_001d),
+            Some(QuicVersion::V1Draft)
+        );
+        assert_eq!(
+            QuicVersion::from_wire(0x6b33_43cf),
+            None,
+            "a version this reader carries no salt for must not be read as V1"
+        );
+        // AND THE TWO SALTS DIFFER, which is what makes the distinction worth
+        // drawing: the same connection ID under the two versions must not
+        // produce the same keys.
+        let (v1, _) = QuicKeys::initial(QuicVersion::V1, &super::tests::ICID);
+        let (draft, _) = QuicKeys::initial(QuicVersion::V1Draft, &super::tests::ICID);
+        assert_ne!(
+            v1.key, draft.key,
+            "two versions with different salts derive different keys"
+        );
+    }
+
+    /// R311y695 (§1.2a) — RFC 9000 §A.3, including the wrap the naive
+    /// arithmetic gets wrong.
+    ///
+    /// The interesting cases are the ones where the truncated number is on the
+    /// other side of a rollover from the expected one: a reader that simply
+    /// pasted the low bits onto the high ones would be a whole window out, and
+    /// the AEAD would refuse a packet that was perfectly good.
+    #[test]
+    fn a_truncated_packet_number_is_reconstructed_across_a_rollover() {
+        // No state: the first packet of a flow IS its number.
+        assert_eq!(reconstruct_packet_number(None, 7, 4), 7);
+        // Ordinary: the next number, one byte on the wire.
+        // RFC 9000 §A.3's own worked example: largest 0xa82f30ea, two bytes
+        // reading 0x9b32.
+        assert_eq!(
+            reconstruct_packet_number(Some(0xa82f_30ea), 0x9b32, 2),
+            0xa82f_9b32
+        );
+        // FORWARD across a rollover: expected is just past a window boundary
+        // and the truncated value is just below it.
+        assert_eq!(reconstruct_packet_number(Some(0xff), 0x01, 1), 0x101);
+        // BACKWARD: a reordered packet from just before the boundary.
+        assert_eq!(reconstruct_packet_number(Some(0x101), 0xff, 1), 0xff);
     }
 }
