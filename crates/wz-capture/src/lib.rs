@@ -1498,7 +1498,16 @@ pub struct DissectionLimits {
     /// forever, on a limit whose whole purpose is that it cannot.
     pub max_flows_per_table: Option<usize>,
     /// R311y606 — half-assembled IP datagrams held at once. Beyond it the
-    /// OLDEST is evicted.
+    /// oldest-STARTED is evicted.
+    ///
+    /// R311y713 (§B5) — "oldest" here does NOT mean what it means three fields
+    /// up. [`Self::max_flows_per_table`] evicts the least recently ACTIVE, and
+    /// this evicts the one that has been waiting LONGEST, whatever arrived
+    /// into it most recently. Both are deliberate and they are opposite: a
+    /// quiet flow may still be a session a reader is watching, while a
+    /// fragment chain that has been open longest is the one least likely ever
+    /// to complete. Two policies under one word is how a reader ends up
+    /// reasoning about the wrong one, so the word is spelled out at both.
     ///
     /// Separate from `max_flows_per_table` because a fragment table entry is not a flow:
     /// it is keyed by the datagram's identification, so a single busy flow can
@@ -4677,6 +4686,60 @@ mod datagram_tests {
     /// (`_z_link_recv_zbuf(&zl, ..)` on the link `__z_scout_loop` opened,
     /// `src/session/scout.c:54-68`). A passive observer has no socket, so it
     /// keeps the correlation instead.
+    #[test]
+    fn a_hello_is_still_an_answer_after_the_cap_evicted_the_scouts_flow() {
+        // R311y713 (§B9) — the two mechanisms have never been driven together.
+        // The asker memory is dissection-wide precisely BECAUSE the exchange
+        // spans two flows, and the flow cap deletes flows: if the memory had
+        // been hung off the scout's flow, an eviction between the SCOUT and
+        // the HELLO would turn the answer back into the `Open` misread
+        // R311y608 closed. That is a real sequence on a live tap — a busy host
+        // recycles slots between a scout and its answer — and nothing pinned
+        // that the two do not interact.
+        let asker = [192, 168, 1, 5];
+        let asker_port = 43210;
+        let mut d = Dissection::with_limits(DissectionLimits {
+            // One datagram flow at a time: the scout's flow CANNOT survive to
+            // the hello, so a rule that needed it would have to fail.
+            max_flows_per_table: Some(1),
+            ..DissectionLimits::default()
+        });
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet(asker, asker_port, SCOUT_GROUP, 7446, &scout_message()),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &udp_packet(
+                [192, 168, 1, 9],
+                7447,
+                asker,
+                asker_port,
+                &hello_with_locators(),
+            ),
+        );
+        assert_eq!(
+            d.drops().flows,
+            1,
+            "the fixture must actually evict the scout's flow"
+        );
+        let reply = &d.datagram_flows()[0];
+        assert_eq!(reply.scouting.len(), 1, "the HELLO must be reported");
+        assert!(
+            matches!(&reply.scouting[0].frame, Ok(ScoutingFrame::Hello { .. })),
+            "an evicted scout flow must not turn its answer back into an \
+             Open: {:?}",
+            reply.scouting[0].frame
+        );
+        assert!(
+            reply.frames.is_empty(),
+            "and it must not enter the transport list: {:?}",
+            reply.frames
+        );
+    }
+
     #[test]
     fn the_hello_answering_a_scout_comes_back_unicast_and_is_still_a_hello() {
         let asker = [192, 168, 1, 5];

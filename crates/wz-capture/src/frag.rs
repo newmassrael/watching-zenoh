@@ -392,7 +392,16 @@ impl FragmentTable {
         dropped
     }
 
-    /// Evict the oldest datagram if inserting one more would exceed the cap.
+    /// Evict the oldest-STARTED datagram if inserting one more would exceed
+    /// the cap.
+    ///
+    /// R311y713 (§B5) — oldest-STARTED, by the insertion sequence, and NOT the
+    /// least recently active: a chain that has been open longest is the one
+    /// least likely ever to complete, which is the opposite of the rule
+    /// `max_flows_per_table` uses for flows and the reason the two are stated
+    /// apart. `the_cap_evicts_by_when_a_chain_started_not_by_when_it_last_grew`
+    /// is the witness; before it, the policy was a `min_by_key` and no
+    /// sentence anywhere.
     fn make_room(&mut self) {
         let Some(cap) = self.max_pending else { return };
         if cap == 0 {
@@ -604,6 +613,43 @@ mod tests {
         // The evicted one was the first inserted, so its tail no longer
         // completes anything.
         assert_eq!(t.push(piece(10, 1, false, b"z", 4), None), None);
+    }
+
+    /// R311y713 (§B5) — and it evicts by WHEN A CHAIN STARTED, not by when it
+    /// last grew.
+    ///
+    /// The distinction the test above cannot see: there, the first-inserted
+    /// chain is also the least recently active, so both readings of "oldest"
+    /// name the same victim. Here chain 10 keeps receiving and is still the
+    /// one thrown away, which pins the policy rather than the coincidence —
+    /// and it is the OPPOSITE of what `max_flows_per_table` does to flows.
+    #[test]
+    fn the_cap_evicts_by_when_a_chain_started_not_by_when_it_last_grew() {
+        let mut t = FragmentTable::bounded(Some(2), None);
+        assert_eq!(t.push(piece(10, 0, true, b"a", 1), None), None);
+        assert_eq!(t.push(piece(11, 0, true, b"b", 2), None), None);
+        // Chain 10 grows AGAIN: it is now the most recently active of the two
+        // and still the oldest-started.
+        assert_eq!(t.push(piece(10, 1, true, b"a2", 3), None), None);
+        assert_eq!(t.pending(), 2, "the fixture must not have completed one");
+        // A third chain forces a victim.
+        assert_eq!(t.push(piece(12, 0, true, b"c", 4), None), None);
+        assert_eq!(t.stats().evicted, 1);
+        // Chain 11 first, and the ORDER matters: each push that opens a new
+        // chain runs `make_room` again, so probing the evicted chain first
+        // would evict the survivor and the second assertion would be reading
+        // its own probe.
+        assert!(
+            t.push(piece(11, 1, false, b"y", 5), None).is_some(),
+            "the chain that started later must have survived"
+        );
+        // And chain 10 is gone, though it moved most recently: its tail
+        // completes nothing.
+        assert_eq!(
+            t.push(piece(10, 3, false, b"z", 6), None),
+            None,
+            "the oldest-STARTED chain must be the evicted one"
+        );
     }
 
     /// A single unfragmented-looking piece that is both first and last still
