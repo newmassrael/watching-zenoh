@@ -1210,9 +1210,18 @@ impl<'a> CaptureReport<'a> {
             }
             for row in t.rows() {
                 let totals = row.totals();
+                // R311y714 ([REDACTED-REQ]) — the share beside the count. Printed as
+                // a dash where the plane has no denominator rather than as
+                // 0.00%, which would say this topic carried none of a total
+                // that does not exist.
+                let share = match t.share_bp(&row.keyexpr) {
+                    Some(bp) => alloc::format!("{:>3}.{:02}%", bp / 100, bp % 100),
+                    None => "     -".into(),
+                };
                 s.push_str(&format!(
-                    "  {:>12} B  {:>6} msg  {}\n",
+                    "  {:>12} B  {} {:>6} msg  {}\n",
                     totals.payload_bytes,
+                    share,
                     totals.messages(),
                     row.keyexpr
                 ));

@@ -935,6 +935,28 @@ impl ThroughputTable {
     /// Ordered by payload bytes, then by record count, then by the keyexpr
     /// itself — the last tiebreak is what makes the order TOTAL, so two runs
     /// over the same capture cannot disagree.
+    /// R311y714 (§1.1f, [REDACTED-REQ]) — this keyexpr's share of the capture's
+    /// application bytes, in truncated basis points.
+    ///
+    /// `None` when the capture carried no sized payload at all, which is a
+    /// different statement from 0%: a capture whose payloads this build cannot
+    /// SIZE has no denominator, and a zero would read as "this topic carried
+    /// nothing" when the truth is "nothing here can be measured".
+    ///
+    /// The denominator is [`Self::total_payload_bytes`] — the bytes this plane
+    /// could size, NOT the ceiling. `payload_bytes_ceiling` includes payloads
+    /// that went elsewhere (shared memory) or could not be separated, and a
+    /// share over it would shrink every topic's figure by an amount that has
+    /// nothing to do with that topic.
+    pub fn share_bp(&self, keyexpr: &str) -> Option<u32> {
+        let total = self.total_payload_bytes();
+        if total == 0 {
+            return None;
+        }
+        let row = self.row(keyexpr)?;
+        Some((row.totals().payload_bytes.saturating_mul(10_000) / total) as u32)
+    }
+
     pub fn rows(&self) -> Vec<&KeyexprRow> {
         let mut rows: Vec<&KeyexprRow> = self.rows.values().collect();
         rows.sort_by(|a, b| {
@@ -3868,5 +3890,37 @@ pub(crate) mod tests {
         );
         assert!(!asked.selection().is_decisive());
         assert_eq!(asked.rows().len(), 0, "and no row was invented");
+    }
+
+    /// R311y714 (§1.1f, [REDACTED-REQ]) — the topic shares are of the capture, and
+    /// they add up.
+    ///
+    /// The occupancy half of [REDACTED-REQ] at the TOPIC axis, and the assertion that
+    /// keeps it honest is the SUM: two keyexprs carrying all the traffic must
+    /// account for all of it, less the truncation each share loses. A share
+    /// computed against a per-row denominator would give every row 100% and
+    /// pass any single-row test.
+    #[test]
+    fn topic_shares_are_of_the_whole_and_sum_to_it() {
+        let table = aggregate_datagrams(&[
+            (true, push(sender_space(0, Some("home/temp")), &[0u8; 30])),
+            (true, push(sender_space(0, Some("home/light")), &[0u8; 10])),
+        ]);
+        assert_eq!(table.total_payload_bytes(), 40, "the denominator");
+        let shares: Vec<u32> = table
+            .rows()
+            .iter()
+            .map(|r| {
+                table
+                    .share_bp(&r.keyexpr)
+                    .expect("a sized capture has a total")
+            })
+            .collect();
+        assert_eq!(shares, alloc::vec![7_500, 2_500], "30 and 10 of 40");
+        let sum: u32 = shares.iter().sum();
+        assert!(
+            (9_998..=10_000).contains(&sum),
+            "the topics are the whole capture, less truncation: {shares:?}"
+        );
     }
 }
