@@ -1648,15 +1648,22 @@ PY
 #
 # R311y726 (N14) — the behavioural half of the `VerdictReason` discipline, and
 # the half a static scan cannot express. Layer C0's `verdict_reason_lint` asks
-# whether a test NAMES each leg; this severs each leg in turn and requires a
+# whether a test NAMES each leg; this MUTATES each leg in turn and requires a
 # test to REDDEN. R311y715 ran exactly this sweep by hand and found nine guards
 # binding nothing; R311y725 bound thirteen unnamed legs and still proved only
 # that they are mentioned.
 #
+# R311y727 (N16) — and it now asks the question from BOTH sides. `sever` stops
+# the leg being raised at all; `widen` makes every capture raise it. A guard
+# that is too wide keeps its push, keeps reddening the fixtures that trip it,
+# and walks through a severing sweep untouched — which is why R311y726 wrote
+# the gap down rather than claiming the leg was pinned.
+#
 # Its own layer rather than a line in C0 because the cost is a different order:
 # C0 is 18s of static scanning and this compiles and runs the suite once per
-# leg. MEASURED locally at 2m16s over 23 legs with a warm cache, which is the
-# shape of a lane, not of a lint.
+# mutant. MEASURED locally at 2m16s over 23 severings with a warm cache; the
+# second operator doubles the population to 46, which is the shape of a lane,
+# not of a lint.
 layer_c0mut_verdict_legs() {
     # A gate that cannot read its input must not report green -- the rule Layer
     # C0 already applies to python3, and this lane IS a python program.

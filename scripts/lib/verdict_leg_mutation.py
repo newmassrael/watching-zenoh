@@ -1,14 +1,36 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R311y726 (N14) — SEVER EACH LEG OF THE VERDICT AND REQUIRE A TEST TO REDDEN.
+"""R311y726 (N14) — MUTATE EACH LEG OF THE VERDICT AND REQUIRE A TEST TO REDDEN.
 
 WHAT THIS IS. The sufficient condition `verdict_reason_lint` cannot express.
 That gate asks whether a test NAMES each `VerdictReason`; this one asks whether
-any test DEPENDS on it. For each variant in turn, the `out.push(...)` that raises
-it in `CaptureReport::reasons` is replaced by a statement with no effect, the
-suite is run, and at least one test must fail. A leg no test misses is a leg that
-can be deleted in silence.
+any test DEPENDS on it. For each variant in turn the leg is broken, the suite is
+run, and at least one test must fail. A leg no test misses is a leg that can be
+deleted in silence.
+
+TWO OPERATORS, BECAUSE A LEG HAS TWO WAYS TO BE WRONG (R311y727, N16).
+
+  * `sever` — the `out.push(...)` becomes a statement with no effect, so no
+    capture can raise the leg. This asks: does anything notice when the reason
+    STOPS being reported?
+  * `widen` — the single-line `if` guarding that push is `|| true`, so every
+    capture raises the leg. This asks: does anything notice when the reason
+    starts being reported by captures that are FINE?
+
+R311y726 shipped only the first and wrote the gap down: a guard that is too wide
+-- `>= 0` where `> 0` was meant, or a counter read off the wrong plane -- keeps
+its push, keeps raising the reason on the fixtures that trip it, and walks
+through a severing sweep untouched. The defect it hides is the worse-reading
+one: a verdict that cries incomplete over a whole capture teaches an operator to
+stop reading verdicts. `widen` is the smallest operator that reaches it, and it
+is the exact complement of `sever` -- the two pin the guard from both sides,
+false-negative and false-positive.
+
+The condition is preserved inside the widened guard (`(COND) || true`, never a
+bare `true`) so that every binding it reads stays read. A bare `true` orphans
+the `let`s above it, and this tool would then be reporting its own dead-code
+warnings as facts about the verdict.
 
 WHY IT HAD TO EXIST. R311y715 ran exactly this sweep BY HAND and found nine of
 the twenty-four guards in the old `is_complete` binding nothing. R311y725 built
@@ -21,12 +43,16 @@ gap as N14, and a hand-run sweep is not a gate.
 WHAT A RESULT MEANS.
 
   * a mutant whose tests FAIL -- the leg is load-bearing. This is the pass.
-  * a mutant whose tests PASS -- nothing in the suite depends on this leg. It
-    can be deleted and no one will know.
+  * a mutant whose tests PASS -- nothing in the suite depends on that half of
+    the leg. Severed, it can be deleted and no one will know; widened, it can
+    fire on every capture in the tree and no one will know.
   * a mutant that does not COMPILE -- proves NOTHING, and is reported as a
-    failure of this tool rather than a finding about the code. A severing that
+    failure of this tool rather than a finding about the code. A mutation that
     cannot be expressed needs a human, and counting it as "red, therefore
     load-bearing" is exactly the false pass this gate exists to refuse.
+  * a leg whose guard this tool cannot SEE is likewise a failure of the tool
+    and is named. Skipping it would answer half the question in silence, which
+    is the population-of-zero green this file exists to refuse.
 
 WHY IT MUTATES THE TREE IN PLACE. The alternative is a copy, and the copy is
 worse than it looks: this workspace's cargo root is `crates/` with path
@@ -65,6 +91,66 @@ TARGET_DIR = Path("crates/target/verdict-mutation/target")
 
 # One leg, as `reasons()` raises it.
 PUSH = re.compile(r"^(\s*)out\.push\(VerdictReason::(\w+)\);\s*$", re.M)
+
+# One leg's GUARD -- the single-line `if` whose whole body is that push.
+#
+# The shape is insisted upon rather than searched for. A guard spread over
+# several lines, or one holding more than the push, is not matched here and is
+# then reported BY NAME as a leg this tool could not ask its second question of.
+# Guessing at where such a condition begins is how a mutation tool starts
+# producing findings about its own parsing.
+GUARD = re.compile(
+    r"^(?P<indent>[ \t]*)if (?P<cond>.+) \{\n"
+    r"(?P<push>[ \t]*out\.push\(VerdictReason::(?P<variant>\w+)\);)$",
+    re.M,
+)
+
+
+def sever(pristine: str, variant: str) -> str:
+    """Operator 1 — this leg can no longer be raised by any capture."""
+    return PUSH.sub(
+        lambda m: (
+            f"{m.group(1)}let _ = VerdictReason::{m.group(2)};"
+            if m.group(2) == variant
+            else m.group(0)
+        ),
+        pristine,
+    )
+
+
+def widen(pristine: str, variant: str) -> str:
+    """Operator 2 — this leg is now raised by EVERY capture.
+
+    `(COND) || true` and not `true`: the condition still runs, so every binding
+    it reads stays read and the mutant does not collect unused-variable
+    warnings that have nothing to do with the verdict.
+    """
+
+    def rewrite(m: re.Match) -> str:
+        if m.group("variant") != variant:
+            return m.group(0)
+        return f"{m.group('indent')}if ({m.group('cond')}) || true {{\n{m.group('push')}"
+
+    return GUARD.sub(rewrite, pristine)
+
+
+# Name, mutation, what a survivor means. The third field is the sentence the
+# failure prints, because "SURVIVED" means a different defect per operator and
+# one generic message would send the reader to the wrong fix.
+OPERATORS = (
+    (
+        "sever",
+        sever,
+        "every test passed with this leg SEVERED, so nothing in the suite "
+        "depends on it being raised",
+    ),
+    (
+        "widen",
+        widen,
+        "every test passed with this leg's guard WIDENED to always fire, so "
+        "no test holds it quiet over a capture that is fine",
+    ),
+)
 
 # How long one mutant's suite may take before this calls it hung. Generous --
 # the point is to notice a mutant that never returns, not to police speed.
@@ -158,6 +244,22 @@ def failing_tests(output: str) -> list[str]:
 
 
 def main() -> int:
+    # `--only X` narrows the sweep to one leg. It exists for the probe that
+    # keeps this gate honest -- weaken the single test that kills one mutant and
+    # re-ask about THAT leg -- and re-running forty-six mutants to learn about
+    # one is how a probe stops being run at all. It says PROBE in the headline
+    # and in the OK line, because a partial population reporting a plain OK is
+    # the population-of-zero green wearing this tool's own words.
+    only: str | None = None
+    argv = sys.argv[1:]
+    while argv:
+        arg = argv.pop(0)
+        if arg == "--only" and argv:
+            only = argv.pop(0)
+        else:
+            print(f"usage: {Path(sys.argv[0]).name} [--only VARIANT]", file=sys.stderr)
+            return 2
+
     source_path = REPO_ROOT / SOURCE
     backup_path = REPO_ROOT / BACKUP
     if not source_path.is_file():
@@ -205,6 +307,29 @@ def main() -> int:
             )
         return 1
 
+    # Every leg must be reachable by BOTH operators before any of them runs.
+    # Discovering half way through that a guard cannot be widened would leave
+    # the run reporting on a population it never states.
+    guarded = {m.group("variant") for m in GUARD.finditer(pristine)}
+    unguarded = sorted(set(raised) - guarded)
+    if unguarded:
+        print("verdict-leg mutation: FAIL", file=sys.stderr)
+        for v in unguarded:
+            print(
+                f"  `VerdictReason::{v}` is raised, but its guard is not a "
+                "single-line `if COND {` directly above the push, so the "
+                "`widen` operator cannot reach it",
+                file=sys.stderr,
+            )
+        print(
+            "\nThis is a failure of the SWEEP. Half a question asked in "
+            "silence is the\npopulation-of-zero green this gate exists to "
+            "refuse: either give the leg a\nsingle-line guard, or teach this "
+            "tool the shape it now has.",
+            file=sys.stderr,
+        )
+        return 1
+
     # Which packages to run. DERIVED from where the bindings actually are, so a
     # binding that moves to a new crate brings that crate into the sweep without
     # anyone editing a list here.
@@ -223,15 +348,26 @@ def main() -> int:
         )
         return 1
 
+    if only is not None:
+        if only not in raised:
+            print(
+                f"verdict-leg mutation: FAIL — `--only {only}` names no leg "
+                f"`reasons()` raises. The population is {', '.join(raised)}.",
+                file=sys.stderr,
+            )
+            return 1
+        raised = [only]
+
     backup_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_path, backup_path)
-    survivors: list[str] = []
-    broken: list[tuple[str, str]] = []
-    evidence: dict[str, list[str]] = {}
+    survivors: list[tuple[str, str, str]] = []
+    broken: list[tuple[str, str, str]] = []
+    evidence: dict[tuple[str, str], list[str]] = {}
     try:
         print(
-            f"verdict-leg mutation: {len(raised)} leg(s), suite = "
-            f"{' '.join(packages)}",
+            ("verdict-leg mutation PROBE: " if only else "verdict-leg mutation: ")
+            + f"{len(raised)} leg(s) × {len(OPERATORS)} operator(s), suite = "
+            + " ".join(packages),
             flush=True,
         )
         verdict, output = run_suite(packages)
@@ -258,47 +394,60 @@ def main() -> int:
         print("  baseline green", flush=True)
 
         for variant in raised:
-            mutant = PUSH.sub(
-                lambda m: (
-                    f"{m.group(1)}let _ = VerdictReason::{m.group(2)};"
-                    if m.group(2) == variant
-                    else m.group(0)
-                ),
-                pristine,
-            )
-            if mutant == pristine:
-                broken.append((variant, "the severing produced no change"))
-                continue
-            source_path.write_text(mutant, encoding="utf-8")
-            # The crates whose tests NAME this leg go first. A kill found in a
-            # subset is a kill: running fewer tests can only make a mutant
-            # harder to catch, never easier, so a red here is proof and a green
-            # here is not yet an answer. Twenty of the twenty-three legs are
-            # named only inside `wz-capture`, and asking about those without
-            # rebuilding the reader is most of this sweep's wall clock.
-            narrow = crates_for.get(variant) or packages
-            verdict, output = run_suite(narrow)
-            if verdict == "green" and narrow != packages:
-                # ESCALATION, and it is what keeps the narrowing honest: a leg
-                # that survives its own crate might still be depended on by a
-                # test that never names it, and calling that a survivor would
-                # be this tool reporting a defect it manufactured.
-                verdict, output = run_suite(packages)
-            if verdict == "uncompilable":
-                broken.append((variant, f"the mutant does not compile\n{output[-1500:]}"))
-            elif verdict in ("hung", "unrun"):
-                broken.append((variant, f"{verdict}: {output[-1500:]}"))
-            elif verdict == "green":
-                survivors.append(variant)
-                print(f"  {variant}: SURVIVED", flush=True)
-            else:
-                names = failing_tests(output)
-                evidence[variant] = names
-                print(
-                    f"  {variant}: killed by {len(names)} test(s) in "
-                    f"{' '.join(narrow)}" + (f" (e.g. {names[0]})" if names else ""),
-                    flush=True,
-                )
+            for op_name, mutate, survived_means in OPERATORS:
+                mutant = mutate(pristine, variant)
+                if mutant == pristine:
+                    broken.append(
+                        (variant, op_name, f"the `{op_name}` produced no change")
+                    )
+                    continue
+                source_path.write_text(mutant, encoding="utf-8")
+                # The crates whose tests NAME this leg go first. A kill found in
+                # a subset is a kill: running fewer tests can only make a mutant
+                # harder to catch, never easier, so a red here is proof and a
+                # green here is not yet an answer. Twenty of the twenty-three
+                # legs are named only inside `wz-capture`, and asking about
+                # those without rebuilding the reader is most of this sweep's
+                # wall clock.
+                narrow = crates_for.get(variant) or packages
+                ran = narrow
+                verdict, output = run_suite(narrow)
+                if verdict == "green" and narrow != packages:
+                    # ESCALATION, and it is what keeps the narrowing honest: a
+                    # leg that survives its own crate might still be depended on
+                    # by a test that never names it, and calling that a survivor
+                    # would be this tool reporting a defect it manufactured.
+                    #
+                    # R311y727 — and the evidence line now names the set that
+                    # ACTUALLY ran. It used to print `narrow` either way, so an
+                    # escalated kill was reported against a package set the
+                    # killing test is not even in. Measured, not reasoned: a
+                    # probe here printed a `wz-replay` test as killed "in
+                    # wz-capture".
+                    ran = packages
+                    verdict, output = run_suite(packages)
+                if verdict == "uncompilable":
+                    broken.append(
+                        (
+                            variant,
+                            op_name,
+                            f"the mutant does not compile\n{output[-1500:]}",
+                        )
+                    )
+                elif verdict in ("hung", "unrun"):
+                    broken.append((variant, op_name, f"{verdict}: {output[-1500:]}"))
+                elif verdict == "green":
+                    survivors.append((variant, op_name, survived_means))
+                    print(f"  {variant} [{op_name}]: SURVIVED", flush=True)
+                else:
+                    names = failing_tests(output)
+                    evidence[(variant, op_name)] = names
+                    print(
+                        f"  {variant} [{op_name}]: killed by {len(names)} "
+                        f"test(s) in {' '.join(ran)}"
+                        + (f" (e.g. {names[0]})" if names else ""),
+                        flush=True,
+                    )
     finally:
         source_path.write_text(pristine, encoding="utf-8")
         restored = source_path.read_text(encoding="utf-8")
@@ -314,37 +463,49 @@ def main() -> int:
 
     if broken:
         print("verdict-leg mutation: FAIL", file=sys.stderr)
-        for variant, why in broken:
-            print(f"  `VerdictReason::{variant}`: {why}", file=sys.stderr)
+        for variant, op_name, why in broken:
+            print(f"  `VerdictReason::{variant}` [{op_name}]: {why}", file=sys.stderr)
         print(
             "\nA mutant that does not build proves nothing about the leg. This "
             "is a\nfailure of the SWEEP, not a finding about the code: the "
-            "severing has to be\nexpressible before the question can be asked.",
+            "mutation has to be\nexpressible before the question can be asked.",
             file=sys.stderr,
         )
         return 1
     if survivors:
         print("verdict-leg mutation: FAIL", file=sys.stderr)
-        for variant in survivors:
+        for variant, op_name, survived_means in survivors:
             print(
-                f"  `VerdictReason::{variant}` SURVIVED — every test passed "
-                "with this leg severed, so nothing in the suite depends on it",
+                f"  `VerdictReason::{variant}` [{op_name}] SURVIVED — "
+                f"{survived_means}",
                 file=sys.stderr,
             )
         print(
-            "\nA surviving leg can be deleted and no one will know. R311y715 "
-            "measured nine\nsuch guards at once. Bind it with a fixture that "
-            "raises this reason and asserts\nit BY NAME -- "
-            "`reasons() == vec![VerdictReason::X]` where the fixture can be "
-            "isolated.",
+            "\nA leg surviving `sever` can be deleted and no one will know; "
+            "R311y715 measured\nnine such guards at once. Bind it with a "
+            "fixture that raises the reason and\nasserts it BY NAME — "
+            "`reasons() == vec![VerdictReason::X]`.\n\n"
+            "A leg surviving `widen` fires on every capture in the tree "
+            "unnoticed, so the\nverdict can start crying incomplete over "
+            "whole captures in silence. Bind it\nwith a fixture that is FINE "
+            "in this respect and assert the reason is ABSENT —\n"
+            "`assert!(!report.reasons().contains(&VerdictReason::X))`.",
             file=sys.stderr,
         )
         return 1
 
     least = min(len(v) for v in evidence.values()) if evidence else 0
+    ops = ", ".join(name for name, _fn, _why in OPERATORS)
     print(
-        f"verdict-leg mutation: OK ({len(raised)} leg(s) severed, every one "
-        f"killed by at least {least} test(s); suite = {' '.join(packages)})"
+        ("verdict-leg mutation PROBE: OK for " if only else "verdict-leg mutation: OK (")
+        + f"{len(raised)} leg(s) × {len(OPERATORS)} operator(s) [{ops}] = "
+        f"{len(evidence)} mutant(s), every one killed by at least {least} "
+        f"test(s); suite = {' '.join(packages)}"
+        + (
+            " — A PARTIAL POPULATION: this says nothing about the other legs"
+            if only
+            else ")"
+        )
     )
     return 0
 
