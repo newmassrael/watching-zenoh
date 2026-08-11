@@ -152,6 +152,169 @@ async fn the_binary_dials_a_peer_and_that_peer_decodes_the_captured_samples() {
     );
 }
 
+/// R311y716 ([REDACTED-REQ]) — the ALERT reaches a real peer, and a clean capture
+/// sends nothing to the same one.
+///
+/// The delivery half of the requirement, witnessed the only way that counts: a
+/// process dials, a session opens, and a peer DECODES the notification. Both
+/// arms run against the same acceptor in one test, because the two failures
+/// they exclude are opposite and a suite that only proved the first would ship
+/// a channel that cries wolf on every run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_alert_reaches_a_peer_and_a_clean_capture_sends_it_nothing() {
+    let scratch = std::env::temp_dir().join(format!("wz-replay-alert-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).expect("a scratch directory");
+    // A record under a keyexpr id this capture never saw declared: read,
+    // attributed to nothing, and so a capture whose totals are a floor.
+    let short = scratch.join("aliased.pcapng");
+    std::fs::write(&short, fixture::aliased_capture(false)).expect("a fixture");
+    // And a capture with nothing wrong with it. Deliberately NOT one of the
+    // reply fixtures: a reply whose request this capture never held is an
+    // ORPHAN, so every one of them is short for a reason that has nothing to do
+    // with what this arm is about. `clean_capture` exists for exactly that.
+    let clean = scratch.join("clean.pcapng");
+    std::fs::write(&clean, fixture::clean_capture()).expect("a fixture");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+
+    let heard: Heard = Arc::new(Mutex::new(Vec::new()));
+    let recorder = heard.clone();
+
+    let acceptor = async move {
+        let (stream, _peer) = listener.accept().await.expect("accept");
+        let clock = TokioTime::new();
+        let OpenedSession {
+            mut engine,
+            actions,
+            inbound,
+            writer_handle,
+            clock: _,
+        } = accept_and_open_session(
+            DialedLink::Tcp(stream),
+            peer_init_params(),
+            clock,
+            None,
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("the alert opens a session this peer accepts");
+
+        let mut driver = inbound;
+        let timeouts = SessionTimeouts::spec_defaults();
+        let _ = drive_session_until_terminal(
+            &mut driver,
+            &actions,
+            &mut engine,
+            Some(ITER_CAP),
+            &clock,
+            &timeouts,
+            |event: IterationEvent<'_>| {
+                let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event
+                else {
+                    return;
+                };
+                for message in messages {
+                    if let Some(sample) = keyexpr_and_payload(message) {
+                        recorder.lock().expect("not poisoned").push(sample);
+                    }
+                }
+            },
+        )
+        .await;
+        drop(actions);
+        writer_handle.drain().await;
+    };
+
+    let alerting = async {
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+            .arg(&short)
+            .arg("--alert")
+            .arg("--alert-key")
+            .arg("site/health")
+            .arg("--connect")
+            .arg(format!("tcp/{addr}"))
+            .output()
+            .await
+            .expect("the binary runs")
+    };
+
+    let (_, out) = tokio::join!(acceptor, alerting);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "the alert must exit clean: {stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("1 of 1 emission(s) sent to"),
+        "and say that it went: {stdout}"
+    );
+
+    // THE CLAIM: the peer decoded the notification, under the operator's key,
+    // and its body names the leg that was short. A count alone would pass on a
+    // tool that published anything at all.
+    let heard = heard.lock().expect("not poisoned").clone();
+    assert_eq!(heard.len(), 1, "exactly one notification: {heard:?}");
+    assert_eq!(
+        heard[0].0, "site/health",
+        "under the key the operator chose"
+    );
+    let body = String::from_utf8(heard[0].1.clone()).expect("utf-8");
+    assert!(
+        body.contains("\"complete\":false") && body.contains("unresolved_records"),
+        "the peer must receive the REASON, not only that something is wrong: \
+         {body}"
+    );
+
+    // THE OTHER HALF, against a fresh acceptor: a capture with nothing to
+    // report must publish nothing. A channel that fires every run is ignored.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let quiet: Heard = Arc::new(Mutex::new(Vec::new()));
+    let recorder = quiet.clone();
+    let acceptor = async move {
+        // A connection is never expected here, so the accept is RACED against
+        // the tool finishing rather than awaited -- a bare await would hang the
+        // suite on the behaviour this arm exists to prove.
+        if let Ok(Ok((stream, _))) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept()).await
+        {
+            drop(stream);
+            recorder
+                .lock()
+                .expect("not poisoned")
+                .push((String::from("<a session was opened at all>"), Vec::new()));
+        }
+    };
+    let silent = async {
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+            .arg(&clean)
+            .arg("--alert")
+            .arg("--connect")
+            .arg(format!("tcp/{addr}"))
+            .output()
+            .await
+            .expect("the binary runs")
+    };
+    let (_, out) = tokio::join!(acceptor, silent);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let _ = std::fs::remove_dir_all(&scratch);
+    assert!(
+        out.status.success(),
+        "a clean capture is not a failure: {stdout}"
+    );
+    assert!(
+        stdout.contains("alert: none") && stdout.contains("nothing sent to"),
+        "and the tool must SAY it sent nothing, so silence and not-running \
+         never look alike: {stdout}"
+    );
+    assert!(
+        quiet.lock().expect("not poisoned").is_empty(),
+        "a complete capture must not even dial"
+    );
+}
+
 /// R311y702 — a build without `live` REFUSES `--connect` instead of printing
 /// the plan and exiting zero.
 ///

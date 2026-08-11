@@ -422,12 +422,24 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
 }
 
 /// What one analysis found, beyond the rendered report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// R311y716 — no longer `Copy`: it carries the verdict's REASONS, and a list is
+/// the only shape that can say which of them. The alternative was a second
+/// accessor that recomputes them, which is the two-opinions-about-one-capture
+/// shape this crate has paid for before.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     /// The rendered report's own verdict: did this reader see the whole
     /// capture. Drives the exit code, so a script can tell a clean read from
     /// one with encrypted flows, gaps or dropped packets in it.
     pub complete: bool,
+    /// R311y716 (§C G1 / [REDACTED-REQ]) — WHY, when [`Self::complete`] is false.
+    ///
+    /// Empty exactly when `complete`. A caller that has to act on the verdict
+    /// -- an exit code is one action, a notification onto a live deployment is
+    /// another -- needs the reason as much as the bool: "this capture is short"
+    /// tells an operator to go and run the tool they were trying not to run.
+    pub reasons: Vec<wz_capture::report::VerdictReason>,
     /// Encrypted flows the decryption pass fully opened.
     pub decrypted_flows: usize,
     /// Encrypted flows it did not.
@@ -731,8 +743,13 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
         report = report.with_nodes(table);
     }
     let report = report;
+    // R311y716 ([REDACTED-REQ]) — the verdict AND its reasons, from ONE call. A
+    // caller that took the bool here and re-derived the list somewhere else
+    // could report a capture as short for a reason this run never found.
+    let reasons = report.reasons();
     let outcome = Outcome {
-        complete: report.is_complete(),
+        complete: reasons.is_empty(),
+        reasons,
         decrypted_flows,
         undecrypted_flows: flows.len() - decrypted_flows,
         key_log_connections,

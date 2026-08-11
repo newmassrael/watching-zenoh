@@ -56,6 +56,43 @@ fn reply(request_id: u64, suffix: &'static str, payload: &'static [u8]) -> Vec<u
     .encode_to_vec()
 }
 
+/// R311y716 ([REDACTED-REQ]) — a PUSH, which is the one record shape in this module
+/// that leaves nothing outstanding.
+///
+/// Every other fixture here carries a `Response`, and a reply whose request the
+/// capture never held is an ORPHAN: the exchange plane reports a gap and the
+/// verdict is short. That is right, and it means none of them could witness the
+/// alert's silent arm -- a capture that raises nothing has to be a capture with
+/// nothing wrong with it, and until this existed there was no such capture to
+/// point the tool at.
+fn push(suffix: &'static str, payload: &'static [u8]) -> Vec<u8> {
+    wz_codecs::push::Push {
+        // The N flag says the keyexpr carries a SUFFIX, and `keyexpr` above
+        // always writes one. Without it the decode reads a different shape and
+        // the walk halts on the record -- which reports as three plane-level
+        // gaps rather than as a bad fixture.
+        header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+        keyexpr: keyexpr(suffix),
+        body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+            payload_len: payload.len() as u64,
+            payload,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+/// R311y716 ([REDACTED-REQ]) — a capture with NOTHING wrong with it.
+pub fn clean_capture() -> Vec<u8> {
+    let mut body = framed_frame(&push("demo/a", b"first"));
+    body.extend_from_slice(&framed_frame(&push("demo/b", b"second")));
+    wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet_reverse(1000, &body))],
+    )
+}
+
 fn tcp_segment_from(seq: u32, payload: &[u8], reverse: bool, client_port: u16) -> Vec<u8> {
     const CLIENT: [u8; 4] = [10, 0, 0, 1];
     const SERVER: [u8; 4] = [10, 0, 0, 2];

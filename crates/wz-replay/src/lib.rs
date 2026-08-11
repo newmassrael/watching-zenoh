@@ -35,6 +35,16 @@ use wz_analyze::{Sample, Samples};
 /// stays buildable without the session runtime's dependency graph; see this
 /// crate's `Cargo.toml` for why the CLI REFUSES `--connect` when it is off
 /// rather than falling back to a dry run.
+/// R311y716 ([REDACTED-REQ]) — the analyzer's verdict as a NOTIFICATION.
+///
+/// UNGATED, unlike [`live`] which delivers it: deciding whether a capture
+/// warrants an alert, and what that alert says, is a pure function of an
+/// [`wz_analyze::Outcome`] and belongs to the plan half this crate keeps
+/// buildable without the session runtime. A caller on a build with `live` off
+/// can still ask what would have been sent -- and is REFUSED if it tries to
+/// send it, which is the rule `--connect` already follows.
+pub mod alert;
+
 #[cfg(feature = "live")]
 pub mod live;
 

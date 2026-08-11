@@ -53,6 +53,13 @@ OPTIONS:
                         extend:<n>:<seed>
                         scramble:<seed>
     --dry-run         print the plan and send nothing. THE DEFAULT.
+    --alert           do not replay: judge the capture and, when it is
+                      INCOMPLETE, publish the verdict and its named reasons as
+                      one sample. A complete capture publishes nothing, and the
+                      page says so either way. Refuses the plan-shaping options,
+                      which do not apply to a notification
+    --alert-key <keyexpr>
+                      where the alert goes (default `wz/alert`)
 
 Exit: 0 the plan was produced (or played), 2 this tool failed.
 ";
@@ -73,6 +80,14 @@ fn main() -> ExitCode {
     let mut side: Option<wz_session_core::passive::Direction> = None;
     let mut keylog: Option<String> = None;
     let mut connect: Option<String> = None;
+    let mut alert = false;
+    let mut alert_key: Option<String> = None;
+    // R311y716 ([REDACTED-REQ]) — the plan-shaping options an alert must REFUSE. A
+    // notification is not a replay: `--fuzz` has nothing to mutate, `--select`
+    // nothing to select from, and `--speed` nothing to space out. Accepting
+    // them silently would be the shape this workspace keeps paying for -- an
+    // operator who typed one would believe it had an effect.
+    let mut plan_shaping: Vec<&'static str> = Vec::new();
 
     let mut at = 1usize;
     while at < argv.len() {
@@ -85,8 +100,27 @@ fn main() -> ExitCode {
             eprintln!("wz-replay: {what}\n\n{USAGE}");
             ExitCode::from(2)
         };
+        for name in [
+            "--select",
+            "--side",
+            "--timing",
+            "--gap",
+            "--max-gap",
+            "--max-total",
+            "--speed",
+            "--fuzz",
+        ] {
+            if arg == name {
+                plan_shaping.push(name);
+            }
+        }
         match arg {
             "--dry-run" => {}
+            "--alert" => alert = true,
+            "--alert-key" => match value() {
+                Some(v) => alert_key = Some(v),
+                None => return bad("--alert-key needs a key expression"),
+            },
             "--keylog" => match value() {
                 Some(v) => keylog = Some(v),
                 None => return bad("--keylog needs a file"),
@@ -141,6 +175,27 @@ fn main() -> ExitCode {
         at += 1;
     }
 
+    if !alert && alert_key.is_some() {
+        eprintln!(
+            "wz-replay: --alert-key names where an alert goes and this run \
+             raises none. Add --alert, or drop the key.\n\n{USAGE}"
+        );
+        return ExitCode::from(2);
+    }
+    if alert && !plan_shaping.is_empty() {
+        eprintln!(
+            "wz-replay: --alert does not replay, so {} shape{} nothing. \
+             Drop {} or drop --alert.\n\n{USAGE}",
+            plan_shaping.join(", "),
+            if plan_shaping.len() == 1 { "s" } else { "" },
+            if plan_shaping.len() == 1 {
+                "it"
+            } else {
+                "them"
+            }
+        );
+        return ExitCode::from(2);
+    }
     let schedule = match schedule.checked() {
         Ok(schedule) => schedule,
         Err(why) => {
@@ -163,6 +218,20 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // R311y716 ([REDACTED-REQ]) — the ALERT path, which is not a replay and takes its
+    // own exit before one is planned. Extracting samples first would read the
+    // capture a second way for a question that does not need them.
+    if alert {
+        return run_alert(
+            &capture,
+            keylog.as_deref(),
+            alert_key
+                .as_deref()
+                .unwrap_or(wz_replay::alert::DEFAULT_KEYEXPR),
+            connect.as_deref(),
+            path,
+        );
+    }
     let samples = match wz_analyze::samples(&capture, keylog.as_deref()) {
         Ok(samples) => samples,
         Err(err) => {
@@ -196,6 +265,57 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     };
     run_live(&connect, plan)
+}
+
+/// R311y716 ([REDACTED-REQ]) — judge the capture, print the verdict, and deliver it
+/// when there is a destination and something to say.
+///
+/// The order is the one `--connect` established for a replay and it matters
+/// more here: the page is printed BEFORE anything is published, so an operator
+/// sees exactly what is about to land on their deployment's bus.
+fn run_alert(
+    capture: &[u8],
+    keylog: Option<&[u8]>,
+    key: &str,
+    connect: Option<&str>,
+    path: &str,
+) -> ExitCode {
+    // EVERY PLANE, and this is the whole correctness of the alert. The verdict
+    // is only as wide as the planes the analysis built: `analyze` builds none
+    // of the censuses, so a capture whose only shortfall is an unresolved
+    // keyexpr reads as COMPLETE through it -- measured, on the first version of
+    // this path. An alert that under-reports is worse than no alert, because
+    // its silence is taken as an all-clear.
+    let request = wz_analyze::Request {
+        capture,
+        keylog,
+        format: wz_analyze::Format::Json,
+        per_flow: false,
+        per_message: false,
+        messages_per_flow: None,
+        quic_ports: &[],
+        quic_cid_len: None,
+        payload_rules: &[],
+        census: wz_analyze::Census::all(),
+        per_field: false,
+        select: None,
+    };
+    let outcome = match wz_analyze::analyze_request(&request) {
+        Ok((_rendered, outcome)) => outcome,
+        Err(err) => {
+            eprintln!("wz-replay: {path}: {err:?}");
+            return ExitCode::from(2);
+        }
+    };
+    let alert = wz_replay::alert::alert_for(&outcome, key);
+    print!("{}", wz_replay::alert::render(alert.as_ref(), connect));
+    match (alert, connect) {
+        (Some(a), Some(to)) => run_live(to, wz_replay::alert::as_plan(&a)),
+        // Nothing to send, or nowhere to send it. Both are ordinary outcomes
+        // and neither is a failure of this tool; `render` above has already
+        // told the operator which one happened.
+        _ => ExitCode::SUCCESS,
+    }
 }
 
 /// R311y702 — dial and play.

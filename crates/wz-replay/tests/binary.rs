@@ -67,6 +67,92 @@ fn a_capture_yields_a_plan_naming_its_keyexpr_and_its_payload_length() {
     );
 }
 
+/// R311y716 ([REDACTED-REQ]) — the ALERT reaches the command line, with its reasons.
+///
+/// The delivery half of the requirement. What this proves that the module's own
+/// tests cannot: the verdict an operator gets is computed from a real capture
+/// read by the real binary, not from an `Outcome` a test built -- so a reason
+/// that stops reaching the verdict, or a flag nothing acts on, fails here.
+#[test]
+fn an_incomplete_capture_raises_an_alert_naming_why() {
+    let scratch = Scratch::new("alert");
+    // A record referencing a keyexpr id this capture never saw declared: read,
+    // attributed to nothing, and therefore a row total that is short.
+    let capture = scratch.write("aliased.pcapng", &fixture::aliased_capture(false));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+        .arg(&capture)
+        .arg("--alert")
+        .output()
+        .expect("runs");
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        text.contains("unresolved_records"),
+        "the alert names the leg that is short: {text}"
+    );
+    assert!(text.contains("wz/alert"), "and the default key: {text}");
+    assert!(
+        text.contains("NOT SENT"),
+        "an alert with nowhere to go must say it did not go: {text}"
+    );
+
+    // The operator's own key reaches it.
+    let keyed = Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+        .arg(&capture)
+        .arg("--alert")
+        .arg("--alert-key")
+        .arg("site/health")
+        .output()
+        .expect("runs");
+    let keyed = String::from_utf8_lossy(&keyed.stdout).into_owned();
+    assert!(keyed.contains("site/health"), "{keyed}");
+    assert!(
+        !keyed.contains("wz/alert"),
+        "and REPLACES the default: {keyed}"
+    );
+}
+
+/// R311y716 ([REDACTED-REQ]) — an alert REFUSES the options that shape a replay.
+///
+/// The rule this workspace settled after measuring the alternative: an option a
+/// tool reads and nothing acts on is worse than one it rejects, because the
+/// operator who typed it believes it took effect. `--fuzz` has nothing to
+/// mutate when the payload is a verdict this run just computed.
+#[test]
+fn an_alert_refuses_the_options_that_would_shape_a_replay() {
+    let scratch = Scratch::new("alert-refuse");
+    let capture = scratch.write("aliased.pcapng", &fixture::aliased_capture(false));
+
+    let refused = Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+        .arg(&capture)
+        .arg("--alert")
+        .arg("--fuzz")
+        .arg("flip:0")
+        .output()
+        .expect("runs");
+    assert_eq!(refused.status.code(), Some(2), "it must not run");
+    let why = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        why.contains("--fuzz"),
+        "and it must name what it refused: {why}"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stdout).is_empty(),
+        "nothing may be printed as though it had run"
+    );
+
+    // And the mirror: a key with no alert to send is equally a mistake.
+    let orphan_key = Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+        .arg(&capture)
+        .arg("--alert-key")
+        .arg("site/health")
+        .output()
+        .expect("runs");
+    assert_eq!(orphan_key.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&orphan_key.stderr).contains("--alert"));
+}
+
 /// R311y700 ([REDACTED-REQ]) — the SPEED reaches the plan from the command line.
 ///
 /// The engine proves the arithmetic; this proves the flag is wired to it. A
