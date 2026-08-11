@@ -4518,6 +4518,276 @@ fn a_payload_format_rule_decodes_by_keyexpr_and_reports_message_coordinates() {
     );
 }
 
+/// A zenoh transport `Frame` carrying `record`, WITHOUT the stream link's
+/// length prefix — a datagram is its own framing unit.
+fn datagram_frame(record: &[u8]) -> Vec<u8> {
+    let mut frame = vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
+    frame.extend_from_slice(record);
+    frame
+}
+
+/// Ethernet + IPv4 + UDP from 50000 to the zenoh port, carrying `payload`.
+fn udp_to_zenoh(payload: &[u8]) -> Vec<u8> {
+    let mut udp = Vec::new();
+    udp.extend_from_slice(&50000u16.to_be_bytes());
+    udp.extend_from_slice(&7447u16.to_be_bytes());
+    udp.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    udp.extend_from_slice(&0u16.to_be_bytes());
+    udp.extend_from_slice(payload);
+    let mut ip = vec![0x45u8, 0];
+    ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+    ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+    ip.extend_from_slice(&[10, 0, 0, 1]);
+    ip.extend_from_slice(&[10, 0, 0, 2]);
+    // Checked, so the report this fixture produces carries no finding of its
+    // own: an `ip_checksum_invalid` beside the rows would be a second thing for
+    // a reader of a failure here to rule out.
+    let ip_sum = checksum(&[&ip[..20]]);
+    ip[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+    ip.extend_from_slice(&udp);
+    let mut eth = vec![0u8; 12];
+    eth.extend_from_slice(&[0x08, 0x00]);
+    eth.extend_from_slice(&ip);
+    while eth.len() < 60 {
+        eth.push(0);
+    }
+    eth
+}
+
+/// A DATAGRAM capture whose one message is a reply carrying `PROTOBUF` under
+/// `demo/a`.
+fn protobuf_datagram_capture() -> Vec<u8> {
+    let packet = udp_to_zenoh(&datagram_frame(&reply(7, "demo/a", PROTOBUF)));
+    wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &packet)],
+    )
+}
+
+/// A TLS capture whose one decrypted record carries that same reply, and the
+/// key log that opens it.
+fn protobuf_tls_capture() -> (Vec<u8>, String) {
+    let secret: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(11).wrapping_add(3))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(2));
+    let mut stream = client_hello(&random);
+    let mut enc = sealer(&secret);
+    stream.extend_from_slice(&seal_at(
+        &mut enc,
+        rustls::ContentType::ApplicationData,
+        &framed_frame(&reply(7, "demo/a", PROTOBUF)),
+        0,
+    ));
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &stream))],
+    );
+    let log = format!(
+        "CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+        hex(&random),
+        hex(&secret)
+    );
+    (file, log)
+}
+
+/// R311y701 ([REDACTED-REQ], PF1) — A PAYLOAD-FORMAT RULE REACHES EVERY ROW PRODUCER,
+/// NOT ONLY THE CLEARTEXT STREAM.
+///
+/// ## The defect, measured before the fix
+///
+/// R311y699 attached `--payload-format` inside `render_field_row`, which draws
+/// exactly one of this crate's three row producers. `render_sink_row` draws the
+/// other two — the rows a TLS decryption produced, and every datagram row — and
+/// carried no payload block at all. A reader who typed a rule and pointed it at
+/// a multicast capture or a decrypted session got a listing with NO payload
+/// section, which is the rendering for "no rule matched": the tool reported the
+/// absence of a finding rather than the absence of a lookup.
+///
+/// ## Why this shape gets its own test rather than a line in the R311y699 one
+///
+/// It is the FOURTH time a plane in this crate reached one producer — R311y668
+/// (`--flows`), R311y678 (the field layer), R311y699 (payloads), this. So the
+/// witness is built the way the repetition says to build it: the SAME rule and
+/// the SAME payload bytes driven through each producer, so a future plane can be
+/// checked by copying the shape rather than by remembering the lesson.
+///
+/// ## Anti-vacuity
+///
+/// Each capture is run WITHOUT the rule as well. The decoded fields must be
+/// absent there, or "the rule fired" would be a claim about a listing that
+/// prints those fields regardless.
+#[test]
+fn a_payload_format_rule_reaches_every_row_producer() {
+    let scratch = Scratch::new("payload-format-producers");
+    let run = |path: &std::path::Path, args: &[&str]| {
+        String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                .arg(path)
+                .args(args)
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned()
+    };
+
+    // PRODUCER 2 — the DATAGRAM rows.
+    let datagram = scratch.write("dgram.pcapng", &protobuf_datagram_capture());
+    let bare = run(&datagram, &["--fields"]);
+    assert!(
+        bare.contains("payload"),
+        "the fixture must reach the field listing at all, or every claim below \
+         is about an empty page: {bare}"
+    );
+    assert!(
+        !bare.contains("as protobuf"),
+        "ANTI-VACUITY: no rule, no payload block: {bare}"
+    );
+    let told = run(
+        &datagram,
+        &["--fields", "--payload-format", "demo/**=protobuf"],
+    );
+    assert!(
+        told.contains("payload `demo/a` as protobuf:"),
+        "a datagram row must carry the payload decoding -- it did not before \
+         R311y701, and the absence read as `no rule matched`: {told}"
+    );
+    assert!(
+        told.contains("1 = varint 150") && told.contains("2 = len \"zenoh\""),
+        "with the fields actually decoded: {told}"
+    );
+    // And in the OTHER rendering, which is a separate branch of the same
+    // function -- the shape R311y664 found rendering two different verdicts.
+    let json = run(
+        &datagram,
+        &["--fields", "--json", "--payload-format", "demo/**=protobuf"],
+    );
+    assert!(
+        json.contains("\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/a\"")
+            && json.contains("\"value\":\"varint 150\""),
+        "the JSON row carries it too: {json}"
+    );
+
+    // PRODUCER 3 — the DECRYPTED rows.
+    let (file, log) = protobuf_tls_capture();
+    let tls = scratch.write("tls.pcapng", &file);
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+    let keylog = keylog.to_string_lossy().into_owned();
+    let bare = run(&tls, &["--fields", "--keylog", &keylog]);
+    assert!(
+        bare.contains("(decrypted)"),
+        "the fixture must actually decrypt, or this half tests nothing: {bare}"
+    );
+    assert!(
+        !bare.contains("as protobuf"),
+        "ANTI-VACUITY: no rule, no payload block: {bare}"
+    );
+    let told = run(
+        &tls,
+        &[
+            "--fields",
+            "--keylog",
+            &keylog,
+            "--payload-format",
+            "demo/**=protobuf",
+        ],
+    );
+    assert!(
+        told.contains("payload `demo/a` as protobuf:"),
+        "a decrypted row must carry it as well: {told}"
+    );
+    assert!(
+        told.contains("1 = varint 150"),
+        "with the fields decoded out of the PLAINTEXT: {told}"
+    );
+}
+
+/// `{ 1: 150, 2: { 1: 7, 2: "in" } }` — the nested shape, by hand.
+const NESTED_PROTOBUF: &[u8] = &[
+    0x08, 0x96, 0x01, // 1: varint 150
+    0x12, 0x06, // 2: len 6
+    0x08, 0x07, // 2.1: varint 7
+    0x12, 0x02, b'i', b'n', // 2.2: len "in"
+];
+
+/// R311y701 ([REDACTED-REQ], PF3) — A NESTED PAYLOAD IS WALKED ALL THE WAY DOWN, run
+/// through the binary rather than only through the decoder.
+///
+/// The decoder's own tests pin the walk. This pins that a person pointing the
+/// tool at a capture SEES it: R311y664's rule is that a library nobody runs
+/// hides its own lies, and the lie available here is the rebase — the nested
+/// spans are computed against the sub-buffer and then moved twice, once into
+/// the payload and once into the message.
+#[test]
+fn a_nested_payload_is_decoded_to_its_leaves_at_the_command_line() {
+    let scratch = Scratch::new("payload-format-nested");
+    let mut client = Vec::new();
+    client.extend_from_slice(&framed_frame(&query(7, "demo/**")));
+    let mut server = Vec::new();
+    server.extend_from_slice(&framed_frame(&reply(7, "demo/a", NESTED_PROTOBUF)));
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[
+            (0, 1_000_000, &tcp_packet(1000, &client)),
+            (0, 1_030_000, &tcp_packet_reverse(1000, &server)),
+        ],
+    );
+    let capture = scratch.write("nested.pcapng", &file);
+
+    let out = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--fields")
+            .arg("--payload-format")
+            .arg("demo/**=protobuf")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+
+    assert!(
+        out.contains("1 = varint 150"),
+        "the outer fields are still walked: {out}"
+    );
+    assert!(
+        out.contains("2 = len 2 field(s)"),
+        "and a length field holding a message says how many are under it \
+         rather than printing a byte count: {out}"
+    );
+    assert!(
+        out.contains("2.1 = varint 7") && out.contains("2.2 = len \"in\""),
+        "the LEAVES reach the listing, named by the route to them -- before \
+         R311y701 the walk stopped at `2`: {out}"
+    );
+
+    // THE COORDINATES, one layer in. Every span in this listing is
+    // message-relative; a nested span is computed against the sub-buffer and
+    // has to be moved twice to get there, so it is the one most likely to be
+    // in the wrong space. `2.1` begins two bytes past where `2`'s body does.
+    let outer_at = out
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            let (span, name) = line.strip_prefix('[')?.split_once(']')?;
+            (name.trim().starts_with("2 = len")).then(|| {
+                span.split_once("..")
+                    .and_then(|(start, _)| start.parse::<usize>().ok())
+            })?
+        })
+        .expect("the nested field is in the listing");
+    assert!(
+        out.contains(&format!(
+            "[{}..{}] 2.1 = varint 7",
+            outer_at + 2,
+            outer_at + 4
+        )),
+        "the first nested field sits at the parent's tag and length plus its \
+         own offset (parent begins at {outer_at}): {out}"
+    );
+}
+
 /// R311y699 ([REDACTED-REQ]) — a format name this build has no decoder for is REFUSED
 /// at the command line, and the refusal says what it does have.
 ///

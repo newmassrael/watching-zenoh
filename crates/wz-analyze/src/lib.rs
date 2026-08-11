@@ -1318,6 +1318,7 @@ fn field_lines(
                     space: OffsetSpace::CiphertextRecord,
                 },
                 row,
+                payload_formats,
             );
         }
         if let Some((_, n)) = decrypted.omitted.iter().find(|(f, _)| *f == flow.flow) {
@@ -1371,6 +1372,7 @@ fn field_lines(
         messages_per_flow,
         &mut emitted,
         &mut listings,
+        payload_formats,
     );
     render_listings(&listings, format)
 }
@@ -2303,6 +2305,7 @@ fn datagram_field_rows(
     messages_per_flow: Option<usize>,
     emitted: &mut usize,
     listings: &mut Vec<FlowListing>,
+    payload_formats: &wz_capture::payload::formats::FormatMap<'_>,
 ) {
     if dissection.datagram_flows().is_empty() {
         return;
@@ -2400,6 +2403,7 @@ fn datagram_field_rows(
                     space: OffsetSpace::Packet,
                 },
                 &row,
+                payload_formats,
             );
         }
         // R311y679 — the SCOUTING list, which is where a discovery capture's
@@ -2470,6 +2474,7 @@ fn datagram_field_rows(
                     space: OffsetSpace::Packet,
                 },
                 &FieldRow::Walked(field),
+                payload_formats,
             );
         }
         if omitted > 0 {
@@ -2534,7 +2539,26 @@ impl RowAt {
 /// not merged with it: that one takes a `PassiveFrame` and this one takes what
 /// the sink kept, and threading a frame that does not exist through the other
 /// would mean inventing one.
-fn render_sink_row(out: &mut String, format: Format, at: RowAt, row: &FieldRow) {
+///
+/// # R311y701 — and the payload rules reach it, which they did not
+///
+/// R311y699 attached `--payload-format` to `render_field_row` and stopped there.
+/// This function draws BOTH of the other two row producers — the decrypted rows a
+/// TLS sink kept, and every datagram row — so a rule a reader typed silently
+/// covered one third of their capture. It did not report a miss; the block was
+/// simply absent, which reads as "no rule matched".
+///
+/// That is the fourth time a new plane in this crate reached one row producer:
+/// R311y668 (`--flows`), R311y678 (the field layer), R311y699 (payloads), here.
+/// The rule the repetition earns: a plane is not attached until every producer
+/// AND the datagram half have it.
+fn render_sink_row(
+    out: &mut String,
+    format: Format,
+    at: RowAt,
+    row: &FieldRow,
+    payload_formats: &wz_capture::payload::formats::FormatMap<'_>,
+) {
     let RowAt {
         flow,
         direction,
@@ -2555,9 +2579,10 @@ fn render_sink_row(out: &mut String, format: Format, at: RowAt, row: &FieldRow) 
     match (format, row) {
         (Format::Json, FieldRow::Walked(field)) => out.push_str(&format!(
             "{{\"from\":\"{from}\",\"to\":\"{to}\",\"direction\":\"{dir}\",\
-             \"stream_offset\":{origin}{},\"decrypted\":{decrypted},\"field\":{}}}",
+             \"stream_offset\":{origin}{},\"decrypted\":{decrypted},\"field\":{}{}}}",
             space.json(),
-            wz_session_core::dissect::to_json(field)
+            wz_session_core::dissect::to_json(field),
+            payload_block(field, payload_formats, Format::Json)
         )),
         // R311y683 — a row the walker refused is still a row, in both formats.
         // The key is `declined`, the same one the cleartext path uses, because
@@ -2576,6 +2601,7 @@ fn render_sink_row(out: &mut String, format: Format, at: RowAt, row: &FieldRow) 
                 space.note()
             ));
             push_field_text(out, field, 2);
+            out.push_str(&payload_block(field, payload_formats, Format::Text));
         }
         (Format::Text, FieldRow::Declined(why)) => {
             let how = if decrypted { " (decrypted)" } else { "" };
@@ -2692,6 +2718,22 @@ pub struct Sample {
 /// throughput plane. A capture that began after the declarations therefore
 /// replays less than it holds, and [`Samples::unresolved`] is how many — a
 /// floor reported as a floor.
+///
+/// # R311y701 (RP2) — and DATAGRAM flows, which this read did not cover
+///
+/// R311y700 walked `dissection.flows()`, which is the TCP half. A multicast or
+/// scouting capture therefore yielded ZERO samples and said nothing at all: a
+/// replay of it printed an empty plan, which is exactly what a capture holding
+/// no application traffic prints. That is the fourth arrival of one shape in
+/// this crate — R311y668 (`--flows`), R311y678 (the field layer), R311y699
+/// (payload formats), here — and the rule it earns is stated on
+/// [`render_sink_row`].
+///
+/// The datagram half is walked the way [`datagram_field_rows`] walks it: a
+/// second read of the caller's own bytes, because a datagram frame's offset IS
+/// its packet index and the payload is not retained anywhere. What that read
+/// cannot reach is COUNTED rather than skipped ([`Samples::unreachable`]) — a
+/// plan short by rows nobody accounted for is a plan that looks whole.
 pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, CaptureError> {
     let mut dissection = Dissection::from_capture(capture)?;
     let (mut opener, _) = CaptureOpener::from_secrets_blocks(dissection.decryption_secrets());
@@ -2707,7 +2749,59 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
             collect_sample(flow, frame, &mut out);
         }
     }
+    collect_datagram_samples(capture, &dissection, &mut out);
     Ok(out)
+}
+
+/// R311y701 (RP2) — the samples a DATAGRAM capture carried.
+///
+/// Scouting datagrams are deliberately NOT walked: a Scout or a Hello is
+/// discovery, carries no key expression and no application payload, and a
+/// replay of one would be a claim about traffic the application never sent.
+fn collect_datagram_samples(capture: &[u8], dissection: &Dissection, out: &mut Samples) {
+    let flows = dissection.datagram_flows();
+    if flows.is_empty() {
+        return;
+    }
+    let Some(file) = Reread::of(capture) else {
+        // Every datagram message is out of reach, and the count says so rather
+        // than the plan quietly holding only the stream half.
+        out.unreachable += flows.iter().map(|f| f.frames.len()).sum::<usize>();
+        return;
+    };
+    for flow in flows {
+        for frame in &flow.frames {
+            let Some(packet) = file.packet(frame.stream_offset) else {
+                out.unreachable += 1;
+                continue;
+            };
+            let Ok(wz_capture::link::Transport::Udp(datagram)) =
+                wz_capture::link::decapsulate(packet.link_type, packet.index, packet.data)
+            else {
+                out.unreachable += 1;
+                continue;
+            };
+            // The same three-axis check the field listing makes, and for the
+            // same reason: these bytes are found by an INHERITED coordinate,
+            // and a replay built out of a packet that did not vouch for itself
+            // would re-publish someone else's payload under this keyexpr.
+            if packet_disagreement(&datagram, &flow.flow, frame.direction, frame.stream_offset)
+                .any()
+            {
+                out.unreachable += 1;
+                continue;
+            }
+            let Some(message) = datagram.payload.get(frame.unit_offset..) else {
+                out.unreachable += 1;
+                continue;
+            };
+            let FieldRow::Walked(field) = walk_plaintext(message, frame) else {
+                out.undecodable += 1;
+                continue;
+            };
+            push_sample(&field, frame.direction, frame.stream_offset, out);
+        }
+    }
 }
 
 /// What [`samples`] recovered, and what it could not.
@@ -2720,6 +2814,15 @@ pub struct Samples {
     pub unresolved: usize,
     /// Messages this walk could not read at all.
     pub undecodable: usize,
+    /// R311y701 (RP2) — datagram messages this walk could not REACH: the
+    /// capture would not parse a second time, the packet the dissection named
+    /// is not in that parse, or the packet disagreed about which flow, which
+    /// direction or which index it is.
+    ///
+    /// Separate from [`Self::undecodable`] because the two send a reader to
+    /// different places: that one is a message this walker does not understand,
+    /// this one is a disagreement between two reads of one file.
+    pub unreachable: usize,
 }
 
 /// Pull one frame's sample, if it has one.
@@ -2728,7 +2831,6 @@ fn collect_sample(
     frame: &wz_session_core::passive::PassiveFrame,
     out: &mut Samples,
 ) {
-    use wz_session_core::dissect::FieldValue;
     let assembler = flow.assembler(frame.direction);
     let stream = assembler.stream();
     let row = walk_message(stream, assembler.retained_from(), frame);
@@ -2736,7 +2838,24 @@ fn collect_sample(
         out.undecodable += 1;
         return;
     };
-    match keyexpr_and_payload(&field) {
+    push_sample(&field, frame.direction, frame.stream_offset, out);
+}
+
+/// R311y701 (RP2) — the sample inside ONE walked message, whichever half of the
+/// capture produced it.
+///
+/// Shared by the stream and datagram walks on purpose: a second copy of this
+/// rule would be a second opinion about what counts as a sample and about which
+/// non-sample is `unresolved`, and the two halves would drift exactly where a
+/// reader compares their counts.
+fn push_sample(
+    field: &wz_session_core::dissect::Field,
+    direction: wz_session_core::passive::Direction,
+    origin: usize,
+    out: &mut Samples,
+) {
+    use wz_session_core::dissect::FieldValue;
+    match keyexpr_and_payload(field) {
         Some((keyexpr, payload)) => {
             let FieldValue::Bytes(bytes) = &payload.value else {
                 return;
@@ -2747,12 +2866,12 @@ fn collect_sample(
             out.items.push(Sample {
                 keyexpr,
                 payload: bytes.clone(),
-                direction: frame.direction,
-                origin: frame.stream_offset,
+                direction,
+                origin,
             });
         }
         None => {
-            if subtree_payload_bytes(&field).is_some() {
+            if subtree_payload_bytes(field).is_some() {
                 out.unresolved += 1;
             }
         }
@@ -4901,6 +5020,173 @@ pub mod payload_formats {
         }
     }
 
+    /// R311y701 (PF3) — how deep a nested walk goes before it stops walking.
+    ///
+    /// A payload is attacker-influenced bytes and a length-delimited field can
+    /// name another one forever, so the recursion is bounded like every other
+    /// walk in this workspace. Eight is past any hand-written schema this
+    /// analyzer is pointed at, and what sits below it is not silently dropped —
+    /// the field says the nesting went further than this reader walks.
+    const MAX_NESTING: usize = 8;
+
+    /// Is this run of bytes TEXT rather than a nested message?
+    ///
+    /// # Why the question is asked this way, and what it cannot settle
+    ///
+    /// Protobuf's wire format does not distinguish a string, a nested message
+    /// and a blob: all three are wire type 2, and the ambiguity is IN THE
+    /// FORMAT rather than in this reader. So there is no rule that is right
+    /// every time and the choice is which mistake to make.
+    ///
+    /// Valid UTF-8 with no control characters is a strong signal for a string
+    /// and a weak one for a message: a nested message begins with a tag byte,
+    /// and the overwhelming majority of tags (any field with a varint under a
+    /// small number, any 64-bit or 32-bit field) put a control byte or a
+    /// non-UTF-8 byte in the first two positions. "Parses as protobuf" is by
+    /// contrast very permissive — two bytes like `"Px"` parse cleanly as field
+    /// 10 varint 120 — so trying the parse first would rename short strings as
+    /// messages far more often than this rule hides a message.
+    fn text_like(raw: &[u8]) -> Option<&str> {
+        let text = core::str::from_utf8(raw).ok()?;
+        if text.is_empty() {
+            return None;
+        }
+        text.chars()
+            .all(|c| !c.is_control() || c == '\n' || c == '\t' || c == '\r')
+            .then_some(text)
+    }
+
+    /// Walk `payload`, whose first byte sits at `base` in the message this
+    /// decoding will be rendered against, appending to `out` under `prefix`.
+    ///
+    /// R311y701 — `base` and `prefix` are what make the recursion honest. A
+    /// nested field's span must be in the SAME coordinate space as its parent's
+    /// or a reader cannot line the two up, and its path must name the route to
+    /// it (`2.1`) rather than restart at `1` — a listing with two fields called
+    /// `1` says nothing about where either lives.
+    fn walk(
+        payload: &[u8],
+        base: usize,
+        depth: usize,
+        prefix: &str,
+        out: &mut Vec<PayloadField>,
+    ) -> Result<(), PayloadFormatError> {
+        let mut at = 0usize;
+        while at < payload.len() {
+            let start = at;
+            let tag = varint(payload, &mut at).map_err(|e| rebase(e, base))?;
+            let number = tag >> 3;
+            let wire = tag & 0x07;
+            let Some(kind) = wire_type_name(wire) else {
+                // Wire types 3 and 4 are the deprecated group markers and 6
+                // and 7 are unassigned. A reader that stepped over one
+                // would not know where it ends, so this stops -- the same
+                // rule the QUIC frame walk follows for an unknown type.
+                return Err(PayloadFormatError::Malformed {
+                    at: base + start,
+                    why: format!("wire type {wire} has no length rule"),
+                });
+            };
+            if number == 0 {
+                // Field number zero is invalid in every protobuf version,
+                // and it is what a run of zero bytes decodes to -- which is
+                // the single most likely thing to be under a WRONG mapping.
+                return Err(PayloadFormatError::NotThisFormat);
+            }
+            let path = if prefix.is_empty() {
+                format!("{number}")
+            } else {
+                format!("{prefix}.{number}")
+            };
+            // The children of a nested field are collected into their own
+            // vector so the PARENT row can be pushed before them: a listing
+            // reads top-down, and a walk that pushed as it went would put
+            // `2.1` above `2`.
+            let mut children = Vec::new();
+            let value = match wire {
+                0 => {
+                    let v = varint(payload, &mut at).map_err(|e| rebase(e, base))?;
+                    format!("{v}")
+                }
+                1 | 5 => {
+                    let width = if wire == 1 { 8 } else { 4 };
+                    let end = at
+                        .checked_add(width)
+                        .ok_or(PayloadFormatError::Truncated(base + at))?;
+                    let raw = payload
+                        .get(at..end)
+                        .ok_or(PayloadFormatError::Truncated(base + at))?;
+                    at = end;
+                    format!(
+                        "0x{}",
+                        raw.iter()
+                            .rev()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<String>()
+                    )
+                }
+                _ => {
+                    let len = varint(payload, &mut at).map_err(|e| rebase(e, base))? as usize;
+                    let body = at;
+                    let end = at
+                        .checked_add(len)
+                        .ok_or(PayloadFormatError::Truncated(base + at))?;
+                    let raw = payload
+                        .get(at..end)
+                        .ok_or(PayloadFormatError::Truncated(base + at))?;
+                    at = end;
+                    // Rendered as text when it IS text, because a
+                    // length-delimited field is a string as often as it is
+                    // a nested message and a reader should not have to
+                    // decode hex to find out.
+                    match text_like(raw) {
+                        Some(text) => format!("{text:?}"),
+                        // R311y701 (PF3) — otherwise it may be a NESTED
+                        // MESSAGE, which nesting is common enough in real
+                        // schemas that stopping here showed a reader one
+                        // layer of their own data.
+                        None if depth >= MAX_NESTING => {
+                            format!("{len} byte(s), nested deeper than this reader walks")
+                        }
+                        None => {
+                            // A TRY, and a failure falls back rather than
+                            // rejecting the message: these bytes may simply be
+                            // a blob, and a blob is not a malformed message.
+                            // The whole sub-buffer must be consumed and yield
+                            // at least one field, or "it parsed" would be a
+                            // statement about a prefix.
+                            match walk(raw, base + body, depth + 1, &path, &mut children) {
+                                Ok(()) if !children.is_empty() => {
+                                    format!("{} field(s)", children.len())
+                                }
+                                _ => {
+                                    children.clear();
+                                    format!("{len} byte(s)")
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            out.push(PayloadField {
+                path,
+                value: format!("{kind} {value}"),
+                start: base + start,
+                end: base + at,
+            });
+            out.append(&mut children);
+        }
+        Ok(())
+    }
+
+    /// Move an error's offset into the outer payload's coordinates.
+    fn rebase(err: PayloadFormatError, base: usize) -> PayloadFormatError {
+        match err {
+            PayloadFormatError::Truncated(at) => PayloadFormatError::Truncated(base + at),
+            other => other,
+        }
+    }
+
     impl PayloadFormat for Protobuf {
         fn name(&self) -> &str {
             "protobuf"
@@ -4915,76 +5201,7 @@ pub mod payload_formats {
                 return Err(PayloadFormatError::NotThisFormat);
             }
             let mut out = Vec::new();
-            let mut at = 0usize;
-            while at < payload.len() {
-                let start = at;
-                let tag = varint(payload, &mut at)?;
-                let number = tag >> 3;
-                let wire = tag & 0x07;
-                let Some(kind) = wire_type_name(wire) else {
-                    // Wire types 3 and 4 are the deprecated group markers and 6
-                    // and 7 are unassigned. A reader that stepped over one
-                    // would not know where it ends, so this stops -- the same
-                    // rule the QUIC frame walk follows for an unknown type.
-                    return Err(PayloadFormatError::Malformed {
-                        at: start,
-                        why: format!("wire type {wire} has no length rule"),
-                    });
-                };
-                if number == 0 {
-                    // Field number zero is invalid in every protobuf version,
-                    // and it is what a run of zero bytes decodes to -- which is
-                    // the single most likely thing to be under a WRONG mapping.
-                    return Err(PayloadFormatError::NotThisFormat);
-                }
-                let value = match wire {
-                    0 => {
-                        let v = varint(payload, &mut at)?;
-                        format!("{v}")
-                    }
-                    1 | 5 => {
-                        let width = if wire == 1 { 8 } else { 4 };
-                        let end = at
-                            .checked_add(width)
-                            .ok_or(PayloadFormatError::Truncated(at))?;
-                        let raw = payload
-                            .get(at..end)
-                            .ok_or(PayloadFormatError::Truncated(at))?;
-                        at = end;
-                        format!(
-                            "0x{}",
-                            raw.iter()
-                                .rev()
-                                .map(|b| format!("{b:02x}"))
-                                .collect::<String>()
-                        )
-                    }
-                    _ => {
-                        let len = varint(payload, &mut at)? as usize;
-                        let end = at
-                            .checked_add(len)
-                            .ok_or(PayloadFormatError::Truncated(at))?;
-                        let raw = payload
-                            .get(at..end)
-                            .ok_or(PayloadFormatError::Truncated(at))?;
-                        at = end;
-                        // Rendered as text when it IS text, because a
-                        // length-delimited field is a string as often as it is
-                        // a nested message and a reader should not have to
-                        // decode hex to find out.
-                        match core::str::from_utf8(raw) {
-                            Ok(text) if !text.is_empty() => format!("{text:?}"),
-                            _ => format!("{len} byte(s)"),
-                        }
-                    }
-                };
-                out.push(PayloadField {
-                    path: format!("{number}"),
-                    value: format!("{kind} {value}"),
-                    start,
-                    end: at,
-                });
-            }
+            walk(payload, 0, 0, "", &mut out)?;
             Ok(out)
         }
     }
@@ -5005,6 +5222,145 @@ pub mod payload_formats {
     /// Every built-in name, for the usage text and for a refusal that can say
     /// what IS available.
     pub const BUILTIN_NAMES: &[&str] = &["protobuf"];
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// R311y701 (PF3) — A NESTED MESSAGE IS WALKED, and its fields carry
+        /// the ROUTE to them and spans in the OUTER payload's coordinates.
+        ///
+        /// Before this round wire type 2 was rendered as text or as a byte
+        /// count, so a reader whose schema nests — which real schemas do — saw
+        /// exactly one layer of their own data and no sign there was more.
+        #[test]
+        fn a_nested_message_is_walked_and_its_paths_name_the_route() {
+            // { 1: 150, 2: { 1: 7, 2: "in" } }
+            let inner = [0x08u8, 0x07, 0x12, 0x02, b'i', b'n'];
+            let mut outer = vec![0x08u8, 0x96, 0x01, 0x12, inner.len() as u8];
+            outer.extend_from_slice(&inner);
+
+            let fields = Protobuf.decode(&outer).expect("a protobuf message");
+            let seen: Vec<(&str, &str, usize, usize)> = fields
+                .iter()
+                .map(|f| (f.path.as_str(), f.value.as_str(), f.start, f.end))
+                .collect();
+            assert_eq!(
+                seen,
+                vec![
+                    ("1", "varint 150", 0, 3),
+                    // The parent is rendered as a COUNT of what is under it and
+                    // stands ABOVE its children, so the listing reads top-down.
+                    ("2", "len 2 field(s)", 3, 11),
+                    // R311y677's rule, one layer in: the inner spans are in the
+                    // outer payload's space, so a reader can line them up
+                    // against the bytes. `5` is where the nested body begins.
+                    ("2.1", "varint 7", 5, 7),
+                    ("2.2", "len \"in\"", 7, 11),
+                ],
+                "the walk must reach the nested fields and name the route to them"
+            );
+        }
+
+        /// R311y701 (PF3) — TWO layers, because one does not test the rebase.
+        ///
+        /// MEASURED: dropping the accumulated `base` from the recursive call
+        /// left the one-layer test above GREEN, and it has to — at the top
+        /// level `base` is zero, so `base + body` and `body` are the same
+        /// number. The offset only diverges from the second layer down, which
+        /// is where a probe put it and where this witness now sits.
+        #[test]
+        fn a_span_two_layers_in_is_still_in_the_outer_payloads_coordinates() {
+            // { 1: { 1: { 1: 7 } } }
+            let innermost = [0x08u8, 0x07];
+            let mid = [0x0Au8, innermost.len() as u8, innermost[0], innermost[1]];
+            let mut outer = vec![0x0Au8, mid.len() as u8];
+            outer.extend_from_slice(&mid);
+
+            let fields = Protobuf.decode(&outer).expect("a protobuf message");
+            let seen: Vec<(&str, usize, usize)> = fields
+                .iter()
+                .map(|f| (f.path.as_str(), f.start, f.end))
+                .collect();
+            assert_eq!(
+                seen,
+                vec![("1", 0, 6), ("1.1", 2, 6), ("1.1.1", 4, 6)],
+                "each layer's body begins two bytes past its parent's, and the \
+                 offsets ACCUMULATE"
+            );
+        }
+
+        /// R311y701 (PF3) — bytes that are NOT a message fall back rather than
+        /// rejecting the whole payload.
+        ///
+        /// A length-delimited field is a string, a message OR a blob, and the
+        /// wire format does not say which. A recursion that treated "does not
+        /// parse" as malformed would refuse every payload carrying a JPEG.
+        #[test]
+        fn a_length_field_that_is_not_a_message_falls_back_to_its_byte_count() {
+            // Field 1, four bytes that start with a valid-looking tag and then
+            // run out: `0x08` says field 1 varint and nothing follows it.
+            let blob = [0xFFu8, 0xD8, 0xFF, 0x08];
+            let mut outer = vec![0x0Au8, blob.len() as u8];
+            outer.extend_from_slice(&blob);
+
+            let fields = Protobuf.decode(&outer).expect("still a protobuf message");
+            assert_eq!(
+                fields.len(),
+                1,
+                "the blob contributes no children: {fields:?}"
+            );
+            assert_eq!(fields[0].value, "len 4 byte(s)");
+        }
+
+        /// R311y701 (PF3) — text still wins over a nested parse, and the rule
+        /// that makes that safe is stated on [`text_like`].
+        ///
+        /// `"Px"` parses cleanly as field 10 varint 120. It is a string, and a
+        /// walker that tried the parse first would rename it.
+        #[test]
+        fn printable_bytes_are_text_even_when_they_would_parse_as_a_message() {
+            let mut outer = vec![0x0Au8, 2];
+            outer.extend_from_slice(b"Px");
+            let fields = Protobuf.decode(&outer).expect("a protobuf message");
+            assert_eq!(fields[0].value, "len \"Px\"");
+            assert_eq!(fields.len(), 1, "and nothing was walked into it");
+
+            // The control-character half of the rule, which is what lets a
+            // nested message through: the same two bytes with a control byte in
+            // front are not text.
+            assert!(text_like(b"Px").is_some());
+            assert!(text_like(&[0x08, 0x07]).is_none());
+        }
+
+        /// R311y701 (PF3) — the depth bound is REPORTED rather than silently
+        /// stopping, the rule every bound in this workspace answers to.
+        #[test]
+        fn nesting_past_the_bound_says_so_rather_than_going_quiet() {
+            // MAX_NESTING + 1 layers, each one field 1 wrapping the next, with
+            // a two-byte non-text leaf so no layer is mistaken for a string.
+            let mut body = vec![0x08u8, 0x07];
+            for _ in 0..=MAX_NESTING {
+                let mut wrapped = vec![0x0Au8, body.len() as u8];
+                wrapped.extend_from_slice(&body);
+                body = wrapped;
+            }
+            let fields = Protobuf.decode(&body).expect("a protobuf message");
+            let deepest = fields.last().expect("at least one field");
+            assert!(
+                deepest
+                    .value
+                    .contains("nested deeper than this reader walks"),
+                "the bottom of the walk says the bound bit: {fields:?}"
+            );
+            // And the bound is the one declared, counted by path depth.
+            assert_eq!(
+                deepest.path.matches('.').count(),
+                MAX_NESTING,
+                "the walk went exactly as deep as it says it does: {fields:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
