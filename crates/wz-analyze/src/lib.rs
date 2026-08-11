@@ -59,6 +59,13 @@ pub struct Options {
     pub per_flow: bool,
     /// R311y667 (§1.2a) — list the decoded MESSAGES, not just how many.
     pub per_message: bool,
+    /// R311y709 (Y2) — the short-header connection id length, for a capture
+    /// that begins MID-CONNECTION.
+    ///
+    /// Not on the wire and not inferable: both endpoints remember it from a
+    /// handshake such a capture does not contain. `None` leaves the reader
+    /// where it was, refusing 1-RTT packets by name.
+    pub quic_cid_len: Option<usize>,
     /// R311y670 (§1.2a) — UDP ports the caller declares to be QUIC.
     ///
     /// The one fact about a mid-connection QUIC capture that cannot come from
@@ -207,6 +214,12 @@ OPTIONS:
                       capture usually has one log per endpoint. Keys carried
                       inside the capture's own Decryption Secrets Blocks are
                       used without this flag.
+    --quic-cid-len <n>
+                      the short-header connection id length, for a capture that
+                      begins mid-connection. Not on the wire; both endpoints
+                      remember it from a handshake such a capture lacks. Used
+                      only where the key log holds exactly ONE connection, since
+                      the ClientHello that names which one is also absent.
     --flows           list every flow, stream and datagram: endpoints, framing,
                       messages decoded, scouting messages, and for an encrypted
                       one whether its plaintext was read
@@ -263,6 +276,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut per_flow = false;
     let mut per_message = false;
     let mut quic_ports: Vec<u16> = Vec::new();
+    let mut quic_cid_len: Option<usize> = None;
     let mut payload_formats: Vec<(String, String)> = Vec::new();
     let mut max_messages: Option<usize> = None;
     let mut census = Census::default();
@@ -321,6 +335,22 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
                         .map_err(|_| UsageError::BadValue("--quic", raw.clone()))?,
                 );
             }
+            // R311y709 (Y2) — bounded at the RFC's own maximum, refused rather
+            // than clamped: a caller who typed 21 has a wrong number in hand,
+            // and silently reading it as 20 would hide that from them.
+            "--quic-cid-len" => {
+                at += 1;
+                let raw = args
+                    .get(at)
+                    .ok_or(UsageError::MissingValue("--quic-cid-len"))?;
+                let n = raw
+                    .parse::<usize>()
+                    .map_err(|_| UsageError::BadValue("--quic-cid-len", raw.clone()))?;
+                if n > 20 {
+                    return Err(UsageError::BadValue("--quic-cid-len", raw.clone()));
+                }
+                quic_cid_len = Some(n);
+            }
             "--max-messages" => {
                 at += 1;
                 let raw = args
@@ -362,6 +392,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
         per_flow,
         per_message,
         quic_ports,
+        quic_cid_len,
         payload_formats,
         max_messages,
         census,
@@ -476,6 +507,7 @@ pub fn analyze_declaring_quic(
         per_message,
         messages_per_flow,
         quic_ports,
+        quic_cid_len: None,
         payload_rules: &[],
         census: Census::default(),
         per_field: false,
@@ -515,6 +547,9 @@ pub struct Request<'a> {
     pub messages_per_flow: Option<usize>,
     /// UDP ports the caller declares to be QUIC.
     pub quic_ports: &'a [u16],
+    /// R311y709 (Y2) — the short-header connection id length a mid-connection
+    /// capture cannot supply from its own bytes.
+    pub quic_cid_len: Option<usize>,
     /// R311y699 ([REDACTED-REQ]) — payload format rules as `(keyexpr pattern, format
     /// name)`. Applied to the field layer, so they need `per_field`.
     pub payload_rules: &'a [(String, String)],
@@ -538,6 +573,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
         per_message,
         messages_per_flow,
         quic_ports,
+        quic_cid_len,
         payload_rules,
         census,
         per_field,
@@ -643,7 +679,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     // no key log still yields its handshake, its version, its connection ID and
     // its ClientHello, which is exactly what tells a reader whether the key log
     // they are about to fetch is the right one.
-    let (quic, quic_flows) = quic_pass(capture, &dissection, opener.log());
+    let (quic, quic_flows) = quic_pass(capture, &dissection, opener.log(), quic_cid_len);
     // R311y706 (Y5) — and the report SAYS the selector did not reach this pass.
     //
     // The register carried this as "--select does not reach the QUIC pass", and
@@ -919,6 +955,7 @@ fn quic_pass(
     capture: &[u8],
     dissection: &Dissection,
     log: &KeyLog,
+    cid_len: Option<usize>,
 ) -> (wz_capture::quic::QuicDecryption, Vec<QuicFlowOutcome>) {
     use wz_session_core::passive::Direction;
 
@@ -943,7 +980,19 @@ fn quic_pass(
     };
     let mut openers: Vec<(wz_capture::link::FlowKey, QuicFlowOpener)> = keys
         .iter()
-        .map(|flow| (*flow, QuicFlowOpener::new(log.clone())))
+        .map(|flow| {
+            let opener = QuicFlowOpener::new(log.clone());
+            // R311y709 (Y2) — the declaration reaches the OPENER, which is the
+            // half y698's own register recorded as the failure mode one round
+            // over: a flag the parser reads and nothing acts on.
+            (
+                *flow,
+                match cid_len {
+                    Some(len) => opener.declaring_short_connection_id_len(len),
+                    None => opener,
+                },
+            )
+        })
         .collect();
 
     let mut at = 0usize;
@@ -3830,6 +3879,7 @@ mod tests {
                 per_flow: false,
                 per_message: false,
                 quic_ports: Vec::new(),
+                quic_cid_len: None,
                 payload_formats: Vec::new(),
                 max_messages: None,
                 census: Census::default(),
@@ -3858,6 +3908,7 @@ mod tests {
                 per_flow: true,
                 per_message: true,
                 quic_ports: Vec::new(),
+                quic_cid_len: None,
                 payload_formats: Vec::new(),
                 max_messages: None,
                 census: Census::default(),
@@ -5804,6 +5855,90 @@ mod quic_pass_tests {
         (capture, log_text(random, 1), STREAM)
     }
 
+    /// R311y709 (Y2) — the same connection, captured AFTER its handshake.
+    ///
+    /// The two Initial packets are simply absent, which is what a tap started
+    /// on a running deployment produces. Nothing in what remains carries the
+    /// connection id length, the version, or the ClientHello random.
+    fn mid_connection_quic_capture(random: &[u8; 32]) -> (Vec<u8>, String, &'static [u8]) {
+        const STREAM: &[u8] = b"a zenoh session over quic";
+        let client_keys = QuicKeys::derive(Suite::Aes128GcmSha256, &application_secret(false, 0));
+        let payload = stream_frame(0, 0, STREAM);
+        let (h, o) = short_header(&SCID, 1);
+        let client_one_rtt = protect(&client_keys, 1, &h, o, &payload);
+
+        let packets = [udp(true, &client_one_rtt)];
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+        (capture, log_text(random, 1), STREAM)
+    }
+
+    /// R311y709 (Y2) — A MID-CONNECTION CAPTURE OPENS ONLY ONCE THE LENGTH IS
+    /// DECLARED, AND THE FLAG IS WHAT DECLARES IT.
+    ///
+    /// Both arms run the same bytes through the same public entry point and
+    /// differ in ONE option, which is what makes this a test of the wiring
+    /// rather than of the opener — that half is pinned in `wz-tls-record`. The
+    /// failure this guards is the one R311y669 measured on `--max-messages` and
+    /// R311y698's own register recorded again: a flag the parser reads and
+    /// nothing acts on.
+    ///
+    /// `--quic` is on BOTH arms. Without it neither is recognised as QUIC at all
+    /// (a short header cannot establish a flow — `wz_capture::quic`'s whole
+    /// reason for being flow-scoped), so leaving it off the first arm would make
+    /// the difference between the arms two options instead of one.
+    #[test]
+    fn a_mid_connection_quic_capture_opens_only_once_the_length_is_declared() {
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(5).wrapping_add(2));
+        let (capture, keylog, stream) = mid_connection_quic_capture(&random);
+
+        let run = |cid_len| {
+            analyze_request(&Request {
+                capture: &capture,
+                keylog: Some(keylog.as_bytes()),
+                format: Format::Text,
+                per_flow: false,
+                per_message: false,
+                messages_per_flow: None,
+                quic_ports: &[4433],
+                quic_cid_len: cid_len,
+                payload_rules: &[],
+                census: Census::default(),
+                per_field: false,
+                select: None,
+            })
+            .expect("the capture reads")
+            .0
+        };
+
+        // THE POPULATION: without the declaration the flow is QUIC and shut.
+        let undeclared = run(None);
+        assert!(
+            undeclared.contains("QUIC: 1 flow(s)"),
+            "the flow must be recognised on both arms or the difference is not \
+             the length: {undeclared}"
+        );
+        assert!(
+            undeclared.contains("NOT DECRYPTED"),
+            "and unopened, which is the state this round moves: {undeclared}"
+        );
+
+        // THE SAME BYTES, WITH THE LENGTH DECLARED.
+        let declared = run(Some(SCID.len()));
+        assert!(
+            declared.contains("packet(s) opened"),
+            "the declared length opens the 1-RTT packet: {declared}"
+        );
+        assert!(
+            declared.contains(&format!("{} stream byte(s)", stream.len())),
+            "and the application bytes are accounted for: {declared}"
+        );
+    }
+
     /// R311y698 (§1.2a) — THE CALLER EXISTS. A QUIC capture and a key log go in
     /// at the command line and the session's bytes come out.
     ///
@@ -5926,6 +6061,7 @@ mod quic_pass_tests {
             per_message: false,
             messages_per_flow,
             quic_ports: &[],
+            quic_cid_len: None,
             payload_rules: &[],
             census: Census::default(),
             per_field: false,

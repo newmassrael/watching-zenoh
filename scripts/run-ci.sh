@@ -5330,6 +5330,7 @@ layer_c1bw_analyze_cli() {
         quic_pass_tests::the_json_reports_the_decryption_rather_than_a_literal_false \
         quic_pass_tests::a_key_log_for_one_direction_opens_that_half_and_names_the_other \
         quic_pass_tests::the_quic_listing_takes_the_bound_and_says_the_selector_did_not_reach_it \
+        quic_pass_tests::a_mid_connection_quic_capture_opens_only_once_the_length_is_declared \
         payload_formats::tests::a_nested_message_is_walked_and_its_paths_name_the_route \
         payload_formats::tests::a_span_two_layers_in_is_still_in_the_outer_payloads_coordinates \
         payload_formats::tests::a_length_field_that_is_not_a_message_falls_back_to_its_byte_count \
@@ -5518,6 +5519,7 @@ layer_c1bx_tls_record_oracle() {
     for name in \
         quic::connection::tests::a_connection_is_followed_from_its_connection_id_to_a_one_rtt_stream \
         quic::connection::tests::a_short_header_needs_a_length_only_the_handshake_states \
+        quic::connection::tests::a_mid_connection_capture_opens_on_a_declared_length_and_never_on_a_guess \
         quic::connection::tests::a_datagram_that_coalesces_two_packets_opens_both \
         quic::connection::tests::a_space_with_no_key_is_refused_differently_from_a_key_that_failed \
         quic::connection::tests::a_rekeyed_connection_is_followed_into_the_next_generation \

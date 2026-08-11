@@ -245,6 +245,9 @@ pub struct QuicFlowOpener {
     /// Frame types seen, for a reader that wants to know a connection closed.
     frame_types: [Vec<u64>; 2],
     census: [DirectionCensus; 2],
+    /// R311y709 (Y2) — this flow's identity was ADOPTED from a key log holding
+    /// exactly one connection, rather than read from a ClientHello it saw.
+    identity_adopted: bool,
 }
 
 impl core::fmt::Debug for QuicFlowOpener {
@@ -291,7 +294,99 @@ impl QuicFlowOpener {
             datagrams: [Vec::new(), Vec::new()],
             frame_types: [Vec::new(), Vec::new()],
             census: [DirectionCensus::default(); 2],
+            identity_adopted: false,
         }
+    }
+
+    /// R311y709 (Y2) — open a capture that begins MID-CONNECTION, on two
+    /// declarations that are held apart on purpose.
+    ///
+    /// # Why a declaration at all
+    ///
+    /// A 1-RTT packet does not carry the length of the connection id in front
+    /// of its packet number; both endpoints remember it from a handshake this
+    /// capture does not contain ([`Self::open_short`] refuses by name for
+    /// exactly that). Nothing in the bytes can supply it, so it comes from the
+    /// caller — the same shape `--quic <port>` already takes for the recognition
+    /// question one crate over, and marked as a PREMISE for the same reason: a
+    /// wrong length takes the header-protection sample from the wrong bytes and
+    /// the failure then looks like a wrong key.
+    ///
+    /// # And why the OTHER half is not a declaration
+    ///
+    /// Keys are indexed by the ClientHello random, which a mid-connection
+    /// capture also does not contain. This does NOT ask the caller for it. It
+    /// adopts the identity only when the key log holds EXACTLY ONE connection,
+    /// where the operator's two inputs identify each other and there is nothing
+    /// to guess between; a log holding several leaves the flow unopened rather
+    /// than picking one.
+    ///
+    /// WHICH DIRECTION IS THE CLIENT is then settled by EVIDENCE and not by a
+    /// third premise: both parties' application secrets are installed as
+    /// candidates in both directions, and the AEAD tag picks — the same 128-bit
+    /// check [`Self::open`] already settles the cipher suite and the key
+    /// generation with, rather than the guess "whoever spoke first".
+    ///
+    /// # The limit this mode has, stated rather than discovered
+    ///
+    /// Key updates are not followed here. The generation ladder is per
+    /// direction and this mode has not established which direction is which
+    /// until a packet opens, so the rungs are left uninstalled. A mid-connection
+    /// capture that spans a rekey opens the packets before it and refuses the
+    /// ones after — refuses, not misreads.
+    pub fn declaring_short_connection_id_len(mut self, len: usize) -> Self {
+        self.short_connection_id_len = [Some(len), Some(len)];
+        self.adopt_lone_identity();
+        self
+    }
+
+    /// R311y709 (Y2) — was this flow's identity ADOPTED rather than read?
+    ///
+    /// Carried so a report can say so. "I saw the ClientHello this key indexes"
+    /// and "the log held one connection and I assumed it was this one" are
+    /// different claims, and a reader acts differently on them.
+    pub fn identity_adopted(&self) -> bool {
+        self.identity_adopted
+    }
+
+    /// Adopt the key log's connection when it holds exactly one.
+    fn adopt_lone_identity(&mut self) {
+        if self.keys_installed || self.client_random.is_some() {
+            return;
+        }
+        let mut randoms = self.log.client_randoms();
+        let Some(only) = randoms.next().copied() else {
+            return;
+        };
+        if randoms.next().is_some() {
+            // Two or more. Nothing here can tell which connection these packets
+            // belong to, and picking would produce a confident wrong answer of
+            // exactly the kind this module exists to end.
+            return;
+        }
+        let Some(secrets) = self.log.get(&only) else {
+            return;
+        };
+        // Both parties' application secrets, as candidates in BOTH directions.
+        let mut derived: Vec<QuicKeys> = Vec::new();
+        for is_server in [false, true] {
+            if let Some((_, secret)) = secrets.application_secrets(is_server).into_iter().next() {
+                if let Some(keys) = SpaceKeys::from_secret(secret) {
+                    derived.extend(keys.candidates);
+                }
+            }
+        }
+        if derived.is_empty() {
+            return;
+        }
+        for index in [0usize, 1] {
+            self.keys[index][PacketSpace::OneRtt.index()] = Some(SpaceKeys {
+                candidates: derived.clone(),
+            });
+        }
+        self.client_random = Some(only);
+        self.identity_adopted = true;
+        self.keys_installed = true;
     }
 
     /// Offer one UDP payload, in capture order.
@@ -980,6 +1075,98 @@ mod tests {
         assert!(
             matches!(outcomes.as_slice(), [PacketOutcome::Opened { .. }]),
             "and the same bytes open once the length is known: {outcomes:?}"
+        );
+    }
+
+    /// R311y709 (Y2) — A MID-CONNECTION CAPTURE OPENS ON A DECLARED LENGTH,
+    /// AND THE DIRECTION IS SETTLED BY THE AEAD RATHER THAN GUESSED.
+    ///
+    /// The three arms are the whole claim and no two of them are the same test:
+    ///
+    /// 1. **Undeclared** — the refusal the test above pins, restated here as the
+    ///    baseline this round moves. Without it the second arm proves only that
+    ///    something opens, not that the declaration is what opened it.
+    /// 2. **Declared** — the identical bytes open. The packet is sealed with the
+    ///    CLIENT's application secret and pushed on direction A, and nothing
+    ///    told this opener that A is the client: both parties' secrets went in
+    ///    as candidates in both directions and the 128-bit tag picked.
+    /// 3. **Ambiguous log** — the same declaration over a log holding TWO
+    ///    connections leaves the flow unopened. This is the arm that stops the
+    ///    feature from being "assume the first one": there is no rule here that
+    ///    picks between two connections, and the refusal is the design.
+    #[test]
+    fn a_mid_connection_capture_opens_on_a_declared_length_and_never_on_a_guess() {
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_add(3));
+        let keys = QuicKeys::derive(Suite::Aes128GcmSha256, &application_secret(false, 0));
+        let payload = stream_frame(0, 0, b"zenoh");
+        let (header, pn_offset) = short_header(&SCID, 0);
+        let packet = protect(&keys, 0, &header, pn_offset, &payload);
+
+        // 1. THE BASELINE.
+        let mut undeclared = QuicFlowOpener::new(log_for(&random, 1));
+        assert_eq!(
+            undeclared.push_datagram(Direction::A, &packet),
+            alloc::vec![PacketOutcome::Refused {
+                space: Some(PacketSpace::OneRtt),
+                why: QuicOpenError::UnknownConnectionIdLength,
+            }],
+            "without the declaration this capture is still unreadable"
+        );
+        assert!(
+            !undeclared.identity_adopted(),
+            "and nothing was assumed about which connection it is"
+        );
+
+        // 2. THE SAME BYTES, DECLARED.
+        let mut declared =
+            QuicFlowOpener::new(log_for(&random, 1)).declaring_short_connection_id_len(SCID.len());
+        assert!(
+            declared.identity_adopted(),
+            "a log holding one connection identifies this one"
+        );
+        let outcomes = declared.push_datagram(Direction::A, &packet);
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [PacketOutcome::Opened {
+                    space: PacketSpace::OneRtt,
+                    ..
+                }]
+            ),
+            "the declared length locates the packet number and the tag does the \
+             rest: {outcomes:?}"
+        );
+        assert_eq!(
+            declared.census()[0].stream_bytes,
+            5,
+            "and the application bytes came out"
+        );
+
+        // 3. AN AMBIGUOUS LOG IS NOT A GUESS.
+        let other: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_add(200));
+        let mut both = KeyLog::parse(log_text(&random, 1).as_bytes());
+        both.absorb(KeyLog::parse(log_text(&other, 1).as_bytes()));
+        assert_eq!(
+            both.client_randoms().count(),
+            2,
+            "the population: one connection in this log would make the arm vacuous"
+        );
+        let mut ambiguous = QuicFlowOpener::new(both).declaring_short_connection_id_len(SCID.len());
+        assert!(
+            !ambiguous.identity_adopted(),
+            "two connections and no way to tell which -- so none is adopted"
+        );
+        let outcomes = ambiguous.push_datagram(Direction::A, &packet);
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [PacketOutcome::Refused {
+                    space: Some(PacketSpace::OneRtt),
+                    why: QuicOpenError::NoKeysForSpace(PacketSpace::OneRtt),
+                }]
+            ),
+            "and the refusal names the space rather than blaming the length: \
+             {outcomes:?}"
         );
     }
 
