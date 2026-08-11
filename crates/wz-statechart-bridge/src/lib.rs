@@ -4,7 +4,7 @@
 #![no_std]
 
 //! R311gh gc-2b — the engine bridge: the concrete
-//! [`EventInjector`](wz_session_core::switchboard::EventInjector) adapter
+//! [`EventInjector`] adapter
 //! over a borrowed SCE [`Engine`].
 //!
 //! ## Why this crate exists (orphan rule)

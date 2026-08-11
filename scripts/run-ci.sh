@@ -5624,29 +5624,39 @@ layer_c1bx_tls_record_oracle() {
 # `x.rs`, which merges the two and then resolves the merged text's relative links
 # against the CRATE ROOT. Fully qualifying is the fix.
 #
-# R311y711 cleared 13 crates by fixing all 16 of their links, which is why the
-# budget below is 12 crates and not 25.
+# R311y711 cleared 15 crates by fixing all 18 of their findings, which is why the
+# budget below is 12 crates and not 27. The totals it carries are 639 across
+# those twelve, of which 465 are two crates.
 layer_c1bz_docs_resolve() {
     local crate count expected budget failed=0 seen=""
     # crate:expected-broken-links. Absent from this list means ZERO is expected.
     budget="
         wz-ap-demo:13
-        wz-capi-c:46
-        wz-capi-core:6
-        wz-capi-pico:44
-        wz-link-lwip:10
+        wz-capi-c:56
+        wz-capi-core:7
+        wz-capi-pico:45
+        wz-link-lwip:11
         wz-mcu-session-acceptor:6
         wz-routing-graph:6
         wz-runtime-coop:19
-        wz-runtime-tokio:182
-        wz-session-core:273
+        wz-runtime-tokio:190
+        wz-session-core:275
         wz-switchboard-codegen:8
-        zenoh-pico-sys:2
+        zenoh-pico-sys:3
     "
     while read -r crate; do
         [[ -n "$crate" ]] || continue
+        # EVERY rustdoc error, not the two kinds this lane was written for.
+        #
+        # R311y711 shipped this counting `unresolved link` and `public
+        # documentation` only, and MEASURED the hole the same round: two crates
+        # fail `cargo doc` on `redundant explicit link target`, which matched
+        # neither pattern, so the lane read them as ZERO and passed while their
+        # docs did not build. A gate that cannot count a finding does not have
+        # it. The trailing `could not document <crate>` summary is excluded
+        # because it is one line per failing crate rather than a finding.
         count="$( (cd crates && cargo doc -p "$crate" --no-deps --quiet 2>&1) |
-            grep -cE '^error: (unresolved link|public documentation)' || true)"
+            grep -E '^error' | grep -cvE '^error: could not document' || true)"
         expected="$(grep -oE "\b${crate}:[0-9]+" <<<"$budget" | cut -d: -f2)"
         expected="${expected:-0}"
         seen="$seen $crate"

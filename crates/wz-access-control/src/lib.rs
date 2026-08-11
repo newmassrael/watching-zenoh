@@ -29,7 +29,7 @@
 //!   subjects need transport authentication and arrive with the extauth
 //!   features (§5.16 `access-extauth-*`).
 //! - Keyexpr rule matching uses
-//!   [`keyexpr_includes_target`](wz_session_core::keyexpr_match::keyexpr_includes_target):
+//!   [`keyexpr_includes_target`]:
 //!   a rule keyexpr must INCLUDE the message keyexpr (`rule ⊇ msg`), the
 //!   directional predicate zenoh's `policy_decision_point` applies via
 //!   `deny.nodes_including(key_expr)` / `allow.nodes_including(key_expr)`. This
