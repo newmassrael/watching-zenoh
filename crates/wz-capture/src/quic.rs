@@ -322,6 +322,50 @@ impl QuicCensus {
     }
 }
 
+/// R311y698 (§1.2a) — what a DECRYPTOR did with this capture's QUIC flows.
+///
+/// # Why this type is in the crate that opens nothing
+///
+/// This crate recognises QUIC and carries no cipher, by the same rule that put
+/// TLS record decryption behind `wz_capture::tls::RecordOpener`: the decode path
+/// builds for the MCU profiles and may not gain a third-party dependency. Until
+/// this round that meant the report's QUIC sentence ended `NOT DECRYPTED (this
+/// reader recognises QUIC and opens none of it)` and its JSON carried a
+/// hard-coded `"decrypted":false` -- statements that were true of this crate and
+/// became false the moment a caller existed.
+///
+/// So the RESULT comes back as plain counts. Nothing here is a key, a cipher or
+/// a plaintext; a decryptor fills it in and the report renders it, which is the
+/// same inversion `RecordOpener` uses in the other direction.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct QuicDecryption {
+    /// Flows a decryptor was given.
+    pub flows_offered: usize,
+    /// Flows whose every packet opened. The figure
+    /// [`crate::report::CaptureReport::is_complete`] consults, on exactly the
+    /// rule an undecrypted TLS flow reaches that verdict by.
+    pub flows_opened: usize,
+    /// Packets offered.
+    pub packets: usize,
+    /// Packets whose AEAD authenticated.
+    pub packets_opened: usize,
+    /// Packets refused for want of a key for their space -- a key log question.
+    pub packets_no_keys: usize,
+    /// Packets refused for any other reason -- a capture question.
+    pub packets_refused: usize,
+    /// Handshake bytes recovered in order.
+    pub crypto_bytes: usize,
+    /// Application stream bytes recovered in order.
+    pub stream_bytes: usize,
+    /// RFC 9221 datagram bytes recovered, which carry no order at all.
+    pub datagram_bytes: usize,
+    /// Frame walks that stopped at a type the walker does not know. Nonzero
+    /// means some packet's later frames went unread and a stream is short by an
+    /// unknown amount -- a floor reported as a total is exactly what this
+    /// crate's gap counters exist to prevent.
+    pub walks_stopped: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

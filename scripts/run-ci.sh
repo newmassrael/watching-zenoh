@@ -5283,7 +5283,11 @@ layer_c1bw_analyze_cli() {
         tests::a_mid_connection_quic_capture_needs_the_caller_to_say_so \
         tests::a_declared_flow_is_marked_as_a_premise_and_a_recognised_one_is_not \
         tests::a_declaration_its_own_flow_contradicts_is_reported_as_probably_wrong \
-        tests::the_contradiction_signal_misses_zenoh_whose_first_byte_carries_the_fixed_bit
+        tests::the_contradiction_signal_misses_zenoh_whose_first_byte_carries_the_fixed_bit \
+        quic_pass_tests::a_quic_capture_and_a_key_log_yield_the_session_at_the_command_line \
+        quic_pass_tests::without_keys_the_initial_space_still_opens_and_the_rest_says_why \
+        quic_pass_tests::the_json_reports_the_decryption_rather_than_a_literal_false \
+        quic_pass_tests::a_key_log_for_one_direction_opens_that_half_and_names_the_other
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bw FAIL: $name is absent from the wz-analyze lib target"
@@ -5348,6 +5352,47 @@ layer_c1bx_tls_record_oracle() {
         }
     done
     [[ $missing -eq 0 ]] || return 1
+
+    # R311y698 (§1.2a) — the QUIC CONNECTION READER, pinned as its own SET.
+    #
+    # These live in the LIB target rather than the oracle one, because what they
+    # gate is the layer above the cipher: which space a packet belongs to, which
+    # key that selects, where a short header's packet number begins, which
+    # sequence a piece is filed under. The cryptography under them is gated by
+    # the oracle set above, and stating the split is the point -- a round that
+    # dropped one of these would leave the wiring ungated while rustls kept
+    # agreeing about the parts that were never in question.
+    listing="$(cd crates && cargo test -p wz-tls-record --lib -- --list 2>/dev/null)" \
+        || { echo "  C1bx FAIL: the library tests did not list"; return 1; }
+    for name in \
+        quic::connection::tests::a_connection_is_followed_from_its_connection_id_to_a_one_rtt_stream \
+        quic::connection::tests::a_short_header_needs_a_length_only_the_handshake_states \
+        quic::connection::tests::a_datagram_that_coalesces_two_packets_opens_both \
+        quic::connection::tests::a_space_with_no_key_is_refused_differently_from_a_key_that_failed \
+        quic::connection::tests::a_rekeyed_connection_is_followed_into_the_next_generation \
+        quic::connection::tests::the_sequence_table_is_bounded_and_says_what_it_refused \
+        quic::connection::tests::the_quic_client_hello_offset_is_the_tls_one_without_a_record_header \
+        quic::connection::tests::a_retry_packet_is_refused_by_name_and_not_as_a_truncation \
+        quic::connection::tests::an_unsupported_version_is_named_before_its_type_bits_are_walked \
+        quic::frame_tests::every_frame_type_in_the_table_is_walked_past_to_the_stream_behind_it \
+        quic::frame_tests::a_datagram_frame_is_application_bytes_with_no_stream
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1bx FAIL: $name is absent from the wz-tls-record lib target"
+            missing=1
+        }
+    done
+    [[ $missing -eq 0 ]] || return 1
+
+    # R311y698 — and the FIXTURE feature builds on its own. Feature unification
+    # means `cargo test -p wz-analyze` turns it on and nothing else does, so a
+    # break inside `quic::fixture` would surface only through another crate's
+    # lane. `a lane must compile the feature alone` is this workspace's own
+    # measured rule.
+    (cd crates && cargo test -p wz-tls-record --features fixtures --quiet) || {
+        echo "  C1bx FAIL: wz-tls-record does not pass with the fixtures feature alone"
+        return 1
+    }
 
     echo "  C1bx: the decryptor is checked against rustls and the SET is pinned"
 }

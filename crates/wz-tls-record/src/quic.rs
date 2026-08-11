@@ -39,6 +39,23 @@
 
 use crate::{expand_label, Suite};
 
+/// R311y698 (§1.2a) — the CALLER: one connection, followed across a capture.
+///
+/// Everything above is a primitive over one packet. The state a reader of a
+/// FLOW keeps — which space a packet belongs to, which key opens it, how long
+/// the connection ID in a short header is, what the largest packet number was,
+/// which stream a piece belongs to — lives there.
+pub mod connection;
+
+/// R311y698 (§1.2a) — QUIC packets, BUILT, so a reader of them can be gated.
+///
+/// Compiled for this crate's own tests and for a consumer that asks for the
+/// `fixtures` feature, and for nothing else: `wz-analyze` needs to build a
+/// capture to prove its QUIC pass runs, and duplicating the packet layout there
+/// would be a second opinion about where a header ends.
+#[cfg(any(test, feature = "fixtures"))]
+pub mod fixture;
+
 /// RFC 9001 §5.2 — the version-1 Initial salt.
 ///
 /// Read from `rustls-0.23.43/src/quic.rs::Version::initial_salt`, which cites
@@ -51,14 +68,14 @@ const INITIAL_SALT_V1: [u8; 20] = [
 ];
 
 /// The AEAD nonce width, which is the IV's width. Fixed for every TLS 1.3 AEAD.
-const NONCE_LEN: usize = 12;
+pub(crate) const NONCE_LEN: usize = 12;
 
 /// The header-protection sample width, and the offset it is taken from past the
 /// packet number field. RFC 9001 §5.4.2: the sample starts four bytes into the
 /// packet number field regardless of how long that field turns out to be, which
 /// is what makes the sample readable BEFORE the length is known.
-const SAMPLE_LEN: usize = 16;
-const SAMPLE_OFFSET: usize = 4;
+pub(crate) const SAMPLE_LEN: usize = 16;
+pub(crate) const SAMPLE_OFFSET: usize = 4;
 
 /// R311y695 (§1.2a) — the QUIC version a packet declares, as far as this
 /// reader can act on it.
@@ -107,6 +124,68 @@ impl QuicVersion {
     }
 }
 
+/// R311y698 (§1.2a) — the four PACKET NUMBER SPACES a QUIC connection carries.
+///
+/// # Why a reader has to name them
+///
+/// Each space has its own keys, its own packet numbers, and — for the handshake
+/// — its own CRYPTO byte stream, which all start at zero independently. A
+/// reader that folded them together would reassemble the server's Handshake
+/// CRYPTO bytes on top of its Initial ones at the same offsets, and hand the
+/// TLS layer a message that no endpoint ever sent.
+///
+/// The space is derived from the packet's SHAPE and never configured: a long
+/// header's two type bits for the first three, and a short header for the
+/// fourth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PacketSpace {
+    /// The handshake's first flight, whose keys come from the connection ID on
+    /// the wire and need no key log.
+    Initial,
+    /// A resuming client's early data. The client direction only.
+    ZeroRtt,
+    /// The rest of the TLS handshake.
+    Handshake,
+    /// Everything after it — where a zenoh session actually lives.
+    OneRtt,
+}
+
+impl PacketSpace {
+    /// The four spaces, in the order a connection reaches them.
+    pub const ALL: [Self; 4] = [Self::Initial, Self::ZeroRtt, Self::Handshake, Self::OneRtt];
+
+    /// A stable index, for the per-space arrays a flow reader keeps.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Initial => 0,
+            Self::ZeroRtt => 1,
+            Self::Handshake => 2,
+            Self::OneRtt => 3,
+        }
+    }
+
+    /// The name this space is reported under.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Initial => "initial",
+            Self::ZeroRtt => "0-rtt",
+            Self::Handshake => "handshake",
+            Self::OneRtt => "1-rtt",
+        }
+    }
+
+    /// The space a LONG header's two type bits name, or `None` for Retry —
+    /// which is a packet type rather than a protected space.
+    pub fn from_long_packet_type(packet_type: u8) -> Option<Self> {
+        match packet_type {
+            LongHeader::INITIAL => Some(Self::Initial),
+            LongHeader::ZERO_RTT => Some(Self::ZeroRtt),
+            LongHeader::HANDSHAKE => Some(Self::Handshake),
+            _ => None,
+        }
+    }
+}
+
 /// The salt of drafts 29-32, read from the same rustls table as
 /// [`INITIAL_SALT_V1`].
 const INITIAL_SALT_V1_DRAFT: [u8; 20] = [
@@ -140,6 +219,29 @@ pub enum QuicOpenError {
     /// does not know where it ends: the walk stops rather than producing
     /// pieces at offsets nobody sent.
     UnknownFrame(u64),
+    /// R311y698 — a Retry packet, refused BY NAME rather than as a truncation.
+    ///
+    /// A Retry carries neither a length nor a packet number: its tail is a
+    /// token and a 128-bit integrity tag under a separate derivation. R311y695
+    /// refused it as [`Self::TruncatedHeader`], which sent a reader looking for
+    /// a cut capture when the packet is whole and this reader simply does not
+    /// read it -- a wrong diagnosis is worse than a coarse one, because the
+    /// reader acts on it.
+    RetryNotRead,
+    /// R311y698 — a 1-RTT packet arrived before any long header taught this
+    /// reader how long the connection ID in front of its packet number is.
+    ///
+    /// A short header does not carry that length: both endpoints remember it
+    /// from the handshake. A capture that begins mid-connection therefore has
+    /// no way to locate the packet number, and guessing zero would take the
+    /// protection sample from the wrong bytes and blame the key.
+    UnknownConnectionIdLength,
+    /// R311y698 — no key is held for the packet space this packet belongs to.
+    ///
+    /// Distinct from [`Self::NotAuthenticated`], which is a key that did not
+    /// work: this is no key at all, and it sends the reader to their key log
+    /// rather than to their capture.
+    NoKeysForSpace(PacketSpace),
 }
 
 /// One direction's QUIC packet-protection keys, for one packet space.
@@ -150,10 +252,10 @@ pub enum QuicOpenError {
 /// does for a TLS record.
 #[derive(Clone)]
 pub struct QuicKeys {
-    suite: Suite,
-    key: Vec<u8>,
-    iv: [u8; NONCE_LEN],
-    hp: Vec<u8>,
+    pub(crate) suite: Suite,
+    pub(crate) key: Vec<u8>,
+    pub(crate) iv: [u8; NONCE_LEN],
+    pub(crate) hp: Vec<u8>,
 }
 
 impl core::fmt::Debug for QuicKeys {
@@ -258,8 +360,13 @@ impl LongHeader {
         // A Retry packet has neither a length nor a packet number: its tail is
         // a token and an integrity tag. Refused here rather than half-walked,
         // because there is no packet number offset to report.
+        //
+        // R311y698 — and refused BY ITS OWN NAME. Until this round it came back
+        // as `TruncatedHeader`, which is a statement about the capture, and the
+        // packet is not cut: this reader does not read Retry. A reader who acts
+        // on the wrong diagnosis goes looking for a truncated file.
         if packet_type == Self::RETRY {
-            return Err(QuicOpenError::TruncatedHeader);
+            return Err(QuicOpenError::RetryNotRead);
         }
         if packet_type == Self::INITIAL {
             let token_len = take_varint(packet, &mut at)? as usize;
@@ -391,6 +498,20 @@ impl QuicKeys {
         let mut server = vec![0u8; suite.hash_len()];
         expand_label(suite, &initial_secret, b"server in", &[], &mut server);
         (Self::derive(suite, &client), Self::derive(suite, &server))
+    }
+
+    /// R311y698 — these packet-protection keys with ANOTHER derivation's
+    /// HEADER-protection key.
+    ///
+    /// RFC 9001 §6: a key update replaces the packet protection key and the IV
+    /// and explicitly does NOT replace the header protection key, which is
+    /// derived once and used for the whole connection. A reader that re-derived
+    /// `quic hp` from each new application secret would fail to unmask the first
+    /// packet after every update — and the failure arrives as a bad packet
+    /// number, so it reads as a wrong key rather than a wrong rule.
+    pub fn with_header_protection_of(mut self, other: &Self) -> Self {
+        self.hp = other.hp.clone();
+        self
     }
 
     /// RFC 9001 §5.4 — remove header protection, in place.
@@ -840,13 +961,34 @@ pub mod frames {
     use super::QuicOpenError;
     use std::collections::BTreeMap;
 
-    /// One piece of a byte stream, as a frame delivered it.
+    /// R311y698 (§1.2a) — WHICH byte sequence a piece belongs to.
+    ///
+    /// R311y696 modelled this as `Option<u64>`, where `None` meant CRYPTO. That
+    /// was two of the three answers, and the third is not a stream at all: an
+    /// RFC 9221 DATAGRAM frame carries application bytes with no identity and
+    /// no offset, and zenoh's own `transport-link-quic-datagram` sends its
+    /// batches that way. Folding it into `None` would file it with the
+    /// handshake; giving it an offset of zero would make every datagram after
+    /// the first look like a retransmission of the first.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum PieceOf {
+        /// A `CRYPTO` frame: the handshake's own stream, which has no identity
+        /// because there is one per packet space.
+        Crypto,
+        /// A `STREAM` frame, and the stream it names.
+        Stream(u64),
+        /// A `DATAGRAM` frame (RFC 9221): whole, unordered, unretransmitted.
+        Datagram,
+    }
+
+    /// One piece of a byte sequence, as a frame delivered it.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct StreamPiece<'a> {
-        /// `None` for a `CRYPTO` frame, which has no stream identity: the
-        /// handshake is its own space.
-        pub stream_id: Option<u64>,
-        /// Where these bytes belong in that stream.
+        /// Which sequence these bytes belong to.
+        pub of: PieceOf,
+        /// Where these bytes belong in it. Always zero for a
+        /// [`PieceOf::Datagram`], which is delivered whole and is not part of
+        /// any ordering — a caller must not reassemble one.
         pub offset: u64,
         /// The bytes.
         pub data: &'a [u8],
@@ -864,10 +1006,29 @@ pub mod frames {
     /// not know a type does not know where it ends, and guessing produces
     /// pieces at offsets nobody sent.
     pub fn walk(plaintext: &[u8]) -> Result<Vec<StreamPiece<'_>>, QuicOpenError> {
+        walk_with(plaintext, &mut |_| {})
+    }
+
+    /// R311y698 (§1.2a) — the same walk, with each frame's TYPE handed to
+    /// `on_frame` as it is stepped over.
+    ///
+    /// One walk and not two, for the reason `wz_capture::tls::walk_records`
+    /// gives about records: a census taken by a second walk and a reassembly
+    /// taken by the first can come to disagree about where a frame starts, and
+    /// nothing would catch it. [`walk`] is this function with an empty observer.
+    ///
+    /// The observer is why a reader can report that a connection carried a
+    /// `CONNECTION_CLOSE` or a `HANDSHAKE_DONE` without this module growing a
+    /// return type for every frame kind it steps over.
+    pub fn walk_with<'a>(
+        plaintext: &'a [u8],
+        on_frame: &mut impl FnMut(u64),
+    ) -> Result<Vec<StreamPiece<'a>>, QuicOpenError> {
         let mut out = Vec::new();
         let mut at = 0usize;
         while at < plaintext.len() {
             let ty = super::take_varint(plaintext, &mut at)?;
+            on_frame(ty);
             match ty {
                 // PADDING and PING carry nothing and are one byte each.
                 0x00 | 0x01 => {}
@@ -894,7 +1055,7 @@ pub mod frames {
                     let data = slice(plaintext, at, len)?;
                     at += len;
                     out.push(StreamPiece {
-                        stream_id: None,
+                        of: PieceOf::Crypto,
                         offset,
                         data,
                         fin: false,
@@ -921,16 +1082,123 @@ pub mod frames {
                     let data = slice(plaintext, at, len)?;
                     at += len;
                     out.push(StreamPiece {
-                        stream_id: Some(stream_id),
+                        of: PieceOf::Stream(stream_id),
                         offset,
                         data,
                         fin: ty & 0x01 != 0,
+                    });
+                }
+                // R311y698 (§1.2a) — THE REST OF RFC 9000's TABLE.
+                //
+                // R311y696 knew six types and stopped at everything else, and
+                // its own carry recorded what that costs: `HANDSHAKE_DONE`,
+                // `NEW_CONNECTION_ID`, `MAX_DATA` and `CONNECTION_CLOSE` are
+                // ordinary traffic, so a real capture almost always stopped
+                // part way through its first packet -- and a stream cut short
+                // in the middle looks exactly like a stream that ended.
+                //
+                // Each arm is the frame's field list from RFC 9000 §19, walked
+                // rather than skipped by a guessed width: that is the whole
+                // reason an unknown type still stops the walk below.
+
+                // RESET_STREAM: stream id, application error code, final size.
+                0x04 => {
+                    for _ in 0..3 {
+                        super::take_varint(plaintext, &mut at)?;
+                    }
+                }
+                // STOP_SENDING: stream id, application error code.
+                0x05 => {
+                    for _ in 0..2 {
+                        super::take_varint(plaintext, &mut at)?;
+                    }
+                }
+                // NEW_TOKEN: a length-prefixed token.
+                0x07 => {
+                    let len = super::take_varint(plaintext, &mut at)? as usize;
+                    step(plaintext, &mut at, len)?;
+                }
+                // MAX_DATA, MAX_STREAMS (bidi and uni), DATA_BLOCKED,
+                // STREAMS_BLOCKED, RETIRE_CONNECTION_ID: one varint each.
+                0x10 | 0x12 | 0x13 | 0x14 | 0x16 | 0x17 | 0x19 => {
+                    super::take_varint(plaintext, &mut at)?;
+                }
+                // MAX_STREAM_DATA, STREAM_DATA_BLOCKED: two.
+                0x11 | 0x15 => {
+                    for _ in 0..2 {
+                        super::take_varint(plaintext, &mut at)?;
+                    }
+                }
+                // NEW_CONNECTION_ID: sequence, retire-prior-to, a ONE-BYTE
+                // length (not a varint -- the one place in this table where
+                // that is true), the connection ID, and a 16-byte reset token.
+                0x18 => {
+                    for _ in 0..2 {
+                        super::take_varint(plaintext, &mut at)?;
+                    }
+                    let len =
+                        usize::from(*plaintext.get(at).ok_or(QuicOpenError::TruncatedHeader)?);
+                    at += 1;
+                    step(plaintext, &mut at, len)?;
+                    step(plaintext, &mut at, 16)?;
+                }
+                // PATH_CHALLENGE / PATH_RESPONSE: eight opaque bytes, fixed.
+                0x1a | 0x1b => step(plaintext, &mut at, 8)?,
+                // CONNECTION_CLOSE, transport form: error code, the frame type
+                // that caused it, then a length-prefixed reason.
+                0x1c => {
+                    for _ in 0..2 {
+                        super::take_varint(plaintext, &mut at)?;
+                    }
+                    let len = super::take_varint(plaintext, &mut at)? as usize;
+                    step(plaintext, &mut at, len)?;
+                }
+                // CONNECTION_CLOSE, application form: no frame type field.
+                0x1d => {
+                    super::take_varint(plaintext, &mut at)?;
+                    let len = super::take_varint(plaintext, &mut at)? as usize;
+                    step(plaintext, &mut at, len)?;
+                }
+                // HANDSHAKE_DONE: no fields at all.
+                0x1e => {}
+                // R311y698 — DATAGRAM (RFC 9221), whose low bit says whether a
+                // length is present. Carried here rather than left unknown
+                // because it is not a curiosity in THIS workspace: zenoh's
+                // `transport-link-quic-datagram` atom sends its batches in
+                // these, so a reader that stopped at one would open the packet
+                // and report no application bytes at all.
+                0x30 | 0x31 => {
+                    let len = if ty & 0x01 != 0 {
+                        super::take_varint(plaintext, &mut at)? as usize
+                    } else {
+                        // No length means "to the end of the packet", the same
+                        // rule STREAM follows, and it is why a DATAGRAM without
+                        // one must be the last frame.
+                        plaintext.len() - at
+                    };
+                    let data = slice(plaintext, at, len)?;
+                    at += len;
+                    out.push(StreamPiece {
+                        of: PieceOf::Datagram,
+                        offset: 0,
+                        data,
+                        fin: false,
                     });
                 }
                 _ => return Err(QuicOpenError::UnknownFrame(ty)),
             }
         }
         Ok(out)
+    }
+
+    /// Advance `at` past `len` bytes, refusing rather than running off the end.
+    fn step(bytes: &[u8], at: &mut usize, len: usize) -> Result<(), QuicOpenError> {
+        let end = at.checked_add(len).ok_or(QuicOpenError::TruncatedHeader)?;
+        if end > bytes.len() {
+            return Err(QuicOpenError::TruncatedHeader);
+        }
+        *at = end;
+        Ok(())
     }
 
     fn slice(bytes: &[u8], at: usize, len: usize) -> Result<&[u8], QuicOpenError> {
@@ -974,14 +1242,23 @@ pub mod frames {
             }
         }
 
-        /// Offer one piece. Returns how many bytes became deliverable.
-        pub fn push(&mut self, piece: &StreamPiece<'_>) -> usize {
-            if piece.fin {
+        /// Offer one piece's ORDERING FACTS. Returns how many bytes became
+        /// deliverable.
+        ///
+        /// R311y698 — takes the offset, the bytes and the FIN rather than a
+        /// [`StreamPiece`], and that is a prevention rather than a style. A
+        /// [`PieceOf::Datagram`] carries no ordering at all and its offset is a
+        /// placeholder zero; handed to this function as a piece it would look
+        /// like a retransmission of the stream's first bytes and be silently
+        /// dropped. Asking for the three facts an ordering needs means a caller
+        /// with a datagram in hand has nothing to pass.
+        pub fn push(&mut self, offset: u64, data: &[u8], fin: bool) -> usize {
+            if fin {
                 self.finished = true;
             }
             let before = self.ready.len();
-            let start = piece.offset;
-            let end = start + piece.data.len() as u64;
+            let start = offset;
+            let end = start + data.len() as u64;
             if end <= self.ready.len() as u64 {
                 // Wholly retransmitted: QUIC may resend, and a reader that
                 // appended it again would invent bytes nobody sent.
@@ -989,16 +1266,16 @@ pub mod frames {
             }
             if start <= self.ready.len() as u64 {
                 let skip = (self.ready.len() as u64 - start) as usize;
-                self.ready.extend_from_slice(&piece.data[skip..]);
+                self.ready.extend_from_slice(&data[skip..]);
                 self.drain_held();
             } else if self
                 .max_buffered
-                .is_none_or(|cap| self.held_bytes + piece.data.len() <= cap)
+                .is_none_or(|cap| self.held_bytes + data.len() <= cap)
             {
-                self.held_bytes += piece.data.len();
-                self.held.insert(start, piece.data.to_vec());
+                self.held_bytes += data.len();
+                self.held.insert(start, data.to_vec());
             } else {
-                self.dropped += piece.data.len();
+                self.dropped += data.len();
             }
             self.ready.len() - before
         }
@@ -1043,7 +1320,7 @@ pub mod frames {
 
 #[cfg(test)]
 mod frame_tests {
-    use super::frames::{walk, StreamReassembler};
+    use super::frames::{walk, walk_with, PieceOf, StreamReassembler};
     use super::QuicOpenError;
 
     /// One STREAM frame: type bits for OFF and LEN, the id, the offset, the
@@ -1072,9 +1349,9 @@ mod frame_tests {
         // not stopped at -- a walk that gave up at the first frame would also
         // produce "only the ones that carry bytes".
         assert_eq!(pieces.len(), 2, "two frames carry stream bytes: {pieces:?}");
-        assert_eq!(pieces[0].stream_id, None, "CRYPTO has no stream identity");
+        assert_eq!(pieces[0].of, PieceOf::Crypto, "CRYPTO is its own sequence");
         assert_eq!(pieces[0].data, b"hi\x00\x01");
-        assert_eq!(pieces[1].stream_id, Some(4));
+        assert_eq!(pieces[1].of, PieceOf::Stream(4));
         assert_eq!(pieces[1].data, b"zenoh");
         assert!(pieces[1].fin, "the FIN bit is read from the type");
     }
@@ -1096,7 +1373,11 @@ mod frame_tests {
         let plaintext = vec![0x0a, 0x04, 0x05, b'z', b'e', b'n', b'o', b'h'];
         let pieces = walk(&plaintext).expect("the walk reads it");
         assert_eq!(pieces.len(), 1);
-        assert_eq!(pieces[0].stream_id, Some(4), "the id is the first varint");
+        assert_eq!(
+            pieces[0].of,
+            PieceOf::Stream(4),
+            "the id is the first varint"
+        );
         assert_eq!(
             pieces[0].offset, 0,
             "a frame with no OFF bit starts at zero, and the byte after the id \
@@ -1116,11 +1397,106 @@ mod frame_tests {
     /// look like a stream and are not one.
     #[test]
     fn an_unknown_frame_type_stops_the_walk_by_name() {
-        // 0x1e is HANDSHAKE_DONE in RFC 9000 and this walk does not carry it.
-        let plaintext = vec![0x1e, 0x00];
+        // 0x1f is past the end of RFC 9000's table and no extension this reader
+        // carries defines it. R311y698 moved this fixture off 0x1e, which is
+        // HANDSHAKE_DONE and is now walked -- a negative test whose subject
+        // became supported would have gone on passing for the wrong reason had
+        // it not been changed, and the assertion here is the same one.
+        let plaintext = vec![0x1f, 0x00];
         assert_eq!(
             walk(&plaintext).err(),
-            Some(QuicOpenError::UnknownFrame(0x1e))
+            Some(QuicOpenError::UnknownFrame(0x1f))
+        );
+    }
+
+    /// R311y698 (§1.2a) — RFC 9000's WHOLE frame table is walked, and the
+    /// walk's own carry said what its absence cost.
+    ///
+    /// ## Why this is not a parade of arms
+    ///
+    /// The assertion is not "each type is recognised": it is that a STREAM
+    /// frame placed AFTER every one of them is still found. R311y696 stopped at
+    /// the first type it did not know, and its carry recorded the consequence --
+    /// `HANDSHAKE_DONE`, `NEW_CONNECTION_ID`, `MAX_DATA` and `CONNECTION_CLOSE`
+    /// are ordinary traffic, so a real capture stopped part way through its
+    /// first packet and reported the bytes before the stop as the whole stream.
+    /// A stream cut short in the middle looks exactly like one that ended.
+    ///
+    /// So each frame is walked by its FIELD LIST, and getting a width wrong
+    /// leaves the walk mid-frame: the trailing STREAM frame is then read from
+    /// the wrong offset and the test fails. That is what makes one assertion
+    /// cover twenty arms.
+    #[test]
+    fn every_frame_type_in_the_table_is_walked_past_to_the_stream_behind_it() {
+        let mut p: Vec<u8> = Vec::new();
+        p.extend_from_slice(&[0x04, 0x04, 0x00, 0x40, 0x10]); // RESET_STREAM
+        p.extend_from_slice(&[0x05, 0x04, 0x02]); // STOP_SENDING
+        p.extend_from_slice(&[0x07, 0x03, 0xaa, 0xbb, 0xcc]); // NEW_TOKEN
+        p.extend_from_slice(&[0x10, 0x44, 0x00]); // MAX_DATA, two-byte varint
+        p.extend_from_slice(&[0x11, 0x04, 0x20]); // MAX_STREAM_DATA
+        p.extend_from_slice(&[0x12, 0x08]); // MAX_STREAMS bidi
+        p.extend_from_slice(&[0x13, 0x08]); // MAX_STREAMS uni
+        p.extend_from_slice(&[0x14, 0x10]); // DATA_BLOCKED
+        p.extend_from_slice(&[0x15, 0x04, 0x10]); // STREAM_DATA_BLOCKED
+        p.extend_from_slice(&[0x16, 0x02]); // STREAMS_BLOCKED bidi
+        p.extend_from_slice(&[0x17, 0x02]); // STREAMS_BLOCKED uni
+        p.extend_from_slice(&[0x18, 0x01, 0x00, 0x02, 0xde, 0xad]); // NEW_CONNECTION_ID
+        p.extend_from_slice(&[0x11u8; 16]); // ... and its reset token
+        p.extend_from_slice(&[0x19, 0x00]); // RETIRE_CONNECTION_ID
+        p.extend_from_slice(&[0x1a]); // PATH_CHALLENGE
+        p.extend_from_slice(&[0x22u8; 8]);
+        p.extend_from_slice(&[0x1b]); // PATH_RESPONSE
+        p.extend_from_slice(&[0x33u8; 8]);
+        p.extend_from_slice(&[0x1c, 0x00, 0x00, 0x02, b'n', b'o']); // CONNECTION_CLOSE
+        p.extend_from_slice(&[0x1d, 0x00, 0x01, b'x']); // ... application form
+        p.extend_from_slice(&[0x1e]); // HANDSHAKE_DONE
+        p.extend_from_slice(&[0x00, 0x00, 0x01]); // PADDING, PADDING, PING
+        p.extend_from_slice(&stream_frame(8, 0, b"zenoh", true));
+
+        let mut seen: Vec<u64> = Vec::new();
+        let pieces = walk_with(&p, &mut |ty| seen.push(ty)).expect("every frame walks");
+
+        assert_eq!(
+            pieces.len(),
+            1,
+            "only the STREAM frame carries bytes: {pieces:?}"
+        );
+        assert_eq!(pieces[0].of, PieceOf::Stream(8));
+        assert_eq!(
+            pieces[0].data, b"zenoh",
+            "the trailing frame is read from the right offset, which is only \
+             true if every field list above it was walked exactly"
+        );
+        // AND THE OBSERVER SAW THEM, which is what lets a reader report a
+        // CONNECTION_CLOSE without this module returning one.
+        assert_eq!(seen.len(), 22, "every frame is offered once: {seen:?}");
+        assert!(seen.contains(&0x1e) && seen.contains(&0x1c));
+    }
+
+    /// R311y698 (§1.2a) — an RFC 9221 DATAGRAM frame is application bytes with
+    /// no stream, and this reader must not file it as one.
+    ///
+    /// zenoh's `transport-link-quic-datagram` sends its batches in these. A
+    /// reader that stopped at the type would open the packet and report no
+    /// application bytes; one that filed it as a stream at offset zero would
+    /// report the SECOND datagram as a retransmission of the first and drop it.
+    #[test]
+    fn a_datagram_frame_is_application_bytes_with_no_stream() {
+        // 0x31 = DATAGRAM with a length, twice, then one without.
+        let mut p: Vec<u8> = vec![0x31, 0x03, b'o', b'n', b'e'];
+        p.extend_from_slice(&[0x31, 0x03, b't', b'w', b'o']);
+        p.extend_from_slice(&[0x30, b'r', b'e', b's', b't']);
+        let pieces = walk(&p).expect("the walk reads all three");
+        assert_eq!(pieces.len(), 3);
+        assert!(pieces.iter().all(|piece| piece.of == PieceOf::Datagram));
+        assert_eq!(pieces[0].data, b"one");
+        assert_eq!(
+            pieces[1].data, b"two",
+            "the second datagram is its own bytes and not a retransmission"
+        );
+        assert_eq!(
+            pieces[2].data, b"rest",
+            "a DATAGRAM with no length runs to the end of the packet"
         );
     }
 
@@ -1135,24 +1511,20 @@ mod frame_tests {
     #[test]
     fn pieces_are_reassembled_in_order_and_a_hole_holds_the_rest() {
         let mut r = StreamReassembler::new(None);
-        let tail = super::frames::StreamPiece {
-            stream_id: Some(0),
-            offset: 5,
-            data: b" world",
-            fin: false,
-        };
-        let head = super::frames::StreamPiece {
-            stream_id: Some(0),
-            offset: 0,
-            data: b"hello",
-            fin: true,
-        };
 
-        assert_eq!(r.push(&tail), 0, "a piece behind a hole delivers nothing");
+        assert_eq!(
+            r.push(5, b" world", false),
+            0,
+            "a piece behind a hole delivers nothing"
+        );
         assert_eq!(r.buffered(), 6, "and is held, counted");
         assert_eq!(r.stream(), b"", "nothing is delivered early");
 
-        assert_eq!(r.push(&head), 11, "the hole filling releases both");
+        assert_eq!(
+            r.push(0, b"hello", true),
+            11,
+            "the hole filling releases both"
+        );
         assert_eq!(r.stream(), b"hello world");
         assert_eq!(r.buffered(), 0, "and the hold is empty again");
         assert!(
@@ -1162,7 +1534,7 @@ mod frame_tests {
 
         // A RETRANSMISSION adds nothing: QUIC may resend, and a reader that
         // appended it again would invent bytes nobody sent.
-        assert_eq!(r.push(&head), 0);
+        assert_eq!(r.push(0, b"hello", true), 0);
         assert_eq!(r.stream(), b"hello world");
     }
 
@@ -1175,13 +1547,7 @@ mod frame_tests {
     #[test]
     fn the_hold_is_bounded_and_says_what_it_refused() {
         let mut r = StreamReassembler::new(Some(4));
-        let far = super::frames::StreamPiece {
-            stream_id: Some(0),
-            offset: 100,
-            data: b"12345",
-            fin: false,
-        };
-        assert_eq!(r.push(&far), 0);
+        assert_eq!(r.push(100, b"12345", false), 0);
         // ANTI-VACUITY: nothing was held, so the drop is the bound biting and
         // not an empty hold reporting itself.
         assert_eq!(r.buffered(), 0, "the piece did not fit");

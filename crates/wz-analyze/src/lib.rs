@@ -23,6 +23,7 @@ use wz_capture::report::CaptureReport;
 use wz_capture::{CaptureError, Dissection};
 use wz_tls_record::capture::CaptureOpener;
 use wz_tls_record::keylog::KeyLog;
+use wz_tls_record::quic::connection::{DirectionCensus, QuicFlowOpener, SequenceKey};
 
 /// How the report should be rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -559,7 +560,19 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     let payloads = census
         .payloads
         .then(|| wz_capture::payload::payloads_where(&dissection, filter));
+    // R311y698 (§1.2a) — THE QUIC PASS, which is the item this crate was
+    // created to make unnecessary and which had never been written.
+    //
+    // `wz-tls-record::quic` could open a QUIC packet since R311y694 and nothing
+    // called it: the register's whole §QUIC section reduced to "there is no
+    // caller". It runs unconditionally rather than behind a flag, because the
+    // Initial packet space needs NO key at all -- a capture with QUIC in it and
+    // no key log still yields its handshake, its version, its connection ID and
+    // its ClientHello, which is exactly what tells a reader whether the key log
+    // they are about to fetch is the right one.
+    let (quic, quic_flows) = quic_pass(capture, &dissection, opener.log());
     let mut report = CaptureReport::of(&dissection);
+    report = report.with_quic_decryption(&quic);
     if let Some(table) = &throughput {
         report = report.with_throughput(table);
     }
@@ -586,6 +599,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
             let mut rendered = report.to_text();
             rendered.push_str(&pass_lines(&pass, format));
             rendered.push_str(&epoch_lines(&epochs, format));
+            rendered.push_str(&quic_lines(&quic_flows, format));
             if per_field {
                 rendered.push_str("fields:\n");
                 rendered.push_str(&field_lines(
@@ -611,6 +625,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
             report.json_fields(&mut rendered);
             rendered.push_str(&pass_lines(&pass, format));
             rendered.push_str(&epoch_lines(&epochs, format));
+            rendered.push_str(&quic_lines(&quic_flows, format));
             if per_field {
                 rendered.push(',');
                 rendered.push_str(&field_lines(
@@ -686,6 +701,283 @@ fn pass_lines(pass: &wz_capture::DecryptionSummary, format: Format) -> String {
          skipped -- their plaintext was not offered again\n",
         pass.already_opened
     )
+}
+
+/// R311y698 (§1.2a) — one QUIC flow, as far as this reader got into it.
+#[derive(Debug, Clone)]
+pub struct QuicFlowOutcome {
+    /// The five-tuple.
+    pub flow: wz_capture::link::FlowKey,
+    /// Per-direction tallies, `[A, B]`.
+    pub census: [DirectionCensus; 2],
+    /// Which direction the client is, settled by whoever sent the first Initial.
+    pub client_direction: Option<wz_session_core::passive::Direction>,
+    /// The version the connection declared.
+    pub version: Option<wz_tls_record::quic::QuicVersion>,
+    /// Whether the key log held this connection's secrets.
+    pub keys_installed: bool,
+    /// Whether a ClientHello was found and its random read.
+    pub client_hello_seen: bool,
+    /// Each recovered sequence: direction, which one, and how many contiguous
+    /// bytes came out.
+    pub sequences: Vec<(wz_session_core::passive::Direction, SequenceKey, usize)>,
+    /// Sequences the table's bound refused, `[A, B]`.
+    pub sequences_dropped: [usize; 2],
+}
+
+/// R311y698 (§1.2a) — open every QUIC flow the dissection found.
+///
+/// # Why this needed no seam in `wz-capture`
+///
+/// The register estimated this item as needing one -- `push_datagram` counts a
+/// QUIC packet and returns without retaining its payload, so the bytes appear
+/// to be gone. Measured instead of assumed, which is what R311y679 found for
+/// datagram fields and what R311y694-R311y697 got wrong four times in a row:
+/// the bytes are in the CALLER'S OWN FILE, `Reread` already parses it a second
+/// time for `--fields`, `link::decapsulate` is public, and a datagram flow's
+/// key is a public `FlowKey`. Nothing had to be added anywhere.
+///
+/// So this walks the capture once more, hands each QUIC flow's datagrams to its
+/// own [`QuicFlowOpener`] in capture order, and retains nothing but what came
+/// out. The cost is one extra parse of the caller's file, paid only by a capture
+/// that HAS a QUIC flow -- the early return sits above it.
+fn quic_pass(
+    capture: &[u8],
+    dissection: &Dissection,
+    log: &KeyLog,
+) -> (wz_capture::quic::QuicDecryption, Vec<QuicFlowOutcome>) {
+    use wz_session_core::passive::Direction;
+
+    let keys: Vec<wz_capture::link::FlowKey> = dissection
+        .datagram_flows()
+        .iter()
+        .filter(|f| f.quic.is_some())
+        .map(|f| f.flow)
+        .collect();
+    let mut summary = wz_capture::quic::QuicDecryption {
+        flows_offered: keys.len(),
+        ..Default::default()
+    };
+    if keys.is_empty() {
+        return (summary, Vec::new());
+    }
+    let Some(file) = Reread::of(capture) else {
+        // Unreadable on the second pass. The flows are still OFFERED, so the
+        // summary says none were opened rather than saying there were none --
+        // the distinction `CaptureNotReread` draws one plane over.
+        return (summary, Vec::new());
+    };
+    let mut openers: Vec<(wz_capture::link::FlowKey, QuicFlowOpener)> = keys
+        .iter()
+        .map(|flow| (*flow, QuicFlowOpener::new(log.clone())))
+        .collect();
+
+    let mut at = 0usize;
+    while let Some(packet) = file.packet(at) {
+        at += 1;
+        let Ok(wz_capture::link::Transport::Udp(datagram)) =
+            wz_capture::link::decapsulate(packet.link_type, packet.index, packet.data)
+        else {
+            continue;
+        };
+        let Some((_, opener)) = openers.iter_mut().find(|(f, _)| *f == datagram.flow) else {
+            continue;
+        };
+        // The SAME direction rule the field walk uses (`packet_disagreement`),
+        // called the same way rather than restated: two readers of one capture
+        // that disagree about which half a packet is on would file a client's
+        // stream under the server.
+        let direction = if datagram.from_low {
+            Direction::A
+        } else {
+            Direction::B
+        };
+        opener.push_datagram(direction, &datagram.payload);
+    }
+
+    let mut flows = Vec::new();
+    for (flow, opener) in openers {
+        let census = opener.census();
+        let packets: usize = census.iter().map(|c| c.packets).sum();
+        let opened: usize = census.iter().map(|c| c.opened).sum();
+        summary.packets += packets;
+        summary.packets_opened += opened;
+        summary.packets_no_keys += census.iter().map(|c| c.no_keys).sum::<usize>();
+        summary.packets_refused += census.iter().map(|c| c.refused).sum::<usize>();
+        summary.crypto_bytes += census.iter().map(|c| c.crypto_bytes).sum::<usize>();
+        summary.stream_bytes += census.iter().map(|c| c.stream_bytes).sum::<usize>();
+        summary.datagram_bytes += census.iter().map(|c| c.datagram_bytes).sum::<usize>();
+        summary.walks_stopped += census.iter().map(|c| c.walks_stopped).sum::<usize>();
+        // A flow is WHOLE when every packet in it opened. Zero packets is not
+        // whole: a QUIC flow the dissection counted and this pass saw none of is
+        // a disagreement between two reads of one file, not a success.
+        if packets > 0 && opened == packets {
+            summary.flows_opened += 1;
+        }
+        let mut sequences = Vec::new();
+        for direction in [Direction::A, Direction::B] {
+            for (key, reassembler) in opener.sequences(direction) {
+                sequences.push((direction, key, reassembler.stream().len()));
+            }
+        }
+        flows.push(QuicFlowOutcome {
+            flow,
+            census,
+            client_direction: opener.client_direction(),
+            version: opener.version(),
+            keys_installed: opener.keys_installed(),
+            client_hello_seen: opener.client_random().is_some(),
+            sequences,
+            sequences_dropped: opener.sequences_dropped(),
+        });
+    }
+    (summary, flows)
+}
+
+/// R311y698 (§1.2a) — the per-flow QUIC detail, in whichever format.
+///
+/// Silent in text where there is nothing to say -- a capture with no QUIC in it
+/// gets no line -- and absent from JSON on the same condition, because the
+/// capture-wide `quic` object the report already emits is the structural one a
+/// consumer branches on. This is the LISTING beside it.
+fn quic_lines(flows: &[QuicFlowOutcome], format: Format) -> String {
+    use wz_session_core::passive::Direction;
+
+    if flows.is_empty() {
+        return String::new();
+    }
+    if format == Format::Json {
+        let mut out = String::from(",\"quic_flows\":[");
+        for (index, flow) in flows.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                "{{\"flow\":\"{}\",\"version\":{},\"client_direction\":{},\
+                 \"client_hello\":{},\"keys_installed\":{},\
+                 \"sequences_dropped\":[{},{}],\"directions\":[",
+                escape(&format!("{:?}", flow.flow)),
+                match flow.version {
+                    None => String::from("null"),
+                    Some(v) => format!("\"{v:?}\""),
+                },
+                match flow.client_direction {
+                    None => String::from("null"),
+                    Some(Direction::A) => String::from("\"A\""),
+                    Some(Direction::B) => String::from("\"B\""),
+                },
+                flow.client_hello_seen,
+                flow.keys_installed,
+                flow.sequences_dropped[0],
+                flow.sequences_dropped[1],
+            ));
+            for (index, census) in flow.census.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(&format!(
+                    "{{\"packets\":{},\"opened\":{},\"no_keys\":{},\"refused\":{},\
+                     \"frames\":{},\"walks_stopped\":{},\"crypto_bytes\":{},\
+                     \"stream_bytes\":{},\"datagrams\":{},\"datagram_bytes\":{}}}",
+                    census.packets,
+                    census.opened,
+                    census.no_keys,
+                    census.refused,
+                    census.frames,
+                    census.walks_stopped,
+                    census.crypto_bytes,
+                    census.stream_bytes,
+                    census.datagrams,
+                    census.datagram_bytes,
+                ));
+            }
+            out.push_str("],\"sequences\":[");
+            for (index, (direction, key, bytes)) in flow.sequences.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(&format!(
+                    "{{\"direction\":\"{}\",\"of\":\"{}\",\"bytes\":{bytes}}}",
+                    match direction {
+                        Direction::A => "A",
+                        Direction::B => "B",
+                    },
+                    escape(&sequence_name(*key)),
+                ));
+            }
+            out.push_str("]}");
+        }
+        out.push(']');
+        return out;
+    }
+    let mut out = String::from("quic:\n");
+    for flow in flows {
+        out.push_str(&format!(
+            "  {:?}: {}, {}\n",
+            flow.flow,
+            match flow.version {
+                None => String::from("no long header seen"),
+                Some(v) => format!("version {v:?}"),
+            },
+            if flow.keys_installed {
+                "keys installed from the log"
+            } else if flow.client_hello_seen {
+                "a ClientHello was read and the key log does not hold it"
+            } else {
+                "no ClientHello reached this reader, so no key log entry can be found"
+            }
+        ));
+        for (index, census) in flow.census.iter().enumerate() {
+            if census.packets == 0 {
+                continue;
+            }
+            out.push_str(&format!(
+                "    {}: {} of {} packet(s) opened ({} without a key, {} refused), \
+                 {} handshake byte(s), {} stream byte(s), {} datagram(s)\n",
+                if index == 0 { "A" } else { "B" },
+                census.opened,
+                census.packets,
+                census.no_keys,
+                census.refused,
+                census.crypto_bytes,
+                census.stream_bytes,
+                census.datagrams,
+            ));
+            if census.walks_stopped > 0 {
+                out.push_str(&format!(
+                    "      WARNING: {} packet(s) carried a frame type this reader \
+                     does not know, so their later frames went unread\n",
+                    census.walks_stopped
+                ));
+            }
+        }
+        for (direction, key, bytes) in &flow.sequences {
+            out.push_str(&format!(
+                "    {} {}: {bytes} byte(s)\n",
+                match direction {
+                    Direction::A => "A",
+                    Direction::B => "B",
+                },
+                sequence_name(*key),
+            ));
+        }
+        if flow.sequences_dropped.iter().any(|n| *n > 0) {
+            out.push_str(&format!(
+                "    WARNING: {} and {} sequence(s) were refused by this reader's \
+                 own table bound\n",
+                flow.sequences_dropped[0], flow.sequences_dropped[1]
+            ));
+        }
+    }
+    out
+}
+
+/// How one recovered sequence is named in either rendering.
+fn sequence_name(key: SequenceKey) -> String {
+    match key {
+        SequenceKey::Crypto(space) => format!("crypto/{}", space.name()),
+        SequenceKey::Stream(id) => format!("stream/{id}"),
+    }
 }
 
 /// R311y671 (§1.2a) — the epoch witness, in whichever format.
@@ -4070,5 +4362,278 @@ mod packet_and_note_tests {
             note_disagreement(&mut named, &mut count, None, at, Disagreement::Absent);
         }
         assert_eq!((count, named.len()), (5, 5), "no cap, no omission");
+    }
+}
+
+#[cfg(test)]
+mod quic_pass_tests {
+    use super::*;
+    use wz_tls_record::quic::fixture::{
+        application_secret, client_hello, crypto_frame, datagram_frame, log_text, long_header,
+        protect, short_header, stream_frame, ICID, SCID,
+    };
+    use wz_tls_record::quic::{QuicKeys, QuicVersion};
+    use wz_tls_record::Suite;
+
+    /// One UDP datagram of a QUIC connection, in the direction `from_client`
+    /// says. Ethernet/IPv4, ports 51000 and 4433.
+    fn udp(from_client: bool, payload: &[u8]) -> Vec<u8> {
+        let (src, dst) = if from_client {
+            (51000u16, 4433u16)
+        } else {
+            (4433u16, 51000u16)
+        };
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&src.to_be_bytes());
+        udp.extend_from_slice(&dst.to_be_bytes());
+        udp.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(payload);
+
+        let (from, to) = if from_client {
+            ([10u8, 0, 0, 1], [10u8, 0, 0, 2])
+        } else {
+            ([10u8, 0, 0, 2], [10u8, 0, 0, 1])
+        };
+        let mut ip = vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+        ip.extend_from_slice(&from);
+        ip.extend_from_slice(&to);
+        ip.extend_from_slice(&udp);
+
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// The connection every test here reads: a client Initial carrying a
+    /// ClientHello, a server Initial, and one 1-RTT packet in each direction —
+    /// the client's a STREAM frame, the server's an RFC 9221 DATAGRAM.
+    ///
+    /// Returned as (capture, key log text, the client's stream bytes).
+    fn quic_capture(random: &[u8; 32]) -> (Vec<u8>, String, &'static [u8]) {
+        let (client_initial, server_initial) = QuicKeys::initial(QuicVersion::V1, &ICID);
+        let hello = client_hello(random);
+
+        let first = crypto_frame(0, &hello);
+        let (h, o) = long_header(0, &ICID, &[], first.len(), 0);
+        let client_initial_packet = protect(&client_initial, 0, &h, o, &first);
+
+        let reply = crypto_frame(0, b"\x02\x00\x00\x04....");
+        let (h, o) = long_header(0, &[], &SCID, reply.len(), 0);
+        let server_initial_packet = protect(&server_initial, 0, &h, o, &reply);
+
+        const STREAM: &[u8] = b"a zenoh session over quic";
+        let client_keys = QuicKeys::derive(Suite::Aes128GcmSha256, &application_secret(false, 0));
+        let payload = stream_frame(0, 0, STREAM);
+        let (h, o) = short_header(&SCID, 1);
+        let client_one_rtt = protect(&client_keys, 1, &h, o, &payload);
+
+        let server_keys = QuicKeys::derive(Suite::Aes128GcmSha256, &application_secret(true, 0));
+        let payload = datagram_frame(b"a batch");
+        // The server's short header is addressed to the CLIENT's connection ID,
+        // which this fixture leaves empty -- so its packet number begins at one.
+        let (h, o) = short_header(&[], 1);
+        let server_one_rtt = protect(&server_keys, 1, &h, o, &payload);
+
+        let packets = [
+            udp(true, &client_initial_packet),
+            udp(false, &server_initial_packet),
+            udp(true, &client_one_rtt),
+            udp(false, &server_one_rtt),
+        ];
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+        (capture, log_text(random, 1), STREAM)
+    }
+
+    /// R311y698 (§1.2a) — THE CALLER EXISTS. A QUIC capture and a key log go in
+    /// at the command line and the session's bytes come out.
+    ///
+    /// ## What this is the test for
+    ///
+    /// Every primitive under it had a test and no caller: the store's register
+    /// recorded the whole QUIC section as "reachable only by writing Rust, which
+    /// is the shape `wz-analyze` was created to end". A unit test of a decryptor
+    /// cannot catch a decryptor nobody runs -- measured at R311y664, where
+    /// building this binary exposed two false statements that four rounds of
+    /// unit tests had not.
+    ///
+    /// So this drives the PUBLIC entry point with bytes, exactly as the binary
+    /// does, and asserts on the rendering a person reads.
+    #[test]
+    fn a_quic_capture_and_a_key_log_yield_the_session_at_the_command_line() {
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(7));
+        let (capture, keylog, stream) = quic_capture(&random);
+
+        let (rendered, outcome) = analyze(&capture, Some(keylog.as_bytes())).expect("it reads");
+
+        // The SENTENCE a person sees, which said "NOT DECRYPTED (this reader
+        // recognises QUIC and opens none of it)" for every capture until this
+        // round -- a confident statement that became false the moment a caller
+        // existed.
+        assert!(
+            rendered.contains("4 of 4 packet(s) opened"),
+            "every packet opens: {rendered}"
+        );
+        assert!(
+            !rendered.contains("NOT DECRYPTED"),
+            "and the old sentence is gone: {rendered}"
+        );
+        assert!(
+            rendered.contains("stream/0: 25 byte(s)"),
+            "the client's stream is listed with its length: {rendered}"
+        );
+        assert_eq!(stream.len(), 25, "which is the length the fixture sent");
+        assert!(
+            rendered.contains("crypto/initial"),
+            "and the handshake stream is its own sequence: {rendered}"
+        );
+        assert!(
+            rendered.contains("keys installed from the log"),
+            "the ClientHello random found this connection in the log: {rendered}"
+        );
+        // AND THE VERDICT MOVES. Until this round any QUIC flow made a capture
+        // incomplete unconditionally, because there was no key path at all.
+        assert!(
+            outcome.complete,
+            "a fully opened QUIC capture is not a shortfall: {rendered}"
+        );
+    }
+
+    /// R311y698 (§1.2a) — WITHOUT the key log, the same capture opens its
+    /// Initial packets and says which packets it could not open.
+    ///
+    /// ## Why this half matters as much as the other
+    ///
+    /// The Initial space needs no key at all, so a keyless run is not a blank:
+    /// it yields the version, the connection ID, the ClientHello and therefore
+    /// the `Random` a reader needs to go and FIND the right key log. A tool that
+    /// refused to look without keys would withhold exactly the fact that tells
+    /// its user which keys to fetch.
+    ///
+    /// It is also the anti-vacuity half of the test above: if the pass opened
+    /// packets without keys, "the key log worked" would be a statement about
+    /// nothing.
+    #[test]
+    fn without_keys_the_initial_space_still_opens_and_the_rest_says_why() {
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(7));
+        let (capture, _, _) = quic_capture(&random);
+
+        let (rendered, outcome) = analyze(&capture, None).expect("it reads");
+        assert!(
+            rendered.contains("2 of 4 packet(s) opened"),
+            "the two Initial packets open from the wire alone: {rendered}"
+        );
+        assert!(
+            rendered.contains("a ClientHello was read and the key log does not hold it"),
+            "and the reader is told where to go next: {rendered}"
+        );
+        assert!(
+            rendered.contains("crypto/initial"),
+            "the handshake bytes are recovered without any key: {rendered}"
+        );
+        assert!(
+            !rendered.contains("stream/0"),
+            "and the 1-RTT stream is NOT, which is what makes the other test's \
+             claim about the key log mean something: {rendered}"
+        );
+        assert!(
+            !outcome.complete,
+            "a flow this reader could not fully open is a shortfall: {rendered}"
+        );
+    }
+
+    /// R311y698 (§1.2a) — the JSON says the same thing, in one document, and the
+    /// `decrypted` field is no longer a literal.
+    ///
+    /// `"decrypted":false` was hard-coded into the report from R311y669 until
+    /// this round. A field that cannot change is a field a consumer cannot
+    /// branch on — and it was a wrong answer the moment this workspace could
+    /// open a QUIC packet.
+    #[test]
+    fn the_json_reports_the_decryption_rather_than_a_literal_false() {
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(7));
+        let (capture, keylog, _) = quic_capture(&random);
+
+        let (rendered, _) = analyze_with(
+            &capture,
+            Some(keylog.as_bytes()),
+            Format::Json,
+            false,
+            false,
+        )
+        .expect("it reads");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).expect("one valid document");
+        let quic = &parsed["capture"]["quic"];
+        assert_eq!(quic["decrypted"], serde_json::json!(true));
+        assert_eq!(quic["decryption"]["packets"], serde_json::json!(4));
+        assert_eq!(quic["decryption"]["packets_opened"], serde_json::json!(4));
+        assert_eq!(quic["decryption"]["stream_bytes"], serde_json::json!(25));
+        assert_eq!(quic["decryption"]["datagram_bytes"], serde_json::json!(7));
+        assert_eq!(quic["decryption"]["walks_stopped"], serde_json::json!(0));
+
+        // The per-flow listing, whose direction split is the thing a summed
+        // figure cannot carry: a key log holding one side's secrets opens one
+        // half and not the other.
+        let flows = parsed["quic_flows"].as_array().expect("a flow list");
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0]["client_direction"], serde_json::json!("A"));
+        assert_eq!(flows[0]["keys_installed"], serde_json::json!(true));
+        assert_eq!(
+            flows[0]["directions"][0]["stream_bytes"],
+            serde_json::json!(25)
+        );
+        assert_eq!(
+            flows[0]["directions"][1]["datagram_bytes"],
+            serde_json::json!(7),
+            "the server's RFC 9221 datagram is on the server's half"
+        );
+    }
+
+    /// R311y698 (§1.2a) — a key log holding ONE direction's secrets opens that
+    /// half and says so about the other.
+    ///
+    /// The per-direction census is the reason this is reportable at all: a
+    /// summed "3 of 4 packets" cannot tell a reader that the half they care
+    /// about is the missing one, and this is the exact shape R311y668 had to fix
+    /// on the TLS side after measuring it.
+    #[test]
+    fn a_key_log_for_one_direction_opens_that_half_and_names_the_other() {
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(7));
+        let (capture, keylog, _) = quic_capture(&random);
+        // Drop every SERVER line, leaving the handshake and application secrets
+        // of the client only.
+        let half: String = keylog
+            .lines()
+            .filter(|line| !line.starts_with("SERVER_"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+
+        let (rendered, outcome) = analyze(&capture, Some(half.as_bytes())).expect("it reads");
+        assert!(
+            rendered.contains("3 of 4 packet(s) opened"),
+            "the server's 1-RTT packet is the only one left: {rendered}"
+        );
+        assert!(
+            rendered.contains("A stream/0: 25 byte(s)"),
+            "the client's half is whole: {rendered}"
+        );
+        assert!(
+            rendered.contains("B: 1 of 2 packet(s) opened (1 without a key, 0 refused)"),
+            "and the server's half names WHICH kind of failure it is -- a key \
+             log question, not a capture question: {rendered}"
+        );
+        assert!(!outcome.complete);
     }
 }

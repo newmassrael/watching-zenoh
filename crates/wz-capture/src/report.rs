@@ -54,6 +54,8 @@ pub struct CaptureReport<'a> {
     exchanges: Option<&'a crate::exchange::ExchangeTable>,
     #[cfg(feature = "network-codecs")]
     payloads: Option<&'a crate::payload::PayloadCensus>,
+    /// R311y698 — what a decryptor did with the QUIC flows, if one ran.
+    quic: Option<&'a crate::quic::QuicDecryption>,
 }
 
 impl<'a> CaptureReport<'a> {
@@ -66,7 +68,20 @@ impl<'a> CaptureReport<'a> {
             exchanges: None,
             #[cfg(feature = "network-codecs")]
             payloads: None,
+            quic: None,
         }
+    }
+
+    /// R311y698 — include what a QUIC decryptor found.
+    ///
+    /// Without it this report says the QUIC in the capture was not opened,
+    /// which is what happens when nothing opened it. With it the sentence and
+    /// the verdict both follow the result — the same shape `with_throughput`
+    /// has, and for the same reason: a report must not re-derive a plane the
+    /// caller never ran.
+    pub fn with_quic_decryption(mut self, quic: &'a crate::quic::QuicDecryption) -> Self {
+        self.quic = Some(quic);
+        self
     }
 
     /// Include a throughput table.
@@ -138,15 +153,31 @@ impl<'a> CaptureReport<'a> {
         }
         // R311y669 (§1.2a) — a QUIC flow reaches the verdict on the same rule an
         // undecrypted TLS flow does: the traffic was there, its zenoh is not in
-        // the totals, and this reader opens none of it. Unconditional rather
-        // than "unless opened", because unlike TLS there is no key path here at
-        // all — recognition is the whole of what this reader does with QUIC.
-        if self
+        // the totals, and this reader opens none of it.
+        //
+        // R311y698 — and "unless opened" is now reachable, which it was not when
+        // that rule was written: the disjunct was unconditional because there was
+        // no key path for QUIC at all, and the round that built one has to move
+        // this or the verdict says a fully opened capture is incomplete. This is
+        // R311y664's change to the TLS half, arriving here for the same reason.
+        //
+        // The population is the LIVE flows and that is airtight rather than
+        // approximate: a QUIC flow the cap evicted took its packets with it, and
+        // every eviction increments `drops.flows`, which the first line of this
+        // function already reads.
+        let quic_flows = self
             .dissection
             .datagram_flows()
             .iter()
-            .any(|f| f.quic.is_some())
-        {
+            .filter(|f| f.quic.is_some())
+            .count();
+        if quic_flows > self.quic.map_or(0, |q| q.flows_opened) {
+            return false;
+        }
+        // A walk that stopped mid-packet is a shortfall in the rows even where
+        // every packet opened: the frames after the stop were not read, so a
+        // stream cut short there is reported as one that ended.
+        if self.quic.is_some_and(|q| q.walks_stopped > 0) {
             return false;
         }
         // R311y624 (§1.1m) — the FRAMING witnesses reach the verdict, and until
@@ -469,7 +500,7 @@ impl<'a> CaptureReport<'a> {
                 ",\"quic\":{{\"flows\":{},\"packets\":{},\"bytes\":{},\"initial\":{},\
                  \"handshake\":{},\"zero_rtt\":{},\"one_rtt\":{},\"retry\":{},\
                  \"version_negotiation\":{},\"unrecognised\":{},\"declared_flows\":{},\
-                 \"declarations_unsupported\":{},\"decrypted\":false}}",
+                 \"declarations_unsupported\":{},{}}}",
                 q.len(),
                 q.iter().map(|c| c.packets).sum::<usize>(),
                 q.iter().map(|c| c.bytes).sum::<u64>(),
@@ -489,6 +520,32 @@ impl<'a> CaptureReport<'a> {
                 // cost of one is the worst this reader inflicts: real zenoh
                 // withheld from the decoder and reported as protected bytes.
                 q.iter().filter(|c| c.declaration_unsupported()).count(),
+                // R311y698 — the DECRYPTION result, which was a hard-coded
+                // `"decrypted":false` until a caller existed. A literal that
+                // cannot change is a field a consumer cannot branch on, and it
+                // became a wrong answer the moment this workspace could open a
+                // QUIC packet.
+                match self.quic {
+                    None => alloc::string::String::from("\"decrypted\":false"),
+                    Some(k) => format!(
+                        "\"decrypted\":{},\"decryption\":{{\"flows_offered\":{},\
+                         \"flows_opened\":{},\"packets\":{},\"packets_opened\":{},\
+                         \"packets_no_keys\":{},\"packets_refused\":{},\
+                         \"crypto_bytes\":{},\"stream_bytes\":{},\
+                         \"datagram_bytes\":{},\"walks_stopped\":{}}}",
+                        k.flows_opened > 0 && k.flows_opened == k.flows_offered,
+                        k.flows_offered,
+                        k.flows_opened,
+                        k.packets,
+                        k.packets_opened,
+                        k.packets_no_keys,
+                        k.packets_refused,
+                        k.crypto_bytes,
+                        k.stream_bytes,
+                        k.datagram_bytes,
+                        k.walks_stopped,
+                    ),
+                },
             ));
         }
         s.push_str(&format!(
@@ -702,9 +759,33 @@ impl<'a> CaptureReport<'a> {
             let q: alloc::vec::Vec<crate::quic::QuicCensus> =
                 d.datagram_flows().iter().filter_map(|fl| fl.quic).collect();
             if !q.is_empty() {
+                // R311y698 — the TAIL of this sentence follows what happened.
+                // "this reader recognises QUIC and opens none of it" was true of
+                // this crate on its own and false of a run whose caller opened
+                // it, and a person reads this line rather than the JSON.
+                let verdict = match self.quic {
+                    None => alloc::string::String::from(
+                        "NOT DECRYPTED (this reader recognises QUIC and opens \
+                         none of it; supply --keylog to open one)",
+                    ),
+                    Some(k) if k.packets_opened == 0 => format!(
+                        "NOT DECRYPTED ({} packet(s) offered, {} had no key for \
+                         their space, {} were refused)",
+                        k.packets, k.packets_no_keys, k.packets_refused
+                    ),
+                    Some(k) => format!(
+                        "{} of {} packet(s) opened, {} flow(s) whole -- {} \
+                         handshake byte(s), {} stream byte(s), {} datagram byte(s)",
+                        k.packets_opened,
+                        k.packets,
+                        k.flows_opened,
+                        k.crypto_bytes,
+                        k.stream_bytes,
+                        k.datagram_bytes
+                    ),
+                };
                 s.push_str(&format!(
-                    "  QUIC: {} flow(s){}, {} packet(s), {} byte(s) -- NOT DECRYPTED \
-                     (this reader recognises QUIC and opens none of it)\n",
+                    "  QUIC: {} flow(s){}, {} packet(s), {} byte(s) -- {verdict}\n",
                     q.len(),
                     // Named in the rendering and not only in the JSON: a person
                     // reading this must know whether the classification came from

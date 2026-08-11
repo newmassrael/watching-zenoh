@@ -50,3 +50,15 @@ wz-capture = { path = "../wz-capture" }
 # derives what this crate derives. Two independent implementations agreeing is
 # the claim; one implementation agreeing with itself is not.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+[features]
+# R311y698 (§1.2a) — the QUIC packet BUILDERS, for a consumer that must make a
+# capture to prove it reads one.
+#
+# Off by default and never on for the analyzer itself: nothing in the read path
+# builds a QUIC packet. `wz-analyze` turns it on as a DEV-dependency so its
+# end-to-end test can synthesise a connection, and the alternative -- a second
+# copy of the packet layout in that crate -- would be a second opinion about
+# where a header ends, which is the shape this workspace closes rather than
+# writes.
+fixtures = []

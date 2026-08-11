@@ -97,7 +97,7 @@ impl Suite {
         }
     }
 
-    fn aead_algorithm(self) -> &'static aead::Algorithm {
+    pub(crate) fn aead_algorithm(self) -> &'static aead::Algorithm {
         match self {
             Self::Aes128GcmSha256 => &aead::AES_128_GCM,
             Self::Aes256GcmSha384 => &aead::AES_256_GCM,
@@ -130,7 +130,7 @@ impl Suite {
     /// A SEPARATE algorithm family from the AEAD: header protection is a raw
     /// block operation (AES-ECB, or a ChaCha20 block) rather than an
     /// authenticated one, and `ring` models it as such.
-    fn quic_hp_algorithm(self) -> &'static aead::quic::Algorithm {
+    pub(crate) fn quic_hp_algorithm(self) -> &'static aead::quic::Algorithm {
         match self {
             Self::Aes128GcmSha256 => &aead::quic::AES_128,
             Self::Aes256GcmSha384 => &aead::quic::AES_256,

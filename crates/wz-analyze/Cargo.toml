@@ -59,3 +59,11 @@ serde_json = "1"
 # decrypts, which means records genuinely sealed by an implementation that is
 # not this workspace's.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# R311y698 (§1.2a) — the QUIC packet BUILDERS, on for tests only.
+#
+# The QUIC pass has to be driven by a capture holding a real QUIC connection,
+# and rustls's public surface protects exactly one thing -- an Initial packet
+# from a connection ID -- so every later space has to be built. It is built by
+# the crate that must invert it, because a second copy of the packet layout here
+# would be a second opinion about where a header ends.
+wz-tls-record = { path = "../wz-tls-record", features = ["fixtures"] }
