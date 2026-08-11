@@ -1824,6 +1824,24 @@ fn note_disagreement(
 /// A pcapng packet carries its own link type (its interface's) and a classic
 /// pcap has ONE for the whole file. Flattening them here would mean copying
 /// every packet's bytes to attach a number that the file already answers for.
+///
+/// # R311y693 — what this costs, measured rather than estimated
+///
+/// The store carried this as an open item reading "parses the whole file a
+/// second time for every `--fields` run, outside the bound discipline every
+/// other accumulation in this crate follows". Counted: [`Self::of`] has ONE
+/// call site, inside [`datagram_field_rows`], which has one, inside
+/// [`field_lines`], of which exactly one of its two call sites runs per
+/// invocation. At most once per run, and not at all for a capture with no
+/// datagram flow -- the early return sits above it.
+///
+/// So the cost is one extra parse of the caller's own file, paid only by a
+/// reader who asked for `--fields` over datagram traffic. It is bounded by the
+/// same thing the FIRST parse is bounded by, which is the input the caller
+/// handed over; there is no accumulation here that grows with anything else,
+/// and a bound of this crate's own would be a bound on someone else's file.
+/// Recorded because "outside the bound discipline" and "bounded by the input"
+/// are different claims and the item asserted the first.
 enum Reread {
     Ng(wz_capture::pcapng::PcapngFile),
     Classic(wz_capture::pcap::PcapFile),
