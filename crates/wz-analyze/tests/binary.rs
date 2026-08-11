@@ -3744,3 +3744,132 @@ fn a_decrypted_unit_carrying_several_messages_walks_each_of_them() {
          old slice: {text}"
     );
 }
+
+/// R311y688 (§1.1n) — every field row NAMES the coordinate space its `@N` is
+/// in, and the three spaces are driven side by side.
+///
+/// ## What a reader could not tell
+///
+/// Three producers put a number after `@` and they count three different
+/// things: a cleartext stream row's is a byte offset into the retained stream,
+/// a datagram row's is a PACKET INDEX, and a decrypted row's is the offset of
+/// the ciphertext record the plaintext came out of. All three are small numbers
+/// and nothing distinguished them.
+///
+/// The spans inside every tree are message-relative, so "row offset + span" is a
+/// capture coordinate in exactly ONE of the three cases -- and R311y687 showed
+/// that even there the sum needs the framing prefix and the message's place in
+/// its batch. That arithmetic is now printed rather than left to be inferred.
+#[test]
+fn every_field_row_says_which_coordinate_space_its_offset_is_in() {
+    let scratch = Scratch::new("fields-spaces");
+    let cleartext = scratch.write("plain.pcapng", &exchange_capture());
+    let datagram = scratch.write("scout.pcapng", &scouting_capture());
+    let (tls_file, log) = tls_exchange_capture();
+    let tls = scratch.write("tls.pcapng", &tls_file);
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+
+    for (space, args) in [
+        ("stream_byte", vec![cleartext.clone()]),
+        ("packet", vec![datagram.clone()]),
+        (
+            "ciphertext_record",
+            vec![tls.clone(), "--keylog".into(), keylog.clone()],
+        ),
+    ] {
+        let run = |extra: &[&str]| {
+            String::from_utf8_lossy(
+                &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                    .args(&args)
+                    .arg("--fields")
+                    .args(extra)
+                    .output()
+                    .expect("runs")
+                    .stdout,
+            )
+            .into_owned()
+        };
+
+        let json = run(&["--json"]);
+        let json = json.trim();
+        assert_one_document(json);
+        assert!(
+            json.contains(&format!("\"offset_space\":\"{space}\"")),
+            "{space}: every row must name its space: {json}"
+        );
+        // AND NO OTHER SPACE APPEARS, which is what says the label follows the
+        // producer rather than being a constant somebody typed once.
+        for other in ["stream_byte", "packet", "ciphertext_record"] {
+            if other != space {
+                assert!(
+                    !json.contains(&format!("\"offset_space\":\"{other}\"")),
+                    "{space}: a row of this capture must not be labelled \
+                     {other}: {json}"
+                );
+            }
+        }
+
+        let text = run(&[]);
+        let note = match space {
+            "stream_byte" => "[stream byte; this message begins at",
+            "packet" => "[packet index]",
+            _ => "[ciphertext record]",
+        };
+        assert!(
+            text.contains(note),
+            "{space}: and the person reading the text is told the same: {text}"
+        );
+    }
+}
+
+/// R311y688 (§1.1n) — the offset a stream row reports for its MESSAGE is the
+/// one a reader can add a span to, and it is not the row's own number.
+///
+/// R311y687's fix is what makes the two differ by more than the prefix: a
+/// message standing second in a batched unit begins `prefix_width +
+/// unit_offset` past the unit, and a reader doing that sum by hand would have to
+/// know both.
+#[test]
+fn the_message_offset_a_stream_row_reports_lands_on_the_message() {
+    let scratch = Scratch::new("fields-message-at");
+    // One unit, two messages: KeepAlive at unit offset 0, Close at 1.
+    let body = [0x04u8, 0x03, 0x00];
+    let mut framed = (body.len() as u16).to_le_bytes().to_vec();
+    framed.extend_from_slice(&body);
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &framed))],
+    );
+    let capture = scratch.write("batch.pcapng", &file);
+    let json = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .args(["--fields", "--json"])
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert_one_document(json.trim());
+
+    let ats: Vec<&str> = json.split("\"message_at\":").skip(1).collect();
+    // ANTI-VACUITY: two rows, or the pair below is not a pair.
+    assert_eq!(ats.len(), 2, "the unit's two messages are two rows: {json}");
+    let value = |s: &str| -> usize {
+        s.split(|c: char| !c.is_ascii_digit())
+            .next()
+            .expect("digits")
+            .parse()
+            .expect("a number")
+    };
+    let (first, second) = (value(ats[0]), value(ats[1]));
+    // The stream begins at offset 0 with a two-byte prefix, so the first
+    // message is at 2 and the second one byte further on.
+    assert_eq!(
+        (first, second),
+        (2, 3),
+        "the two messages of one unit must have DIFFERENT message offsets, one \
+         byte apart -- the same number twice is the R311y687 defect wearing a \
+         new label: {json}"
+    );
+}

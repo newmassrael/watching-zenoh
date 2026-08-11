@@ -862,7 +862,17 @@ fn field_lines(
                 rows.push(',');
             }
             emitted += 1;
-            render_sink_row(&mut rows, format, flow.flow, *direction, *origin, row, true);
+            render_sink_row(
+                &mut rows,
+                format,
+                RowAt {
+                    flow: flow.flow,
+                    direction: *direction,
+                    origin: *origin,
+                    space: OffsetSpace::CiphertextRecord,
+                },
+                row,
+            );
         }
         if let Some((_, n)) = decrypted.omitted.iter().find(|(f, _)| *f == flow.flow) {
             omitted += n;
@@ -1499,6 +1509,67 @@ fn walk_agrees(walked: &str, framed: &str) -> bool {
         || walked == framed
 }
 
+/// R311y688 (§1.1n) — WHICH COORDINATE SPACE a row's `@N` is in.
+///
+/// # What a reader could not tell
+///
+/// Three producers put a number after `@` and they are numbers of three
+/// different things: a cleartext stream row's is a BYTE OFFSET into the
+/// direction's retained stream, a datagram row's is a PACKET INDEX (a datagram
+/// link has no stream to be offset within), and a decrypted row's is the offset
+/// of the CIPHERTEXT RECORD the plaintext came out of. Nothing on the row said
+/// which, and the three are indistinguishable by inspection -- small numbers all
+/// round.
+///
+/// The spans inside every tree are message-relative (R311y677), so a reader
+/// adding a span to the row's number gets a capture coordinate in exactly one
+/// of the three cases. This says which case that is, and in that case gives the
+/// sum rather than leaving the arithmetic to be inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OffsetSpace {
+    /// A byte offset into the direction's retained stream, carrying the offset
+    /// the MESSAGE itself begins at: past the framing prefix and past whatever
+    /// of the unit's batch stands ahead of it.
+    StreamByte { message_at: usize },
+    /// The index of the packet in the capture file. NOT a byte offset.
+    Packet,
+    /// The offset of the ciphertext record the plaintext was opened from. The
+    /// plaintext has no position in the stream at all, which is why this is not
+    /// a byte offset a span can be added to.
+    CiphertextRecord,
+}
+
+impl OffsetSpace {
+    /// The machine-readable name a consumer branches on.
+    fn name(self) -> &'static str {
+        match self {
+            Self::StreamByte { .. } => "stream_byte",
+            Self::Packet => "packet",
+            Self::CiphertextRecord => "ciphertext_record",
+        }
+    }
+
+    /// What the text listing puts after the offset.
+    fn note(self) -> String {
+        match self {
+            Self::StreamByte { message_at } => {
+                format!(" [stream byte; this message begins at {message_at}]")
+            }
+            Self::Packet => " [packet index]".into(),
+            Self::CiphertextRecord => " [ciphertext record]".into(),
+        }
+    }
+
+    /// The JSON keys, which are the same fact as [`Self::note`].
+    fn json(self) -> String {
+        let mut out = format!(",\"offset_space\":\"{}\"", self.name());
+        if let Self::StreamByte { message_at } = self {
+            out.push_str(&format!(",\"message_at\":{message_at}"));
+        }
+        out
+    }
+}
+
 fn render_field_row(
     out: &mut String,
     format: Format,
@@ -1507,6 +1578,13 @@ fn render_field_row(
     row: &FieldRow,
     to_json: &dyn Fn(&wz_session_core::dissect::Field) -> String,
 ) {
+    // R311y688 — a cleartext stream row's offset IS a byte offset, and the
+    // message it names begins past the framing prefix and past whatever of the
+    // unit stands ahead of it. That sum is the one a reader would otherwise
+    // have to do, and get wrong on a batch.
+    let space = OffsetSpace::StreamByte {
+        message_at: frame.stream_offset + frame.prefix_width + frame.unit_offset,
+    };
     // R311y675 — the arrow follows the DIRECTION. `assembler()` maps A to
     // low_to_high and B to high_to_low, so printing the endpoints in table order
     // for both would say every message travelled the same way -- a row that is
@@ -1528,30 +1606,34 @@ fn render_field_row(
         (Format::Json, FieldRow::Walked(field)) => {
             out.push_str(&format!(
                 "{{\"from\":\"{from}\",\"to\":\"{to}\",\"direction\":\"{dir}\",\
-                 \"stream_offset\":{},\"field\":{}}}",
+                 \"stream_offset\":{}{},\"field\":{}}}",
                 frame.stream_offset,
+                space.json(),
                 to_json(field)
             ));
         }
         (Format::Json, FieldRow::Declined(why)) => {
             out.push_str(&format!(
                 "{{\"from\":\"{from}\",\"to\":\"{to}\",\"direction\":\"{dir}\",\
-                 \"stream_offset\":{},\"declined\":\"{}\"}}",
+                 \"stream_offset\":{}{},\"declined\":\"{}\"}}",
                 frame.stream_offset,
+                space.json(),
                 escape(why)
             ));
         }
         (Format::Text, FieldRow::Walked(field)) => {
             out.push_str(&format!(
-                "  {from} -> {to} {dir} @{}\n",
-                frame.stream_offset
+                "  {from} -> {to} {dir} @{}{}\n",
+                frame.stream_offset,
+                space.note()
             ));
             push_field_text(out, field, 2);
         }
         (Format::Text, FieldRow::Declined(why)) => {
             out.push_str(&format!(
-                "  {from} -> {to} {dir} @{}: NO FIELDS -- {why}\n",
-                frame.stream_offset
+                "  {from} -> {to} {dir} @{}{}: NO FIELDS -- {why}\n",
+                frame.stream_offset,
+                space.note()
             ));
         }
     }
@@ -1806,11 +1888,13 @@ fn datagram_field_rows(
             render_sink_row(
                 &mut out,
                 format,
-                flow.flow,
-                frame.direction,
-                frame.stream_offset,
+                RowAt {
+                    flow: flow.flow,
+                    direction: frame.direction,
+                    origin: frame.stream_offset,
+                    space: OffsetSpace::Packet,
+                },
                 &FieldRow::Walked(field),
-                false,
             );
         }
         // R311y679 — the SCOUTING list, which is where a discovery capture's
@@ -1874,11 +1958,13 @@ fn datagram_field_rows(
             render_sink_row(
                 &mut out,
                 format,
-                flow.flow,
-                datagram.direction,
-                datagram.packet_index,
+                RowAt {
+                    flow: flow.flow,
+                    direction: datagram.direction,
+                    origin: datagram.packet_index,
+                    space: OffsetSpace::Packet,
+                },
                 &FieldRow::Walked(field),
-                false,
             );
         }
         if omitted > 0 {
@@ -1911,26 +1997,52 @@ fn datagram_field_rows(
     }
 }
 
+/// R311y688 — WHERE a sink row stands, as one value.
+///
+/// Four coordinates travelled as four arguments and the fifth this round would
+/// have added took the call past what `clippy` allows -- which is the arity
+/// smell R311y678's carry already recorded about this crate's constructors,
+/// arriving in a renderer. They are one fact about one row and they now travel
+/// as one.
+///
+/// `decrypted` is DERIVED rather than carried beside the space, because the two
+/// cannot disagree: the ciphertext-record space is exactly the decrypted case.
+/// A bool beside it would be a second place to get the same fact wrong, which is
+/// how R311y679 came to print `(decrypted)` over cleartext rows.
+#[derive(Debug, Clone, Copy)]
+struct RowAt {
+    flow: wz_capture::link::FlowKey,
+    direction: wz_session_core::passive::Direction,
+    origin: usize,
+    space: OffsetSpace,
+}
+
+impl RowAt {
+    fn decrypted(&self) -> bool {
+        matches!(self.space, OffsetSpace::CiphertextRecord)
+    }
+}
+
 /// R311y677 — one row the sink produced, in whichever format.
 ///
 /// Structurally identical to [`render_field_row`]'s walked arm and deliberately
 /// not merged with it: that one takes a `PassiveFrame` and this one takes what
 /// the sink kept, and threading a frame that does not exist through the other
 /// would mean inventing one.
-fn render_sink_row(
-    out: &mut String,
-    format: Format,
-    flow: wz_capture::link::FlowKey,
-    direction: wz_session_core::passive::Direction,
-    origin: usize,
-    row: &FieldRow,
+fn render_sink_row(out: &mut String, format: Format, at: RowAt, row: &FieldRow) {
+    let RowAt {
+        flow,
+        direction,
+        origin,
+        space,
+    } = at;
     // R311y679 — whether these bytes came out of a DECRYPTION. Not a constant:
-    // this renderer took its second caller this round and the datagram rows it
+    // this renderer took its second caller that round and the datagram rows it
     // produces are cleartext, so a hardcoded `(decrypted)` is a label that is
     // silently false for every one of them -- the shape R311y669 removed when a
-    // QUIC row was keyed `tls`.
-    decrypted: bool,
-) {
+    // QUIC row was keyed `tls`. R311y688 DERIVES it from the space, so the two
+    // cannot disagree.
+    let decrypted = at.decrypted();
     let (dir, from, to) = match direction {
         wz_session_core::passive::Direction::A => ("A", endpoint(&flow.low), endpoint(&flow.high)),
         wz_session_core::passive::Direction::B => ("B", endpoint(&flow.high), endpoint(&flow.low)),
@@ -1938,7 +2050,8 @@ fn render_sink_row(
     match (format, row) {
         (Format::Json, FieldRow::Walked(field)) => out.push_str(&format!(
             "{{\"from\":\"{from}\",\"to\":\"{to}\",\"direction\":\"{dir}\",\
-             \"stream_offset\":{origin},\"decrypted\":{decrypted},\"field\":{}}}",
+             \"stream_offset\":{origin}{},\"decrypted\":{decrypted},\"field\":{}}}",
+            space.json(),
             wz_session_core::dissect::to_json(field)
         )),
         // R311y683 — a row the walker refused is still a row, in both formats.
@@ -1947,18 +2060,23 @@ fn render_sink_row(
         // transport produced it.
         (Format::Json, FieldRow::Declined(why)) => out.push_str(&format!(
             "{{\"from\":\"{from}\",\"to\":\"{to}\",\"direction\":\"{dir}\",\
-             \"stream_offset\":{origin},\"decrypted\":{decrypted},\"declined\":\"{}\"}}",
+             \"stream_offset\":{origin}{},\"decrypted\":{decrypted},\"declined\":\"{}\"}}",
+            space.json(),
             escape(why)
         )),
         (Format::Text, FieldRow::Walked(field)) => {
             let how = if decrypted { " (decrypted)" } else { "" };
-            out.push_str(&format!("  {from} -> {to} {dir} @{origin}{how}\n"));
+            out.push_str(&format!(
+                "  {from} -> {to} {dir} @{origin}{}{how}\n",
+                space.note()
+            ));
             push_field_text(out, field, 2);
         }
         (Format::Text, FieldRow::Declined(why)) => {
             let how = if decrypted { " (decrypted)" } else { "" };
             out.push_str(&format!(
-                "  {from} -> {to} {dir} @{origin}{how}: NO FIELDS -- {why}\n"
+                "  {from} -> {to} {dir} @{origin}{}{how}: NO FIELDS -- {why}\n",
+                space.note()
             ));
         }
     }
