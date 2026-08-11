@@ -3952,4 +3952,129 @@ pub(crate) mod tests {
             "the topics are the whole capture, less truncation: {shares:?}"
         );
     }
+
+    /// R311y720 (§D M4) — THE COST OF THE THREE WALKS, MEASURED.
+    ///
+    /// # Why this exists and why it is `#[ignore]`d
+    ///
+    /// The register has carried M4 since R311y660 in this shape: "three planes
+    /// walk the same frames three times -- cost UNMEASURED, so whether it is
+    /// debt at all has to be measured first". Four rounds restated it and none
+    /// measured it, because the harness was the missing piece: the planes are
+    /// cheap per frame, so the answer only appears at a capture size no unit
+    /// fixture has.
+    ///
+    /// So this is the harness. It builds a capture of `MESSAGES` records,
+    /// times the dissection that reads it, then times each plane over the
+    /// result, and prints the numbers. A wall-clock assertion would be flaky on
+    /// a shared runner and would gate the wrong thing -- what the round needs is
+    /// a NUMBER for the ledger, not a threshold. Run it with
+    /// `cargo test -p wz-capture -- --ignored --nocapture m4_`.
+    ///
+    /// What the number decides: if the four plane walks together cost a small
+    /// fraction of the parse that produced the frames, fusing them into one
+    /// walk buys nothing and M4 is not debt. If they dominate, it is.
+    #[test]
+    #[ignore = "a measurement harness, not a gate: run with --ignored --nocapture"]
+    fn m4_the_cost_of_walking_the_same_frames_four_times() {
+        use std::time::Instant;
+
+        const MESSAGES: usize = 20_000;
+        // Enough distinct keyexprs that the plane's tables do real work rather
+        // than folding everything onto one row -- a single-key capture would
+        // measure a hash lookup, not the plane.
+        const KEYS: [&str; 8] = [
+            "home/temp",
+            "home/light",
+            "home/door",
+            "car/speed",
+            "car/rpm",
+            "plant/line/1",
+            "plant/line/2",
+            "plant/line/3",
+        ];
+
+        let packets: alloc::vec::Vec<alloc::vec::Vec<u8>> = (0..MESSAGES)
+            .map(|i| {
+                let record = push(sender_space(0, Some(KEYS[i % KEYS.len()])), &[0u8; 32]);
+                let wire = crate::datagram_tests::frame_carrying(&record);
+                if i % 2 == 0 {
+                    udp_packet(LOW, 43210, HIGH, 7447, &wire)
+                } else {
+                    udp_packet(HIGH, 7447, LOW, 43210, &wire)
+                }
+            })
+            .collect();
+
+        let start = Instant::now();
+        let mut d = Dissection::new();
+        for (i, pkt) in packets.iter().enumerate() {
+            d.push_packet(LINKTYPE_ETHERNET, i, pkt);
+        }
+        let parse = start.elapsed();
+        let decoded = d.decoded_messages();
+        assert!(
+            decoded >= MESSAGES,
+            "the fixture must actually decode, or this measures nothing: {decoded}"
+        );
+
+        let start = Instant::now();
+        let throughput = aggregate(&d);
+        let t_throughput = start.elapsed();
+
+        let start = Instant::now();
+        let exchanges = crate::exchange::exchanges(&d);
+        let t_exchanges = start.elapsed();
+
+        let start = Instant::now();
+        let payloads = crate::payload::payloads(&d);
+        let t_payloads = start.elapsed();
+
+        let start = Instant::now();
+        let nodes = crate::node::nodes(&d);
+        let t_nodes = start.elapsed();
+
+        // THE NUMBER THE DECISION ACTUALLY TURNS ON, and it is measured rather
+        // than argued: fusing four walks into one removes the ITERATION, never
+        // the per-record work each plane does inside it. So iteration is timed
+        // on its own -- a traversal of every frame list that touches each frame
+        // and computes nothing.
+        let start = Instant::now();
+        let mut seen = 0usize;
+        for _ in 0..4 {
+            for flow in d.datagram_flows() {
+                for frames in flow.frame_lists() {
+                    for frame in frames {
+                        seen += frame.stream_offset & 1;
+                    }
+                }
+            }
+        }
+        let t_iteration = start.elapsed();
+        core::hint::black_box(seen);
+
+        let planes = t_throughput + t_exchanges + t_payloads + t_nodes;
+        std::println!(
+            "M4 over {decoded} decoded message(s):\n  \
+             parse      {parse:?}\n  \
+             throughput {t_throughput:?}  ({} row(s))\n  \
+             exchanges  {t_exchanges:?}  ({} row(s))\n  \
+             payloads   {t_payloads:?}\n  \
+             nodes      {t_nodes:?}  ({} node(s))\n  \
+             ---------- planes {planes:?} = {:.1}% of parse\n  \
+             4x bare iteration {t_iteration:?} = {:.1}% of the plane time \
+             (this is ALL that fusing the walks could save)",
+            throughput.rows().len(),
+            exchanges.rows().len(),
+            nodes.nodes().len(),
+            planes.as_secs_f64() / parse.as_secs_f64() * 100.0,
+            t_iteration.as_secs_f64() / planes.as_secs_f64() * 100.0,
+        );
+        // The only ASSERTION is the one that keeps the print honest: a plane
+        // that produced nothing measured nothing.
+        assert!(
+            !throughput.rows().is_empty() && payloads.payloads() > 0,
+            "a plane with no rows measured an empty walk"
+        );
+    }
 }

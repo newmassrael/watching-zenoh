@@ -75,6 +75,16 @@ pub struct Options {
     /// R311y699 ([REDACTED-REQ]) — payload format rules, as `(keyexpr pattern, format
     /// name)` in the order they were typed. First match wins.
     pub payload_formats: Vec<(String, String)>,
+    /// R311y720 (PF4) — declared field names, as `(keyexpr pattern, field
+    /// path, name)` in the order they were typed. First match wins.
+    ///
+    /// The analyzer never derives these. See
+    /// `wz_capture::payload::formats::FormatMap::name_field` for why a name
+    /// that did not come from the deployment would be invented.
+    pub payload_field_names: Vec<(String, String, String)>,
+    /// R311y720 (§D M3) — link types the caller declared as carrying raw zenoh
+    /// SERIAL bytes. See `wz_capture::serial` for why they are declared.
+    pub serial_linktypes: Vec<u32>,
     /// R311y670 (§1.2a) — the ceiling on messages listed per flow.
     ///
     /// R311y669 added the ceiling to the library and left `wz-analyze` passing
@@ -246,6 +256,20 @@ OPTIONS:
                       first matching rule wins. Matching is zenoh's own
                       keyexpr dialect, so `demo/**` covers `demo/a`.
                       Needs --fields. Formats: protobuf.
+    --payload-name <keyexpr>:<path>=<name>
+                      name one decoded field path, e.g.
+                      `demo/**:1=temperature`. Repeatable; the first matching
+                      declaration wins. A schemaless walk recovers `1` and its
+                      bytes and NEVER a name, so this is the only place a name
+                      can come from. Needs --fields.
+    --serial <linktype>
+                      treat packets on this pcap link type as raw zenoh SERIAL
+                      bytes: COBS envelope, CRC32, handshake flags.
+                      Repeatable. DECLARED because LINKTYPE_RTAC_SERIAL's
+                      pseudo-header is not verifiable here, so nothing is
+                      parsed out of one. A pcapng capture's two interfaces are
+                      the line's two wires; a one-interface capture is read and
+                      reports its direction as unattributed.
     --quic <port>     treat UDP traffic on this port as QUIC. Repeatable.
                       A capture that begins mid-connection carries nothing that
                       distinguishes a QUIC 1-RTT packet from a zenoh datagram --
@@ -293,6 +317,8 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut quic_ports: Vec<u16> = Vec::new();
     let mut quic_cid_len: Option<usize> = None;
     let mut payload_formats: Vec<(String, String)> = Vec::new();
+    let mut payload_field_names: Vec<(String, String, String)> = Vec::new();
+    let mut serial_linktypes: Vec<u32> = Vec::new();
     let mut max_messages: Option<usize> = None;
     let mut census = Census::default();
     let mut select: Option<wz_capture::filter::Filter> = None;
@@ -342,6 +368,37 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
                     return Err(UsageError::BadValue("--payload-format", raw.clone()));
                 }
                 payload_formats.push((pattern.to_string(), name.to_string()));
+            }
+            // R311y720 (PF4) — `<keyexpr>:<path>=<name>`. Refused at parse
+            // time when any of the three is empty, for the reason
+            // `--payload-format` refuses an unknown format name: a declaration
+            // this reader silently drops leaves the deployment believing their
+            // schema is live while every field still renders as a number.
+            "--payload-name" => {
+                at += 1;
+                let raw = args
+                    .get(at)
+                    .ok_or(UsageError::MissingValue("--payload-name"))?;
+                let bad = || UsageError::BadValue("--payload-name", raw.clone());
+                let (scope, name) = raw.rsplit_once('=').ok_or_else(bad)?;
+                let (pattern, path) = scope.rsplit_once(':').ok_or_else(bad)?;
+                if pattern.is_empty() || path.is_empty() || name.is_empty() {
+                    return Err(bad());
+                }
+                payload_field_names.push((pattern.to_string(), path.to_string(), name.to_string()));
+            }
+            // R311y720 (§D M3) — the link type a serial capture was written
+            // with. DECLARED and never sniffed: `LINKTYPE_RTAC_SERIAL` (250)
+            // carries a pseudo-header whose layout this machine cannot verify,
+            // and a reader that parsed one from memory would report a guessed
+            // direction as a measurement.
+            "--serial" => {
+                at += 1;
+                let raw = args.get(at).ok_or(UsageError::MissingValue("--serial"))?;
+                serial_linktypes.push(
+                    raw.parse::<u32>()
+                        .map_err(|_| UsageError::BadValue("--serial", raw.clone()))?,
+                );
             }
             "--quic" => {
                 at += 1;
@@ -410,6 +467,8 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
         quic_ports,
         quic_cid_len,
         payload_formats,
+        payload_field_names,
+        serial_linktypes,
         max_messages,
         census,
         per_field,
@@ -537,6 +596,8 @@ pub fn analyze_declaring_quic(
         quic_ports,
         quic_cid_len: None,
         payload_rules: &[],
+        payload_field_names: &[],
+        serial_linktypes: &[],
         census: Census::default(),
         per_field: false,
         select: None,
@@ -581,6 +642,12 @@ pub struct Request<'a> {
     /// R311y699 ([REDACTED-REQ]) — payload format rules as `(keyexpr pattern, format
     /// name)`. Applied to the field layer, so they need `per_field`.
     pub payload_rules: &'a [(String, String)],
+    /// R311y720 (PF4) — declared field names, as `(keyexpr pattern, field
+    /// path, name)`. Applied to the decoded payload fields, so like
+    /// [`Self::payload_rules`] they need `per_field`.
+    pub payload_field_names: &'a [(String, String, String)],
+    /// R311y720 (§D M3) — declared serial link types.
+    pub serial_linktypes: &'a [u32],
     /// Which observer planes to build. See [`Census`].
     pub census: Census,
     /// R311y675 — dissect each message into its fields.
@@ -603,6 +670,8 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
         quic_ports,
         quic_cid_len,
         payload_rules,
+        payload_field_names,
+        serial_linktypes,
         census,
         per_field,
         select,
@@ -632,7 +701,19 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
             }
         }
     }
-    let mut dissection = Dissection::from_capture_declaring_quic(capture, quic_ports)?;
+    // R311y720 (PF4) — the DECLARED names, installed into the same map and
+    // refused the same way. A declaration that names a path under a pattern no
+    // rule decodes is not an error: the reader may be declaring ahead of the
+    // traffic, and the field simply renders unnamed until it appears.
+    for (pattern, path, name) in payload_field_names {
+        if let Err(err) = payload_formats.name_field(pattern, path, name) {
+            payload_refusals.push(FieldNote::PayloadRuleRefused {
+                rule: format!("{pattern}:{path}={name}"),
+                why: err.to_string(),
+            });
+        }
+    }
+    let mut dissection = Dissection::from_capture_declaring(capture, quic_ports, serial_linktypes)?;
 
     // The capture's own keys first, then the external log folded in.
     let (mut opener, foreign) = CaptureOpener::from_secrets_blocks(dissection.decryption_secrets());
@@ -3620,6 +3701,12 @@ fn decode_payload(
             for f in &mut fields {
                 f.start += base;
                 f.end += base;
+                // R311y720 (PF4) — and the DECLARED name, where the deployment
+                // gave one for this path under this keyexpr. Attached here
+                // because this is the one place that holds both the resolved
+                // keyexpr and the decoded paths; the decoder has the paths and
+                // no keyexpr, and the map has neither until now.
+                f.name = map.field_name(&keyexpr, &f.path).map(str::to_string);
             }
             PayloadDecoding::Decoded {
                 keyexpr,
@@ -3675,9 +3762,19 @@ fn payload_block(
                 let rows: Vec<String> = fields
                     .iter()
                     .map(|f| {
+                        // R311y720 (PF4) — `name` is present with a `null`
+                        // rather than absent when no declaration covers the
+                        // path, on the structural rule the rest of this JSON
+                        // follows: a consumer must never have to test for a
+                        // key to learn that a fact is unknown.
                         format!(
-                            "{{\"path\":\"{}\",\"value\":\"{}\",\"start\":{},\"end\":{}}}",
+                            "{{\"path\":\"{}\",\"name\":{},\"value\":\"{}\",\
+                             \"start\":{},\"end\":{}}}",
                             escape(&f.path),
+                            match &f.name {
+                                Some(name) => format!("\"{}\"", escape(name)),
+                                None => String::from("null"),
+                            },
                             escape(&f.value),
                             f.start,
                             f.end
@@ -3717,9 +3814,19 @@ fn payload_block(
         } => {
             let mut out = format!("    payload `{keyexpr}` as {name}:\n");
             for f in fields {
+                // R311y720 (PF4) — the declared name follows the path rather
+                // than replacing it. Both, because they answer different
+                // questions: the path is what the WIRE carried and the name is
+                // what a deployment SAYS it means, and a rendering that showed
+                // only the name would leave a reader unable to check the
+                // declaration against the bytes.
+                let named = match &f.name {
+                    Some(name) => format!("{} ({name})", f.path),
+                    None => f.path.clone(),
+                };
                 out.push_str(&format!(
                     "      [{}..{}] {} = {}\n",
-                    f.start, f.end, f.path, f.value
+                    f.start, f.end, named, f.value
                 ));
             }
             out
@@ -3910,6 +4017,41 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
             flow.decoded_messages(),
             flow.scouting.len(),
             state,
+            per_message.then_some(&rows[..]),
+            cap,
+        );
+    }
+    // R311y720 (§D M3) — the SERIAL line, which is a third kind of row
+    // producer: not a stream flow, not a datagram flow, but a point-to-point
+    // link with no addresses at all. Listed with the others rather than in a
+    // block of its own, because a reader scanning `--flows` for "what did this
+    // capture carry" must not have to know that serial answers somewhere else.
+    if let Some(k) = d.serial_census() {
+        let rows: Vec<MessageRow> = d
+            .serial_messages()
+            .iter()
+            .map(|(_, frame)| MessageRow::transport(frame, OffsetSpace::Packet))
+            .collect();
+        // The FlowKey a serial line does not have. `port` carries the interface
+        // count rather than a port, and the addresses are empty -- a serial
+        // link is two wires and has no addressing, so a synthesised 5-tuple
+        // would be a fabricated fact in a column readers resolve.
+        let flow = wz_capture::link::FlowKey::serial_line(k.interfaces as u32);
+        push_flow(
+            &mut out,
+            format,
+            &mut emitted,
+            &flow,
+            "serial",
+            d.serial_messages().len(),
+            0,
+            if k.direction_unattributed {
+                "SerialDirectionUnattributed"
+            } else if k.roles_witnessed {
+                "SerialDirectionMeasured"
+            } else {
+                "SerialDirectionPositional"
+            },
             per_message.then_some(&rows[..]),
             cap,
         );
@@ -4174,6 +4316,8 @@ mod tests {
                 quic_ports: Vec::new(),
                 quic_cid_len: None,
                 payload_formats: Vec::new(),
+                payload_field_names: Vec::new(),
+                serial_linktypes: Vec::new(),
                 max_messages: None,
                 census: Census::default(),
                 per_field: false,
@@ -4203,6 +4347,8 @@ mod tests {
                 quic_ports: Vec::new(),
                 quic_cid_len: None,
                 payload_formats: Vec::new(),
+                payload_field_names: Vec::new(),
+                serial_linktypes: Vec::new(),
                 max_messages: None,
                 census: Census::default(),
                 per_field: false,
@@ -5864,6 +6010,11 @@ pub mod payload_formats {
             };
             out.push(PayloadField {
                 path,
+                // R311y720 (PF4) — ALWAYS `None` here, and it is a statement
+                // rather than a placeholder: protobuf's wire format carries no
+                // names, so this decoder has none to give. The declaration
+                // fills it in, in `decode_payload`.
+                name: None,
                 value: format!("{kind} {value}"),
                 start: base + start,
                 end: base + at,
@@ -6273,6 +6424,8 @@ mod quic_pass_tests {
                 quic_ports: &[4433],
                 quic_cid_len: cid_len,
                 payload_rules: &[],
+                payload_field_names: &[],
+                serial_linktypes: &[],
                 census: Census::default(),
                 per_field: false,
                 select: None,
@@ -6343,6 +6496,8 @@ mod quic_pass_tests {
                 quic_ports: &[4433],
                 quic_cid_len: cid_len,
                 payload_rules: &[],
+                payload_field_names: &[],
+                serial_linktypes: &[],
                 census: Census::default(),
                 per_field: false,
                 select: None,
@@ -6577,6 +6732,8 @@ mod quic_pass_tests {
             quic_ports: &[],
             quic_cid_len: None,
             payload_rules: &[],
+            payload_field_names: &[],
+            serial_linktypes: &[],
             census: Census::default(),
             per_field: false,
             select: None,
@@ -6664,6 +6821,8 @@ mod quic_pass_tests {
             quic_ports: &[],
             quic_cid_len: None,
             payload_rules: &[],
+            payload_field_names: &[],
+            serial_linktypes: &[],
             census: Census {
                 nodes: true,
                 ..Census::default()
@@ -6703,6 +6862,8 @@ mod quic_pass_tests {
             quic_ports: &[],
             quic_cid_len: None,
             payload_rules: &[],
+            payload_field_names: &[],
+            serial_linktypes: &[],
             census: Census::default(),
             per_field: true,
             select: None,
@@ -6797,6 +6958,8 @@ mod quic_pass_tests {
                 quic_ports: &[],
                 quic_cid_len: None,
                 payload_rules: &[],
+                payload_field_names: &[],
+                serial_linktypes: &[],
                 census,
                 per_field,
                 select: None,
@@ -6880,6 +7043,8 @@ mod quic_pass_tests {
             quic_ports: &[],
             quic_cid_len: None,
             payload_rules: &[],
+            payload_field_names: &[],
+            serial_linktypes: &[],
             census: Census::default(),
             per_field: false,
             select,

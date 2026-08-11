@@ -776,6 +776,27 @@ impl<'a> CaptureReport<'a> {
                 .map(|fl| fl.scouting.len())
                 .sum::<usize>()
         ));
+        // R311y720 (§D M3) — STRUCTURAL, with a `null` when no serial link type
+        // was declared: a consumer branches on the key's VALUE rather than on
+        // its presence, which is the rule the `quic` block above follows.
+        match d.serial_census() {
+            None => s.push_str(",\"serial\":null"),
+            Some(k) => s.push_str(&format!(
+                ",\"serial\":{{\"interfaces\":{},\"bytes\":{},\"frames\":{},\
+                 \"messages\":{},\"crc_failures\":{},\"framing_errors\":{},\
+                 \"handshake_frames\":{},\"roles_witnessed\":{},\
+                 \"direction_unattributed\":{}}}",
+                k.interfaces,
+                k.bytes,
+                k.frames,
+                d.serial_messages().len(),
+                k.crc_failures,
+                k.framing_errors,
+                k.handshake_frames,
+                k.roles_witnessed,
+                k.direction_unattributed,
+            )),
+        }
         // R311y669 (§1.2a) — QUIC. STRUCTURAL, present with zeroes on a capture
         // that carried none, for the reason `encrypted` is: a consumer must be
         // able to learn that part of a capture was unreadable BY DESIGN without
@@ -1269,6 +1290,42 @@ impl<'a> CaptureReport<'a> {
         let scouting: usize = d.datagram_flows().iter().map(|fl| fl.scouting.len()).sum();
         if scouting > 0 {
             s.push_str(&format!("  scouting: {scouting} message(s)\n"));
+        }
+        // R311y720 (§D M3) — the declared SERIAL line. Printed only when one
+        // was declared AND something arrived on it, which is the distinction
+        // `serial_census`'s `Option` carries: a capture with no serial in it
+        // and a declaration nothing matched must not render alike.
+        if let Some(k) = d.serial_census() {
+            s.push_str(&format!(
+                "  serial: {} frame(s) on {} interface(s), {} byte(s); \
+                 {} message(s) decoded",
+                k.frames,
+                k.interfaces,
+                k.bytes,
+                d.serial_messages().len()
+            ));
+            if k.crc_failures > 0 || k.framing_errors > 0 {
+                s.push_str(&format!(
+                    " -- {} CRC failure(s), {} framing error(s)",
+                    k.crc_failures, k.framing_errors
+                ));
+            }
+            // THE SENTENCE A READER MUST NOT MISS. Everything above is a
+            // count; this says whether the direction column beside those
+            // messages is a measurement or a convention, and a reader who
+            // takes a positional attribution for a measured one will read a
+            // reply as a request.
+            s.push_str(if k.direction_unattributed {
+                "\n    direction UNATTRIBUTED: one interface holds both wires of \
+                 the line, and no rule over the zenoh bytes recovers which \
+                 frame came off which\n"
+            } else if k.roles_witnessed {
+                "\n    direction measured: a handshake frame named which \
+                 interface is the initiator\n"
+            } else {
+                "\n    direction POSITIONAL: no handshake frame was captured, \
+                 so A is the first interface seen rather than the initiator\n"
+            });
         }
         // R311y669 (§1.2a) — QUIC, and the sentence says what a reader must do
         // with it: the zenoh is inside and this reader does not open it. Printed

@@ -1153,6 +1153,15 @@ pub mod formats {
     pub struct PayloadField {
         /// A path a reader can key on, e.g. `1` or `3.2` for a nested field.
         pub path: String,
+        /// R311y720 (PF4) — the DECLARED name for this path, where a
+        /// deployment gave one.
+        ///
+        /// Always `None` as a decoder returns it, and that is the invariant
+        /// worth stating: protobuf's wire format carries no names, so a decoder
+        /// filling this in would be inventing one. It is set afterwards, and
+        /// only from [`FormatMap::field_name`] -- see that method for why the
+        /// declaration is the only honest source.
+        pub name: Option<String>,
         /// What the decoder made of it, rendered.
         pub value: String,
         /// First byte of the field, within the payload.
@@ -1217,11 +1226,23 @@ pub mod formats {
         WildcardUnsupported(String),
         /// The pattern is not a key expression.
         NotAKeyexpr(String),
+        /// R311y720 (PF4) — a field-name declaration with an empty path or an
+        /// empty name.
+        ///
+        /// Refused rather than stored: a declaration naming nothing, or naming
+        /// a field the empty string, would render as a blank beside a field
+        /// number and read as "this reader knows the name and it is nothing".
+        EmptyFieldName(String),
     }
 
     impl core::fmt::Display for FormatMapError {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             match self {
+                Self::EmptyFieldName(p) => write!(
+                    f,
+                    "the field-name declaration for `{p}` has an empty path or \
+                     an empty name"
+                ),
                 Self::WildcardUnsupported(p) => write!(
                     f,
                     "this build's keyexpr matcher has no wildcards, so the \
@@ -1242,12 +1263,19 @@ pub mod formats {
     #[derive(Default)]
     pub struct FormatMap<'a> {
         rules: Vec<(String, &'a dyn PayloadFormat)>,
+        /// R311y720 (PF4) — declared field names: (keyexpr pattern, field
+        /// path, name). See [`FormatMap::name_field`] for why they are
+        /// declared rather than derived.
+        names: Vec<(String, String, String)>,
     }
 
     impl<'a> FormatMap<'a> {
         /// An empty map, which decodes nothing.
         pub fn new() -> Self {
-            Self { rules: Vec::new() }
+            Self {
+                rules: Vec::new(),
+                names: Vec::new(),
+            }
         }
 
         /// Map every keyexpr matching `pattern` to `format`.
@@ -1294,6 +1322,72 @@ pub mod formats {
         pub fn patterns(&self) -> impl Iterator<Item = &str> {
             self.rules.iter().map(|(pattern, _)| pattern.as_str())
         }
+
+        /// R311y720 (PF4) — DECLARE a name for one field path under one
+        /// keyexpr pattern.
+        ///
+        /// # Why the names come from the caller and never from the decoder
+        ///
+        /// A schemaless walk recovers `1`, `3.2` and their spans, and that is
+        /// the whole of what the bytes carry: protobuf's wire format has no
+        /// names in it. The register carried this as PF4 -- "field 3 is 3, not
+        /// `temperature`" -- and every way of closing it that ENDS in the
+        /// analyzer is a way of inventing names, which on a plane whose whole
+        /// output is findings is the worst kind of wrong.
+        ///
+        /// So the name arrives the way `--quic-port` arrives: DECLARED. The
+        /// deployment that owns the schema says `demo/**:1=temperature`, this
+        /// map carries it, and a reader sees `1 temperature` where a
+        /// declaration covers the path and a bare `1` where none does. Nothing
+        /// is guessed and nothing is silently renamed.
+        ///
+        /// Keyed by (pattern, path) rather than by path alone, because a field
+        /// number means different things under different topics -- one
+        /// deployment's `1` is a temperature and another's is a sequence
+        /// number, and a global table would rename both.
+        pub fn name_field(
+            &mut self,
+            pattern: &str,
+            path: &str,
+            name: &str,
+        ) -> Result<(), FormatMapError> {
+            if pattern.is_empty() || pattern.starts_with('/') || pattern.ends_with('/') {
+                return Err(FormatMapError::NotAKeyexpr(pattern.to_owned()));
+            }
+            if pattern.contains('*') && !cfg!(feature = "filter-wildcards") {
+                return Err(FormatMapError::WildcardUnsupported(pattern.to_owned()));
+            }
+            if path.is_empty() || name.is_empty() {
+                return Err(FormatMapError::EmptyFieldName(pattern.to_owned()));
+            }
+            self.names
+                .push((pattern.to_owned(), path.to_owned(), name.to_owned()));
+            Ok(())
+        }
+
+        /// The declared name for `path` under `keyexpr`, if one was given.
+        ///
+        /// First match wins, on the same rule [`Self::for_keyexpr`] states: a
+        /// later, more specific declaration cannot quietly override an earlier
+        /// one, so the order a reader typed is the order that applies.
+        pub fn field_name(&self, keyexpr: &str, path: &str) -> Option<&str> {
+            self.names
+                .iter()
+                .find(|(pattern, p, _)| {
+                    p == path && {
+                        let chunks: Vec<&str> = pattern.split('/').collect();
+                        wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
+                    }
+                })
+                .map(|(_, _, name)| name.as_str())
+        }
+
+        /// Whether any field name was declared. A caller that renders the
+        /// declaration inventory needs this separately from [`Self::is_empty`]:
+        /// names can be declared for a format the built-ins already cover.
+        pub fn has_names(&self) -> bool {
+            !self.names.is_empty()
+        }
     }
 }
 
@@ -1315,6 +1409,7 @@ mod format_map_tests {
         ) -> Result<alloc::vec::Vec<PayloadField>, PayloadFormatError> {
             Ok(alloc::vec![PayloadField {
                 path: alloc::string::String::from(self.0),
+                name: None,
                 value: alloc::format!("{} byte(s)", payload.len()),
                 start: 0,
                 end: payload.len(),

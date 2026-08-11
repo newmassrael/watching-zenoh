@@ -296,6 +296,13 @@ fn run_alert(
         quic_ports: &[],
         quic_cid_len: None,
         payload_rules: &[],
+        // R311y720 — the alert path declares neither: `--payload-name` is a
+        // rendering concern and this reads a VERDICT, and a serial capture
+        // reaches the alert through the same `--serial` the analyzer takes,
+        // which this binary does not expose. Both empty and stated rather than
+        // defaulted silently.
+        payload_field_names: &[],
+        serial_linktypes: &[],
         census: wz_analyze::Census::all(),
         per_field: false,
         select: None,

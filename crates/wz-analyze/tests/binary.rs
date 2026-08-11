@@ -4769,6 +4769,100 @@ fn a_payload_format_rule_decodes_by_keyexpr_and_reports_message_coordinates() {
     );
 }
 
+/// R311y720 (PF4) — A DECLARED FIELD NAME REACHES BOTH RENDERINGS, and an
+/// undeclared path still renders as its number.
+///
+/// ## What the register carried and why it could not be closed inside
+///
+/// PF4 has stood since R311y699: "field 3 is `3`, not `temperature` -- the
+/// honest limit of a schemaless walk". Every closure that ENDS in the analyzer
+/// is a closure that invents names, because protobuf's wire format carries
+/// none. So the name arrives the way `--quic` arrives: DECLARED by the
+/// deployment that owns the schema, and rendered beside the path rather than
+/// instead of it, so a reader can check the declaration against the bytes.
+///
+/// ## The three legs
+///
+/// 1. The declared path renders WITH its name, in text and in JSON.
+/// 2. An UNDECLARED path in the same message renders without one, and its JSON
+///    `name` is `null` rather than absent -- a consumer must not have to test
+///    for a key to learn a fact is unknown.
+/// 3. A declaration whose keyexpr pattern does not cover the traffic changes
+///    nothing, which is what stops leg 1 from being "any declaration renames
+///    everything".
+#[test]
+fn a_declared_field_name_reaches_the_rendering_and_an_undeclared_one_does_not() {
+    let scratch = Scratch::new("payload-name");
+    let capture = scratch.write("pb.pcapng", &protobuf_capture());
+
+    let run = |args: &[&str]| {
+        String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                .arg(&capture)
+                .args(args)
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned()
+    };
+
+    // (1) Declared: field 1 is `temperature`. Field 2 is deliberately NOT
+    // declared, which is leg (2) in the same run.
+    let named = run(&[
+        "--fields",
+        "--payload-format",
+        "demo/**=protobuf",
+        "--payload-name",
+        "demo/**:1=temperature",
+    ]);
+    assert!(
+        named.contains("1 (temperature) = varint 150"),
+        "the declared name follows the path, and the path stays: {named}"
+    );
+    assert!(
+        named.contains("2 = len \"zenoh\""),
+        "an undeclared path is unchanged -- the declaration named ONE field, \
+         not the message: {named}"
+    );
+
+    // The SAME run in JSON, because a fact rendered twice must be asserted
+    // twice: R311y664 measured one flow reporting NOT DECRYPTED in text and
+    // `"decrypted":true` in JSON in a single run.
+    let json = run(&[
+        "--fields",
+        "--json",
+        "--payload-format",
+        "demo/**=protobuf",
+        "--payload-name",
+        "demo/**:1=temperature",
+    ]);
+    assert!(
+        json.contains("\"path\":\"1\",\"name\":\"temperature\""),
+        "the name is in the JSON too: {json}"
+    );
+    assert!(
+        json.contains("\"path\":\"2\",\"name\":null"),
+        "and an undeclared path carries an explicit null rather than no key: {json}"
+    );
+
+    // (3) ANTI-VACUITY: a declaration for a subtree this traffic is not in
+    // renames nothing. Without this, leg (1) would pass on a build that
+    // ignored the pattern entirely.
+    let elsewhere = run(&[
+        "--fields",
+        "--payload-format",
+        "demo/**=protobuf",
+        "--payload-name",
+        "other/**:1=temperature",
+    ]);
+    assert!(
+        elsewhere.contains("1 = varint 150") && !elsewhere.contains("temperature"),
+        "a declaration whose pattern does not cover `demo/a` names nothing: \
+         {elsewhere}"
+    );
+}
+
 /// A zenoh transport `Frame` carrying `record`, WITHOUT the stream link's
 /// length prefix — a datagram is its own framing unit.
 fn datagram_frame(record: &[u8]) -> Vec<u8> {
@@ -5368,4 +5462,139 @@ fn the_node_plane_reaches_both_renderings() {
     )
     .into_owned();
     assert!(!bare.contains("nodes:"), "{bare}");
+}
+
+/// R311y720 (§D M3) — A SERIAL CAPTURE IS READ, and the direction it reports is
+/// the one the wire proved.
+///
+/// ## What the register carried, and the trap it carried beside it
+///
+/// "decap dispatches SIX link types and no serial one" has stood since
+/// R311y660, together with a standing warning that shaped the whole design:
+/// `LINKTYPE_RTAC_SERIAL` (250) has a pseudo-header whose layout is NOT
+/// verifiable on this machine -- `pcap/dlt.h` gives the number and nothing
+/// else. So the link type is DECLARED by the caller, exactly as `--quic`
+/// declares a port, and what the reader then does is only what it can check:
+/// COBS, CRC32, and the handshake flags pinned against zenoh-pico's headers.
+///
+/// ## The three legs
+///
+/// 1. The frames are recovered and the zenoh inside them decoded -- driven
+///    through the BINARY, over a file, which is the shape that catches a
+///    library nobody runs.
+/// 2. The DIRECTION is measured, not positional: interface 1 is seen first and
+///    is provisionally A, then sends `INIT|ACK`, so it is the responder and the
+///    report says the attribution was measured.
+/// 3. ANTI-VACUITY: without `--serial` the same file decodes nothing at all,
+///    which is what makes leg 1 a statement about the declaration.
+#[test]
+fn a_declared_serial_capture_is_read_and_its_direction_is_measured() {
+    use wz_session_core::serial_link::{encode_frame, SERIAL_FLAG_ACK, SERIAL_FLAG_INIT};
+
+    // The link type a serial capture is written with. Its VALUE is all this
+    // test needs and all the reader uses -- nothing parses a header out of it.
+    const RTAC_SERIAL: u32 = 250;
+
+    // One zenoh KeepAlive: MID 0x04 with every flag clear. No length prefix --
+    // a serial link is `Z_LINK_CAP_FLOW_DATAGRAM`
+    // (vendor/zenoh-pico/src/link/unicast/serial.c:68), so the frame IS the
+    // framing unit.
+    let keep_alive = encode_frame(0, &[0x04]).expect("encodes");
+    // The handshake, which is the only thing that names a side.
+    let init = encode_frame(SERIAL_FLAG_INIT, &[]).expect("encodes");
+    let init_ack = encode_frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, &[]).expect("encodes");
+
+    // TWO interfaces = the line's two wires. Interface 1 is seen FIRST, so a
+    // positional rule would call it A; it then sends INIT|ACK, so the wire says
+    // it is the responder and it must be B.
+    let file = wz_capture::pcapng::write(
+        &[(RTAC_SERIAL, 6), (RTAC_SERIAL, 6)],
+        &[
+            (1, 1_000_000, &keep_alive[..]),
+            (0, 1_000_100, &init[..]),
+            (1, 1_000_200, &init_ack[..]),
+            (0, 1_000_300, &keep_alive[..]),
+        ],
+    );
+
+    let scratch = Scratch::new("serial-decap");
+    let capture = scratch.write("serial.pcapng", &file);
+    let run = |args: &[&str]| {
+        String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                .arg(&capture)
+                .args(args)
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned()
+    };
+
+    // (1) The frames are read and the zenoh in them decoded.
+    let with = run(&["--serial", "250"]);
+    assert!(
+        with.contains("serial: 4 frame(s) on 2 interface(s)"),
+        "every frame is recovered, off both wires: {with}"
+    );
+    assert!(
+        with.contains("2 message(s) decoded"),
+        "the two KeepAlives are zenoh; the two handshake frames are the \
+         LINK's own exchange and carry none: {with}"
+    );
+    assert!(
+        with.contains("messages decoded: 2"),
+        "and they are in the capture-wide total, not only in the serial \
+         block: {with}"
+    );
+
+    // (2) The direction was MEASURED, and by the frame that proves it.
+    assert!(
+        with.contains("direction measured"),
+        "a handshake frame named the initiator: {with}"
+    );
+    // AND THE VALUE, not only the flag. MEASURED: an earlier version of this
+    // test asserted `roles_witnessed` alone and PASSED with the initiator and
+    // responder arms swapped -- the probe that finds a vacuous proof found this
+    // one. Interface 1 was seen first, so a positional rule calls it A; it sent
+    // `INIT|ACK`, so it is the responder and its KeepAlive must be B. The other
+    // wire's KeepAlive is A. Both are asserted, because a build that put every
+    // message on one direction would satisfy either alone.
+    let messages = run(&["--serial", "250", "--messages"]);
+    let directions: Vec<&str> = messages
+        .lines()
+        .filter(|l| l.contains("KeepAlive"))
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    assert_eq!(
+        directions,
+        vec!["B", "A"],
+        "the responder's KeepAlive came first in the file and is B; the \
+         initiator's follows and is A: {messages}"
+    );
+    let json = run(&["--serial", "250", "--json"]);
+    assert!(
+        json.contains("\"roles_witnessed\":true")
+            && json.contains("\"direction_unattributed\":false"),
+        "and both halves of that say so in JSON: {json}"
+    );
+    assert!(
+        json.contains("\"crc_failures\":0") && json.contains("\"framing_errors\":0"),
+        "over a clean line, with no envelope refused: {json}"
+    );
+
+    // (3) ANTI-VACUITY: no declaration, nothing read. Without this the
+    // assertions above would pass on a build that sniffed link type 250.
+    let without = run(&[]);
+    assert!(
+        without.contains("messages decoded: 0"),
+        "an undeclared serial capture decodes nothing -- the declaration is \
+         what makes this readable: {without}"
+    );
+    let without_json = run(&["--json"]);
+    assert!(
+        without_json.contains("\"serial\":null"),
+        "and the serial block is an explicit null rather than absent: \
+         {without_json}"
+    );
 }

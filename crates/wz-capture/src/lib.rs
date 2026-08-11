@@ -98,6 +98,7 @@ pub mod quic;
 /// something that is not a Rust caller, with their loss counters structurally
 /// attached.
 pub mod report;
+pub mod serial;
 pub mod tcp;
 /// R311y648 (§1.2a) — RECOGNISING TLS, and deliberately not decrypting it.
 ///
@@ -2327,6 +2328,20 @@ pub struct Dissection {
     /// so the only honest ways to settle it are a long header (which such a
     /// capture lacks) or a caller who knows.
     declared_quic_ports: alloc::vec::Vec<u16>,
+    /// R311y720 (§D M3) — link types the CALLER declared as carrying raw zenoh
+    /// serial bytes. See [`serial`] for why nothing here reads a pseudo-header.
+    declared_serial_linktypes: alloc::vec::Vec<u32>,
+    /// The tapped serial line, once a declared packet has arrived. `None` on
+    /// every capture that declared none, which is nearly all of them.
+    serial: Option<alloc::boxed::Box<serial::SerialLine>>,
+    /// Frames recovered off that line and not yet decoded — see
+    /// `finish_serial` for why the decode waits.
+    serial_pending: alloc::vec::Vec<serial::SerialFrame>,
+    /// Messages decoded out of that line, in capture order.
+    serial_frames: alloc::vec::Vec<(serial::SerialFrame, PassiveFrame)>,
+    /// The zenoh session over that line. One, because a serial link is point
+    /// to point: the two wires are its two directions, not two sessions.
+    serial_session: PassiveSession,
     /// R311y605 (F5) — checksum verdicts, tallied as packets arrive. They must
     /// be counted here and not derived later: a `Checksums` rides on the
     /// `Segment` / `Datagram`, which is consumed by the assembler and gone.
@@ -2454,6 +2469,11 @@ impl Default for Dissection {
             skipped: Vec::new(),
             skip_census: SkipCensus::default(),
             declared_quic_ports: Vec::new(),
+            declared_serial_linktypes: Vec::new(),
+            serial: None,
+            serial_pending: Vec::new(),
+            serial_frames: Vec::new(),
+            serial_session: new_session(DissectionLimits::default().reassembly_window_ms),
             limits: DissectionLimits::default(),
             drops: DissectionDrops::default(),
             checksums: [0; 6],
@@ -2856,13 +2876,39 @@ impl Dissection {
     /// decoded messages with it. Same shape as [`Self::encrypted_census`], and
     /// added for the same reason R311y650 added that one.
     pub fn decoded_messages(&self) -> usize {
-        self.carry.messages()
+        // R311y720 — the serial line's messages are in the total, on the rule
+        // every other producer here answers to: a count that named some of the
+        // lists would report a serial capture as having decoded nothing.
+        self.serial_frames.len()
+            + self.carry.messages()
             + self.flows.iter().map(|f| f.frames.len()).sum::<usize>()
             + self
                 .datagram_flows
                 .iter()
                 .map(|f| f.decoded_messages())
                 .sum::<usize>()
+    }
+
+    /// R311y720 (§D M3) — what the declared serial line turned out to hold,
+    /// or `None` when no serial link type was declared or none arrived.
+    ///
+    /// An `Option` and not a zeroed census, because the two are different
+    /// findings: a capture with no serial in it and a declared line that
+    /// carried nothing would otherwise render identically, and the second is
+    /// the one that means the declaration is wrong.
+    pub fn serial_census(&self) -> Option<serial::SerialCensus> {
+        self.serial.as_ref().map(|line| line.census())
+    }
+
+    /// R311y720 — the zenoh messages decoded off that line, with the serial
+    /// frame each came out of.
+    ///
+    /// Paired rather than split, because the two halves answer together: the
+    /// `PassiveFrame` says what zenoh message it was and the `SerialFrame` says
+    /// which wire and which capture packet carried it. A reader given only the
+    /// first cannot point at the bytes.
+    pub fn serial_messages(&self) -> &[(serial::SerialFrame, PassiveFrame)] {
+        &self.serial_frames
     }
 
     /// R311y661 (§1.2a) — the Decryption Secrets Blocks the capture file
@@ -3408,6 +3454,9 @@ impl Dissection {
     /// gaps that are open NOW, and a flow with none is untouched. Returns the
     /// number of gaps it forced.
     pub fn finish(&mut self) -> usize {
+        // R311y720 (§D M3) — FIRST, because the serial line's direction mapping
+        // is final only now and everything below reads decoded messages.
+        self.finish_serial();
         let mut forced = 0usize;
         // R311y713 (§B1) — the obligations are [`exit::ExitingFlow`], the same
         // act the flow cap performs on its way past. What differs between the
@@ -3464,6 +3513,114 @@ impl Dissection {
     /// whose traffic interleaves must not let one connection's silence expire
     /// the other's chains, and a shared clock would do exactly that.
     pub fn push_packet_at(
+        &mut self,
+        link_type: u32,
+        packet_index: usize,
+        ts_millis: Option<u64>,
+        bytes: &[u8],
+    ) {
+        self.push_packet_on(link_type, packet_index, 0, ts_millis, bytes)
+    }
+
+    /// R311y720 (§D M3) — [`Self::push_packet_at`], naming the capture
+    /// INTERFACE the packet arrived on.
+    ///
+    /// Only the serial path reads it, and it reads it because a serial line is
+    /// two wires: the interface is the one fact in the file that stands in for
+    /// which wire, and every other link type carries its addresses in the
+    /// packet. `push_packet_at` passes `0`, which is right for a pcap (one
+    /// interface by construction) and for every declared link type but this
+    /// one.
+    pub fn push_packet_on(
+        &mut self,
+        link_type: u32,
+        packet_index: usize,
+        interface_id: u32,
+        ts_millis: Option<u64>,
+        bytes: &[u8],
+    ) {
+        // BEFORE decapsulation, because a declared serial link type has no link
+        // header for `decapsulate` to strip -- the bytes ARE the serial stream.
+        // Declared and never sniffed: see `serial`'s module doc for why a
+        // pseudo-header this machine cannot verify must not be parsed.
+        if self.declared_serial_linktypes.contains(&link_type) {
+            self.push_serial(interface_id, packet_index, ts_millis, bytes);
+            return;
+        }
+        self.push_packet_inner(link_type, packet_index, ts_millis, bytes)
+    }
+
+    /// R311y720 (§D M3) — one read of a declared serial line.
+    ///
+    /// The frames that complete inside these bytes are decoded as zenoh
+    /// DATAGRAMS, which is what the link is: `Z_LINK_CAP_FLOW_DATAGRAM`
+    /// (`vendor/zenoh-pico/src/link/unicast/serial.c:68`), so one frame carries
+    /// one transport message and there is no length prefix to frame. Handshake
+    /// frames are counted and NOT decoded -- an `INIT` with an empty payload is
+    /// the link's own exchange, not zenoh's, and handing its zero bytes to the
+    /// transport decoder would produce an undecodable-message row per
+    /// handshake.
+    ///
+    /// `LinkHandshake::Present` because the link is UNICAST
+    /// (`serial.c:67`), so the zenoh session on it really does open with INIT
+    /// and OPEN -- the same reading `feed_quic_datagram` states for the other
+    /// unicast datagram link.
+    fn push_serial(
+        &mut self,
+        interface_id: u32,
+        packet_index: usize,
+        ts_millis: Option<u64>,
+        bytes: &[u8],
+    ) {
+        let line = self
+            .serial
+            .get_or_insert_with(|| alloc::boxed::Box::new(serial::SerialLine::default()));
+        // COLLECTED, not decoded. The direction of a serial frame is not
+        // knowable when it arrives: the handshake that names which wire is the
+        // initiator's may come after it, and R311y720 MEASURED the consequence
+        // of decoding eagerly -- the frames ahead of the handshake kept the
+        // POSITIONAL guess while the ones after it were measured, so one
+        // capture reported two different attributions and neither was labelled.
+        //
+        // So the whole line is decoded at `finish`, when the mapping is final.
+        // The cost is one buffered frame list per line, which is the order a
+        // single flow's frames already are.
+        self.serial_pending
+            .extend(line.push(interface_id, packet_index, bytes));
+        let _ = ts_millis;
+    }
+
+    /// R311y720 (§D M3) — decode the buffered serial line, once its direction
+    /// mapping is final.
+    ///
+    /// Called from [`Self::finish`], which is where every end-of-capture
+    /// decision in this crate already lives.
+    fn finish_serial(&mut self) {
+        let Some(line) = self.serial.as_ref() else {
+            return;
+        };
+        let pending = core::mem::take(&mut self.serial_pending);
+        for frame in pending {
+            // The LINK's own exchange, not zenoh's. An `INIT` carries an empty
+            // payload, and handing zero bytes to the transport decoder would
+            // put an undecodable-message row in the listing per handshake.
+            if serial::is_handshake(frame.header) {
+                continue;
+            }
+            let direction = line.direction_of(frame.interface);
+            let batch = self.serial_session.next_datagram_on(
+                direction,
+                &frame.payload,
+                frame.packet_index,
+                wz_session_core::passive::LinkHandshake::Present,
+            );
+            for decoded in batch {
+                self.serial_frames.push((frame.clone(), decoded));
+            }
+        }
+    }
+
+    fn push_packet_inner(
         &mut self,
         link_type: u32,
         packet_index: usize,
@@ -4016,8 +4173,22 @@ impl Dissection {
         bytes: &[u8],
         quic_udp_ports: &[u16],
     ) -> Result<Self, pcap::PcapError> {
+        Self::from_pcap_declaring(bytes, quic_udp_ports, &[])
+    }
+
+    /// R311y720 (§D M3) — the same, also declaring serial link types.
+    ///
+    /// A pcap file has ONE interface by construction, so a serial capture in
+    /// this format cannot separate the two wires — which is exactly what
+    /// [`serial::SerialCensus::direction_unattributed`] then reports.
+    pub fn from_pcap_declaring(
+        bytes: &[u8],
+        quic_udp_ports: &[u16],
+        serial_linktypes: &[u32],
+    ) -> Result<Self, pcap::PcapError> {
         let file = pcap::parse(bytes)?;
         let mut out = Self::new();
+        out.declared_serial_linktypes = serial_linktypes.to_vec();
         // Declared BEFORE the first packet, which is the whole point: a flow is
         // established as QUIC by its first datagram, so a declaration arriving
         // afterwards would have let that datagram through the zenoh decoder.
@@ -4052,8 +4223,18 @@ impl Dissection {
         bytes: &[u8],
         quic_udp_ports: &[u16],
     ) -> Result<Self, pcapng::PcapngError> {
+        Self::from_pcapng_declaring(bytes, quic_udp_ports, &[])
+    }
+
+    /// R311y720 (§D M3) — the same, also declaring serial link types.
+    pub fn from_pcapng_declaring(
+        bytes: &[u8],
+        quic_udp_ports: &[u16],
+        serial_linktypes: &[u32],
+    ) -> Result<Self, pcapng::PcapngError> {
         let file = pcapng::parse(bytes)?;
         let mut out = Self::new();
+        out.declared_serial_linktypes = serial_linktypes.to_vec();
         // See `from_pcap_declaring_quic`: before the first packet, not after.
         out.declared_quic_ports = quic_udp_ports.to_vec();
         // R311y661 (§1.2a) — the file's own key material, carried instead of
@@ -4067,9 +4248,13 @@ impl Dissection {
             .filter_map(|s| s.dropped)
             .try_fold(0u64, |acc, d| acc.checked_add(d));
         for packet in &file.packets {
-            out.push_packet_at(
+            // R311y720 — the INTERFACE travels with the packet. Only the serial
+            // path reads it, and it is the one fact in the file that stands in
+            // for which wire of a two-wire line the bytes came off.
+            out.push_packet_on(
                 packet.link_type,
                 packet.index,
+                packet.interface_id,
                 file.ts_millis(packet),
                 &packet.data,
             );
@@ -4112,6 +4297,39 @@ impl Dissection {
     /// A declared flow is marked as DECLARED in its census, because "I recognised
     /// this" and "I was told this" are different claims and a reader must be able
     /// to tell which one they are reading.
+    /// R311y720 (§D M3) — read a capture in which `serial_linktypes` carry raw
+    /// zenoh SERIAL bytes.
+    ///
+    /// DECLARED, and the declaration is the whole design: `LINKTYPE_RTAC_SERIAL`
+    /// (250) has a pseudo-header this machine cannot verify -- `pcap/dlt.h`
+    /// gives the number and no layout -- so a reader that parsed one would
+    /// report a guessed direction bit as a measurement. The caller names the
+    /// link type, exactly as `from_capture_declaring_quic` has the caller name
+    /// a UDP port, and what this crate then reads is what it can verify: the
+    /// COBS envelope, the CRC32 and the handshake flags, all three pinned
+    /// against zenoh-pico's own sources. See [`serial`].
+    pub fn from_capture_declaring_serial(
+        bytes: &[u8],
+        serial_linktypes: &[u32],
+    ) -> Result<Self, CaptureError> {
+        Self::from_capture_declaring(bytes, &[], serial_linktypes)
+    }
+
+    /// R311y720 — both declarations at once, which is what the analyzer passes.
+    pub fn from_capture_declaring(
+        bytes: &[u8],
+        quic_udp_ports: &[u16],
+        serial_linktypes: &[u32],
+    ) -> Result<Self, CaptureError> {
+        if pcapng::looks_like_pcapng(bytes) {
+            Self::from_pcapng_declaring(bytes, quic_udp_ports, serial_linktypes)
+                .map_err(CaptureError::Pcapng)
+        } else {
+            Self::from_pcap_declaring(bytes, quic_udp_ports, serial_linktypes)
+                .map_err(CaptureError::Pcap)
+        }
+    }
+
     pub fn from_capture_declaring_quic(
         bytes: &[u8],
         quic_udp_ports: &[u16],

@@ -96,6 +96,14 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     # `raweth_link` is pure header parsing with no dependencies of its own, so
     # the cost is a struct and two functions.
     "transport-link-raweth",
+    # R311y720 (§D M3) — the SERIAL link's framing, on exactly the argument the
+    # raweth line above makes and for a sharper reason. A `--serial` flag that
+    # silently read nothing because a feature was off is the "silent
+    # degradation" this workspace turns into a refusal everywhere else; making
+    # it non-optional means the flag either works or the build does not exist.
+    # It is COBS + CRC32 + a 7-byte envelope, all of it already in the codec
+    # crate this depends on.
+    "transport-link-serial",
     # R311y605 — the multicast JOIN, and for the same reason as raweth above:
     # not behind a `wz-capture` feature, because a capture front end reads what
     # is on the wire. Its absence was silent in the worst available way — the

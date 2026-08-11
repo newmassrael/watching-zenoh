@@ -74,6 +74,8 @@ fn main() -> ExitCode {
         quic_ports: &options.quic_ports,
         quic_cid_len: options.quic_cid_len,
         payload_rules: &options.payload_formats,
+        payload_field_names: &options.payload_field_names,
+        serial_linktypes: &options.serial_linktypes,
         census: options.census,
         per_field: options.per_field,
         select: options.select.as_ref(),
