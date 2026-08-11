@@ -2647,6 +2647,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-replay"
+version = "0.1.0"
+dependencies = [
+ "wz-analyze",
+ "wz-capture",
+ "wz-codecs",
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-rest"
 version = "0.1.0"
 dependencies = [

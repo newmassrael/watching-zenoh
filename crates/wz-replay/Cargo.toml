@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-replay — R311y700 ([REDACTED-REQ] / [REDACTED-REQ] / [REDACTED-REQ]), the analyzer's ACTIVE half.
+#
+# Every crate above `wz-capture` so far has been an OBSERVER: it reads a capture
+# and emits findings. This one sends. That is a different kind of program and it
+# is a separate crate for the reason `wz-analyze` is one -- it is a composition
+# root, and the session runtime it needs to emit is a dependency graph no
+# observer should carry.
+#
+# The ENGINE is separated from the SINK on purpose. Building a replay plan from
+# a capture, spacing it in time and mutating a payload are decisions, and a
+# decision that can only be tested by putting packets on a wire is a decision
+# nobody tests. So the plan is a value, the sink is a trait, and the tests drive
+# both with a sink that records.
+[package]
+name = "wz-replay"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+publish = false
+
+[[bin]]
+name = "wz-replay"
+path = "src/main.rs"
+
+[dependencies]
+# The SOURCE of a replay: `samples` pairs a keyexpr with the payload underneath
+# it, using the same walk the field layer uses. A second extraction here would
+# be a second opinion about which payload belongs to which keyexpr.
+wz-analyze = { path = "../wz-analyze" }
+wz-capture = { path = "../wz-capture" }
+wz-session-core = { path = "../wz-session-core", features = ["dissect"] }
+
+[dev-dependencies]
+# The fixtures build REAL zenoh messages, which means encoding them with the
+# codec that owns their wire form -- the same argument `wz-analyze` makes for
+# its own fixtures. A hand-written byte string would be a second opinion about
+# the wire.
+wz-codecs = { path = "../wz-codecs" }

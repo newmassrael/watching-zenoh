@@ -5302,6 +5302,66 @@ layer_c1bw_analyze_cli() {
     echo "  C1bw: the analyzer builds as a program and its command line is gated"
 }
 
+# ── R311y700 ([REDACTED-REQ]) — Layer C1by: the REPLAY engine.
+#
+# A new crate with no lane is the defect R311y668 measured for `wz-tls-record`,
+# which appeared ZERO times in this script while being the only place a
+# decryptor met its oracle. `wz-replay` is the analyzer's ACTIVE half and the
+# only crate here that can put packets on a network, so it gets a lane on the
+# round it lands rather than on the round somebody notices.
+#
+# The SET pin is the point: the schedule, the mutations and the extraction each
+# have one witness, and a round that dropped any of them would leave that half
+# ungated while the suite stayed green.
+layer_c1by_replay_engine() {
+    # `name` is LOCAL. Measured: without it the loop variable leaked into the
+    # caller's scope and run-ci announced the layer under the last test's name.
+    local listing missing name
+    (cd crates && cargo clippy -p wz-replay --all-targets --quiet -- -D warnings) || return 1
+    (cd crates && cargo build -p wz-replay --bins --quiet) || {
+        echo "  C1by FAIL: the wz-replay binary does not build"; return 1; }
+    (cd crates && cargo test -p wz-replay --quiet) || {
+        echo "  C1by FAIL: wz-replay does not pass in isolation"; return 1; }
+
+    listing="$(cd crates && cargo test -p wz-replay --lib -- --list 2>/dev/null)" \
+        || { echo "  C1by FAIL: the engine tests did not list"; return 1; }
+    missing=0
+    for name in \
+        tests::a_plan_reaches_the_sink_in_order_and_unchanged \
+        tests::the_speed_control_scales_the_gaps_and_never_the_first_one \
+        tests::a_speed_that_cannot_be_played_is_refused_rather_than_clamped \
+        tests::every_mutation_changes_the_payload_and_reports_whether_it_did \
+        tests::a_mutation_that_could_not_apply_says_so \
+        tests::a_seeded_mutation_repeats_and_two_seeds_differ \
+        tests::a_selector_narrows_the_plan_by_zenohs_keyexpr_dialect \
+        tests::a_plan_says_what_the_capture_held_and_it_will_not_send \
+        tests::a_refusal_stops_the_replay_at_the_emission_that_failed
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1by FAIL: $name is absent from the wz-replay lib target"
+            missing=1
+        }
+    done
+    [[ $missing -eq 0 ]] || return 1
+
+    listing="$(cd crates && cargo test -p wz-replay --test binary -- --list 2>/dev/null)" \
+        || { echo "  C1by FAIL: the binary tests did not list"; return 1; }
+    for name in \
+        a_capture_yields_a_plan_naming_its_keyexpr_and_its_payload_length \
+        the_speed_and_gap_options_reach_the_plan \
+        the_fuzz_option_mutates_the_payload_and_the_plan_says_so \
+        a_speed_of_zero_is_refused_at_the_command_line
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1by FAIL: $name is absent from the wz-replay binary target"
+            missing=1
+        }
+    done
+    [[ $missing -eq 0 ]] || return 1
+
+    echo "  C1by: the replay plan is gated, and a real capture feeds it"
+}
+
 # ── R311y668 (§1.2a) — Layer C1bx: the TLS DECRYPTOR's oracle suite.
 #
 # MEASURED while adding a reason to it: `wz-tls-record` appeared ZERO times in
@@ -10995,6 +11055,7 @@ run_layer C1bv layer_c1bv_dynamic_volume_loading || overall=1
 run_layer C1cc layer_c1cc_api_compat_c || overall=1
 run_layer C1ce layer_c1ce_api_compat_c_shm_oracle || overall=1
 run_layer C1cd layer_c1cd_api_compat_c_attachment || overall=1
+run_layer C1by layer_c1by_replay_engine || overall=1
 run_layer Epico layer_epico_library_oracles || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1

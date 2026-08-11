@@ -2654,6 +2654,111 @@ enum PayloadDecoding {
     },
 }
 
+/// R311y700 ([REDACTED-REQ]) — one application SAMPLE a capture carried: the key
+/// expression it was published under and the bytes that went with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sample {
+    /// The key expression, as the wire spelled it.
+    pub keyexpr: String,
+    /// The payload bytes.
+    pub payload: Vec<u8>,
+    /// Which direction of which flow carried it, so a replay can be told to
+    /// send one side of a conversation.
+    pub direction: wz_session_core::passive::Direction,
+    /// The framing unit this message came out of. On a datagram link this IS
+    /// the packet index; on a stream it is a byte offset. Carried because it is
+    /// the only ordering key a sample has — the capture's own arrival order.
+    pub origin: usize,
+}
+
+/// R311y700 ([REDACTED-REQ]) — every sample a capture carried, in capture order.
+///
+/// # Why this is here and not in a replay tool
+///
+/// A replay tool needs to know what was published; so does the field layer,
+/// which already walks every message and pairs a keyexpr with the payload
+/// underneath it ([`keyexpr_and_payload`]). Writing that walk a second time in
+/// another crate would be a second opinion about which payload belongs to which
+/// keyexpr — the shape R311y678 closed on the framing side by making one walk
+/// serve both readers.
+///
+/// So the extraction stays beside the walk it reuses, and the replay tool takes
+/// this as its input.
+///
+/// # What is NOT here, said rather than implied
+///
+/// A message that names its keyexpr by NUMERIC ID alone yields no sample: this
+/// walk reads the wire and the id-to-path table is per-flow state in the
+/// throughput plane. A capture that began after the declarations therefore
+/// replays less than it holds, and [`Samples::unresolved`] is how many — a
+/// floor reported as a floor.
+pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, CaptureError> {
+    let mut dissection = Dissection::from_capture(capture)?;
+    let (mut opener, _) = CaptureOpener::from_secrets_blocks(dissection.decryption_secrets());
+    if let Some(text) = keylog {
+        opener.absorb(KeyLog::parse(text));
+    }
+    if !opener.log().is_empty() {
+        dissection.decrypt_with(&mut opener);
+    }
+    let mut out = Samples::default();
+    for flow in dissection.flows() {
+        for frame in &flow.frames {
+            collect_sample(flow, frame, &mut out);
+        }
+    }
+    Ok(out)
+}
+
+/// What [`samples`] recovered, and what it could not.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Samples {
+    /// The samples, in capture order.
+    pub items: Vec<Sample>,
+    /// Messages carrying a payload whose keyexpr this walk could not read,
+    /// because the sender named it by numeric id alone.
+    pub unresolved: usize,
+    /// Messages this walk could not read at all.
+    pub undecodable: usize,
+}
+
+/// Pull one frame's sample, if it has one.
+fn collect_sample(
+    flow: &wz_capture::FlowDissection,
+    frame: &wz_session_core::passive::PassiveFrame,
+    out: &mut Samples,
+) {
+    use wz_session_core::dissect::FieldValue;
+    let assembler = flow.assembler(frame.direction);
+    let stream = assembler.stream();
+    let row = walk_message(stream, assembler.retained_from(), frame);
+    let FieldRow::Walked(field) = row else {
+        out.undecodable += 1;
+        return;
+    };
+    match keyexpr_and_payload(&field) {
+        Some((keyexpr, payload)) => {
+            let FieldValue::Bytes(bytes) = &payload.value else {
+                return;
+            };
+            if bytes.is_empty() {
+                return;
+            }
+            out.items.push(Sample {
+                keyexpr,
+                payload: bytes.clone(),
+                direction: frame.direction,
+                origin: frame.stream_offset,
+            });
+        }
+        None => {
+            if subtree_payload_bytes(&field).is_some() {
+                out.unresolved += 1;
+            }
+        }
+    }
+}
+
 /// R311y699 ([REDACTED-REQ]) — the keyexpr and the payload OF ONE MESSAGE.
 ///
 /// # Why this is not two `find` calls

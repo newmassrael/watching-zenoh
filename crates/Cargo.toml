@@ -42,6 +42,7 @@ members = [
     # in the whole workspace, a test and the C ABI, so every finding this track
     # added was reachable only by writing Rust.
     "wz-analyze",
+    "wz-replay",
     # §5.27 api-compat-pico — zenoh-pico-compatible C ABI (cdylib+rlib)
     # wrapping the wz AP tokio Session. Reverse of the *-sys crates
     # (which BIND to C); this crate EXPORTS a C ABI. AP/std-only.

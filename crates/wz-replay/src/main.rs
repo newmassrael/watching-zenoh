@@ -1,0 +1,158 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! R311y700 ([REDACTED-REQ] / [REDACTED-REQ] / [REDACTED-REQ]) — the replay binary.
+//!
+//! Everything except reading the file and printing is in the library beside it,
+//! which is what lets the plan be tested without sending anything.
+//!
+//! ## Why the default is a DRY RUN
+//!
+//! This is the one tool in the analyzer that puts packets on a network, and a
+//! replay of captured production traffic into the wrong deployment is not
+//! recoverable. So printing the plan is what happens when no destination is
+//! given, and it is the same value a live run plays — not a second computation
+//! of it.
+
+use std::process::ExitCode;
+
+use wz_replay::{plan, render, Mutation, Schedule};
+
+const USAGE: &str = "\
+wz-replay -- re-publish a capture's samples into a new session
+
+USAGE:
+    wz-replay <capture> [options]
+
+OPTIONS:
+    --keylog <file>   an NSS key log, so encrypted flows contribute samples
+    --select <keyexpr>
+                      replay only samples whose keyexpr matches. zenoh's own
+                      dialect, so `demo/**` covers `demo/a`
+    --gap <ms>        milliseconds between samples at speed 1.0 (default 100)
+    --speed <factor>  play faster (>1) or slower (<1). Must be positive
+    --max-gap <ms>    ceiling on any one delay (default 10000)
+    --fuzz <spec>     mutate each payload before sending. One of:
+                        flip:<bit>      flip one bit
+                        truncate:<n>    keep the first n bytes
+                        extend:<n>:<seed>
+                        scramble:<seed>
+    --dry-run         print the plan and send nothing. THE DEFAULT.
+
+Exit: 0 the plan was produced (or played), 2 this tool failed.
+";
+
+fn main() -> ExitCode {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.iter().any(|a| a == "-h" || a == "--help") {
+        print!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
+    let Some(path) = argv.first().filter(|a| !a.starts_with('-')) else {
+        eprintln!("wz-replay: a capture file is required\n\n{USAGE}");
+        return ExitCode::from(2);
+    };
+    let mut schedule = Schedule::default();
+    let mut mutation = Mutation::None;
+    let mut select: Option<String> = None;
+    let mut keylog: Option<String> = None;
+
+    let mut at = 1usize;
+    while at < argv.len() {
+        let arg = argv[at].as_str();
+        let mut value = || {
+            at += 1;
+            argv.get(at).cloned()
+        };
+        let bad = |what: &str| {
+            eprintln!("wz-replay: {what}\n\n{USAGE}");
+            ExitCode::from(2)
+        };
+        match arg {
+            "--dry-run" => {}
+            "--keylog" => match value() {
+                Some(v) => keylog = Some(v),
+                None => return bad("--keylog needs a file"),
+            },
+            "--select" => match value() {
+                Some(v) => select = Some(v),
+                None => return bad("--select needs a keyexpr"),
+            },
+            "--gap" => match value().and_then(|v| v.parse().ok()) {
+                Some(v) => schedule.gap_millis = v,
+                None => return bad("--gap needs a whole number of milliseconds"),
+            },
+            "--max-gap" => match value().and_then(|v| v.parse().ok()) {
+                Some(v) => schedule.max_gap_millis = Some(v),
+                None => return bad("--max-gap needs a whole number of milliseconds"),
+            },
+            "--speed" => match value().and_then(|v| v.parse().ok()) {
+                Some(v) => schedule.speed = v,
+                None => return bad("--speed needs a number"),
+            },
+            "--fuzz" => match value().as_deref().and_then(parse_fuzz) {
+                Some(v) => mutation = v,
+                None => return bad("--fuzz needs one of flip:/truncate:/extend:/scramble:"),
+            },
+            other => return bad(&format!("unknown option `{other}`")),
+        }
+        at += 1;
+    }
+
+    let schedule = match schedule.checked() {
+        Ok(schedule) => schedule,
+        Err(why) => {
+            eprintln!("wz-replay: {why}\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let capture = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!("wz-replay: {path}: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let keylog = match keylog.as_deref().map(std::fs::read) {
+        None => None,
+        Some(Ok(bytes)) => Some(bytes),
+        Some(Err(err)) => {
+            eprintln!("wz-replay: {}: {err}", keylog.unwrap_or_default());
+            return ExitCode::from(2);
+        }
+    };
+    let samples = match wz_analyze::samples(&capture, keylog.as_deref()) {
+        Ok(samples) => samples,
+        Err(err) => {
+            eprintln!("wz-replay: {path}: {err:?}");
+            return ExitCode::from(2);
+        }
+    };
+    let plan = plan(&samples, schedule, mutation, select.as_deref());
+    print!("{}", render(&plan));
+    ExitCode::SUCCESS
+}
+
+/// `flip:12` / `truncate:4` / `extend:8:99` / `scramble:7`.
+fn parse_fuzz(spec: &str) -> Option<Mutation> {
+    let (kind, rest) = spec.split_once(':')?;
+    match kind {
+        "flip" => Some(Mutation::FlipBit {
+            at: rest.parse().ok()?,
+        }),
+        "truncate" => Some(Mutation::Truncate {
+            to: rest.parse().ok()?,
+        }),
+        "extend" => {
+            let (count, seed) = rest.split_once(':')?;
+            Some(Mutation::Extend {
+                count: count.parse().ok()?,
+                seed: seed.parse().ok()?,
+            })
+        }
+        "scramble" => Some(Mutation::Scramble {
+            seed: rest.parse().ok()?,
+        }),
+        _ => None,
+    }
+}
