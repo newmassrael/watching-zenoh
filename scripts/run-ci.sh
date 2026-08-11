@@ -15,7 +15,27 @@
 # finding is structural rather than a defect to fix. Scoped to this file
 # deliberately: SC2329 stays live for the other 17 shell files, none of which
 # dispatch indirectly.
-# shellcheck disable=SC2329
+# R311y707 — and SC2317 beside it, for the SAME dispatch and a different
+# reason: the LOCAL shellcheck is not the pinned one.
+#
+# `#!/usr/bin/env bash` scripts are linted by whatever shellcheck is on the
+# developer's PATH, which here is 0.9.0 while CI runs 0.11.0. 0.9.0 reports
+# SC2317 ("command appears to be unreachable") on the bodies of every
+# dispatch-invoked function in this file -- the identical false positive
+# SC2329 above documents, under an older code that 0.11.0 no longer emits.
+#
+# WHY THIS IS WORTH A DIRECTIVE RATHER THAN A KNOWN-NOISE NOTE. It was a
+# known-noise note, in agent memory, reading "local Layer 0 red is a
+# pre-existing condition". The consequence was measured: Layer 0 is the lane
+# that owns `run-ci.sh` itself, this session edited that file in SIX
+# consecutive rounds, and the lane was never once run -- because a lane that is
+# permanently red teaches you to stop reading it. A real SC2043 sat in it for
+# four rounds and reached hosted CI. The finding a gate cannot report is the
+# finding it does not have.
+#
+# Scoped to this file, like SC2329: SC2317 stays live for the other 17 shell
+# files, none of which dispatch indirectly.
+# shellcheck disable=SC2329,SC2317
 #
 # run-ci.sh — CI-equivalent local check.
 #
@@ -5410,17 +5430,18 @@ layer_c1by_replay_engine() {
     # This is the only test in the workspace that puts an application Push on a
     # real socket from a tool a person runs, so a round that dropped it would
     # take [REDACTED-REQ]'s whole claim with it while the suite stayed green.
+    # R311y707 — a DIRECT check rather than a loop over one name. The loop shape
+    # is this file's idiom for a SET, and a set of one is not a set: shellcheck
+    # says so (SC2043) and it was RIGHT, which is how this reached hosted CI as
+    # a red. Written this way the reader is not asked to see a set that is not
+    # there, and a second live test joins as a loop when there is a second.
     listing="$(cd crates && cargo test -p wz-replay --test live -- --list 2>/dev/null)" \
         || { echo "  C1by FAIL: the live tests did not list"; return 1; }
-    for name in \
-        the_binary_dials_a_peer_and_that_peer_decodes_the_captured_samples
-    do
-        grep -qF "$name: test" <<<"$listing" || {
-            echo "  C1by FAIL: $name is absent from the wz-replay live target"
-            missing=1
-        }
-    done
-    [[ $missing -eq 0 ]] || return 1
+    name=the_binary_dials_a_peer_and_that_peer_decodes_the_captured_samples
+    grep -qF "$name: test" <<<"$listing" || {
+        echo "  C1by FAIL: $name is absent from the wz-replay live target"
+        return 1
+    }
 
     echo "  C1by: the replay plan is gated, a real capture feeds it, and a real peer receives it"
 }
