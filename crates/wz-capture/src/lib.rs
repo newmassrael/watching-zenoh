@@ -58,6 +58,10 @@ pub mod exchange;
 /// beside each door. Private: its whole purpose is that nothing outside can add
 /// to the carried counters, and a `pub` module would hand that back.
 mod exit;
+/// R311y714 (§1.1f) — the capture read as NODES: zids, their roles, and the
+/// links where both ends named themselves. The one plane whose unit is not a
+/// flow.
+pub mod node;
 use exit::ExitingFlow as _;
 /// R311y616 (§1.1f) — the FILTER LANGUAGE: a selector a reader types, compiled
 /// into a three-valued predicate over records.
@@ -4617,7 +4621,7 @@ mod datagram_tests {
 
     /// R311y607 — a SCOUT on the wire, built by the SCOUT codec's own encode
     /// so a routing decision cannot agree with a hand-laid byte string.
-    fn scout_message() -> Vec<u8> {
+    pub(crate) fn scout_message() -> Vec<u8> {
         let mut scout = wz_codecs::scout::Scout::new();
         scout.version = 0x09;
         scout.set_what(0x03);
@@ -4631,7 +4635,7 @@ mod datagram_tests {
 
     /// zenoh's IPv4 scouting group and port
     /// (`DEFAULT_MULTICAST_SCOUTING_ADDRESS`, `224.0.0.224:7446`).
-    const SCOUT_GROUP: [u8; 4] = [224, 0, 0, 224];
+    pub(crate) const SCOUT_GROUP: [u8; 4] = [224, 0, 0, 224];
 
     /// R311y607 — THE ONE THAT MATTERS: a multicast SCOUT is named a SCOUT.
     ///
@@ -4937,7 +4941,7 @@ mod datagram_tests {
     }
 
     /// An Init body the transport decoder accepts, on the wire.
-    fn init_message() -> Vec<u8> {
+    pub(crate) fn init_message() -> Vec<u8> {
         let mut wire = alloc::vec![wz_session_core::wire_const::T_MID_INIT, 0x09, 0x38];
         wire.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
         wire
@@ -4950,7 +4954,7 @@ mod datagram_tests {
     /// `aa:bb:cc:dd:ee:ff` (`vendor/zenoh-pico/src/transport/raweth/link.c:66`)
     /// — deliberately, because its I/G bit is CLEAR. Any rule that judged this
     /// link by the address would call it unicast.
-    fn raweth_packet(payload: &[u8]) -> Vec<u8> {
+    pub(crate) fn raweth_packet(payload: &[u8]) -> Vec<u8> {
         use wz_session_core::raweth_link::{frame, RawEthHeader, DEFAULT_ETHTYPE};
         let h = RawEthHeader::new(
             [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],

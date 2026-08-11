@@ -68,6 +68,8 @@ fn document_only_versions(q: &[crate::quic::QuicCensus]) -> alloc::vec::Vec<u32>
 /// never inspected.
 #[derive(Debug, Clone, Copy)]
 pub struct CaptureReport<'a> {
+    /// R311y714 — the node plane, when the caller built one.
+    nodes: Option<&'a crate::node::NodeCensus>,
     dissection: &'a crate::Dissection,
     throughput: Option<&'a ThroughputTable>,
     #[cfg(feature = "network-codecs")]
@@ -76,6 +78,31 @@ pub struct CaptureReport<'a> {
     payloads: Option<&'a crate::payload::PayloadCensus>,
     /// R311y698 — what a decryptor did with the QUIC flows, if one ran.
     quic: Option<&'a crate::quic::QuicDecryption>,
+}
+
+/// R311y714 — a zid as the hex a reader can match against a config file.
+///
+/// zenoh prints zids as lowercase hex with no separators and so does this.
+fn hex_zid(zid: &[u8]) -> String {
+    let mut out = String::with_capacity(zid.len() * 2);
+    for b in zid {
+        out.push_str(&alloc::format!("{b:02x}"));
+    }
+    out
+}
+
+/// The handshake's 2-bit role, named.
+///
+/// Unknown values are printed as themselves rather than mapped to a default:
+/// a role this build does not know is a finding about the capture, and
+/// "peer" is what an invented default would have said.
+fn role_name(w: u8) -> &'static str {
+    match w {
+        0 => "router",
+        1 => "peer",
+        2 => "client",
+        _ => "unknown",
+    }
 }
 
 impl<'a> CaptureReport<'a> {
@@ -88,6 +115,7 @@ impl<'a> CaptureReport<'a> {
             exchanges: None,
             #[cfg(feature = "network-codecs")]
             payloads: None,
+            nodes: None,
             quic: None,
         }
     }
@@ -121,6 +149,12 @@ impl<'a> CaptureReport<'a> {
     #[cfg(feature = "network-codecs")]
     pub fn with_payloads(mut self, census: &'a crate::payload::PayloadCensus) -> Self {
         self.payloads = Some(census);
+        self
+    }
+
+    /// R311y714 (§1.1f) — attach the NODE plane: the capture keyed by zid.
+    pub fn with_nodes(mut self, census: &'a crate::node::NodeCensus) -> Self {
+        self.nodes = Some(census);
         self
     }
 
@@ -636,6 +670,45 @@ impl<'a> CaptureReport<'a> {
             drops.scouting,
             drops.scout_askers
         ));
+        // R311y714 (§1.1f) — the node plane, in the export. Absent rather
+        // than empty when the plane was not built: `"nodes":[]` would say the
+        // capture named none, which is a different statement from not asking.
+        if let Some(n) = self.nodes {
+            s.push_str(",\"nodes\":[");
+            for (i, node) in n.nodes().iter().enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                let e = node.evidence;
+                s.push_str(&alloc::format!(
+                    "{{\"zid\":\"{}\",\"whatami\":{},\"init\":{},\"join\":{},\
+                     \"hello\":{},\"scout\":{},\"inadmissible\":{},\"flows\":{}}}",
+                    hex_zid(&node.zid),
+                    match node.whatami {
+                        Some(w) => alloc::format!("\"{}\"", role_name(w)),
+                        None => "null".into(),
+                    },
+                    e.init,
+                    e.join,
+                    e.hello,
+                    e.scout,
+                    e.inadmissible,
+                    node.flows.len()
+                ));
+            }
+            s.push_str("],\"node_links\":[");
+            for (i, link) in n.links().iter().enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push_str(&alloc::format!(
+                    "{{\"a\":\"{}\",\"b\":\"{}\"}}",
+                    hex_zid(&n.nodes()[link.a].zid),
+                    hex_zid(&n.nodes()[link.b].zid)
+                ));
+            }
+            s.push(']');
+        }
         // R311y713 (§B10) — the same census the text renders, in the export.
         // One fact rendered in two places is one fact that can drift, so the
         // test asserts BOTH in one run.
@@ -702,6 +775,42 @@ impl<'a> CaptureReport<'a> {
         // holding three decoded messages. That is R311y648's silence in the one
         // place it had not been closed: the summary of what WAS read.
         s.push_str(&format!("  messages decoded: {}\n", decoded_messages(d)));
+        // R311y714 (§1.1f) — the capture's NODES, when the caller built the
+        // plane. Printed as an inventory rather than a drawing: the shipped
+        // artifact draws it, and what this reader owes is the evidence behind
+        // each vertex and edge.
+        if let Some(n) = self.nodes {
+            s.push_str(&format!(
+                "  nodes: {} (links {})\n",
+                n.nodes().len(),
+                n.links().len()
+            ));
+            for node in n.nodes() {
+                let e = node.evidence;
+                s.push_str(&format!(
+                    "    {} role {} -- init {}, join {}, hello {}, scout {}, \
+                     inadmissible {}, flows {}\n",
+                    hex_zid(&node.zid),
+                    match node.whatami {
+                        Some(w) => role_name(w),
+                        None => "unstated",
+                    },
+                    e.init,
+                    e.join,
+                    e.hello,
+                    e.scout,
+                    e.inadmissible,
+                    node.flows.len()
+                ));
+            }
+            for link in n.links() {
+                s.push_str(&format!(
+                    "    link {} <-> {}\n",
+                    hex_zid(&n.nodes()[link.a].zid),
+                    hex_zid(&n.nodes()[link.b].zid)
+                ));
+            }
+        }
         // R311y713 (§B10) — and WHAT the per-flow bound discarded, when it
         // discarded anything. A count alone leaves a reader unable to tell a
         // trim of a hundred keepalives from one that took the `Close` the

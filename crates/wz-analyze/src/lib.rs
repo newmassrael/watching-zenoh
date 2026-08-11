@@ -127,21 +127,34 @@ pub struct Census {
     pub exchanges: bool,
     /// The PAYLOAD plane: what the samples carry, by shape and size.
     pub payloads: bool,
+    /// R311y714 (§1.1f) — the NODE plane: the capture keyed by zid rather than
+    /// by 5-tuple, and the links where both ends named themselves.
+    ///
+    /// Deliberately NOT in [`Self::all`]: `--census` is the three RECORD planes
+    /// and this one folds handshakes, so a reader asking for the record
+    /// censuses is not asking for a topology. It is its own flag.
+    pub nodes: bool,
 }
 
 impl Census {
-    /// All three, which is what `--census` asks for.
+    /// The three RECORD planes, which is what `--census` asks for.
+    ///
+    /// R311y714 — `nodes` is not among them, and the omission is the decision
+    /// stated on the field: the topology plane folds handshakes rather than
+    /// records, so a reader asking for the record censuses has not asked for
+    /// it. `--nodes` is its own flag.
     pub const fn all() -> Self {
         Self {
             throughput: true,
             exchanges: true,
             payloads: true,
+            nodes: false,
         }
     }
 
     /// Whether any plane was asked for at all.
     pub const fn any(&self) -> bool {
-        self.throughput || self.exchanges || self.payloads
+        self.throughput || self.exchanges || self.payloads || self.nodes
     }
 }
 
@@ -246,6 +259,8 @@ OPTIONS:
                       subtree rollups and the declarations still unresolved
     --exchanges       the query plane: queries matched to their replies, the
                       first-reply delay, and the ones never answered
+    --nodes           the node plane: the capture keyed by zid, and the
+                      links where both ends named themselves
     --payloads        the payload plane: what the samples carry, by shape
     --census          all three planes above. Each is a separate walk of every
                       frame, which is why they are asked for rather than always
@@ -291,6 +306,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
             "--throughput" => census.throughput = true,
             "--exchanges" => census.exchanges = true,
             "--payloads" => census.payloads = true,
+            "--nodes" => census.nodes = true,
             "--census" => census = Census::all(),
             "--fields" => per_field = true,
             "--select" => {
@@ -669,6 +685,11 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     let payloads = census
         .payloads
         .then(|| wz_capture::payload::payloads_where(&dissection, filter));
+    // R311y714 (§1.1f) — built after the decryption pass with the rest, and
+    // taking NO selector: `Filter`'s terms are record-level, and a node is
+    // named by a handshake that has no keyexpr, kind or payload for them to
+    // read. Same reason the QUIC pass below states, one plane over.
+    let node_census = census.nodes.then(|| wz_capture::node::nodes(&dissection));
     // R311y698 (§1.2a) — THE QUIC PASS, which is the item this crate was
     // created to make unnecessary and which had never been written.
     //
@@ -705,6 +726,9 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     }
     if let Some(table) = &payloads {
         report = report.with_payloads(table);
+    }
+    if let Some(table) = &node_census {
+        report = report.with_nodes(table);
     }
     let report = report;
     let outcome = Outcome {

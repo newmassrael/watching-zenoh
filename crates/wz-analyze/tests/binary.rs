@@ -5284,3 +5284,71 @@ fn the_payload_decoding_reaches_the_json_as_one_document() {
         "the other messages carry a state too: {text}"
     );
 }
+
+/// R311y714 (§1.1f) — `--nodes` reaches BOTH renderings, in one run.
+///
+/// The plane keyed by zid rather than by 5-tuple, which is what [REDACTED-REQ] asks
+/// for and what this reader could not answer before: `--flows` names addresses,
+/// and an address is a fiction across a NAT while the zid is not. Asserted in
+/// text and JSON together, because this workspace has measured the two
+/// disagreeing about one fact in the same run (R311y664).
+#[test]
+fn the_node_plane_reaches_both_renderings() {
+    let scratch = Scratch::new("nodes");
+    let capture = scratch.write("nodes.pcapng", &scouting_capture());
+
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--nodes")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        text.contains("nodes: 1"),
+        "the scout named its asker: {text}"
+    );
+    assert!(
+        text.contains("11223344"),
+        "and the zid is printed as the hex a config file carries: {text}"
+    );
+    // Three scouts, ONE node: the fixture repeats the packet, and collapsing
+    // repeats onto one identity is the whole reason this plane is keyed by zid.
+    assert!(
+        text.contains("scout 3"),
+        "with the evidence that named it: {text}"
+    );
+
+    let json = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--nodes")
+            .arg("--json")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        json.contains("\"zid\":\"11223344\""),
+        "the export must carry the same node: {json}"
+    );
+    assert!(
+        json.contains("\"node_links\":[]"),
+        "and say plainly that no link was established: {json}"
+    );
+
+    // ABSENT without the flag, not empty: a reader who did not ask must not be
+    // told the capture named no nodes.
+    let bare = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(!bare.contains("nodes:"), "{bare}");
+}
