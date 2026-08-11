@@ -10,7 +10,7 @@
 //!
 //! - inbound: [`LwipUdpDriver::try_recv`] -> [`wz_session_core::link::LinkEvent::Rx`]
 //!   -> [`dispatch_link_event`] (the shared dispatch core) ->
-//!   [`report_outcome_reassembling`] (reassembly-gated) or the bare
+//!   `report_outcome_reassembling` (reassembly-gated) or the bare
 //!   `on_event(Poll)` otherwise.
 //! - deadlines: [`HandshakeDeadlineTracker`] yields the handshake deadline;
 //!   in Established the keepalive-resetting lease deadline applies and

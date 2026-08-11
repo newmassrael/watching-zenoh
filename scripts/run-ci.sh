@@ -5592,42 +5592,88 @@ layer_c1bx_tls_record_oracle() {
     echo "  C1bx: the decryptor is checked against rustls and the SET is pinned"
 }
 
-# ── R311y710 (§1.2a) — Layer C1bz: the DOCS resolve.
+# ── R311y710/y711 (§1.2a) — Layer C1bz: the DOCS resolve, workspace-wide.
 #
-# MEASURED when this lane did not exist: `cargo doc -p wz-capture` failed with
-# THIRTY-THREE broken intra-doc links, and the crate is the analyzer's core. No
-# lane in this file had ever run rustdoc, on any crate, so the rot accumulated
-# for the whole life of the workspace with nothing able to report it.
+# MEASURED when this lane did not exist (R311y710): `cargo doc -p wz-capture`
+# failed with 33 broken intra-doc links, and NO lane in this file had ever run
+# rustdoc on any crate. R311y711 then measured the rest: 631 broken links across
+# 25 of the workspace's 53 crates.
 #
-# ## What the 33 turned out to be, because the shape matters more than the count
+# ## Why a LEDGER rather than three hand-picked crates
 #
-# TWENTY-THREE were one cause: a module that carries BOTH an outer `///` doc on
-# its `pub mod x;` in lib.rs AND an inner `//!` doc in `x.rs` has the two merged,
-# and the merged text's relative links then resolve against the CRATE ROOT rather
-# than against `x`. So `[`ThroughputTable::unresolved`]`, written inside
-# `agg.rs` where that type is declared, resolves to nothing. Fully qualifying is
-# the fix and `crate::agg::ThroughputTable::...` is what the file now says.
+# R311y710 gated the three analyzer crates because those were the ones measured.
+# That is a gate over the part somebody happened to look at, and it says nothing
+# about the other fifty. This lane gates ALL of them and carries the ones that
+# are not clean yet as an explicit budget -- the shape this workspace already
+# uses for T1 orphans: carried with a number, never silenced.
 #
-# NINE were a public doc hyperlinking a PRIVATE item, which rustdoc refuses and
-# which is right: the name still belongs in the prose, so those keep the name and
-# drop the brackets.
+# The budget is checked in BOTH directions. A crate whose count RISES is a
+# regression. A crate whose count FALLS is also a failure, and deliberately: a
+# stale budget is a gate that has quietly stopped measuring, and the fix is to
+# write down the smaller number (or delete the line) in the same commit that
+# earned it. That is the drift catch `validate-workspace` applies to a
+# resolved-but-still-ledgered orphan.
 #
-# TWO were plain WRONG NAMES -- `crate::Limits` and `CaptureHealth` are called
-# `DissectionLimits` and `DissectionHealth`. Those are the ones worth having a
-# gate for: a rename that leaves a doc behind is invisible to every other lane
-# here, and the doc then sends a reader to a type that does not exist.
+# ## What is in the budget, and why each is still there
 #
-# Scoped to the three analyzer crates rather than the workspace, because that is
-# what this round measured; widening it is a round with its own evidence.
+# `zenoh-pico-sys` is the one that will not shrink by editing source: its two
+# findings are inside bindgen's OUTPUT (`target/.../bindings.rs`), where the doc
+# text is copied from zenoh-pico's own C headers. The rest are ordinary debt,
+# dominated by two crates -- and the composition is known: most are a module
+# carrying both an outer `///` doc on its `pub mod x;` and an inner `//!` doc in
+# `x.rs`, which merges the two and then resolves the merged text's relative links
+# against the CRATE ROOT. Fully qualifying is the fix.
+#
+# R311y711 cleared 13 crates by fixing all 16 of their links, which is why the
+# budget below is 12 crates and not 25.
 layer_c1bz_docs_resolve() {
-    local crate
-    for crate in wz-capture wz-analyze wz-tls-record; do
-        (cd crates && cargo doc -p "$crate" --no-deps --quiet) || {
-            echo "  C1bz FAIL: $crate has broken intra-doc links"
-            return 1
+    local crate count expected budget failed=0 seen=""
+    # crate:expected-broken-links. Absent from this list means ZERO is expected.
+    budget="
+        wz-ap-demo:13
+        wz-capi-c:46
+        wz-capi-core:6
+        wz-capi-pico:44
+        wz-link-lwip:10
+        wz-mcu-session-acceptor:6
+        wz-routing-graph:6
+        wz-runtime-coop:19
+        wz-runtime-tokio:182
+        wz-session-core:273
+        wz-switchboard-codegen:8
+        zenoh-pico-sys:2
+    "
+    while read -r crate; do
+        [[ -n "$crate" ]] || continue
+        count="$( (cd crates && cargo doc -p "$crate" --no-deps --quiet 2>&1) |
+            grep -cE '^error: (unresolved link|public documentation)' || true)"
+        expected="$(grep -oE "\b${crate}:[0-9]+" <<<"$budget" | cut -d: -f2)"
+        expected="${expected:-0}"
+        seen="$seen $crate"
+        if [[ "$count" != "$expected" ]]; then
+            if [[ "$count" -gt "$expected" ]]; then
+                echo "  C1bz FAIL: $crate has $count broken doc link(s), budget $expected"
+            else
+                echo "  C1bz FAIL: $crate has $count broken doc link(s) but the budget still says $expected — lower it in this commit"
+            fi
+            failed=1
+        fi
+    done < <( (cd crates && cargo metadata --no-deps --format-version 1 2>/dev/null) |
+        python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"]]')
+
+    # A budget line naming a crate the workspace no longer has is a budget nobody
+    # is reading. Same reason the orphan ledger rejects a resolved entry.
+    while read -r crate; do
+        [[ -n "$crate" ]] || continue
+        crate="${crate%%:*}"
+        grep -qw -- "$crate" <<<"$seen" || {
+            echo "  C1bz FAIL: the budget names $crate, which is not a workspace member"
+            failed=1
         }
-    done
-    echo "  C1bz: the analyzer crates' docs resolve every link they make"
+    done < <(tr -s " " "\n" <<<"$budget" | grep ":")
+
+    [[ $failed -eq 0 ]] || return 1
+    echo "  C1bz: every workspace crate's docs resolve, or spend exactly their budget"
 }
 
 

@@ -4,7 +4,7 @@
 //! `wz-runtime-zephyr` — the Zephyr **cooperative single-task profile**.
 //!
 //! This crate is deliberately THIN, identical in shape to
-//! [`wz_runtime_freertos`]. It does not reimplement the async executor or
+//! `wz-runtime-freertos`. It does not reimplement the async executor or
 //! `impl Runtime` — that is the audited [`wz_runtime_coop::CoopRuntime`] (task
 //! pool, custom waker, cancel, timer queue), generic over a [`ClockSource`].
 //! The Zephyr profile is that executor running inside ONE Zephyr thread (the

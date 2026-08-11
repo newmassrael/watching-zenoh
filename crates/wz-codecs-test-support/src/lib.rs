@@ -20,7 +20,7 @@
 //! into `wz-session-core-test-support`. Consumed exclusively from
 //! `#[cfg(test)]` modules via a dev-dep path edge, so production builds
 //! of either crate carry zero of this code regardless of workspace-level
-//! Cargo feature unification ([[feedback_test_fixtures_sibling_crate]]).
+//! Cargo feature unification (recorded in this project's own notes as the sibling-crate fixture rule).
 //!
 //! The `.expect()` is sound by construction: wz builders emit far fewer
 //! extensions than the heapless ext cap `N`, so `try_as_borrowed` never

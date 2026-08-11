@@ -40,7 +40,7 @@ const DRIVE_MAX_ITERS: usize = 10_000;
 
 /// The Established session surface a plane-specific setup closure
 /// registers into. Exposes only what the four setups need: the
-/// [`Session`] (for `publish` / `declare_*`) and the shared monotonic
+/// `Session` (for `publish` / `declare_*`) and the shared monotonic
 /// `clock` (for a publish burst's inter-emit sleeps). The action sink,
 /// observer, FSM engine, and writer handle stay internal to
 /// [`run_acceptor_e2e`].

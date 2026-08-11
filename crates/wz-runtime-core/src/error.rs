@@ -117,7 +117,7 @@ impl RuntimeError {
     /// field exists (it's the textbook "smart constructor" shape
     /// for a feature-gated struct-like variant). Runtime impls
     /// that DO capture payloads call the alloc-gated
-    /// [`Self::join_failed_with_payload`] instead.
+    /// `Self::join_failed_with_payload` instead.
     pub fn join_failed() -> Self {
         #[cfg(feature = "alloc")]
         {

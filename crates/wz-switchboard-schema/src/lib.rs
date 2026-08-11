@@ -78,7 +78,7 @@ pub struct SwitchboardSpec {
 ///    codec's decoded fields against the event's `EventSchema` and gates
 ///    the value path on the machine's `typed_inject_events` set.
 ///
-/// [`EventInjector`]: wz_session_core::switchboard
+/// [`EventInjector`]: https://docs.rs/wz-session-core
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {

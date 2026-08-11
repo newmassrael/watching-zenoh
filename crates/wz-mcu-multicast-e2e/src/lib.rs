@@ -43,7 +43,7 @@
 //! Multicast self-loopback needs `LWIP_LOOPIF_MULTICAST` + `LWIP_TESTMODE` +
 //! `ip4_set_default_multicast_netif(netif_get_loopif())`. The HOST lwIP port
 //! ships these, so the host integration test (using
-//! [`wz_link_lwip::lwip_test_link`]'s routed link + a frozen clock) is ONE home
+//! `wz_link_lwip::lwip_test_link`'s routed link + a frozen clock) is ONE home
 //! for this round trip. R311y190 added the SECOND home: the `loopback-multicast`
 //! deploy build routes the loop netif via the no_std
 //! [`LwipLink::route_multicast_over_loopback`] seam against the testmode
@@ -154,7 +154,7 @@ pub struct MulticastE2eReport {
 /// [`LwipLink`].
 ///
 /// `link` is the lwIP link the loop pumps. The host test passes a
-/// [`wz_link_lwip::lwip_test_link`] link (multicast TX routed over the
+/// `wz_link_lwip::lwip_test_link` link (multicast TX routed over the
 /// IGMP-capable loop netif, so the self-loopback round trip is observable);
 /// the deploy bin's `loopback-multicast` build routes multicast over the loop
 /// netif too (via [`LwipLink::route_multicast_over_loopback`] on the testmode

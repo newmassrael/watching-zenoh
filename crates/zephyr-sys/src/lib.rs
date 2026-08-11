@@ -4,7 +4,7 @@
 //! `zephyr-sys` — hand-written FFI to the Zephyr kernel symbols the wz Zephyr
 //! cooperative single-task profile calls.
 //!
-//! UNLIKE [`freertos-sys`], which vendors + cross-compiles the FreeRTOS kernel
+//! UNLIKE `freertos-sys`, which vendors + cross-compiles the FreeRTOS kernel
 //! in a `build.rs` (the FreeRTOS deploy is cargo-driven, so cargo must produce
 //! the kernel), the **Zephyr build system compiles the kernel** and links the
 //! wz Rust static lib into the final image (the Z2 `deploy/` west/cmake build).

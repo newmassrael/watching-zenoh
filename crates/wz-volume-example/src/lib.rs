@@ -20,7 +20,7 @@
 //! Surviving a PROCESS restart is not like that. Only the `.so` can supply a
 //! value the previous process stored, and it can only reach the new host through
 //! `store_entries`. So this volume writes one file per key under a root the host
-//! hands it in [`configure`], and the witness discriminates on the restart.
+//! hands it in `configure`, and the witness discriminates on the restart.
 //!
 //! ## Format
 //!
@@ -64,7 +64,7 @@ static PUTS: AtomicU32 = AtomicU32::new(0);
 /// Times `create_store` handed back a live store.
 static CREATES: AtomicU32 = AtomicU32::new(0);
 
-/// The configured root, or `None` until [`configure`] has been called with one.
+/// The configured root, or `None` until `configure` has been called with one.
 ///
 /// A `Mutex` rather than a `OnceLock`: the host may load the same `.so` into a
 /// process that reconfigures it, and a write-once cell would make the second
@@ -159,7 +159,7 @@ unsafe extern "C" fn configure(config: *const c_char) -> c_int {
 }
 
 /// Forget the configured root, so [`capability`] reports Volatile and
-/// [`create_store`] refuses. Used by every [`configure`] failure path — see the
+/// [`create_store`] refuses. Used by every `configure` failure path — see the
 /// fail-closed note there.
 fn clear_root() {
     if let Ok(mut guard) = ROOT.lock() {

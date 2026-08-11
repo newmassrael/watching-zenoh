@@ -9,7 +9,7 @@
 //! hook runs (`wz_initiator_round_trip_against_wz_acceptor` and
 //! `ap_demo_round_trip_against_zenoh_pico_z_put`). R216 lifts the
 //! helpers into this module and replaces the racey port picker with
-//! a [`PortReservation`] that holds a process-global mutex across the
+//! a [`crate::common::PortReservation`] that holds a process-global mutex across the
 //! bind → child-spawn → bind-confirmed window so concurrent tests in
 //! the same `cargo test` invocation cannot pick the same port.
 
@@ -42,7 +42,7 @@ pub mod common {
     /// seventeenth of the contention and the other sixteen ran the
     /// `bind(0) -> close -> child bind` window unguarded against each other.
     ///
-    /// That is precisely the window [`PortReservation`]'s doc dismissed as an
+    /// That is precisely the window [`crate::common::PortReservation`]'s doc dismissed as an
     /// EXTERNAL process stealing the port, "sub-millisecond ... not observed in
     /// this workspace's CI history", deferring the fix "until the in-process race
     /// is confirmed insufficient". It is now confirmed insufficient: 17
@@ -131,7 +131,7 @@ pub mod common {
     ///
     /// FD inheritance is NOT the fix available here, either: the listener in the
     /// leg that surfaced this is zenoh-pico's own `z_sub`, a foreign C binary
-    /// with no `--listen-fd` to give it. [`CrossProcessPortLock`] widens the
+    /// with no `--listen-fd` to give it. `CrossProcessPortLock` widens the
     /// exclusion to the scope the design always intended instead.
     ///
     /// What remains undefended is a genuinely unrelated process on the machine
@@ -141,7 +141,7 @@ pub mod common {
         port: u16,
         _guard: MutexGuard<'static, ()>,
         /// R311y490 — held for the SAME window as `_guard`, and released by the
-        /// same drop. See [`CrossProcessPortLock`] for why the mutex alone was
+        /// same drop. See `CrossProcessPortLock` for why the mutex alone was
         /// only one seventeenth of the exclusion this window needs.
         _cross_process: Option<CrossProcessPortLock>,
     }
@@ -853,7 +853,7 @@ pub mod common {
     /// drop-in suite linked `target/zenoh-pico-build/lib` through a local
     /// `oracle_binary` helper. Both are genuine foreign witnesses, and Layer
     /// A4's classifier could see NEITHER: it derives a file's foreign class
-    /// from the RESOLVER FUNCTIONS the file names ([`FOREIGN_ROOTS`] in
+    /// from the RESOLVER FUNCTIONS the file names (`FOREIGN_ROOTS` in
     /// `scripts/lib/crossimpl_corpus.py`), so an artifact resolved by hand is
     /// an artifact the audit does not know is foreign. Five `wz->pico` claims
     /// were therefore rejected as "this file spawns/links no foreign

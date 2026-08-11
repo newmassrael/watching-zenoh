@@ -5,7 +5,7 @@
 //!
 //! ## The design choice, and why it is this one
 //!
-//! A [REDACTED]/C++ consumer can drive wz as a zenoh NODE today ([`wz_capi_c`]) and
+//! A [REDACTED]/C++ consumer can drive wz as a zenoh NODE today (`wz-capi-c`) and
 //! could not call the decode core at all. Closing that had two candidate
 //! shapes, and they are not equally durable:
 //!

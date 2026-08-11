@@ -116,7 +116,7 @@ pub fn zenohd_interop_session_init_params() -> SessionInitParams {
 /// calls *in addition to* recording every outbound frame. This is the
 /// second driver shape the runtime tests need — handshake / lifecycle
 /// tests assert the FSM drove the link through open → sends → close in
-/// the right order, which the no-op-open/close [`RecordingLinkDriver`]
+/// the right order, which the no-op-open/close `RecordingLinkDriver`
 /// cannot observe.
 ///
 /// SSOT home for the `RecordingDriver { opens, closes, sends }` shape

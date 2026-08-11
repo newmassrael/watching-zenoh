@@ -5,7 +5,7 @@
 //! profile's `Session` API.
 //!
 //! `wz-runtime-tokio`'s own `cargo test` cannot reach the multicast-only
-//! `Session` API ([`Session::new_multicast`], gated `not(transport-unicast)`;
+//! `Session` API (`Session::new_multicast`, gated `not(transport-unicast)`;
 //! and the now-unified transport-agnostic `Session::publish` exercised against
 //! a multicast transport): its `wz-runtime-tokio-test-support` dev-dependency
 //! depends on `wz-runtime-tokio` with `transport-unicast`, so `cargo test`'s
