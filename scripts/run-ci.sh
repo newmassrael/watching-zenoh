@@ -1527,6 +1527,21 @@ PY
     # MEASURED: reverting `samples` to its R311y700 shape reds and names the
     # function; the restore returns OK.
     python3 scripts/lib/datagram_half_lint.py || return 1
+    # R311y717 (§C G5) — the DISCARD-SITE gate. R311y713 made the flow table's
+    # exit an obligation a TYPE enforces and closed that one invariant; the
+    # register carried "the other multi-exit sites have not been looked at" as
+    # G5. Looked at: five more places discard captured evidence and every one
+    # accounts for it by a HAND-WRITTEN counter beside the removal. All correct
+    # today, and nothing makes the next one correct -- which is the shape this
+    # workspace paid for four times before y713 ended it for flows. Enforcement
+    # MEASURED four ways: delete the census beside the stream frame bound, the
+    # tally beside the skipped-packet bound, the one beside the datagram
+    # scouting bound, or the chain-expiry tally, and each reds by name; the
+    # restore returns OK. Two of those four passed against earlier versions of
+    # this scan -- a sibling block's counter excused one, a COMMENT excused
+    # another -- which is why the window is the removal's own block with the
+    # comments stripped out.
+    python3 scripts/lib/discard_site_lint.py || return 1
     # R311y639 (§4.30) — the PAYLOAD-MEASUREMENT gate. Two rounds in a row a
     # carrier arm of `agg::classify` wrote a byte total with a bare assignment
     # and so had no way to say "unknown": R311y637's query carries its value in
