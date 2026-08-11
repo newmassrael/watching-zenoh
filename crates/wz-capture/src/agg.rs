@@ -516,6 +516,24 @@ impl KeyexprSpaces {
                 (a.id, a.suffix.as_deref(), direction.peer())
             }
         };
+        self.resolve_parts(space, id, suffix)
+    }
+
+    /// R311y701 (PF2) — the same resolution, from the PARTS a reader has when
+    /// it holds a walked field tree rather than a decoded message.
+    ///
+    /// `space` is the table the `M` bit named, already chosen by the caller —
+    /// [`Self::resolve`] derives it from the codec variant, and a field-tree
+    /// reader derives it from the `mapping` bit the walk records. Everything
+    /// after that choice is one rule, in one place, because two copies of
+    /// "prepend the base, then the suffix" is two chances to disagree about a
+    /// keyexpr in a report whose whole output is keyexprs.
+    pub fn resolve_parts(
+        &self,
+        space: Direction,
+        id: u64,
+        suffix: Option<&str>,
+    ) -> Result<String, (Direction, u64)> {
         if id == 0 {
             // No mapping named at all: the suffix IS the keyexpr, on either
             // arm, consulting no table. This is the overwhelming majority of
@@ -532,6 +550,49 @@ impl KeyexprSpaces {
             }
             None => Err((space, id)),
         }
+    }
+
+    /// R311y701 (PF2) — fold ONE FRAME's keyexpr declarations in.
+    ///
+    /// # Why this lives here rather than in the reader that wants it
+    ///
+    /// The field layer in `wz-analyze` needs the same table to resolve a
+    /// keyexpr id, and reaching it from there means matching on `Carried` — a
+    /// enum whose variants are `#[cfg]`-gated on features this crate declares.
+    /// R311y668 measured what that costs: an exhaustive match written outside
+    /// the crate that owns the variants is not a mirror of it, and the arms
+    /// silently differ per feature set. Written here, a new variant is an
+    /// `E0004` on the round it lands.
+    ///
+    /// A frame carrying no readable batch contributes nothing, which is the
+    /// right answer rather than a silence: an undecompressible batch may well
+    /// have held a declaration, and the ids that declaration would have bound
+    /// stay unresolved — reported by whoever counts unresolved references,
+    /// never guessed at here.
+    pub fn absorb_frame(&mut self, frame: &PassiveFrame) {
+        let batch = match &frame.carried {
+            Carried::Batch(batch) => batch,
+            #[cfg(feature = "reassembly")]
+            Carried::Reassembled(batch) => batch,
+            Carried::Undecompressible => return,
+            #[cfg(feature = "reassembly")]
+            Carried::FragmentWithoutResolution => return,
+            Carried::Nothing => return,
+            #[cfg(feature = "reassembly")]
+            Carried::Fragment(_) => return,
+        };
+        #[cfg(feature = "network-codecs")]
+        for (message, _) in batch.records() {
+            if let NetworkMessage::Declare(d) = message {
+                self.absorb(frame.direction, d);
+            }
+        }
+        // Without `network-codecs` there is no `Declare` variant to match, and
+        // a build that cannot read one resolves only `id == 0` literals -- the
+        // honest reach of that decoder, stated the way `observe_message` states
+        // it one type over.
+        #[cfg(not(feature = "network-codecs"))]
+        let _ = batch;
     }
 
     /// Absorb one `Declare` travelling in `direction` into the DECLARER's

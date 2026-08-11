@@ -4703,6 +4703,154 @@ fn a_payload_format_rule_reaches_every_row_producer() {
     );
 }
 
+/// A `Wireexpr` naming an id in the SENDER's space, with an optional suffix
+/// appended to whatever that id was bound to.
+fn aliased_keyexpr(
+    id: u64,
+    suffix: Option<&'static str>,
+) -> wz_codecs::wireexpr::Wireexpr<'static> {
+    wz_codecs::wireexpr::Wireexpr {
+        body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
+            wz_codecs::wireexpr_local::WireexprLocal {
+                id,
+                suffix_len: suffix.map(|s| s.len() as u64),
+                suffix,
+            },
+        ),
+    }
+}
+
+/// `DeclKexpr`: bind `id` to the literal `base` in the sender's space.
+fn declare_kexpr(id: u64, base: &'static str) -> Vec<u8> {
+    wz_codecs::declare::Declare {
+        body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
+            wz_codecs::decl_kexpr::DeclKexpr {
+                header: wz_session_core::wire_const::D_MID_KEXPR
+                    | wz_session_core::wire_const::FLAG_D_N,
+                id,
+                keyexpr: keyexpr(base),
+            },
+        ),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+/// A reply under an ALIASED keyexpr, carrying `payload`.
+fn aliased_reply(
+    request_id: u64,
+    id: u64,
+    suffix: Option<&'static str>,
+    payload: &'static [u8],
+) -> Vec<u8> {
+    let n_flag = if suffix.is_some() {
+        wz_codecs::wire_const::FLAG_N_N
+    } else {
+        0
+    };
+    wz_codecs::response::Response {
+        header: wz_codecs::response::Response::default().header | n_flag,
+        request_id,
+        keyexpr: aliased_keyexpr(id, suffix),
+        body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
+            body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                payload_len: payload.len() as u64,
+                payload,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+/// R311y701 ([REDACTED-REQ], PF2) — A KEYEXPR NAMED BY NUMERIC ID IS RESOLVED, and a
+/// suffix hanging off an id gets its BASE.
+///
+/// ## Two defects, and the second is the worse one
+///
+/// R311y699 read the wire `suffix` and stopped, on the note that the id table
+/// lived in another plane. The visible cost was silence: a capture taken from a
+/// running system names every keyexpr by id, so every `--payload-format` rule
+/// matched nothing and the listing said `keyexpr_unresolved` per message.
+///
+/// The cost that was not noticed is that a message carrying an id AND a suffix
+/// has the id's base PREPENDED. Reading the suffix alone reported `/temp` for a
+/// record published under `demo/sensor/temp` — a WRONG keyexpr rather than a
+/// missing one, so a rule keyed on `demo/**` silently did not fire on traffic
+/// it covers, and a reader had no way to tell that from an empty topic.
+///
+/// ## Anti-vacuity
+///
+/// A rule for `other/**` is run over the same capture. If it fired, "resolved
+/// to demo/..." would be a claim about a listing that decodes regardless.
+#[test]
+fn a_keyexpr_named_by_id_is_resolved_through_the_declaration_the_capture_carried() {
+    let scratch = Scratch::new("payload-format-alias");
+    let mut client = Vec::new();
+    client.extend_from_slice(&framed_frame(&query(7, "demo/**")));
+    let mut server = Vec::new();
+    // The declaration first, exactly as a real session sends it...
+    server.extend_from_slice(&framed_frame(&declare_kexpr(5, "demo/sensor")));
+    // ...then a reply under the bare id, and one under the id plus a suffix.
+    server.extend_from_slice(&framed_frame(&aliased_reply(7, 5, None, PROTOBUF)));
+    server.extend_from_slice(&framed_frame(&aliased_reply(8, 5, Some("/temp"), PROTOBUF)));
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[
+            (0, 1_000_000, &tcp_packet(1000, &client)),
+            (0, 1_030_000, &tcp_packet_reverse(1000, &server)),
+        ],
+    );
+    let capture = scratch.write("alias.pcapng", &file);
+
+    let run = |args: &[&str]| {
+        String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                .arg(&capture)
+                .args(args)
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned()
+    };
+
+    let told = run(&["--fields", "--payload-format", "demo/**=protobuf"]);
+    assert!(
+        told.contains("payload `demo/sensor` as protobuf:"),
+        "the bare id resolves to what the capture's own DeclKexpr bound it to: \
+         {told}"
+    );
+    assert!(
+        told.contains("payload `demo/sensor/temp` as protobuf:"),
+        "and a suffix hanging off that id gets the base PREPENDED -- reading \
+         the suffix alone reported `/temp`, which is a wrong keyexpr and not a \
+         missing one: {told}"
+    );
+    assert!(
+        !told.contains("keyexpr_unresolved") && !told.contains("no --payload-format rule"),
+        "neither message is refused any more: {told}"
+    );
+    assert!(
+        told.matches("1 = varint 150").count() == 2,
+        "both payloads are decoded: {told}"
+    );
+
+    // ANTI-VACUITY: a rule for another subtree still does not fire, and names
+    // the RESOLVED keyexpr it tested -- which is the half a reader acts on.
+    let elsewhere = run(&["--fields", "--payload-format", "other/**=protobuf"]);
+    assert!(
+        elsewhere.contains("no --payload-format rule covers `demo/sensor`"),
+        "the keyexpr that was tested is the resolved one: {elsewhere}"
+    );
+    assert!(
+        !elsewhere.contains("varint 150"),
+        "and nothing was decoded: {elsewhere}"
+    );
+}
+
 /// `{ 1: 150, 2: { 1: 7, 2: "in" } }` — the nested shape, by hand.
 const NESTED_PROTOBUF: &[u8] = &[
     0x08, 0x96, 0x01, // 1: varint 150

@@ -5230,7 +5230,8 @@ layer_c1bw_analyze_cli() {
         a_format_name_this_build_cannot_decode_is_refused_at_the_command_line \
         the_payload_decoding_reaches_the_json_as_one_document \
         a_payload_format_rule_reaches_every_row_producer \
-        a_nested_payload_is_decoded_to_its_leaves_at_the_command_line
+        a_nested_payload_is_decoded_to_its_leaves_at_the_command_line \
+        a_keyexpr_named_by_id_is_resolved_through_the_declaration_the_capture_carried
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bw FAIL: $name is absent from the binary test target"

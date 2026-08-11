@@ -1266,7 +1266,19 @@ fn field_lines(
         let mut omitted = 0usize;
         let mut rows = String::new();
         let mut notes: Vec<FieldNote> = Vec::new();
+        // R311y701 (PF2) — this flow's keyexpr id tables, built AS THE ROWS ARE
+        // WALKED. In order rather than up front on purpose: an id can be
+        // undeclared and rebound, so a table folded to its final state would
+        // resolve an early reference through a later binding and print a
+        // keyexpr the sender never used.
+        //
+        // The granularity is the FRAMING UNIT and not the record, which is the
+        // one place this differs from the throughput plane: a batch holding
+        // `Declare(5)` then `Put(5)` resolves, and the reverse order -- which
+        // no conforming sender emits -- would resolve too.
+        let mut spaces = wz_capture::agg::KeyexprSpaces::new();
         for frame in &flow.frames {
+            spaces.absorb_frame(frame);
             if let Some(cap) = messages_per_flow {
                 if shown >= cap {
                     omitted += 1;
@@ -1296,10 +1308,26 @@ fn field_lines(
                 frame,
                 &row,
                 &to_json,
-                payload_formats,
+                PayloadLens {
+                    formats: payload_formats,
+                    spaces: &spaces,
+                },
             );
         }
         // R311y677 — the sink's rows for this flow, if it was a decrypted one.
+        //
+        // R311y701 (PF2) — a decrypted flow BREAKS out of the loop above before
+        // absorbing anything, so its declarations are folded here. All of them,
+        // which is the generous form the ordered walk above deliberately is
+        // not: the sink's rows do not travel with the frame that produced them,
+        // so there is no point in the sequence to fold up to. A capture that
+        // rebound an id would resolve an early row through the later binding,
+        // and that is stated rather than hidden.
+        if decrypted_coordinates(flow).is_some() {
+            for frame in &flow.frames {
+                spaces.absorb_frame(frame);
+            }
+        }
         for (f, direction, origin, row) in &decrypted.rows {
             if *f != flow.flow {
                 continue;
@@ -1318,7 +1346,10 @@ fn field_lines(
                     space: OffsetSpace::CiphertextRecord,
                 },
                 row,
-                payload_formats,
+                PayloadLens {
+                    formats: payload_formats,
+                    spaces: &spaces,
+                },
             );
         }
         if let Some((_, n)) = decrypted.omitted.iter().find(|(f, _)| *f == flow.flow) {
@@ -2058,8 +2089,9 @@ fn render_field_row(
     frame: &wz_session_core::passive::PassiveFrame,
     row: &FieldRow,
     to_json: &dyn Fn(&wz_session_core::dissect::Field) -> String,
-    payload_formats: &wz_capture::payload::formats::FormatMap<'_>,
+    lens: PayloadLens<'_>,
 ) {
+    let at = lens.at(frame.direction);
     // R311y688 — a cleartext stream row's offset IS a byte offset, and the
     // message it names begins past the framing prefix and past whatever of the
     // unit stands ahead of it. That sum is the one a reader would otherwise
@@ -2092,7 +2124,7 @@ fn render_field_row(
                 frame.stream_offset,
                 space.json(),
                 to_json(field),
-                payload_block(field, payload_formats, Format::Json)
+                payload_block(field, lens, Format::Json, at)
             ));
         }
         (Format::Json, FieldRow::Declined(why)) => {
@@ -2111,7 +2143,7 @@ fn render_field_row(
                 space.note()
             ));
             push_field_text(out, field, 2);
-            out.push_str(&payload_block(field, payload_formats, Format::Text));
+            out.push_str(&payload_block(field, lens, Format::Text, at));
         }
         (Format::Text, FieldRow::Declined(why)) => {
             out.push_str(&format!(
@@ -2322,6 +2354,10 @@ fn datagram_field_rows(
     for flow in dissection.datagram_flows() {
         let mut out = String::new();
         let mut notes: Vec<FieldNote> = Vec::new();
+        // R311y701 (PF2) — this flow's keyexpr tables, on the same rule the
+        // stream listing follows: folded in frame order so an id resolves
+        // through the binding that was live when it travelled.
+        let mut spaces = wz_capture::agg::KeyexprSpaces::new();
         let mut shown = 0usize;
         let mut omitted = 0usize;
         // R311y680 — messages whose packet did not vouch for itself.
@@ -2329,6 +2365,7 @@ fn datagram_field_rows(
         let mut disagreed = 0usize;
         let mut named: Vec<Disagreed> = Vec::new();
         for frame in &flow.frames {
+            spaces.absorb_frame(frame);
             // The datagram coordinate: `stream_offset` names the PACKET, because
             // a datagram link has no stream to be offset within.
             // R311y680 — a packet the second read does not have, or one it
@@ -2403,7 +2440,10 @@ fn datagram_field_rows(
                     space: OffsetSpace::Packet,
                 },
                 &row,
-                payload_formats,
+                PayloadLens {
+                    formats: payload_formats,
+                    spaces: &spaces,
+                },
             );
         }
         // R311y679 — the SCOUTING list, which is where a discovery capture's
@@ -2474,7 +2514,10 @@ fn datagram_field_rows(
                     space: OffsetSpace::Packet,
                 },
                 &FieldRow::Walked(field),
-                payload_formats,
+                PayloadLens {
+                    formats: payload_formats,
+                    spaces: &spaces,
+                },
             );
         }
         if omitted > 0 {
@@ -2557,7 +2600,7 @@ fn render_sink_row(
     format: Format,
     at: RowAt,
     row: &FieldRow,
-    payload_formats: &wz_capture::payload::formats::FormatMap<'_>,
+    lens: PayloadLens<'_>,
 ) {
     let RowAt {
         flow,
@@ -2565,6 +2608,7 @@ fn render_sink_row(
         origin,
         space,
     } = at;
+    let keyexpr_at = lens.at(direction);
     // R311y679 — whether these bytes came out of a DECRYPTION. Not a constant:
     // this renderer took its second caller that round and the datagram rows it
     // produces are cleartext, so a hardcoded `(decrypted)` is a label that is
@@ -2582,7 +2626,7 @@ fn render_sink_row(
              \"stream_offset\":{origin}{},\"decrypted\":{decrypted},\"field\":{}{}}}",
             space.json(),
             wz_session_core::dissect::to_json(field),
-            payload_block(field, payload_formats, Format::Json)
+            payload_block(field, lens, Format::Json, keyexpr_at)
         )),
         // R311y683 — a row the walker refused is still a row, in both formats.
         // The key is `declined`, the same one the cleartext path uses, because
@@ -2601,7 +2645,7 @@ fn render_sink_row(
                 space.note()
             ));
             push_field_text(out, field, 2);
-            out.push_str(&payload_block(field, payload_formats, Format::Text));
+            out.push_str(&payload_block(field, lens, Format::Text, keyexpr_at));
         }
         (Format::Text, FieldRow::Declined(why)) => {
             let how = if decrypted { " (decrypted)" } else { "" };
@@ -2745,8 +2789,14 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
     }
     let mut out = Samples::default();
     for flow in dissection.flows() {
+        // R311y701 (PF2) — folded in frame order, the same rule the field
+        // listing follows. A sample's keyexpr is the name it will be
+        // RE-PUBLISHED under, so resolving it through a binding that was not
+        // live when it travelled would send a payload to the wrong topic.
+        let mut spaces = wz_capture::agg::KeyexprSpaces::new();
         for frame in &flow.frames {
-            collect_sample(flow, frame, &mut out);
+            spaces.absorb_frame(frame);
+            collect_sample(flow, frame, &spaces, &mut out);
         }
     }
     collect_datagram_samples(capture, &dissection, &mut out);
@@ -2770,7 +2820,9 @@ fn collect_datagram_samples(capture: &[u8], dissection: &Dissection, out: &mut S
         return;
     };
     for flow in flows {
+        let mut spaces = wz_capture::agg::KeyexprSpaces::new();
         for frame in &flow.frames {
+            spaces.absorb_frame(frame);
             let Some(packet) = file.packet(frame.stream_offset) else {
                 out.unreachable += 1;
                 continue;
@@ -2799,7 +2851,7 @@ fn collect_datagram_samples(capture: &[u8], dissection: &Dissection, out: &mut S
                 out.undecodable += 1;
                 continue;
             };
-            push_sample(&field, frame.direction, frame.stream_offset, out);
+            push_sample(&field, frame.direction, frame.stream_offset, &spaces, out);
         }
     }
 }
@@ -2829,6 +2881,7 @@ pub struct Samples {
 fn collect_sample(
     flow: &wz_capture::FlowDissection,
     frame: &wz_session_core::passive::PassiveFrame,
+    spaces: &wz_capture::agg::KeyexprSpaces,
     out: &mut Samples,
 ) {
     let assembler = flow.assembler(frame.direction);
@@ -2838,7 +2891,7 @@ fn collect_sample(
         out.undecodable += 1;
         return;
     };
-    push_sample(&field, frame.direction, frame.stream_offset, out);
+    push_sample(&field, frame.direction, frame.stream_offset, spaces, out);
 }
 
 /// R311y701 (RP2) — the sample inside ONE walked message, whichever half of the
@@ -2852,10 +2905,12 @@ fn push_sample(
     field: &wz_session_core::dissect::Field,
     direction: wz_session_core::passive::Direction,
     origin: usize,
+    spaces: &wz_capture::agg::KeyexprSpaces,
     out: &mut Samples,
 ) {
     use wz_session_core::dissect::FieldValue;
-    match keyexpr_and_payload(field) {
+    let at = KeyexprAt { direction, spaces };
+    match keyexpr_and_payload(field, at) {
         Some((keyexpr, payload)) => {
             let FieldValue::Bytes(bytes) = &payload.value else {
                 return;
@@ -2895,38 +2950,112 @@ fn push_sample(
 /// sender never put under it, and the rule would decode the wrong bytes while
 /// naming the right topic. So the pair is found INNERMOST-FIRST inside one
 /// subtree: the node returned is the smallest one holding both.
-fn keyexpr_and_payload(
-    field: &wz_session_core::dissect::Field,
-) -> Option<(String, &wz_session_core::dissect::Field)> {
+fn keyexpr_and_payload<'a>(
+    field: &'a wz_session_core::dissect::Field,
+    at: KeyexprAt<'_>,
+) -> Option<(String, &'a wz_session_core::dissect::Field)> {
     use wz_session_core::dissect::FieldValue;
     if let FieldValue::Nested(children) = &field.value {
         for child in children {
-            if let Some(found) = keyexpr_and_payload(child) {
+            if let Some(found) = keyexpr_and_payload(child, at) {
                 return Some(found);
             }
         }
     }
-    let keyexpr = subtree_suffix(field)?;
+    let keyexpr = subtree_keyexpr(field, at)?;
     let payload = subtree_payload_bytes(field)?;
     Some((keyexpr, payload))
 }
 
-/// The textual keyexpr anywhere under `field`.
+/// R311y701 (PF2) — what a keyexpr id is resolved AGAINST.
 ///
-/// `suffix` is the textual part of a `WireExpr`; a message naming its keyexpr
-/// by numeric id alone has none, and this answers `None` rather than inventing
-/// one. The table that would turn an id into a path is per-flow state in the
-/// throughput plane and this row does not hold it — a boundary, said here so it
-/// is not read as an oversight.
-fn subtree_suffix(field: &wz_session_core::dissect::Field) -> Option<String> {
+/// The two halves a `WireExpr` needs and a field tree alone does not carry:
+/// which side sent this message, and what that flow has declared so far.
+#[derive(Clone, Copy)]
+struct KeyexprAt<'a> {
+    direction: wz_session_core::passive::Direction,
+    spaces: &'a wz_capture::agg::KeyexprSpaces,
+}
+
+/// R311y701 — everything a ROW needs to decode the payload under it.
+///
+/// The rules a reader typed and the tables their keyexprs resolve through, as
+/// one value. They arrived as two arguments and took `render_field_row` past
+/// what `clippy` allows — the same arity smell R311y688 settled for the four
+/// coordinates of a row, arriving again for the same reason: they are one fact
+/// about one listing and a caller that could pass one without the other could
+/// pass a rule set with nothing to resolve against.
+#[derive(Clone, Copy)]
+struct PayloadLens<'a> {
+    formats: &'a wz_capture::payload::formats::FormatMap<'a>,
+    spaces: &'a wz_capture::agg::KeyexprSpaces,
+}
+
+impl<'a> PayloadLens<'a> {
+    /// This lens, pointed at a row travelling `direction`.
+    fn at(self, direction: wz_session_core::passive::Direction) -> KeyexprAt<'a> {
+        KeyexprAt {
+            direction,
+            spaces: self.spaces,
+        }
+    }
+}
+
+/// The keyexpr of the `WireExpr` under `field`, RESOLVED.
+///
+/// # R311y701 (PF2) — why the suffix alone was not the answer
+///
+/// This read the `suffix` text and stopped, on the note that the id-to-path
+/// table lived in another plane. Two things were wrong with that.
+///
+/// The first is a silence: a capture that began AFTER the declarations names
+/// every keyexpr by id alone, which is the ordinary shape of a capture taken
+/// from a running system. Every `--payload-format` rule then matched nothing
+/// and the listing said `keyexpr_unresolved` for each message — honest, and
+/// useless.
+///
+/// The second is worse and was not noticed when that note was written: a
+/// message carrying BOTH an id and a suffix has the id's base PREPENDED to the
+/// suffix, so reading the suffix alone reported `/temp` for a record published
+/// under `demo/sensor/temp`. That is a wrong keyexpr rather than a missing one,
+/// and a rule keyed on `demo/**` silently did not fire on traffic it covers.
+///
+/// The resolution itself is [`wz_capture::agg::KeyexprSpaces::resolve_parts`],
+/// never a second copy of the rule.
+fn subtree_keyexpr(field: &wz_session_core::dissect::Field, at: KeyexprAt<'_>) -> Option<String> {
     use wz_session_core::dissect::FieldValue;
-    if field.name == "suffix" {
-        if let FieldValue::Text(text) = &field.value {
-            return (!text.is_empty()).then(|| text.clone());
+    if field.name == "keyexpr" {
+        if let FieldValue::Nested(parts) = &field.value {
+            let mut id = 0u64;
+            let mut mapping = 0u64;
+            let mut suffix: Option<&str> = None;
+            for part in parts {
+                match (part.name.as_ref(), &part.value) {
+                    ("id", FieldValue::Uint(v)) => id = *v,
+                    ("mapping", FieldValue::Bits(v)) => mapping = *v,
+                    ("suffix", FieldValue::Text(text)) => suffix = Some(text),
+                    _ => {}
+                }
+            }
+            // The `M` bit names the table: 1 is the SENDER's space, which for a
+            // message travelling this way is this direction's own, and 0 is the
+            // receiver's. `KeyexprSpaces::resolve` derives the same choice from
+            // the codec variant; this derives it from the bit the walk records,
+            // and both hand the same question to one resolver.
+            let space = if mapping == 1 {
+                at.direction
+            } else {
+                at.direction.peer()
+            };
+            return at
+                .spaces
+                .resolve_parts(space, id, suffix)
+                .ok()
+                .filter(|k| !k.is_empty());
         }
     }
     if let FieldValue::Nested(children) = &field.value {
-        return children.iter().find_map(subtree_suffix);
+        return children.iter().find_map(|c| subtree_keyexpr(c, at));
     }
     None
 }
@@ -2953,12 +3082,13 @@ fn subtree_payload_bytes(
 fn decode_payload(
     field: &wz_session_core::dissect::Field,
     map: &wz_capture::payload::formats::FormatMap<'_>,
+    at: KeyexprAt<'_>,
 ) -> PayloadDecoding {
     use wz_session_core::dissect::FieldValue;
     if map.is_empty() {
         return PayloadDecoding::NoRules;
     }
-    let Some((keyexpr, payload)) = keyexpr_and_payload(field) else {
+    let Some((keyexpr, payload)) = keyexpr_and_payload(field, at) else {
         // Either there is no payload under any keyexpr, or the only keyexpr is
         // a numeric id. The two are told apart by asking again for each half.
         return if subtree_payload_bytes(field).is_none() {
@@ -3001,10 +3131,11 @@ fn decode_payload(
 /// Render the payload decoding beside the field tree, in whichever format.
 fn payload_block(
     field: &wz_session_core::dissect::Field,
-    map: &wz_capture::payload::formats::FormatMap<'_>,
+    lens: PayloadLens<'_>,
     format: Format,
+    at: KeyexprAt<'_>,
 ) -> String {
-    let decoding = decode_payload(field, map);
+    let decoding = decode_payload(field, lens.formats, at);
     if decoding == PayloadDecoding::NoRules {
         return String::new();
     }
