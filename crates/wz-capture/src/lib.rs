@@ -1423,6 +1423,14 @@ impl FlowDissection {
 /// Bounds rather than a fixed policy because the two consumers want opposite
 /// things: a file replay wants everything and a live viewer wants the recent
 /// past and its memory back. See [`Self::for_live_tap`] for a starting point.
+/// R311y713 (§B2) — how many flow tables a [`Dissection`] keeps: the stream
+/// table and the datagram table.
+///
+/// Named because [`DissectionLimits::max_flows_held`] multiplies by it, and a
+/// bare `2` in that expression is exactly the kind of constant that stays `2`
+/// after a third table lands.
+const FLOW_TABLES: usize = 2;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DissectionLimits {
     /// Per-chain reassembly deadline, in the capture's own milliseconds.
@@ -1444,27 +1452,47 @@ pub struct DissectionLimits {
     /// survives depend on traffic it has nothing to do with. The cost is that
     /// the bound admits up to twice the number, and that is the trade taken.
     ///
+    /// R311y713 (§B2) — and the field is NAMED for it now. The trade above was
+    /// stated in this doc from the day it was made and the field was still
+    /// called `max_flows`, so a caller sizing memory off the name was wrong by
+    /// a factor of two and the doc that would have told them was one hop away.
+    /// The decision is unchanged; what changed is that the name no longer
+    /// contradicts it. [`Self::max_flows_held`] is the number that sizing
+    /// wants.
+    ///
     /// Until R311y651 this bounded the STREAM table alone. A UDP-only capture —
     /// scouting on a multicast group is exactly one — grew a flow per 5-tuple
     /// forever, on a limit whose whole purpose is that it cannot.
-    pub max_flows: Option<usize>,
+    pub max_flows_per_table: Option<usize>,
     /// R311y606 — half-assembled IP datagrams held at once. Beyond it the
     /// OLDEST is evicted.
     ///
-    /// Separate from `max_flows` because a fragment table entry is not a flow:
+    /// Separate from `max_flows_per_table` because a fragment table entry is not a flow:
     /// it is keyed by the datagram's identification, so a single busy flow can
     /// hold many at once and a bound on flows would not touch them.
     pub max_pending_fragments: Option<usize>,
     /// R311y608 — endpoints remembered as having sent a SCOUT. Beyond it the
     /// OLDEST asker goes, and [`DissectionDrops::scout_askers`] says so.
     ///
-    /// Its own bound rather than a share of `max_flows`, because an asker is
+    /// Its own bound rather than a share of `max_flows_per_table`, because an asker is
     /// not a flow either: one host scouting on a schedule keeps a single slot
     /// for the life of the tap while its flows come and go.
     pub max_scout_askers: Option<usize>,
 }
 
 impl DissectionLimits {
+    /// R311y713 (§B2) — flows a [`Dissection`] may hold AT ONCE, over every
+    /// table, which is the number a caller sizing memory needs.
+    ///
+    /// [`Self::max_flows_per_table`] times the number of flow tables. The
+    /// multiplier is not a constant a reader has to trust:
+    /// `the_flow_bound_is_the_one_a_caller_can_size_against` fills both tables
+    /// past the cap and holds this figure against what the dissection actually
+    /// holds, so the day a third table appears the test says so.
+    pub fn max_flows_held(&self) -> Option<usize> {
+        self.max_flows_per_table.map(|n| n * FLOW_TABLES)
+    }
+
     /// A starting point for a live tap. Not tuned — these are the shapes, and
     /// a deployment with a measured packet rate should set its own.
     ///
@@ -1478,13 +1506,13 @@ impl DissectionLimits {
             frames_per_flow: Some(10_000),
             stream_bytes_per_direction: Some(4 * 1024 * 1024),
             skipped_packets: Some(10_000),
-            max_flows: Some(1_024),
+            max_flows_per_table: Some(1_024),
             // 256 concurrent half-assembled datagrams is far past what a real
             // link produces at once — fragmentation is bursty and short-lived —
             // and it bounds the table at well under the ceiling times the cap.
             max_pending_fragments: Some(256),
             // One slot per scouting host. 1 024 is the same order as
-            // `max_flows` and each entry is an `Endpoint`, so the whole set is
+            // `max_flows_per_table` and each entry is an `Endpoint`, so the whole set is
             // smaller than a single flow's frame list.
             max_scout_askers: Some(1_024),
         }
@@ -1521,7 +1549,7 @@ mod live_tap_tests {
             frames_per_flow,
             stream_bytes_per_direction,
             skipped_packets,
-            max_flows,
+            max_flows_per_table,
             max_pending_fragments,
             max_scout_askers,
         } = DissectionLimits::for_live_tap();
@@ -1534,7 +1562,7 @@ mod live_tap_tests {
             ("frames_per_flow", frames_per_flow),
             ("stream_bytes_per_direction", stream_bytes_per_direction),
             ("skipped_packets", skipped_packets),
-            ("max_flows", max_flows),
+            ("max_flows_per_table", max_flows_per_table),
             ("max_pending_fragments", max_pending_fragments),
             ("max_scout_askers", max_scout_askers),
         ] {
@@ -1638,7 +1666,7 @@ pub struct DissectionDrops {
     pub stream_bytes: usize,
     /// Skipped-packet records discarded to stay inside `skipped_packets`.
     pub skipped: usize,
-    /// Flows evicted to stay inside `max_flows`.
+    /// Flows evicted to stay inside `max_flows_per_table`.
     pub flows: usize,
     /// R311y651 (§4.4) — scouting datagrams discarded to stay inside
     /// `frames_per_flow`.
@@ -2001,7 +2029,7 @@ pub struct Dissection {
     /// The third cause and the third number, on the rule that separated the
     /// first two: what a reader DOES about it differs. A chain past its deadline
     /// asks for a wider window, a chain still open when the file ended asks for
-    /// nothing, and this one asks for a larger `max_flows` — advice about the
+    /// nothing, and this one asks for a larger `max_flows_per_table` — advice about the
     /// wrong knob is worse than none, which is why they are not one field.
     /// R311y713 — now carried by [`exit::ExitCarry::chains`] and read through
     /// [`Self::evicted_chains`]; the distinction above is unchanged.
@@ -2922,7 +2950,7 @@ impl Dissection {
     /// it is counted; a live tap on a busy host would otherwise hold every
     /// connection it ever saw.
     fn evict_flows_beyond_cap(&mut self) {
-        let Some(cap) = self.limits.max_flows else {
+        let Some(cap) = self.limits.max_flows_per_table else {
             return;
         };
         while self.flows.len() > cap {
@@ -3158,13 +3186,7 @@ impl Dissection {
             // at all: a tap on a scouting group grows one entry per SCOUT for
             // as long as the process runs, which is the leak `frames_per_flow`
             // exists to prevent, one list over.
-            if let Some(cap) = self.limits.frames_per_flow {
-                if flow.scouting.len() > cap {
-                    let cut = flow.scouting.len() - cap;
-                    flow.scouting.drain(..cut);
-                    self.drops.scouting += cut;
-                }
-            }
+            self.enforce_datagram_message_cap(idx);
             self.evict_datagram_flows_beyond_cap();
             return;
         }
@@ -3177,17 +3199,54 @@ impl Dissection {
             link.handshake(&d),
         );
         flow.frames.extend(batch);
-        if let Some(cap) = self.limits.frames_per_flow {
-            if flow.frames.len() > cap {
-                let cut = flow.frames.len() - cap;
-                flow.frames.drain(..cut);
-                self.drops.frames += cut;
-            }
-        }
+        self.enforce_datagram_message_cap(idx);
         self.evict_datagram_flows_beyond_cap();
     }
 
-    /// R311y651 (§4.4) — the datagram table's half of `max_flows`.
+    /// R311y713 (§B3) — hold one datagram flow's DECODED MESSAGES inside
+    /// `frames_per_flow`, across both of the lists it keeps them in.
+    ///
+    /// R311y651 bounded the scouting list by this same limit on the argument
+    /// that it answers the same question — how many decoded messages of this
+    /// flow are kept — and then applied it to each list separately, so a flow
+    /// that both scouts and carries traffic held up to twice the number the
+    /// limit names. Its own argument asks for one budget: if the two lists
+    /// answer one question they must share the answer's bound.
+    ///
+    /// What goes is the OLDEST message of the flow, whichever list holds it,
+    /// which is the rule `frames_per_flow` already states one list at a time.
+    /// Both lists carry the packet index, so "oldest" is answerable across
+    /// them without inventing an ordering.
+    fn enforce_datagram_message_cap(&mut self, idx: usize) {
+        let Some(cap) = self.limits.frames_per_flow else {
+            return;
+        };
+        loop {
+            let flow = &self.datagram_flows[idx];
+            if flow.frames.len() + flow.scouting.len() <= cap {
+                return;
+            }
+            let scout_is_older = match (flow.frames.first(), flow.scouting.first()) {
+                (Some(f), Some(s)) => s.packet_index <= f.stream_offset,
+                (None, Some(_)) => true,
+                (Some(_), None) => false,
+                // Unreachable while the sum exceeds a cap, and a `return`
+                // rather than a panic: a bound that cannot be met must not take
+                // the capture down with it.
+                (None, None) => return,
+            };
+            let flow = &mut self.datagram_flows[idx];
+            if scout_is_older {
+                flow.scouting.remove(0);
+                self.drops.scouting += 1;
+            } else {
+                flow.frames.remove(0);
+                self.drops.frames += 1;
+            }
+        }
+    }
+
+    /// R311y651 (§4.4) — the datagram table's half of `max_flows_per_table`.
     ///
     /// A separate walk from the stream table's rather than a generic one over
     /// both, because what has to be CARRIED off an evicted flow differs: a
@@ -3201,7 +3260,7 @@ impl Dissection {
     /// would make a live tap's multicast loss figures improve every time a slot
     /// recycled.
     fn evict_datagram_flows_beyond_cap(&mut self) {
-        let Some(cap) = self.limits.max_flows else {
+        let Some(cap) = self.limits.max_flows_per_table else {
             return;
         };
         while self.datagram_flows.len() > cap {
@@ -5744,7 +5803,7 @@ mod datagram_tests {
     fn an_evicted_flows_counters_stay_in_the_total() {
         let msg = framed_keepalive();
         let mut d = Dissection::with_limits(DissectionLimits {
-            max_flows: Some(1),
+            max_flows_per_table: Some(1),
             ..DissectionLimits::default()
         });
         // Flow 1, with a retransmission on it.
@@ -5815,7 +5874,7 @@ mod datagram_tests {
         );
 
         let mut evicted = Dissection::with_limits(DissectionLimits {
-            max_flows: Some(1),
+            max_flows_per_table: Some(1),
             ..DissectionLimits::default()
         });
         fixture(&mut evicted);
@@ -5845,6 +5904,96 @@ mod datagram_tests {
         );
     }
 
+    /// R311y713 (§B3) — one datagram flow's two message lists share the one
+    /// bound that names them.
+    ///
+    /// Measured before the fix on this fixture: `frames_per_flow: Some(4)` and
+    /// a flow that both scouts and carries traffic held EIGHT decoded messages.
+    /// A reader sizing a live tap off the limit was wrong by the same factor
+    /// §B2 names one layer up, for the same reason — a bound applied per list
+    /// rather than per thing the lists hold.
+    #[test]
+    fn a_datagram_flows_two_lists_share_one_message_bound() {
+        const CAP: usize = 4;
+        let mut d = Dissection::with_limits(DissectionLimits {
+            frames_per_flow: Some(CAP),
+            ..DissectionLimits::default()
+        });
+        // Alternating on ONE 5-tuple: a scout, then a transport message, ten
+        // times over. The scouting port is what puts a datagram in the other
+        // list, so both lists fill from the same flow.
+        let keepalive = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let scout = scout_message();
+        for i in 0..10usize {
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                i * 2,
+                &udp_packet([10, 0, 0, 1], 43210, SCOUT_GROUP, 7446, &scout),
+            );
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                i * 2 + 1,
+                &udp_packet([10, 0, 0, 1], 43210, SCOUT_GROUP, 7446, &keepalive),
+            );
+        }
+        let flow = &d.datagram_flows()[0];
+        assert!(
+            !flow.frames.is_empty() && !flow.scouting.is_empty(),
+            "the fixture must fill BOTH lists, or it cannot see the doubling"
+        );
+        assert_eq!(
+            flow.frames.len() + flow.scouting.len(),
+            CAP,
+            "the flow's decoded messages, over both lists, must fit the bound"
+        );
+        assert!(
+            d.drops().frames > 0 && d.drops().scouting > 0,
+            "and both lists must have been bitten, each on its own counter"
+        );
+    }
+
+    /// R311y713 (§B2) — the flow bound a caller can size memory against, held
+    /// against what the dissection ACTUALLY holds.
+    ///
+    /// `max_flows_per_table` is per table by a decision R311y651 made and
+    /// argued for, and the cost it named — the bound admits twice the number —
+    /// sat in a doc comment while the field was called `max_flows`. This is
+    /// that arithmetic with a witness instead of a sentence: both tables are
+    /// driven past the cap and the total held must be exactly what
+    /// [`DissectionLimits::max_flows_held`] promises. A third flow table would
+    /// break it here rather than in a deployment's memory figures.
+    #[test]
+    fn the_flow_bound_is_the_one_a_caller_can_size_against() {
+        let msg = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let limits = DissectionLimits {
+            max_flows_per_table: Some(2),
+            ..DissectionLimits::default()
+        };
+        let mut d = Dissection::with_limits(limits);
+        // Six stream 5-tuples and six datagram ones, well past the cap on both.
+        for i in 0..6u8 {
+            let mut pkt = tcp_packet(1000, &framed_keepalive());
+            pkt[26] = 100 + i;
+            d.push_packet(LINKTYPE_ETHERNET, i as usize, &pkt);
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                100 + i as usize,
+                &udp_packet([10, 1, 1, i], 7447, [10, 1, 2, i], 7447, &msg),
+            );
+        }
+        let held = d.flows().len() + d.datagram_flows().len();
+        assert_eq!(
+            Some(held),
+            limits.max_flows_held(),
+            "the promised bound and the held flows must be the same number"
+        );
+        assert!(
+            held > limits.max_flows_per_table.unwrap(),
+            "and it must be the TOTAL, not one table's share — the whole point \
+             is that a caller reading the per-table field sizes for half"
+        );
+    }
+
     /// R311y713 (§B1) — and the count of what this reader decoded must not walk
     /// backwards when a MULTICAST slot recycles either.
     ///
@@ -5852,13 +6001,13 @@ mod datagram_tests {
     /// got one, which nothing had noticed because the two retirements were
     /// eighty lines apart. Written next to each other in [`exit`], the omission
     /// is one missing line rather than a comparison nobody makes: a tap on a
-    /// scouting group is exactly where `max_flows` recycles hardest, so this is
+    /// scouting group is exactly where `max_flows_per_table` recycles hardest, so this is
     /// the table where the number moved wrong FASTEST.
     #[test]
     fn an_evicted_datagram_flows_messages_stay_in_the_total() {
         let msg = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
         let mut d = Dissection::with_limits(DissectionLimits {
-            max_flows: Some(1),
+            max_flows_per_table: Some(1),
             ..DissectionLimits::default()
         });
         d.push_packet(
@@ -5897,7 +6046,7 @@ mod datagram_tests {
         const SEG: usize = 37;
         let segments: Vec<&[u8]> = stream.chunks(SEG).collect();
         let mut d = Dissection::with_limits(DissectionLimits {
-            max_flows: Some(1),
+            max_flows_per_table: Some(1),
             ..DissectionLimits::default()
         });
         d.set_gap_patience(Some(2));
@@ -6065,7 +6214,7 @@ mod datagram_tests {
     fn the_flow_table_evicts_the_least_recently_active() {
         let msg = framed_keepalive();
         let mut d = Dissection::with_limits(DissectionLimits {
-            max_flows: Some(2),
+            max_flows_per_table: Some(2),
             ..DissectionLimits::default()
         });
         // Three distinct connections, by source port.
@@ -6094,7 +6243,7 @@ mod datagram_tests {
             pkt
         };
         let mut e = Dissection::with_limits(DissectionLimits {
-            max_flows: Some(2),
+            max_flows_per_table: Some(2),
             ..DissectionLimits::default()
         });
         e.push_packet(LINKTYPE_ETHERNET, 0, &at(2221, 1000));
@@ -6117,8 +6266,8 @@ mod datagram_tests {
 
     /// R311y651 (§4.4) — the DATAGRAM flow table is bounded too.
     ///
-    /// Measured before the fix, on this fixture: `max_flows: Some(2)` and forty
-    /// 5-tuples produced FORTY flows and `drops.flows == 0`. `max_flows` exists
+    /// Measured before the fix, on this fixture: `max_flows_per_table: Some(2)` and forty
+    /// 5-tuples produced FORTY flows and `drops.flows == 0`. `max_flows_per_table` exists
     /// because "a 5-tuple that never returns is a flow that is never freed", and
     /// the plane where that is most true — scouting, where every host on a
     /// multicast group is its own 5-tuple and none of them ever closes — was the
@@ -6127,7 +6276,7 @@ mod datagram_tests {
     fn the_datagram_flow_table_is_bounded_by_the_same_limit() {
         let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
         let mut d = Dissection::with_limits(DissectionLimits {
-            max_flows: Some(2),
+            max_flows_per_table: Some(2),
             ..DissectionLimits::default()
         });
         for i in 0..40u16 {
@@ -6154,7 +6303,7 @@ mod datagram_tests {
                 .collect()
         };
         let mut e = Dissection::with_limits(DissectionLimits {
-            max_flows: Some(2),
+            max_flows_per_table: Some(2),
             ..DissectionLimits::default()
         });
         let at = |port: u16| udp_packet([10, 0, 0, 1], port, [224, 0, 0, 224], 7446, &keepalive);
@@ -6193,7 +6342,7 @@ mod datagram_tests {
             ]
         };
         let mut d = Dissection::with_limits(DissectionLimits {
-            max_flows: Some(1),
+            max_flows_per_table: Some(1),
             ..DissectionLimits::default()
         });
         // One flow, numbered frames, and NO handshake in front of them -- so the
@@ -6302,7 +6451,7 @@ mod datagram_tests {
     fn a_scouting_only_capture_is_bounded_too() {
         let scout = [wz_session_core::wire_const::S_MID_SCOUT, 0x00, 0x01, 0x00];
         let mut d = Dissection::with_limits(DissectionLimits {
-            max_flows: Some(2),
+            max_flows_per_table: Some(2),
             ..DissectionLimits::default()
         });
         for i in 0..25u16 {
@@ -6613,7 +6762,7 @@ mod datagram_tests {
     /// the loss counter carried and the finding did not.
     ///
     /// Its own field rather than a share of the other two because the ACTION
-    /// differs: this one asks for a larger `max_flows`, and telling a reader to
+    /// differs: this one asks for a larger `max_flows_per_table`, and telling a reader to
     /// widen a reassembly window would be advice about the wrong knob.
     #[cfg(feature = "reassembly")]
     #[test]
@@ -6636,7 +6785,7 @@ mod datagram_tests {
             // Far longer than the capture, so the deadline sweep can rescue
             // nothing and the number below is the eviction's alone.
             reassembly_window_ms: Some(600_000),
-            max_flows: Some(1),
+            max_flows_per_table: Some(1),
             ..DissectionLimits::default()
         });
         for (i, (from_low, message)) in [
@@ -6684,7 +6833,7 @@ mod datagram_tests {
         );
         assert!(
             rep.to_text()
-                .contains("raising max_flows is what would have kept"),
+                .contains("raising max_flows_per_table is what would have kept"),
             "the reader must be pointed at the knob that would have helped: {}",
             rep.to_text()
         );
@@ -6709,7 +6858,7 @@ mod datagram_tests {
         };
         let mut e = Dissection::with_limits(DissectionLimits {
             reassembly_window_ms: Some(600_000),
-            max_flows: Some(1),
+            max_flows_per_table: Some(1),
             ..DissectionLimits::default()
         });
         let mut seq_low = 1000u32;
@@ -7947,7 +8096,7 @@ mod vsock_flow_tests {
     fn the_vsock_flow_table_evicts_the_least_recently_active() {
         let msg = framed_keepalive();
         let mut d = Dissection::with_limits(DissectionLimits {
-            max_flows: Some(2),
+            max_flows_per_table: Some(2),
             ..DissectionLimits::default()
         });
         let at = |port: u32| vsockmon(3, port, 2, 7447, OP_PAYLOAD, &[], &msg);
@@ -8702,7 +8851,7 @@ mod tls_flow_tests {
         let hello = record(0x16, [0x03, 0x01], &[0x01, 0x00, 0x00, 0x30]);
         let app_a = record(0x17, [0x03, 0x03], &[0xAB; 40]);
         let mut d = Dissection::with_limits(DissectionLimits {
-            max_flows: Some(1),
+            max_flows_per_table: Some(1),
             ..DissectionLimits::default()
         });
         d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &hello));
@@ -8776,7 +8925,7 @@ mod tls_flow_tests {
         };
         let app = record(0x17, [0x03, 0x03], &[0xCD; 40]);
         let mut d = Dissection::with_limits(DissectionLimits {
-            max_flows: Some(1),
+            max_flows_per_table: Some(1),
             ..DissectionLimits::default()
         });
         // PATIENCE 1: the hole has to be ANNOUNCED while the capture is still
@@ -8904,7 +9053,7 @@ mod tls_flow_tests {
         );
 
         let mut d = Dissection::with_limits(DissectionLimits {
-            max_flows: Some(1),
+            max_flows_per_table: Some(1),
             ..DissectionLimits::default()
         });
         d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1111, 7447, 1000, &framed));
@@ -9741,7 +9890,7 @@ mod tls_flow_tests {
     #[test]
     fn the_decoded_message_count_survives_an_eviction() {
         let mut d = Dissection::with_limits(DissectionLimits {
-            max_flows: Some(1),
+            max_flows_per_table: Some(1),
             ..DissectionLimits::default()
         });
         // A plaintext zenoh flow, so the messages are decoded without keys.

@@ -758,7 +758,7 @@ impl<'a> CaptureReport<'a> {
         if d.evicted_chains() > 0 {
             s.push_str(&format!(
                 "  {} reassembly chain(s) went with a flow the flow cap evicted; \
-                 raising max_flows is what would have kept them\n",
+                 raising max_flows_per_table is what would have kept them\n",
                 d.evicted_chains()
             ));
         }
