@@ -3080,3 +3080,50 @@ fn a_decrypted_record_the_walker_cannot_read_is_still_a_row() {
          that is missing: {text}"
     );
 }
+
+/// R311y684 (§1.1n) — THE DOCUMENT CHECKER IS ITSELF CHECKED.
+///
+/// ## Why a helper needs a test
+///
+/// `assert_one_document` is the gate twelve tests lean on, and it has two legs
+/// that answer different questions: a real parser for VALIDITY, and a bracket
+/// walk for "is this ONE value". Measured: deleting the parser leg left all
+/// twelve green, because none of their fixtures is invalid-and-balanced -- which
+/// is precisely the shape the parser leg was added for (R311y675 emitted rows
+/// concatenated with no comma: invalid JSON, perfectly balanced, and every
+/// assertion passed on it).
+///
+/// A gate whose own failure modes nothing exercises is a gate that can be
+/// quietly deleted. So each leg is driven with the input only it catches, and
+/// the honest document is driven first so a checker that rejected everything
+/// could not pass.
+#[test]
+fn the_one_document_check_catches_each_shape_it_exists_for() {
+    let rejects = |json: &str| std::panic::catch_unwind(|| assert_one_document(json)).is_err();
+
+    // ANTI-VACUITY: a real single document must pass, or every rejection below
+    // is satisfied by a checker that rejects everything.
+    assert!(
+        !rejects("{\"a\":1,\"b\":[{\"c\":\"}\"}]}"),
+        "one valid document -- braces inside strings and all -- must pass"
+    );
+
+    // THE BRACKET LEG's own shape: two documents on one stream. Valid JSON by
+    // the parser's reckoning, because it stops at the end of the first.
+    assert!(
+        rejects("{\"a\":1}{\"b\":2}"),
+        "two documents must be caught: a consumer sees only the first"
+    );
+    // THE PARSER LEG's own shape: invalid and PERFECTLY BALANCED, which is what
+    // the bracket walk cannot see. This is the R311y675 defect exactly.
+    assert!(
+        rejects("[{\"a\":1}{\"b\":2}]"),
+        "rows concatenated with no comma are balanced and invalid, and only a \
+         real parser catches it"
+    );
+    // And the plain unbalanced case.
+    assert!(
+        rejects("{\"a\":1"),
+        "an unterminated document must be caught"
+    );
+}

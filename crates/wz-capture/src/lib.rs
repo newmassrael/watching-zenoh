@@ -581,6 +581,24 @@ pub struct DecryptionSummary {
     ///
     /// The number the whole track exists to move off zero.
     pub frames: usize,
+    /// R311y684 (§1.1n) — flows a PREVIOUS pass already settled, which this one
+    /// skipped.
+    ///
+    /// # The silence this ends
+    ///
+    /// The pass is idempotent by flow, and it has to be: a stream reader handed
+    /// the same bytes twice decodes them twice, and the second set of frames
+    /// would look exactly as real as the first (R311y661). But the skip was
+    /// SILENT, so a second pass reported `flows: 0` — byte-identical to the
+    /// summary of a capture that had no encrypted flow in it at all.
+    ///
+    /// That matters because of [`Dissection::decrypt_with_sink`]: a caller
+    /// installing a sink on a second pass receives NOTHING, and had no way to
+    /// tell that from "this capture had no plaintext to offer". Counted here,
+    /// the two are different numbers, which is the same rule every bound in
+    /// this crate follows — a skip that reports nothing reports itself as the
+    /// wire.
+    pub already_opened: usize,
 }
 
 /// R311y615 — which of a [`Dissection`]'s two flow vectors an index refers to.
@@ -2333,7 +2351,11 @@ impl Dissection {
                 continue;
             };
             // (3) above. A pass that already ran owns this flow's frames.
+            // R311y684 — counted rather than silently skipped: this is the one
+            // fact that separates "already done" from "nothing to do", and a
+            // caller offering a sink on a second pass needs it.
             if state.outcome.is_some() {
+                summary.already_opened += 1;
                 continue;
             }
             summary.flows += 1;
@@ -9075,6 +9097,52 @@ mod tls_flow_tests {
         );
         assert_eq!(summary.flows, 0);
         assert_eq!(d.flows()[0].frames.len(), 2, "and no frame is duplicated");
+        // R311y684 — and the skip is COUNTED. Without this the summary of a
+        // second pass is byte-identical to the summary of a capture with no
+        // encrypted flow in it, which is what a caller installing a sink on a
+        // second pass would have to tell apart to know its sink got nothing.
+        assert_eq!(
+            summary.already_opened, 1,
+            "the flow this pass skipped because an earlier one settled it must \
+             be counted, or 'already done' and 'nothing to do' are one summary"
+        );
+    }
+
+    /// R311y684 (§1.1n) — "already done" and "nothing to do" are DIFFERENT
+    /// summaries, driven side by side in one test.
+    ///
+    /// The discriminator is the whole point: asserting a count on the second
+    /// pass alone would pass just as well if the field counted something else
+    /// entirely, so the capture with nothing to decrypt is run through the same
+    /// assertion and must answer zero.
+    #[test]
+    fn a_pass_with_nothing_to_do_and_one_already_done_do_not_read_alike() {
+        let random = [9u8; 32];
+        let records = alloc::vec![protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(0))];
+        let mut settled = decryptable_flow(&random, &records);
+        settled.decrypt_with(&mut FakeOpener::new());
+        let second = settled.decrypt_with(&mut FakeOpener::new());
+
+        // A capture with no encrypted flow at all: the OTHER way to get a pass
+        // that opens nothing.
+        let mut nothing = Dissection::new();
+        let empty = nothing.decrypt_with(&mut FakeOpener::new());
+
+        assert_eq!(
+            (empty.flows, empty.records, empty.already_opened),
+            (0, 0, 0),
+            "a capture with nothing to decrypt reports nothing on every axis"
+        );
+        assert_eq!(
+            (second.flows, second.records),
+            (0, 0),
+            "and so does a second pass, on the two axes it shares"
+        );
+        assert_eq!(
+            second.already_opened, 1,
+            "which is why the third axis has to differ: it is the only thing \
+             separating the two"
+        );
     }
 
     /// R311y661 — the report's `decrypted` and `reason` are facts now.

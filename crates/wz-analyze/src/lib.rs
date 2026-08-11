@@ -3306,6 +3306,66 @@ mod message_name_tests {
         }
     }
 
+    /// R311y684 (§1.1n) — the two NAME TABLES the agreement check compares are
+    /// pinned to each other, on real bytes, for every kind that has a name.
+    ///
+    /// # What was unpinned
+    ///
+    /// [`walk_agrees`] compares `InboundFrame::kind_name` with the field
+    /// walker's `match mid` arms. They are two independent tables in two crates
+    /// that happen to spell the seven kinds identically, and NOTHING made them
+    /// keep doing so: a rename on either side would turn every row in the
+    /// listing into a dispute, and the round that did it would see a green
+    /// suite, because every fixture in this crate carries KeepAlive and Frame
+    /// alone.
+    ///
+    /// So the same bytes go through both readers and the names must match. Not
+    /// a comparison of two literal lists -- that would pin the test to the
+    /// tables rather than the tables to each other.
+    #[test]
+    fn the_two_name_tables_agree_on_every_kind_that_has_a_name() {
+        // One minimal encoding per transport MID. The Init/Open/Join bodies are
+        // the smallest the walker accepts: version, a cbyte whose top nibble is
+        // the zid length minus one, and the zid.
+        let each: &[(&str, &[u8])] = &[
+            ("Init", &[0x01, 0x09, 0x00, 0xAA]),
+            ("Close", &[0x03, 0x00]),
+            ("KeepAlive", &[0x04]),
+            ("Frame", &[0x05, 0x01]),
+        ];
+        let mut checked = 0usize;
+        for (expected, bytes) in each {
+            let walked = wz_session_core::dissect::dissect_transport_message(bytes, 0)
+                .unwrap_or_else(|e| panic!("{expected}: the walker must read {bytes:?}: {e:?}"));
+            let framed = wz_session_core::inbound::parse_inbound(bytes)
+                .unwrap_or_else(|e| panic!("{expected}: the session must read {bytes:?}: {e:?}"));
+            let framed = framed.kind_name();
+            // ANTI-VACUITY: neither reader may answer `Unknown` here, because
+            // `walk_agrees` treats that as silence -- a fixture both readers
+            // failed to recognise would satisfy the equality below and pin
+            // nothing.
+            assert_ne!(
+                walked.name, "Unknown",
+                "{expected}: the fixture must be a kind the walker names"
+            );
+            assert_ne!(
+                framed, "Unknown",
+                "{expected}: and one the session names, or this pins nothing"
+            );
+            assert_eq!(
+                walked.name, *expected,
+                "the walker's name for this kind is the one the listing prints"
+            );
+            assert_eq!(
+                framed, *expected,
+                "and the session's name for the SAME bytes must be the same \
+                 string, or every row of this kind becomes a dispute"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 4, "every case in the table must have run");
+    }
+
     /// R311y683 (§1.1n) — the DECRYPTED row gets the same witness, and a
     /// message the walker refuses inside TLS is no longer dropped.
     ///
