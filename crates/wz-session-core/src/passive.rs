@@ -370,6 +370,23 @@ pub struct PassiveFrame {
     /// Recorded on every message of a batch, not only the first: the prefix
     /// framed the whole unit, so it is the width this message arrived under.
     pub prefix_width: usize,
+    /// R311y687 (§1.1n) — the length the prefix DECLARED, in bytes.
+    ///
+    /// # Why the reader should not read it again
+    ///
+    /// Recorded for the same reason [`Self::prefix_width`] is, and it closes
+    /// the last place outside this module that knew how a zenoh stream is
+    /// framed. `wz-analyze` re-read the two prefix bytes to find where the unit
+    /// ended, which made the framing rule live in two crates -- and the copy
+    /// was not merely redundant, it was WRONG about a batch: it sliced from the
+    /// unit's start for every message in it, so the second message of a unit
+    /// was walked as the first.
+    ///
+    /// Like `prefix_width`, it is on every message of the unit rather than the
+    /// first: the prefix framed the whole unit, so it is the length this
+    /// message arrived under, and [`Self::unit_offset`] is where inside it this
+    /// message stands.
+    pub unit_len: usize,
     /// The decoded transport message, or the decode error.
     pub frame: Result<InboundFrame, InboundParseError>,
     /// The flow context AS OF this frame (after folding it in). Copied rather
@@ -1404,6 +1421,7 @@ impl PassiveSession {
                 stream_offset: offset,
                 batch_index,
                 unit_offset: pos,
+                unit_len: bytes.len(),
                 batch_offset,
                 undefined_mandatory_ext,
                 prefix_width,

@@ -1296,18 +1296,12 @@ impl wz_capture::PlaintextSink for FieldSink {
         for frame in stream.frames {
             let at = frame.stream_offset;
             let body = at + frame.prefix_width;
-            if body + PREFIX_MAX > bytes.len() && body > bytes.len() {
-                continue;
-            }
-            // The unit's length, read where the session read it.
-            let Some(prefix) = bytes.get(at..body) else {
-                continue;
-            };
-            let mut len = 0usize;
-            for (i, b) in prefix.iter().enumerate() {
-                len |= (*b as usize) << (8 * i);
-            }
-            let Some(message) = bytes.get(body..body + len) else {
+            // R311y687 — the unit's length and this message's place inside it
+            // come from the FRAME. This read the two prefix bytes itself, which
+            // made it the third place that knows how a zenoh stream is framed,
+            // and it took the unit from its first byte for every message in it
+            // -- the same batch defect the cleartext path carried.
+            let Some(message) = bytes.get(body + frame.unit_offset..body + frame.unit_len) else {
                 continue;
             };
             if let Some(cap) = self.cap {
@@ -1335,9 +1329,6 @@ impl wz_capture::PlaintextSink for FieldSink {
         }
     }
 }
-
-/// The widest length prefix this framing uses.
-const PREFIX_MAX: usize = 2;
 
 /// R311y676 (§1.1n) — a flow whose messages came out of DECRYPTED bytes cannot
 /// be walked from the retained stream, and this says so BY NAME.
@@ -1375,9 +1366,22 @@ fn decrypted_coordinates(flow: &wz_capture::FlowDissection) -> Option<String> {
 /// R311y675 — the message's bytes, sliced out of the direction's retained
 /// stream at the coordinates the frame carries.
 ///
-/// The length prefix is read from the stream rather than assumed: `prefix_width`
-/// says how wide it is, so the width is a fact the framing already settled and
-/// only the VALUE is read here.
+/// # R311y687 — the framing is read from the FRAME, and a batch is now right
+///
+/// This re-read the unit's two length-prefix bytes out of the stream, which made
+/// it a second place that knows how a zenoh stream is framed and, worse, made it
+/// wrong about a batch: it returned the WHOLE unit from its first byte, for
+/// every message in the unit. A unit carrying a KeepAlive and a Close produced
+/// two rows and both walked the KeepAlive.
+///
+/// That is not a hypothetical. It was found by writing the fixture, and the
+/// misread never reached a reader only because R311y682's cross-check declined
+/// the second row -- "the session read these bytes as Close and the field
+/// walker reads them as KeepAlive" -- which is the check earning its place two
+/// rounds after it was added.
+///
+/// Now the unit's length comes from `unit_len` and the message's place inside it
+/// from `unit_offset`, both recorded by the framer. Nothing here parses framing.
 fn message_bytes<'a>(
     stream: &'a [u8],
     origin: usize,
@@ -1391,21 +1395,22 @@ fn message_bytes<'a>(
     }
     let at = frame.stream_offset - origin;
     let body = at + frame.prefix_width;
-    if body > stream.len() {
-        return Err("the framing unit is past the retained stream".into());
-    }
-    let mut len = 0usize;
-    for (i, b) in stream[at..body].iter().enumerate() {
-        len |= (*b as usize) << (8 * i);
-    }
-    let end = body + len;
+    let end = body + frame.unit_len;
     if end > stream.len() {
         return Err(format!(
-            "the framing unit declares {len} byte(s) and the retained stream holds {}",
-            stream.len() - body
+            "the framing unit declares {} byte(s) and the retained stream holds {}",
+            frame.unit_len,
+            stream.len().saturating_sub(body)
         ));
     }
-    Ok(&stream[body..end])
+    let start = body + frame.unit_offset;
+    if start > end {
+        return Err(format!(
+            "this message stands {} byte(s) into a unit of {}",
+            frame.unit_offset, frame.unit_len
+        ));
+    }
+    Ok(&stream[start..end])
 }
 
 /// R311y682 (§1.1n) — the stream row, walked and then CHECKED against the
@@ -3229,6 +3234,7 @@ mod message_name_tests {
             stream_offset: 12,
             batch_index: 0,
             unit_offset: 0,
+            unit_len: 0,
             batch_offset: None,
             prefix_width: 2,
             frame: Err(wz_session_core::parse_error::InboundParseError::Empty),
@@ -3267,6 +3273,7 @@ mod message_name_tests {
             stream_offset,
             batch_index: 0,
             unit_offset: 0,
+            unit_len: 1,
             batch_offset: None,
             prefix_width: 2,
             frame,

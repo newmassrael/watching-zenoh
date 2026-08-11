@@ -3626,3 +3626,121 @@ fn a_handshake_tail_interrupted_by_another_record_is_let_go_of_and_counted() {
         "and the two bytes held for it are counted when they are let go: {json}"
     );
 }
+
+/// R311y687 (§1.1n) — a STREAM framing unit carrying several messages walks
+/// each of them, and the datagram path has done so since R311y679.
+#[test]
+fn a_stream_unit_carrying_several_messages_walks_each_of_them() {
+    let scratch = Scratch::new("fields-stream-batch");
+    // One framing unit, two messages: a KeepAlive and a Close.
+    let body = [0x04u8, 0x03, 0x00];
+    let mut framed = (body.len() as u16).to_le_bytes().to_vec();
+    framed.extend_from_slice(&body);
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &framed))],
+    );
+    let capture = scratch.write("batch.pcapng", &file);
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--fields")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+
+    assert!(
+        text.contains("messages decoded: 2"),
+        "the session must have decoded both messages of the unit: {text}"
+    );
+    assert_eq!(
+        text.matches("] KeepAlive").count(),
+        1,
+        "the first message is walked exactly once: {text}"
+    );
+    assert_eq!(
+        text.matches("] Close").count(),
+        1,
+        "and the SECOND one is walked too, from its own offset within the \
+         unit: {text}"
+    );
+}
+
+/// R311y687 (§1.1n) — and the DECRYPTED path walks each message of a unit too.
+///
+/// The sink read the same two prefix bytes and took the unit from its first
+/// byte for every message in it, so the defect the cleartext path carried was
+/// carried here as well -- in the transport where a reader cannot check the
+/// bytes by eye. Same fixture shape, sealed.
+#[test]
+fn a_decrypted_unit_carrying_several_messages_walks_each_of_them() {
+    let scratch = Scratch::new("fields-tls-batch");
+    let secret: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(17).wrapping_add(9))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(5).wrapping_add(41));
+    let body = [0x04u8, 0x03, 0x00];
+    let mut framed = (body.len() as u16).to_le_bytes().to_vec();
+    framed.extend_from_slice(&body);
+
+    let mut stream = client_hello(&random);
+    stream.extend_from_slice(&seal_at(
+        &mut sealer(&secret),
+        rustls::ContentType::ApplicationData,
+        &framed,
+        0,
+    ));
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &stream))],
+    );
+    let capture = scratch.write("tls-batch.pcapng", &file);
+    let keylog = scratch.write(
+        "keys.txt",
+        format!(
+            "CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+            hex(&random),
+            hex(&secret)
+        )
+        .as_bytes(),
+    );
+
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .arg("--fields")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+
+    // ANTI-VACUITY: the flow must have been opened and both messages decoded.
+    assert!(
+        text.contains("DECRYPTED: 1 flow(s)"),
+        "the fixture must decrypt: {text}"
+    );
+    assert!(
+        text.contains("messages decoded: 2"),
+        "and both messages of the unit must be decoded: {text}"
+    );
+    assert_eq!(
+        text.matches("] KeepAlive").count(),
+        1,
+        "the first is walked once: {text}"
+    );
+    assert_eq!(
+        text.matches("] Close").count(),
+        1,
+        "and the second from its own offset within the unit: {text}"
+    );
+    assert!(
+        !text.contains("NO FIELDS"),
+        "neither row is declined, which is what the cross-check said about the \
+         old slice: {text}"
+    );
+}
