@@ -1392,6 +1392,19 @@ fn decrypted_coordinates(flow: &wz_capture::FlowDissection) -> Option<String> {
 ///
 /// Now the unit's length comes from `unit_len` and the message's place inside it
 /// from `unit_offset`, both recorded by the framer. Nothing here parses framing.
+/// R311y690 (§1.1n) — where this message begins in the direction's retained
+/// stream.
+///
+/// One place, because two of them were the R311y688 shape waiting to happen:
+/// [`message_bytes`] sliced at `stream_offset + prefix_width + unit_offset` and
+/// the row rendered `message_at` from the same three fields written out again.
+/// They agreed by CONSTRUCTION rather than by comparison, which is exactly the
+/// property R311y689's carry recorded as still open -- a wrong slice reported a
+/// matching wrong offset, and the reader could not tell.
+fn message_at(frame: &wz_session_core::passive::PassiveFrame) -> usize {
+    frame.stream_offset + frame.prefix_width + frame.unit_offset
+}
+
 fn message_bytes<'a>(
     stream: &'a [u8],
     origin: usize,
@@ -1413,7 +1426,11 @@ fn message_bytes<'a>(
             stream.len().saturating_sub(body)
         ));
     }
-    let start = body + frame.unit_offset;
+    // R311y690 — the SAME function the row's `message_at` is rendered from, so
+    // the offset a reader is given is the offset these bytes were taken at. It
+    // was two sums of the same three fields, agreeing by construction; a sum
+    // written twice is a sum that can be edited once.
+    let start = message_at(frame) - origin;
     if start > end {
         return Err(format!(
             "this message stands {} byte(s) into a unit of {}",
@@ -1583,7 +1600,7 @@ fn render_field_row(
     // unit stands ahead of it. That sum is the one a reader would otherwise
     // have to do, and get wrong on a batch.
     let space = OffsetSpace::StreamByte {
-        message_at: frame.stream_offset + frame.prefix_width + frame.unit_offset,
+        message_at: message_at(frame),
     };
     // R311y675 — the arrow follows the DIRECTION. `assembler()` maps A to
     // low_to_high and B to high_to_low, so printing the endpoints in table order
@@ -2419,7 +2436,7 @@ impl MessageRow {
     /// this is the right space at all.
     fn stream_byte(f: &wz_session_core::passive::PassiveFrame) -> OffsetSpace {
         OffsetSpace::StreamByte {
-            message_at: f.stream_offset + f.prefix_width + f.unit_offset,
+            message_at: message_at(f),
         }
     }
 
@@ -3561,10 +3578,18 @@ mod message_name_tests {
         // the smallest the walker accepts: version, a cbyte whose top nibble is
         // the zid length minus one, and the zid.
         let each: &[(&str, &[u8])] = &[
+            // Init: version, a cbyte whose top nibble is the zid length minus
+            // one, and the zid.
             ("Init", &[0x01, 0x09, 0x00, 0xAA]),
+            // Open with A clear, so the cookie rides this one: lease, initial
+            // sn, cookie length, cookie.
+            ("Open", &[0x02, 0x01, 0x00, 0x01, 0xAA]),
             ("Close", &[0x03, 0x00]),
             ("KeepAlive", &[0x04]),
             ("Frame", &[0x05, 0x01]),
+            ("Fragment", &[0x06, 0x01]),
+            // Join: version, cbyte, zid, lease, and the two next-sn values.
+            ("Join", &[0x07, 0x09, 0x00, 0xAA, 0x01, 0x00, 0x00]),
         ];
         let mut checked = 0usize;
         for (expected, bytes) in each {
@@ -3596,7 +3621,9 @@ mod message_name_tests {
             );
             checked += 1;
         }
-        assert_eq!(checked, 4, "every case in the table must have run");
+        // R311y690 — SEVEN, which is every kind `kind_name` has a name for.
+        // Four of them left three renames able to pass silently.
+        assert_eq!(checked, 7, "every case in the table must have run");
     }
 
     /// R311y683 (§1.1n) — the DECRYPTED row gets the same witness, and a

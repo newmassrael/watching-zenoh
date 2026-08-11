@@ -3881,6 +3881,112 @@ fn the_message_offset_a_stream_row_reports_lands_on_the_message() {
          byte apart -- the same number twice is the R311y687 defect wearing a \
          new label: {json}"
     );
+
+    // R311y690 — AND THE OFFSET LANDS ON THE MESSAGE, which the numbers alone
+    // do not say. The stream's bytes here are `03 00 04 03 00`: a two-byte
+    // prefix, then a KeepAlive (MID 4) at 2 and a Close (MID 3) at 3. Each
+    // row's own header value is read back and paired with the offset it
+    // reported, so an offset that is arithmetically tidy and points at the
+    // wrong byte cannot pass.
+    //
+    // This is the check R311y689's carry asked for: `message_at` and the slice
+    // now come from ONE function, and this is what says that function is right
+    // rather than merely singular.
+    let headers: Vec<usize> = json
+        .split("\"name\":\"header\"")
+        .skip(1)
+        .map(|s| {
+            s.split("\"value\":")
+                .nth(1)
+                .expect("a header value")
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .expect("digits")
+                .parse()
+                .expect("a number")
+        })
+        .collect();
+    assert_eq!(
+        headers,
+        vec![4, 3],
+        "the row reporting message_at 2 must be the KeepAlive at byte 2 and the \
+         one reporting 3 the Close at byte 3: {json}"
+    );
+}
+
+/// R311y690 (§1.1n) — the rule that decides ROW or NOTE, as behaviour rather
+/// than as prose.
+///
+/// Two shapes carry one genre of fact and R311y681's own carry recorded that
+/// nothing stated which applies: a failure with a MESSAGE to attach to is a row
+/// with a `declined` key, and one about a FLOW or about the capture is an entry
+/// in `field_notes`. The distinction is not stylistic -- a consumer walking rows
+/// would never see a flow-level refusal, and one walking notes would never see
+/// a message the walker refused.
+///
+/// Driven on the two captures that produce one each, and each is asserted to
+/// produce ITS shape and NOT the other.
+#[test]
+fn a_message_level_failure_is_a_row_and_a_flow_level_one_is_a_note() {
+    let scratch = Scratch::new("row-or-note");
+
+    // MESSAGE level: a decrypted record the field walker cannot read.
+    let (file, log) = capture_with_an_unwalkable_unit();
+    let capture = scratch.write("bad.pcapng", &file);
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+    let json = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .args(["--fields", "--json"])
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    let json = json.trim();
+    assert_one_document(json);
+    // `split_once` and not `split(..).nth(1)`: a walked row's own tree carries a
+    // NESTED `"fields"` key, so counting occurrences cuts the rows array off at
+    // the first row. Measured -- the first version of this test did exactly
+    // that and failed looking for a separator it had already walked past.
+    let (_, rows) = json.split_once("\"fields\":[").expect("the rows array");
+    let (rows, notes) = rows
+        .split_once("],\"field_notes\":[")
+        .unwrap_or_else(|| panic!("both arrays: {json}"));
+    assert!(
+        rows.contains("\"declined\":\"the field walker refused these bytes"),
+        "a failure with a message to attach to is a ROW: {json}"
+    );
+    assert!(
+        notes.trim_end_matches([']', '}']).is_empty(),
+        "and it is NOT also a note: {json}"
+    );
+
+    // FLOW level: a datagram flow with nothing walkable in it.
+    let empty = scratch.write("empty.pcapng", &empty_datagram_capture());
+    let json = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&empty)
+            .args(["--fields", "--json"])
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    let json = json.trim();
+    assert_one_document(json);
+    let (_, rows) = json.split_once("\"fields\":[").expect("the rows array");
+    let (rows, notes) = rows.split_once("],\"field_notes\":[").expect("both arrays");
+    assert!(
+        rows.is_empty(),
+        "a flow-level failure produces no row at all: {json}"
+    );
+    assert!(
+        notes.contains("\"kind\":\"nothing_walkable\""),
+        "and IS a note: {json}"
+    );
 }
 
 /// R311y689 (§1.1n) — the FLOW listing's per-message offsets name their space
