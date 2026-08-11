@@ -235,6 +235,13 @@ struct DirectionState {
     /// track has spent eight rounds removing from elsewhere in the crate. The
     /// count is one `+= 1` away if a consumer ever appears.
     opened_a_record: bool,
+    /// R311y692 (§1.2a) — has this direction let go of handshake bytes since its
+    /// last key change?
+    ///
+    /// One question, one bool -- the R311y691 rule, applied where it was learnt.
+    /// TAKEN at the advance rather than read, because dropped bytes can explain
+    /// the next boundary and not every boundary after it.
+    abandoned_since_advance: bool,
     /// R311y686 (§1.2a) — handshake bytes held for a message whose rest is in a
     /// record that has not arrived.
     ///
@@ -346,6 +353,20 @@ pub struct EpochWitness {
     /// reader**, which is why the three are not one number: the first two are
     /// facts about the capture and were being summed with it.
     pub advances_unexplained: usize,
+    /// R311y692 (§1.2a) — of [`Self::advances_unwitnessed`], the ones on a
+    /// direction that had LET GO OF handshake bytes since its last advance.
+    ///
+    /// [`Self::advances_unexplained`] summed two things R311y686's own carry
+    /// named: a 128-bit coincidence, and an announcement this reader could not
+    /// read. The second has a signal now that the carry exists -- a tail dropped
+    /// past its bound, or one abandoned when a record of another content type
+    /// interrupted it, is precisely an announcement whose bytes this reader
+    /// stopped being able to assemble.
+    ///
+    /// Not proof that THIS advance's announcement was in those bytes. It is the
+    /// difference between "no explanation" and "an explanation this reader
+    /// already reported, on this direction, since the last time the keys moved".
+    pub advances_after_abandoned_handshake: usize,
     /// R311y686 (§1.2a) — of [`Self::key_updates`], the ones whose bytes began
     /// in an EARLIER record.
     ///
@@ -385,6 +406,8 @@ impl EpochWitness {
                 + other.advances_before_first_record,
             advances_after_hole: self.advances_after_hole + other.advances_after_hole,
             advances_unexplained: self.advances_unexplained + other.advances_unexplained,
+            advances_after_abandoned_handshake: self.advances_after_abandoned_handshake
+                + other.advances_after_abandoned_handshake,
             key_updates_reassembled: self.key_updates_reassembled + other.key_updates_reassembled,
             handshake_bytes_abandoned: self.handshake_bytes_abandoned
                 + other.handshake_bytes_abandoned,
@@ -559,6 +582,7 @@ impl DirectionState {
             witness: EpochWitness::default(),
             pending_key_update: false,
             opened_a_record: false,
+            abandoned_since_advance: false,
             handshake_carry: alloc::vec::Vec::new(),
         })
     }
@@ -586,6 +610,10 @@ impl DirectionState {
     fn count_advance(&mut self, to: usize, after_hole: bool) {
         let mut pending = core::mem::take(&mut self.pending_key_update);
         let before_first = !self.opened_a_record;
+        // R311y692 — taken, not read: an abandoned tail explains at most the
+        // NEXT key change, and leaving it set would attribute every later one
+        // to the same dropped bytes.
+        let after_abandon = core::mem::take(&mut self.abandoned_since_advance);
         for target in (self.at + 1)..=to {
             self.witness.epoch_advances += 1;
             if pending {
@@ -602,6 +630,8 @@ impl DirectionState {
                     self.witness.advances_before_first_record += 1;
                 } else if after_hole {
                     self.witness.advances_after_hole += 1;
+                } else if after_abandon {
+                    self.witness.advances_after_abandoned_handshake += 1;
                 } else {
                     self.witness.advances_unexplained += 1;
                 }
@@ -702,6 +732,9 @@ impl DirectionState {
                     // the bytes this reader let go of are a fact about what it
                     // could no longer be looking for.
                     self.witness.handshake_bytes_abandoned += scan.abandoned;
+                    if scan.abandoned > 0 {
+                        self.abandoned_since_advance = true;
+                    }
                     if scan.seen > 0 {
                         self.witness.key_updates += scan.seen;
                         self.witness.updates_requested += scan.requested;
@@ -758,6 +791,22 @@ impl CaptureOpener {
                 .map(|d| d.witness)
                 .unwrap_or_default();
             let mut out = self.retired[i].plus(live);
+            // R311y692 — a handshake TAIL still outstanding when the report is
+            // read is one that never completed, and it is composed here for
+            // exactly the reason the obligation below is: it is only ever true
+            // of the PRESENT, since the next record of this direction may
+            // finish the message.
+            //
+            // Both halves are needed and they cannot double count: a flow the
+            // opener has moved past had its state REPLACED, so its tail is
+            // counted into `retired` at that moment and is no longer in any live
+            // buffer. Measured -- with only the retirement half, a capture whose
+            // LAST flow held a tail reported zero, because nothing ever retires
+            // the flow that is still current.
+            out.handshake_bytes_abandoned += self.directions[i]
+                .as_ref()
+                .map(|d| d.handshake_carry.len())
+                .unwrap_or(0);
             // R311y672 — an obligation still standing at the moment the report is
             // read is one that was never discharged. Composed here rather than
             // stored, because "unanswered" is only ever true of the PRESENT: the
@@ -816,7 +865,28 @@ impl RecordOpener for CaptureOpener {
         client_random: Option<&[u8; 32]>,
         client_direction: Option<Direction>,
     ) -> Result<(), NotDecrypted> {
+        // R311y692 — the outgoing flow's WITNESS and any handshake tail it is
+        // still holding are carried off BEFORE this, and this line is why the
+        // carry has to happen there: it drops both directions, so anything read
+        // out of them afterwards is gone. Measured -- the first version of this
+        // round put the tail's accounting in the retire loop below and got zero
+        // on a two-connection capture, because the loop runs after this line and
+        // sees `None`.
+        //
+        // Kept HERE rather than moved down: a flow whose identity is missing
+        // must not keep the previous flow's state, and that is exactly what
+        // this line prevents on the early return below.
+        for i in 0..2usize {
+            if let Some(d) = &self.directions[i] {
+                self.retired[i] = self.retired[i].plus(d.witness);
+                self.retired[i].handshake_bytes_abandoned += d.handshake_carry.len();
+            }
+            if self.owed[i] > 0 {
+                self.retired[i].requests_unanswered += self.owed[i];
+            }
+        }
         self.directions = [None, None];
+        self.owed = [0, 0];
         // Both halves of the identity are required and the reason is the same
         // for each: without the random there is nothing to select an entry BY,
         // and without the direction there is nothing to say which of the two
@@ -877,18 +947,6 @@ impl RecordOpener for CaptureOpener {
         // R311y671 — the outgoing flow's witness is carried BEFORE its state is
         // dropped. Retiring it afterwards is not possible: the numbers live in
         // the value being replaced.
-        for i in 0..2usize {
-            if let Some(d) = &self.directions[i] {
-                self.retired[i] = self.retired[i].plus(d.witness);
-            }
-            // R311y672 — and an obligation the outgoing flow never discharged is
-            // carried the same way. Dropping it silently would make a request the
-            // peer ignored indistinguishable from one that was answered.
-            self.retired[i].requests_unanswered += self.owed[i];
-        }
-        // The obligation belongs to a CONNECTION, so it does not cross into the
-        // next one.
-        self.owed = [0, 0];
         self.directions[client_index] = DirectionState::new(&client);
         self.directions[1 - client_index] = DirectionState::new(&server);
         Ok(())
@@ -954,6 +1012,68 @@ mod tests {
     /// output, so its length pins the hash and not the AEAD. Asserting the
     /// candidate list here keeps the claim from drifting into "we try
     /// everything".
+    /// R311y692 (§1.2a) — a handshake TAIL is counted whether the flow holding
+    /// it is current or has been replaced, and the two halves cannot double
+    /// count.
+    ///
+    /// # Why two halves and not one
+    ///
+    /// R311y686 bounded the carry and counted what the bound let go of. Two
+    /// lifetime events were left: the opener moving to another connection,
+    /// which REPLACES both directions, and the report being read while a flow
+    /// is still current. Measured -- with only the retirement half, a capture
+    /// whose last flow held a tail reported zero, because nothing ever retires
+    /// the flow that is still current.
+    ///
+    /// Driven on the opener directly rather than through a capture, because
+    /// what is under test is the ACCOUNTING at those two moments and a capture
+    /// would have to defeat the decryption path to reach either.
+    #[test]
+    fn a_handshake_tail_is_counted_current_or_replaced() {
+        let random = [0x5Au8; 32];
+        let secret = alloc::vec![0x11u8; 48];
+        let log = KeyLog::parse(
+            alloc::format!(
+                "CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+                hex(&random),
+                hex(&secret)
+            )
+            .as_bytes(),
+        );
+        let mut opener = CaptureOpener::new(log);
+        let mut held = DirectionState::new(&[(&secret[..], true)]).expect("a usable secret");
+        held.handshake_carry.extend_from_slice(&[0x18, 0x00]);
+        opener.directions[0] = Some(held);
+
+        // CURRENT: the flow still holds it, and the report is being read now.
+        let seen: usize = opener
+            .epoch_witness()
+            .iter()
+            .map(|w| w.handshake_bytes_abandoned)
+            .sum();
+        assert_eq!(
+            seen, 2,
+            "a tail outstanding when the report is read has not completed and \
+             must be counted"
+        );
+
+        // REPLACED: the opener moves to another connection.
+        opener
+            .begin_flow(Some(&random), Some(Direction::A))
+            .expect("the log holds this connection");
+        let after: usize = opener
+            .epoch_witness()
+            .iter()
+            .map(|w| w.handshake_bytes_abandoned)
+            .sum();
+        assert_eq!(
+            after, 2,
+            "and it is counted ONCE -- the replaced flow's tail moves into the \
+             retired witness and is no longer in any live buffer, so the two \
+             halves cannot both claim it"
+        );
+    }
+
     #[test]
     fn a_secrets_length_narrows_the_suite_and_a_record_settles_it() {
         let sha256 = EpochState::new(alloc::vec![0u8; 32]).expect("32 is a hash width");

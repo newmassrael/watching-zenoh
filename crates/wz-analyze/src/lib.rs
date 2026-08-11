@@ -736,6 +736,7 @@ fn epoch_lines(witness: &[wz_tls_record::capture::EpochWitness; 2], format: Form
     let before_first = a.advances_before_first_record + b.advances_before_first_record;
     let after_hole = a.advances_after_hole + b.advances_after_hole;
     let unexplained = a.advances_unexplained + b.advances_unexplained;
+    let after_abandon = a.advances_after_abandoned_handshake + b.advances_after_abandoned_handshake;
     // R311y686 — of the KeyUpdates read, the ones that took reassembling, and
     // the handshake bytes this reader had to let go of.
     let reassembled = a.key_updates_reassembled + b.key_updates_reassembled;
@@ -751,6 +752,7 @@ fn epoch_lines(witness: &[wz_tls_record::capture::EpochWitness; 2], format: Form
              \"advances_before_first_record\":{before_first},\
              \"advances_after_hole\":{after_hole},\
              \"advances_unexplained\":{unexplained},\
+             \"advances_after_abandoned_handshake\":{after_abandon},\
              \"key_updates\":{updates},\"updates_requested\":{requested},\
              \"updates_answering\":{answering},\"requests_unanswered\":{unanswered},\
              \"key_updates_reassembled\":{reassembled},\
@@ -792,10 +794,17 @@ fn epoch_lines(witness: &[wz_tls_record::capture::EpochWitness; 2], format: Form
                  the announcing record is one the capture lost\n"
             ));
         }
+        if after_abandon > 0 {
+            out.push_str(&format!(
+                "      {after_abandon} after this direction let go of handshake \
+                 bytes -- the announcement may be in the tail this reader could \
+                 not assemble\n"
+            ));
+        }
         if unexplained > 0 {
             out.push_str(&format!(
-                "      {unexplained} with neither -- this reader was watching \
-                 and did not see the announcement\n"
+                "      {unexplained} with none of those -- this reader was \
+                 watching, lost nothing, and did not see the announcement\n"
             ));
         }
     }

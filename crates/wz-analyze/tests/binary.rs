@@ -77,7 +77,13 @@ fn checksum(parts: &[&[u8]]) -> u16 {
 /// builds read as corrupt, which is a fine thing to ignore in a test asserting
 /// a frame count and a wrong thing to build an exit-code claim on.
 fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
-    tcp_segment(seq, payload, false)
+    tcp_segment_from(seq, payload, false, 1111)
+}
+
+/// R311y692 — the same segment from a DIFFERENT client port, which is a
+/// different flow key and therefore a different TLS connection to the opener.
+fn tcp_packet_from(port: u16, seq: u32, payload: &[u8]) -> Vec<u8> {
+    tcp_segment_from(seq, payload, false, port)
 }
 
 /// R311y672 — the SAME connection, travelling the other way.
@@ -91,19 +97,23 @@ fn tcp_packet_reverse(seq: u32, payload: &[u8]) -> Vec<u8> {
 }
 
 fn tcp_segment(seq: u32, payload: &[u8], reverse: bool) -> Vec<u8> {
+    tcp_segment_from(seq, payload, reverse, 1111)
+}
+
+fn tcp_segment_from(seq: u32, payload: &[u8], reverse: bool, client_port: u16) -> Vec<u8> {
     const CLIENT: [u8; 4] = [10, 0, 0, 1];
     const SERVER: [u8; 4] = [10, 0, 0, 2];
-    const CLIENT_PORT: u16 = 1111;
     const SERVER_PORT: u16 = 7447;
+    let client_side = client_port;
     let (src, dst) = if reverse {
         (SERVER, CLIENT)
     } else {
         (CLIENT, SERVER)
     };
     let (src_port, dst_port) = if reverse {
-        (SERVER_PORT, CLIENT_PORT)
+        (SERVER_PORT, client_side)
     } else {
-        (CLIENT_PORT, SERVER_PORT)
+        (client_side, SERVER_PORT)
     };
 
     let mut tcp = Vec::new();
@@ -916,6 +926,7 @@ fn the_epoch_line_reaches_the_rendering() {
              \"advances_unannounced\":0,\"advances_unwitnessed\":0,\
              \"advances_before_first_record\":0,\"advances_after_hole\":0,\
              \"advances_unexplained\":0,\
+             \"advances_after_abandoned_handshake\":0,\
              \"key_updates\":1,\"updates_requested\":0,\
              \"updates_answering\":0,\"requests_unanswered\":0,\
              \"key_updates_reassembled\":0,\"handshake_bytes_abandoned\":0}"
@@ -3286,25 +3297,30 @@ fn an_unwitnessed_key_change_says_which_of_its_three_causes_it_was() {
             "{cause}: the fixture must produce exactly one unwitnessed advance \
              for the attribution to be about anything: {json}"
         );
-        let three = [
+        // R311y692 added a FOURTH cause, and the invariant below is why it had
+        // to be added here rather than beside: a partition that grows a member
+        // and leaves this sum at three members would start passing while
+        // silently losing advances.
+        let causes = [
             number("advances_before_first_record"),
             number("advances_after_hole"),
+            number("advances_after_abandoned_handshake"),
             number("advances_unexplained"),
         ];
-        // THE INVARIANT: the three subdivide the figure and never exceed it.
+        // THE INVARIANT: the causes subdivide the figure and never exceed it.
         assert_eq!(
-            three.iter().sum::<usize>(),
+            causes.iter().sum::<usize>(),
             unwitnessed,
-            "{cause}: the three causes must add up to the figure they \
-             subdivide: {json}"
+            "{cause}: the causes must add up to the figure they subdivide: \
+             {json}"
         );
         let expected = match cause {
-            "before_first_record" => [1, 0, 0],
-            "after_hole" => [0, 1, 0],
-            _ => [0, 0, 1],
+            "before_first_record" => [1, 0, 0, 0],
+            "after_hole" => [0, 1, 0, 0],
+            _ => [0, 0, 0, 1],
         };
         assert_eq!(
-            three, expected,
+            causes, expected,
             "{cause}: this capture's advance belongs to exactly one cause, and \
              a build that attributed everything to one would pass a single leg \
              and fail this table: {json}"
@@ -4142,5 +4158,228 @@ fn the_decryption_passs_own_numbers_reach_the_reader() {
             .contains("\"pass\":{\"flows_considered\":1,\"flows_refused\":1,\"already_opened\":0}"),
         "but a pass DID run and was refused, which the report alone cannot say: \
          {strangers}"
+    );
+}
+
+/// R311y692 (§1.2a) — an unwitnessed rekey on a direction that LET GO OF
+/// handshake bytes says so, instead of being filed as unexplained.
+///
+/// R311y686's carry named the residue exactly: `advances_unexplained` is a
+/// 128-bit coincidence OR an announcement this reader could not read, and that
+/// round removed the only known member of the second class without proving the
+/// class empty. The carry it introduced is the signal -- a tail dropped past its
+/// bound, or abandoned when another content type interrupted it, is precisely
+/// an announcement whose bytes this reader stopped being able to assemble.
+///
+/// It is not proof that THIS advance's announcement was in those bytes, and the
+/// wording says so. It is the difference between "no explanation" and "an
+/// explanation this reader already reported, on this direction, since the last
+/// time the keys moved".
+#[test]
+fn a_rekey_after_abandoned_handshake_bytes_is_not_filed_as_unexplained() {
+    let scratch = Scratch::new("epoch-after-abandon");
+    let c0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(29).wrapping_add(6))
+        .collect();
+    let c1: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(31).wrapping_add(8))
+        .collect();
+    let c2: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(41).wrapping_add(10))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(37).wrapping_add(2));
+
+    let mut client = client_hello(&random);
+    let mut g0 = sealer(&c0);
+    // Half a KeyUpdate...
+    client.extend_from_slice(&seal_at(
+        &mut g0,
+        rustls::ContentType::Handshake,
+        &[0x18u8, 0x00],
+        0,
+    ));
+    // ...interrupted by application data, which abandons the tail...
+    client.extend_from_slice(&seal_at(
+        &mut g0,
+        rustls::ContentType::ApplicationData,
+        &unit(1),
+        1,
+    ));
+    // ...and then the keys move, with nothing this reader could read announcing
+    // it.
+    client.extend_from_slice(&seal_at(
+        &mut sealer(&c1),
+        rustls::ContentType::ApplicationData,
+        &unit(2),
+        0,
+    ));
+    // AND THEY MOVE AGAIN. The dropped bytes explain at most the NEXT boundary;
+    // this one has nothing behind it and must be filed as the residue.
+    // Measured: without this record, reading the flag instead of TAKING it
+    // passed every assertion -- the leak had no witness.
+    client.extend_from_slice(&seal_at(
+        &mut sealer(&c2),
+        rustls::ContentType::ApplicationData,
+        &unit(3),
+        0,
+    ));
+
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &client))],
+    );
+    let capture = scratch.write("after-abandon.pcapng", &file);
+    let keylog = scratch.write(
+        "keys.txt",
+        format!(
+            "CLIENT_TRAFFIC_SECRET_0 {} {}\nCLIENT_TRAFFIC_SECRET_1 {} {}\n\
+             CLIENT_TRAFFIC_SECRET_2 {} {}\n",
+            hex(&random),
+            hex(&c0),
+            hex(&random),
+            hex(&c1),
+            hex(&random),
+            hex(&c2)
+        )
+        .as_bytes(),
+    );
+
+    let json = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .arg("--json")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    let json = json.trim();
+    assert_one_document(json);
+
+    // ANTI-VACUITY, both halves: bytes must actually have been abandoned, and
+    // there must be unwitnessed advances to attribute.
+    assert!(
+        json.contains("\"handshake_bytes_abandoned\":2"),
+        "the tail must have been let go of: {json}"
+    );
+    assert!(
+        json.contains("\"advances_unwitnessed\":2"),
+        "and the keys must have moved TWICE with no announcement read: {json}"
+    );
+    // ONE EACH, which is the whole point: the dropped bytes explain the next
+    // boundary and not the one after it.
+    assert!(
+        json.contains("\"advances_after_abandoned_handshake\":1"),
+        "the FIRST advance is attributed to the bytes this reader dropped: \
+         {json}"
+    );
+    assert!(
+        json.contains("\"advances_unexplained\":1"),
+        "and the SECOND is the residue -- an explanation that carried forward \
+         would attribute both, which is what reading the flag instead of taking \
+         it does: {json}"
+    );
+
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        text.contains("let go of handshake bytes"),
+        "and the person reading the text is told the same: {text}"
+    );
+}
+
+/// R311y692 (§1.2a) — a handshake tail outstanding when the opener moves to
+/// ANOTHER connection is counted as abandoned, not dropped in silence.
+///
+/// R311y686 bounded the carry and counted what the bound let go of, and left
+/// this door open: `begin_flow` replaces both `DirectionState`s, and a flow
+/// still holding half a message dropped it with no number moving. That is the
+/// same silence the whole round was about, one lifetime event further out.
+///
+/// The two connections differ by client port, which is a different flow key and
+/// therefore a different `client_random` to the opener.
+#[test]
+fn a_tail_outstanding_when_the_opener_moves_on_is_counted() {
+    let scratch = Scratch::new("epoch-flow-change");
+    let a0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(43).wrapping_add(1))
+        .collect();
+    let b0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(47).wrapping_add(2))
+        .collect();
+    let ra: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(11).wrapping_add(1));
+    let rb: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(13).wrapping_add(2));
+
+    // Connection A: a ClientHello, then HALF a KeyUpdate and nothing more.
+    let mut first = client_hello(&ra);
+    first.extend_from_slice(&seal_at(
+        &mut sealer(&a0),
+        rustls::ContentType::Handshake,
+        &[0x18u8, 0x00],
+        0,
+    ));
+    // Connection B: ordinary traffic on a different client port.
+    let mut second = client_hello(&rb);
+    second.extend_from_slice(&seal_at(
+        &mut sealer(&b0),
+        rustls::ContentType::ApplicationData,
+        &unit(1),
+        0,
+    ));
+
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[
+            (0, 1_000_000, &tcp_packet(1000, &first)),
+            (0, 1_000_100, &tcp_packet_from(2222, 1000, &second)),
+        ],
+    );
+    let capture = scratch.write("two.pcapng", &file);
+    let keylog = scratch.write(
+        "keys.txt",
+        format!(
+            "CLIENT_TRAFFIC_SECRET_0 {} {}\nCLIENT_TRAFFIC_SECRET_0 {} {}\n",
+            hex(&ra),
+            hex(&a0),
+            hex(&rb),
+            hex(&b0)
+        )
+        .as_bytes(),
+    );
+
+    let json = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .arg("--json")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    let json = json.trim();
+    assert_one_document(json);
+
+    // ANTI-VACUITY: BOTH connections must have been considered, or the opener
+    // never moved on and nothing could be dropped by moving.
+    assert!(
+        json.contains("\"pass\":{\"flows_considered\":2"),
+        "the pass must have seen two connections: {json}"
+    );
+    assert!(
+        json.contains("\"handshake_bytes_abandoned\":2"),
+        "the tail the first connection was still holding is counted when the \
+         opener moves to the second: {json}"
     );
 }
