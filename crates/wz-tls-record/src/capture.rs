@@ -71,7 +71,23 @@ pub struct CaptureOpener {
     /// that crosses the two directions, and it therefore cannot live in
     /// [`DirectionState`] — which is why until this round the byte was skipped
     /// and each direction counted only its own messages.
-    owed: [bool; 2],
+    /// R311y685 (§1.2a) — `update_requested` messages this direction owes a
+    /// reply to, as a COUNT.
+    ///
+    /// It was a bool, so a peer that asked twice before being answered had its
+    /// second request silently absorbed: the obligation could not exceed one and
+    /// `requests_unanswered` could not exceed one per direction per connection.
+    /// A count is what the protocol's own shape allows -- RFC 8446 §4.6.3 puts
+    /// the receiver under an obligation per message received, and nothing in it
+    /// says a sender may only have one outstanding.
+    ///
+    /// One reply discharges ONE request, which is a rule this reader states
+    /// rather than one the RFC settles: a single `KeyUpdate` arguably satisfies
+    /// every request outstanding at the moment it is sent. Stated here, and
+    /// chosen because the alternative silently forgives a peer that ignored the
+    /// first ask -- and "an expected key change did not arrive" is the fact this
+    /// number exists to report.
+    owed: [usize; 2],
 }
 
 /// R311y662 (§1.2a) — one EPOCH of one direction: the secret in force between
@@ -206,6 +222,14 @@ struct DirectionState {
     /// list, because a secret of an unusable width is dropped and would otherwise
     /// shift every index below it.
     first_application_epoch: usize,
+    /// R311y685 (§1.2a) — records this direction has actually opened.
+    ///
+    /// Asked one question -- was this the FIRST -- which is what separates the
+    /// epoch climb of a capture that began mid-session from a rekey inside one
+    /// this reader was already watching. A bool would answer it; the count is
+    /// kept because "how many records of this direction opened" is a fact the
+    /// witness may want next and a bool throws it away.
+    records_opened: usize,
 }
 
 /// R311y671 (§1.2a) — one direction's epoch changes, observed against inferred.
@@ -282,6 +306,33 @@ pub struct EpochWitness {
     /// looking at**, and until this round it was summed with the harmless kind
     /// above into a single "unconfirmed" figure that could not tell them apart.
     pub advances_unwitnessed: usize,
+    /// R311y685 (§1.2a) — of [`Self::advances_unwitnessed`], the ones this
+    /// direction reached BEFORE it had opened a single record.
+    ///
+    /// The capture began mid-session: the trial had to climb to the epoch the
+    /// traffic was already in, and every announcement below it went past before
+    /// the tap started. Nothing was missed by this reader that was ever there to
+    /// see.
+    pub advances_before_first_record: usize,
+    /// R311y685 (§1.2a) — of [`Self::advances_unwitnessed`], the ones committed
+    /// on a record with a HOLE in front of it.
+    ///
+    /// The announcing `KeyUpdate` is one of the records the capture lost. Also
+    /// nothing this reader could have done -- but a different remedy from the
+    /// one above, because it says the capture is incomplete rather than late.
+    pub advances_after_hole: usize,
+    /// R311y685 (§1.2a) — of [`Self::advances_unwitnessed`], the residue.
+    ///
+    /// A rekey inside a capture this reader was already watching, with no hole
+    /// in front of the record that crossed it. Either the announcement was in a
+    /// record this reader could not read as one -- a `KeyUpdate` split across
+    /// two records is the known case, and is not reassembled -- or the trial
+    /// crossed on a 128-bit coincidence.
+    ///
+    /// **This is the only one of the three that says something about this
+    /// reader**, which is why the three are not one number: the first two are
+    /// facts about the capture and were being summed with it.
+    pub advances_unexplained: usize,
 }
 
 impl EpochWitness {
@@ -297,6 +348,10 @@ impl EpochWitness {
             advances_confirmed: self.advances_confirmed + other.advances_confirmed,
             advances_unannounced: self.advances_unannounced + other.advances_unannounced,
             advances_unwitnessed: self.advances_unwitnessed + other.advances_unwitnessed,
+            advances_before_first_record: self.advances_before_first_record
+                + other.advances_before_first_record,
+            advances_after_hole: self.advances_after_hole + other.advances_after_hole,
+            advances_unexplained: self.advances_unexplained + other.advances_unexplained,
         }
     }
 }
@@ -417,6 +472,7 @@ impl DirectionState {
             skew: 0,
             witness: EpochWitness::default(),
             pending_key_update: false,
+            records_opened: 0,
         })
     }
 
@@ -427,8 +483,22 @@ impl DirectionState {
     /// authenticates. Each step is therefore classified on its own, and the
     /// pending announcement — of which there is at most one — confirms the FIRST,
     /// because that is the step the sender announced when it wrote the message.
-    fn count_advance(&mut self, to: usize) {
+    /// ## R311y685 — and an unwitnessed advance says WHICH of its three causes
+    ///
+    /// R311y672 named this bucket and its own doc listed three causes it sums:
+    /// a capture that began mid-session, a hole over the announcing record, and
+    /// a 128-bit coincidence. Two of the three are facts about the CAPTURE and
+    /// the third is a fact about this READER, so a figure summing them answers
+    /// neither -- the same objection that split `unannounced` off in the first
+    /// place, one bucket further in.
+    ///
+    /// Both are attributed from state this direction already holds: an advance
+    /// reached before any record opened is the mid-session climb, and one
+    /// committed on a record with a hole in front of it is an announcement that
+    /// went into the hole. What is left is the residue.
+    fn count_advance(&mut self, to: usize, after_hole: bool) {
         let mut pending = core::mem::take(&mut self.pending_key_update);
+        let before_first = self.records_opened == 0;
         for target in (self.at + 1)..=to {
             self.witness.epoch_advances += 1;
             if pending {
@@ -438,6 +508,16 @@ impl DirectionState {
                 self.witness.advances_unannounced += 1;
             } else {
                 self.witness.advances_unwitnessed += 1;
+                // Attributed in the order the causes EXCLUDE each other: a
+                // direction that has opened nothing cannot have had a hole in
+                // front of a record it never read.
+                if before_first {
+                    self.witness.advances_before_first_record += 1;
+                } else if after_hole {
+                    self.witness.advances_after_hole += 1;
+                } else {
+                    self.witness.advances_unexplained += 1;
+                }
             }
         }
     }
@@ -500,7 +580,7 @@ impl DirectionState {
                     // walk that authenticated under nothing leaves no witness
                     // behind either (the R311y667 rule this loop already keeps).
                     if at > self.at {
-                        self.count_advance(at);
+                        self.count_advance(at, record.lost_before > 0);
                     }
                     self.at = at;
                     self.base = base;
@@ -515,6 +595,11 @@ impl DirectionState {
                     } else {
                         KeyUpdateScan::default()
                     };
+                    // R311y685 — counted at the COMMIT, like everything else on
+                    // this path: a walk that authenticated under nothing leaves
+                    // no state behind, which is the R311y667 rule this loop
+                    // already keeps.
+                    self.records_opened += 1;
                     if scan.seen > 0 {
                         self.witness.key_updates += scan.seen;
                         self.witness.updates_requested += scan.requested;
@@ -552,7 +637,7 @@ impl CaptureOpener {
             log,
             directions: [None, None],
             retired: [EpochWitness::default(); 2],
-            owed: [false, false],
+            owed: [0, 0],
         }
     }
 
@@ -574,9 +659,7 @@ impl CaptureOpener {
             // read is one that was never discharged. Composed here rather than
             // stored, because "unanswered" is only ever true of the PRESENT: the
             // very next record of this direction may answer it.
-            if self.owed[i] {
-                out.requests_unanswered += 1;
-            }
+            out.requests_unanswered += self.owed[i];
             out
         })
     }
@@ -698,13 +781,11 @@ impl RecordOpener for CaptureOpener {
             // R311y672 — and an obligation the outgoing flow never discharged is
             // carried the same way. Dropping it silently would make a request the
             // peer ignored indistinguishable from one that was answered.
-            if self.owed[i] {
-                self.retired[i].requests_unanswered += 1;
-            }
+            self.retired[i].requests_unanswered += self.owed[i];
         }
         // The obligation belongs to a CONNECTION, so it does not cross into the
         // next one.
-        self.owed = [false, false];
+        self.owed = [0, 0];
         self.directions[client_index] = DirectionState::new(&client);
         self.directions[1 - client_index] = DirectionState::new(&server);
         Ok(())
@@ -717,16 +798,17 @@ impl RecordOpener for CaptureOpener {
         };
         // Read BEFORE the direction is borrowed: the obligation lives on the
         // opener precisely because it is the one fact neither direction owns.
-        let owed = self.owed[at];
+        let owed = self.owed[at] > 0;
         let (opened, scan) = self.directions[at].as_mut()?.open(record, owed)?;
         if scan.seen > 0 {
-            // Whatever this direction owed, it has now sent a `KeyUpdate` and the
-            // obligation is discharged.
-            self.owed[at] = false;
-            if scan.requested > 0 {
-                // And RFC 8446 §4.6.3 puts the PEER under one.
-                self.owed[1 - at] = true;
-            }
+            // This direction has now sent a `KeyUpdate`, which discharges ONE
+            // of whatever it owed. R311y685: it used to discharge all of them,
+            // because there could only ever be one.
+            self.owed[at] = self.owed[at].saturating_sub(1);
+            // And RFC 8446 §4.6.3 puts the PEER under one per message that
+            // asked -- `requested` counts messages in this record, so two asks
+            // in one record are two obligations and not one.
+            self.owed[1 - at] += scan.requested;
         }
         Some(opened)
     }

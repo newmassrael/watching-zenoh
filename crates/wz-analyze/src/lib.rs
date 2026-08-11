@@ -669,6 +669,10 @@ fn epoch_lines(witness: &[wz_tls_record::capture::EpochWitness; 2], format: Form
     let confirmed = a.advances_confirmed + b.advances_confirmed;
     let unannounced = a.advances_unannounced + b.advances_unannounced;
     let unwitnessed = a.advances_unwitnessed + b.advances_unwitnessed;
+    // R311y685 — and WHICH of the three causes, which the figure above sums.
+    let before_first = a.advances_before_first_record + b.advances_before_first_record;
+    let after_hole = a.advances_after_hole + b.advances_after_hole;
+    let unexplained = a.advances_unexplained + b.advances_unexplained;
     let updates = a.key_updates + b.key_updates;
     let requested = a.updates_requested + b.updates_requested;
     let answering = a.updates_answering + b.updates_answering;
@@ -677,6 +681,9 @@ fn epoch_lines(witness: &[wz_tls_record::capture::EpochWitness; 2], format: Form
         return format!(
             ",\"epochs\":{{\"advances\":{advances},\"advances_confirmed\":{confirmed},\
              \"advances_unannounced\":{unannounced},\"advances_unwitnessed\":{unwitnessed},\
+             \"advances_before_first_record\":{before_first},\
+             \"advances_after_hole\":{after_hole},\
+             \"advances_unexplained\":{unexplained},\
              \"key_updates\":{updates},\"updates_requested\":{requested},\
              \"updates_answering\":{answering},\"requests_unanswered\":{unanswered}}}"
         );
@@ -697,9 +704,31 @@ fn epoch_lines(witness: &[wz_tls_record::capture::EpochWitness; 2], format: Form
     if unwitnessed > 0 {
         out.push_str(&format!(
             "    {unwitnessed} was a rekey with NO KeyUpdate behind it -- the \
-             announcement was missed (mid-session capture, or a hole over it) and \
-             the boundary rests on the trial alone\n"
+             announcement was missed and the boundary rests on the trial alone\n"
         ));
+        // R311y685 — and WHICH of the three, because they carry different
+        // remedies. Two are facts about the capture (it started late, or it
+        // lost records) and one is a fact about this reader, and the figure
+        // above sums all three.
+        if before_first > 0 {
+            out.push_str(&format!(
+                "      {before_first} before this direction's first record -- \
+                 the capture began mid-session and the announcement was never \
+                 in it\n"
+            ));
+        }
+        if after_hole > 0 {
+            out.push_str(&format!(
+                "      {after_hole} on a record with a hole in front of it -- \
+                 the announcing record is one the capture lost\n"
+            ));
+        }
+        if unexplained > 0 {
+            out.push_str(&format!(
+                "      {unexplained} with neither -- this reader was watching \
+                 and did not see the announcement\n"
+            ));
+        }
     }
     // R311y672 — the `update_requested` byte, which the round above opened and
     // read past. It is the only fact in this protocol that crosses the two

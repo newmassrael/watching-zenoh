@@ -914,6 +914,8 @@ fn the_epoch_line_reaches_the_rendering() {
         json.contains(
             "\"epochs\":{\"advances\":1,\"advances_confirmed\":1,\
              \"advances_unannounced\":0,\"advances_unwitnessed\":0,\
+             \"advances_before_first_record\":0,\"advances_after_hole\":0,\
+             \"advances_unexplained\":0,\
              \"key_updates\":1,\"updates_requested\":0,\
              \"updates_answering\":0,\"requests_unanswered\":0}"
         ),
@@ -3125,5 +3127,299 @@ fn the_one_document_check_catches_each_shape_it_exists_for() {
     assert!(
         rejects("{\"a\":1"),
         "an unterminated document must be caught"
+    );
+}
+
+/// R311y685 (§1.2a) — an unwitnessed advance says WHICH of its three causes,
+/// and the three are driven side by side.
+///
+/// ## Why one number could not answer
+///
+/// R311y672 split the harmless boundary (one TLS never announces) off from the
+/// rekey with no `KeyUpdate` behind it, and its own doc listed the three causes
+/// the second still sums: a capture that began mid-session, a hole over the
+/// announcing record, and a 128-bit coincidence. Two of those are facts about
+/// the CAPTURE — go and take a longer one, go and fix the tap — and the third is
+/// a fact about this READER. A figure summing them answers neither, which is the
+/// same objection that produced the earlier split.
+///
+/// ## The discriminator
+///
+/// Three captures differing in exactly the thing under test, run through one
+/// assertion each, plus the invariant that the three always add up to the figure
+/// they subdivide. A build that attributed everything to one cause would pass
+/// any single leg and fails here.
+#[test]
+fn an_unwitnessed_key_change_says_which_of_its_three_causes_it_was() {
+    let scratch = Scratch::new("epoch-causes");
+    let c0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(37).wrapping_add(1))
+        .collect();
+    let c1: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(41).wrapping_add(2))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(23).wrapping_add(5));
+    let log = format!(
+        "CLIENT_TRAFFIC_SECRET_0 {} {}\nCLIENT_TRAFFIC_SECRET_1 {} {}\n",
+        hex(&random),
+        hex(&c0),
+        hex(&random),
+        hex(&c1)
+    );
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+
+    // (1) UNEXPLAINED: two records, contiguous, the second under the next key
+    // and no KeyUpdate anywhere. This reader was watching the whole time.
+    let mut watching = client_hello(&random);
+    watching.extend_from_slice(&seal_at(
+        &mut sealer(&c0),
+        rustls::ContentType::ApplicationData,
+        &unit(1),
+        0,
+    ));
+    watching.extend_from_slice(&seal_at(
+        &mut sealer(&c1),
+        rustls::ContentType::ApplicationData,
+        &unit(2),
+        0,
+    ));
+
+    // (2) AFTER A HOLE: the same two records, with a TCP gap between them --
+    // the announcing record is one the capture lost.
+    let mut first = client_hello(&random);
+    first.extend_from_slice(&seal_at(
+        &mut sealer(&c0),
+        rustls::ContentType::ApplicationData,
+        &unit(1),
+        0,
+    ));
+    let second = seal_at(
+        &mut sealer(&c1),
+        rustls::ContentType::ApplicationData,
+        &unit(2),
+        0,
+    );
+
+    // (3) BEFORE THE FIRST RECORD: the capture holds only the LATER key's
+    // record, so the trial climbs to it before this direction opens anything.
+    let mut late = client_hello(&random);
+    late.extend_from_slice(&seal_at(
+        &mut sealer(&c1),
+        rustls::ContentType::ApplicationData,
+        &unit(2),
+        0,
+    ));
+
+    let files = [
+        (
+            "unexplained",
+            wz_capture::pcapng::write(
+                &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+                &[(0, 1_000_000, &tcp_packet(1000, &watching))],
+            ),
+        ),
+        (
+            "after_hole",
+            wz_capture::pcapng::write(
+                &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+                &[
+                    (0, 1_000_000, &tcp_packet(1000, &first)),
+                    // 4096 bytes of sequence space nobody captured.
+                    (
+                        0,
+                        1_000_100,
+                        &tcp_packet(1000 + first.len() as u32 + 4096, &second),
+                    ),
+                ],
+            ),
+        ),
+        (
+            "before_first_record",
+            wz_capture::pcapng::write(
+                &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+                &[(0, 1_000_000, &tcp_packet(1000, &late))],
+            ),
+        ),
+    ];
+
+    for (cause, file) in files {
+        let capture = scratch.write(&format!("{cause}.pcapng"), &file);
+        let json = String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                .arg(&capture)
+                .arg("--keylog")
+                .arg(&keylog)
+                .arg("--json")
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned();
+        let json = json.trim();
+        assert_one_document(json);
+
+        let number = |key: &str| -> usize {
+            json.split(&format!("\"{key}\":"))
+                .nth(1)
+                .unwrap_or_else(|| panic!("{cause}: the {key} key: {json}"))
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .expect("digits")
+                .parse()
+                .expect("a number")
+        };
+        // ANTI-VACUITY: there must BE an unwitnessed advance to attribute, or
+        // every equality below is between two zeroes.
+        let unwitnessed = number("advances_unwitnessed");
+        assert_eq!(
+            unwitnessed, 1,
+            "{cause}: the fixture must produce exactly one unwitnessed advance \
+             for the attribution to be about anything: {json}"
+        );
+        let three = [
+            number("advances_before_first_record"),
+            number("advances_after_hole"),
+            number("advances_unexplained"),
+        ];
+        // THE INVARIANT: the three subdivide the figure and never exceed it.
+        assert_eq!(
+            three.iter().sum::<usize>(),
+            unwitnessed,
+            "{cause}: the three causes must add up to the figure they \
+             subdivide: {json}"
+        );
+        let expected = match cause {
+            "before_first_record" => [1, 0, 0],
+            "after_hole" => [0, 1, 0],
+            _ => [0, 0, 1],
+        };
+        assert_eq!(
+            three, expected,
+            "{cause}: this capture's advance belongs to exactly one cause, and \
+             a build that attributed everything to one would pass a single leg \
+             and fail this table: {json}"
+        );
+    }
+}
+
+/// R311y685 (§1.2a) — a peer that asks TWICE before answering owes two, and the
+/// obligation used to be a bool.
+///
+/// `owed` could not exceed one, so the second `update_requested` was silently
+/// absorbed and `requests_unanswered` could not exceed one per direction per
+/// connection. "An expected key change did not arrive" is the fact this number
+/// exists to report, and it was reporting a ceiling.
+#[test]
+fn two_requests_before_a_reply_are_two_obligations_and_not_one() {
+    let scratch = Scratch::new("epoch-two-requests");
+    let c0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(67).wrapping_add(1))
+        .collect();
+    let c1: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(71).wrapping_add(2))
+        .collect();
+    let c2: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(73).wrapping_add(3))
+        .collect();
+    let s0: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(79).wrapping_add(4))
+        .collect();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(31).wrapping_add(17));
+
+    // The client rekeys twice, ASKING each time. `\x18\x00\x00\x01\x01` is a
+    // KeyUpdate whose one body byte is update_requested.
+    let mut client = client_hello(&random);
+    client.extend_from_slice(&seal_at(
+        &mut sealer(&c0),
+        rustls::ContentType::Handshake,
+        b"\x18\x00\x00\x01\x01",
+        0,
+    ));
+    client.extend_from_slice(&seal_at(
+        &mut sealer(&c1),
+        rustls::ContentType::Handshake,
+        b"\x18\x00\x00\x01\x01",
+        0,
+    ));
+    client.extend_from_slice(&seal_at(
+        &mut sealer(&c2),
+        rustls::ContentType::ApplicationData,
+        &unit(1),
+        0,
+    ));
+    // The server answers neither.
+    let mut server = Vec::new();
+    server.extend_from_slice(&seal_at(
+        &mut sealer(&s0),
+        rustls::ContentType::ApplicationData,
+        &unit(2),
+        0,
+    ));
+
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[
+            (0, 1_000_000, &tcp_packet(1000, &client)),
+            (0, 1_000_100, &tcp_packet_reverse(1000, &server)),
+        ],
+    );
+    let capture = scratch.write("two-requests.pcapng", &file);
+    let keylog = scratch.write(
+        "keys.txt",
+        format!(
+            "CLIENT_TRAFFIC_SECRET_0 {} {}\nCLIENT_TRAFFIC_SECRET_1 {} {}\n\
+             CLIENT_TRAFFIC_SECRET_2 {} {}\nSERVER_TRAFFIC_SECRET_0 {} {}\n",
+            hex(&random),
+            hex(&c0),
+            hex(&random),
+            hex(&c1),
+            hex(&random),
+            hex(&c2),
+            hex(&random),
+            hex(&s0)
+        )
+        .as_bytes(),
+    );
+
+    let json = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .arg("--json")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    // ANTI-VACUITY: both asks must have been READ, or an unanswered count of
+    // two would be measuring something else.
+    assert!(
+        json.contains("\"updates_requested\":2"),
+        "both requests must be read off the wire: {json}"
+    );
+    assert!(
+        json.contains("\"updates_answering\":0"),
+        "and neither answered: {json}"
+    );
+    assert!(
+        json.contains("\"requests_unanswered\":2"),
+        "so TWO obligations stand -- a bool could only ever report one: {json}"
+    );
+    assert_one_document(json.trim());
+
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--keylog")
+            .arg(&keylog)
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        text.contains("2 request(s) still unanswered"),
+        "and the person reading the text sees the same two: {text}"
     );
 }
