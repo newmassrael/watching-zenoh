@@ -639,3 +639,36 @@ from = "Round 1619"
 to = "5.1-transport"
 reason = "R311y605 (Round 1620 correction): Round 1619 was appended with DOMAIN names in --impact instead of atomic section ids; the frozen ledger forbids amending it, so Round 1620 carries the correct refs and these two are absorbed as known-stale."
 since = "Round 1620"
+
+# R311y718 impact_refs typo — the same class again (Round 193, y327,
+# y503, y526, y579, Round 1619). Round 1744 was appended with the PROSE
+# citation numbering the crate doc comments use (§1.2a, §1.1n, §4.4)
+# instead of atomic section ids. Those numbers are not this store's
+# section space at all — they are the analyzer track's own headings, the
+# same numbering the 14 carried prose orphans belong to — so all three
+# dangle. The frozen ledger forbids amending Round 1744, so Round 1745
+# carries the correct refs and these three are absorbed as known-stale.
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 1744"
+to = "1.2a"
+reason = "R311y718 (Round 1745 correction): Round 1744 was appended with the crate doc comments' PROSE citation numbering in --impact instead of atomic section ids. Intended atomic section: feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport. Round 1745 re-cites it."
+since = "Round 1745"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 1744"
+to = "1.1n"
+reason = "R311y718 (Round 1745 correction): Round 1744 was appended with the crate doc comments' PROSE citation numbering in --impact instead of atomic section ids. Intended atomic section: feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport. Round 1745 re-cites it."
+since = "Round 1745"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 1744"
+to = "4.4"
+reason = "R311y718 (Round 1745 correction): Round 1744 was appended with the crate doc comments' PROSE citation numbering in --impact instead of atomic section ids. Intended atomic section: feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport. Round 1745 re-cites it."
+since = "Round 1745"
