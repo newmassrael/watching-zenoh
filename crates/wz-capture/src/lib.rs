@@ -6164,6 +6164,76 @@ mod datagram_tests {
         );
     }
 
+    /// R311y713 (§B8) — a session CLOSING under an open chain is not a fourth
+    /// way to lose one, and this is the measurement that says so.
+    ///
+    /// The register carried "a fourth chain-loss cause is already visible: the
+    /// session RESET path, and nobody has looked" for several rounds. Looked
+    /// at: `PassiveSession::fold` answers a `Close` by moving the phase to
+    /// `Closed` and does not touch the reassembler at all
+    /// (`wz-session-core/src/passive.rs:1907-1909`), so a chain open at that
+    /// moment stays in its slot and is caught by one of the three causes that
+    /// already exist. The item is refuted rather than paid, and this test is
+    /// what keeps the refutation true: a close that started reclaiming slots
+    /// would make the count below read zero.
+    #[test]
+    fn a_session_closing_under_an_open_chain_loses_nothing_extra() {
+        let fragment = |sn: u8, piece: &[u8]| {
+            let mut wire = alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAGMENT
+                    | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
+                    | wz_codecs::wire_const::FLAG_T_FRAGMENT_M,
+                sn,
+            ];
+            wire.extend_from_slice(piece);
+            wire
+        };
+        let mut d = Dissection::with_limits(DissectionLimits {
+            reassembly_window_ms: Some(600_000),
+            ..DissectionLimits::default()
+        });
+        for (i, (from_low, message)) in [
+            (true, init_datagram(false, &[])),
+            (false, init_datagram(true, &[])),
+            (true, open_datagram(false)),
+            (false, open_datagram(true)),
+            // A chain opens, and then the session is CLOSED under it.
+            (true, fragment(0, &[0xDE, 0xAD])),
+            (
+                false,
+                alloc::vec![wz_session_core::wire_const::T_MID_CLOSE, 0x00],
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let packet = if from_low {
+                udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &message)
+            } else {
+                udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 43210, &message)
+            };
+            d.push_packet_at(LINKTYPE_ETHERNET, i, Some(10), &packet);
+        }
+        assert_eq!(
+            d.abandoned_chains() + d.expired_chains() + d.evicted_chains(),
+            0,
+            "the close itself must not reclaim the chain, or the loss would \
+             be counted at a moment no cause names"
+        );
+
+        d.finish();
+        assert_eq!(
+            d.abandoned_chains(),
+            1,
+            "and the chain the close left open is still caught by the exit"
+        );
+        assert_eq!(
+            d.chain_bytes_lost(),
+            2,
+            "with its bytes, on the cause that did catch it"
+        );
+    }
+
     /// R311y713 (§B4) — an eviction follows the CAPTURE'S CLOCK, not the order
     /// the packets happen to sit in the file.
     ///
