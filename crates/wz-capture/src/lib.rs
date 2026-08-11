@@ -5830,7 +5830,7 @@ mod datagram_tests {
 
     /// A HELLO carrying no locator list, built by the HELLO codec.
     /// The locator a HELLO in these tests advertises.
-    const PEER_LOCATOR: &str = "udp/192.168.1.9:7447";
+    pub(crate) const PEER_LOCATOR: &str = "udp/192.168.1.9:7447";
 
     /// R311y608 — the HELLO zenoh actually puts on the wire: WITH its locator
     /// list, which the responder always fills (`locators: self.get_locators()`,
@@ -5841,7 +5841,7 @@ mod datagram_tests {
     /// which in the transport namespace is `FLAG_T_OPEN_A`. The bare-HELLO
     /// fixture next to this one has no flags at all and is the shape a
     /// locator-less answer takes.
-    fn hello_with_locators() -> Vec<u8> {
+    pub(crate) fn hello_with_locators() -> Vec<u8> {
         use wz_session_core::codec_owned::{owned_bytes, owned_string};
         let zid = [0x55u8, 0x66, 0x77, 0x88];
         let owned: wz_codecs::hello::HelloOwned = wz_codecs::hello::HelloOwned {

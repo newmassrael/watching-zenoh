@@ -41,6 +41,7 @@
 //! plaintext was just opened carries messages, and a plane built before the
 //! pass censuses the ciphertext-only view.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use wz_session_core::inbound::InboundFrame;
@@ -105,6 +106,18 @@ pub struct ObservedNode {
     /// so summing it per message multiplies a batch by its own message count.
     /// Only the message at `batch_index == 0` contributes.
     pub wire_bytes: u64,
+    /// R311y714 — where this node said it can be REACHED, from the HELLO's
+    /// locator list, in first-appearance order and without duplicates.
+    ///
+    /// The half of a node's identity that a deployment's config can be matched
+    /// against: a zid answers "who" and this answers "where", and a reader
+    /// holding a config file has the second and not the first. Empty for a
+    /// node that only ever INITed — a locator list is a HELLO's payload, and
+    /// inventing one from the flow's addresses would report the ADDRESS THIS
+    /// CAPTURE SAW rather than the address the node advertises, which are
+    /// different across a NAT and it is exactly the NAT case this plane exists
+    /// for.
+    pub locators: Vec<String>,
 }
 
 /// Two nodes that named themselves to each other on one flow.
@@ -296,6 +309,19 @@ impl NodeCensus {
                 continue;
             }
             let idx = self.intern_scouted(&zid, whatami, datagram.packet_index, flow);
+            // R311y714 — the locator list, which only a HELLO carries. Taken
+            // from the decoded body rather than from the flow's addresses: see
+            // `ObservedNode::locators` for why the two are not the same claim.
+            if let wz_session_core::scouting_message::ScoutingFrame::Hello { body, .. } = decoded {
+                if let Some(list) = body.locators.as_ref() {
+                    for loc in list.iter() {
+                        let text = loc.locator.as_str();
+                        if !text.is_empty() && !self.nodes[idx].locators.iter().any(|l| l == text) {
+                            self.nodes[idx].locators.push(String::from(text));
+                        }
+                    }
+                }
+            }
             match kind {
                 Named::Hello => self.nodes[idx].evidence.hello += 1,
                 Named::Scout => self.nodes[idx].evidence.scout += 1,
@@ -341,6 +367,7 @@ impl NodeCensus {
                     first_packet,
                     flows: Vec::new(),
                     wire_bytes: 0,
+                    locators: Vec::new(),
                 });
                 self.nodes.len() - 1
             }
@@ -712,6 +739,58 @@ mod tests {
     /// One length-prefixed KeepAlive.
     fn framed_keepalive() -> Vec<u8> {
         alloc::vec![1, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE]
+    }
+
+    /// R311y714 (§1.1f, [REDACTED-REQ]) — a node says WHERE it can be reached, and
+    /// the census keeps it.
+    ///
+    /// The other half of an identity: a zid answers "who" and a locator
+    /// answers "where", and a reader holding a deployment's config has the
+    /// second and not the first. Taken from the HELLO's own list and never
+    /// from the flow's addresses — across a NAT those are different claims,
+    /// and the NAT case is the reason this plane is keyed by zid at all.
+    #[test]
+    fn a_hello_tells_the_census_where_its_node_can_be_reached() {
+        let mut d = Dissection::new();
+        // The SCOUT first, so the HELLO answering it is read as an answer.
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet([192, 168, 1, 5], 43210, SCOUT_GROUP, 7446, &scout_message()),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &udp_packet(
+                [192, 168, 1, 9],
+                7447,
+                [192, 168, 1, 5],
+                43210,
+                &crate::datagram_tests::hello_with_locators(),
+            ),
+        );
+        d.finish();
+
+        let census = nodes(&d);
+        let responder = census
+            .nodes()
+            .iter()
+            .find(|n| n.evidence.hello > 0)
+            .expect("the HELLO named its sender");
+        assert_eq!(
+            responder.locators,
+            alloc::vec![String::from(crate::datagram_tests::PEER_LOCATOR)],
+            "the advertised locator is what a config file can be matched \
+             against: {responder:?}"
+        );
+        // The asker advertised nothing, and an empty list is the honest answer
+        // rather than the address this capture happened to see it from.
+        let asker = census
+            .nodes()
+            .iter()
+            .find(|n| n.evidence.scout > 0)
+            .expect("the SCOUT named its asker");
+        assert!(asker.locators.is_empty(), "{asker:?}");
     }
 
     /// One length-prefixed INIT naming `zid`.

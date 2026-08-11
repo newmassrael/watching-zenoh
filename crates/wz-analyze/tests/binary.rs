@@ -5350,6 +5350,12 @@ fn the_node_plane_reaches_both_renderings() {
         json.contains("\"node_bytes\":{\"attributed\":0,"),
         "and the denominator must be readable: {json}"
     );
+    // R311y714 — a node that advertised nothing carries an empty list, which
+    // is the honest answer and not the address this capture saw it from.
+    assert!(
+        json.contains("\"locators\":[]"),
+        "the scout advertised no locator: {json}"
+    );
 
     // ABSENT without the flag, not empty: a reader who did not ask must not be
     // told the capture named no nodes.

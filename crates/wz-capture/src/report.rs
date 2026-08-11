@@ -683,7 +683,8 @@ impl<'a> CaptureReport<'a> {
                 s.push_str(&alloc::format!(
                     "{{\"zid\":\"{}\",\"whatami\":{},\"wire_bytes\":{},\
                      \"share_bp\":{},\"init\":{},\"join\":{},\
-                     \"hello\":{},\"scout\":{},\"inadmissible\":{},\"flows\":{}}}",
+                     \"hello\":{},\"scout\":{},\"inadmissible\":{},\"flows\":{},\
+                     \"locators\":[{}]}}",
                     hex_zid(&node.zid),
                     match node.whatami {
                         Some(w) => alloc::format!("\"{}\"", role_name(w)),
@@ -701,7 +702,12 @@ impl<'a> CaptureReport<'a> {
                     e.hello,
                     e.scout,
                     e.inadmissible,
-                    node.flows.len()
+                    node.flows.len(),
+                    node.locators
+                        .iter()
+                        .map(|l| alloc::format!("\"{l}\""))
+                        .collect::<alloc::vec::Vec<_>>()
+                        .join(",")
                 ));
             }
             s.push_str(&alloc::format!(
@@ -820,6 +826,12 @@ impl<'a> CaptureReport<'a> {
                     e.inadmissible,
                     node.flows.len()
                 ));
+                // R311y714 — where it said it can be reached, when it said so.
+                // Absent rather than an empty bracket for a node that never
+                // advertised: the two are different facts.
+                if !node.locators.is_empty() {
+                    s.push_str(&format!("      at {}\n", node.locators.join(", ")));
+                }
             }
             for link in n.links() {
                 s.push_str(&format!(
