@@ -2305,6 +2305,116 @@ mod tests {
         );
     }
 
+    /// R311y715 (§C G1) — a WIRE-ACCOUNTED loss reaches the verdict.
+    ///
+    /// `is_complete` is a conjunction of 24 terms and R311y618 measured what
+    /// that costs: one leg was severed and 229 tests stayed green, because
+    /// every fixture that reached the verdict reached it through some OTHER
+    /// leg. This round severed all 24 one at a time and NINE bound nothing.
+    /// These tests are the payment, and each carries the same two parts: a
+    /// fixture that trips exactly one term, and an ISOLATION block asserting
+    /// that no other term is tripped — without which the test would pass for a
+    /// reason that has nothing to do with the leg it names.
+    ///
+    /// A record whose keyexpr this capture never saw declared is traffic read
+    /// and not attributed: it is in no row, so a reader summing the rows is
+    /// summing less than the capture holds.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_reference_to_an_undeclared_keyexpr_makes_the_capture_a_floor() {
+        use crate::datagram_tests::{push, sender_space};
+        use crate::exchange::tests as fx;
+
+        // id 9 was never declared by anyone, so the record is seen and lands in
+        // no row.
+        let d = fx::dissect(&[(true, Some(10), push(sender_space(9, None), &[0u8; 50]))]);
+        let t = crate::agg::aggregate(&d);
+        assert_eq!(t.unresolved_records(), 1, "the fixture must fail to bind");
+        // ISOLATION on this plane's OWN legs as well as the dissection's: an
+        // unresolved record must be the only thing wrong here.
+        assert!(t.gaps().is_clean(), "gaps: {:?}", t.gaps());
+        assert_eq!(t.unsized_payloads(), 0);
+        assert!(t.selection().is_decisive());
+        assert_verdict_rests_on(&d, VerdictLeg::None);
+
+        assert!(
+            !CaptureReport::of(&d).with_throughput(&t).is_complete(),
+            "a record in no row is a row total that is short"
+        );
+    }
+
+    /// R311y715 (§C G1) — a packet this reader SKIPPED reaches the verdict.
+    ///
+    /// The first line of `is_complete` and one of the nine that bound nothing.
+    /// A skipped packet is traffic the capture holds and the rows do not, which
+    /// is the definition every other leg answers to.
+    #[test]
+    fn a_skipped_packet_makes_the_capture_a_floor() {
+        let mut d = crate::Dissection::new();
+        // An ARP frame: ethernet this reader parses and IP it is not, so it is
+        // skipped rather than misread.
+        let mut arp = alloc::vec![0u8; 12];
+        arp.extend_from_slice(&[0x08, 0x06]);
+        arp.extend_from_slice(&[0u8; 46]);
+        d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &arp);
+        d.finish();
+
+        assert_eq!(
+            d.health().packets_skipped,
+            1,
+            "the fixture must skip exactly one packet"
+        );
+        assert_verdict_rests_on(&d, VerdictLeg::PacketsSkipped);
+        assert!(
+            !CaptureReport::of(&d).is_complete(),
+            "a packet the reader walked past is not in any row"
+        );
+    }
+
+    /// Which leg of the verdict a §C G1 fixture is allowed to trip.
+    #[derive(PartialEq, Eq, Debug)]
+    enum VerdictLeg {
+        /// The fixture trips no dissection-level leg at all — its shortfall is
+        /// on a PLANE, and the plane's own legs are asserted by the caller.
+        ///
+        /// Gated to match its only constructor: the plane-level fixtures need
+        /// the network codecs, and a variant nothing builds is what `-D
+        /// dead-code` refuses in the arm a default build never compiles.
+        #[cfg(feature = "network-codecs")]
+        None,
+        PacketsSkipped,
+    }
+
+    /// The ISOLATION half of a §C G1 witness: every dissection-level leg of
+    /// `is_complete` EXCEPT the named one must be quiet.
+    ///
+    /// Without this a fixture that trips two legs proves neither — severing the
+    /// one under test leaves the other to fail the assertion, and the test
+    /// reports a pass that belongs to its neighbour. This is the shape that let
+    /// nine legs go unbound in the first place.
+    fn assert_verdict_rests_on(d: &crate::Dissection, leg: VerdictLeg) {
+        let fh = d.framing_health();
+        if leg != VerdictLeg::PacketsSkipped {
+            assert_eq!(d.health().packets_skipped, 0, "packets_skipped: {fh:?}");
+        }
+        assert_eq!(fh.sn_missing, 0, "sn_missing: {fh:?}");
+        assert!(!d.drops().any(), "drops: {:?}", d.drops());
+        assert_eq!(fh.gaps_forced, 0, "gaps_forced: {fh:?}");
+        assert_eq!(fh.desyncs, 0, "desyncs: {fh:?}");
+        assert_eq!(fh.ws_desyncs, 0, "ws_desyncs: {fh:?}");
+        assert_eq!(
+            fh.unaccounted_batch_bytes, 0,
+            "unaccounted_batch_bytes: {fh:?}"
+        );
+        assert_eq!(d.expired_chains(), 0);
+        assert_eq!(d.abandoned_chains(), 0);
+        assert_eq!(
+            d.encrypted_census().flows,
+            0,
+            "an encrypted flow reaches the verdict on its own leg"
+        );
+    }
+
     /// R311y715 (§C G6, [REDACTED-REQ]) — the TOPIC occupancy, in both renderings at
     /// once, and the export half is new here.
     ///
