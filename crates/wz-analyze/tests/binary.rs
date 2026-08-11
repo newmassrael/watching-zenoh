@@ -2519,3 +2519,197 @@ fn a_scout_and_its_hello_are_both_walked_across_two_flows() {
          rejected for it: {text}"
     );
 }
+
+/// R311y681 (§1.1n) — EVERY field-layer notice reaches the JSON, and the two
+/// renderings are asserted in the SAME run.
+///
+/// ## What was measured
+///
+/// Five notices — a flow whose plaintext was never opened, a datagram flow
+/// nothing walkable came out of, a capture that could not be re-read, a bound
+/// that bit, and a disagreement between this reader's two reads — were each
+/// written straight into the text branch behind `format == Format::Text`. A
+/// consuming tool saw an array that was SHORT and no key saying why: exactly the
+/// silence this track spent six rounds removing for a person, left standing for
+/// a program. The store's own carry has said so since R311y678 and three rounds
+/// added new notices without closing it.
+///
+/// ## Why both formats in one run, per notice
+///
+/// The failure this crate exists to end is a fact rendered twice and drifting:
+/// R311y664 found `NOT DECRYPTED` in text beside `"decrypted":true` in JSON, in
+/// one run of one binary. So each notice below is driven through both renderings
+/// of the SAME capture and the SAME sentence is required in both — a `note` key
+/// whose prose disagrees with the line above it would red here.
+#[test]
+fn every_field_notice_reaches_the_json_carrying_the_same_sentence() {
+    let scratch = Scratch::new("field-notes");
+
+    // (1) A TLS flow with NO keys: nothing was opened, so there is nothing to
+    // walk and the reason is the interesting part.
+    let (tls_file, _) = tls_exchange_capture();
+    let no_keys = scratch.write("nokeys.pcapng", &tls_file);
+    // (2) A datagram flow with an EMPTY datagram in it: a flow that exists and
+    // has no message this reader can walk.
+    let empty = scratch.write("empty.pcapng", &empty_datagram_capture());
+    // (3) A cleartext flow under a bound that takes two of its three messages.
+    let bounded = scratch.write("bounded.pcapng", &exchange_capture());
+
+    for (name, args, kind, sentence) in [
+        (
+            "not_decrypted",
+            vec![no_keys.to_string_lossy().into_owned(), "--fields".into()],
+            "not_decrypted",
+            "NO FIELDS -- this flow's messages were decrypted",
+        ),
+        (
+            "nothing_walkable",
+            vec![empty.to_string_lossy().into_owned(), "--fields".into()],
+            "nothing_walkable",
+            "NO FIELDS -- this reader walked none of this datagram flow's messages",
+        ),
+        (
+            "omitted",
+            vec![
+                bounded.to_string_lossy().into_owned(),
+                "--fields".into(),
+                "--max-messages".into(),
+                "1".into(),
+            ],
+            "omitted",
+            "2 more not listed",
+        ),
+    ] {
+        let run = |extra: Option<&str>| {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_wz-analyze"));
+            command.args(&args);
+            if let Some(flag) = extra {
+                command.arg(flag);
+            }
+            String::from_utf8_lossy(&command.output().expect("runs").stdout).into_owned()
+        };
+
+        let text = run(None);
+        assert!(
+            text.contains(sentence),
+            "{name}: the text listing must carry the notice at all: {text}"
+        );
+
+        let json = run(Some("--json"));
+        let json = json.trim();
+        assert_one_document(json);
+        // THE STRUCTURAL KEY. A consumer must not have to test for the key that
+        // explains a short array, which is the rule the epoch object already
+        // follows one listing over.
+        assert!(
+            json.contains("\"field_notes\":["),
+            "{name}: the notes key is structural and present on every run: {json}"
+        );
+        assert!(
+            json.contains(&format!("\"kind\":\"{kind}\"")),
+            "{name}: the notice must be machine-readable, not only printable: \
+             {json}"
+        );
+        assert!(
+            json.contains(&format!("\"note\":\"{sentence}")),
+            "{name}: and it must carry the SAME sentence the text printed, \
+             because one fact rendered twice is two facts to keep true: {json}"
+        );
+        // ANTI-VACUITY: the notice must be about a flow this run actually saw,
+        // so a build that emitted a constant note array would not pass.
+        let notes = json
+            .split("\"field_notes\":[")
+            .nth(1)
+            .expect("the notes array");
+        assert!(
+            kind == "capture_not_reread" || notes.contains("\"low\":\""),
+            "{name}: a flow-scoped note names its flow: {json}"
+        );
+    }
+}
+
+/// R311y681 (§1.1n) — a bound that takes EVERY row still reports itself.
+///
+/// ## The silence this closes, measured
+///
+/// The notice sat below a `continue` taken when a flow produced no rows, so a
+/// flow whose every row the bound removed printed nothing AND said nothing.
+/// Driven before the fix: `--fields --max-messages 0` over a three-message
+/// cleartext capture produced a `fields:` heading with nothing under it — the
+/// exact reading this crate is built against, an empty listing that looks like
+/// an empty capture.
+#[test]
+fn a_bound_that_takes_every_row_still_reports_itself() {
+    let scratch = Scratch::new("fields-cap-zero");
+    let capture = scratch.write("fields.pcapng", &exchange_capture());
+    let run = |extra: &[&str]| {
+        String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                .arg(&capture)
+                .args(["--fields", "--max-messages", "0"])
+                .args(extra)
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned()
+    };
+
+    let text = run(&[]);
+    // ANTI-VACUITY: the capture must have had messages for the bound to take.
+    assert!(
+        text.contains("messages decoded: 3"),
+        "the fixture must carry three messages: {text}"
+    );
+    assert_eq!(
+        text.matches("] Frame").count(),
+        0,
+        "the bound takes every row: {text}"
+    );
+    assert!(
+        text.contains("... 3 more not listed"),
+        "and says so rather than printing an empty listing: {text}"
+    );
+
+    let json = run(&["--json"]);
+    let json = json.trim();
+    assert_one_document(json);
+    assert!(
+        json.contains("\"fields\":[]"),
+        "the rows really are gone: {json}"
+    );
+    assert!(
+        json.contains("\"kind\":\"omitted\"") && json.contains("\"count\":3"),
+        "and the consumer is told how many, as a number: {json}"
+    );
+}
+
+/// A pcapng carrying ONE empty UDP datagram: a datagram flow that exists and has
+/// no message in it to walk.
+///
+/// R311y679 measured why an empty one and not a malformed one: a datagram
+/// carrying a bad MID is read as `Unknown` and produces a ROW, so the notice
+/// under test is never reached.
+fn empty_datagram_capture() -> Vec<u8> {
+    let mut udp = Vec::new();
+    udp.extend_from_slice(&43210u16.to_be_bytes());
+    udp.extend_from_slice(&7446u16.to_be_bytes());
+    udp.extend_from_slice(&8u16.to_be_bytes());
+    udp.extend_from_slice(&0u16.to_be_bytes());
+    let mut ip = vec![0x45u8, 0];
+    ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+    ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+    ip.extend_from_slice(&[192, 168, 1, 5]);
+    ip.extend_from_slice(&[224, 0, 0, 224]);
+    ip.extend_from_slice(&udp);
+    let mut packet = vec![0u8; 12];
+    packet.extend_from_slice(&[0x08, 0x00]);
+    packet.extend_from_slice(&ip);
+    while packet.len() < 60 {
+        packet.push(0);
+    }
+    wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &packet)],
+    )
+}

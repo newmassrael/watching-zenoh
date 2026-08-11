@@ -761,10 +761,12 @@ fn field_lines(
 ) -> String {
     use wz_session_core::dissect::{dissect_transport_message, to_json};
 
-    let mut out = String::new();
-    if format == Format::Json {
-        out.push_str("\"fields\":[");
-    }
+    // R311y681 — the listing is BUILT as flows, each carrying its rows and the
+    // notes that belong beside them, and rendered once per format at the end.
+    // Both renderings then read the same values, so neither can carry a notice
+    // the other lacks -- which is exactly what this round found: five notices
+    // written straight into the text branch and invisible to a consumer.
+    let mut listings: Vec<FlowListing> = Vec::new();
     // R311y675 — the separator belongs to the ROW, not to the flow. Counting
     // flows put one comma between two flows and NONE between the rows inside
     // one, which concatenated JSON objects into a document no parser accepts.
@@ -774,6 +776,7 @@ fn field_lines(
         let mut shown = 0usize;
         let mut omitted = 0usize;
         let mut rows = String::new();
+        let mut notes: Vec<FieldNote> = Vec::new();
         for frame in &flow.frames {
             if let Some(cap) = messages_per_flow {
                 if shown >= cap {
@@ -846,21 +849,29 @@ fn field_lines(
         // silence there would read as "this flow carried nothing".
         if rows.is_empty() {
             if let Some(why) = decrypted_coordinates(flow) {
-                if format == Format::Text {
-                    out.push_str(&format!(
-                        "  {} : NO FIELDS -- {why}\n",
-                        endpoint(&flow.flow.low)
-                    ));
-                }
+                notes.push(FieldNote::NotDecrypted {
+                    flow: flow.flow,
+                    why,
+                });
             }
+        }
+        // Per FLOW, like every other listing this tool bounds: a bound that
+        // reports nothing reports itself as the wire.
+        //
+        // R311y681 — and it is reported whether or not a row survived it. The
+        // `continue` above used to be reached first, so a flow whose every row
+        // the bound took printed nothing AND said nothing: measured, a cleartext
+        // capture under `--max-messages 0` was a silent empty listing.
+        if omitted > 0 {
+            notes.push(FieldNote::Omitted {
+                flow: flow.flow,
+                count: omitted,
+            });
+        }
+        if rows.is_empty() && notes.is_empty() {
             continue;
         }
-        out.push_str(&rows);
-        if format == Format::Text && omitted > 0 {
-            // Per FLOW, like every other listing this tool bounds: a bound that
-            // reports nothing reports itself as the wire.
-            out.push_str(&format!("    ... {omitted} more not listed\n"));
-        }
+        listings.push(FlowListing { rows, notes });
     }
     // R311y679 — DATAGRAM flows, walked from the capture's own bytes.
     //
@@ -873,15 +884,307 @@ fn field_lines(
     //
     // Re-parsed rather than kept: the file is already in memory and parsing it
     // twice costs a walk that only a reader who asked for `--fields` pays.
-    out.push_str(&datagram_field_rows(
+    datagram_field_rows(
         capture,
         dissection,
         format,
         messages_per_flow,
         &mut emitted,
-    ));
-    if format == Format::Json {
-        out.push(']');
+        &mut listings,
+    );
+    render_listings(&listings, format)
+}
+
+/// R311y681 (§1.1n) — one flow's contribution to the field listing: the rows it
+/// produced and the notes that belong beside them.
+///
+/// Rows are rendered as they are walked because their shape is per-format
+/// already; notes are held as VALUES until the end, which is the whole point of
+/// this type. A notice rendered at the point it is discovered has to be rendered
+/// once per format, and the two copies then drift -- the shape R311y664 found by
+/// running the binary, where one flow reported `NOT DECRYPTED` in text and
+/// `"decrypted":true` in JSON in the same run.
+struct FlowListing {
+    /// The rows, already rendered in the requested format.
+    rows: String,
+    /// What could not be done, in the order it should be read.
+    notes: Vec<FieldNote>,
+}
+
+/// R311y681 (§1.1n) — something the field layer could NOT do, held as a value.
+///
+/// # What was measured
+///
+/// Every notice this listing produces was written directly into the text branch
+/// behind `format == Format::Text`: a flow whose plaintext was never opened, a
+/// datagram flow nothing walkable came out of, a capture that could not be
+/// re-read, a bound that left messages out, and a disagreement between this
+/// reader's two reads of the file. Five notices, none of them reachable by a
+/// consuming tool -- which sees an array that is SHORT and no key saying why.
+///
+/// That is the silence this track spent six rounds removing for a person and
+/// left standing for a program, and the store's own carry has said so since
+/// R311y678.
+enum FieldNote {
+    /// The flow's messages came out of a decryption whose plaintext is not
+    /// retained, so there are no bytes here to walk.
+    NotDecrypted {
+        flow: wz_capture::link::FlowKey,
+        why: String,
+    },
+    /// A datagram flow this reader walked none of.
+    NothingWalkable { flow: wz_capture::link::FlowKey },
+    /// The capture could not be parsed a second time, so NO datagram flow could
+    /// be walked. Capture-wide, and the only note with no flow.
+    CaptureNotReread,
+    /// The `--max-messages` bound left messages out of this flow's listing.
+    Omitted {
+        flow: wz_capture::link::FlowKey,
+        count: usize,
+    },
+    /// This reader's two reads of the file disagreed about the packet a message
+    /// named.
+    Disagreement {
+        flow: wz_capture::link::FlowKey,
+        /// How many disagreed in total. Exact, and unaffected by the bound
+        /// below.
+        count: usize,
+        /// The ones named individually, bounded by the same `--max-messages`
+        /// that bounds the rows.
+        ///
+        /// R311y680 reported the count ALONE, which loses the actionable half:
+        /// a wrong index and a wrong flow point at different upstream changes,
+        /// and a reader given only "3 skipped" cannot tell which to go look at.
+        named: Vec<Disagreed>,
+    },
+}
+
+/// One message whose packet did not vouch for it, and why.
+struct Disagreed {
+    /// The packet index the message named.
+    at: usize,
+    why: Disagreement,
+}
+
+/// Why a packet did not vouch for the message that named it.
+enum Disagreement {
+    /// The second read has no packet at that index at all.
+    Absent,
+    /// It has one, and does not read it as a UDP datagram.
+    NotUdp,
+    /// It is a UDP datagram, and it disagrees about these coordinates.
+    Coordinates(Axes),
+}
+
+/// Which of the three coordinates a packet disagreed about.
+///
+/// All three are reported, not just the first: they fail independently and a
+/// reader chasing the cause needs to know whether one moved or all of them did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Axes {
+    flow: bool,
+    direction: bool,
+    index: bool,
+}
+
+impl Axes {
+    /// Whether the packet disagreed about anything at all.
+    fn any(self) -> bool {
+        self.flow || self.direction || self.index
+    }
+
+    /// The axes that disagreed, by name, in a fixed order.
+    fn names(self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.flow {
+            names.push("flow");
+        }
+        if self.direction {
+            names.push("direction");
+        }
+        if self.index {
+            names.push("index");
+        }
+        names
+    }
+}
+
+impl Disagreement {
+    /// The machine-readable reason.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::NotUdp => "not_udp",
+            Self::Coordinates(_) => "coordinates",
+        }
+    }
+
+    /// The same reason as a sentence.
+    fn sentence(&self) -> String {
+        match self {
+            Self::Absent => "the second read has no packet at this index".into(),
+            Self::NotUdp => "the second read does not read this packet as a UDP datagram".into(),
+            Self::Coordinates(axes) => {
+                format!("the packet disagrees about: {}", axes.names().join(", "))
+            }
+        }
+    }
+}
+
+impl FieldNote {
+    /// The flow this note is about, where it is about one.
+    fn flow(&self) -> Option<&wz_capture::link::FlowKey> {
+        match self {
+            Self::NotDecrypted { flow, .. }
+            | Self::NothingWalkable { flow }
+            | Self::Omitted { flow, .. }
+            | Self::Disagreement { flow, .. } => Some(flow),
+            Self::CaptureNotReread => None,
+        }
+    }
+
+    /// The machine-readable kind, which is what a consumer branches on.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::NotDecrypted { .. } => "not_decrypted",
+            Self::NothingWalkable { .. } => "nothing_walkable",
+            Self::CaptureNotReread => "capture_not_reread",
+            Self::Omitted { .. } => "omitted",
+            Self::Disagreement { .. } => "disagreement",
+        }
+    }
+
+    /// The prose, which BOTH renderings carry: the text listing as its line and
+    /// the JSON as the `note` key beside the machine fields.
+    ///
+    /// One function, because a sentence written twice is two sentences to keep
+    /// true.
+    fn sentence(&self) -> String {
+        match self {
+            Self::NotDecrypted { why, .. } => format!("NO FIELDS -- {why}"),
+            Self::NothingWalkable { .. } => {
+                "NO FIELDS -- this reader walked none of this datagram flow's messages".into()
+            }
+            Self::CaptureNotReread => {
+                "NO FIELDS -- this capture's packets could not be re-read to walk them".into()
+            }
+            Self::Omitted { count, .. } => format!("{count} more not listed"),
+            Self::Disagreement { count, .. } => format!(
+                "{count} message(s) skipped -- this reader's two reads of the file \
+                 disagree about the packet they name"
+            ),
+        }
+    }
+
+    /// The note as the text listing prints it, indented to sit under its flow.
+    fn to_text(&self) -> String {
+        let sentence = self.sentence();
+        match self {
+            Self::NotDecrypted { flow, .. } | Self::NothingWalkable { flow } => {
+                format!("  {} : {sentence}\n", endpoint(&flow.low))
+            }
+            Self::CaptureNotReread => format!("  datagram flow(s): {sentence}\n"),
+            Self::Omitted { .. } => format!("    ... {sentence}\n"),
+            Self::Disagreement { named, .. } => {
+                let mut out = format!("    {sentence}\n");
+                for message in named {
+                    out.push_str(&format!(
+                        "      packet {}: {}\n",
+                        message.at,
+                        message.why.sentence()
+                    ));
+                }
+                out
+            }
+        }
+    }
+
+    /// The note as JSON: the kind a consumer branches on, the flow it is about,
+    /// whatever numbers it carries, and the sentence a person reads.
+    fn to_json(&self) -> String {
+        let mut out = format!("{{\"kind\":\"{}\"", self.kind());
+        if let Some(flow) = self.flow() {
+            // `low` / `high` and NOT `from` / `to`: a note is about a FLOW and
+            // not about a direction, so borrowing the row keys would put a
+            // directional name on a value that has no direction -- the label
+            // defect R311y669 and R311y679 each removed once already.
+            out.push_str(&format!(
+                ",\"low\":\"{}\",\"high\":\"{}\"",
+                endpoint(&flow.low),
+                endpoint(&flow.high)
+            ));
+        }
+        match self {
+            Self::Omitted { count, .. } => out.push_str(&format!(",\"count\":{count}")),
+            Self::Disagreement { count, named, .. } => {
+                out.push_str(&format!(",\"count\":{count},\"messages\":["));
+                for (i, message) in named.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&format!(
+                        "{{\"at\":{},\"why\":\"{}\"",
+                        message.at,
+                        message.why.kind()
+                    ));
+                    if let Disagreement::Coordinates(axes) = &message.why {
+                        let names: Vec<String> =
+                            axes.names().iter().map(|n| format!("\"{n}\"")).collect();
+                        out.push_str(&format!(",\"axes\":[{}]", names.join(",")));
+                    }
+                    out.push('}');
+                }
+                out.push(']');
+            }
+            _ => {}
+        }
+        out.push_str(&format!(",\"note\":\"{}\"}}", escape(&self.sentence())));
+        out
+    }
+}
+
+/// The two characters a JSON string cannot carry raw.
+///
+/// R311y681 — extracted rather than copied a third time: `render_field_row` had
+/// it inline for a declined row's reason, and every note's sentence needs the
+/// same treatment.
+fn escape(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// R311y681 (§1.1n) — the whole field listing, in the requested format.
+///
+/// The JSON carries TWO keys and both are structural: `fields` is the rows and
+/// `field_notes` is everything that could not become one. A consumer must never
+/// have to test for the key that explains a short array -- that is the same rule
+/// the epoch object follows, one listing over.
+fn render_listings(listings: &[FlowListing], format: Format) -> String {
+    let mut out = String::new();
+    match format {
+        Format::Text => {
+            for listing in listings {
+                out.push_str(&listing.rows);
+                for note in &listing.notes {
+                    out.push_str(&note.to_text());
+                }
+            }
+        }
+        Format::Json => {
+            out.push_str("\"fields\":[");
+            for listing in listings {
+                out.push_str(&listing.rows);
+            }
+            out.push_str("],\"field_notes\":[");
+            let mut first = true;
+            for note in listings.iter().flat_map(|l| l.notes.iter()) {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str(&note.to_json());
+            }
+            out.push(']');
+        }
     }
     out
 }
@@ -1106,7 +1409,7 @@ fn render_field_row(
                 "{{\"from\":\"{from}\",\"to\":\"{to}\",\"direction\":\"{dir}\",\
                  \"stream_offset\":{},\"declined\":\"{}\"}}",
                 frame.stream_offset,
-                why.replace('\\', "\\\\").replace('"', "\\\"")
+                escape(why)
             ));
         }
         (Format::Text, FieldRow::Walked(field)) => {
@@ -1154,18 +1457,49 @@ fn render_field_row(
 /// scout/hello fixture. The committed test asserts the other direction -- that a
 /// scout and its hello, which live in DIFFERENT flows by design, are both walked
 /// and neither is rejected.
-fn packet_agrees(
+///
+/// # R311y681 — and it now says WHICH axis, because that is the actionable half
+///
+/// The round above returned a bool and the caller counted the noes. A reader
+/// given "3 messages skipped" cannot act on it: a wrong index means the packet
+/// numbering moved under this reader, a wrong flow means the key derivation did,
+/// and a wrong direction means `from_low` did. Three different upstream changes,
+/// one number. The axes fail independently and are reported independently.
+fn packet_disagreement(
     datagram: &wz_capture::link::Datagram,
     flow: &wz_capture::link::FlowKey,
     direction: wz_session_core::passive::Direction,
     index: usize,
-) -> bool {
+) -> Axes {
     let travels = if datagram.from_low {
         wz_session_core::passive::Direction::A
     } else {
         wz_session_core::passive::Direction::B
     };
-    datagram.flow == *flow && travels == direction && datagram.packet_index == index
+    Axes {
+        flow: datagram.flow != *flow,
+        direction: travels != direction,
+        index: datagram.packet_index != index,
+    }
+}
+
+/// R311y681 — one disagreement, counted exactly and named while the bound
+/// allows.
+///
+/// The count is the fact the reader is owed and it is never approximate; the
+/// per-message detail is a listing like any other in this crate and takes the
+/// same `--max-messages` ceiling.
+fn note_disagreement(
+    named: &mut Vec<Disagreed>,
+    count: &mut usize,
+    cap: Option<usize>,
+    at: usize,
+    why: Disagreement,
+) {
+    *count += 1;
+    if cap.is_none_or(|c| named.len() < c) {
+        named.push(Disagreed { at, why });
+    }
 }
 
 /// R311y679 (§1.1n) — the field rows of every DATAGRAM flow.
@@ -1193,27 +1527,29 @@ fn datagram_field_rows(
     format: Format,
     messages_per_flow: Option<usize>,
     emitted: &mut usize,
-) -> String {
-    let mut out = String::new();
+    listings: &mut Vec<FlowListing>,
+) {
     if dissection.datagram_flows().is_empty() {
-        return out;
+        return;
     }
     let Ok(file) = wz_capture::pcapng::parse(capture) else {
         // Not a pcapng, or unreadable on the second pass. Said rather than
         // silently skipped, which is the whole point of this round's sibling.
-        if format == Format::Text {
-            out.push_str(
-                "  datagram flow(s): NO FIELDS -- this capture's packets could \
-                 not be re-read to walk them\n",
-            );
-        }
-        return out;
+        listings.push(FlowListing {
+            rows: String::new(),
+            notes: vec![FieldNote::CaptureNotReread],
+        });
+        return;
     };
     for flow in dissection.datagram_flows() {
+        let mut out = String::new();
+        let mut notes: Vec<FieldNote> = Vec::new();
         let mut shown = 0usize;
         let mut omitted = 0usize;
         // R311y680 — messages whose packet did not vouch for itself.
+        // R311y681 — counted exactly, and named while the bound allows.
         let mut disagreed = 0usize;
+        let mut named: Vec<Disagreed> = Vec::new();
         for frame in &flow.frames {
             // The datagram coordinate: `stream_offset` names the PACKET, because
             // a datagram link has no stream to be offset within.
@@ -1223,17 +1559,37 @@ fn datagram_field_rows(
             // would drop rows and leave the listing looking whole, which is the
             // failure this whole check exists for.
             let Some(packet) = file.packets.get(frame.stream_offset) else {
-                disagreed += 1;
+                note_disagreement(
+                    &mut named,
+                    &mut disagreed,
+                    messages_per_flow,
+                    frame.stream_offset,
+                    Disagreement::Absent,
+                );
                 continue;
             };
             let Ok(wz_capture::link::Transport::Udp(datagram)) =
                 wz_capture::link::decapsulate(packet.link_type, packet.index, &packet.data)
             else {
-                disagreed += 1;
+                note_disagreement(
+                    &mut named,
+                    &mut disagreed,
+                    messages_per_flow,
+                    frame.stream_offset,
+                    Disagreement::NotUdp,
+                );
                 continue;
             };
-            if !packet_agrees(&datagram, &flow.flow, frame.direction, frame.stream_offset) {
-                disagreed += 1;
+            let axes =
+                packet_disagreement(&datagram, &flow.flow, frame.direction, frame.stream_offset);
+            if axes.any() {
+                note_disagreement(
+                    &mut named,
+                    &mut disagreed,
+                    messages_per_flow,
+                    frame.stream_offset,
+                    Disagreement::Coordinates(axes),
+                );
                 continue;
             }
             let body = frame.unit_offset;
@@ -1273,17 +1629,37 @@ fn datagram_field_rows(
         // is nothing but discovery traffic.
         for datagram in &flow.scouting {
             let Some(packet) = file.packets.get(datagram.packet_index) else {
-                disagreed += 1;
+                note_disagreement(
+                    &mut named,
+                    &mut disagreed,
+                    messages_per_flow,
+                    datagram.packet_index,
+                    Disagreement::Absent,
+                );
                 continue;
             };
             let Ok(wz_capture::link::Transport::Udp(udp)) =
                 wz_capture::link::decapsulate(packet.link_type, packet.index, &packet.data)
             else {
-                disagreed += 1;
+                note_disagreement(
+                    &mut named,
+                    &mut disagreed,
+                    messages_per_flow,
+                    datagram.packet_index,
+                    Disagreement::NotUdp,
+                );
                 continue;
             };
-            if !packet_agrees(&udp, &flow.flow, datagram.direction, datagram.packet_index) {
-                disagreed += 1;
+            let axes =
+                packet_disagreement(&udp, &flow.flow, datagram.direction, datagram.packet_index);
+            if axes.any() {
+                note_disagreement(
+                    &mut named,
+                    &mut disagreed,
+                    messages_per_flow,
+                    datagram.packet_index,
+                    Disagreement::Coordinates(axes),
+                );
                 continue;
             }
             if let Some(cap) = messages_per_flow {
@@ -1312,32 +1688,34 @@ fn datagram_field_rows(
                 false,
             );
         }
-        if format == Format::Text && omitted > 0 {
-            out.push_str(&format!("    ... {omitted} more not listed\n"));
+        if omitted > 0 {
+            notes.push(FieldNote::Omitted {
+                flow: flow.flow,
+                count: omitted,
+            });
         }
         // R311y680 — and a disagreement between the two reads of this file is
         // REPORTED, not skipped. It cannot be silent for the same reason a bound
         // that bites cannot: a listing short by rows nobody accounted for is a
         // listing that looks whole.
-        if disagreed > 0 && format == Format::Text {
-            out.push_str(&format!(
-                "    {disagreed} message(s) skipped -- the packet at that index \
-                 does not belong to this flow and direction, so this reader's \
-                 two reads of the file disagree\n"
-            ));
+        if disagreed > 0 {
+            notes.push(FieldNote::Disagreement {
+                flow: flow.flow,
+                count: disagreed,
+                named,
+            });
         }
         // A datagram flow this reader could not walk says so, rather than being
         // absent -- the R311y678 rule, kept now that the absence has a second
         // possible cause.
-        if shown == 0 && format == Format::Text {
-            out.push_str(&format!(
-                "  {} : NO FIELDS -- this reader walked none of this datagram \
-                 flow's messages\n",
-                endpoint(&flow.flow.low)
-            ));
+        if shown == 0 {
+            notes.push(FieldNote::NothingWalkable { flow: flow.flow });
         }
+        if out.is_empty() && notes.is_empty() {
+            continue;
+        }
+        listings.push(FlowListing { rows: out, notes });
     }
-    out
 }
 
 /// R311y677 — one row the sink produced, in whichever format.
@@ -2647,7 +3025,7 @@ mod message_name_tests {
 }
 
 #[cfg(test)]
-mod packet_agreement_tests {
+mod packet_and_note_tests {
     use super::*;
     use wz_session_core::passive::Direction;
 
@@ -2710,27 +3088,41 @@ mod packet_agreement_tests {
 
         // The truthful call, which is what every real row makes.
         assert!(
-            packet_agrees(&datagram, &datagram.flow, travels, datagram.packet_index),
+            !packet_disagreement(&datagram, &datagram.flow, travels, datagram.packet_index).any(),
             "a packet must vouch for its own coordinates"
         );
         // WRONG DIRECTION, everything else right.
+        //
+        // R311y681 — and the answer NAMES the axis. Asserting the whole `Axes`
+        // rather than `any()` is what makes each leg about ONE coordinate: a
+        // predicate that returned "everything disagrees" for every mutation
+        // would satisfy three `any()` assertions and be useless to the reader
+        // it reports to.
         let other = match travels {
             Direction::A => Direction::B,
             Direction::B => Direction::A,
         };
-        assert!(
-            !packet_agrees(&datagram, &datagram.flow, other, datagram.packet_index),
-            "the direction axis must be checked on its own"
+        assert_eq!(
+            packet_disagreement(&datagram, &datagram.flow, other, datagram.packet_index),
+            Axes {
+                direction: true,
+                ..Default::default()
+            },
+            "the direction axis must be reported on its own"
         );
         // WRONG INDEX, everything else right.
-        assert!(
-            !packet_agrees(
+        assert_eq!(
+            packet_disagreement(
                 &datagram,
                 &datagram.flow,
                 travels,
                 datagram.packet_index + 1
             ),
-            "the index axis must be checked on its own"
+            Axes {
+                index: true,
+                ..Default::default()
+            },
+            "the index axis must be reported on its own"
         );
         // WRONG FLOW, everything else right: the same endpoints with the ports
         // swapped is a different key and a real confusion to guard against.
@@ -2741,9 +3133,158 @@ mod packet_agreement_tests {
             "the mutation must actually change the key, or the assertion below \
              is about nothing"
         );
-        assert!(
-            !packet_agrees(&datagram, &crossed, travels, datagram.packet_index),
-            "the flow axis must be checked on its own"
+        assert_eq!(
+            packet_disagreement(&datagram, &crossed, travels, datagram.packet_index),
+            Axes {
+                flow: true,
+                ..Default::default()
+            },
+            "the flow axis must be reported on its own"
         );
+        // AND THEY COMPOSE. Two axes wrong at once must name two, or the reader
+        // chasing the cause is told to look at one of the two places.
+        assert_eq!(
+            packet_disagreement(&datagram, &crossed, other, datagram.packet_index),
+            Axes {
+                flow: true,
+                direction: true,
+                ..Default::default()
+            },
+            "axes fail independently and must be reported independently"
+        );
+        assert_eq!(
+            Axes {
+                flow: true,
+                direction: true,
+                ..Default::default()
+            }
+            .names(),
+            vec!["flow", "direction"],
+            "and the names are what the listing prints"
+        );
+    }
+
+    /// A real `FlowKey`, decapsulated from a real packet.
+    ///
+    /// R311y681 — built this way for the reason R311y680 recorded: `Endpoint`
+    /// keeps its address bytes private, so the only way to hold one here is to
+    /// decode one. The cost is stated where it bites: a test built this way
+    /// cannot reach coordinate combinations no real packet produces.
+    fn sample_flow() -> wz_capture::link::FlowKey {
+        let packet = udp(&[0x01, 0x09, 0x3B, 0x11, 0x22, 0x33, 0x44]);
+        let file = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000_000, &packet)],
+        );
+        let parsed = wz_capture::pcapng::parse(&file).expect("the fixture parses");
+        let first = &parsed.packets[0];
+        let wz_capture::link::Transport::Udp(datagram) =
+            wz_capture::link::decapsulate(first.link_type, first.index, &first.data)
+                .expect("a UDP datagram")
+        else {
+            panic!("the fixture must decapsulate as UDP");
+        };
+        datagram.flow
+    }
+
+    /// R311y681 (§1.1n) — a disagreement names WHICH MESSAGE and WHICH AXIS, in
+    /// both renderings, from one value.
+    ///
+    /// # Why this is driven on the note and not on a capture
+    ///
+    /// The disagreement branch cannot fire from any capture while the code
+    /// upstream of it is correct — R311y680 established that and proved
+    /// reachability by probe rather than by fixture. What CAN be gated is the
+    /// rendering: given a disagreement, does the reader learn anything it can
+    /// act on? R311y680's answer was a bare count, which is the same for a
+    /// packet index that moved and a flow key that did.
+    #[test]
+    fn a_disagreement_names_the_message_and_the_axis_in_both_renderings() {
+        let flow = sample_flow();
+        let note = FieldNote::Disagreement {
+            flow,
+            count: 3,
+            named: vec![
+                Disagreed {
+                    at: 7,
+                    why: Disagreement::Absent,
+                },
+                Disagreed {
+                    at: 9,
+                    why: Disagreement::Coordinates(Axes {
+                        direction: true,
+                        index: true,
+                        ..Default::default()
+                    }),
+                },
+            ],
+        };
+
+        let text = note.to_text();
+        // The COUNT is exact and unaffected by the bound on the detail below it.
+        assert!(
+            text.contains("3 message(s) skipped"),
+            "the exact count leads: {text}"
+        );
+        assert!(
+            text.contains("packet 7: the second read has no packet at this index"),
+            "an absent packet is named as absent: {text}"
+        );
+        assert!(
+            text.contains("packet 9: the packet disagrees about: direction, index"),
+            "and a packet that is there names every axis it disagrees on: {text}"
+        );
+
+        let json = note.to_json();
+        serde_json::from_str::<serde_json::Value>(&json).expect("a note is one JSON value");
+        assert!(
+            json.contains("\"kind\":\"disagreement\"") && json.contains("\"count\":3"),
+            "the machine form carries the kind and the exact count: {json}"
+        );
+        assert!(
+            json.contains("{\"at\":7,\"why\":\"absent\"}"),
+            "and names the same messages the text did: {json}"
+        );
+        assert!(
+            json.contains("{\"at\":9,\"why\":\"coordinates\",\"axes\":[\"direction\",\"index\"]}"),
+            "with the axes as data rather than as prose: {json}"
+        );
+        // ONE FACT, TWO RENDERINGS: the sentence the text printed is the
+        // sentence the consumer gets, from the same function.
+        assert!(
+            json.contains("\"note\":\"3 message(s) skipped"),
+            "the note key is the text line's own sentence: {json}"
+        );
+    }
+
+    /// R311y681 (§1.1n) — the per-message detail takes the same bound as the
+    /// rows, and the COUNT never does.
+    ///
+    /// A listing that named every disagreement would be a second unbounded
+    /// accumulation in a crate whose whole discipline is that every bound has a
+    /// paired counter. So the detail is bounded and the count is exact, and this
+    /// is what says the two are not the same number.
+    #[test]
+    fn naming_the_disagreements_is_bounded_and_counting_them_is_not() {
+        let mut named = Vec::new();
+        let mut count = 0usize;
+        for at in 0..5 {
+            note_disagreement(&mut named, &mut count, Some(2), at, Disagreement::Absent);
+        }
+        assert_eq!(count, 5, "every disagreement is counted");
+        assert_eq!(named.len(), 2, "and only the first two are named");
+        assert_eq!(
+            named.iter().map(|d| d.at).collect::<Vec<_>>(),
+            vec![0, 1],
+            "the ones named are the ones nearest the start of the flow"
+        );
+
+        // Unbounded means unbounded.
+        let mut named = Vec::new();
+        let mut count = 0usize;
+        for at in 0..5 {
+            note_disagreement(&mut named, &mut count, None, at, Disagreement::Absent);
+        }
+        assert_eq!((count, named.len()), (5, 5), "no cap, no omission");
     }
 }
