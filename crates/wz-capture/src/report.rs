@@ -785,7 +785,7 @@ impl<'a> CaptureReport<'a> {
                 ",\"serial\":{{\"interfaces\":{},\"bytes\":{},\"frames\":{},\
                  \"messages\":{},\"crc_failures\":{},\"framing_errors\":{},\
                  \"handshake_frames\":{},\"roles_witnessed\":{},\
-                 \"direction_unattributed\":{}}}",
+                 \"direction_unattributed\":{},\"committed_positionally\":{}}}",
                 k.interfaces,
                 k.bytes,
                 k.frames,
@@ -795,6 +795,7 @@ impl<'a> CaptureReport<'a> {
                 k.handshake_frames,
                 k.roles_witnessed,
                 k.direction_unattributed,
+                k.committed_positionally,
             )),
         }
         // R311y669 (§1.2a) — QUIC. STRUCTURAL, present with zeroes on a capture
@@ -1315,7 +1316,16 @@ impl<'a> CaptureReport<'a> {
             // messages is a measurement or a convention, and a reader who
             // takes a positional attribution for a measured one will read a
             // reply as a request.
-            s.push_str(if k.direction_unattributed {
+            s.push_str(if k.committed_positionally {
+                // FIRST, because it overrides `roles_witnessed`: a line that
+                // committed before its handshake arrived ignored that
+                // handshake, so a rendering that read the witness flag would
+                // call a convention a measurement.
+                "\n    direction POSITIONAL and COMMITTED: no handshake arrived \
+                 within the frame bound, so A is the first interface seen and \
+                 a later handshake was ignored to keep one capture on one \
+                 mapping\n"
+            } else if k.direction_unattributed {
                 "\n    direction UNATTRIBUTED: one interface holds both wires of \
                  the line, and no rule over the zenoh bytes recovers which \
                  frame came off which\n"

@@ -4036,7 +4036,7 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
         // count rather than a port, and the addresses are empty -- a serial
         // link is two wires and has no addressing, so a synthesised 5-tuple
         // would be a fabricated fact in a column readers resolve.
-        let flow = wz_capture::link::FlowKey::serial_line(k.interfaces as u32);
+        let flow = wz_capture::link::FlowKey::serial_line();
         push_flow(
             &mut out,
             format,

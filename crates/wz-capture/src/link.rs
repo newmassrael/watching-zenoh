@@ -151,17 +151,24 @@ pub struct FlowKey {
 impl FlowKey {
     /// R311y720 (§D M3) — the key a SERIAL line stands under.
     ///
-    /// A serial link has NO addressing: two wires, no ports, no MACs. So both
-    /// endpoints are empty and the `port` carries the number of capture
-    /// interfaces the line was read off -- a real fact about the read, in the
-    /// only field of this key that can hold one. Synthesising an address would
-    /// put a fabricated 5-tuple in the column a reader uses to match a row
-    /// against their deployment.
-    pub fn serial_line(interfaces: u32) -> Self {
+    /// A serial link has NO addressing: two wires, no ports, no MACs. So the
+    /// key is empty in every field, and that is the whole design -- there is
+    /// exactly ONE serial line per capture (it is point to point), so the key
+    /// has nothing to distinguish and nothing to carry.
+    ///
+    /// R311y722 — it USED to carry the interface count in the `port`, on the
+    /// argument that this was "a real fact in the only field that can hold
+    /// one". That was the wrong argument: the field is a PORT, a reader
+    /// matching a row against their deployment reads it as one, and a count
+    /// sitting there is a fabricated fact in the column that must not hold any.
+    /// The interface count belongs to the census, where it already is
+    /// ([`crate::serial::SerialCensus::interfaces`]), and putting it here as
+    /// well was a second home for one number.
+    pub fn serial_line() -> Self {
         let end = Endpoint {
             addr: [0; 16],
             addr_len: 0,
-            port: interfaces,
+            port: 0,
         };
         Self {
             low: end,

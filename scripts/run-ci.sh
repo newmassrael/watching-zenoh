@@ -1516,6 +1516,16 @@ PY
     # page, a solo page that gains a second plane, and a builder set the scan
     # cannot read — each reds, and the revert returns OK.
     python3 scripts/lib/solo_plane_page_lint.py || return 1
+    # R311y722 (§1.1f) — the MESSAGE-PRODUCER gate. Four census planes walk one
+    # enumeration (`Dissection::message_lists`, R311y721), and a `Vec<PassiveFrame>`
+    # field is a producer of their rows by construction. A producer the
+    # enumeration does not reach is censused by nothing, and the planes then
+    # report that traffic as ABSENT rather than as unread — which has shipped
+    # five times (R311y668, y678, y699, y700, y720). R311y721 replaced five call
+    # sites with one door and left the convention ungated; this is the gate.
+    # MEASURED: dropping the serial list from the enumeration reds it by name,
+    # and the revert returns OK.
+    python3 scripts/lib/message_producer_lint.py || return 1
     # R311y704 (§1.1n) — the DATAGRAM-HALF gate. `Dissection::flows()` is the
     # TCP half and `datagram_flows()` is the other one; a reader that walks the
     # first and forgets the second produces an EMPTY result over a multicast or

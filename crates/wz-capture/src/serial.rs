@@ -106,6 +106,22 @@ pub struct SerialCensus {
     /// the zenoh bytes recovers which frame came off which — so this is the
     /// honest report rather than a direction column that looks measured.
     pub direction_unattributed: bool,
+    /// R311y722 — whether the line COMMITTED to its positional mapping before
+    /// any handshake frame could correct it.
+    ///
+    /// The bound's visible half. The frames a line reads before its handshake
+    /// have to be held, because their direction is not knowable yet; a capture
+    /// whose handshake never arrives would hold all of them, which is the
+    /// unbounded accumulation this crate bounds everywhere else. Beyond
+    /// [`crate::DissectionLimits::serial_frames_before_attribution`] the line
+    /// stops waiting and commits — nothing is discarded, and a later handshake
+    /// frame is deliberately IGNORED, because taking it would leave one capture
+    /// with two mappings, which is the defect R311y720 measured and fixed.
+    ///
+    /// When this is set the direction column is a CONVENTION, whatever
+    /// [`Self::roles_witnessed`] says, and every rendering must read this
+    /// first.
+    pub committed_positionally: bool,
 }
 
 /// One tapped serial line, read as zenoh.
@@ -121,6 +137,12 @@ pub struct SerialLine {
     /// The interface provisionally or measuredly holding [`Direction::A`],
     /// once one has been seen.
     a_interface: Option<u32>,
+    /// R311y722 — frames read so far, which is what the bound counts. Reset is
+    /// never needed: once committed, the count stops mattering.
+    read: usize,
+    /// The ceiling on frames held before the mapping is committed. `None` is
+    /// unbounded, which is right for a FILE and wrong for a live tap.
+    limit: Option<usize>,
     census: SerialCensus,
 }
 
@@ -173,6 +195,19 @@ pub struct SerialFrame {
 }
 
 impl SerialLine {
+    /// R311y722 — a line that commits its direction mapping after `limit`
+    /// frames rather than waiting for a handshake that may never come.
+    ///
+    /// See [`SerialCensus::committed_positionally`] for why the bound COMMITS
+    /// instead of discarding: the frames are evidence, and a bound that threw
+    /// evidence away to save memory would be trading the answer for the budget.
+    pub fn with_limit(limit: Option<usize>) -> Self {
+        Self {
+            limit,
+            ..Self::default()
+        }
+    }
+
     /// Feed one capture packet's raw serial bytes.
     ///
     /// Returns the frames that completed inside it, in order. A packet is a
@@ -239,10 +274,22 @@ impl SerialLine {
             if is_handshake(frame.header) {
                 self.census.handshake_frames += 1;
             }
+            self.read += 1;
+            // R311y722 — the bound, as a COMMITMENT. Checked before the
+            // correction below, so a handshake arriving in the same packet that
+            // crosses the ceiling does not race it.
+            if !self.census.committed_positionally
+                && !self.census.roles_witnessed
+                && self.limit.is_some_and(|n| self.read > n)
+            {
+                self.census.committed_positionally = true;
+            }
             // The CORRECTION: a role read off the wire outranks the positional
             // guess. Applied once -- the first handshake frame that proves a
             // side settles it, and a later one cannot flip a line mid-capture.
-            if !self.census.roles_witnessed {
+            // Refused once committed, for the same reason: one capture, one
+            // mapping.
+            if !self.census.roles_witnessed && !self.census.committed_positionally {
                 if let Some(side) = role_of(frame.header) {
                     self.a_interface = Some(match side {
                         SerialSide::Initiator => frame.interface,
@@ -393,6 +440,84 @@ mod tests {
             !two.census().direction_unattributed,
             "and two interfaces are two wires -- the CONTROL that keeps the \
              flag from being a constant"
+        );
+    }
+
+    /// R311y722 — THE BOUND COMMITS RATHER THAN DISCARDS, and a late handshake
+    /// cannot flip a line that has already committed.
+    ///
+    /// # Why a bound here had to be a decision
+    ///
+    /// A frame read before the handshake has no knowable direction, so it must
+    /// be held; a capture whose handshake never arrives holds everything, which
+    /// is the unbounded accumulation this crate bounds everywhere else. But the
+    /// held frames are EVIDENCE -- discarding them to save memory would trade
+    /// the capture's contents for its budget, which no other bound here does
+    /// (they all trade recency). So the bound stops the WAIT instead: past it
+    /// the mapping is committed, everything held is decoded under it, and the
+    /// census says the attribution was positional.
+    ///
+    /// The refusal of a late handshake is the other half and is not an
+    /// optimisation: taking it would leave one capture with two mappings, which
+    /// is exactly the defect R311y720 measured and moved the decode to `finish`
+    /// to fix.
+    #[test]
+    fn the_bound_commits_the_mapping_and_a_late_handshake_cannot_move_it() {
+        use wz_session_core::passive::Direction;
+
+        let data = encode_frame(0, b"data").expect("encodes");
+        let mut line = SerialLine::with_limit(Some(2));
+        // Interface 7 first, so positionally A. Three frames, one past the
+        // ceiling of two.
+        for at in 0..3 {
+            line.push(7, at, &data);
+        }
+        line.push(9, 3, &data);
+        assert!(
+            line.census().committed_positionally,
+            "past the ceiling the line stops waiting: {:?}",
+            line.census()
+        );
+        assert_eq!(line.direction_of(7), Direction::A, "positionally");
+
+        // The handshake arrives LATE and says interface 7 is the responder. It
+        // is refused, and the census still says the attribution is positional
+        // -- a reader is never told this direction was measured.
+        line.push(
+            7,
+            4,
+            &encode_frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, &[]).expect("encodes"),
+        );
+        assert_eq!(
+            line.direction_of(7),
+            Direction::A,
+            "one capture, one mapping"
+        );
+        assert!(
+            !line.census().roles_witnessed,
+            "and the census does not claim the wire settled it"
+        );
+        assert_eq!(
+            line.census().frames,
+            5,
+            "NOTHING was discarded -- the bound stopped a wait, not a read"
+        );
+
+        // THE CONTROL that keeps the commitment from being unconditional: the
+        // same frames under a ceiling they do not reach let the handshake win.
+        let mut patient = SerialLine::with_limit(Some(64));
+        patient.push(7, 0, &data);
+        patient.push(9, 1, &data);
+        patient.push(
+            7,
+            2,
+            &encode_frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, &[]).expect("encodes"),
+        );
+        assert!(patient.census().roles_witnessed && !patient.census().committed_positionally);
+        assert_eq!(
+            patient.direction_of(7),
+            Direction::B,
+            "the responder's half"
         );
     }
 
@@ -551,7 +676,7 @@ mod plane_tests {
         );
         assert_eq!(
             census.links()[0].flow,
-            FlowKey::serial_line(2),
+            FlowKey::serial_line(),
             "under the key a serial line stands on, carrying the interface \
              count it was read off"
         );

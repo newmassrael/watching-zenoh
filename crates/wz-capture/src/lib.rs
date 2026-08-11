@@ -1732,6 +1732,19 @@ pub struct DissectionLimits {
     /// the two above it are: a stream is not a flow, and one QUIC connection can
     /// open many while occupying a single slot in the datagram table.
     pub quic_streams_per_flow: Option<usize>,
+    /// R311y722 (§D M3) — frames a declared SERIAL line holds while it waits
+    /// for a handshake to name which wire is the initiator's.
+    ///
+    /// Beyond it the line COMMITS to its positional mapping and decodes,
+    /// eagerly from then on. Nothing is discarded: the bound converts a wait
+    /// into a DECISION, which is what makes it safe to set — a bound that threw
+    /// the held frames away would trade the capture's contents for its memory
+    /// budget, and every other bound here trades only recency.
+    ///
+    /// `None` is unbounded and is right for a FILE, which ends. A live tap on a
+    /// line whose handshake it never captures would otherwise hold every frame
+    /// for the life of the process.
+    pub serial_frames_before_attribution: Option<usize>,
 }
 
 impl DissectionLimits {
@@ -1778,6 +1791,11 @@ impl DissectionLimits {
             // second stream lose it, and the point of the ceiling is the
             // runaway case, not the second case.
             quic_streams_per_flow: Some(16),
+            // A handshake is the FIRST thing a serial link does, so a line that
+            // has read 256 frames without one is a tap that started mid-session
+            // and will never see it. Far past the two or three frames a
+            // captured handshake takes, and far short of a leak.
+            serial_frames_before_attribution: Some(256),
         }
     }
 }
@@ -1816,6 +1834,7 @@ mod live_tap_tests {
             max_pending_fragments,
             max_scout_askers,
             quic_streams_per_flow,
+            serial_frames_before_attribution,
         } = DissectionLimits::for_live_tap();
 
         for (name, bound) in [
@@ -1830,6 +1849,10 @@ mod live_tap_tests {
             ("max_pending_fragments", max_pending_fragments),
             ("max_scout_askers", max_scout_askers),
             ("quic_streams_per_flow", quic_streams_per_flow),
+            (
+                "serial_frames_before_attribution",
+                serial_frames_before_attribution,
+            ),
         ] {
             let Some(v) = bound else {
                 panic!("{name} is unbounded in the live-tap preset");
@@ -2961,12 +2984,10 @@ impl Dissection {
                     .flat_map(|f| f.frame_lists().map(move |frames| (f.flow, frames))),
             )
             .chain(core::iter::once((
-                // The key a serial line stands under: no addresses, and the
-                // interface count in the one field that can hold a fact. See
-                // `FlowKey::serial_line`.
-                FlowKey::serial_line(
-                    self.serial.as_ref().map_or(0, |l| l.census().interfaces) as u32
-                ),
+                // The key a serial line stands under: empty in every field,
+                // because a serial link is point to point and there is one per
+                // capture. See `FlowKey::serial_line`.
+                FlowKey::serial_line(),
                 self.serial_frames.as_slice(),
             )))
     }
@@ -3632,9 +3653,10 @@ impl Dissection {
         ts_millis: Option<u64>,
         bytes: &[u8],
     ) {
+        let limit = self.limits.serial_frames_before_attribution;
         let line = self
             .serial
-            .get_or_insert_with(|| alloc::boxed::Box::new(serial::SerialLine::default()));
+            .get_or_insert_with(|| alloc::boxed::Box::new(serial::SerialLine::with_limit(limit)));
         // COLLECTED, not decoded. The direction of a serial frame is not
         // knowable when it arrives: the handshake that names which wire is the
         // initiator's may come after it, and R311y720 MEASURED the consequence
@@ -3645,17 +3667,25 @@ impl Dissection {
         // So the whole line is decoded at `finish`, when the mapping is final.
         // The cost is one buffered frame list per line, which is the order a
         // single flow's frames already are.
-        self.serial_pending
-            .extend(line.push(interface_id, packet_index, bytes));
+        let frames = line.push(interface_id, packet_index, bytes);
+        // R311y722 — once the mapping is SETTLED, nothing needs holding: the
+        // direction of each frame is knowable as it arrives, so the buffer
+        // drains here and stops growing. Settled means either a handshake
+        // proved the roles or the bound committed to the positional mapping;
+        // both are final by construction (`SerialLine` refuses to move a
+        // settled mapping), which is exactly what makes draining safe.
+        let settled = line.census().roles_witnessed || line.census().committed_positionally;
+        self.serial_pending.extend(frames);
+        if settled {
+            self.decode_pending_serial();
+        }
         let _ = ts_millis;
     }
 
-    /// R311y720 (§D M3) — decode the buffered serial line, once its direction
-    /// mapping is final.
-    ///
-    /// Called from [`Self::finish`], which is where every end-of-capture
-    /// decision in this crate already lives.
-    fn finish_serial(&mut self) {
+    /// R311y722 — decode whatever the line is holding, under the mapping it has
+    /// now. Called as each packet lands once the mapping is settled, and once
+    /// more at [`Self::finish`] for a capture whose mapping never settled.
+    fn decode_pending_serial(&mut self) {
         let Some(line) = self.serial.as_ref() else {
             return;
         };
@@ -3684,6 +3714,17 @@ impl Dissection {
         }
     }
 
+    /// R311y720 (§D M3) — decode the buffered serial line, once its direction
+    /// mapping is final.
+    ///
+    /// Called from [`Self::finish`], which is where every end-of-capture
+    /// decision in this crate already lives.
+    fn finish_serial(&mut self) {
+        // Everything still held: a capture whose mapping never settled -- no
+        // handshake, and fewer frames than the bound -- decodes here under the
+        // positional mapping, which the census reports as such.
+        self.decode_pending_serial();
+    }
     fn push_packet_inner(
         &mut self,
         link_type: u32,
