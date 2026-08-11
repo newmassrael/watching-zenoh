@@ -54,6 +54,11 @@ pub mod agg;
 /// that cannot be fed is absent rather than empty.
 #[cfg(feature = "network-codecs")]
 pub mod exchange;
+/// R311y713 (§B1) — the exit every flow takes, as a type rather than as prose
+/// beside each door. Private: its whole purpose is that nothing outside can add
+/// to the carried counters, and a `pub` module would hand that back.
+mod exit;
+use exit::ExitingFlow as _;
 /// R311y616 (§1.1f) — the FILTER LANGUAGE: a selector a reader types, compiled
 /// into a three-valued predicate over records.
 ///
@@ -1890,8 +1895,10 @@ fn add_sn(h: &mut FramingHealth, a: wz_session_core::passive::SnAccounting) {
 /// session.
 #[derive(Debug)]
 pub struct Dissection {
-    flows: Vec<FlowDissection>,
-    datagram_flows: Vec<DatagramDissection>,
+    /// R311y713 (§B1) — a [`exit::FlowTable`] rather than a `Vec`, so a flow
+    /// can only leave it through the accounted exit. See [`exit`].
+    flows: exit::FlowTable<FlowDissection>,
+    datagram_flows: exit::FlowTable<DatagramDissection>,
     skipped: Vec<SkippedPacket>,
     /// R311y643 (§1.1e) — the by-reason census, counted at the door rather than
     /// folded from `skipped` above, which is capped.
@@ -1917,25 +1924,15 @@ pub struct Dissection {
     /// be counted here and not derived later: a `Checksums` rides on the
     /// `Segment` / `Datagram`, which is consumed by the assembler and gone.
     checksums: [usize; 6],
-    /// R311y605 (F5) — the stream counters of flows the flow-cap has EVICTED.
-    /// `health()` adds this to the live flows' own, so a total survives
-    /// eviction; a flow is either live or counted here, never both.
-    evicted_streams: StreamTally,
-    /// R311y610 (§4.4) — the same carry for the counters that live inside
-    /// `PassiveSession`: resynchronisation and sequence-number accounting.
+    /// R311y713 (§B1) — everything the flows that have LEFT are still owed.
     ///
-    /// Its `gaps_forced` / `gap_bytes_missing` are never written — those belong
-    /// to [`Self::evicted_streams`] — and [`Self::framing_health`] overwrites
-    /// them, so the shared type is a reuse rather than a conflation.
-    evicted_sessions: FramingHealth,
-    /// R311y650 (§1.2a) — the same carry for the TLS record census, which
-    /// R311y648 created and no eviction path knew about.
-    ///
-    /// The third counter to need this and the first that is a FINDING rather
-    /// than a loss tally: an evicted encrypted flow took the whole "this
-    /// capture is unreadable and here is how much of it" statement with it,
-    /// leaving a report that named a dropped flow and not what was in it.
-    evicted_encrypted: tls::EncryptedTotals,
+    /// One value where R311y605 / R311y610 / R311y650 / R311y656 / R311y666
+    /// each added a field, and the consolidation is the point rather than
+    /// tidiness: its counters are private to [`exit`], so no code here can add
+    /// to them except by retiring a whole flow. Six rounds added a carry to
+    /// this struct one counter at a time, each after finding the previous exit
+    /// site had missed it.
+    carry: exit::ExitCarry,
     /// R311y606 — half-assembled IP datagrams. Bounded by
     /// [`DissectionLimits::max_pending_fragments`] and by the same
     /// `reassembly_window_ms` deadline the message chains use, because the two
@@ -2006,13 +2003,8 @@ pub struct Dissection {
     /// asks for a wider window, a chain still open when the file ended asks for
     /// nothing, and this one asks for a larger `max_flows` — advice about the
     /// wrong knob is worse than none, which is why they are not one field.
-    evicted_chains: usize,
-    /// R311y666 (§1.2a) — transport messages decoded on flows the cap evicted.
-    ///
-    /// The carry `messages_decoded` needed and R311y665 knowingly shipped
-    /// without: a count read off the live table alone walks backwards on a live
-    /// tap, and a census of what this reader SAW must only ever go up.
-    evicted_messages: usize,
+    /// R311y713 — now carried by [`exit::ExitCarry::chains`] and read through
+    /// [`Self::evicted_chains`]; the distinction above is unchanged.
     /// R311y661 (§1.2a) — the Decryption Secrets Blocks the capture FILE
     /// carried, kept so a caller can build an opener out of the capture's own
     /// key material.
@@ -2038,17 +2030,15 @@ pub struct Dissection {
 impl Default for Dissection {
     fn default() -> Self {
         Self {
-            flows: Vec::new(),
-            datagram_flows: Vec::new(),
+            flows: exit::FlowTable::default(),
+            datagram_flows: exit::FlowTable::default(),
             skipped: Vec::new(),
             skip_census: SkipCensus::default(),
             declared_quic_ports: Vec::new(),
             limits: DissectionLimits::default(),
             drops: DissectionDrops::default(),
             checksums: [0; 6],
-            evicted_streams: StreamTally::default(),
-            evicted_sessions: FramingHealth::default(),
-            evicted_encrypted: tls::EncryptedTotals::default(),
+            carry: exit::ExitCarry::default(),
             fragments: frag::FragmentTable::default(),
             #[cfg(feature = "reassembly")]
             expired_chains: 0,
@@ -2057,8 +2047,6 @@ impl Default for Dissection {
             gap_patience: Some(crate::tcp::DEFAULT_GAP_PATIENCE),
             capture_origin_ms: None,
             abandoned_chains: 0,
-            evicted_chains: 0,
-            evicted_messages: 0,
             decryption_secrets: Vec::new(),
         }
     }
@@ -2090,11 +2078,11 @@ impl Dissection {
     /// silently rolled in: those counters live inside `PassiveSession`, which
     /// the eviction drops whole.
     pub fn framing_health(&self) -> FramingHealth {
-        let mut streams = self.evicted_streams;
+        let mut streams = self.carry.streams();
         // R311y610 (§4.4) — the session half of what eviction took with it. Its
         // gap fields are always zero and are OVERWRITTEN from `streams` below,
         // which is why one type can carry both halves without double-counting.
-        let mut h = self.evicted_sessions;
+        let mut h = self.carry.sessions();
         for flow in &self.flows {
             streams.add_assembler(&flow.low_to_high);
             streams.add_assembler(&flow.high_to_low);
@@ -2159,7 +2147,13 @@ impl Dissection {
 
     /// What staying inside [`DissectionLimits`] has cost.
     pub fn drops(&self) -> DissectionDrops {
-        self.drops
+        // R311y713 (§B1) — `flows` is composed from the retirement count rather
+        // than incremented at the eviction sites, so counting the eviction is
+        // part of the one act that also accounts for it.
+        DissectionDrops {
+            flows: self.carry.flows(),
+            ..self.drops
+        }
     }
 
     /// R311y605 (F5) — the whole dissection's counters in one value.
@@ -2170,7 +2164,7 @@ impl Dissection {
     /// on [`DissectionHealth`] before summing anything here against a packet
     /// count.
     pub fn health(&self) -> DissectionHealth {
-        let mut streams = self.evicted_streams;
+        let mut streams = self.carry.streams();
         for flow in &self.flows {
             streams.add_assembler(&flow.low_to_high);
             streams.add_assembler(&flow.high_to_low);
@@ -2392,7 +2386,7 @@ impl Dissection {
     /// R311y656 (§4.4) — how many chains were still open on flows the cap
     /// evicted. See [`Self::expired_chains`] for why the three are apart.
     pub fn evicted_chains(&self) -> usize {
-        self.evicted_chains
+        self.carry.chains()
     }
 
     /// Every TCP flow seen, in first-appearance order.
@@ -2420,7 +2414,7 @@ impl Dissection {
     /// decoded messages with it. Same shape as [`Self::encrypted_census`], and
     /// added for the same reason R311y650 added that one.
     pub fn decoded_messages(&self) -> usize {
-        self.evicted_messages
+        self.carry.messages()
             + self.flows.iter().map(|f| f.frames.len()).sum::<usize>()
             + self
                 .datagram_flows
@@ -2634,7 +2628,7 @@ impl Dissection {
     /// this capture was unreadable. `encrypted_flows` remains the right call for
     /// a reader who wants to LOOK at a flow, which an evicted one no longer is.
     pub fn encrypted_census(&self) -> tls::EncryptedTotals {
-        let mut totals = self.evicted_encrypted;
+        let mut totals = self.carry.encrypted();
         for flow in &self.flows {
             if let Some(e) = flow.encrypted() {
                 totals.add_flow(&e.per_direction);
@@ -2652,7 +2646,12 @@ impl Dissection {
     /// built from it alone silently omits every UDP flow — including, here, the
     /// exact flows the measurement was created for.
     pub fn byte_residue(&self) -> ByteResidue {
-        let mut total = ByteResidue::default();
+        // R311y713 (§B1) — starting from the RETIRED flows' residue rather than
+        // from zero. R311y709 added this counter to both live tables and to no
+        // carry, so a capture that evicted a flow reported less recovered
+        // residue than it had recovered — the same silence the five carries
+        // before it were each added to end.
+        let mut total = self.carry.residue();
         for f in &self.flows {
             total.absorb(f.residue);
         }
@@ -2707,50 +2706,37 @@ impl Dissection {
     /// number of gaps it forced.
     pub fn finish(&mut self) -> usize {
         let mut forced = 0usize;
+        // R311y713 (§B1) — the obligations are [`exit::ExitingFlow`], the same
+        // act the flow cap performs on its way past. What differs between the
+        // two exits is only where the numbers are BOOKED: the end of a capture
+        // is not a loss, so nothing here is an eviction and the flows stay in
+        // their tables.
         for idx in 0..self.flows.len() {
-            for direction in [Direction::A, Direction::B] {
-                loop {
-                    let flow = &mut self.flows[idx];
-                    let before = flow.assembler(direction).len();
-                    let asm = match direction {
-                        Direction::A => &mut flow.low_to_high,
-                        Direction::B => &mut flow.high_to_low,
-                    };
-                    if asm.force_oldest_gap().is_none() {
-                        break;
-                    }
-                    forced += 1;
-                    flow.deliver_from(direction, before);
-                }
-            }
-            // R311y612 (§4.1) — a flow still deciding what it is when the
-            // capture ends must be reported rather than held. The state that
-            // ended one silent hole would otherwise open a quieter one: bytes
-            // held for a verdict that never comes are bytes reported as absent.
-            //
-            // R311y649 (§1.2a) added the same rule for `Undecided`, and R311y650
-            // moved both behind one verb so the flow table's OTHER exit — the
-            // cap evicting a flow — takes them too.
-            self.flows[idx].settle_on_exit();
+            let tally = self.flows[idx].perform_exit();
+            forced += tally.gaps_forced;
+            self.abandoned_chains += tally.chains_abandoned;
             self.enforce_flow_limits(idx);
         }
-        // R311y655 (§1.1f) — and the chains, on exactly the argument the gap
-        // forcing above rests on: "no further packet is coming" is a fact only
-        // the caller has. A chain opened by the LAST fragment on a flow is never
-        // swept, because the sweep runs when the NEXT packet on that flow
-        // advances the clock and there is no next packet — so the capture used
-        // to end holding it, report `complete`, and never mention the message it
-        // was carrying. Measured that way before this line existed.
-        //
         // Both flow tables, because both hold sessions and a datagram flow is
-        // where fragments actually arrive.
-        for flow in &mut self.flows {
-            self.abandoned_chains += flow.session.abandon_open_chains();
+        // where fragments actually arrive. A chain opened by the LAST fragment
+        // on a flow is never swept — the sweep runs when the NEXT packet
+        // advances that flow's clock, and there is no next packet.
+        let mut abandoned = 0usize;
+        for flow in self.datagram_flows.iter_mut() {
+            abandoned += flow.perform_exit().chains_abandoned;
         }
-        for flow in &mut self.datagram_flows {
-            self.abandoned_chains += flow.session.abandon_open_chains();
-        }
+        self.abandoned_chains += abandoned;
         forced
+    }
+
+    /// R311y713 (§B1) — take one stream flow out of its table, for the probe
+    /// that shows [`exit::Exiting`]'s destructor is a gate.
+    ///
+    /// `cfg(test)` because it is the ONE way to obtain an unretired flow, and a
+    /// shipped one would be the hole this module closes.
+    #[cfg(test)]
+    fn take_stream_flow_for_test(&mut self, idx: usize) -> exit::Exiting<FlowDissection> {
+        self.flows.take(idx)
     }
 
     /// Feed one captured packet.
@@ -2949,63 +2935,16 @@ impl Dissection {
             else {
                 break;
             };
-            let mut gone = self.flows.remove(oldest);
-            // R311y650 (§1.2a) — the flow is LEAVING, so it takes the same exit
-            // the end of a capture gives it, BEFORE any counter below is
-            // harvested. A flow held for a verdict that will never come now has
-            // two ways to leave holding its bytes, and the carries below can
-            // only carry what the flow has already accounted for.
-            gone.settle_on_exit();
-            // R311y656 (§4.4) — and the chains it was holding, which
-            // `settle_on_exit` does not reach: the framing decision and the
-            // reassembler are two different things the flow was in the middle
-            // of. Measured before this line: an evicted flow's open chain was
-            // counted by nothing at all, so the report said a flow had been
-            // dropped and never that a half-assembled message went with it.
-            self.evicted_chains += gone.session.abandon_open_chains();
-            // R311y650 (§1.2a) — and the ENCRYPTED census carries, on exactly
-            // the rule the three carries below exist for. Without it the report
-            // said a flow was dropped and never said it carried zenoh inside
-            // TLS: the finding R311y648 was written to produce, deleted by the
-            // flow cap.
-            if let Some(e) = gone.encrypted() {
-                self.evicted_encrypted.add_flow(&e.per_direction);
-            }
-            // R311y666 (§1.2a) — and the MESSAGES it decoded. R311y665 added
-            // `messages_decoded` reading the live table and said so in its own
-            // carry: without this the number walks BACKWARDS on a live tap every
-            // time the flow cap recycles a slot, which is the one direction a
-            // count of what this reader saw must never move. The sixth counter
-            // to need this carry, and the rule is the same every time: a flow is
-            // either live or counted here, never both.
-            self.evicted_messages += gone.frames.len();
-            // R311y605 (F5) — carry the evicted flow's stream counters, or a
-            // live tap's totals would silently reset every time the flow cap
-            // recycled a slot.
-            self.evicted_streams.add_assembler(&gone.low_to_high);
-            self.evicted_streams.add_assembler(&gone.high_to_low);
-            // R311y612 — and the ws framing counters, on the same argument the
-            // R311y610 carry below was added for: a counter that resets when a
-            // slot recycles is a loss counter that moves the wrong way.
-            add_ws(&mut self.evicted_sessions, gone.ws_accounting());
-            // R311y610 (§4.4) — and the SESSION counters, which R311y609 left
-            // behind. They live inside `PassiveSession` rather than on an
-            // assembler, so the F5 carry above did not reach them and an
-            // evicted flow's losses vanished with it — the one direction a
-            // loss counter must never move.
-            for dir in [Direction::A, Direction::B] {
-                let r = gone.session.resync_accounting(dir);
-                self.evicted_sessions.desyncs += r.desyncs;
-                self.evicted_sessions.recoveries += r.recoveries;
-                self.evicted_sessions.resync_skipped_bytes += r.skipped_bytes;
-                self.evicted_sessions.reserved_headers += gone.session.reserved_headers(dir);
-                self.evicted_sessions.undefined_mandatory_exts +=
-                    gone.session.undefined_mandatory_exts(dir);
-                self.evicted_sessions.unaccounted_batch_bytes +=
-                    gone.session.unaccounted_batch_bytes(dir);
-                add_sn(&mut self.evicted_sessions, gone.session.sn_accounting(dir));
-            }
-            self.drops.flows += 1;
+            // R311y713 (§B1) — the flow is LEAVING, and everything that used to
+            // be written out here one counter at a time is now the one act
+            // `absorb_stream` performs: the exit obligations first (the open
+            // gaps, the framing verdict, the chains), then every counter it
+            // held. Six rounds each added one carry to this loop after finding
+            // the previous version had missed it; the counters are private to
+            // [`exit`] now, so a seventh cannot be missed here — there is
+            // nothing here to miss it with.
+            let gone = self.flows.take(oldest);
+            self.carry.absorb_stream(gone);
         }
     }
 
@@ -3275,23 +3214,12 @@ impl Dissection {
             else {
                 break;
             };
-            let mut gone = self.datagram_flows.remove(oldest);
-            // R311y656 (§4.4) — the same, on the table where fragments actually
-            // arrive.
-            self.evicted_chains += gone.session.abandon_open_chains();
-            // The same four the stream path carries, minus the two a datagram
-            // flow cannot have. `resync_accounting` is deliberately absent: a
-            // datagram flow has no framing to lose, which is the reason
-            // `framing_health` does not read it there either.
-            for dir in [Direction::A, Direction::B] {
-                self.evicted_sessions.reserved_headers += gone.session.reserved_headers(dir);
-                self.evicted_sessions.undefined_mandatory_exts +=
-                    gone.session.undefined_mandatory_exts(dir);
-                self.evicted_sessions.unaccounted_batch_bytes +=
-                    gone.session.unaccounted_batch_bytes(dir);
-                add_sn(&mut self.evicted_sessions, gone.session.sn_accounting(dir));
-            }
-            self.drops.flows += 1;
+            // R311y713 (§B1) — the same act, on the table where fragments
+            // actually arrive. Writing the two retirements next to each other
+            // in [`exit`] is what surfaced that this one had never carried the
+            // MESSAGES it decoded, though the stream path has since R311y666.
+            let gone = self.datagram_flows.take(oldest);
+            self.carry.absorb_datagram(gone);
         }
     }
 
@@ -5836,6 +5764,122 @@ mod datagram_tests {
             d.health().retransmits,
             1,
             "the evicted flow's retransmission must survive its flow"
+        );
+    }
+
+    /// R311y713 (§B1) — the flow cap must give a leaving flow the SAME exit
+    /// `finish` gives it, and forcing the open gap is part of that exit.
+    ///
+    /// `finish` performs three obligations (force the open gaps, settle the
+    /// framing, abandon the open chains) and the eviction path performed two.
+    /// The third is the one measured here: a flow evicted while a hole is still
+    /// open leaves holding every byte that arrived BEHIND the hole, so the
+    /// messages in them are decoded by nobody and counted by nobody — the
+    /// silence R311y650 and R311y656 each closed from a different direction,
+    /// from the direction neither looked.
+    #[test]
+    fn an_evicted_flow_forces_its_open_gap() {
+        let msg = framed_keepalive();
+        // The same flow, held behind the same hole, taken through the two
+        // different doors. Stated as a DIFFERENCE rather than as two magic
+        // numbers because the number is not the claim — "an eviction is the
+        // same exit as the end of a capture" is, and a number would have to be
+        // re-derived by hand every time the framing changes.
+        let fixture = |d: &mut Dissection| {
+            // No patience at all: a gap is stepped over only when somebody
+            // decides no further packet is coming, which is exactly the
+            // decision an exit is.
+            d.set_gap_patience(None);
+            d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1000, &msg));
+            // A hole one message wide, then a whole message behind it.
+            let far = 1000 + 2 * msg.len() as u32;
+            d.push_packet(LINKTYPE_ETHERNET, 1, &tcp_packet(far, &msg));
+            assert_eq!(
+                d.decoded_messages(),
+                1,
+                "the fixture must hold the far message behind an open hole"
+            );
+        };
+
+        let mut ended = Dissection::new();
+        fixture(&mut ended);
+        ended.finish();
+        assert_eq!(
+            ended.framing_health().gaps_forced,
+            1,
+            "the fixture must actually leave a hole for the exit to force"
+        );
+        assert!(
+            ended.byte_residue().recovered > 0,
+            "and the exit must recover the bytes behind it"
+        );
+
+        let mut evicted = Dissection::with_limits(DissectionLimits {
+            max_flows: Some(1),
+            ..DissectionLimits::default()
+        });
+        fixture(&mut evicted);
+        // A second 5-tuple evicts the first flow. `tcp_packet` fixes the ports,
+        // so a different SOURCE ADDRESS is what makes this a different 5-tuple.
+        let mut other = tcp_packet(2000, &msg);
+        other[26] = 99;
+        evicted.push_packet(LINKTYPE_ETHERNET, 2, &other);
+        assert_eq!(evicted.flows().len(), 1, "the cap must have evicted");
+        assert_eq!(evicted.drops().flows, 1);
+
+        assert_eq!(
+            evicted.framing_health().gaps_forced,
+            ended.framing_health().gaps_forced,
+            "the hole the evicted flow left holding must be forced too"
+        );
+        assert_eq!(
+            evicted.decoded_messages(),
+            ended.decoded_messages() + 1,
+            "and whatever the exit decodes, it must decode on both doors \
+             (+1 for the second flow, which only the evicting dissection has)"
+        );
+        assert_eq!(
+            evicted.byte_residue().recovered,
+            ended.byte_residue().recovered + msg.len() as u64,
+            "and the retired flow's recovered bytes must not leave with it"
+        );
+    }
+
+    /// R311y713 (§B1) — and the count of what this reader decoded must not walk
+    /// backwards when a MULTICAST slot recycles either.
+    ///
+    /// R311y666 gave the stream table this carry and the datagram table never
+    /// got one, which nothing had noticed because the two retirements were
+    /// eighty lines apart. Written next to each other in [`exit`], the omission
+    /// is one missing line rather than a comparison nobody makes: a tap on a
+    /// scouting group is exactly where `max_flows` recycles hardest, so this is
+    /// the table where the number moved wrong FASTEST.
+    #[test]
+    fn an_evicted_datagram_flows_messages_stay_in_the_total() {
+        let msg = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows: Some(1),
+            ..DissectionLimits::default()
+        });
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &msg),
+        );
+        assert_eq!(d.decoded_messages(), 1, "the fixture must decode one");
+
+        // A second datagram 5-tuple evicts the first.
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &udp_packet([10, 0, 0, 3], 7447, [10, 0, 0, 4], 7447, &msg),
+        );
+        assert_eq!(d.datagram_flows().len(), 1, "the cap must have evicted");
+        assert_eq!(d.drops().flows, 1);
+        assert_eq!(
+            d.decoded_messages(),
+            2,
+            "the evicted datagram flow's message must survive its flow"
         );
     }
 
