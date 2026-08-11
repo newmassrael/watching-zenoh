@@ -110,21 +110,83 @@ const MAX_CID_LEN: usize = 20;
 /// `0` is Version Negotiation (RFC 9000 §17.2.1) and is accepted separately in
 /// [`recognise_long`], since it is the one long-header packet with no version to
 /// match.
-const KNOWN_VERSIONS: &[u32] = &[
-    // RFC 9000.
-    0x0000_0001,
-    // RFC 9369, QUIC v2.
-    0x6b33_43cf,
+const KNOWN_VERSIONS: &[(u32, VersionSource)] = &[
+    // RFC 9000, and named by an implementation this tree resolves:
+    // `quinn_proto::DEFAULT_SUPPORTED_VERSIONS[0]`
+    // (quinn-proto-0.11.16/src/lib.rs:161).
+    (0x0000_0001, VersionSource::Implementation),
+    // RFC 9369, QUIC v2. NO implementation on this machine names this word --
+    // see [`VersionSource::Document`] for what was searched.
+    (0x6b33_43cf, VersionSource::Document),
 ];
 
-/// Is this word one of the IETF draft versions (`0xff00_00xx`)?
+/// R311y708 (§1.2a) — WHERE the number a version field was matched against came
+/// from.
+///
+/// Carried because this crate has a rule about constants — one it cannot check
+/// must not be carried as though it could (R311y695) — and because the flat list
+/// this replaced was in breach of it while looking exactly like compliance. A
+/// reader of `KNOWN_VERSIONS` could not tell which of its entries this tree can
+/// verify and which is a remembered reading of an RFC, and that is precisely the
+/// laundering the rule names.
+///
+/// The alternative considered and REJECTED was to delete the unverifiable entry.
+/// That trades a stated weakness for a silent one: without `0x6b33_43cf` a QUIC
+/// v2 flow is not recognised, so its datagrams go to the zenoh decoder and come
+/// back as the confident wrong answer in this module's own header comment. The
+/// asymmetry decides it — a wrong number here can only silence traffic that
+/// deliberately carries that exact word in the version field behind both header
+/// bits and two valid connection-id lengths, while a missing number silences
+/// every v2 flow there is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionSource {
+    /// An implementation in this tree's own dependency graph names this word,
+    /// so a build here is wrong about it only if that implementation is.
+    Implementation,
+    /// Only a specification document names it.
+    ///
+    /// MEASURED for `0x6b33_43cf` (R311y708): absent from every `.rs` and
+    /// `.toml` in this machine's cargo registry cache;
+    /// `quinn_proto::DEFAULT_SUPPORTED_VERSIONS` lists v1 and six drafts and not
+    /// this (quinn-proto-0.11.16/src/lib.rs:160-168); `rustls::quic::Version::V2`
+    /// carries the salt and the `quicv2 key` / `iv` / `hp` labels and no wire
+    /// number at all (rustls-0.23.40/src/quic.rs:1003,1015,1023,1031).
+    Document,
+}
+
+/// Which authority names this word as a QUIC version, if any.
+///
+/// `None` is the answer for a word that is not a version this reader accepts —
+/// the same answer [`recognise_long`] acts on, exposed so a caller can ask about
+/// provenance without re-deriving the table.
+pub fn version_source(v: u32) -> Option<VersionSource> {
+    if let Some((_, src)) = KNOWN_VERSIONS.iter().find(|(known, _)| *known == v) {
+        return Some(*src);
+    }
+    draft_version_source(v)
+}
+
+/// Is this word one of the IETF draft versions (`0xff00_00xx`), and who names it?
 ///
 /// Kept separate from [`KNOWN_VERSIONS`] because it is a RANGE and because a
 /// draft version is a fact about a capture's age rather than about the
 /// protocol: a reader that refused them would fail to recognise older captures
 /// while reporting them as zenoh, which is the misread this module removes.
-fn is_draft_version(v: u32) -> bool {
-    v & 0xffff_ff00 == 0xff00_0000
+///
+/// R311y708 — the range is split by the same authority question, because the
+/// answer genuinely differs across it: `quinn_proto::DEFAULT_SUPPORTED_VERSIONS`
+/// names `0xff00_001d` through `0xff00_0022` and nothing else in the range, so
+/// the other 250 words are accepted on the shape of the space rather than on any
+/// implementation agreeing.
+fn draft_version_source(v: u32) -> Option<VersionSource> {
+    if v & 0xffff_ff00 != 0xff00_0000 {
+        return None;
+    }
+    Some(if (0xff00_001d..=0xff00_0022).contains(&v) {
+        VersionSource::Implementation
+    } else {
+        VersionSource::Document
+    })
 }
 
 /// Recognise a LONG-header QUIC packet, or answer `None`.
@@ -172,9 +234,7 @@ pub fn recognise_long(payload: &[u8]) -> Option<QuicPacket> {
         // it set; something else produced these bytes.
         return None;
     }
-    if !KNOWN_VERSIONS.contains(&version) && !is_draft_version(version) {
-        return None;
-    }
+    version_source(version)?;
     let kind = match (first >> 4) & 0x03 {
         0 => QuicPacketKind::Initial,
         1 => QuicPacketKind::ZeroRtt,
@@ -400,6 +460,70 @@ mod tests {
             assert_eq!(got.version, Some(1));
             assert_eq!(got.bytes, wire.len(), "the whole datagram is accounted for");
         }
+    }
+
+    /// R311y708 — EVERY ACCEPTED VERSION, PAIRED WITH WHO SAYS SO.
+    ///
+    /// The SET and not a count (R311y634), and stated in both directions,
+    /// because the two halves fail differently: an entry that quietly moved to
+    /// `Implementation` would launder exactly the constant this round un-
+    /// laundered, and one that moved to `Document` would put a caveat on a
+    /// number `quinn_proto::DEFAULT_SUPPORTED_VERSIONS` names out loud.
+    ///
+    /// The negative arm matters just as much. `0x0000_0002` is not a QUIC
+    /// version and must answer `None` rather than any authority — the whole
+    /// point of an explicit list is that "any nonzero word" reduces recognition
+    /// to two header bits, which a zenoh datagram satisfies.
+    #[test]
+    fn each_accepted_version_names_the_authority_that_names_it() {
+        for (word, want) in [
+            // Named by quinn-proto: v1 and the six drafts it lists.
+            (0x0000_0001u32, Some(VersionSource::Implementation)),
+            (0xff00_001d, Some(VersionSource::Implementation)),
+            (0xff00_001e, Some(VersionSource::Implementation)),
+            (0xff00_001f, Some(VersionSource::Implementation)),
+            (0xff00_0020, Some(VersionSource::Implementation)),
+            (0xff00_0021, Some(VersionSource::Implementation)),
+            (0xff00_0022, Some(VersionSource::Implementation)),
+            // Accepted from a document alone: v2, and the rest of the draft
+            // space either side of the six above.
+            (0x6b33_43cf, Some(VersionSource::Document)),
+            (0xff00_0000, Some(VersionSource::Document)),
+            (0xff00_001c, Some(VersionSource::Document)),
+            (0xff00_0023, Some(VersionSource::Document)),
+            (0xff00_00ff, Some(VersionSource::Document)),
+            // Not a version this reader accepts at all.
+            (0x0000_0002, None),
+            (0x6b33_43ce, None),
+            (0xfe00_0001, None),
+            (0xff00_0100, None),
+        ] {
+            assert_eq!(
+                version_source(word),
+                want,
+                "the authority for {word:#010x} is not what this tree measured"
+            );
+        }
+    }
+
+    /// R311y708 — AND THE RECOGNITION IS UNCHANGED BY SAYING SO.
+    ///
+    /// This is what deleting the unverifiable entry would have cost, made
+    /// concrete: a v2 long header is a QUIC packet, and a reader that dropped it
+    /// would hand these bytes to the zenoh decoder, which is the misread in this
+    /// module's own header comment. The caveat rides ALONGSIDE the recognition,
+    /// it does not replace it.
+    #[test]
+    fn a_version_only_a_document_names_is_still_recognised() {
+        let wire = long(0, 0x6b33_43cf, &[0xAA; 20]);
+        let got = recognise_long(&wire).expect("a v2 long header is a QUIC packet");
+        assert_eq!(got.kind, QuicPacketKind::Initial);
+        assert_eq!(got.version, Some(0x6b33_43cf));
+        assert_eq!(
+            version_source(0x6b33_43cf),
+            Some(VersionSource::Document),
+            "and the fact that nothing here can check it survives recognition"
+        );
     }
 
     /// THE DISCRIMINATING NEGATIVE, and it is the reason this module is

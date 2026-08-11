@@ -40,6 +40,26 @@ use alloc::string::{String, ToString};
 
 use crate::agg::{ThroughputGaps, ThroughputTable};
 
+/// R311y708 (§1.2a) — the versions these QUIC flows settled on that NO
+/// implementation in this build names, sorted and deduplicated.
+///
+/// One function rather than a computation inlined into each rendering, because
+/// the two renderings must agree about the SET and not merely about whether it
+/// is empty — a text line that says `0x6b3343cf` beside a JSON array that says
+/// something else is worse than either alone. Both call this.
+fn document_only_versions(q: &[crate::quic::QuicCensus]) -> alloc::vec::Vec<u32> {
+    let mut v: alloc::vec::Vec<u32> = q
+        .iter()
+        .filter_map(|c| c.version)
+        .filter(|ver| {
+            crate::quic::version_source(*ver) == Some(crate::quic::VersionSource::Document)
+        })
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
 /// One capture's findings, ready to render.
 ///
 /// Planes are OPTIONAL and named individually rather than recomputed here: a
@@ -530,7 +550,7 @@ impl<'a> CaptureReport<'a> {
                 ",\"quic\":{{\"flows\":{},\"packets\":{},\"bytes\":{},\"initial\":{},\
                  \"handshake\":{},\"zero_rtt\":{},\"one_rtt\":{},\"retry\":{},\
                  \"version_negotiation\":{},\"unrecognised\":{},\"declared_flows\":{},\
-                 \"declarations_unsupported\":{},{}}}",
+                 \"declarations_unsupported\":{},\"versions_document_only\":[{}],{}}}",
                 q.len(),
                 q.iter().map(|c| c.packets).sum::<usize>(),
                 q.iter().map(|c| c.bytes).sum::<u64>(),
@@ -550,6 +570,15 @@ impl<'a> CaptureReport<'a> {
                 // cost of one is the worst this reader inflicts: real zenoh
                 // withheld from the decoder and reported as protected bytes.
                 q.iter().filter(|c| c.declaration_unsupported()).count(),
+                // R311y708 — the versions among these flows that NO
+                // implementation in this build names. Emitted as the SET rather
+                // than a count so a consumer can see WHICH word it is: the count
+                // says a caveat applies and the word says what to go check.
+                document_only_versions(&q)
+                    .iter()
+                    .map(|v| alloc::format!("\"{v:#010x}\""))
+                    .collect::<alloc::vec::Vec<_>>()
+                    .join(","),
                 // R311y698 — the DECRYPTION result, which was a hard-coded
                 // `"decrypted":false` until a caller existed. A literal that
                 // cannot change is a field a consumer cannot branch on, and it
@@ -858,6 +887,27 @@ impl<'a> CaptureReport<'a> {
                         "  QUIC: {unsupported} DECLARED flow(s) carried no packet this \
                          reader can name as QUIC -- the --quic port is probably wrong, \
                          and that traffic was withheld from the zenoh decoder\n"
+                    ));
+                }
+                // R311y708 — and the sentence for a flow this reader accepted on
+                // a number NOTHING it links against knows. The recognition is
+                // still the right call (the note on `VersionSource` says why
+                // deleting the entry is the worse trade), but a person reading
+                // "QUIC: 1 flow" is entitled to know that this particular flow
+                // rests on a reading of an RFC rather than on agreement with an
+                // implementation, because that is the one line above that could
+                // be wrong for a reason no test here can find.
+                let doc_only = document_only_versions(&q);
+                if !doc_only.is_empty() {
+                    let words = doc_only
+                        .iter()
+                        .map(|v| alloc::format!("{v:#010x}"))
+                        .collect::<alloc::vec::Vec<_>>()
+                        .join(", ");
+                    s.push_str(&format!(
+                        "  QUIC: recognised at version(s) {words}, which no \
+                         implementation in this build names -- accepted from the \
+                         specification alone, and nothing here can check it\n"
                     ));
                 }
             }
@@ -2728,6 +2778,103 @@ mod tests {
             r.to_json().contains("\"walks_stopped\":1"),
             "{}",
             r.to_json()
+        );
+    }
+
+    /// R311y708 (§1.2a) — A VERSION NOTHING HERE CAN CHECK, SAID OUT LOUD IN
+    /// BOTH RENDERINGS.
+    ///
+    /// The two captures differ in FOUR BYTES — the version word — and in nothing
+    /// else, which is what makes this a difference rather than a description.
+    /// Both axes are asserted because either alone is satisfiable by a wrong
+    /// implementation: a reader that printed the caveat unconditionally passes
+    /// the v2 arm, and one that never printed it passes the v1 arm.
+    ///
+    /// The population assertion in the middle is the point of the round. The
+    /// alternative this design rejected was DELETING `0x6b33_43cf`, and its cost
+    /// is exactly the line that asserts the v2 capture still holds a QUIC flow:
+    /// without the entry that count is zero, the datagram goes to the zenoh
+    /// decoder, and the caveat is moot because there is nothing left to caveat.
+    #[test]
+    fn a_version_only_a_document_names_is_said_in_both_renderings() {
+        fn capture_at(version: u32) -> crate::Dissection {
+            let mut initial = alloc::vec![0xC0u8];
+            initial.extend_from_slice(&version.to_be_bytes());
+            initial.push(8);
+            initial.extend_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7]);
+            initial.push(4);
+            initial.extend_from_slice(&[8, 9, 10, 11]);
+            initial.extend_from_slice(&[0xAA; 40]);
+
+            let mut d = crate::Dissection::new();
+            d.push_packet(
+                crate::link::LINKTYPE_ETHERNET,
+                0,
+                &crate::datagram_tests::udp_packet(
+                    [10, 0, 0, 1],
+                    50000,
+                    [10, 0, 0, 2],
+                    7447,
+                    &initial,
+                ),
+            );
+            d
+        }
+
+        let checked = capture_at(0x0000_0001);
+        let unchecked = capture_at(0x6b33_43cf);
+
+        // THE POPULATION, on both arms. A capture holding no QUIC flow renders
+        // no QUIC line at all, and every `!contains` below would then pass for
+        // the wrong reason.
+        for (name, d) in [("v1", &checked), ("v2", &unchecked)] {
+            let flows: alloc::vec::Vec<_> =
+                d.datagram_flows().iter().filter_map(|f| f.quic).collect();
+            assert_eq!(
+                flows.len(),
+                1,
+                "{name}: the long header must have established exactly one QUIC flow"
+            );
+            assert!(
+                flows[0].version.is_some(),
+                "{name}: and that flow must have settled on a version"
+            );
+        }
+
+        let (t_unchecked, j_unchecked) = (
+            CaptureReport::of(&unchecked).to_text(),
+            CaptureReport::of(&unchecked).to_json(),
+        );
+        assert!(
+            t_unchecked.contains(
+                "recognised at version(s) 0x6b3343cf, which no implementation in \
+                 this build names"
+            ),
+            "the person-facing rendering must carry the caveat and the word: \
+             {t_unchecked}"
+        );
+        assert!(
+            j_unchecked.contains("\"versions_document_only\":[\"0x6b3343cf\"]"),
+            "and the machine-facing one must carry the SET, not a flag: {j_unchecked}"
+        );
+
+        let (t_checked, j_checked) = (
+            CaptureReport::of(&checked).to_text(),
+            CaptureReport::of(&checked).to_json(),
+        );
+        assert!(
+            t_checked.contains("QUIC: 1 flow(s)"),
+            "the v1 arm must still report its flow: {t_checked}"
+        );
+        assert!(
+            !t_checked.contains("no implementation in this build names"),
+            "and must NOT caveat a version quinn-proto names: {t_checked}"
+        );
+        assert!(
+            j_checked.contains("\"versions_document_only\":[]"),
+            "the JSON says empty rather than omitting the key -- a consumer must \
+             be able to tell 'checked' from 'this build has no such field': \
+             {j_checked}"
         );
     }
 }

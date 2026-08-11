@@ -5968,7 +5968,10 @@ layer_c1bn_passive_dissection_features() {
         || { echo "  C1bn FAIL: the wz-capture --list did not run"; return 1; }
     for name in \
         agg::tests::a_reassembled_record_declines_the_offset_it_never_had \
-        report::tests::a_record_with_no_offset_in_the_capture_is_named_in_both_renderings
+        report::tests::a_record_with_no_offset_in_the_capture_is_named_in_both_renderings \
+        quic::tests::each_accepted_version_names_the_authority_that_names_it \
+        quic::tests::a_version_only_a_document_names_is_still_recognised \
+        report::tests::a_version_only_a_document_names_is_said_in_both_renderings
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bn FAIL: $name is absent from the default build"; return 1; }
