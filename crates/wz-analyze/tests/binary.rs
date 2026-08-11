@@ -5339,6 +5339,17 @@ fn the_node_plane_reaches_both_renderings() {
         json.contains("\"node_links\":[]"),
         "and say plainly that no link was established: {json}"
     );
+    // R311y714 (§1.1f, [REDACTED-REQ]) — occupancy, with its denominator visible. A
+    // scouting-only capture attributes nothing to anybody, and the export must
+    // say that rather than render a tidy zero share.
+    assert!(
+        json.contains("\"share_bp\":null"),
+        "a capture that attributed nothing has no share to state: {json}"
+    );
+    assert!(
+        json.contains("\"node_bytes\":{\"attributed\":0,"),
+        "and the denominator must be readable: {json}"
+    );
 
     // ABSENT without the flag, not empty: a reader who did not ask must not be
     // told the capture named no nodes.

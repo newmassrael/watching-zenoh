@@ -681,11 +681,19 @@ impl<'a> CaptureReport<'a> {
                 }
                 let e = node.evidence;
                 s.push_str(&alloc::format!(
-                    "{{\"zid\":\"{}\",\"whatami\":{},\"init\":{},\"join\":{},\
+                    "{{\"zid\":\"{}\",\"whatami\":{},\"wire_bytes\":{},\
+                     \"share_bp\":{},\"init\":{},\"join\":{},\
                      \"hello\":{},\"scout\":{},\"inadmissible\":{},\"flows\":{}}}",
                     hex_zid(&node.zid),
                     match node.whatami {
                         Some(w) => alloc::format!("\"{}\"", role_name(w)),
+                        None => "null".into(),
+                    },
+                    node.wire_bytes,
+                    match n.share_bp(i) {
+                        Some(bp) => alloc::format!("{bp}"),
+                        // NULL and not zero: a capture that attributed nothing
+                        // has no share to state, and `0` would be a claim.
                         None => "null".into(),
                     },
                     e.init,
@@ -696,7 +704,12 @@ impl<'a> CaptureReport<'a> {
                     node.flows.len()
                 ));
             }
-            s.push_str("],\"node_links\":[");
+            s.push_str(&alloc::format!(
+                "],\"node_bytes\":{{\"attributed\":{},\"unattributed\":{}}},\
+                 \"node_links\":[",
+                n.attributed_bytes(),
+                n.unattributed_bytes()
+            ));
             for (i, link) in n.links().iter().enumerate() {
                 if i > 0 {
                     s.push(',');
@@ -781,20 +794,25 @@ impl<'a> CaptureReport<'a> {
         // each vertex and edge.
         if let Some(n) = self.nodes {
             s.push_str(&format!(
-                "  nodes: {} (links {})\n",
+                "  nodes: {} (links {}); unit bytes attributed {}, \
+                 unattributed {}\n",
                 n.nodes().len(),
-                n.links().len()
+                n.links().len(),
+                n.attributed_bytes(),
+                n.unattributed_bytes()
             ));
-            for node in n.nodes() {
+            for (i, node) in n.nodes().iter().enumerate() {
                 let e = node.evidence;
                 s.push_str(&format!(
-                    "    {} role {} -- init {}, join {}, hello {}, scout {}, \
-                     inadmissible {}, flows {}\n",
+                    "    {} role {} -- share {}.{:02}%, init {}, join {}, \
+                     hello {}, scout {}, inadmissible {}, flows {}\n",
                     hex_zid(&node.zid),
                     match node.whatami {
                         Some(w) => role_name(w),
                         None => "unstated",
                     },
+                    n.share_bp(i).unwrap_or(0) / 100,
+                    n.share_bp(i).unwrap_or(0) % 100,
                     e.init,
                     e.join,
                     e.hello,

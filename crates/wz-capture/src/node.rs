@@ -97,6 +97,14 @@ pub struct ObservedNode {
     pub first_packet: usize,
     /// Flows this zid was named on, in first-appearance order.
     pub flows: Vec<FlowKey>,
+    /// R311y714 (§1.1f) — transport-unit bytes this node SENT, over the flows
+    /// where the capture could say which end it is.
+    ///
+    /// Counted once per UNIT and not once per message: `unit_len` rides on
+    /// every message of a batch (it is the length the message arrived under),
+    /// so summing it per message multiplies a batch by its own message count.
+    /// Only the message at `batch_index == 0` contributes.
+    pub wire_bytes: u64,
 }
 
 /// Two nodes that named themselves to each other on one flow.
@@ -115,6 +123,15 @@ pub struct ObservedLink {
 pub struct NodeCensus {
     nodes: Vec<ObservedNode>,
     links: Vec<ObservedLink>,
+    /// R311y714 (§1.1f) — unit bytes on a direction whose SENDER this capture
+    /// cannot name.
+    ///
+    /// The honesty valve on every share this type computes. A capture that
+    /// joins a session already in progress has no handshake, so no direction
+    /// has an owner and every byte lands here — and a share of the attributed
+    /// bytes alone would then be a percentage of a fraction, presented as a
+    /// percentage of the whole. A reader must be able to see the denominator.
+    unattributed_bytes: u64,
 }
 
 impl NodeCensus {
@@ -131,6 +148,42 @@ impl NodeCensus {
     /// Every link where both ends named themselves.
     pub fn links(&self) -> &[ObservedLink] {
         &self.links
+    }
+
+    /// R311y714 — unit bytes this census could not credit to any node.
+    ///
+    /// Read it BEFORE any share below: a capture with no handshake in it
+    /// attributes nothing, and shares over an empty numerator would otherwise
+    /// read as a tidy 0% rather than as "this capture cannot say".
+    pub fn unattributed_bytes(&self) -> u64 {
+        self.unattributed_bytes
+    }
+
+    /// Unit bytes credited to a named node.
+    pub fn attributed_bytes(&self) -> u64 {
+        self.nodes.iter().map(|n| n.wire_bytes).sum()
+    }
+
+    /// R311y714 (§1.1f) — one node's share of every unit byte this capture
+    /// carried, attributed or not, in parts per ten thousand.
+    ///
+    /// The DENOMINATOR IS THE WHOLE CAPTURE, not the attributed part. A share
+    /// over the attributed bytes alone would rise as attribution got worse,
+    /// which is the one direction an occupancy figure must never move.
+    ///
+    /// Integer basis points rather than a float: this crate is `no_std` and a
+    /// percentage rendered from an integer ratio cannot drift between the two
+    /// renderings that print it. TRUNCATED, so N nodes' shares sum to between
+    /// `10_000 - N` and `10_000` — a consumer that needs them to add up
+    /// exactly must carry the remainder itself rather than round here, where
+    /// rounding would make one node's share depend on the others'.
+    pub fn share_bp(&self, node: usize) -> Option<u32> {
+        let total = self.attributed_bytes() + self.unattributed_bytes;
+        if total == 0 {
+            return None;
+        }
+        let n = self.nodes.get(node)?;
+        Some(((n.wire_bytes.saturating_mul(10_000)) / total) as u32)
     }
 
     /// The node carrying `zid`, if the capture named it.
@@ -188,6 +241,21 @@ impl NodeCensus {
         if let (Some(a), Some(b)) = (ends[0], ends[1]) {
             if a != b {
                 self.record_link(a, b, flow);
+            }
+        }
+        // R311y714 (§1.1f) — SECOND pass, and it has to be second: which node
+        // owns a direction is settled by the handshake, and a fold that
+        // attributed bytes as it walked would credit everything before the
+        // INIT to nobody even on a flow whose INIT arrives one message later.
+        for frame in frames {
+            // Once per unit. See `ObservedNode::wire_bytes`.
+            if frame.batch_index != 0 {
+                continue;
+            }
+            let bytes = frame.unit_len as u64;
+            match ends[dir_index(frame.direction)] {
+                Some(idx) => self.nodes[idx].wire_bytes += bytes,
+                None => self.unattributed_bytes += bytes,
             }
         }
     }
@@ -272,6 +340,7 @@ impl NodeCensus {
                     evidence: NodeEvidence::default(),
                     first_packet,
                     flows: Vec::new(),
+                    wire_bytes: 0,
                 });
                 self.nodes.len() - 1
             }
@@ -495,6 +564,154 @@ mod tests {
             "a JOIN announces to a group; its other end is every listener, \
              which is not a pair"
         );
+    }
+
+    /// R311y714 (§1.1f) — traffic is credited to the node that SENT it, and
+    /// what cannot be credited is stated rather than divided away.
+    ///
+    /// [REDACTED-REQ] asks for occupancy against the whole, and the trap is the
+    /// denominator: a capture that joins a session already in progress carries
+    /// no handshake, so no direction has an owner. Sharing out only the
+    /// attributed bytes would make such a capture read as a tidy 100% for
+    /// whoever happened to be identified, and the figure would IMPROVE as
+    /// attribution got worse.
+    #[test]
+    fn traffic_is_credited_to_its_sender_and_the_rest_is_said_aloud() {
+        let mut d = Dissection::new();
+        // A handshake each way, then a keepalive from the A side only.
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &tcp_packet(1000, &framed_init(&[0xA1; 4])),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &crate::datagram_tests::tcp_packet_reverse(2000, &framed_init(&[0xB2; 4])),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            2,
+            &tcp_packet(
+                1000 + framed_init(&[0xA1; 4]).len() as u32,
+                &framed_keepalive(),
+            ),
+        );
+        d.finish();
+
+        let census = nodes(&d);
+        let a = census
+            .nodes()
+            .iter()
+            .position(|n| n.zid == [0xA1; 4])
+            .expect("the A-side node");
+        let b = census
+            .nodes()
+            .iter()
+            .position(|n| n.zid == [0xB2; 4])
+            .expect("the B-side node");
+        assert!(
+            census.nodes()[a].wire_bytes > census.nodes()[b].wire_bytes,
+            "A sent two units and B one: {:?}",
+            census.nodes()
+        );
+        assert_eq!(
+            census.unattributed_bytes(),
+            0,
+            "every direction on this flow has an owner"
+        );
+        // Truncated basis points: two nodes lose at most two. Asserted as the
+        // stated range rather than as equality, because equality would pass
+        // only by luck of these byte counts and would break on the next
+        // fixture for a reason that is not a defect.
+        let sum = census.share_bp(a).unwrap() + census.share_bp(b).unwrap();
+        assert!(
+            (9_998..=10_000).contains(&sum),
+            "the two shares are the whole capture, less truncation: {sum}"
+        );
+    }
+
+    /// R311y714 (§1.1f) — THE DENOMINATOR. A share is of the whole capture,
+    /// not of the part this reader could attribute.
+    ///
+    /// Written because the first version of the test above did NOT bind this:
+    /// changing the divisor to the attributed bytes alone left every assertion
+    /// green. The fixture that catches it needs PARTIAL attribution — one flow
+    /// with a handshake and one without — and then the difference is the whole
+    /// point: over the attributed part the identified node reads as 100%, and
+    /// over the capture it reads as its actual share of the traffic.
+    #[test]
+    fn a_share_is_of_the_whole_capture_and_not_of_the_attributed_part() {
+        let mut d = Dissection::new();
+        // Flow 1: a full handshake, so both directions have an owner.
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &tcp_packet(1000, &framed_init(&[0xA1; 4])),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &crate::datagram_tests::tcp_packet_reverse(2000, &framed_init(&[0xB2; 4])),
+        );
+        // Flow 2: a DIFFERENT 5-tuple carrying traffic with no handshake in the
+        // capture — the mid-session flow, whose bytes belong to nobody this
+        // reader can name.
+        let mut other = tcp_packet(3000, &framed_keepalive());
+        other[26] = 99;
+        d.push_packet(LINKTYPE_ETHERNET, 2, &other);
+        d.finish();
+
+        assert!(
+            d.byte_residue().recovered > 0,
+            "the fixture must carry bytes at all"
+        );
+        let census = nodes(&d);
+        assert!(
+            census.unattributed_bytes() > 0 && census.attributed_bytes() > 0,
+            "the fixture must be PARTIALLY attributed, or it cannot see the \
+             difference: attributed {}, unattributed {}",
+            census.attributed_bytes(),
+            census.unattributed_bytes()
+        );
+        let sum: u32 = (0..census.nodes().len())
+            .map(|i| census.share_bp(i).unwrap())
+            .sum();
+        assert!(
+            sum < 10_000,
+            "the named nodes cannot be the whole capture while some of it is \
+             uncredited: {sum} bp"
+        );
+    }
+
+    /// R311y714 — the same capture WITHOUT its handshake attributes nothing,
+    /// and says so.
+    ///
+    /// The mid-session capture, which is the ordinary case on a deployment
+    /// somebody is debugging. Not a degenerate input: it is the input.
+    #[test]
+    fn a_capture_with_no_handshake_attributes_nothing_and_says_so() {
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1000, &framed_keepalive()));
+        d.finish();
+
+        let census = nodes(&d);
+        assert!(census.nodes().is_empty(), "no node named itself");
+        assert!(
+            census.unattributed_bytes() > 0,
+            "and the bytes are counted as uncredited rather than dropped"
+        );
+        assert_eq!(census.attributed_bytes(), 0);
+        assert_eq!(
+            census.share_bp(0),
+            None,
+            "a share over an empty numerator must be absent, not zero"
+        );
+    }
+
+    /// One length-prefixed KeepAlive.
+    fn framed_keepalive() -> Vec<u8> {
+        alloc::vec![1, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE]
     }
 
     /// One length-prefixed INIT naming `zid`.
