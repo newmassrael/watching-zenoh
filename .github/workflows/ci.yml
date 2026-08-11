@@ -85,8 +85,25 @@ on:
 #
 # The cost of this is runner time: pushes to main now QUEUE rather than
 # superseding each other. That is what the runner time is for.
+# R311y706 — and `cancel-in-progress: false` was only HALF of it. MEASURED on
+# the very next pair of pushes: the run for `345ee1cb` survived two of them
+# (which is the flag working, and would not have happened before), while the run
+# for `3210c80a` -- the commit carrying the fix -- was CANCELLED at 05:08 while
+# still QUEUED. GitHub's flag protects the run that is already executing; a
+# pending run is superseded regardless, because a group keeps at most one.
+#
+# R311y704's carry predicted "two in succession should now yield two runs that
+# both reach a conclusion". That was wrong, and this is the correction: on main
+# the group is per-COMMIT, so nothing supersedes anything and every commit gets
+# its own verdict. Branches keep the collapsing group, where only the tip
+# matters.
+#
+# The cost is queue time rather than money -- Actions is free for public repos
+# on standard runners -- and it is the cost R311y704's own argument already
+# accepted: every commit on main is a state someone can bisect to, and the run
+# IS its verdict.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.sha) || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
