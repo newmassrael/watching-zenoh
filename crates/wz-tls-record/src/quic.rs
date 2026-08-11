@@ -1188,3 +1188,84 @@ mod frame_tests {
         assert_eq!(r.dropped(), 5, "and what did not fit is counted");
     }
 }
+
+#[cfg(test)]
+mod keylog_tests {
+    use super::*;
+    use crate::keylog::KeyLog;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// R311y697 (§1.2a) — a 1-RTT secret reaches QUIC keys through an ORDINARY
+    /// key log line, and R311y694's carry said it could not.
+    ///
+    /// ## The claim that was wrong, and how it was checked
+    ///
+    /// That round recorded: "Handshake and 1-RTT keys need `QUIC_*_TRAFFIC_
+    /// SECRET` entries, which `keylog::KeyLog` does not parse: it knows the TLS
+    /// label set." Measured against the sources on this machine: rustls emits
+    /// `CLIENT_TRAFFIC_SECRET_0` and `CLIENT_HANDSHAKE_TRAFFIC_SECRET` for QUIC
+    /// exactly as for TLS (`rustls-0.23.43/src/tls13/key_schedule.rs`:1026-1028)
+    /// and neither it nor `quinn-proto` mentions a `QUIC_` label anywhere. The
+    /// NSS key log format has ONE label set and QUIC uses it.
+    ///
+    /// So nothing had to be added. What was missing was a test saying so —
+    /// the fourth time this session a carry's "blocked" turned out to be a
+    /// claim nobody had measured.
+    ///
+    /// ## What this gates, and what it leans on
+    ///
+    /// Gates: the log parses both label kinds, the secret comes out verbatim,
+    /// and the keys derived from it are NOT the Initial ones. Leans on: the
+    /// AEAD and header protection are already oracle-gated against rustls for
+    /// Initial keys, and `initial` reaches them through this same `derive` —
+    /// so what is unproven here is not the cryptography but only that a 1-RTT
+    /// packet in a real capture is found and its short header walked, which is
+    /// this track's remaining item and is stated as such.
+    #[test]
+    fn a_one_rtt_secret_reaches_quic_keys_through_an_ordinary_key_log_line() {
+        let secret: Vec<u8> = (0..32u8)
+            .map(|i| i.wrapping_mul(7).wrapping_add(3))
+            .collect();
+        let handshake: Vec<u8> = (0..32u8)
+            .map(|i| i.wrapping_mul(11).wrapping_add(5))
+            .collect();
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(5).wrapping_add(1));
+        let log = KeyLog::parse(
+            format!(
+                "CLIENT_TRAFFIC_SECRET_0 {} {}\nCLIENT_HANDSHAKE_TRAFFIC_SECRET {} {}\n",
+                hex(&random),
+                hex(&secret),
+                hex(&random),
+                hex(&handshake)
+            )
+            .as_bytes(),
+        );
+
+        let entry = log.get(&random).expect("the log holds this connection");
+        // BOTH label kinds, because the carry named both spaces.
+        assert_eq!(
+            entry.get(crate::keylog::SecretLabel::ClientApplication(0)),
+            Some(&secret[..]),
+            "a QUIC 1-RTT secret is written under the TLS application label"
+        );
+        assert_eq!(
+            entry.get(crate::keylog::SecretLabel::ClientHandshake),
+            Some(&handshake[..]),
+            "and the handshake secret under the TLS handshake label"
+        );
+
+        let one_rtt = QuicKeys::derive(Suite::Aes128GcmSha256, &secret);
+        let hs = QuicKeys::derive(Suite::Aes128GcmSha256, &handshake);
+        // ANTI-VACUITY: two different secrets must give two different keys, or
+        // "derive works" would hold for a function that returned a constant.
+        assert_ne!(one_rtt.key, hs.key, "different secrets, different keys");
+        // AND NEITHER IS THE INITIAL KEY of the same connection: the spaces are
+        // separate derivations and a reader that reused one would open nothing.
+        let (initial, _) = QuicKeys::initial(QuicVersion::V1, &random[..8]);
+        assert_ne!(one_rtt.key, initial.key);
+        assert_ne!(hs.key, initial.key);
+    }
+}
