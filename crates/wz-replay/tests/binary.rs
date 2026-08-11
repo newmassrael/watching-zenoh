@@ -152,6 +152,117 @@ fn a_speed_of_zero_is_refused_at_the_command_line() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("greater than zero"));
 }
 
+/// R311y701 (RP2) — A DATAGRAM CAPTURE YIELDS SAMPLES, and before this round it
+/// yielded NONE.
+///
+/// ## The defect, measured
+///
+/// `wz_analyze::samples` walked `dissection.flows()`, which is the TCP half of a
+/// capture. A multicast or UDP-unicast capture therefore produced an empty plan
+/// — and an empty plan is exactly what a capture holding no application traffic
+/// produces, so the tool reported "nothing to replay" about a file full of it.
+///
+/// ## Why the assertion is on the CONTENT
+///
+/// `1 emission(s)` alone would pass on a walker that invented one. The keyexpr
+/// is `demo/dgram`, which appears nowhere but inside the UDP payload of this
+/// fixture, and the byte count is the payload's.
+#[test]
+fn a_datagram_capture_yields_its_samples() {
+    let scratch = Scratch::new("datagram");
+    let capture = scratch.write("dgram.pcapng", &fixture::datagram_capture());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+        .arg(&capture)
+        .output()
+        .expect("runs");
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    assert!(
+        text.contains("1 emission(s)"),
+        "the datagram half of a capture contributes samples: {text}"
+    );
+    assert!(
+        text.contains("`demo/dgram` 5 byte(s)"),
+        "and they are THESE samples, read out of the UDP payload rather than \
+         invented: {text}"
+    );
+    assert!(
+        !text.contains("could not be reached"),
+        "with nothing out of reach on a capture this reader parses twice \
+         consistently: {text}"
+    );
+}
+
+/// R311y701 (RP3) — `--side` narrows the plan to ONE HALF of the conversation,
+/// and the plan says what it left out.
+///
+/// ## Why the field needed a consumer
+///
+/// `Sample::direction` was recorded in R311y700 and read by nobody. Replaying
+/// both halves of a captured conversation re-publishes the peer's answers as
+/// though this node had said them, which is not a replay of a client — so the
+/// axis existed in the data and could not be acted on.
+///
+/// ## Why the exclusion count is asserted
+///
+/// A plan of zero emissions is the same page whether the capture was empty or
+/// the selector took nothing, and those send a reader to opposite places.
+#[test]
+fn the_side_selector_takes_one_half_of_the_conversation_and_says_what_it_left() {
+    let scratch = Scratch::new("side");
+    let capture = scratch.write("reply.pcapng", &fixture::reply_capture());
+
+    let run = |args: &[&str]| {
+        String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+                .arg(&capture)
+                .args(args)
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned()
+    };
+
+    // The fixture's one sample travels from the high endpoint to the low one,
+    // which the field listing prints as B.
+    let kept = run(&["--side", "B"]);
+    assert!(
+        kept.contains("1 emission(s)") && kept.contains("`demo/a`"),
+        "the half that carried it is taken: {kept}"
+    );
+    assert!(
+        !kept.contains("did not take them"),
+        "and nothing was excluded: {kept}"
+    );
+
+    let dropped = run(&["--side", "A"]);
+    assert!(
+        dropped.contains("0 emission(s)"),
+        "the other half takes nothing: {dropped}"
+    );
+    assert!(
+        dropped.contains("1 sample(s) the capture held are not in this plan"),
+        "and the plan SAYS the capture held a sample the selection refused -- \
+         without it this page is indistinguishable from an empty capture: \
+         {dropped}"
+    );
+
+    // A side letter this tool does not know is a usage error, not a silent
+    // both-halves run: a reader who typed `--side client` and got everything
+    // replayed would believe they had narrowed it.
+    let bad = Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+        .arg(&capture)
+        .arg("--side")
+        .arg("client")
+        .output()
+        .expect("runs");
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("--side needs A or B"));
+}
+
 /// The fixtures: real zenoh messages over a real pcapng.
 ///
 /// Copied verbatim from `wz-analyze`'s own binary tests rather than rewritten,
@@ -309,5 +420,40 @@ mod fixture {
             &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
             &[(0, 1_000_000, &tcp_packet_reverse(1000, &body))],
         )
+    }
+
+    /// R311y701 (RP2) — the same reply over a DATAGRAM link. No length prefix:
+    /// a datagram is its own framing unit.
+    pub fn datagram_capture() -> Vec<u8> {
+        let mut frame = vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
+        frame.extend_from_slice(&reply(7, "demo/dgram", b"first"));
+        wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000_000, &udp_to_zenoh(&frame))],
+        )
+    }
+
+    fn udp_to_zenoh(payload: &[u8]) -> Vec<u8> {
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&50000u16.to_be_bytes());
+        udp.extend_from_slice(&7447u16.to_be_bytes());
+        udp.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(payload);
+        let mut ip = vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+        ip.extend_from_slice(&[10, 0, 0, 1]);
+        ip.extend_from_slice(&[10, 0, 0, 2]);
+        let ip_sum = checksum(&[&ip[..20]]);
+        ip[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+        ip.extend_from_slice(&udp);
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
     }
 }

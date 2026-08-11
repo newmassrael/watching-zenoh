@@ -16,7 +16,7 @@
 
 use std::process::ExitCode;
 
-use wz_replay::{plan, render, Mutation, Schedule};
+use wz_replay::{plan, render, Mutation, Schedule, Selection};
 
 const USAGE: &str = "\
 wz-replay -- re-publish a capture's samples into a new session
@@ -29,6 +29,11 @@ OPTIONS:
     --select <keyexpr>
                       replay only samples whose keyexpr matches. zenoh's own
                       dialect, so `demo/**` covers `demo/a`
+    --side <A|B>      replay only one half of the conversation. A is the
+                      direction `wz-analyze --fields` prints as A (low endpoint
+                      to high); B is the reply half. Without it BOTH halves are
+                      replayed, which re-publishes the peer's answers as though
+                      this node had said them
     --gap <ms>        milliseconds between samples at speed 1.0 (default 100)
     --speed <factor>  play faster (>1) or slower (<1). Must be positive
     --max-gap <ms>    ceiling on any one delay (default 10000)
@@ -55,6 +60,7 @@ fn main() -> ExitCode {
     let mut schedule = Schedule::default();
     let mut mutation = Mutation::None;
     let mut select: Option<String> = None;
+    let mut side: Option<wz_session_core::passive::Direction> = None;
     let mut keylog: Option<String> = None;
 
     let mut at = 1usize;
@@ -77,6 +83,14 @@ fn main() -> ExitCode {
             "--select" => match value() {
                 Some(v) => select = Some(v),
                 None => return bad("--select needs a keyexpr"),
+            },
+            // REFUSED rather than defaulted for an unknown letter: a reader who
+            // typed `--side client` and got both halves replayed would believe
+            // they had narrowed the run. The same rule `--payload-format`
+            // applies to a format name this build cannot decode.
+            "--side" => match value().as_deref().and_then(parse_side) {
+                Some(v) => side = Some(v),
+                None => return bad("--side needs A or B"),
             },
             "--gap" => match value().and_then(|v| v.parse().ok()) {
                 Some(v) => schedule.gap_millis = v,
@@ -128,9 +142,26 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let plan = plan(&samples, schedule, mutation, select.as_deref());
+    let plan = plan(
+        &samples,
+        schedule,
+        mutation,
+        Selection {
+            keyexpr: select.as_deref(),
+            side,
+        },
+    );
     print!("{}", render(&plan));
     ExitCode::SUCCESS
+}
+
+/// `A` / `B`, in either case. The letters the field listing prints.
+fn parse_side(text: &str) -> Option<wz_session_core::passive::Direction> {
+    match text {
+        "A" | "a" => Some(wz_session_core::passive::Direction::A),
+        "B" | "b" => Some(wz_session_core::passive::Direction::B),
+        _ => None,
+    }
 }
 
 /// `flip:12` / `truncate:4` / `extend:8:99` / `scramble:7`.

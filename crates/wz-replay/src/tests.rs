@@ -36,8 +36,7 @@ fn sample(keyexpr: &str, payload: &[u8]) -> Sample {
 fn samples(items: Vec<Sample>) -> Samples {
     Samples {
         items,
-        unresolved: 0,
-        undecodable: 0,
+        ..Default::default()
     }
 }
 
@@ -52,7 +51,12 @@ fn a_plan_reaches_the_sink_in_order_and_unchanged() {
         sample("demo/a", b"first"),
         sample("demo/b", b"second"),
     ]);
-    let plan = plan(&input, Schedule::default(), Mutation::None, None);
+    let plan = plan(
+        &input,
+        Schedule::default(),
+        Mutation::None,
+        Selection::default(),
+    );
     let mut sink = Recorder::default();
     assert_eq!(play(&plan, &mut sink), Ok(2));
 
@@ -219,7 +223,15 @@ fn a_selector_narrows_the_plan_by_zenohs_keyexpr_dialect() {
         sample("other/b", b"out"),
         sample("demo/deep/c", b"in too"),
     ]);
-    let plan = plan(&input, Schedule::default(), Mutation::None, Some("demo/**"));
+    let plan = plan(
+        &input,
+        Schedule::default(),
+        Mutation::None,
+        Selection {
+            keyexpr: Some("demo/**"),
+            ..Default::default()
+        },
+    );
     assert_eq!(plan.emissions.len(), 2);
     assert_eq!(plan.emissions[0].keyexpr, "demo/a");
     assert_eq!(
@@ -245,8 +257,14 @@ fn a_plan_says_what_the_capture_held_and_it_will_not_send() {
         items: vec![sample("demo/a", b"x")],
         unresolved: 3,
         undecodable: 1,
+        ..Default::default()
     };
-    let plan = plan(&input, Schedule::default(), Mutation::None, None);
+    let plan = plan(
+        &input,
+        Schedule::default(),
+        Mutation::None,
+        Selection::default(),
+    );
     let rendered = render(&plan);
     assert!(
         rendered.contains("3 message(s) carried a payload whose keyexpr is a numeric id"),
@@ -270,7 +288,12 @@ fn a_refusal_stops_the_replay_at_the_emission_that_failed() {
         sample("demo/b", b"two"),
         sample("demo/c", b"three"),
     ]);
-    let plan = plan(&input, Schedule::default(), Mutation::None, None);
+    let plan = plan(
+        &input,
+        Schedule::default(),
+        Mutation::None,
+        Selection::default(),
+    );
     let mut sink = Recorder {
         fail_at: Some(1),
         ..Default::default()
@@ -295,7 +318,7 @@ fn the_dry_run_rendering_is_the_plan_itself() {
             max_gap_millis: None,
         },
         Mutation::Truncate { to: 2 },
-        None,
+        Selection::default(),
     );
     let rendered = render(&plan);
     assert!(rendered.contains("1 emission(s)"), "{rendered}");

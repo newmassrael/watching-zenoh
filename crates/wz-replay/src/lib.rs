@@ -269,6 +269,20 @@ pub struct Plan {
     pub unresolved: usize,
     /// Messages the capture held that could not be read at all.
     pub undecodable: usize,
+    /// R311y701 (RP2) — datagram messages the extraction could not REACH. The
+    /// third leg of the same floor, and it exists because the datagram half of
+    /// a capture is walked by a second read of the file rather than out of
+    /// retained bytes.
+    pub unreachable: usize,
+    /// R311y701 (RP3) — samples the capture DID hold that this [`Selection`]
+    /// left out.
+    ///
+    /// A plan with no emissions is otherwise the same page whether the capture
+    /// held nothing or the selector took nothing, and those send a reader to
+    /// opposite places: one is traffic to go and find, the other is a pattern
+    /// to fix. The distinction is exactly the one `PayloadDecoding::NoRule`
+    /// draws one crate over.
+    pub excluded: usize,
 }
 
 impl Plan {
@@ -287,19 +301,67 @@ impl Plan {
     }
 }
 
+/// R311y701 (RP3) — WHICH of a capture's samples a replay takes.
+///
+/// # Why the two narrowings travel as one value
+///
+/// R311y700 took the keyexpr selector as a bare argument, and this round adds a
+/// second axis. Two `Option`s side by side at a call site are two things a
+/// caller can transpose, and the arity only grows — the same argument
+/// `RowAt` settled for the renderers in R311y688.
+///
+/// # Why `side` exists at all
+///
+/// [`Sample::direction`] was recorded in R311y700 and read by NOBODY: the field
+/// was carried through the extraction, into the plan's input, and never
+/// consulted. A capture holds both halves of a conversation, and re-publishing
+/// both means re-publishing the peer's replies as though this node had said
+/// them — which is not a replay of a client, it is a fabrication of a server.
+/// So the field acquires the consumer it was recorded for.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Selection<'a> {
+    /// Only samples whose keyexpr matches, in zenoh's own dialect (`demo/**`
+    /// covers `demo/a`). `None` takes every topic.
+    pub keyexpr: Option<&'a str>,
+    /// Only samples that travelled this way. `None` takes both halves.
+    pub side: Option<wz_session_core::passive::Direction>,
+}
+
+impl Selection<'_> {
+    /// Does this selection take that sample?
+    fn takes(&self, sample: &Sample) -> bool {
+        if let Some(side) = self.side {
+            if sample.direction != side {
+                return false;
+            }
+        }
+        match self.keyexpr {
+            None => true,
+            Some(pattern) => {
+                let chunks: Vec<&str> = pattern.split('/').collect();
+                wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, &sample.keyexpr)
+            }
+        }
+    }
+}
+
 /// Build the plan for these samples.
 ///
-/// `select` narrows by key expression using zenoh's own dialect; `None` takes
-/// everything. Narrowing here rather than at emit time is what makes the plan
-/// the whole truth about a run.
+/// Narrowing here rather than at emit time is what makes the plan the whole
+/// truth about a run.
 pub fn plan(
     samples: &Samples,
     schedule: Schedule,
     mutation: Mutation,
-    select: Option<&str>,
+    selection: Selection<'_>,
 ) -> Plan {
     let mut emissions = Vec::new();
-    for sample in samples.items.iter().filter(|s| covered(select, s)) {
+    let mut excluded = 0usize;
+    for sample in &samples.items {
+        if !selection.takes(sample) {
+            excluded += 1;
+            continue;
+        }
         let outcome = mutation.apply(&sample.payload);
         emissions.push(PlannedEmission {
             delay_millis: schedule.delay_before(emissions.len()),
@@ -313,17 +375,8 @@ pub fn plan(
         emissions,
         unresolved: samples.unresolved,
         undecodable: samples.undecodable,
-    }
-}
-
-/// Does the selector cover this sample's key expression?
-fn covered(select: Option<&str>, sample: &Sample) -> bool {
-    match select {
-        None => true,
-        Some(pattern) => {
-            let chunks: Vec<&str> = pattern.split('/').collect();
-            wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, &sample.keyexpr)
-        }
+        unreachable: samples.unreachable,
+        excluded,
     }
 }
 
@@ -360,6 +413,25 @@ pub fn render(plan: &Plan) -> String {
         out.push_str(&format!(
             "  {} message(s) could not be read at all\n",
             plan.undecodable
+        ));
+    }
+    // R311y701 (RP2) — the datagram half's own floor, named separately because
+    // it is a disagreement between two reads of the capture rather than a
+    // message this walker does not understand.
+    if plan.unreachable > 0 {
+        out.push_str(&format!(
+            "  {} datagram message(s) could not be reached in the capture's own \
+             bytes on a second read\n",
+            plan.unreachable
+        ));
+    }
+    // R311y701 (RP3) — what the SELECTOR left out, so an empty plan is never
+    // mistaken for an empty capture.
+    if plan.excluded > 0 {
+        out.push_str(&format!(
+            "  {} sample(s) the capture held are not in this plan because the \
+             selection did not take them\n",
+            plan.excluded
         ));
     }
     for (index, emission) in plan.emissions.iter().enumerate() {

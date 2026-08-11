@@ -5228,7 +5228,9 @@ layer_c1bw_analyze_cli() {
         the_epoch_line_reaches_the_rendering \
         a_payload_format_rule_decodes_by_keyexpr_and_reports_message_coordinates \
         a_format_name_this_build_cannot_decode_is_refused_at_the_command_line \
-        the_payload_decoding_reaches_the_json_as_one_document
+        the_payload_decoding_reaches_the_json_as_one_document \
+        a_payload_format_rule_reaches_every_row_producer \
+        a_nested_payload_is_decoded_to_its_leaves_at_the_command_line
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bw FAIL: $name is absent from the binary test target"
@@ -5290,7 +5292,12 @@ layer_c1bw_analyze_cli() {
         quic_pass_tests::a_quic_capture_and_a_key_log_yield_the_session_at_the_command_line \
         quic_pass_tests::without_keys_the_initial_space_still_opens_and_the_rest_says_why \
         quic_pass_tests::the_json_reports_the_decryption_rather_than_a_literal_false \
-        quic_pass_tests::a_key_log_for_one_direction_opens_that_half_and_names_the_other
+        quic_pass_tests::a_key_log_for_one_direction_opens_that_half_and_names_the_other \
+        payload_formats::tests::a_nested_message_is_walked_and_its_paths_name_the_route \
+        payload_formats::tests::a_span_two_layers_in_is_still_in_the_outer_payloads_coordinates \
+        payload_formats::tests::a_length_field_that_is_not_a_message_falls_back_to_its_byte_count \
+        payload_formats::tests::printable_bytes_are_text_even_when_they_would_parse_as_a_message \
+        payload_formats::tests::nesting_past_the_bound_says_so_rather_than_going_quiet
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bw FAIL: $name is absent from the wz-analyze lib target"
@@ -5350,7 +5357,9 @@ layer_c1by_replay_engine() {
         a_capture_yields_a_plan_naming_its_keyexpr_and_its_payload_length \
         the_speed_and_gap_options_reach_the_plan \
         the_fuzz_option_mutates_the_payload_and_the_plan_says_so \
-        a_speed_of_zero_is_refused_at_the_command_line
+        a_speed_of_zero_is_refused_at_the_command_line \
+        a_datagram_capture_yields_its_samples \
+        the_side_selector_takes_one_half_of_the_conversation_and_says_what_it_left
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1by FAIL: $name is absent from the wz-replay binary target"
@@ -5768,6 +5777,7 @@ layer_c1bt_capture_no_default_features() {
         payload::census_tests::a_payload_carried_by_a_response_answers_kind_reply \
         report::tests::one_selector_narrows_every_plane_of_the_report \
         report::tests::one_undecided_plane_makes_the_page_a_floor_when_it_is_the_only_plane \
+        report::tests::a_quic_decryption_plane_alone_moves_the_verdict_and_both_renderings \
         agg::tests::a_batch_this_build_cannot_decompress_is_counted_rather_than_missing \
         exchange::tests::a_batch_this_build_cannot_decompress_is_unread_rather_than_absent \
         payload::census_tests::a_batch_this_build_cannot_decompress_is_a_gap_and_not_a_finding \
