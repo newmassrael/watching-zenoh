@@ -5225,7 +5225,10 @@ layer_c1bw_analyze_cli() {
         the_messages_option_lists_what_was_read_and_not_only_how_much \
         the_json_listing_carries_the_messages_and_stays_one_document \
         the_quic_and_max_message_options_reach_the_analysis \
-        the_epoch_line_reaches_the_rendering
+        the_epoch_line_reaches_the_rendering \
+        a_payload_format_rule_decodes_by_keyexpr_and_reports_message_coordinates \
+        a_format_name_this_build_cannot_decode_is_refused_at_the_command_line \
+        the_payload_decoding_reaches_the_json_as_one_document
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bw FAIL: $name is absent from the binary test target"

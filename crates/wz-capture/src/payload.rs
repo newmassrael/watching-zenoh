@@ -1122,6 +1122,319 @@ pub(crate) mod tests_support {
     }
 }
 
+/// R311y699 ([REDACTED-REQ]) — a payload format this crate does not know, decoded by
+/// somebody who does, selected BY KEY EXPRESSION.
+///
+/// # Why the mapping is the requirement and the format is the example
+///
+/// The requirement reads "decode a user-defined format (nanopb / e2e) by key
+/// expression mapping". The format list is parenthetical and the deployments
+/// differ; what is not optional is that the SELECTION is by keyexpr, because a
+/// capture carries many topics and one payload shape per topic is the only
+/// thing that makes a schema-less decoder safe to apply at all. A decoder run
+/// over the wrong topic does not fail — it produces fields.
+///
+/// So this crate owns the MAP and never a format. The seam points the same way
+/// `tls::RecordOpener` does: this crate has zero third-party dependencies
+/// because its decode path builds for the MCU profiles, and a format decoder is
+/// exactly the kind of thing that grows one.
+pub mod formats {
+    use alloc::borrow::ToOwned;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    /// One field a format decoder recovered, with the bytes it came from.
+    ///
+    /// The span is relative to the PAYLOAD, not to the message: a decoder is
+    /// handed a payload slice and knows nothing about where that slice sat. The
+    /// caller that sliced it is the one that can add its base, and it is the
+    /// only one that can — the same rule R311y677 settled for the field layer's
+    /// three coordinate spaces.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct PayloadField {
+        /// A path a reader can key on, e.g. `1` or `3.2` for a nested field.
+        pub path: String,
+        /// What the decoder made of it, rendered.
+        pub value: String,
+        /// First byte of the field, within the payload.
+        pub start: usize,
+        /// One past the last.
+        pub end: usize,
+    }
+
+    /// Why a payload did not decode.
+    ///
+    /// Three answers and not one, because a reader acts differently on each: a
+    /// format that says "these are not my bytes" is a mapping question, a
+    /// truncation is a capture question, and a malformed field is a sender
+    /// question.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum PayloadFormatError {
+        /// The bytes ran out mid-field, at this offset.
+        Truncated(usize),
+        /// A field this decoder could not read, and why.
+        Malformed { at: usize, why: String },
+        /// These bytes are not this format at all. Distinct from a malformed
+        /// field: it means the MAPPING is wrong, not the traffic.
+        NotThisFormat,
+    }
+
+    impl core::fmt::Display for PayloadFormatError {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            match self {
+                Self::Truncated(at) => write!(f, "the payload ends inside a field at byte {at}"),
+                Self::Malformed { at, why } => write!(f, "byte {at}: {why}"),
+                Self::NotThisFormat => {
+                    write!(f, "these bytes are not this format -- check the mapping")
+                }
+            }
+        }
+    }
+
+    /// A decoder for one payload format.
+    ///
+    /// Implemented OUTSIDE this crate. `wz-analyze` is the composition root and
+    /// carries the built-in ones; a consumer with a proprietary format
+    /// implements this and never patches the analyzer.
+    pub trait PayloadFormat {
+        /// The name a reader types on the command line.
+        fn name(&self) -> &str;
+        /// Decode `payload`, or say why not.
+        fn decode(&self, payload: &[u8]) -> Result<Vec<PayloadField>, PayloadFormatError>;
+    }
+
+    /// Why a mapping rule was refused.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum FormatMapError {
+        /// The pattern carries a wildcard and this build's keyexpr matcher has
+        /// none.
+        ///
+        /// REFUSED rather than matched literally, which is the rule
+        /// [`crate::filter`] settled for the same matcher and the same reason:
+        /// with the wildcard features off a `**` token degrades to a literal
+        /// chunk, so `demo/**` quietly stops matching `demo/a`. For a filter
+        /// that silently empties an answer; here it would silently leave a
+        /// payload undecoded while the reader believes their rule is live.
+        WildcardUnsupported(String),
+        /// The pattern is not a key expression.
+        NotAKeyexpr(String),
+    }
+
+    impl core::fmt::Display for FormatMapError {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            match self {
+                Self::WildcardUnsupported(p) => write!(
+                    f,
+                    "this build's keyexpr matcher has no wildcards, so the \
+                     pattern `{p}` cannot be answered (feature `filter-wildcards`)"
+                ),
+                Self::NotAKeyexpr(p) => write!(f, "`{p}` is not a key expression"),
+            }
+        }
+    }
+
+    /// Which format decodes the payloads of which key expressions.
+    ///
+    /// Rules are tried IN INSERTION ORDER and the first match wins, so a
+    /// reader can put a specific topic ahead of a wildcard covering its
+    /// subtree. Stated because the alternative — longest-pattern-wins — is the
+    /// other reasonable rule and a reader must not have to guess which one this
+    /// is.
+    #[derive(Default)]
+    pub struct FormatMap<'a> {
+        rules: Vec<(String, &'a dyn PayloadFormat)>,
+    }
+
+    impl<'a> FormatMap<'a> {
+        /// An empty map, which decodes nothing.
+        pub fn new() -> Self {
+            Self { rules: Vec::new() }
+        }
+
+        /// Map every keyexpr matching `pattern` to `format`.
+        pub fn insert(
+            &mut self,
+            pattern: &str,
+            format: &'a dyn PayloadFormat,
+        ) -> Result<(), FormatMapError> {
+            if pattern.is_empty() || pattern.starts_with('/') || pattern.ends_with('/') {
+                return Err(FormatMapError::NotAKeyexpr(pattern.to_owned()));
+            }
+            if pattern.contains('*') && !cfg!(feature = "filter-wildcards") {
+                return Err(FormatMapError::WildcardUnsupported(pattern.to_owned()));
+            }
+            self.rules.push((pattern.to_owned(), format));
+            Ok(())
+        }
+
+        /// The format for this key expression, if a rule covers it.
+        ///
+        /// Matching is ZENOH'S OWN (`keyexpr_pattern_matches`), not a glob
+        /// written here — a second dialect would disagree with the router about
+        /// `**` at exactly the interesting cases, which is the argument
+        /// [`crate::filter`] already makes for the selector language.
+        pub fn for_keyexpr(&self, keyexpr: &str) -> Option<&'a dyn PayloadFormat> {
+            self.rules
+                .iter()
+                .find(|(pattern, _)| {
+                    // The matcher takes CHUNKS, which is the same split
+                    // `filter::compile_pattern` performs for the same function.
+                    let chunks: Vec<&str> = pattern.split('/').collect();
+                    wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
+                })
+                .map(|(_, format)| *format)
+        }
+
+        /// Whether any rule was installed. A caller renders nothing for an
+        /// empty map rather than a heading with no rows under it.
+        pub fn is_empty(&self) -> bool {
+            self.rules.is_empty()
+        }
+
+        /// The patterns, in the order they are tried.
+        pub fn patterns(&self) -> impl Iterator<Item = &str> {
+            self.rules.iter().map(|(pattern, _)| pattern.as_str())
+        }
+    }
+}
+
+#[cfg(test)]
+mod format_map_tests {
+    use super::formats::*;
+
+    /// A format that claims every byte, so a test can tell WHICH rule fired
+    /// without depending on any real decoder.
+    struct Marker(&'static str);
+
+    impl PayloadFormat for Marker {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn decode(
+            &self,
+            payload: &[u8],
+        ) -> Result<alloc::vec::Vec<PayloadField>, PayloadFormatError> {
+            Ok(alloc::vec![PayloadField {
+                path: alloc::string::String::from(self.0),
+                value: alloc::format!("{} byte(s)", payload.len()),
+                start: 0,
+                end: payload.len(),
+            }])
+        }
+    }
+
+    /// R311y699 ([REDACTED-REQ]) — the mapping is ZENOH'S keyexpr dialect, and the
+    /// first matching rule wins.
+    ///
+    /// Both halves matter and a test of either alone would pass on a wrong
+    /// build: a map that matched literally would answer `None` for `demo/a`
+    /// under `demo/**`, and one that took the LAST match would hand a specific
+    /// topic to the subtree's decoder.
+    ///
+    /// ⚠ Gated on the wildcard feature because in a build without it `insert`
+    /// REFUSES `demo/**` — which is this module's own rule, measured: the first
+    /// version of this test panicked in the `--no-default-features` lane, which
+    /// is exactly the signal that the refusal is real rather than decorative.
+    /// The insertion-order half runs in every build below.
+    #[test]
+    #[cfg(feature = "filter-wildcards")]
+    fn a_rule_is_matched_by_zenohs_own_keyexpr_dialect_in_insertion_order() {
+        let specific = Marker("specific");
+        let subtree = Marker("subtree");
+        let mut map = FormatMap::new();
+        map.insert("demo/temperature", &specific)
+            .expect("a literal");
+        map.insert("demo/**", &subtree).expect("a wildcard");
+
+        assert_eq!(
+            map.for_keyexpr("demo/temperature").map(|f| f.name()),
+            Some("specific"),
+            "the specific rule is ahead of the subtree that also covers it"
+        );
+        assert_eq!(
+            map.for_keyexpr("demo/pressure").map(|f| f.name()),
+            Some("subtree"),
+            "and `**` matches a sibling, which a literal comparison would not"
+        );
+        assert_eq!(
+            map.for_keyexpr("other/thing").map(|f| f.name()),
+            None,
+            "a keyexpr no rule covers has no format"
+        );
+    }
+
+    /// R311y699 ([REDACTED-REQ]) — the FIRST matching rule wins, in a build of any
+    /// feature set.
+    ///
+    /// Literal patterns only, so this runs where the wildcard test cannot. The
+    /// ordering rule is the half a reader depends on when they put a specific
+    /// topic ahead of a broader one, and leaving it gated would have meant the
+    /// `--no-default-features` lane checked nothing about it.
+    #[test]
+    fn the_first_matching_rule_wins_whatever_the_matcher_can_do() {
+        let first = Marker("first");
+        let second = Marker("second");
+        let mut map = FormatMap::new();
+        map.insert("demo/temperature", &first).expect("a literal");
+        map.insert("demo/temperature", &second).expect("a literal");
+        assert_eq!(
+            map.for_keyexpr("demo/temperature").map(|f| f.name()),
+            Some("first"),
+            "two rules covering one keyexpr resolve to the earlier"
+        );
+        assert_eq!(map.patterns().count(), 2, "and both are still installed");
+    }
+
+    /// R311y699 ([REDACTED-REQ]) — a payload with no rule is left ALONE, which is what
+    /// makes a schema-less decoder safe to offer at all.
+    ///
+    /// A decoder run over the wrong topic does not fail: protobuf's wire format
+    /// will read almost any bytes as fields. So the map is the safety, and an
+    /// empty map decoding nothing is the property that says so.
+    #[test]
+    fn an_empty_map_decodes_nothing_and_says_it_is_empty() {
+        let map = FormatMap::new();
+        assert!(map.is_empty());
+        assert!(map.for_keyexpr("demo/a").is_none());
+    }
+
+    /// R311y699 ([REDACTED-REQ]) — a pattern this build's matcher cannot answer is
+    /// REFUSED, not matched literally.
+    ///
+    /// The same rule and the same reason as the selector language: with the
+    /// wildcard features off, `demo/**` degrades to a literal chunk and the
+    /// reader's rule silently covers nothing while they believe it is live.
+    #[test]
+    #[cfg_attr(
+        feature = "filter-wildcards",
+        ignore = "this build's matcher HAS wildcards; the refusal is unreachable"
+    )]
+    fn a_wildcard_pattern_is_refused_where_the_matcher_has_none() {
+        let marker = Marker("m");
+        let mut map = FormatMap::new();
+        assert!(matches!(
+            map.insert("demo/**", &marker),
+            Err(FormatMapError::WildcardUnsupported(_))
+        ));
+    }
+
+    /// R311y699 — a pattern that is not a key expression is refused by name.
+    #[test]
+    fn a_pattern_that_is_not_a_keyexpr_is_refused() {
+        let marker = Marker("m");
+        let mut map = FormatMap::new();
+        for bad in ["", "/demo", "demo/"] {
+            assert!(
+                matches!(
+                    map.insert(bad, &marker),
+                    Err(FormatMapError::NotAKeyexpr(_))
+                ),
+                "{bad:?} must be refused"
+            );
+        }
+    }
+}
+
 #[cfg(all(test, feature = "network-codecs"))]
 mod census_tests {
     use super::*;

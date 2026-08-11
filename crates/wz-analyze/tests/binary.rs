@@ -4383,3 +4383,235 @@ fn a_tail_outstanding_when_the_opener_moves_on_is_counted() {
          opener moves to the second: {json}"
     );
 }
+
+/// One protobuf message, by hand: field 1 varint 150, field 2 the string
+/// `zenoh`. Both encodings are the wire format's own worked example shapes.
+const PROTOBUF: &[u8] = &[0x08, 0x96, 0x01, 0x12, 0x05, b'z', b'e', b'n', b'o', b'h'];
+
+/// A capture whose reply payload is that protobuf message, under `demo/a`.
+fn protobuf_capture() -> Vec<u8> {
+    let mut client = Vec::new();
+    client.extend_from_slice(&framed_frame(&query(7, "demo/**")));
+    let mut server = Vec::new();
+    server.extend_from_slice(&framed_frame(&reply(7, "demo/a", PROTOBUF)));
+    server.extend_from_slice(&framed_frame(&response_final(7)));
+    wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[
+            (0, 1_000_000, &tcp_packet(1000, &client)),
+            (0, 1_030_000, &tcp_packet_reverse(1000, &server)),
+        ],
+    )
+}
+
+/// R311y699 ([REDACTED-REQ]) — A USER-DEFINED PAYLOAD FORMAT, SELECTED BY KEY
+/// EXPRESSION, at the command line.
+///
+/// ## What the requirement asks and what this proves
+///
+/// "decode a user-defined format (nanopb / e2e) payload by key expression
+/// mapping". The format list is parenthetical; the load-bearing half is the
+/// MAPPING, because a schema-less decoder run over the wrong topic does not
+/// fail — protobuf's wire format reads almost any bytes as fields. So the test
+/// drives all three halves in one run: the rule matches by zenoh's own keyexpr
+/// dialect (`demo/**` covers `demo/a`), the decoder recovers the fields, and
+/// the spans it reports are in the MESSAGE's coordinate space rather than the
+/// payload's.
+///
+/// ## Anti-vacuity
+///
+/// The same capture is run WITHOUT the rule and with a rule for a different
+/// subtree. If the fields appeared in either, "the mapping selected it" would
+/// be a statement about nothing.
+#[test]
+fn a_payload_format_rule_decodes_by_keyexpr_and_reports_message_coordinates() {
+    let scratch = Scratch::new("payload-format");
+    let capture = scratch.write("pb.pcapng", &protobuf_capture());
+
+    let run = |args: &[&str]| {
+        String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                .arg(&capture)
+                .args(args)
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned()
+    };
+
+    let with = run(&["--fields", "--payload-format", "demo/**=protobuf"]);
+    assert!(
+        with.contains("payload `demo/a` as protobuf:"),
+        "the rule fired on a keyexpr the pattern covers by zenoh's dialect: {with}"
+    );
+    assert!(
+        with.contains("1 = varint 150"),
+        "field 1 is a varint and its value is decoded, not shown as bytes: {with}"
+    );
+    assert!(
+        with.contains("2 = len \"zenoh\""),
+        "and a length-delimited field that IS text is rendered as text: {with}"
+    );
+
+    // THE COORDINATES. Every other span in this listing is message-relative
+    // (R311y677), and a decoder is handed a payload slice that knows nothing
+    // about where it sat. So the rebase is the caller's, and a build that
+    // skipped it would print `[0..3]` for field 1.
+    let payload_at = with
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            let rest = line.strip_prefix('[')?;
+            let (span, name) = rest.split_once(']')?;
+            (name.trim().starts_with("payload ")).then(|| {
+                span.split_once("..")
+                    .and_then(|(start, _)| start.parse::<usize>().ok())
+            })?
+        })
+        .expect("the payload field is in the tree");
+    assert!(
+        payload_at > 0,
+        "the payload does not begin at byte zero of the message, or the rebase \
+         below would be untestable"
+    );
+    assert!(
+        with.contains(&format!(
+            "[{}..{}] 1 = varint 150",
+            payload_at,
+            payload_at + 3
+        )),
+        "field 1 sits at the payload's offset plus its own, in MESSAGE \
+         coordinates (payload begins at {payload_at}): {with}"
+    );
+    assert!(
+        with.contains(&format!(
+            "[{}..{}] 2 = len \"zenoh\"",
+            payload_at + 3,
+            payload_at + 10
+        )),
+        "and field 2 follows it: {with}"
+    );
+
+    // ANTI-VACUITY 1: no rule, no payload block at all.
+    let without = run(&["--fields"]);
+    assert!(
+        !without.contains("as protobuf"),
+        "a reader who asked for no rule is told nothing about payload formats: {without}"
+    );
+    assert!(
+        !without.contains("varint 150"),
+        "and the fields are not decoded: {without}"
+    );
+
+    // ANTI-VACUITY 2: a rule for a DIFFERENT subtree does not fire, and says so
+    // by naming the keyexpr it tested -- which is what stops a reader blaming
+    // the decoder for their pattern.
+    let elsewhere = run(&["--fields", "--payload-format", "other/**=protobuf"]);
+    assert!(
+        elsewhere.contains("no --payload-format rule covers `demo/a`"),
+        "the keyexpr that was TESTED is named: {elsewhere}"
+    );
+    assert!(
+        !elsewhere.contains("varint 150"),
+        "and nothing was decoded: {elsewhere}"
+    );
+}
+
+/// R311y699 ([REDACTED-REQ]) — a format name this build has no decoder for is REFUSED
+/// at the command line, and the refusal says what it does have.
+///
+/// A reader who typed `protobufff` and got their payload rendered as raw bytes
+/// would believe their rule was live. That is the same failure the wildcard
+/// refusal in `payload::formats` exists for, one layer out.
+#[test]
+fn a_format_name_this_build_cannot_decode_is_refused_at_the_command_line() {
+    let scratch = Scratch::new("payload-format-unknown");
+    let capture = scratch.write("pb.pcapng", &protobuf_capture());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--fields")
+        .arg("--payload-format")
+        .arg("demo/**=protobufff")
+        .output()
+        .expect("runs");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a rule this build cannot honour is a usage error, not a run that \
+         quietly does less"
+    );
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        err.contains("--payload-format"),
+        "and the message names the option: {err}"
+    );
+
+    // A rule with no `=` at all is the other half of the same refusal.
+    let output = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--fields")
+        .arg("--payload-format")
+        .arg("demo/**")
+        .output()
+        .expect("runs");
+    assert_eq!(output.status.code(), Some(2));
+}
+
+/// R311y699 ([REDACTED-REQ]) — the JSON carries the decoding, in one document.
+#[test]
+fn the_payload_decoding_reaches_the_json_as_one_document() {
+    let scratch = Scratch::new("payload-format-json");
+    let capture = scratch.write("pb.pcapng", &protobuf_capture());
+
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--fields")
+            .arg("--json")
+            .arg("--payload-format")
+            .arg("demo/**=protobuf")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+
+    let parsed: serde_json::Value = serde_json::from_str(&text).expect("one valid document");
+    let rows = parsed["fields"].as_array().expect("a field listing");
+    let decoded = rows
+        .iter()
+        .find(|row| row["payload_decode"]["state"] == serde_json::json!("decoded"))
+        .expect("one row decoded its payload");
+    assert_eq!(
+        decoded["payload_decode"]["keyexpr"],
+        serde_json::json!("demo/a")
+    );
+    assert_eq!(
+        decoded["payload_decode"]["format"],
+        serde_json::json!("protobuf")
+    );
+    let fields = decoded["payload_decode"]["fields"]
+        .as_array()
+        .expect("the decoded fields");
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0]["path"], serde_json::json!("1"));
+    assert_eq!(fields[0]["value"], serde_json::json!("varint 150"));
+    // The spans are the SAME numbers the text rendering printed, which is what
+    // stops the two renderings from drifting into two coordinate spaces.
+    assert!(
+        fields[1]["start"].as_u64().expect("a start") == fields[0]["end"].as_u64().expect("an end"),
+        "the second field begins where the first ends: {decoded}"
+    );
+    // A row whose keyexpr no rule covers says so rather than being absent --
+    // the state a reader needs to tell "rule did not fire" from "rule fired and
+    // found nothing".
+    assert!(
+        rows.iter().any(
+            |row| row["payload_decode"]["state"] == serde_json::json!("no_rule")
+                || row["payload_decode"]["state"] == serde_json::json!("no_payload")
+        ),
+        "the other messages carry a state too: {text}"
+    );
+}

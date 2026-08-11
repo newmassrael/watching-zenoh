@@ -57,6 +57,9 @@ pub struct Options {
     /// the bytes; see
     /// [`Dissection::from_capture_declaring_quic`](wz_capture::Dissection::from_capture_declaring_quic).
     pub quic_ports: Vec<u16>,
+    /// R311y699 ([REDACTED-REQ]) — payload format rules, as `(keyexpr pattern, format
+    /// name)` in the order they were typed. First match wins.
+    pub payload_formats: Vec<(String, String)>,
     /// R311y670 (§1.2a) — the ceiling on messages listed per flow.
     ///
     /// R311y669 added the ceiling to the library and left `wz-analyze` passing
@@ -201,6 +204,12 @@ OPTIONS:
                       with the direction, offset and namespace of each.
                       Implies --flows
     --json            render the report as JSON instead of text
+    --payload-format <keyexpr>=<format>
+                      decode the PAYLOAD of messages whose key expression
+                      matches <keyexpr>, using <format>. Repeatable; the
+                      first matching rule wins. Matching is zenoh's own
+                      keyexpr dialect, so `demo/**` covers `demo/a`.
+                      Needs --fields. Formats: protobuf.
     --quic <port>     treat UDP traffic on this port as QUIC. Repeatable.
                       A capture that begins mid-connection carries nothing that
                       distinguishes a QUIC 1-RTT packet from a zenoh datagram --
@@ -244,6 +253,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut per_flow = false;
     let mut per_message = false;
     let mut quic_ports: Vec<u16> = Vec::new();
+    let mut payload_formats: Vec<(String, String)> = Vec::new();
     let mut max_messages: Option<usize> = None;
     let mut census = Census::default();
     let mut select: Option<wz_capture::filter::Filter> = None;
@@ -273,6 +283,25 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
                 // combination that has one sensible meaning.
                 per_flow = true;
                 per_message = true;
+            }
+            // R311y699 ([REDACTED-REQ]) — `<keyexpr pattern>=<format>`, repeatable.
+            // REFUSED rather than defaulted on either half: a rule whose
+            // format name this build has no decoder for would otherwise leave
+            // the payload rendered as bytes while the reader believes their
+            // rule is live -- the same failure mode the wildcard refusal in
+            // `payload::formats` exists for.
+            "--payload-format" => {
+                at += 1;
+                let raw = args
+                    .get(at)
+                    .ok_or(UsageError::MissingValue("--payload-format"))?;
+                let (pattern, name) = raw
+                    .split_once('=')
+                    .ok_or_else(|| UsageError::BadValue("--payload-format", raw.clone()))?;
+                if payload_formats::builtin(name).is_none() {
+                    return Err(UsageError::BadValue("--payload-format", raw.clone()));
+                }
+                payload_formats.push((pattern.to_string(), name.to_string()));
             }
             "--quic" => {
                 at += 1;
@@ -320,6 +349,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
         per_flow,
         per_message,
         quic_ports,
+        payload_formats,
         max_messages,
         census,
         per_field,
@@ -433,6 +463,7 @@ pub fn analyze_declaring_quic(
         per_message,
         messages_per_flow,
         quic_ports,
+        payload_rules: &[],
         census: Census::default(),
         per_field: false,
         select: None,
@@ -471,6 +502,9 @@ pub struct Request<'a> {
     pub messages_per_flow: Option<usize>,
     /// UDP ports the caller declares to be QUIC.
     pub quic_ports: &'a [u16],
+    /// R311y699 ([REDACTED-REQ]) — payload format rules as `(keyexpr pattern, format
+    /// name)`. Applied to the field layer, so they need `per_field`.
+    pub payload_rules: &'a [(String, String)],
     /// Which observer planes to build. See [`Census`].
     pub census: Census,
     /// R311y675 — dissect each message into its fields.
@@ -491,10 +525,36 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
         per_message,
         messages_per_flow,
         quic_ports,
+        payload_rules,
         census,
         per_field,
         select,
     } = request;
+    // R311y699 ([REDACTED-REQ]) — the rules become a MAP here, in the composition
+    // root: `wz-capture` owns the mapping and never a format, so this is the
+    // one place the two meet. A pattern the map refuses is a hard failure
+    // rather than a rule silently dropped.
+    let mut payload_formats = wz_capture::payload::formats::FormatMap::new();
+    let mut payload_refusals: Vec<FieldNote> = Vec::new();
+    for (pattern, name) in payload_rules {
+        match payload_formats::builtin(name) {
+            None => payload_refusals.push(FieldNote::PayloadRuleRefused {
+                rule: format!("{pattern}={name}"),
+                why: format!(
+                    "this build has no decoder named `{name}` (it has: {})",
+                    payload_formats::BUILTIN_NAMES.join(", ")
+                ),
+            }),
+            Some(format) => {
+                if let Err(err) = payload_formats.insert(pattern, format) {
+                    payload_refusals.push(FieldNote::PayloadRuleRefused {
+                        rule: format!("{pattern}={name}"),
+                        why: err.to_string(),
+                    });
+                }
+            }
+        }
+    }
     let mut dissection = Dissection::from_capture_declaring_quic(capture, quic_ports)?;
 
     // The capture's own keys first, then the external log folded in.
@@ -608,6 +668,8 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
                     &fields,
                     format,
                     messages_per_flow,
+                    &payload_formats,
+                    &payload_refusals,
                 ));
             }
             if per_flow {
@@ -634,6 +696,8 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
                     &fields,
                     format,
                     messages_per_flow,
+                    &payload_formats,
+                    &payload_refusals,
                 ));
             }
             if per_flow {
@@ -1173,6 +1237,8 @@ fn field_lines(
     decrypted: &FieldSink,
     format: Format,
     messages_per_flow: Option<usize>,
+    payload_formats: &wz_capture::payload::formats::FormatMap<'_>,
+    payload_refusals: &[FieldNote],
 ) -> String {
     use wz_session_core::dissect::to_json;
 
@@ -1182,6 +1248,14 @@ fn field_lines(
     // the other lacks -- which is exactly what this round found: five notices
     // written straight into the text branch and invisible to a consumer.
     let mut listings: Vec<FlowListing> = Vec::new();
+    // R311y699 — a rule this reader would not install leads the listing, so a
+    // reader sees it before the rows it expected the rule to change.
+    if !payload_refusals.is_empty() {
+        listings.push(FlowListing {
+            rows: String::new(),
+            notes: payload_refusals.to_vec(),
+        });
+    }
     // R311y675 — the separator belongs to the ROW, not to the flow. Counting
     // flows put one comma between two flows and NONE between the rows inside
     // one, which concatenated JSON objects into a document no parser accepts.
@@ -1215,7 +1289,15 @@ fn field_lines(
                 rows.push(',');
             }
             emitted += 1;
-            render_field_row(&mut rows, format, flow, frame, &row, &to_json);
+            render_field_row(
+                &mut rows,
+                format,
+                flow,
+                frame,
+                &row,
+                &to_json,
+                payload_formats,
+            );
         }
         // R311y677 — the sink's rows for this flow, if it was a decrypted one.
         for (f, direction, origin, row) in &decrypted.rows {
@@ -1323,6 +1405,7 @@ struct FlowListing {
 /// That is the silence this track spent six rounds removing for a person and
 /// left standing for a program, and the store's own carry has said so since
 /// R311y678.
+#[derive(Clone)]
 enum FieldNote {
     /// The flow's messages came out of a decryption whose plaintext is not
     /// retained, so there are no bytes here to walk.
@@ -1335,6 +1418,14 @@ enum FieldNote {
     /// The capture could not be parsed a second time, so NO datagram flow could
     /// be walked. Capture-wide, and the only note with no flow.
     CaptureNotReread,
+    /// R311y699 ([REDACTED-REQ]) — a payload-format rule this reader would not install.
+    ///
+    /// Capture-wide, like `CaptureNotReread`, and a NOTE rather than a silent
+    /// drop: a rule that vanished leaves the reader believing their mapping is
+    /// live while every payload under it renders as raw bytes. The command line
+    /// refuses these at parse time; this covers a library caller, which is the
+    /// path that would otherwise be silent.
+    PayloadRuleRefused { rule: String, why: String },
     /// The `--max-messages` bound left messages out of this flow's listing.
     Omitted {
         flow: wz_capture::link::FlowKey,
@@ -1358,6 +1449,7 @@ enum FieldNote {
 }
 
 /// One message whose packet did not vouch for it, and why.
+#[derive(Clone)]
 struct Disagreed {
     /// The packet index the message named.
     at: usize,
@@ -1365,6 +1457,7 @@ struct Disagreed {
 }
 
 /// Why a packet did not vouch for the message that named it.
+#[derive(Clone)]
 enum Disagreement {
     /// The second read has no packet at that index at all.
     Absent,
@@ -1437,7 +1530,7 @@ impl FieldNote {
             | Self::NothingWalkable { flow }
             | Self::Omitted { flow, .. }
             | Self::Disagreement { flow, .. } => Some(flow),
-            Self::CaptureNotReread => None,
+            Self::CaptureNotReread | Self::PayloadRuleRefused { .. } => None,
         }
     }
 
@@ -1447,6 +1540,7 @@ impl FieldNote {
             Self::NotDecrypted { .. } => "not_decrypted",
             Self::NothingWalkable { .. } => "nothing_walkable",
             Self::CaptureNotReread => "capture_not_reread",
+            Self::PayloadRuleRefused { .. } => "payload_rule_refused",
             Self::Omitted { .. } => "omitted",
             Self::Disagreement { .. } => "disagreement",
         }
@@ -1466,6 +1560,9 @@ impl FieldNote {
             Self::CaptureNotReread => {
                 "NO FIELDS -- this capture's packets could not be re-read to walk them".into()
             }
+            Self::PayloadRuleRefused { rule, why } => {
+                format!("payload-format rule `{rule}` was NOT installed -- {why}")
+            }
             Self::Omitted { count, .. } => format!("{count} more not listed"),
             Self::Disagreement { count, .. } => format!(
                 "{count} message(s) skipped -- this reader's two reads of the file \
@@ -1482,6 +1579,7 @@ impl FieldNote {
                 format!("  {} : {sentence}\n", endpoint(&flow.low))
             }
             Self::CaptureNotReread => format!("  datagram flow(s): {sentence}\n"),
+            Self::PayloadRuleRefused { .. } => format!("  {sentence}\n"),
             Self::Omitted { .. } => format!("    ... {sentence}\n"),
             Self::Disagreement { named, .. } => {
                 let mut out = format!("    {sentence}\n");
@@ -1958,6 +2056,7 @@ fn render_field_row(
     frame: &wz_session_core::passive::PassiveFrame,
     row: &FieldRow,
     to_json: &dyn Fn(&wz_session_core::dissect::Field) -> String,
+    payload_formats: &wz_capture::payload::formats::FormatMap<'_>,
 ) {
     // R311y688 — a cleartext stream row's offset IS a byte offset, and the
     // message it names begins past the framing prefix and past whatever of the
@@ -1987,10 +2086,11 @@ fn render_field_row(
         (Format::Json, FieldRow::Walked(field)) => {
             out.push_str(&format!(
                 "{{\"from\":\"{from}\",\"to\":\"{to}\",\"direction\":\"{dir}\",\
-                 \"stream_offset\":{}{},\"field\":{}}}",
+                 \"stream_offset\":{}{},\"field\":{}{}}}",
                 frame.stream_offset,
                 space.json(),
-                to_json(field)
+                to_json(field),
+                payload_block(field, payload_formats, Format::Json)
             ));
         }
         (Format::Json, FieldRow::Declined(why)) => {
@@ -2009,6 +2109,7 @@ fn render_field_row(
                 space.note()
             ));
             push_field_text(out, field, 2);
+            out.push_str(&payload_block(field, payload_formats, Format::Text));
         }
         (Format::Text, FieldRow::Declined(why)) => {
             out.push_str(&format!(
@@ -2513,6 +2614,257 @@ fn walk_plaintext(message: &[u8], frame: &wz_session_core::passive::PassiveFrame
     }
 }
 
+/// R311y699 ([REDACTED-REQ]) — what a payload-format rule did to ONE message.
+///
+/// # Why every non-decode is a named answer rather than silence
+///
+/// A rule that did not fire and a rule that fired and found nothing look
+/// identical in an empty listing, and they send a reader to opposite places:
+/// one is a mapping to fix, the other is traffic to look at. The keyexpr that
+/// was TESTED is carried for the same reason — a reader whose rule covers
+/// `demo/**` needs to see that this message's keyexpr was `other/thing` before
+/// they start doubting the decoder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PayloadDecoding {
+    /// No rules at all. Renders nothing: a reader who passed no
+    /// `--payload-format` is not told about payloads they did not ask about.
+    NoRules,
+    /// This message carries no payload field. Not every zenoh message does.
+    NoPayload,
+    /// The keyexpr is a numeric id with no suffix on the wire, so no rule can
+    /// be tested against it at all.
+    ///
+    /// Said rather than skipped: this is the ordinary shape of a capture that
+    /// began after the declarations, and a reader whose rules silently cover
+    /// nothing would blame the rules.
+    KeyexprUnresolved,
+    /// A keyexpr, and no rule covers it.
+    NoRule(String),
+    /// Decoded, and the fields with spans in the MESSAGE's coordinates.
+    Decoded {
+        keyexpr: String,
+        format: String,
+        fields: Vec<wz_capture::payload::formats::PayloadField>,
+    },
+    /// The format was applied and refused.
+    Refused {
+        keyexpr: String,
+        format: String,
+        why: String,
+    },
+}
+
+/// R311y699 ([REDACTED-REQ]) — the keyexpr and the payload OF ONE MESSAGE.
+///
+/// # Why this is not two `find` calls
+///
+/// [`Field::find`] is first-match-by-name over the whole tree, and its own doc
+/// warns that a group sharing a leaf's name SHADOWS it. Both names collide here:
+/// a `Frame`'s body is a group called `payload`, so `find("payload")` returns
+/// the whole batch rather than the `MsgPut`'s bytes. MEASURED — the first
+/// version of this function decoded a Frame's payload group and the rule never
+/// fired.
+///
+/// Worse than the shadowing is what two independent lookups would MEAN. A
+/// batch carries several messages; taking the first keyexpr and the first
+/// payload bytes anywhere under it would pair a keyexpr with a payload the
+/// sender never put under it, and the rule would decode the wrong bytes while
+/// naming the right topic. So the pair is found INNERMOST-FIRST inside one
+/// subtree: the node returned is the smallest one holding both.
+fn keyexpr_and_payload(
+    field: &wz_session_core::dissect::Field,
+) -> Option<(String, &wz_session_core::dissect::Field)> {
+    use wz_session_core::dissect::FieldValue;
+    if let FieldValue::Nested(children) = &field.value {
+        for child in children {
+            if let Some(found) = keyexpr_and_payload(child) {
+                return Some(found);
+            }
+        }
+    }
+    let keyexpr = subtree_suffix(field)?;
+    let payload = subtree_payload_bytes(field)?;
+    Some((keyexpr, payload))
+}
+
+/// The textual keyexpr anywhere under `field`.
+///
+/// `suffix` is the textual part of a `WireExpr`; a message naming its keyexpr
+/// by numeric id alone has none, and this answers `None` rather than inventing
+/// one. The table that would turn an id into a path is per-flow state in the
+/// throughput plane and this row does not hold it — a boundary, said here so it
+/// is not read as an oversight.
+fn subtree_suffix(field: &wz_session_core::dissect::Field) -> Option<String> {
+    use wz_session_core::dissect::FieldValue;
+    if field.name == "suffix" {
+        if let FieldValue::Text(text) = &field.value {
+            return (!text.is_empty()).then(|| text.clone());
+        }
+    }
+    if let FieldValue::Nested(children) = &field.value {
+        return children.iter().find_map(subtree_suffix);
+    }
+    None
+}
+
+/// The payload BYTES anywhere under `field`.
+///
+/// Bytes and not a group: a `Frame`'s `payload` is a walked sub-structure and a
+/// message's is the application's own bytes, and only the second is something a
+/// format decodes.
+fn subtree_payload_bytes(
+    field: &wz_session_core::dissect::Field,
+) -> Option<&wz_session_core::dissect::Field> {
+    use wz_session_core::dissect::FieldValue;
+    if field.name == "payload" && matches!(field.value, FieldValue::Bytes(_)) {
+        return Some(field);
+    }
+    if let FieldValue::Nested(children) = &field.value {
+        return children.iter().find_map(subtree_payload_bytes);
+    }
+    None
+}
+
+/// Apply the mapping to one walked message.
+fn decode_payload(
+    field: &wz_session_core::dissect::Field,
+    map: &wz_capture::payload::formats::FormatMap<'_>,
+) -> PayloadDecoding {
+    use wz_session_core::dissect::FieldValue;
+    if map.is_empty() {
+        return PayloadDecoding::NoRules;
+    }
+    let Some((keyexpr, payload)) = keyexpr_and_payload(field) else {
+        // Either there is no payload under any keyexpr, or the only keyexpr is
+        // a numeric id. The two are told apart by asking again for each half.
+        return if subtree_payload_bytes(field).is_none() {
+            PayloadDecoding::NoPayload
+        } else {
+            PayloadDecoding::KeyexprUnresolved
+        };
+    };
+    let FieldValue::Bytes(bytes) = &payload.value else {
+        return PayloadDecoding::NoPayload;
+    };
+    let Some(format) = map.for_keyexpr(&keyexpr) else {
+        return PayloadDecoding::NoRule(keyexpr);
+    };
+    match format.decode(bytes) {
+        Ok(mut fields) => {
+            // The spans arrive PAYLOAD-relative and every other span in this
+            // listing is MESSAGE-relative (R311y677). Rebasing here is the only
+            // place that knows the payload's own offset, and leaving the two
+            // spaces mixed in one listing is the defect R311y677 measured.
+            let base = payload.span.start;
+            for f in &mut fields {
+                f.start += base;
+                f.end += base;
+            }
+            PayloadDecoding::Decoded {
+                keyexpr,
+                format: format.name().to_string(),
+                fields,
+            }
+        }
+        Err(why) => PayloadDecoding::Refused {
+            keyexpr,
+            format: format.name().to_string(),
+            why: why.to_string(),
+        },
+    }
+}
+
+/// Render the payload decoding beside the field tree, in whichever format.
+fn payload_block(
+    field: &wz_session_core::dissect::Field,
+    map: &wz_capture::payload::formats::FormatMap<'_>,
+    format: Format,
+) -> String {
+    let decoding = decode_payload(field, map);
+    if decoding == PayloadDecoding::NoRules {
+        return String::new();
+    }
+    if format == Format::Json {
+        let body = match &decoding {
+            PayloadDecoding::NoRules => unreachable!("returned above"),
+            PayloadDecoding::NoPayload => String::from("{\"state\":\"no_payload\"}"),
+            PayloadDecoding::KeyexprUnresolved => {
+                String::from("{\"state\":\"keyexpr_unresolved\"}")
+            }
+            PayloadDecoding::NoRule(keyexpr) => format!(
+                "{{\"state\":\"no_rule\",\"keyexpr\":\"{}\"}}",
+                escape(keyexpr)
+            ),
+            PayloadDecoding::Refused {
+                keyexpr,
+                format: name,
+                why,
+            } => format!(
+                "{{\"state\":\"refused\",\"keyexpr\":\"{}\",\"format\":\"{}\",\"why\":\"{}\"}}",
+                escape(keyexpr),
+                escape(name),
+                escape(why)
+            ),
+            PayloadDecoding::Decoded {
+                keyexpr,
+                format: name,
+                fields,
+            } => {
+                let rows: Vec<String> = fields
+                    .iter()
+                    .map(|f| {
+                        format!(
+                            "{{\"path\":\"{}\",\"value\":\"{}\",\"start\":{},\"end\":{}}}",
+                            escape(&f.path),
+                            escape(&f.value),
+                            f.start,
+                            f.end
+                        )
+                    })
+                    .collect();
+                format!(
+                    "{{\"state\":\"decoded\",\"keyexpr\":\"{}\",\"format\":\"{}\",\
+                     \"fields\":[{}]}}",
+                    escape(keyexpr),
+                    escape(name),
+                    rows.join(",")
+                )
+            }
+        };
+        return format!(",\"payload_decode\":{body}");
+    }
+    match &decoding {
+        PayloadDecoding::NoRules => unreachable!("returned above"),
+        PayloadDecoding::NoPayload => String::new(),
+        PayloadDecoding::KeyexprUnresolved => String::from(
+            "    payload: this message names its keyexpr by id only, so no \
+             --payload-format rule can be tested against it\n",
+        ),
+        PayloadDecoding::NoRule(keyexpr) => {
+            format!("    payload: no --payload-format rule covers `{keyexpr}`\n")
+        }
+        PayloadDecoding::Refused {
+            keyexpr,
+            format: name,
+            why,
+        } => format!("    payload `{keyexpr}` as {name}: REFUSED -- {why}\n"),
+        PayloadDecoding::Decoded {
+            keyexpr,
+            format: name,
+            fields,
+        } => {
+            let mut out = format!("    payload `{keyexpr}` as {name}:\n");
+            for f in fields {
+                out.push_str(&format!(
+                    "      [{}..{}] {} = {}\n",
+                    f.start, f.end, f.path, f.value
+                ));
+            }
+            out
+        }
+    }
+}
+
 /// One field per line, indented by nesting, with the BYTES it was decoded from.
 ///
 /// The span is the point of the whole layer, so it leads: a reader comparing
@@ -2933,6 +3285,7 @@ mod tests {
                 per_flow: false,
                 per_message: false,
                 quic_ports: Vec::new(),
+                payload_formats: Vec::new(),
                 max_messages: None,
                 census: Census::default(),
                 per_field: false,
@@ -2960,6 +3313,7 @@ mod tests {
                 per_flow: true,
                 per_message: true,
                 quic_ports: Vec::new(),
+                payload_formats: Vec::new(),
                 max_messages: None,
                 census: Census::default(),
                 per_field: false,
@@ -4363,6 +4717,189 @@ mod packet_and_note_tests {
         }
         assert_eq!((count, named.len()), (5, 5), "no cap, no omission");
     }
+}
+
+/// R311y699 ([REDACTED-REQ]) — the payload FORMATS this binary carries, and why they
+/// live here rather than in `wz-capture`.
+///
+/// `wz-capture` owns the MAP (which keyexpr gets which format) and never a
+/// format: it has zero third-party dependencies because its decode path builds
+/// for the MCU profiles, and a format decoder is exactly what grows one. This
+/// crate is the composition root, so the built-ins are here — and the seam is
+/// public, so a consumer with a proprietary format implements
+/// `PayloadFormat` and never patches this binary.
+pub mod payload_formats {
+    use wz_capture::payload::formats::{PayloadField, PayloadFormat, PayloadFormatError};
+
+    /// The protobuf WIRE FORMAT, walked without a schema.
+    ///
+    /// # Why this one is the built-in, and what it can honestly claim
+    ///
+    /// nanopb emits protobuf's wire format, and that format is
+    /// self-describing enough to walk with no `.proto` at all: every field
+    /// carries its number and one of four wire types, and each wire type
+    /// determines its own length. So a reader gets field numbers, wire types,
+    /// values and BYTE SPANS — the structure — without anyone shipping a
+    /// schema.
+    ///
+    /// What it cannot give is NAMES: field 3 is field 3, not `temperature`.
+    /// Said plainly rather than papered over, because a decoder that invented
+    /// names would be the worst kind of wrong on a plane whose whole output is
+    /// findings.
+    ///
+    /// # Why not an `e2e` built-in beside it
+    ///
+    /// An AUTOSAR E2E profile is a CRC, a counter and a data id at offsets the
+    /// PROFILE fixes, and this machine's sources carry neither the profile
+    /// table nor the CRC polynomial — a grep for `0x1021` / `crc16` across
+    /// every crate returns nothing. This workspace's own rule (R311y695) is
+    /// that a constant a module cannot check is one it must not carry, so `e2e`
+    /// is a format a deployment supplies through the seam rather than one
+    /// invented here from memory.
+    pub struct Protobuf;
+
+    /// The four wire types of protobuf, and what each one's length is.
+    fn wire_type_name(ty: u64) -> Option<&'static str> {
+        match ty {
+            0 => Some("varint"),
+            1 => Some("i64"),
+            2 => Some("len"),
+            5 => Some("i32"),
+            _ => None,
+        }
+    }
+
+    /// One base-128 varint, advancing `at`.
+    fn varint(bytes: &[u8], at: &mut usize) -> Result<u64, PayloadFormatError> {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        let start = *at;
+        loop {
+            let byte = *bytes.get(*at).ok_or(PayloadFormatError::Truncated(start))?;
+            *at += 1;
+            // Ten groups of seven bits is 70, so the tenth byte may only carry
+            // the one bit left of a u64. A longer run is malformed rather than
+            // silently truncated -- the shift would panic in debug and wrap the
+            // value in release, which is the pair of behaviours a decoder over
+            // adversarial bytes must not have.
+            if shift >= 64 {
+                return Err(PayloadFormatError::Malformed {
+                    at: start,
+                    why: String::from("a varint longer than ten bytes"),
+                });
+            }
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+            shift += 7;
+        }
+    }
+
+    impl PayloadFormat for Protobuf {
+        fn name(&self) -> &str {
+            "protobuf"
+        }
+
+        fn decode(&self, payload: &[u8]) -> Result<Vec<PayloadField>, PayloadFormatError> {
+            if payload.is_empty() {
+                // An empty payload is not a protobuf message this reader can
+                // vouch for; it is also not malformed. Saying NotThisFormat
+                // sends the reader to their mapping, which is where an empty
+                // payload under a protobuf rule usually comes from.
+                return Err(PayloadFormatError::NotThisFormat);
+            }
+            let mut out = Vec::new();
+            let mut at = 0usize;
+            while at < payload.len() {
+                let start = at;
+                let tag = varint(payload, &mut at)?;
+                let number = tag >> 3;
+                let wire = tag & 0x07;
+                let Some(kind) = wire_type_name(wire) else {
+                    // Wire types 3 and 4 are the deprecated group markers and 6
+                    // and 7 are unassigned. A reader that stepped over one
+                    // would not know where it ends, so this stops -- the same
+                    // rule the QUIC frame walk follows for an unknown type.
+                    return Err(PayloadFormatError::Malformed {
+                        at: start,
+                        why: format!("wire type {wire} has no length rule"),
+                    });
+                };
+                if number == 0 {
+                    // Field number zero is invalid in every protobuf version,
+                    // and it is what a run of zero bytes decodes to -- which is
+                    // the single most likely thing to be under a WRONG mapping.
+                    return Err(PayloadFormatError::NotThisFormat);
+                }
+                let value = match wire {
+                    0 => {
+                        let v = varint(payload, &mut at)?;
+                        format!("{v}")
+                    }
+                    1 | 5 => {
+                        let width = if wire == 1 { 8 } else { 4 };
+                        let end = at
+                            .checked_add(width)
+                            .ok_or(PayloadFormatError::Truncated(at))?;
+                        let raw = payload
+                            .get(at..end)
+                            .ok_or(PayloadFormatError::Truncated(at))?;
+                        at = end;
+                        format!(
+                            "0x{}",
+                            raw.iter()
+                                .rev()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<String>()
+                        )
+                    }
+                    _ => {
+                        let len = varint(payload, &mut at)? as usize;
+                        let end = at
+                            .checked_add(len)
+                            .ok_or(PayloadFormatError::Truncated(at))?;
+                        let raw = payload
+                            .get(at..end)
+                            .ok_or(PayloadFormatError::Truncated(at))?;
+                        at = end;
+                        // Rendered as text when it IS text, because a
+                        // length-delimited field is a string as often as it is
+                        // a nested message and a reader should not have to
+                        // decode hex to find out.
+                        match core::str::from_utf8(raw) {
+                            Ok(text) if !text.is_empty() => format!("{text:?}"),
+                            _ => format!("{len} byte(s)"),
+                        }
+                    }
+                };
+                out.push(PayloadField {
+                    path: format!("{number}"),
+                    value: format!("{kind} {value}"),
+                    start,
+                    end: at,
+                });
+            }
+            Ok(out)
+        }
+    }
+
+    /// The format a name selects, or `None` for a name this build has no
+    /// decoder for.
+    ///
+    /// A refusal rather than a fallback: a reader who typed `--payload-format
+    /// 'demo/**=protobufff'` and got the bytes rendered as hex would think
+    /// their rule was live.
+    pub fn builtin(name: &str) -> Option<&'static dyn PayloadFormat> {
+        match name {
+            "protobuf" => Some(&Protobuf),
+            _ => None,
+        }
+    }
+
+    /// Every built-in name, for the usage text and for a refusal that can say
+    /// what IS available.
+    pub const BUILTIN_NAMES: &[&str] = &["protobuf"];
 }
 
 #[cfg(test)]
