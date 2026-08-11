@@ -76,6 +76,15 @@ pub mod filter;
 /// pure decapsulator; the same division `passive`'s chain reassembly is under.
 pub mod frag;
 pub mod link;
+/// R311y669 (§1.2a) — RECOGNISING QUIC, so a QUIC capture stops being read as
+/// zenoh.
+///
+/// Not a symmetry with [`tls`] but a correction: measured before it existed, a
+/// QUIC exchange on a zenoh port reported four decoded messages including an
+/// `Init` and a `Fragment`, out of a capture holding no zenoh at all. A QUIC
+/// short header's first byte IS a flagged zenoh MID, so the module's whole
+/// design question is what may decide — see its own note.
+pub mod messages;
 /// R311y617 (§1.1f) — the PAYLOAD sub-decoder: what is INSIDE a Put, judged
 /// against the encoding the sender declared rather than rendered on its word.
 ///
@@ -85,14 +94,6 @@ pub mod link;
 pub mod payload;
 pub mod pcap;
 pub mod pcapng;
-/// R311y669 (§1.2a) — RECOGNISING QUIC, so a QUIC capture stops being read as
-/// zenoh.
-///
-/// Not a symmetry with [`tls`] but a correction: measured before it existed, a
-/// QUIC exchange on a zenoh port reported four decoded messages including an
-/// `Init` and a `Fragment`, out of a capture holding no zenoh at all. A QUIC
-/// short header's first byte IS a flagged zenoh MID, so the module's whole
-/// design question is what may decide — see its own note.
 pub mod quic;
 /// R311y615 (§1.1f) — the EXPORT plane: the analysis tables rendered for
 /// something that is not a Rust caller, with their loss counters structurally
@@ -246,7 +247,7 @@ pub struct DatagramDissection {
     /// Decoded messages, in capture order. Each one's `stream_offset` is the
     /// index of the packet that carried it — there is no stream for it to be
     /// an offset into, so the field carries the only anchor that exists.
-    pub frames: Vec<PassiveFrame>,
+    pub frames: messages::MessageList,
     /// R311y607 — messages decoded in the SCOUTING namespace, in capture
     /// order.
     ///
@@ -333,7 +334,7 @@ pub struct DatagramDissection {
     ///
     /// Their fields come from the sink instead, taken while the recovered
     /// plaintext was alive — the same route [`Self::quic_streams`] uses.
-    pub quic_datagrams: Vec<PassiveFrame>,
+    pub quic_datagrams: messages::MessageList,
 }
 
 /// R311y718 (§1.2a) — one recovered QUIC stream, framed as zenoh.
@@ -352,7 +353,7 @@ pub struct QuicStreamDissection {
     /// Decoded transport messages. `stream_offset` is a byte offset within the
     /// RECOVERED stream of its own direction — see [`DatagramDissection`] on
     /// why that cannot share a list with the packet-indexed ones.
-    pub frames: Vec<PassiveFrame>,
+    pub frames: messages::MessageList,
     /// Bytes handed to the framer, per direction.
     fed: [u64; 2],
 }
@@ -407,7 +408,7 @@ impl DatagramDissection {
         Self {
             flow,
             session: new_session(window_ms),
-            frames: Vec::new(),
+            frames: messages::MessageList::new(),
             scouting: Vec::new(),
             last_activity: 0,
             quic: None,
@@ -415,7 +416,7 @@ impl DatagramDissection {
             chain_loss: ChainLoss::default(),
             last_seen_ms: None,
             quic_streams: Vec::new(),
-            quic_datagrams: Vec::new(),
+            quic_datagrams: messages::MessageList::new(),
         }
     }
 
@@ -937,7 +938,7 @@ pub struct FlowDissection {
     /// The zenoh-level observer over both.
     pub session: PassiveSession,
     /// Decoded transport messages, in the order the observer produced them.
-    pub frames: Vec<PassiveFrame>,
+    pub frames: messages::MessageList,
     /// R311y594b — capture index of the last packet on this flow, the key
     /// `Dissection` evicts by. A packet index rather than a timestamp because
     /// every source has one and not every source has a clock.
@@ -1002,7 +1003,7 @@ impl FlowDissection {
             low_to_high: StreamAssembler::new().with_gap_patience(gap_patience),
             high_to_low: StreamAssembler::new().with_gap_patience(gap_patience),
             session: new_session(window_ms),
-            frames: Vec::new(),
+            frames: messages::MessageList::new(),
             last_activity: 0,
             framing: Framing::Undecided,
             held: [Vec::new(), Vec::new()],
@@ -1610,7 +1611,7 @@ impl FlowDissection {
             // this side calls the datagram entry point at all; the same call
             // now yields every transport message the frame carried.
             let batch = self.session.next_datagram(direction, &payload, offset);
-            self.frames.extend(batch);
+            self.frames.append(batch);
         }
     }
 
@@ -1797,6 +1798,151 @@ impl DissectionLimits {
             // captured handshake takes, and far short of a leak.
             serial_frames_before_attribution: Some(256),
         }
+    }
+}
+
+/// R311y723 (§1.1f) — THE COMPILE-TIME CENSUS OF MESSAGE LISTS.
+///
+/// # What this is, and why it is a test rather than the enumeration itself
+///
+/// [`Dissection::message_lists`] is the door every census plane walks, and
+/// R311y722 gated it with a lint that reads field TYPES. A lint catches a list
+/// nobody wired; it cannot catch a list added to a struct whose enumeration is
+/// then not updated, because at that moment the type is right and only the
+/// wiring is missing.
+///
+/// The destructures below are EXHAUSTIVE — no `..` anywhere — which is the
+/// mechanism `the_live_tap_preset_bounds_every_axis_it_has` already uses in
+/// this file for the same class of problem: a new field does not make these
+/// wrong, it makes them NOT COMPILE, and the author adding the field is the one
+/// who decides whether it holds decoded messages.
+///
+/// Kept out of `message_lists` itself deliberately. Putting a 25-field pattern
+/// in the production path would make the door unreadable, and the forcing is
+/// identical either way — `cargo test` does not build.
+#[cfg(test)]
+mod message_list_census {
+    use super::*;
+
+    /// Every field of [`Dissection`], classified.
+    ///
+    /// The three bound names are the lists; everything else is `_` and that is
+    /// a CLAIM the reader can check against the field's own doc.
+    #[test]
+    fn every_dissection_field_is_classified_as_a_message_list_or_not() {
+        let d = Dissection::new();
+        let Dissection {
+            // ── holds decoded messages ──
+            flows,
+            datagram_flows,
+            serial_frames,
+            // ── does not ──
+            skipped: _,
+            skip_census: _,
+            limits: _,
+            drops: _,
+            declared_quic_ports: _,
+            declared_serial_linktypes: _,
+            serial: _,
+            // Recovered serial FRAMES awaiting a direction, not decoded
+            // messages: they are still COBS payloads at this point.
+            serial_pending: _,
+            // One entry per message in `serial_frames`, holding the serial
+            // frame it came out of -- an origin, not a message.
+            serial_origins: _,
+            serial_session: _,
+            checksums: _,
+            carry: _,
+            fragments: _,
+            #[cfg(feature = "reassembly")]
+                expired_chains: _,
+            capture_reported_drops: _,
+            scouts: _,
+            gap_patience: _,
+            capture_origin_ms: _,
+            abandoned_chains: _,
+            // The census OF discarded messages, which is the opposite of a list
+            // a plane should walk: these are gone.
+            dropped_frames: _,
+            chain_bytes_lost: _,
+            decryption_secrets: _,
+        } = &d;
+
+        // AND THE THREE ARE THE ENUMERATION. Without this the pattern above
+        // would only prove that someone typed the names, not that the door
+        // opens onto them.
+        let enumerated: usize = d.message_lists().map(|(_, frames)| frames.len()).sum();
+        let named: usize = flows.iter().map(|f| f.frames.len()).sum::<usize>()
+            + datagram_flows
+                .iter()
+                .map(|f| f.frame_lists().map(<[_]>::len).sum::<usize>())
+                .sum::<usize>()
+            + serial_frames.len();
+        assert_eq!(
+            enumerated, named,
+            "the lists named in the pattern above and the lists the planes walk \
+             must be the same set"
+        );
+    }
+
+    /// Every field of [`FlowDissection`], classified.
+    #[test]
+    fn every_stream_flow_field_is_classified() {
+        let FlowDissection {
+            frames: _,
+            flow: _,
+            low_to_high: _,
+            high_to_low: _,
+            session: _,
+            last_activity: _,
+            framing: _,
+            held: _,
+            vsock_seq: _,
+            opening_gap: _,
+            ws_resyncs: _,
+            residue: _,
+            chain_loss: _,
+            last_seen_ms: _,
+        } = FlowDissection::new(FlowKey::serial_line(), None, None);
+    }
+
+    /// Every field of [`DatagramDissection`], classified.
+    ///
+    /// Three of these are lists, and `frame_lists` is what must name all three.
+    #[test]
+    fn every_datagram_flow_field_is_classified() {
+        let DatagramDissection {
+            frames: _,
+            quic_datagrams: _,
+            quic_streams: _,
+            flow: _,
+            session: _,
+            // Scouting messages are in the Scout/Hello namespace, not the
+            // transport one, so they are not `PassiveFrame` and cannot be in
+            // an enumeration typed on it. `node::nodes` walks them separately.
+            scouting: _,
+            last_activity: _,
+            quic: _,
+            residue: _,
+            chain_loss: _,
+            last_seen_ms: _,
+        } = DatagramDissection::new(FlowKey::serial_line(), None);
+    }
+
+    /// Every field of [`QuicStreamDissection`], classified.
+    #[test]
+    fn every_quic_stream_field_is_classified() {
+        let QuicStreamDissection {
+            frames: _,
+            id: _,
+            session: _,
+            fed: _,
+        } = QuicStreamDissection {
+            id: 0,
+            session: new_session(None),
+            frames: messages::MessageList::new(),
+            fed: [0, 0],
+        };
     }
 }
 
@@ -2368,7 +2514,7 @@ pub struct Dissection {
     /// `&[PassiveFrame]`, and a plane that had to be handed a pair would be a
     /// plane taught about serial -- which is exactly the coupling
     /// [`Self::message_lists`] exists to remove.
-    serial_frames: alloc::vec::Vec<PassiveFrame>,
+    serial_frames: messages::MessageList,
     /// The serial frame each of [`Self::serial_frames`] was decoded from, at
     /// the same index. One serial frame can yield several messages, so this is
     /// per MESSAGE and not per frame.
@@ -2506,7 +2652,7 @@ impl Default for Dissection {
             declared_serial_linktypes: Vec::new(),
             serial: None,
             serial_pending: Vec::new(),
-            serial_frames: Vec::new(),
+            serial_frames: messages::MessageList::new(),
             serial_origins: Vec::new(),
             serial_session: new_session(DissectionLimits::default().reassembly_window_ms),
             limits: DissectionLimits::default(),
@@ -3290,7 +3436,7 @@ impl Dissection {
                 dg.quic_streams.push(QuicStreamDissection {
                     id: stream_id,
                     session: new_session(self.limits.reassembly_window_ms),
-                    frames: Vec::new(),
+                    frames: messages::MessageList::new(),
                     fed: [0, 0],
                 });
                 dg.quic_streams.len() - 1
@@ -3334,8 +3480,10 @@ impl Dissection {
         // defect `DissectionDrops` exists to prevent.
         if let Some(cap) = self.limits.frames_per_flow {
             while stream.frames.len() > cap {
-                let gone = stream.frames.remove(0);
-                self.dropped_frames.add(&gone);
+                let Some(receipt) = stream.frames.discard_oldest() else {
+                    break;
+                };
+                self.dropped_frames.add(&receipt.take());
                 self.drops.frames += 1;
             }
         }
@@ -3428,7 +3576,7 @@ impl Dissection {
         );
         feed.messages += batch.len();
         let before = dg.quic_datagrams.len();
-        dg.quic_datagrams.extend(batch);
+        dg.quic_datagrams.append(batch);
         // OFFERED with the payload still in hand, which is the only moment it
         // exists: the capture packet this came out of holds the QUIC
         // ciphertext, so a later walk of the file cannot recover it.
@@ -3891,8 +4039,15 @@ impl Dissection {
                 let cut = flow.frames.len() - cap;
                 // R311y713 (§B10) — censused BEFORE the drain, which is the
                 // only moment the messages still exist to be read.
-                for f in flow.frames.drain(..cut) {
-                    self.dropped_frames.add(&f);
+                for _ in 0..cut {
+                    // R311y723 — one receipt per message, each taken and
+                    // counted. The `drain` this replaced could have been
+                    // written without the loop body and would have compiled;
+                    // this cannot.
+                    let Some(receipt) = flow.frames.discard_oldest() else {
+                        break;
+                    };
+                    self.dropped_frames.add(&receipt.take());
                 }
                 self.drops.frames += cut;
             }
@@ -4156,7 +4311,7 @@ impl Dissection {
             d.packet_index,
             link.handshake(&d),
         );
-        flow.frames.extend(batch);
+        flow.frames.append(batch);
         self.enforce_datagram_message_cap(idx);
         self.evict_datagram_flows_beyond_cap();
     }
@@ -4220,13 +4375,17 @@ impl Dissection {
                     self.drops.scouting += 1;
                 }
                 2 => {
-                    let gone = flow.quic_datagrams.remove(0);
-                    self.dropped_frames.add(&gone);
+                    let Some(receipt) = flow.quic_datagrams.discard_oldest() else {
+                        return;
+                    };
+                    self.dropped_frames.add(&receipt.take());
                     self.drops.frames += 1;
                 }
                 _ => {
-                    let gone = flow.frames.remove(0);
-                    self.dropped_frames.add(&gone);
+                    let Some(receipt) = flow.frames.discard_oldest() else {
+                        return;
+                    };
+                    self.dropped_frames.add(&receipt.take());
                     self.drops.frames += 1;
                 }
             }

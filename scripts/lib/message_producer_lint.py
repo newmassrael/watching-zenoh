@@ -14,20 +14,28 @@ carry recorded a whole serial line reaching the flow listing and none of the
 planes.
 
 R311y721 replaced the five call sites with one enumeration
-(`Dissection::message_lists`) and wrote down what it had not done: "a sixth
-producer added beside it reaches the planes only if its author adds it here.
-That is strictly better than five call sites, and it is still a convention."
+(`Dissection::message_lists`); R311y722 gated it on fields typed
+`Vec<PassiveFrame>`; and R311y723 asked what that gate could not see.
 
-This is the gate that ends the convention. A `Vec<PassiveFrame>` field is a
-producer of census rows by construction — it is the only type those planes
-consume — so the rule is mechanical: every one of them must be reachable from
-the enumeration, or be registered here with the reason it is not.
+## The two holes R311y722 had, and which layer closed each
 
-## Why the field TYPE and not a list of names
+1. It read one CRATE. A producer in `wz-analyze` was never looked at. THIS scan
+   now reads the whole workspace.
+2. It read a container SHAPE. `Vec<(SerialFrame, PassiveFrame)>` — the exact
+   form the serial list had one round earlier — matched nothing, and so would
+   `[Vec<PassiveFrame>; 2]` or a map of them. Widening the regex would have
+   chased shapes forever, so R311y723 made the population a NAME instead:
+   decoded messages live in `MessageList` (`wz-capture/src/messages.rs`), whose
+   deref target is a SLICE, so growth and removal have exactly one door each.
+   A field that holds messages says `MessageList` whatever it is wrapped in.
 
-A hand-kept list of producers would have to be updated by the same person who
-forgot to add the producer, which is the failure this gate exists to catch. The
-type is the population and the compiler maintains it.
+## What this layer is FOR, given the other two
+
+`MessageList` makes the population unambiguous; the exhaustive destructures in
+`message_list_census` make a new field on an EXISTING owner fail to compile.
+Neither can catch a whole NEW owner struct — a sixth type, anywhere, holding a
+`MessageList` that no enumeration reaches. That is this gate's job, and it is
+the only one of the three that can do it.
 
 ## What counts as reached
 
@@ -47,12 +55,30 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# The crate that owns the dissection and its planes.
-CRATE = REPO_ROOT / "crates/wz-capture/src"
+# The WHOLE workspace: a producer in any crate is a producer.
+CRATES = REPO_ROOT / "crates"
 
-# The enumeration every plane walks, and the type that makes a field a producer.
+# The enumeration every plane walks.
 ENUMERATION = "message_lists"
-PRODUCER_TYPE = re.compile(r"^\s*(?:pub\s+)?(\w+)\s*:\s*(?:alloc::vec::)?Vec<PassiveFrame>\s*,")
+
+# A field whose declaration MENTIONS the type, in any container. `=` is the one
+# character excluded: a struct declaration has none, and allowing `;` is what
+# lets `[MessageList; 2]` -- an array of them, one per direction, which is a
+# shape this crate already uses for other per-direction state -- be seen. This is the
+# whole point of R311y723's newtype: `frames: MessageList`,
+# `kept: [MessageList; 2]`, `by_id: BTreeMap<u64, MessageList>` and
+# `rows: Vec<(Origin, MessageList)>` all match, where a shape-based pattern
+# caught only the first.
+PRODUCER_TYPE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*([^=]*\bMessageList\b[^=]*),\s*$")
+
+# A struct LITERAL field looks identical to a declaration -- `frames:
+# messages::MessageList::new(),` beside `frames: messages::MessageList,` -- and
+# MEASURED, the right-hand side cannot tell them apart: a first attempt read a
+# `(` as "this is a call" and a tuple TYPE
+# (`Vec<(usize, MessageList)>`) has one too, so a cross-crate probe wrapped in a
+# tuple sailed through the gate. What separates them is WHERE they are, so the
+# scan tracks struct-item blocks and counts fields only inside one.
+STRUCT_OPEN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+\w+")
 
 # A method opening line, so the scan can take one hop out of the enumeration.
 FN_OPEN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+(\w+)\s*(?:<[^>]*>)?\s*\(")
@@ -105,9 +131,11 @@ def method_bodies(text: str) -> dict[str, str]:
 
 
 def main() -> int:
-    files = sorted(CRATE.rglob("*.rs"))
+    files = sorted(CRATES.rglob("*.rs"))
+    # Vendored trees are somebody else's code and carry no planes of ours.
+    files = [f for f in files if "/target/" not in f.as_posix()]
     if not files:
-        print(f"message-producer lint: FAIL no sources under {CRATE}")
+        print(f"message-producer lint: FAIL no sources under {CRATES}")
         return 1
 
     producers: list[tuple[str, str]] = []
@@ -115,15 +143,30 @@ def main() -> int:
     for path in files:
         text = path.read_text(encoding="utf-8")
         bodies.update(method_bodies(text))
+        # The type's OWN definition is not a field of it. By file name, because
+        # the module is one file.
+        if path.name == "messages.rs":
+            continue
+        depth = 0
+        in_struct = False
         for line in text.splitlines():
+            stripped = line.strip()
             # Doc comments and ordinary comments carry the type in prose all
             # over this crate; only a real field declaration counts.
-            stripped = line.strip()
             if stripped.startswith("//"):
                 continue
-            found = PRODUCER_TYPE.match(line)
-            if found:
-                producers.append((path.relative_to(REPO_ROOT).as_posix(), found.group(1)))
+            if not in_struct and STRUCT_OPEN.match(line) and "{" in line:
+                in_struct = True
+                depth = 0
+            if in_struct:
+                found = PRODUCER_TYPE.match(line)
+                if found:
+                    producers.append(
+                        (path.relative_to(REPO_ROOT).as_posix(), found.group(1))
+                    )
+                depth += line.count("{") - line.count("}")
+                if depth <= 0 and "}" in line:
+                    in_struct = False
 
     if len(producers) < MIN_PRODUCERS:
         print(
@@ -160,8 +203,8 @@ def main() -> int:
     if findings:
         for rel, field in findings:
             print(
-                "message-producer lint: FAIL %s: `%s: Vec<PassiveFrame>` is a "
-                "producer of census rows and `%s` does not reach it" % (rel, field, ENUMERATION)
+                "message-producer lint: FAIL %s: the field `%s` holds a "
+                "`MessageList` and `%s` does not reach it" % (rel, field, ENUMERATION)
             )
         print(
             "    Every list of decoded messages must be in the enumeration the\n"

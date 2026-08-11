@@ -101,6 +101,22 @@ ACCOUNTING = (
 # excuse another crate's site.
 ALLOWED = [
     (
+        "wz-capture/messages.rs",
+        "frame: Some(self.0.remove(0)),",
+        "R311y723 — THE DOOR ITSELF. This removal accounts for nothing on "
+        "purpose: it hands back a `#[must_use] Discarded` whose destructor "
+        "PANICS unless the caller took the frame, so the obligation is moved "
+        "into the type system rather than discharged here. Registering the one "
+        "site that makes every other site impossible to get wrong",
+    ),
+    (
+        "wz-capture/messages.rs",
+        "out.remove(0)",
+        "R311y723 — a TEST fixture taking the single decoded frame out of the "
+        "observer's return value. Nothing captured is discarded: the vector is "
+        "a local the call just produced",
+    ),
+    (
         "wz-capture/agg.rs",
         "while let Some(node) = stack.pop() {",
         "a traversal's own work list, built and consumed inside one call; "
