@@ -272,6 +272,74 @@ impl Drop for Scratch {
     }
 }
 
+/// R311y709 (§1.2a) — THE RESIDUE IS NON-ZERO ON A CAPTURE THAT IS COMPLETE,
+/// AND THAT IS THE POINT.
+///
+/// The register's open question was whether "bytes recovered minus bytes fed to
+/// a decoder" is non-zero anywhere other than QUIC. It is, and this capture is
+/// the answer: a TLS flow whose every record decrypted recovers CIPHERTEXT and
+/// feeds PLAINTEXT, so the record layer's own bytes -- 5 header, 16 tag, one
+/// inner content type, per record -- are recovered and reach no zenoh decoder.
+///
+/// So the second assertion is the load-bearing one. `complete:true` beside a
+/// non-zero `unfed` is the pin that this number MOVES NO VERDICT: wire it into
+/// `is_complete` and this capture -- which decrypted perfectly and read every
+/// message -- would start reporting itself short.
+///
+/// The count is asserted as "greater than zero" rather than exactly, which is
+/// deliberate and the one place this file does that: the exact value is
+/// rustls's record overhead, and pinning it here would make a dependency bump
+/// look like a defect in this reader.
+#[test]
+fn a_fully_decrypted_capture_has_a_residue_and_is_still_complete() {
+    let scratch = Scratch::new("residue");
+    let (file, log, _) = capture_and_key_log();
+    let capture = scratch.write("session.pcapng", &file);
+    let keylog = scratch.write("keys.txt", log.as_bytes());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--keylog")
+        .arg(&keylog)
+        .arg("--json")
+        .output()
+        .expect("the binary runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // THE POPULATION: this capture must actually have decrypted, or "recovered
+    // ciphertext, fed plaintext" describes nothing that happened.
+    assert!(
+        stdout.contains("\"records_decrypted\":3"),
+        "the three records must have opened: {stdout}"
+    );
+
+    let residue = stdout
+        .split("\"residue\":{")
+        .nth(1)
+        .and_then(|s| s.split('}').next())
+        .expect("the report carries a residue object")
+        .to_string();
+    let unfed: u64 = residue
+        .split("\"unfed\":")
+        .nth(1)
+        .expect("with an unfed count")
+        .parse()
+        .expect("which is a number");
+    assert!(
+        unfed > 0,
+        "a decrypted TLS flow recovers more than it feeds -- the record layer's \
+         own bytes: {residue}"
+    );
+
+    assert!(
+        stdout.contains("\"complete\":true"),
+        "AND THE VERDICT DID NOT MOVE. A capture that decrypted every record and \
+         read every message is complete, residue or not -- this assertion is what \
+         stops the number from becoming a verdict on the round it was first \
+         measured: {stdout}"
+    );
+}
+
 /// R311y708 (G2) — A KEY LOG FOR ANOTHER CONNECTION NAMES BOTH SIDES.
 ///
 /// `no_key_for_session` tells a reader their keys are for a different session

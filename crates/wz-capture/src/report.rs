@@ -607,6 +607,20 @@ impl<'a> CaptureReport<'a> {
                 },
             ));
         }
+        // R311y709 (§1.2a) — bytes recovered against bytes handed to a decoder.
+        // Emitted UNCONDITIONALLY, and as two numbers plus their difference
+        // rather than the difference alone: a consumer given only the difference
+        // cannot recover the scale it happened on, and 300 unfed bytes out of
+        // 320 is a different report from 300 out of 3 000 000.
+        {
+            let r = d.byte_residue();
+            s.push_str(&alloc::format!(
+                ",\"residue\":{{\"recovered\":{},\"fed\":{},\"unfed\":{}}}",
+                r.recovered,
+                r.fed,
+                r.unfed()
+            ));
+        }
         s.push_str(&format!(
             ",\"drops\":{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\"flows\":{},\
              \"scouting\":{},\"scout_askers\":{}}}",
@@ -910,6 +924,27 @@ impl<'a> CaptureReport<'a> {
                          specification alone, and nothing here can check it\n"
                     ));
                 }
+            }
+        }
+
+        // R311y709 (§1.2a) — the same two numbers for a person, printed only
+        // when the difference is non-zero.
+        //
+        // The conditional is the R311y707 lesson applied before it can bite: a
+        // line that appears on every capture, carrying a number that is
+        // non-zero on every capture, is a line readers learn to skip — which is
+        // how a real SC2043 sat inside a permanently red lane for four rounds.
+        // The differences this reader EXPECTS are documented on `ByteResidue`;
+        // what is worth a person's attention is that there IS one.
+        {
+            let r = d.byte_residue();
+            if r.unfed() > 0 {
+                s.push_str(&format!(
+                    "residue: {} of {} recovered byte(s) reached no decoder \
+                     -- this is a MEASUREMENT and moves no verdict above\n",
+                    r.unfed(),
+                    r.recovered
+                ));
             }
         }
 
@@ -2778,6 +2813,104 @@ mod tests {
             r.to_json().contains("\"walks_stopped\":1"),
             "{}",
             r.to_json()
+        );
+    }
+
+    /// R311y709 (§1.2a) — RECOVERED AGAINST FED, ON THE TWO SHAPES THAT ANSWER
+    /// THE REGISTER'S QUESTION.
+    ///
+    /// The open question was "R311y705 established the value is non-zero for
+    /// QUIC by construction; what nobody has measured is whether it is non-zero
+    /// anywhere else". So both arms are here and the second is not decoration:
+    /// a capture where every recovered byte IS fed is what makes the QUIC number
+    /// a difference rather than a property of the counter.
+    ///
+    /// The QUIC arm pins EXACT numbers because they are this reader's own
+    /// arithmetic — the payload length it recovered, and the zero it fed — and
+    /// an inequality there would pass on an instrument that counted nothing.
+    #[test]
+    fn a_quic_flow_feeds_nothing_and_a_zenoh_one_feeds_everything() {
+        // A v1 Initial: recognised, counted, and handed to no decoder.
+        let mut initial = alloc::vec![0xC0u8];
+        initial.extend_from_slice(&1u32.to_be_bytes());
+        initial.push(8);
+        initial.extend_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7]);
+        initial.push(4);
+        initial.extend_from_slice(&[8, 9, 10, 11]);
+        initial.extend_from_slice(&[0xAA; 40]);
+
+        let mut quic = crate::Dissection::new();
+        quic.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &crate::datagram_tests::udp_packet([10, 0, 0, 1], 50000, [10, 0, 0, 2], 7447, &initial),
+        );
+        assert_eq!(
+            quic.datagram_flows()
+                .iter()
+                .filter(|f| f.quic.is_some())
+                .count(),
+            1,
+            "the population: without a QUIC flow the numbers below are about nothing"
+        );
+        let r = quic.byte_residue();
+        assert_eq!(
+            r.recovered,
+            initial.len() as u64,
+            "every byte of the datagram was recovered"
+        );
+        assert_eq!(
+            r.fed, 0,
+            "and none of them reached a decoder -- R311y705's finding as a number"
+        );
+        assert_eq!(r.unfed(), initial.len() as u64);
+        assert!(
+            CaptureReport::of(&quic)
+                .to_text()
+                .contains("reached no decoder"),
+            "and a person is told: {}",
+            CaptureReport::of(&quic).to_text()
+        );
+
+        // THE OTHER AXIS. A zenoh datagram on a flow nothing has classified as
+        // QUIC goes to the observer whole.
+        let mut zenoh = crate::Dissection::new();
+        let payload = [0x01u8, 0x05, 0x00, 0x01, 0x02];
+        zenoh.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &crate::datagram_tests::udp_packet([10, 0, 0, 1], 50000, [10, 0, 0, 2], 7447, &payload),
+        );
+        assert_eq!(
+            zenoh.datagram_flows().len(),
+            1,
+            "the population on this arm too"
+        );
+        assert!(
+            zenoh.datagram_flows()[0].quic.is_none(),
+            "this flow must NOT be QUIC or the two arms are the same test"
+        );
+        let r = zenoh.byte_residue();
+        assert_eq!(r.recovered, payload.len() as u64);
+        assert_eq!(
+            r.fed,
+            payload.len() as u64,
+            "a decoder saw all of it, so the difference is zero"
+        );
+        assert_eq!(r.unfed(), 0);
+        assert!(
+            !CaptureReport::of(&zenoh)
+                .to_text()
+                .contains("reached no decoder"),
+            "and no sentence is printed: {}",
+            CaptureReport::of(&zenoh).to_text()
+        );
+        assert!(
+            CaptureReport::of(&zenoh)
+                .to_json()
+                .contains("\"residue\":{\"recovered\":5,\"fed\":5,\"unfed\":0}"),
+            "the JSON carries the key even at zero -- absent cannot say 'none': {}",
+            CaptureReport::of(&zenoh).to_json()
         );
     }
 

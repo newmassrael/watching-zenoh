@@ -264,6 +264,11 @@ pub struct DatagramDissection {
     /// and not handed to the zenoh observer — which is the whole correction, as
     /// the alternative measured as four decoded messages that did not exist.
     pub quic: Option<quic::QuicCensus>,
+    /// R311y709 (§1.2a) — bytes recovered for this flow against bytes handed on.
+    ///
+    /// On a QUIC flow `fed` stays zero for the life of the capture, which is
+    /// R311y705's finding expressed as a count rather than as a paragraph.
+    residue: ByteResidue,
 }
 
 impl DatagramDissection {
@@ -275,7 +280,13 @@ impl DatagramDissection {
             scouting: Vec::new(),
             last_activity: 0,
             quic: None,
+            residue: ByteResidue::default(),
         }
+    }
+
+    /// R311y709 — this flow's recovered-against-fed counts.
+    pub fn residue(&self) -> ByteResidue {
+        self.residue
     }
 }
 
@@ -731,6 +742,8 @@ pub struct FlowDissection {
     /// R311y612 — resynchronisations the ws deframers reported, in order, with
     /// the direction each belongs to.
     ws_resyncs: Vec<(Direction, ws::WsResync)>,
+    /// R311y709 (§1.2a) — bytes recovered for this flow against bytes handed on.
+    residue: ByteResidue,
 }
 
 /// R311y612 (§4.1) — post-hole bytes held per direction while deciding whether
@@ -745,6 +758,11 @@ pub struct FlowDissection {
 const WS_CLASSIFY_BUDGET: usize = 8 * 1024;
 
 impl FlowDissection {
+    /// R311y709 — this flow's recovered-against-fed counts.
+    pub fn residue(&self) -> ByteResidue {
+        self.residue
+    }
+
     fn new(flow: FlowKey, window_ms: Option<u64>, gap_patience: Option<usize>) -> Self {
         Self {
             flow,
@@ -758,6 +776,7 @@ impl FlowDissection {
             vsock_seq: [0, 0],
             opening_gap: [None, None],
             ws_resyncs: Vec::new(),
+            residue: ByteResidue::default(),
         }
     }
 
@@ -867,6 +886,13 @@ impl FlowDissection {
         if bytes.is_empty() {
             return;
         }
+        // R311y709 — THE recovery point for a stream flow. Counted here and not
+        // in `feed`, because what is being counted is what reassembly produced:
+        // bytes that are held (`Undecided`, `OpeningLost`) were recovered just
+        // as much as bytes that dispatch, and a run that is held and later
+        // dropped is exactly the difference this measures. Held bytes replay
+        // through `feed` rather than through here, so nothing is counted twice.
+        self.residue.recovered += bytes.len() as u64;
         if matches!(self.framing, Framing::OpeningLost) {
             self.held[dir_index(direction)].extend_from_slice(bytes);
             self.decide_after_opening_lost(false);
@@ -1340,6 +1366,10 @@ impl FlowDissection {
             self.ws_resyncs.push((direction, resync));
         }
         for (offset, payload) in ready {
+            // R311y709 — the payload, which is what a decoder sees. The frame
+            // headers this deframer consumed are recovered and never fed, and
+            // that difference is a fact about ws rather than a defect.
+            self.residue.fed += payload.len() as u64;
             // R311y631 (§1.2b) — a ws message delimits a BATCH, not a message.
             // zenoh's ws link reports `is_streamed() == false`, which is why
             // this side calls the datagram entry point at all; the same call
@@ -1350,6 +1380,10 @@ impl FlowDissection {
     }
 
     fn feed_stream(&mut self, direction: Direction, bytes: &[u8]) {
+        // R311y709 — reaches a decoder. This is also the entry point decrypted
+        // PLAINTEXT arrives at, which is why `unfed` saturates: a TLS flow
+        // recovers ciphertext and feeds the smaller thing inside it.
+        self.residue.fed += bytes.len() as u64;
         self.session.push(direction, bytes);
         loop {
             let mut progressed = false;
@@ -1449,6 +1483,67 @@ impl DissectionLimits {
             // smaller than a single flow's frame list.
             max_scout_askers: Some(1_024),
         }
+    }
+}
+
+/// R311y709 (§1.2a) — BYTES RECOVERED AGAINST BYTES HANDED TO A DECODER.
+///
+/// # The question this answers
+///
+/// This reader recovers bytes — out of TCP reassembly, out of a datagram
+/// payload — and then hands some of them to something that reads them. The
+/// difference has never been measured, and R311y705 showed why it matters: the
+/// QUIC pass recovered application bytes, no reader in this build took zenoh out
+/// of them, and the capture reported itself COMPLETE with a test asserting it.
+/// That was found by reading the code. Nothing counted it.
+///
+/// So this counts it, everywhere, and the register's open question is the whole
+/// point: **is the difference non-zero anywhere other than QUIC?**
+///
+/// # What it deliberately does NOT do
+///
+/// It moves NO verdict. [`crate::report::CaptureReport::is_complete`] does not
+/// read it and a test pins that it does not. The reason is the R311y705 lesson
+/// read the other way round: a number wired into a verdict on the round it is
+/// first measured is a number nobody has ever seen the range of, and the shapes
+/// below are not yet known to be the only ones. Measure first; a verdict is its
+/// own round, with its own evidence.
+///
+/// # The differences that are EXPECTED, so a reader can tell them from news
+///
+/// - A **TLS** flow recovers ciphertext and feeds plaintext, so a perfectly
+///   decrypted flow still shows the record layer's overhead — 5 header bytes, a
+///   16-byte tag and the inner content type, per record.
+/// - A **WebSocket** flow feeds message payloads, so the frame headers show.
+/// - A flow whose opening was LOST and turned out to be ws feeds only the far
+///   side of the hole (`FlowDissection::decide_after_opening_lost` builds the
+///   deframer already knowing the near side), so the near side shows.
+/// - A **QUIC** flow feeds NOTHING, by construction, which is the R311y705
+///   finding restated as a number rather than as prose.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ByteResidue {
+    /// Bytes this reader recovered and handed to this flow.
+    pub recovered: u64,
+    /// Of those, the bytes that reached something that reads them.
+    pub fed: u64,
+}
+
+impl ByteResidue {
+    /// Recovered and never handed on.
+    ///
+    /// Saturating because `fed` can exceed nothing here today and the assertion
+    /// that it never will is one this type must not make: plaintext is fed on a
+    /// flow whose recovered bytes were ciphertext, and an expansion — a
+    /// decompressing layer, say — would be a legitimate future shape rather
+    /// than a reason to panic in a reporting path.
+    pub fn unfed(&self) -> u64 {
+        self.recovered.saturating_sub(self.fed)
+    }
+
+    /// Fold another flow's counts in.
+    pub fn absorb(&mut self, other: Self) {
+        self.recovered += other.recovered;
+        self.fed += other.fed;
     }
 }
 
@@ -2478,6 +2573,23 @@ impl Dissection {
 
     /// Every UDP flow seen, in first-appearance order. Where scouting,
     /// multicast Join, and the UDP unicast link land.
+    /// R311y709 (§1.2a) — every flow's recovered-against-fed counts, summed.
+    ///
+    /// BOTH tables, which this workspace has had to be told four times
+    /// (R311y668, y678, y699, y700): `flows()` is the stream half and a total
+    /// built from it alone silently omits every UDP flow — including, here, the
+    /// exact flows the measurement was created for.
+    pub fn byte_residue(&self) -> ByteResidue {
+        let mut total = ByteResidue::default();
+        for f in &self.flows {
+            total.absorb(f.residue);
+        }
+        for f in &self.datagram_flows {
+            total.absorb(f.residue);
+        }
+        total
+    }
+
     pub fn datagram_flows(&self) -> &[DatagramDissection] {
         &self.datagram_flows
     }
@@ -2948,6 +3060,11 @@ impl Dissection {
         self.advance_clock(idx, ts_millis, FlowKind::Datagram);
         let flow = &mut self.datagram_flows[idx];
         flow.last_activity = d.packet_index;
+        // R311y709 — THE recovery point for a datagram flow. Before the QUIC
+        // branch on purpose: a datagram counted as QUIC was recovered exactly as
+        // much as one that is decoded, and the branch that follows is precisely
+        // where the two stop being the same.
+        flow.residue.recovered += d.payload.len() as u64;
 
         // R311y669 (§1.2a) — QUIC, BEFORE the scouting question and before the
         // zenoh decode, because it is the question of whether either applies.
@@ -3014,6 +3131,10 @@ impl Dissection {
             // Decoded WITHOUT touching the session: a scouting message is not
             // part of any session, so folding it would let a pre-session
             // datagram move state that only a peer's handshake may move.
+            // R311y709 — `parse_scouting` reads these bytes, so they are fed.
+            // A scouting datagram advances no session, which is a different
+            // question from whether anything read it.
+            flow.residue.fed += d.payload.len() as u64;
             flow.scouting.push(ScoutingDatagram {
                 direction,
                 packet_index: d.packet_index,
@@ -3037,6 +3158,7 @@ impl Dissection {
             return;
         }
         // R311y631 (§1.2b) — one datagram, every message it batched.
+        flow.residue.fed += d.payload.len() as u64;
         let batch = flow.session.next_datagram_on(
             direction,
             &d.payload,

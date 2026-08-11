@@ -5251,6 +5251,7 @@ layer_c1bw_analyze_cli() {
         the_binary_decrypts_a_capture_given_a_key_log_on_the_command_line \
         two_key_logs_are_both_read_and_the_earlier_one_is_not_dropped \
         a_key_log_for_another_connection_names_what_each_side_holds \
+        a_fully_decrypted_capture_has_a_residue_and_is_still_complete \
         the_exit_code_separates_an_incomplete_capture_from_a_failed_run \
         an_unreadable_key_log_fails_instead_of_reporting_the_capture_as_encrypted \
         the_flows_option_names_which_connection_the_summary_cannot \
@@ -5973,6 +5974,7 @@ layer_c1bn_passive_dissection_features() {
         agg::tests::a_reassembled_record_declines_the_offset_it_never_had \
         report::tests::a_record_with_no_offset_in_the_capture_is_named_in_both_renderings \
         quic::tests::each_accepted_version_names_the_authority_that_names_it \
+        report::tests::a_quic_flow_feeds_nothing_and_a_zenoh_one_feeds_everything \
         quic::tests::a_version_only_a_document_names_is_still_recognised \
         report::tests::a_version_only_a_document_names_is_said_in_both_renderings
     do
