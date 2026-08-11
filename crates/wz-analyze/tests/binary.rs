@@ -4061,3 +4061,86 @@ fn capture_and_key_log_pair() -> (Vec<u8>, String) {
     let (file, log, _) = capture_and_key_log();
     (file, log)
 }
+
+/// R311y691 (§1.2a) — the DECRYPTION PASS's own summary reaches the reader, and
+/// every call here used to drop it on the floor.
+///
+/// ## What was unreachable
+///
+/// `Dissection::decrypt_with` has returned a `DecryptionSummary` since long
+/// before this crate existed, and both call sites discarded it. Most of what it
+/// holds the report re-derives from the dissection -- but not all: `flows` is
+/// what THIS PASS considered and `refused` is what the opener declined before
+/// trying a record, and neither is a fact about the capture that survives the
+/// call. A key log for a different connection produced a report saying "not
+/// decrypted, reason no_key_for_session" and nothing saying that a pass had run
+/// and been turned away at the door.
+///
+/// ## The discriminator
+///
+/// Two runs of the SAME capture, one with its own key log and one with a key log
+/// for a different connection. The report's own numbers and the pass's move in
+/// different directions, which is what says the pass block is not a second
+/// rendering of the report.
+#[test]
+fn the_decryption_passs_own_numbers_reach_the_reader() {
+    let scratch = Scratch::new("pass-summary");
+    let (file, log, _) = capture_and_key_log();
+    let capture = scratch.write("session.pcapng", &file);
+    let mine = scratch.write("mine.txt", log.as_bytes());
+    // The same shape of log for a connection this capture does not contain.
+    let stranger: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(200));
+    let secret: Vec<u8> = (0..48u8).map(|i| i.wrapping_mul(23)).collect();
+    let theirs = scratch.write(
+        "theirs.txt",
+        format!(
+            "CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+            hex(&stranger),
+            hex(&secret)
+        )
+        .as_bytes(),
+    );
+
+    let run = |keylog: &std::path::Path| {
+        String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                .arg(&capture)
+                .arg("--keylog")
+                .arg(keylog)
+                .arg("--json")
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned()
+    };
+
+    let ours = run(&mine);
+    let ours = ours.trim();
+    assert_one_document(ours);
+    // ANTI-VACUITY: the pass must have had a flow to consider at all.
+    assert!(
+        ours.contains("\"pass\":{\"flows_considered\":1,\"flows_refused\":0,\"already_opened\":0}"),
+        "a pass that opened the flow considered one and refused none: {ours}"
+    );
+    assert!(
+        ours.contains("\"flows_decrypted\":1"),
+        "and the capture-level number agrees with it here: {ours}"
+    );
+
+    let strangers = run(&theirs);
+    let strangers = strangers.trim();
+    assert_one_document(strangers);
+    // THE DISCRIMINATOR: the capture's own numbers say nothing happened; the
+    // pass's say it ran and was turned away.
+    assert!(
+        strangers.contains("\"flows_decrypted\":0"),
+        "the capture opened nothing: {strangers}"
+    );
+    assert!(
+        strangers
+            .contains("\"pass\":{\"flows_considered\":1,\"flows_refused\":1,\"already_opened\":0}"),
+        "but a pass DID run and was refused, which the report alone cannot say: \
+         {strangers}"
+    );
+}

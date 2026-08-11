@@ -222,14 +222,19 @@ struct DirectionState {
     /// list, because a secret of an unusable width is dropped and would otherwise
     /// shift every index below it.
     first_application_epoch: usize,
-    /// R311y685 (§1.2a) — records this direction has actually opened.
+    /// R311y685 (§1.2a) — has this direction opened a record yet?
     ///
     /// Asked one question -- was this the FIRST -- which is what separates the
     /// epoch climb of a capture that began mid-session from a rekey inside one
-    /// this reader was already watching. A bool would answer it; the count is
-    /// kept because "how many records of this direction opened" is a fact the
-    /// witness may want next and a bool throws it away.
-    records_opened: usize,
+    /// this reader was already watching.
+    ///
+    /// R311y691 made it a BOOL, reversing that round's own reasoning. It kept a
+    /// count on the grounds that "how many records of this direction opened" is
+    /// a fact the witness may want next; nothing wanted it, and a degree of
+    /// freedom kept for a speculative future consumer is the exact shape this
+    /// track has spent eight rounds removing from elsewhere in the crate. The
+    /// count is one `+= 1` away if a consumer ever appears.
+    opened_a_record: bool,
     /// R311y686 (§1.2a) — handshake bytes held for a message whose rest is in a
     /// record that has not arrived.
     ///
@@ -553,7 +558,7 @@ impl DirectionState {
             skew: 0,
             witness: EpochWitness::default(),
             pending_key_update: false,
-            records_opened: 0,
+            opened_a_record: false,
             handshake_carry: alloc::vec::Vec::new(),
         })
     }
@@ -580,7 +585,7 @@ impl DirectionState {
     /// went into the hole. What is left is the residue.
     fn count_advance(&mut self, to: usize, after_hole: bool) {
         let mut pending = core::mem::take(&mut self.pending_key_update);
-        let before_first = self.records_opened == 0;
+        let before_first = !self.opened_a_record;
         for target in (self.at + 1)..=to {
             self.witness.epoch_advances += 1;
             if pending {
@@ -692,7 +697,7 @@ impl DirectionState {
                     // this path: a walk that authenticated under nothing leaves
                     // no state behind, which is the R311y667 rule this loop
                     // already keeps.
-                    self.records_opened += 1;
+                    self.opened_a_record = true;
                     // R311y686 — counted whether or not a message completed:
                     // the bytes this reader let go of are a fact about what it
                     // could no longer be looking for.

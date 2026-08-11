@@ -512,13 +512,23 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     // plaintext exists only during it. A run that did not ask for fields passes
     // the no-op sink and the pass is byte-for-byte what it was.
     let mut fields = FieldSink::new(messages_per_flow);
-    if key_log_connections > 0 {
+    // R311y691 — the pass's own SUMMARY, which this reader dropped on the floor.
+    //
+    // `decrypt_with` has returned a `DecryptionSummary` since long before this
+    // crate existed and every call here discarded it, which is the shape this
+    // crate was created to end: a fact computed and reachable by nobody. Most of
+    // it the report re-derives from the dissection, and one number it cannot --
+    // `already_opened`, which is a fact about THIS PASS and not about the
+    // capture, and is therefore gone the moment the summary is dropped.
+    let pass = if key_log_connections > 0 {
         if per_field {
-            dissection.decrypt_with_sink(&mut opener, &mut fields);
+            dissection.decrypt_with_sink(&mut opener, &mut fields)
         } else {
-            dissection.decrypt_with(&mut opener);
+            dissection.decrypt_with(&mut opener)
         }
-    }
+    } else {
+        wz_capture::DecryptionSummary::default()
+    };
 
     // R311y671 — what the decryptor OBSERVED about its epoch changes, which the
     // dissection does not hold: the epochs are the opener's state, and until this
@@ -574,6 +584,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     let rendered = match format {
         Format::Text => {
             let mut rendered = report.to_text();
+            rendered.push_str(&pass_lines(&pass, format));
             rendered.push_str(&epoch_lines(&epochs, format));
             if per_field {
                 rendered.push_str("fields:\n");
@@ -598,6 +609,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
         Format::Json => {
             let mut rendered = String::from("{");
             report.json_fields(&mut rendered);
+            rendered.push_str(&pass_lines(&pass, format));
             rendered.push_str(&epoch_lines(&epochs, format));
             if per_field {
                 rendered.push(',');
@@ -623,6 +635,57 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
         }
     };
     Ok((rendered, outcome))
+}
+
+/// R311y691 (§1.2a) — what THIS DECRYPTION PASS did, as opposed to what the
+/// capture holds.
+///
+/// # Why the report cannot say it
+///
+/// [`CaptureReport`] reads the dissection, so every number it prints is a fact
+/// about the CAPTURE: how many encrypted flows there are, how many opened, how
+/// many records came out. A pass that ran and found every flow already settled
+/// is invisible there -- the capture looks exactly as it did -- and the
+/// difference is the whole of what a caller offering a `PlaintextSink` on a
+/// second pass needs to know (R311y684).
+///
+/// So this is small on purpose: the three numbers the summary holds that the
+/// dissection cannot re-derive. `flows` is what this pass CONSIDERED, `refused`
+/// is what the opener declined before trying a record, and `already_opened` is
+/// what it skipped because an earlier pass owned them.
+///
+/// # What this binary cannot make non-zero, said rather than implied
+///
+/// `already_opened` is a fact about a SECOND pass and `wz-analyze` runs one, so
+/// from this command line it is always 0. It is rendered anyway because the
+/// field exists and a consumer must not have to test for a key -- and it is
+/// named here so the next round does not read its constancy as evidence that
+/// the pass is idempotent, which is a different claim with its own test one
+/// crate over.
+///
+/// Silent in text where there is nothing to say, like every other qualifier in
+/// this rendering; structural in JSON, because a consumer must not have to test
+/// for a key.
+fn pass_lines(pass: &wz_capture::DecryptionSummary, format: Format) -> String {
+    if format == Format::Json {
+        // THREE numbers and not five. `records` and `frames` are the same facts
+        // the report already prints from the dissection, and a fact rendered
+        // twice is two things to keep in step -- the defect this crate found in
+        // itself at R311y664 and has not repeated since.
+        return format!(
+            ",\"pass\":{{\"flows_considered\":{},\"flows_refused\":{},\
+             \"already_opened\":{}}}",
+            pass.flows, pass.refused, pass.already_opened
+        );
+    }
+    if pass.already_opened == 0 {
+        return String::new();
+    }
+    format!(
+        "  pass: {} flow(s) were already opened by an earlier pass and were \
+         skipped -- their plaintext was not offered again\n",
+        pass.already_opened
+    )
 }
 
 /// R311y671 (§1.2a) — the epoch witness, in whichever format.
