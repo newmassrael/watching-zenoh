@@ -1574,17 +1574,12 @@ pub fn aggregate_where(dissection: &crate::Dissection, filter: &Filter) -> Throu
     // only thing that has seen every packet. Set before the first fold, so no
     // record is judged against a half-known capture.
     table.capture_origin_ms = dissection.capture_origin_ms();
-    for flow in dissection.flows() {
-        table.observe_flow_where(&flow.frames, filter);
-    }
-    for flow in dissection.datagram_flows() {
-        // R311y718 — EVERY list, via the flow's own enumeration. A datagram
-        // flow now holds the zenoh recovered out of its QUIC streams beside the
-        // messages read straight off the wire, and naming `frames` here would
-        // leave this plane censusing the pre-QUIC half.
-        for frames in flow.frame_lists() {
-            table.observe_flow_where(frames, filter);
-        }
+    // R311y721 — EVERY list this capture holds, through the dissection's own
+    // enumeration. Naming the two flow tables here is what left this plane
+    // blind to a serial line, which is in neither: see
+    // `Dissection::message_lists`.
+    for (_, frames) in dissection.message_lists() {
+        table.observe_flow_where(frames, filter);
     }
     table
 }

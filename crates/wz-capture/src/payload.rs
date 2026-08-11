@@ -939,15 +939,9 @@ pub fn payloads_where(
 ) -> PayloadCensus {
     let mut census = PayloadCensus::new();
     census.capture_origin_ms = dissection.capture_origin_ms();
-    for flow in dissection.flows() {
-        census.observe_flow_where(&flow.frames, filter);
-    }
-    for flow in dissection.datagram_flows() {
-        // R311y718 — see `agg::aggregate_where`: every list this flow holds,
-        // which now includes the zenoh recovered out of its QUIC streams.
-        for frames in flow.frame_lists() {
-            census.observe_flow_where(frames, filter);
-        }
+    // R311y721 — see `agg::aggregate_where`: the dissection's enumeration.
+    for (_, frames) in dissection.message_lists() {
+        census.observe_flow_where(frames, filter);
     }
     census
 }

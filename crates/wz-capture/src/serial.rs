@@ -417,3 +417,189 @@ mod tests {
         assert_eq!(census.frames, 0);
     }
 }
+
+/// R311y721 (§1.1f) — THE FOUR CENSUS PLANES SEE A SERIAL LINE.
+///
+/// # What R311y720 left, in its own words
+///
+/// "A serial capture's messages reach the flow listing, the capture-wide total
+/// and the report block, and they do NOT reach the four census planes --
+/// throughput, exchanges, payloads, nodes all walk the two flow TABLES and a
+/// serial line is neither. That is the R311y700 shape one plane over."
+///
+/// It was the FIFTH instance of one omission, and the fix is the one the carry
+/// named: an enumeration the planes walk (`Dissection::message_lists`) rather
+/// than tables they name. These tests drive each plane over a real serial
+/// capture, because a plane that is WIRED and not DRIVEN is the other half of
+/// the same failure.
+#[cfg(test)]
+mod plane_tests {
+    use crate::datagram_tests::{frame_carrying, push, sender_space};
+    use crate::link::FlowKey;
+    use crate::Dissection;
+    use wz_session_core::serial_link::{encode_frame, SERIAL_FLAG_ACK, SERIAL_FLAG_INIT};
+
+    /// The link type this fixture's capture declares. Its VALUE is all that is
+    /// used -- nothing parses a header out of it.
+    const SERIAL_LINKTYPE: u32 = 250;
+
+    /// A zid-naming INIT, as a serial link carries it: no length prefix,
+    /// because the frame IS the framing unit.
+    fn init_wire(zid: &[u8]) -> alloc::vec::Vec<u8> {
+        let mut wire = alloc::vec![
+            wz_session_core::wire_const::T_MID_INIT,
+            0x09,
+            (((zid.len() as u8) - 1) << 4) | 0x02,
+        ];
+        wire.extend_from_slice(zid);
+        wire
+    }
+
+    /// A capture of one serial line carrying a handshake, two INITs naming both
+    /// ends, and a Put with a payload under a key expression.
+    ///
+    /// Everything each plane needs in ONE file: the INITs are the node plane's
+    /// evidence, the Put's keyexpr is the throughput plane's row, and its
+    /// payload is the payload plane's.
+    fn serial_capture() -> alloc::vec::Vec<u8> {
+        const A_ZID: &[u8] = &[0x11, 0x22, 0x33, 0x44];
+        const B_ZID: &[u8] = &[0x55, 0x66, 0x77, 0x88];
+        let put = frame_carrying(&push(sender_space(0, Some("home/temp")), &[0u8; 24]));
+
+        // Interface 0 sends the bare INIT, so it is the initiator and A.
+        let frames: alloc::vec::Vec<(u32, alloc::vec::Vec<u8>)> = alloc::vec![
+            (0, encode_frame(SERIAL_FLAG_INIT, &[]).expect("encodes")),
+            (
+                1,
+                encode_frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, &[]).expect("encodes")
+            ),
+            (0, encode_frame(0, &init_wire(A_ZID)).expect("encodes")),
+            (1, encode_frame(0, &init_wire(B_ZID)).expect("encodes")),
+            (0, encode_frame(0, &put).expect("encodes")),
+        ];
+        let packets: alloc::vec::Vec<(u32, u64, &[u8])> = frames
+            .iter()
+            .enumerate()
+            .map(|(i, (iface, bytes))| (*iface, 1_000_000 + i as u64 * 100, bytes.as_slice()))
+            .collect();
+        crate::pcapng::write(&[(SERIAL_LINKTYPE, 6), (SERIAL_LINKTYPE, 6)], &packets)
+    }
+
+    fn dissect() -> Dissection {
+        Dissection::from_capture_declaring(&serial_capture(), &[], &[SERIAL_LINKTYPE])
+            .expect("the capture reads")
+    }
+
+    /// ANTI-VACUITY FIRST, and it is the leg that makes the other four mean
+    /// anything: the SAME file, undeclared, decodes nothing. Every assertion
+    /// below would otherwise pass on a build that read link type 250 by itself.
+    #[test]
+    fn an_undeclared_serial_capture_reaches_no_plane() {
+        let d = Dissection::from_capture_declaring(&serial_capture(), &[], &[])
+            .expect("the capture reads");
+        assert_eq!(
+            d.decoded_messages(),
+            0,
+            "nothing was declared, nothing read"
+        );
+        assert!(crate::agg::aggregate(&d).rows().is_empty());
+        assert_eq!(crate::node::nodes(&d).nodes().len(), 0);
+        #[cfg(feature = "network-codecs")]
+        assert_eq!(crate::payload::payloads(&d).payloads(), 0);
+    }
+
+    /// The THROUGHPUT plane: the keyexpr a serial line carried.
+    ///
+    /// Gated on `network-codecs` like the two below it, and MEASURED rather
+    /// than assumed: without it the fixture's `Push` is not decoded into a
+    /// keyexpr at all, so the row list is empty and the assertion below would
+    /// be a claim about a population of zero. Running `-p wz-capture
+    /// --no-default-features` is what showed it.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_throughput_plane_sees_a_serial_line() {
+        let d = dissect();
+        let table = crate::agg::aggregate(&d);
+        let keys: alloc::vec::Vec<&str> = table.rows().iter().map(|r| r.keyexpr.as_str()).collect();
+        assert!(
+            keys.contains(&"home/temp"),
+            "the Put's key expression is a row: {keys:?}"
+        );
+    }
+
+    /// The NODE plane: both zids, and the link between them.
+    ///
+    /// The link is the sharper half. It is recorded only where BOTH ends named
+    /// themselves ON ONE FLOW, so it also proves the two directions were
+    /// attributed to one key rather than to two -- which is the thing a serial
+    /// line, having no addresses, could most easily have got wrong.
+    #[test]
+    fn the_node_plane_sees_a_serial_line() {
+        let d = dissect();
+        let census = crate::node::nodes(&d);
+        let zids: alloc::vec::Vec<&[u8]> =
+            census.nodes().iter().map(|n| n.zid.as_slice()).collect();
+        assert!(
+            zids.contains(&&[0x11u8, 0x22, 0x33, 0x44][..])
+                && zids.contains(&&[0x55u8, 0x66, 0x77, 0x88][..]),
+            "both ends of the line named themselves: {zids:?}"
+        );
+        assert_eq!(
+            census.links().len(),
+            1,
+            "and the two INITs are ONE link, on one flow key"
+        );
+        assert_eq!(
+            census.links()[0].flow,
+            FlowKey::serial_line(2),
+            "under the key a serial line stands on, carrying the interface \
+             count it was read off"
+        );
+    }
+
+    /// The PAYLOAD plane: the bytes the Put carried.
+    ///
+    /// R311y721 — gated exactly as `payload::payloads` is. A test gated more
+    /// WIDELY than the item it drives is the shape that reddened C1bt four
+    /// times in R311y715.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_payload_plane_sees_a_serial_line() {
+        let d = dissect();
+        assert_eq!(
+            crate::payload::payloads(&d).payloads(),
+            1,
+            "the Put's payload is judged"
+        );
+    }
+
+    /// The EXCHANGE plane: it WALKS the line.
+    ///
+    /// Gated as `exchange` itself is — see the payload test above.
+    ///
+    /// This fixture carries no query, so the honest assertion is that the plane
+    /// reaches the messages rather than that it finds a request in them -- and
+    /// the way to state that without a query is to check that the plane's own
+    /// message count moves. A `0 == 0` here would be the vacuous form.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_exchange_plane_walks_a_serial_line() {
+        let d = dissect();
+        let table = crate::exchange::exchanges(&d);
+        assert_eq!(
+            table.requests(),
+            0,
+            "no query was sent, so there is no request to match"
+        );
+        // What DID reach it: the same enumeration the other three walked. If
+        // `message_lists` missed the serial line, this count would be zero for
+        // a capture that decoded three messages.
+        let seen: usize = d.message_lists().map(|(_, frames)| frames.len()).sum();
+        assert_eq!(
+            seen,
+            d.decoded_messages(),
+            "every decoded message is in the enumeration the planes walk"
+        );
+        assert_eq!(d.decoded_messages(), 3, "two INITs and one Put");
+    }
+}

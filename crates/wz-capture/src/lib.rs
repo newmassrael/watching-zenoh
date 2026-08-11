@@ -2338,7 +2338,18 @@ pub struct Dissection {
     /// `finish_serial` for why the decode waits.
     serial_pending: alloc::vec::Vec<serial::SerialFrame>,
     /// Messages decoded out of that line, in capture order.
-    serial_frames: alloc::vec::Vec<(serial::SerialFrame, PassiveFrame)>,
+    ///
+    /// R311y721 — a CONTIGUOUS list, with [`Self::serial_origins`] beside it
+    /// holding the serial frame each came out of, one entry per message. Two
+    /// lists rather than a list of pairs because the census planes take
+    /// `&[PassiveFrame]`, and a plane that had to be handed a pair would be a
+    /// plane taught about serial -- which is exactly the coupling
+    /// [`Self::message_lists`] exists to remove.
+    serial_frames: alloc::vec::Vec<PassiveFrame>,
+    /// The serial frame each of [`Self::serial_frames`] was decoded from, at
+    /// the same index. One serial frame can yield several messages, so this is
+    /// per MESSAGE and not per frame.
+    serial_origins: alloc::vec::Vec<serial::SerialFrame>,
     /// The zenoh session over that line. One, because a serial link is point
     /// to point: the two wires are its two directions, not two sessions.
     serial_session: PassiveSession,
@@ -2473,6 +2484,7 @@ impl Default for Dissection {
             serial: None,
             serial_pending: Vec::new(),
             serial_frames: Vec::new(),
+            serial_origins: Vec::new(),
             serial_session: new_session(DissectionLimits::default().reassembly_window_ms),
             limits: DissectionLimits::default(),
             drops: DissectionDrops::default(),
@@ -2907,8 +2919,56 @@ impl Dissection {
     /// `PassiveFrame` says what zenoh message it was and the `SerialFrame` says
     /// which wire and which capture packet carried it. A reader given only the
     /// first cannot point at the bytes.
-    pub fn serial_messages(&self) -> &[(serial::SerialFrame, PassiveFrame)] {
+    pub fn serial_messages(&self) -> impl Iterator<Item = (&serial::SerialFrame, &PassiveFrame)> {
+        self.serial_origins.iter().zip(self.serial_frames.iter())
+    }
+
+    /// R311y721 — the serial line's decoded messages alone, as the census
+    /// planes take them.
+    pub fn serial_frames(&self) -> &[PassiveFrame] {
         &self.serial_frames
+    }
+
+    /// R311y721 (§1.1f) — EVERY list of decoded transport messages this
+    /// capture holds, with the flow key each stands under.
+    ///
+    /// # Why the census planes walk this and name no table
+    ///
+    /// Four planes census the decoded messages — throughput (`agg`), exchanges
+    /// (`exchange`), payloads (`payload`) and nodes (`node`) — and each used to
+    /// name the tables it knew about. That makes every new producer reach
+    /// whichever plane its author remembered, and this workspace has shipped
+    /// that omission five times (R311y668, y678, y699, y700, and R311y720's own
+    /// carry, which recorded a whole serial line reaching the flow listing and
+    /// none of the planes).
+    ///
+    /// [`DatagramDissection::frame_lists`] fixed it INSIDE the datagram table
+    /// and the fifth instance walked straight past it, because a serial line is
+    /// in neither table: it is point to point, has no addresses, and belongs to
+    /// no 5-tuple. So the enumeration moves up here, where a producer that is
+    /// not a flow at all can still be in it.
+    ///
+    /// SLICES and not a flattened frame iterator, deliberately: each list keeps
+    /// its own coordinate meaning (see [`DatagramDissection::quic_streams`]),
+    /// and fusing them into one sequence would fuse three offset spaces.
+    pub fn message_lists(&self) -> impl Iterator<Item = (FlowKey, &[PassiveFrame])> {
+        self.flows
+            .iter()
+            .map(|f| (f.flow, f.frames.as_slice()))
+            .chain(
+                self.datagram_flows
+                    .iter()
+                    .flat_map(|f| f.frame_lists().map(move |frames| (f.flow, frames))),
+            )
+            .chain(core::iter::once((
+                // The key a serial line stands under: no addresses, and the
+                // interface count in the one field that can hold a fact. See
+                // `FlowKey::serial_line`.
+                FlowKey::serial_line(
+                    self.serial.as_ref().map_or(0, |l| l.census().interfaces) as u32
+                ),
+                self.serial_frames.as_slice(),
+            )))
     }
 
     /// R311y661 (§1.2a) — the Decryption Secrets Blocks the capture file
@@ -3615,7 +3675,11 @@ impl Dissection {
                 wz_session_core::passive::LinkHandshake::Present,
             );
             for decoded in batch {
-                self.serial_frames.push((frame.clone(), decoded));
+                // The two lists move together, here and nowhere else, which is
+                // what keeps the index correspondence a local invariant rather
+                // than a convention.
+                self.serial_frames.push(decoded);
+                self.serial_origins.push(frame.clone());
             }
         }
     }

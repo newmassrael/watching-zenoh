@@ -789,7 +789,7 @@ impl<'a> CaptureReport<'a> {
                 k.interfaces,
                 k.bytes,
                 k.frames,
-                d.serial_messages().len(),
+                d.serial_frames().len(),
                 k.crc_failures,
                 k.framing_errors,
                 k.handshake_frames,
@@ -1302,7 +1302,7 @@ impl<'a> CaptureReport<'a> {
                 k.frames,
                 k.interfaces,
                 k.bytes,
-                d.serial_messages().len()
+                d.serial_frames().len()
             ));
             if k.crc_failures > 0 || k.framing_errors > 0 {
                 s.push_str(&format!(

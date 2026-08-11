@@ -436,18 +436,18 @@ fn whatami_of(cbyte: u8) -> u8 {
 /// census that skipped `datagram_flows()` would miss every multicast JOIN.
 pub fn nodes(dissection: &crate::Dissection) -> NodeCensus {
     let mut census = NodeCensus::new();
-    for flow in dissection.flows() {
-        census.observe_flow(&flow.flow, &flow.frames);
+    // R311y721 — every list, through the dissection's own enumeration. A
+    // `quic/...` peer's Init is inside a QUIC stream and a serial peer's is
+    // inside a COBS frame; a census that named the two flow tables would report
+    // either deployment as having no participants at all.
+    for (flow, frames) in dissection.message_lists() {
+        census.observe_flow(&flow, frames);
     }
     for flow in dissection.datagram_flows() {
-        // R311y718 — every frame list, not `frames` alone: a `quic/...` peer's
-        // Init is inside a QUIC stream, so a census that named one list would
-        // report a whole QUIC deployment as having no nodes in it.
-        for frames in flow.frame_lists() {
-            census.observe_flow(&flow.flow, frames);
-        }
         // The scouting list, which is where a discovery-only capture's nodes
-        // all are. Both producers of this table, not one.
+        // all are. A SECOND producer and not a frame list: a scouting datagram
+        // is in the Scout/Hello namespace rather than the transport one, so it
+        // cannot be a `PassiveFrame` and `message_lists` cannot carry it.
         census.observe_scouting(&flow.flow, &flow.scouting);
     }
     census

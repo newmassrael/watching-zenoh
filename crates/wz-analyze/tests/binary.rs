@@ -5504,6 +5504,21 @@ fn a_declared_serial_capture_is_read_and_its_direction_is_measured() {
     let init = encode_frame(SERIAL_FLAG_INIT, &[]).expect("encodes");
     let init_ack = encode_frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, &[]).expect("encodes");
 
+    // A zenoh INIT naming a zid, carried as DATA (header 0) -- the link-level
+    // INIT above is a different thing entirely, and conflating them is why both
+    // are in this fixture.
+    let zenoh_init = |zid: &[u8]| {
+        let mut wire = vec![
+            wz_session_core::wire_const::T_MID_INIT,
+            0x09,
+            (((zid.len() as u8) - 1) << 4) | 0x02,
+        ];
+        wire.extend_from_slice(zid);
+        encode_frame(0, &wire).expect("encodes")
+    };
+    let a_init = zenoh_init(&[0x11, 0x22, 0x33, 0x44]);
+    let b_init = zenoh_init(&[0x55, 0x66, 0x77, 0x88]);
+
     // TWO interfaces = the line's two wires. Interface 1 is seen FIRST, so a
     // positional rule would call it A; it then sends INIT|ACK, so the wire says
     // it is the responder and it must be B.
@@ -5514,6 +5529,8 @@ fn a_declared_serial_capture_is_read_and_its_direction_is_measured() {
             (0, 1_000_100, &init[..]),
             (1, 1_000_200, &init_ack[..]),
             (0, 1_000_300, &keep_alive[..]),
+            (0, 1_000_400, &a_init[..]),
+            (1, 1_000_500, &b_init[..]),
         ],
     );
 
@@ -5534,16 +5551,16 @@ fn a_declared_serial_capture_is_read_and_its_direction_is_measured() {
     // (1) The frames are read and the zenoh in them decoded.
     let with = run(&["--serial", "250"]);
     assert!(
-        with.contains("serial: 4 frame(s) on 2 interface(s)"),
+        with.contains("serial: 6 frame(s) on 2 interface(s)"),
         "every frame is recovered, off both wires: {with}"
     );
     assert!(
-        with.contains("2 message(s) decoded"),
-        "the two KeepAlives are zenoh; the two handshake frames are the \
-         LINK's own exchange and carry none: {with}"
+        with.contains("4 message(s) decoded"),
+        "the two KeepAlives and the two zenoh INITs; the two LINK-level \
+         handshake frames are the line's own exchange and carry none: {with}"
     );
     assert!(
-        with.contains("messages decoded: 2"),
+        with.contains("messages decoded: 4"),
         "and they are in the capture-wide total, not only in the serial \
          block: {with}"
     );
@@ -5596,5 +5613,33 @@ fn a_declared_serial_capture_is_read_and_its_direction_is_measured() {
         without_json.contains("\"serial\":null"),
         "and the serial block is an explicit null rather than absent: \
          {without_json}"
+    );
+
+    // R311y721 — AND THE CENSUS PLANES REACH IT, at the command line.
+    //
+    // R311y720 closed the decode and left this: the four planes walked the two
+    // flow tables and a serial line is neither, so a whole deployment censused
+    // as empty. `Dissection::message_lists` is the enumeration that fixed it,
+    // and the plane a KeepAlive can prove from here is the NODE one -- it is
+    // the only census whose evidence is the handshake rather than a record, and
+    // this fixture's traffic is handshakes and KeepAlives.
+    let nodes = run(&["--serial", "250", "--nodes"]);
+    assert!(
+        nodes.contains("nodes: 2 (links 1)"),
+        "both ends named themselves on the line, and their two INITs are ONE \
+         link -- which also proves the two wires were attributed to one flow \
+         key rather than to two: {nodes}"
+    );
+    assert!(
+        nodes.contains("11223344") && nodes.contains("55667788"),
+        "and the zids reach the rendering a person reads: {nodes}"
+    );
+    // ANTI-VACUITY for the plane, not just for the decode: undeclared, the
+    // node census is empty over the SAME file.
+    let no_nodes = run(&["--nodes"]);
+    assert!(
+        no_nodes.contains("nodes: 0 (links 0)"),
+        "without the declaration there is nothing for the plane to see: \
+         {no_nodes}"
     );
 }

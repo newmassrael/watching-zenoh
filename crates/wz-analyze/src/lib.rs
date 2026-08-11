@@ -4028,9 +4028,9 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
     // capture carry" must not have to know that serial answers somewhere else.
     if let Some(k) = d.serial_census() {
         let rows: Vec<MessageRow> = d
-            .serial_messages()
+            .serial_frames()
             .iter()
-            .map(|(_, frame)| MessageRow::transport(frame, OffsetSpace::Packet))
+            .map(|frame| MessageRow::transport(frame, OffsetSpace::Packet))
             .collect();
         // The FlowKey a serial line does not have. `port` carries the interface
         // count rather than a port, and the addresses are empty -- a serial
@@ -4043,7 +4043,7 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
             &mut emitted,
             &flow,
             "serial",
-            d.serial_messages().len(),
+            d.serial_frames().len(),
             0,
             if k.direction_unattributed {
                 "SerialDirectionUnattributed"
