@@ -72,9 +72,22 @@ on:
 # of its own. That is the right trade here because main is the only pushed
 # branch and the question this gate answers is "is the tip shippable", never
 # "was each intermediate commit green".
+# R311y704 — cancellation is right on a BRANCH and wrong on `main`, and the
+# difference was measured rather than argued.
+#
+# On a branch only the tip matters, so a superseded run is wasted runner time.
+# On `main` every commit is a state someone can bisect to, and the run IS its
+# verdict. With cancellation on, a sequence of pushes leaves NO commit with one:
+# R311y701 through R311y703 were pushed in succession and all three runs came
+# back `cancelled` -- five in a row counting the two before them. Two Layer C0
+# reds fixed in R311y701 have therefore never been confirmed on hosted CI, and
+# `cancelled` is neither red nor green, so nothing even reported the gap.
+#
+# The cost of this is runner time: pushes to main now QUEUE rather than
+# superseding each other. That is what the runner time is for.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
