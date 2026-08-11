@@ -113,11 +113,11 @@ pub mod ws;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
+use wz_session_core::chain_loss::ChainLoss;
 use wz_session_core::parse_error::InboundParseError;
 use wz_session_core::passive::{
     Direction, FlowContext, PassiveFrame, PassiveSession, PassiveStall,
 };
-use wz_session_core::reassembly_dispatch::ChainLoss;
 use wz_session_core::scouting_message::{parse_scouting, ScoutingFrame};
 
 use crate::link::{FlowKey, SkipReason, Transport};
@@ -1746,6 +1746,12 @@ impl DroppedFrameCensus {
             Ok(wz_session_core::inbound::InboundFrame::Close { .. }) => self.close += 1,
             Ok(wz_session_core::inbound::InboundFrame::KeepAlive { .. }) => self.keep_alive += 1,
             Ok(wz_session_core::inbound::InboundFrame::Frame { .. }) => self.frame += 1,
+            // The VARIANT is gated on `reassembly`, and the FIELD above is not:
+            // a reader of this census must not have to know which features this
+            // binary carries (R311y655). Without the feature a `0x06` decodes as
+            // `Unknown { mid: 6 }` and is counted there, which is the honest
+            // reading — this build did not recognise it as a fragment.
+            #[cfg(feature = "reassembly")]
             Ok(wz_session_core::inbound::InboundFrame::Fragment { .. }) => self.fragment += 1,
             Ok(wz_session_core::inbound::InboundFrame::Join { .. }) => self.join += 1,
             Ok(wz_session_core::inbound::InboundFrame::Unknown { .. }) => self.unknown += 1,
@@ -3705,10 +3711,15 @@ mod datagram_tests {
     /// as ports, which is what keeps it the same 5-tuple in the other direction
     /// rather than a second flow.
     ///
-    /// Gated to match its ONLY caller rather than more widely: a fixture built
-    /// in an arm nothing calls it from is dead code, and `-D dead-code` finds it
-    /// in exactly the arm a default-features run never compiles.
-    #[cfg(feature = "reassembly")]
+    /// Gated to match its CALLERS rather than more widely: a fixture built in an
+    /// arm nothing calls it from is dead code, and `-D dead-code` finds it in
+    /// exactly the arm a default-features run never compiles. R311y715 —
+    /// UNGATED now, because the rule cuts the other way as soon as a second
+    /// caller appears: the node census (`node.rs`) needs a reverse-direction
+    /// packet to prove a link takes an INIT from BOTH ends, and it is not a
+    /// reassembly test. A helper gated more narrowly than its callers fails to
+    /// resolve in the arm between them, which is the same shape as `ChainLoss`
+    /// two screens up.
     pub(crate) fn tcp_packet_reverse(seq: u32, payload: &[u8]) -> Vec<u8> {
         let mut tcp = Vec::new();
         tcp.extend_from_slice(&7447u16.to_be_bytes());
@@ -6180,6 +6191,13 @@ mod datagram_tests {
     /// already exist. The item is refuted rather than paid, and this test is
     /// what keeps the refutation true: a close that started reclaiming slots
     /// would make the count below read zero.
+    ///
+    /// R311y715 — gated on the feature whose property it states. Without
+    /// `reassembly` a `0x06` is `Unknown { mid: 6 }`, no chain is ever opened,
+    /// and the exit honestly abandons none: the test would then assert that a
+    /// mechanism this build does not have lost something, which is a false
+    /// statement about a correct build rather than a finding.
+    #[cfg(feature = "reassembly")]
     #[test]
     fn a_session_closing_under_an_open_chain_loses_nothing_extra() {
         let fragment = |sn: u8, piece: &[u8]| {

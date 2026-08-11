@@ -44,7 +44,7 @@ use core::ops::{Deref, DerefMut};
 
 use alloc::vec::Vec;
 
-use wz_session_core::reassembly_dispatch::ChainLoss;
+use wz_session_core::chain_loss::ChainLoss;
 
 use crate::{
     add_sn, add_ws, tls, ByteResidue, DatagramDissection, Direction, FlowDissection, FramingHealth,
