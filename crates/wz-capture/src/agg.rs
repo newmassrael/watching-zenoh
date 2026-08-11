@@ -35,7 +35,7 @@
 //! ## What is never guessed
 //!
 //! A reference this table cannot resolve is COUNTED AND NAMED
-//! ([`ThroughputTable::unresolved`]), never attributed to a keyexpr. Both sides
+//! ([`crate::agg::ThroughputTable::unresolved`]), never attributed to a keyexpr. Both sides
 //! number their mappings from 1, so a wrong-space or stale read very likely
 //! FINDS an entry and produces a confident, wrong row — which is worse than a
 //! missing one, because a total that is quietly wrong is indistinguishable from
@@ -49,7 +49,7 @@
 //! backwards attributes traffic to a keyexpr that was not what the id meant
 //! when the bytes went past. A reference that precedes its declaration is what
 //! a capture started mid-session looks like, and it belongs in
-//! [`ThroughputTable::unresolved`] rather than in a row.
+//! [`crate::agg::ThroughputTable::unresolved`] rather than in a row.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -98,7 +98,7 @@ pub struct KeyexprCounts {
     /// build cannot size.
     ///
     /// Two cases, and every one of them reaches this counter through
-    /// [`Self::record_payload`] rather than by assigning the byte total
+    /// `Self::record_payload` rather than by assigning the byte total
     /// directly, so a third cannot arrive by writing a number the way the two
     /// below each once did:
     ///
@@ -673,7 +673,7 @@ pub struct ThroughputTable {
 }
 
 /// R311y614 (§1.4i) — traffic this table could not read AT ALL, as opposed to
-/// traffic it read and could not attribute ([`ThroughputTable::unresolved`]).
+/// traffic it read and could not attribute ([`crate::agg::ThroughputTable::unresolved`]).
 ///
 /// Every other layer of this crate reports what it lost — a
 /// [`SkipReason`](crate::link::SkipReason) per packet, a

@@ -19,7 +19,7 @@
 //! built because a total that is quietly short reads exactly like a total that
 //! is right. Serialising the rows and dropping the gaps would undo both in one
 //! line — so the gap objects are STRUCTURAL here (always emitted, never
-//! conditional on being non-zero), and [`CaptureReport::is_complete`] is a
+//! conditional on being non-zero), and [`crate::report::CaptureReport::is_complete`] is a
 //! single field a consumer can branch on without knowing which planes ran.
 //!
 //! ## Format
@@ -28,7 +28,7 @@
 //! a serialiser is thirty lines. The escaping is the part that has to be right
 //! rather than short: a keyexpr is attacker-influenced text on the wire, and a
 //! writer that emitted it raw would let a publisher choose the shape of this
-//! tool's output. [`escape_into`] handles every character RFC 8259 requires and
+//! tool's output. `escape_into` handles every character RFC 8259 requires and
 //! is pinned character by character in this module's tests.
 //!
 //! A text rendering sits beside it for the human case. It is deliberately NOT
@@ -591,7 +591,8 @@ impl<'a> CaptureReport<'a> {
                          \"flows_opened\":{},\"packets\":{},\"packets_opened\":{},\
                          \"packets_no_keys\":{},\"packets_refused\":{},\
                          \"crypto_bytes\":{},\"stream_bytes\":{},\
-                         \"datagram_bytes\":{},\"walks_stopped\":{}}}",
+                         \"datagram_bytes\":{},\"walks_stopped\":{},\
+                         \"flows_identity_adopted\":{}}}",
                         k.flows_opened > 0 && k.flows_opened == k.flows_offered,
                         k.flows_offered,
                         k.flows_opened,
@@ -603,6 +604,7 @@ impl<'a> CaptureReport<'a> {
                         k.stream_bytes,
                         k.datagram_bytes,
                         k.walks_stopped,
+                        k.flows_identity_adopted,
                     ),
                 },
             ));
@@ -895,6 +897,24 @@ impl<'a> CaptureReport<'a> {
                 // that really carried three ordinary zenoh datagrams printed
                 // exactly the sentence above, with the traffic silenced and the
                 // `unrecognised: 3` evidence visible only in the JSON.
+                // R311y710 (Y2) — a flow whose KEYS rest on a premise, said in
+                // the summary rather than only in `--flows`. The verdict line
+                // above reports packets opened, which is the CONSEQUENCE of the
+                // assumption and reads exactly like the consequence of evidence.
+                // `declared` below is the same shape one question earlier -- that
+                // one is about whether the flow is QUIC, this one about whether
+                // these are its keys -- and both are premises a wrong answer to
+                // makes every number above wrong with it.
+                if let Some(k) = self.quic {
+                    if k.flows_identity_adopted > 0 {
+                        s.push_str(&format!(
+                            "  QUIC: {} flow(s) opened on an ASSUMED identity -- no \
+                             ClientHello was seen and the key log held exactly one \
+                             connection, taken to be theirs\n",
+                            k.flows_identity_adopted
+                        ));
+                    }
+                }
                 let unsupported = q.iter().filter(|c| c.declaration_unsupported()).count();
                 if unsupported > 0 {
                     s.push_str(&format!(
@@ -2513,7 +2533,7 @@ mod tests {
     ///
     /// The test above cannot see this and a falsification proved it: its
     /// throughput plane is undecided too, so deleting the exchange leg from
-    /// [`CaptureReport::is_complete`] changed nothing and the suite stayed
+    /// [`crate::report::CaptureReport::is_complete`] changed nothing and the suite stayed
     /// green. Here each plane is the ONLY one on the page, so the leg under
     /// test is the only thing that can produce the verdict — the shape §7.14
     /// names, reached by putting one plane on a page rather than by trusting a
@@ -2727,6 +2747,7 @@ mod tests {
             stream_bytes: 0,
             datagram_bytes: 0,
             walks_stopped: 0,
+            flows_identity_adopted: 0,
         };
         let r = CaptureReport::of(&d).with_quic_decryption(&shut);
         assert!(!r.is_complete(), "a flow offered and not opened is a floor");

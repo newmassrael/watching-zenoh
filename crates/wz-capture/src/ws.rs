@@ -147,7 +147,7 @@ pub enum WsDesyncReason {
     /// frame boundary is not where this reader thought.
     MessageBoundary,
     /// Detected as WebSocket on its opening literal, then the HTTP preamble
-    /// never terminated within [`MAX_PREAMBLE`].
+    /// never terminated within `MAX_PREAMBLE`.
     PreambleNeverEnded,
     /// R311y612 (§4.1) — the flow was classified as WebSocket with its opening
     /// LOST to a hole, so there is no preamble to step over and no boundary
@@ -358,7 +358,7 @@ fn chain_confirms(buf: &[u8], at: usize, depth: usize) -> WsCandidate {
 /// R311y612 (§4.1) — do these bytes hold a WebSocket frame boundary that
 /// `depth` chained frames agree on?
 ///
-/// The public face of [`chain_confirms`], for a caller deciding what a flow IS
+/// The public face of `chain_confirms`, for a caller deciding what a flow IS
 /// rather than where its next frame starts. `true` is evidence of WebSocket;
 /// `false` is "not on the bytes so far", never "definitely not" — which is why
 /// its caller keeps asking as more arrive.

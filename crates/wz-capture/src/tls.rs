@@ -427,7 +427,7 @@ impl EncryptedFlow {
 /// counters.
 ///
 /// A flow is either live or counted here, never both — the invariant
-/// [`crate::Dissection::evicted_streams`] states for the stream tally.
+/// `crate::Dissection::evicted_streams` states for the stream tally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EncryptedTotals {
     /// How many flows were recognised as carrying zenoh inside TLS.

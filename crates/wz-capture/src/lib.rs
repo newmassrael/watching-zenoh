@@ -167,7 +167,7 @@ pub struct SkipCensus {
 
 impl SkipCensus {
     /// Every skip, whatever the reason — equal to
-    /// [`CaptureHealth::packets_skipped`] and computed independently of it, so
+    /// [`DissectionHealth::packets_skipped`] and computed independently of it, so
     /// the two disagreeing would mean one of them stopped seeing a path.
     pub fn total(&self) -> usize {
         self.unsupported_link_type

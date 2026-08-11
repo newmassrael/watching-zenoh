@@ -5331,6 +5331,7 @@ layer_c1bw_analyze_cli() {
         quic_pass_tests::a_key_log_for_one_direction_opens_that_half_and_names_the_other \
         quic_pass_tests::the_quic_listing_takes_the_bound_and_says_the_selector_did_not_reach_it \
         quic_pass_tests::a_mid_connection_quic_capture_opens_only_once_the_length_is_declared \
+        quic_pass_tests::an_assumed_identity_is_never_reported_as_a_clienthello \
         payload_formats::tests::a_nested_message_is_walked_and_its_paths_name_the_route \
         payload_formats::tests::a_span_two_layers_in_is_still_in_the_outer_payloads_coordinates \
         payload_formats::tests::a_length_field_that_is_not_a_message_falls_back_to_its_byte_count \
@@ -5572,6 +5573,45 @@ layer_c1bx_tls_record_oracle() {
 
     echo "  C1bx: the decryptor is checked against rustls and the SET is pinned"
 }
+
+# ── R311y710 (§1.2a) — Layer C1bz: the DOCS resolve.
+#
+# MEASURED when this lane did not exist: `cargo doc -p wz-capture` failed with
+# THIRTY-THREE broken intra-doc links, and the crate is the analyzer's core. No
+# lane in this file had ever run rustdoc, on any crate, so the rot accumulated
+# for the whole life of the workspace with nothing able to report it.
+#
+# ## What the 33 turned out to be, because the shape matters more than the count
+#
+# TWENTY-THREE were one cause: a module that carries BOTH an outer `///` doc on
+# its `pub mod x;` in lib.rs AND an inner `//!` doc in `x.rs` has the two merged,
+# and the merged text's relative links then resolve against the CRATE ROOT rather
+# than against `x`. So `[`ThroughputTable::unresolved`]`, written inside
+# `agg.rs` where that type is declared, resolves to nothing. Fully qualifying is
+# the fix and `crate::agg::ThroughputTable::...` is what the file now says.
+#
+# NINE were a public doc hyperlinking a PRIVATE item, which rustdoc refuses and
+# which is right: the name still belongs in the prose, so those keep the name and
+# drop the brackets.
+#
+# TWO were plain WRONG NAMES -- `crate::Limits` and `CaptureHealth` are called
+# `DissectionLimits` and `DissectionHealth`. Those are the ones worth having a
+# gate for: a rename that leaves a doc behind is invisible to every other lane
+# here, and the doc then sends a reader to a type that does not exist.
+#
+# Scoped to the three analyzer crates rather than the workspace, because that is
+# what this round measured; widening it is a round with its own evidence.
+layer_c1bz_docs_resolve() {
+    local crate
+    for crate in wz-capture wz-analyze wz-tls-record; do
+        (cd crates && cargo doc -p "$crate" --no-deps --quiet) || {
+            echo "  C1bz FAIL: $crate has broken intra-doc links"
+            return 1
+        }
+    done
+    echo "  C1bz: the analyzer crates' docs resolve every link they make"
+}
+
 
 # container can grant CAP_NET_RAW to a non-root process and a root process can
 # be denied it by seccomp. Same arming-flag contract as C1br — a green SKIP on
@@ -11133,6 +11173,7 @@ run_layer C1br layer_c1br_uring_fixed_buffers || overall=1
 run_layer C1bs layer_c1bs_live_capture || overall=1
 run_layer C1bw layer_c1bw_analyze_cli || overall=1
 run_layer C1bx layer_c1bx_tls_record_oracle || overall=1
+run_layer C1bz layer_c1bz_docs_resolve || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1bl layer_c1bl_cargo_test_router_failfast || overall=1
 run_layer C1bm layer_c1bm_cargo_test_pico_failfast || overall=1

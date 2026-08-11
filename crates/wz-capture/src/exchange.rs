@@ -39,26 +39,26 @@
 //! ## What is never invented
 //!
 //! - A frame with no clock ([`PassiveFrame::observed_at_ms`] `None`) yields NO
-//!   sample. It is counted in [`ExchangeGaps::unstamped`], because a capture
+//!   sample. It is counted in [`crate::exchange::ExchangeGaps::unstamped`], because a capture
 //!   format that carries no timestamps must not read as a capture whose every
 //!   exchange took zero milliseconds.
 //! - A completion that precedes its request — an out-of-order capture, a clock
 //!   stepped backwards — yields no sample either
-//!   ([`ExchangeGaps::non_monotonic`]). A `saturating_sub` would have turned
+//!   ([`crate::exchange::ExchangeGaps::non_monotonic`]). A `saturating_sub` would have turned
 //!   both into a confident `0`.
 //! - A `Response` whose `Request` was never seen is an ORPHAN
-//!   ([`ExchangeGaps::orphan_responses`]), the ordinary signature of a capture
+//!   ([`crate::exchange::ExchangeGaps::orphan_responses`]), the ordinary signature of a capture
 //!   started mid-query, and it is reported rather than dropped.
 //! - An exchange still open when the flow's frames run out is UNCLOSED
-//!   ([`ExchangeTable::unclosed`]), not a completion with a missing half.
+//!   ([`crate::exchange::ExchangeTable::unclosed`]), not a completion with a missing half.
 //!
 //! ## Memory, without a new constant
 //!
 //! Open exchanges live only for the duration of one
-//! [`ExchangeTable::observe_flow_where`] call
+//! [`crate::exchange::ExchangeTable::observe_flow_where`] call
 //! and are keyed within that flow, so the map is bounded by the number of
 //! `Request` records in the frames the caller handed in — which the caller
-//! already bounds through [`crate::Limits::frames_per_flow`]. A consumer that
+//! already bounds through [`crate::DissectionLimits::frames_per_flow`]. A consumer that
 //! streams frames without retaining them must therefore call this per flow and
 //! per bounded window; that is a real limit and it is stated rather than
 //! papered over with a cap number nobody measured.
@@ -322,13 +322,13 @@ impl ExchangeTable {
     /// the flow for one that never closed — because that is the first moment
     /// `replies`, `errs`, `first_reply`, `completion` and `closed` are facts.
     /// A selector built only from request-time fields is unaffected: the
-    /// request's own fields are carried on [`OpenExchange`] and answer the same
+    /// request's own fields are carried on `OpenExchange` and answer the same
     /// way whenever they are asked.
     ///
     /// ## What a rejected exchange does NOT do
     ///
     /// It does not become an orphan. Its responses land in its own open entry
-    /// and go with it, WITHOUT touching [`ExchangeGaps::orphan_responses`],
+    /// and go with it, WITHOUT touching [`crate::exchange::ExchangeGaps::orphan_responses`],
     /// because that counter means "this capture began mid-query" and a selector
     /// that manufactured it out of its own choice would make the number
     /// unreadable — the reader could no longer tell a truncated capture from a
@@ -341,7 +341,7 @@ impl ExchangeTable {
     /// batch is traffic no predicate can be evaluated against, so it stays in
     /// [`Self::unread`]. [`ExchangeGaps::unattributed_requests`] DOES follow
     /// the selection, and the difference is principled — that record was read,
-    /// and a filter can judge it (to [`Truth::Unknown`] at worst, which
+    /// and a filter can judge it (to [`crate::filter::Truth::Unknown`] at worst, which
     /// [`Self::selection`] counts).
     pub fn observe_flow_where(&mut self, frames: &[PassiveFrame], filter: &Filter) {
         let mut spaces = KeyexprSpaces::new();

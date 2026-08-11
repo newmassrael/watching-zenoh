@@ -22,8 +22,8 @@
 //! filtered total that is quietly short and indistinguishable from one that is
 //! whole.
 //!
-//! So evaluation is Kleene's strong three-valued logic ([`Truth`]), and the
-//! undecidable records are COUNTED ([`Selection::undecided`]) rather than
+//! So evaluation is Kleene's strong three-valued logic ([`crate::filter::Truth`]), and the
+//! undecidable records are COUNTED ([`crate::filter::Selection::undecided`]) rather than
 //! silently dropped. Three-valued and not merely "propagate unknown": `unknown
 //! AND no` is `no`, because a record that fails the decidable half of a
 //! conjunction is out whatever the missing field held. Only where the missing
@@ -75,8 +75,8 @@
 //! ## And on a plane that does not correlate exchanges, they are UNKNOWN
 //!
 //! [`crate::agg`] folds records, not exchanges; it has no `replies` to count for
-//! the record in its hand. So [`RecordView::outcome`] is `None` there and every
-//! outcome term is [`Truth::Unknown`] — the same answer, for the same reason, as
+//! the record in its hand. So [`crate::filter::RecordView::outcome`] is `None` there and every
+//! outcome term is [`crate::filter::Truth::Unknown`] — the same answer, for the same reason, as
 //! a `time` term over a capture with no clock. A reader who points `replies == 0`
 //! at the throughput plane sees `undecided == seen` and has been told precisely
 //! what happened: the question was well-formed and that plane cannot answer it.
@@ -101,7 +101,7 @@
 //! The origin reaches a plane only through the whole-capture entry points
 //! ([`aggregate_where`](crate::agg::aggregate_where) and its siblings). A
 //! caller folding flows by hand has not said where the capture began, so
-//! `elapsed` is [`Truth::Unknown`] there — the same shape as a `time` term
+//! `elapsed` is [`crate::filter::Truth::Unknown`] there — the same shape as a `time` term
 //! over a capture with no clock, and for the same reason.
 //!
 //! `dir` is `a` / `b` and not `a2b` / `b2a` because
@@ -109,7 +109,7 @@
 //! crate says and a second vocabulary for one axis is a second thing to get
 //! wrong.
 //!
-//! `key` matching is zenoh's own — [`keyexpr_pattern_matches`], the matcher the
+//! `key` matching is zenoh's own — `keyexpr_pattern_matches`, the matcher the
 //! subscriber and queryable registries use — rather than a glob written here.
 //! A filter language for zenoh traffic that did not speak zenoh's keyexpr
 //! dialect would be a second dialect a reader has to learn, and it would
@@ -125,7 +125,7 @@
 //! reader's selector into a silently empty answer.
 //!
 //! So this module refuses instead: with `filter-wildcards` off, a pattern
-//! carrying `*` is a PARSE ERROR ([`FilterErrorKind::WildcardUnsupported`]).
+//! carrying `*` is a PARSE ERROR ([`crate::filter::FilterErrorKind::WildcardUnsupported`]).
 //! The reader is told the build cannot answer their question, which is the one
 //! outcome that is never a wrong answer.
 
@@ -287,7 +287,7 @@ pub struct RecordView<'a> {
 ///
 /// [`Self::Unknown`] is not "probably not". It is "this capture does not carry
 /// the fact this predicate needs", and it is a distinct outcome all the way out
-/// to [`Selection::undecided`] so a reader can see how much of the capture the
+/// to [`crate::filter::Selection::undecided`] so a reader can see how much of the capture the
 /// filter could not speak about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Truth {
@@ -1155,7 +1155,7 @@ fn integer(value: &str, at: usize) -> Result<u64, FilterError> {
     })
 }
 
-/// Split a keyexpr pattern into the chunks [`keyexpr_pattern_matches`] wants,
+/// Split a keyexpr pattern into the chunks `keyexpr_pattern_matches` wants,
 /// refusing what this build's matcher cannot answer.
 fn compile_pattern(pattern: &str, at: usize) -> Result<Vec<String>, FilterError> {
     // The refusal, and it is deliberately at PARSE time rather than at match

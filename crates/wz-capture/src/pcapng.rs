@@ -97,7 +97,7 @@ const MIN_BLOCK_LEN: usize = 12;
 /// What went wrong reading a pcapng file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PcapngError {
-    /// Fewer than [`MIN_BLOCK_LEN`] bytes, or a block header that ran past the
+    /// Fewer than `MIN_BLOCK_LEN` bytes, or a block header that ran past the
     /// end of the file.
     Truncated {
         /// Byte offset the read was attempted at.

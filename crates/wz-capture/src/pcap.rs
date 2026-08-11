@@ -41,7 +41,7 @@ const PCAPNG_SHB: u32 = 0x0A0D_0D0A;
 /// What went wrong reading a capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PcapError {
-    /// Fewer than [`FILE_HEADER_LEN`] bytes.
+    /// Fewer than `FILE_HEADER_LEN` bytes.
     TruncatedFileHeader,
     /// The magic matched none of the four classic variants.
     BadMagic(u32),

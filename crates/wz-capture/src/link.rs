@@ -264,7 +264,7 @@ pub enum SkipReason {
     /// transport, carrying the header that stopped it.
     ///
     /// R311y597 — the payload is the extension header's own number, and it is
-    /// now only ever one of [`is_ipv6_extension_header`]'s set. It previously
+    /// now only ever one of `is_ipv6_extension_header`'s set. It previously
     /// carried any next-header that was not TCP, so a reader saw UDP (17) and
     /// ICMPv6 (58) reported as unwalked chains.
     ///
@@ -272,7 +272,7 @@ pub enum SkipReason {
     /// the three cases that genuinely cannot be walked: ESP (50), whose
     /// remainder is encrypted, the two experimental numbers (253 / 254) that
     /// carry no length this reader may assume, and a chain longer than
-    /// [`IPV6_MAX_EXT_HEADERS`].
+    /// `IPV6_MAX_EXT_HEADERS`.
     Ipv6ExtensionChain(u8),
     /// An IPv6 fragment other than the first, which has no transport header to
     /// find. The v6 twin of [`Self::Ipv4Fragment`], and named separately

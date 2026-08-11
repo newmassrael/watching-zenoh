@@ -21,9 +21,9 @@
 //! worth looking at, and this crate's whole reason to exist is that a confident
 //! misread is worse than no answer (R311y607).
 //!
-//! So every rendering here is earned. [`Verdict::Text`] means the bytes ARE
-//! valid UTF-8; [`Verdict::Json`] means they parsed; and a payload that does
-//! not match its own declaration is [`Verdict::NotAsDeclared`], carrying the
+//! So every rendering here is earned. [`crate::payload::Verdict::Text`] means the bytes ARE
+//! valid UTF-8; [`crate::payload::Verdict::Json`] means they parsed; and a payload that does
+//! not match its own declaration is [`crate::payload::Verdict::NotAsDeclared`], carrying the
 //! byte offset where the claim broke. That verdict is not a failure of this
 //! module — it is a FINDING, and the most interesting one it can produce,
 //! because a publisher whose payload disagrees with its own encoding is a bug
@@ -37,7 +37,7 @@
 //! `zenoh-pico` oracle pins it entry for entry against the real library, so a
 //! name printed here is the name the publisher's own stack would print.
 //!
-//! An id the table does not have is [`Encoding::Unknown`]. Not "probably
+//! An id the table does not have is [`crate::payload::Encoding::Unknown`]. Not "probably
 //! bytes": unknown, counted, and rendered opaque.
 //!
 //! ## No allocation to decide, no dependency to parse
@@ -145,7 +145,7 @@ impl<'a> Encoding<'a> {
 /// NOT [`Shape::Json`]: json5 admits comments and trailing commas that a strict
 /// scanner rejects, and a json-seq body is several values with a separator
 /// between them. Judging either with a strict validator would manufacture a
-/// [`Verdict::NotAsDeclared`] against a publisher that did nothing wrong — a
+/// [`crate::payload::Verdict::NotAsDeclared`] against a publisher that did nothing wrong — a
 /// false finding, which is worse here than a missing one because this plane
 /// exists to produce findings.
 fn shape_of(name: &str) -> Shape {

@@ -2495,6 +2495,8 @@ jobs:
       # itself. Builds the crate isolated and pins the SET of oracle test names.
       - name: Layer C1bx — the TLS decryptor vs rustls (R311y668)
         run: bash scripts/run-ci.sh --layer C1bx
+      - name: Layer C1bz — the analyzer crates' docs resolve (R311y710)
+        run: bash scripts/run-ci.sh --layer C1bz
 
       # R311y701 — the REPLAY engine's lane, which R311y700 wrote into
       # run-ci.sh and never wired here. Found by C0's own unwired-lane gate on

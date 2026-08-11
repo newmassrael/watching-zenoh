@@ -40,7 +40,7 @@
 //!
 //! This keeps the FIRST bytes written and COUNTS the overlap. Picking one is
 //! unavoidable; hiding it is not. A capture with a nonzero
-//! [`FragmentStats::overlapping`] is telling the analyst that the reassembly
+//! [`crate::frag::FragmentStats::overlapping`] is telling the analyst that the reassembly
 //! here may not be the reassembly the receiving host performed, which is the
 //! actionable fact — and it is why this is a counter rather than a log line.
 //!

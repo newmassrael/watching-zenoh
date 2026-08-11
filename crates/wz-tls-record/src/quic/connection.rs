@@ -870,6 +870,18 @@ impl QuicFlowOpener {
         self.client_random
     }
 
+    /// R311y710 (Y2) — was a ClientHello actually READ on this flow?
+    ///
+    /// Not `client_random().is_some()`, which is what the one caller of this
+    /// crate asked and which R311y709 made into a lie: adoption sets the random
+    /// from a key log on a flow whose ClientHello this reader never saw, so a
+    /// mid-connection capture reported "a ClientHello was read". The question a
+    /// consumer is asking here is about EVIDENCE, and the two facts have to be
+    /// held apart for it to keep its meaning.
+    pub fn client_hello_seen(&self) -> bool {
+        self.client_random.is_some() && !self.identity_adopted
+    }
+
     /// Whether the key log held this connection's secrets.
     pub fn keys_installed(&self) -> bool {
         self.keys_installed

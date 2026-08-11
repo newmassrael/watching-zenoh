@@ -928,6 +928,14 @@ pub struct QuicFlowOutcome {
     pub keys_installed: bool,
     /// Whether a ClientHello was found and its random read.
     pub client_hello_seen: bool,
+    /// R311y710 (Y2) — the connection's identity was ADOPTED from a key log
+    /// holding exactly one connection, rather than read off the wire.
+    ///
+    /// A PREMISE where `client_hello_seen` is evidence, and carried apart for
+    /// the reason `QuicCensus::declared` is carried apart from recognition one
+    /// crate over: a reader acts differently on "I saw this" and "I assumed
+    /// this", and a rendering that shows only the consequence shows neither.
+    pub identity_adopted: bool,
     /// Each recovered sequence: direction, which one, and how many contiguous
     /// bytes came out.
     pub sequences: Vec<(wz_session_core::passive::Direction, SequenceKey, usize)>,
@@ -1031,6 +1039,10 @@ fn quic_pass(
         summary.stream_bytes += census.iter().map(|c| c.stream_bytes).sum::<usize>();
         summary.datagram_bytes += census.iter().map(|c| c.datagram_bytes).sum::<usize>();
         summary.walks_stopped += census.iter().map(|c| c.walks_stopped).sum::<usize>();
+        if opener.identity_adopted() {
+            summary.flows_identity_adopted += 1;
+        }
+
         // A flow is WHOLE when every packet in it opened. Zero packets is not
         // whole: a QUIC flow the dissection counted and this pass saw none of is
         // a disagreement between two reads of one file, not a success.
@@ -1049,7 +1061,8 @@ fn quic_pass(
             client_direction: opener.client_direction(),
             version: opener.version(),
             keys_installed: opener.keys_installed(),
-            client_hello_seen: opener.client_random().is_some(),
+            client_hello_seen: opener.client_hello_seen(),
+            identity_adopted: opener.identity_adopted(),
             sequences,
             sequences_dropped: opener.sequences_dropped(),
         });
@@ -1077,7 +1090,7 @@ fn quic_lines(flows: &[QuicFlowOutcome], format: Format, per_flow: Option<usize>
             }
             out.push_str(&format!(
                 "{{\"flow\":\"{}\",\"version\":{},\"client_direction\":{},\
-                 \"client_hello\":{},\"keys_installed\":{},\
+                 \"client_hello\":{},\"identity_adopted\":{},\"keys_installed\":{},\
                  \"sequences_dropped\":[{},{}],\"directions\":[",
                 escape(&format!("{:?}", flow.flow)),
                 match flow.version {
@@ -1090,6 +1103,7 @@ fn quic_lines(flows: &[QuicFlowOutcome], format: Format, per_flow: Option<usize>
                     Some(Direction::B) => String::from("\"B\""),
                 },
                 flow.client_hello_seen,
+                flow.identity_adopted,
                 flow.keys_installed,
                 flow.sequences_dropped[0],
                 flow.sequences_dropped[1],
@@ -1143,7 +1157,15 @@ fn quic_lines(flows: &[QuicFlowOutcome], format: Format, per_flow: Option<usize>
                 None => String::from("no long header seen"),
                 Some(v) => format!("version {v:?}"),
             },
-            if flow.keys_installed {
+            // R311y710 (Y2) — the ADOPTED case comes FIRST, because it is the
+            // one the two below cannot express. "keys installed from the log"
+            // reads as evidence and is true of both, and a reader who cannot
+            // tell an assumption from a reading has no way to doubt the right
+            // one when the report is wrong.
+            if flow.identity_adopted {
+                "keys ASSUMED: no ClientHello here, and the key log held exactly \
+                 one connection, taken to be this one"
+            } else if flow.keys_installed {
                 "keys installed from the log"
             } else if flow.client_hello_seen {
                 "a ClientHello was read and the key log does not hold it"
@@ -5936,6 +5958,98 @@ mod quic_pass_tests {
         assert!(
             declared.contains(&format!("{} stream byte(s)", stream.len())),
             "and the application bytes are accounted for: {declared}"
+        );
+    }
+
+    /// R311y710 (Y2) — AN ASSUMED IDENTITY IS REPORTED AS ONE, IN EVERY PLACE
+    /// A READER LOOKS.
+    ///
+    /// ## The defect this closes, which R311y709 created
+    ///
+    /// `client_hello_seen` was filled from `opener.client_random().is_some()`.
+    /// Adoption sets that random from a key log on a flow whose ClientHello this
+    /// reader never saw, so a mid-connection capture reported "a ClientHello was
+    /// read" -- a confident wrong statement of exactly the kind this whole crate
+    /// exists to end, introduced by the round that added the feature.
+    ///
+    /// ## Why all three surfaces, and both arms
+    ///
+    /// The per-flow listing is behind `--flows`; the summary line is what a
+    /// person sees first; the JSON is what a consumer branches on. A premise
+    /// visible in one of the three is a premise most readers never see.
+    ///
+    /// The handshake capture is the other arm and it is not decoration: every
+    /// assertion below is about a sentence being ABSENT on it, and a reader who
+    /// only saw the adopted arm could not tell a correct report from one that
+    /// says "assumed" about everything.
+    #[test]
+    fn an_assumed_identity_is_never_reported_as_a_clienthello() {
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(5).wrapping_add(2));
+        let (mid, keylog, _) = mid_connection_quic_capture(&random);
+        let (whole, whole_log, _) = quic_capture(&random);
+
+        let run = |capture: &[u8], log: &str, cid_len, format| {
+            analyze_request(&Request {
+                capture,
+                keylog: Some(log.as_bytes()),
+                format,
+                per_flow: true,
+                per_message: false,
+                messages_per_flow: None,
+                quic_ports: &[4433],
+                quic_cid_len: cid_len,
+                payload_rules: &[],
+                census: Census::default(),
+                per_field: false,
+                select: None,
+            })
+            .expect("the capture reads")
+            .0
+        };
+
+        // THE ADOPTED ARM.
+        let text = run(&mid, &keylog, Some(SCID.len()), Format::Text);
+        assert!(
+            text.contains("1 flow(s) opened on an ASSUMED identity"),
+            "the SUMMARY must carry the premise: {text}"
+        );
+        assert!(
+            text.contains("keys ASSUMED"),
+            "and so must the per-flow listing: {text}"
+        );
+        assert!(
+            !text.contains("a ClientHello was read"),
+            "and NOTHING may claim a ClientHello was read, because none was: {text}"
+        );
+        let json = run(&mid, &keylog, Some(SCID.len()), Format::Json);
+        assert!(
+            json.contains("\"client_hello\":false,\"identity_adopted\":true"),
+            "the two facts are held apart in the JSON, and the first is FALSE \
+             here -- which is the exact field R311y709 made into a lie: {json}"
+        );
+        assert!(
+            json.contains("\"flows_identity_adopted\":1"),
+            "and the capture-wide object counts it: {json}"
+        );
+
+        // THE OTHER ARM: a capture that really did carry its handshake.
+        let text = run(&whole, &whole_log, None, Format::Text);
+        assert!(
+            !text.contains("ASSUMED"),
+            "a flow whose ClientHello was read must not be called assumed: {text}"
+        );
+        assert!(
+            text.contains("keys installed from the log"),
+            "it is evidence, and says so: {text}"
+        );
+        let json = run(&whole, &whole_log, None, Format::Json);
+        assert!(
+            json.contains("\"client_hello\":true,\"identity_adopted\":false"),
+            "with the two facts the other way round: {json}"
+        );
+        assert!(
+            json.contains("\"flows_identity_adopted\":0"),
+            "and the count at zero rather than the key absent: {json}"
         );
     }
 

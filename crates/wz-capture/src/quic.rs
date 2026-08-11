@@ -424,6 +424,15 @@ pub struct QuicDecryption {
     /// unknown amount -- a floor reported as a total is exactly what this
     /// crate's gap counters exist to prevent.
     pub walks_stopped: usize,
+    /// R311y710 (Y2) — flows whose identity was ADOPTED from a key log holding
+    /// exactly one connection, rather than read from a ClientHello.
+    ///
+    /// Carried at the capture level and not only per flow, because the per-flow
+    /// listing is behind `--flows` and this line is the one a person reads
+    /// first. The same reason `declared_flows` sits beside it: a summary that
+    /// reports the consequence of a premise without reporting the premise
+    /// invites the reader to treat it as evidence.
+    pub flows_identity_adopted: usize,
 }
 
 #[cfg(test)]
