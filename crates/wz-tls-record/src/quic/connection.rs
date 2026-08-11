@@ -647,7 +647,16 @@ impl QuicFlowOpener {
         };
         let Some(secrets) = self.log.get(&random) else {
             // The log does not know this connection. Left uninstalled and NOT
-            // marked done: a caller may absorb a second log and try again.
+            // marked done, so a later ClientHello on this flow can retry against
+            // the same log.
+            //
+            // R311y708 (Y4) — this comment used to end "a caller may absorb a
+            // second log and try again", which named a method with zero callers
+            // and zero tests. The operator's real remedy is a second `--keylog`
+            // on the command line, which merges BEFORE any opener is built; that
+            // flag was silently keeping only the last file until this round, so
+            // the capability lived where nobody could reach it and was broken
+            // where everybody typed it.
             return;
         };
         let c = dir_index(client);
@@ -705,18 +714,6 @@ impl QuicFlowOpener {
     ) -> PacketOutcome {
         self.census[d].refused += 1;
         PacketOutcome::Refused { space, why }
-    }
-
-    /// R311y698 — a second key log, folded in after the fact.
-    ///
-    /// A caller who reads the capture before the key log needs this, and so does
-    /// one whose first log did not hold this connection: [`Self::install_keys`]
-    /// leaves itself uninstalled in that case precisely so a later log can work.
-    pub fn absorb(&mut self, log: KeyLog) {
-        self.log.absorb(log);
-        if let Some(random) = self.client_random {
-            self.install_keys(random);
-        }
     }
 
     /// The per-direction tallies, `[A, B]`.

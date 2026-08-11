@@ -5249,6 +5249,7 @@ layer_c1bw_analyze_cli() {
     missing=0
     for name in \
         the_binary_decrypts_a_capture_given_a_key_log_on_the_command_line \
+        two_key_logs_are_both_read_and_the_earlier_one_is_not_dropped \
         the_exit_code_separates_an_incomplete_capture_from_a_failed_run \
         an_unreadable_key_log_fails_instead_of_reporting_the_capture_as_encrypted \
         the_flows_option_names_which_connection_the_summary_cannot \
@@ -5311,6 +5312,7 @@ layer_c1bw_analyze_cli() {
     listing="$(cd crates && cargo test -p wz-analyze --lib -- --list 2>/dev/null)" \
         || { echo "  C1bw FAIL: the library tests did not list"; return 1; }
     for name in \
+        tests::a_repeated_keylog_keeps_every_file_in_the_order_given \
         tests::a_quic_capture_reports_quic_and_decodes_no_zenoh_from_it \
         tests::a_zenoh_datagram_whose_first_byte_resembles_quic_is_still_read_as_zenoh \
         tests::the_text_flow_row_has_a_pinned_shape_and_not_only_pinned_words \

@@ -40,11 +40,19 @@ pub enum Format {
 pub struct Options {
     /// The capture file to read.
     pub capture: String,
-    /// An NSS key log to read alongside it, for the ordinary case where the
+    /// NSS key logs to read alongside it, for the ordinary case where the
     /// keys were written by `SSLKEYLOGFILE` into a SEPARATE file from the
     /// capture. Keys embedded in the capture's own Decryption Secrets Blocks
     /// are always used and need no flag.
-    pub keylog: Option<String>,
+    ///
+    /// R311y708 (Y4) — a LIST, because `--keylog` given twice used to keep the
+    /// second and drop the first WITHOUT SAYING SO. That is the failure this
+    /// tool exists to end, one level up: the operator with a client-side log and
+    /// a server-side log got a report about half their keys and no indication
+    /// that the other half had been discarded. Two endpoints writing two
+    /// `SSLKEYLOGFILE`s is the ordinary shape of a two-sided capture, not an
+    /// exotic one.
+    pub keylogs: Vec<String>,
     /// How to render.
     pub format: Format,
     /// R311y666 (§1.2a) — list every flow, not just the capture-wide summary.
@@ -195,8 +203,10 @@ USAGE:
 
 OPTIONS:
     --keylog <file>   an NSS key log (SSLKEYLOGFILE) to decrypt TLS flows with.
-                      Keys carried inside the capture's own Decryption Secrets
-                      Blocks are used without this flag.
+                      Repeatable, and every one given is used -- a two-sided
+                      capture usually has one log per endpoint. Keys carried
+                      inside the capture's own Decryption Secrets Blocks are
+                      used without this flag.
     --flows           list every flow, stream and datagram: endpoints, framing,
                       messages decoded, scouting messages, and for an encrypted
                       one whether its plaintext was read
@@ -248,7 +258,7 @@ OPTIONS:
 /// Parse a command line, `argv[0]` already removed.
 pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut capture: Option<String> = None;
-    let mut keylog: Option<String> = None;
+    let mut keylogs: Vec<String> = Vec::new();
     let mut format = Format::Text;
     let mut per_flow = false;
     let mut per_message = false;
@@ -321,9 +331,12 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
                         .map_err(|_| UsageError::BadValue("--max-messages", raw.clone()))?,
                 );
             }
+            // R311y708 (Y4) — PUSH, not assign. The assignment this replaced
+            // kept the last `--keylog` and discarded every earlier one in
+            // silence.
             "--keylog" => {
                 at += 1;
-                keylog = Some(
+                keylogs.push(
                     args.get(at)
                         .cloned()
                         .ok_or(UsageError::MissingValue("--keylog"))?,
@@ -344,7 +357,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     }
     Ok(Options {
         capture: capture.ok_or(UsageError::NoCapture)?,
-        keylog,
+        keylogs,
         format,
         per_flow,
         per_message,
@@ -3741,7 +3754,7 @@ mod tests {
             parse(&args(&["cap.pcapng"])),
             Ok(Options {
                 capture: "cap.pcapng".into(),
-                keylog: None,
+                keylogs: Vec::new(),
                 format: Format::Text,
                 per_flow: false,
                 per_message: false,
@@ -3767,7 +3780,7 @@ mod tests {
             ])),
             Ok(Options {
                 capture: "cap.pcapng".into(),
-                keylog: Some("keys.txt".into()),
+                keylogs: args(&["keys.txt"]),
                 format: Format::Json,
                 // `--messages` implies `--flows`: the messages are printed
                 // under their flow, so the pairing has one sensible meaning.
@@ -3781,6 +3794,35 @@ mod tests {
                 select: None,
             })
         );
+    }
+
+    /// R311y708 (Y4) — `--keylog` TWICE KEEPS BOTH.
+    ///
+    /// MEASURED before this changed: the parser assigned rather than pushed, so
+    /// the command line below produced `Some("second.txt")` and the operator was
+    /// told nothing about the file that had been dropped. Two endpoints writing
+    /// two `SSLKEYLOGFILE`s is the ordinary shape of a two-sided capture, so the
+    /// discarded half was as likely to be the interesting one as the kept half.
+    ///
+    /// ORDER is asserted, not just membership: the merge downstream is textual
+    /// append and a reader comparing a report against their own files should
+    /// find the keys in the order they typed them.
+    #[test]
+    fn a_repeated_keylog_keeps_every_file_in_the_order_given() {
+        let parsed = parse(&args(&[
+            "--keylog",
+            "first.txt",
+            "cap.pcapng",
+            "--keylog",
+            "second.txt",
+        ]))
+        .expect("two key logs is a well-formed command line");
+        assert_eq!(
+            parsed.keylogs,
+            args(&["first.txt", "second.txt"]),
+            "both files, in the order the command line gave them"
+        );
+        assert_eq!(parsed.capture, "cap.pcapng");
     }
 
     /// A misspelt flag is REFUSED, not treated as a filename and not ignored.

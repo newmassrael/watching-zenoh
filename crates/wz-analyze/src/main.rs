@@ -29,21 +29,34 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let keylog = match options.keylog.as_deref().map(std::fs::read) {
-        None => None,
-        Some(Ok(bytes)) => Some(bytes),
-        Some(Err(err)) => {
-            // A key log named and not readable is a HARD failure, not a
-            // fallback to analysing without it: the caller asked for those keys,
-            // and a report saying the capture could not be decrypted would be
-            // the wrong answer to the question they asked.
-            eprintln!(
-                "wz-analyze: {}: {err}",
-                options.keylog.as_deref().unwrap_or("<keylog>")
-            );
-            return ExitCode::from(2);
+    // R311y708 (Y4) — every `--keylog` the command line named, joined.
+    //
+    // The join is where the multiplicity belongs: a command line has N files and
+    // the analysis wants one key log text, and NSS key logs are line-oriented,
+    // so appending them IS the merge. The `\n` between them is not cosmetic --
+    // a file that does not end in a newline would otherwise glue its last line
+    // onto the next file's first, producing two keys where there were three and
+    // no error to say so.
+    let mut keylog: Option<Vec<u8>> = None;
+    for path in &options.keylogs {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                let merged = keylog.get_or_insert_with(Vec::new);
+                if !merged.is_empty() && !merged.ends_with(b"\n") {
+                    merged.push(b'\n');
+                }
+                merged.extend_from_slice(&bytes);
+            }
+            Err(err) => {
+                // A key log named and not readable is a HARD failure, not a
+                // fallback to analysing without it: the caller asked for those
+                // keys, and a report saying the capture could not be decrypted
+                // would be the wrong answer to the question they asked.
+                eprintln!("wz-analyze: {path}: {err}");
+                return ExitCode::from(2);
+            }
         }
-    };
+    }
 
     // R311y670 — every option the command line accepts reaches the analysis.
     // The two added this round had to, or they would have been flags the parser

@@ -272,6 +272,107 @@ impl Drop for Scratch {
     }
 }
 
+/// R311y708 (Y4) — TWO `--keylog` FILES, AND THE FIRST ONE STILL COUNTS.
+///
+/// ## What was measured before this test existed
+///
+/// The parser ASSIGNED `--keylog`, so the last occurrence won and every earlier
+/// one was discarded without a word. An operator holding a client-side and a
+/// server-side `SSLKEYLOGFILE` -- the ordinary shape of a two-sided capture --
+/// passed both and got a report about one, with nothing in the output to say
+/// which.
+///
+/// ## Why the order below is the discriminating one
+///
+/// The real key is given FIRST and an inert one SECOND. Under the old parser
+/// that is precisely the losing arrangement: the inert file survives, the real
+/// one is dropped, and the tool reports a capture it could not decrypt. The
+/// opposite order passed even while broken, which is why it is not the arm this
+/// test leads with.
+///
+/// The inert file is asserted inert ON ITS OWN first. Without that arm a decoy
+/// that happened to decrypt would make every assertion below pass while proving
+/// nothing -- the population-of-zero shape this workspace keeps measuring.
+///
+/// The first file is also written WITHOUT a trailing newline, because the merge
+/// is a textual append: two line-oriented logs joined without a separator would
+/// glue the last line of one onto the first line of the next, and both keys
+/// would be lost rather than one.
+#[test]
+fn two_key_logs_are_both_read_and_the_earlier_one_is_not_dropped() {
+    let scratch = Scratch::new("two-keylogs");
+    let (file, log, random) = capture_and_key_log();
+    let capture = scratch.write("session.pcapng", &file);
+
+    // A well-formed key log line for a DIFFERENT connection: same shape, a
+    // random this capture never carried, so it can decrypt nothing here.
+    let other_random: [u8; 32] =
+        core::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(9));
+    let other_secret: Vec<u8> = (0..48u8)
+        .map(|i| i.wrapping_mul(5).wrapping_add(1))
+        .collect();
+    assert_ne!(
+        other_random, random,
+        "the inert log must be for another connection or it is not inert"
+    );
+    let inert = format!(
+        "CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+        hex(&other_random),
+        hex(&other_secret)
+    );
+
+    // Both written WITHOUT their trailing newline, which is what makes the
+    // separator load-bearing rather than decorative.
+    let real_path = scratch.write("real.txt", log.trim_end().as_bytes());
+    let inert_path = scratch.write("inert.txt", inert.trim_end().as_bytes());
+
+    let run = |args: &[&std::path::Path]| -> String {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_wz-analyze"));
+        cmd.arg(&capture);
+        for a in args {
+            cmd.arg("--keylog").arg(a);
+        }
+        let out = cmd.arg("--json").output().expect("the binary runs");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    // THE POPULATION ARM: the inert file alone decrypts nothing.
+    let alone = run(&[&inert_path]);
+    assert!(
+        alone.contains("\"decrypted\":false"),
+        "the inert key log must decrypt nothing on its own, or this test proves \
+         nothing: {alone}"
+    );
+
+    // THE DISCRIMINATING ARM: real first, inert second.
+    let both = run(&[&real_path, &inert_path]);
+    assert!(
+        both.contains("\"decrypted\":true"),
+        "a real key log followed by another file must still decrypt -- this is \
+         the exact order the old parser dropped: {both}"
+    );
+    assert!(
+        both.contains("\"records_decrypted\":3"),
+        "and all three records, so the newline join did not corrupt the line it \
+         appended to: {both}"
+    );
+    // THE SEPARATOR ARM: the inert file first, and it does NOT end in a newline.
+    // Join the two texts without a `\n` between them and the inert file's line
+    // swallows the real one -- so this arm fails on a merge that concatenates
+    // naively, while the arm above still passes. It is the one that pins the
+    // byte, not merely the loop.
+    let reversed = run(&[&inert_path, &real_path]);
+    assert!(
+        reversed.contains("\"decrypted\":true"),
+        "a key log appended after a file with no trailing newline must still be \
+         read as its own line: {reversed}"
+    );
+    assert!(
+        reversed.contains("\"records_decrypted\":3"),
+        "and completely: {reversed}"
+    );
+}
+
 /// R311y664 — a person with a capture and a key log runs one command and reads
 /// the zenoh session out of a TLS flow.
 ///
