@@ -240,7 +240,17 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # so is INIT, their extension spaces differ (none versus eight), and this is
 # the measurement that `ExtCarrier` tells them apart against the REAL decoder
 # rather than against wz's opinion of itself.
-FOREIGN_ADJUDICATOR_LINKS = 815
+# R311y718 takes it to 817, two links, and the pair is the textbook case this
+# counter exists for. R311y714 closed [REDACTED-REQ] by asking a live zenohd for
+# `@/**` and reading back its node information and its link-state graph, which
+# gave `adminspace-read` and `adminspace-router-linkstate` a THIRD adjudicating
+# test each. Neither atom moved in proven/partial -- both were proven already --
+# so the round that bought a foreign opinion reported changing nothing, and this
+# gate's red was the only thing that disagreed. The two lines are worth naming
+# for WHOSE opinion arrived: every prior witness of both atoms was pico, so this
+# is the first zenohd adjudication either one has, i.e. the half that moved is
+# `1-impl-only`, which is the half `links` was split out to make visible.
+FOREIGN_ADJUDICATOR_LINKS = 817
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
