@@ -759,7 +759,7 @@ fn field_lines(
     format: Format,
     messages_per_flow: Option<usize>,
 ) -> String {
-    use wz_session_core::dissect::{dissect_transport_message, to_json};
+    use wz_session_core::dissect::to_json;
 
     // R311y681 — the listing is BUILT as flows, each carrying its rows and the
     // notes that belong beside them, and rendered once per format at the end.
@@ -793,32 +793,7 @@ fn field_lines(
                 // whole flow below rather than once per frame, since the sink
                 // walked the stream itself and its rows are not this loop's.
                 Some(_) => break,
-                None => match message_bytes(stream, origin, frame) {
-                    Err(why) => FieldRow::Declined(why),
-                    Ok(bytes) => {
-                        // R311y677 — MESSAGE-RELATIVE, base 0, and that is a
-                        // correction of R311y675. That round passed the stream
-                        // offset, so a cleartext row's spans were absolute while
-                        // a decrypted row's -- whose plaintext has no position in
-                        // the stream at all -- could only ever be relative. Two
-                        // coordinate spaces in one listing, distinguishable by
-                        // nothing a reader can see, which is the defect this
-                        // workspace has already paid for twice.
-                        //
-                        // One space everywhere: a span is a range of THE MESSAGE.
-                        // Where it sits is on the row, once.
-                        match dissect_transport_message(bytes, 0) {
-                            Ok(field) => FieldRow::Walked(field),
-                            // The error type is `sce_forge_runtime`'s and is not
-                            // re-exported publicly here, so it is rendered rather than
-                            // named -- a dependency this crate has no reason to take on
-                            // for one message string.
-                            Err(err) => FieldRow::Declined(format!(
-                                "the field walker refused these bytes: {err:?}"
-                            )),
-                        }
-                    }
-                },
+                None => walk_message(stream, origin, frame),
             };
             shown += 1;
             if format == Format::Json && emitted > 0 {
@@ -1368,6 +1343,92 @@ fn message_bytes<'a>(
         ));
     }
     Ok(&stream[body..end])
+}
+
+/// R311y682 (§1.1n) — the stream row, walked and then CHECKED against the
+/// session that framed it.
+///
+/// # What was unwitnessed, in the store's own words
+///
+/// R311y680 made the datagram path ask its packet to vouch for all three
+/// coordinates a row carries, and its own carry stated the residue exactly: "the
+/// cleartext stream rows are sliced out of `StreamAssembler::stream()` at
+/// `stream_offset`, on the same kind of inherited coordinate rule, and nothing
+/// asks that stream to vouch for anything."
+///
+/// The rule inherited here is that `frame.stream_offset` names a position in the
+/// assembler's retained stream and `frame.prefix_width` is the width of the
+/// length prefix sitting at it. Nothing tested that. If it moved, this reader
+/// would slice bytes that are not the message, hand them to a walker that reads
+/// whatever it is given, and print a confident field tree over them — a wrong
+/// answer shaped exactly like a right one.
+///
+/// # The witness, and why it is not a tautology
+///
+/// The SESSION decoded this message while feeding the stream, and its verdict is
+/// on the frame. This walk reads the retained stream afterwards, through
+/// different code. Two readers, two times, one claim: that these bytes are that
+/// message. They are compared, and a row whose two readers disagree is DECLINED
+/// with both opinions named rather than rendered.
+///
+/// # R311y677's coordinate rule, unchanged
+///
+/// Spans are MESSAGE-RELATIVE, base 0. R311y675 passed the stream offset, so a
+/// cleartext row's spans were absolute while a decrypted row's -- whose
+/// plaintext has no position in the stream at all -- could only ever be
+/// relative. Two coordinate spaces in one listing, distinguishable by nothing a
+/// reader can see. One space everywhere: a span is a range of THE MESSAGE, and
+/// where it sits is on the row, once.
+fn walk_message(
+    stream: &[u8],
+    origin: usize,
+    frame: &wz_session_core::passive::PassiveFrame,
+) -> FieldRow {
+    let bytes = match message_bytes(stream, origin, frame) {
+        Err(why) => return FieldRow::Declined(why),
+        Ok(bytes) => bytes,
+    };
+    match wz_session_core::dissect::dissect_transport_message(bytes, 0) {
+        // The error type is `sce_forge_runtime`'s and is not re-exported
+        // publicly here, so it is rendered rather than named -- a dependency
+        // this crate has no reason to take on for one message string.
+        Err(err) => FieldRow::Declined(format!("the field walker refused these bytes: {err:?}")),
+        Ok(field) => {
+            let framed = message_name(frame);
+            if walk_agrees(&field.name, &framed) {
+                FieldRow::Walked(field)
+            } else {
+                FieldRow::Declined(format!(
+                    "the session read these bytes as {framed} and the field \
+                     walker reads them as {}, so the coordinate this row was \
+                     sliced at does not name the message the session framed",
+                    field.name
+                ))
+            }
+        }
+    }
+}
+
+/// R311y682 — do the session and the field walker agree about what this message
+/// is?
+///
+/// # The asymmetry that is NOT a disagreement
+///
+/// `InboundFrame`'s variants are cfg-gated and the walker's names are not, so a
+/// build without `codec-join` decodes a Join as `Unknown` while the walker still
+/// names it. That is by design and firing on it would make this check reject
+/// legitimate rows in every reduced build -- the direction a cross-check must
+/// never be wrong in, which R311y680 measured the hard way when a flow-key check
+/// nearly threw away a scout/hello exchange.
+///
+/// So `Unknown` from EITHER side, and a frame the session could not decode at
+/// all, are silence rather than contradiction. A disagreement is two readers
+/// both naming a specific kind and naming different ones.
+fn walk_agrees(walked: &str, framed: &str) -> bool {
+    walked == "Unknown"
+        || framed == "Unknown"
+        || framed.starts_with("undecodable(")
+        || walked == framed
 }
 
 fn render_field_row(
@@ -3020,6 +3081,141 @@ mod message_name_tests {
         assert!(
             name.contains("Empty"),
             "and carry WHY, because the reason is what a reader acts on: {name}"
+        );
+    }
+
+    /// One `PassiveFrame` at `stream_offset`, claiming to be whatever `frame`
+    /// says it is.
+    fn frame_at(
+        stream_offset: usize,
+        frame: Result<
+            wz_session_core::inbound::InboundFrame,
+            wz_session_core::parse_error::InboundParseError,
+        >,
+    ) -> wz_session_core::passive::PassiveFrame {
+        wz_session_core::passive::PassiveFrame {
+            direction: wz_session_core::passive::Direction::A,
+            stream_offset,
+            batch_index: 0,
+            unit_offset: 0,
+            batch_offset: None,
+            prefix_width: 2,
+            frame,
+            context: Default::default(),
+            exceeds_negotiated_batch: false,
+            carried: wz_session_core::passive::Carried::Nothing,
+            inadmissible_on_link: false,
+            sn_verdict: None,
+            resync: None,
+            observed_at_ms: None,
+            reserved_header_bits: 0,
+            undefined_mandatory_ext: None,
+        }
+    }
+
+    /// A framed unit: `u16` little-endian length, then the message.
+    fn framed(message: &[u8]) -> Vec<u8> {
+        let mut out = (message.len() as u16).to_le_bytes().to_vec();
+        out.extend_from_slice(message);
+        out
+    }
+
+    /// R311y682 (§1.1n) — A ROW WHOSE TWO READERS DISAGREE IS DECLINED, and
+    /// this is the committed witness for a branch the datagram path could only
+    /// probe.
+    ///
+    /// ## Why this one HAS a fixture where R311y680's did not
+    ///
+    /// That check compared a packet against coordinates only correct code can
+    /// produce, so no capture reaches its rejecting arm. This one compares two
+    /// READERS, and both are reachable from here: a stream holding a KeepAlive
+    /// with a frame that says the session read a Frame there is exactly what a
+    /// moved coordinate rule would produce, and it can simply be written down.
+    ///
+    /// ## What must NOT happen, asserted first
+    ///
+    /// The truthful pairing is asserted before the false one, because a check
+    /// that rejects everything would pass the negative leg alone -- and losing
+    /// legitimate rows is the direction this workspace has already been wrong
+    /// in once.
+    #[test]
+    fn a_row_whose_two_readers_disagree_is_declined_rather_than_rendered() {
+        // `0x04` is the KeepAlive MID with every flag clear; the walker names
+        // it KeepAlive and so does the session.
+        let stream = framed(&[0x04]);
+        let honest = frame_at(
+            0,
+            Ok(wz_session_core::inbound::InboundFrame::KeepAlive {
+                has_ext: false,
+                extensions: Vec::new(),
+            }),
+        );
+        match walk_message(&stream, 0, &honest) {
+            FieldRow::Walked(field) => assert_eq!(
+                field.name, "KeepAlive",
+                "the agreeing case must still produce its row"
+            ),
+            FieldRow::Declined(why) => {
+                panic!("a row both readers agree about must NOT be declined: {why}")
+            }
+        }
+
+        // The same bytes, with a session verdict that names a different
+        // message: what a `stream_offset` naming the wrong position looks like
+        // from here.
+        let crossed = frame_at(
+            0,
+            Ok(wz_session_core::inbound::InboundFrame::Close {
+                reason: 0,
+                has_ext: false,
+                extensions: Vec::new(),
+            }),
+        );
+        match walk_message(&stream, 0, &crossed) {
+            FieldRow::Walked(field) => panic!(
+                "bytes the session read as Close must not be rendered as a \
+                 confident {} tree",
+                field.name
+            ),
+            FieldRow::Declined(why) => {
+                // BOTH OPINIONS, because one of them alone does not say which
+                // reader to go and look at.
+                assert!(
+                    why.contains("as Close") && why.contains("as KeepAlive"),
+                    "the decline must name both readers' verdicts: {why}"
+                );
+            }
+        }
+    }
+
+    /// R311y682 (§1.1n) — the cfg asymmetry is silence, not contradiction.
+    ///
+    /// `InboundFrame`'s variants are feature-gated and the walker's names are
+    /// not, so a build without `codec-join` decodes a Join as `Unknown` while
+    /// the walker names it. A check that fired on that would reject legitimate
+    /// rows in every reduced build.
+    #[test]
+    fn the_feature_gated_half_of_the_pair_is_not_a_disagreement() {
+        assert!(
+            walk_agrees("Join", "Unknown"),
+            "the session naming Unknown is a codec this build lacks, not a \
+             contradiction"
+        );
+        assert!(
+            walk_agrees("Unknown", "Frame"),
+            "and the walker naming Unknown is the same asymmetry the other way"
+        );
+        assert!(
+            walk_agrees("KeepAlive", "undecodable(Empty)"),
+            "a frame the session could not decode at all names no kind to \
+             disagree with"
+        );
+        assert!(walk_agrees("Frame", "Frame"), "and agreement is agreement");
+        // THE ONE THAT MUST FIRE: two readers, two specific kinds, different.
+        assert!(
+            !walk_agrees("Frame", "KeepAlive"),
+            "two specific and different kinds is the disagreement this check \
+             exists for"
         );
     }
 }

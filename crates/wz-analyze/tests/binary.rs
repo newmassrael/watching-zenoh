@@ -2713,3 +2713,124 @@ fn empty_datagram_capture() -> Vec<u8> {
         &[(0, 1_000_000, &packet)],
     )
 }
+
+/// R311y682 (§1.1n) — the agreement gate reaches the DATAGRAM transport, and
+/// says out loud which number it is agreeing with.
+///
+/// ## The hole R311y678 left and R311y679 widened
+///
+/// `the_field_rows_are_the_messages_the_reader_decoded` compares the rows with
+/// the `messages decoded:` summary. That number counts TRANSPORT messages, and a
+/// discovery capture has none of them: it reports `messages decoded: 0` beside
+/// `scouting: 3 message(s)` and produces three rows. So the equality is false on
+/// a datagram capture by construction, the gate simply never ran there, and
+/// nothing in the tree stated the rule -- which is how a listing that silently
+/// stopped walking scouting messages would have gone unnoticed.
+///
+/// The rule, written down: a datagram flow's rows are its SCOUTING messages plus
+/// its transport frames, and `messages decoded` counts only the second.
+#[test]
+fn a_datagram_capture_lists_exactly_the_messages_its_own_summary_counted() {
+    let scratch = Scratch::new("fields-agree-datagram");
+    let capture = scratch.write("scout.pcapng", &scouting_capture());
+    let text = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .arg("--fields")
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+
+    let number = |prefix: &str| -> usize {
+        text.lines()
+            .find_map(|l| l.trim().strip_prefix(prefix))
+            .unwrap_or_else(|| panic!("the {prefix:?} summary line: {text}"))
+            .split_whitespace()
+            .next()
+            .expect("a number")
+            .parse()
+            .expect("a number")
+    };
+    let scouting = number("scouting: ");
+    let decoded = number("messages decoded: ");
+    // THE RULE, STATED: this transport's messages are not in the number the
+    // stream gate compares against, and that is why it needs its own.
+    assert_eq!(
+        decoded, 0,
+        "a discovery capture carries no transport messages, so the stream \
+         gate's number is 0 here and cannot be the one to compare: {text}"
+    );
+    // ANTI-VACUITY: zero rows would satisfy an equality with zero.
+    assert!(
+        scouting > 0,
+        "the fixture must carry scouting messages: {text}"
+    );
+    let rows = text.matches("] Scout").count() + text.matches("] Hello").count();
+    assert_eq!(
+        rows, scouting,
+        "every scouting message the summary counted must appear as a row: {text}"
+    );
+    // And nothing was quietly dropped on the way.
+    assert!(
+        !text.contains("message(s) skipped") && !text.contains("more not listed"),
+        "an unbounded run over a whole capture drops nothing: {text}"
+    );
+}
+
+/// R311y682 (§1.1n) — under a cap the rows and the omission ADD UP, which is
+/// what the agreement gate must become where equality stops holding.
+///
+/// R311y678's carry said it exactly: "the rows and the summary agree only
+/// without `--max-messages`; with a cap they must not, and nothing states that
+/// -- the gate simply does not exercise it." A gate that only runs where the
+/// numbers are equal cannot tell a bound that bit from a walker that quietly
+/// lost rows, because both look like "fewer than the summary".
+#[test]
+fn under_a_cap_the_rows_and_the_omission_still_add_up_to_the_whole() {
+    let scratch = Scratch::new("fields-agree-cap");
+    let capture = scratch.write("fields.pcapng", &exchange_capture());
+    for cap in ["1", "2"] {
+        let text = String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                .arg(&capture)
+                .args(["--fields", "--max-messages", cap])
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned();
+        let decoded: usize = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("messages decoded: "))
+            .expect("the summary line")
+            .parse()
+            .expect("a number");
+        let rows = text.matches("] Frame").count() + text.matches("] KeepAlive").count();
+        let omitted: usize = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("... "))
+            .and_then(|l| l.split_whitespace().next())
+            .expect("the omission line")
+            .parse()
+            .expect("a number");
+
+        let cap: usize = cap.parse().expect("a number");
+        // ANTI-VACUITY, both halves: the bound must actually bite, and it must
+        // not have taken everything -- either extreme would satisfy the sum
+        // below without testing what it is for.
+        assert!(
+            omitted > 0 && rows > 0,
+            "cap {cap}: the bound must bite and leave something: {text}"
+        );
+        assert_eq!(rows, cap, "cap {cap}: the bound is the row count: {text}");
+        assert_eq!(
+            rows + omitted,
+            decoded,
+            "cap {cap}: what was shown plus what was left out is what the \
+             summary counted -- a row lost anywhere else would break this sum \
+             while leaving each half plausible: {text}"
+        );
+    }
+}
