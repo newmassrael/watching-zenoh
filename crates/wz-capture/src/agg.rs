@@ -630,7 +630,7 @@ impl KeyexprSpaces {
 /// Per-keyexpr throughput over one or more flows.
 ///
 /// Rows are global (a keyexpr string means the same thing wherever it appears)
-/// while id spaces are per-flow, which is why [`Self::observe_flow`] is the
+/// while id spaces are per-flow, which is why [`Self::observe_flow_where`] is the
 /// unit rather than a per-frame call: two sessions' id `3` are unrelated, and
 /// one table across both would cross-resolve them.
 #[derive(Debug, Default, Clone)]
@@ -725,17 +725,15 @@ impl ThroughputTable {
         Self::default()
     }
 
-    /// Fold one flow's frames in, in capture order, resolving against id spaces
-    /// private to this flow.
-    pub fn observe_flow(&mut self, frames: &[PassiveFrame]) {
-        self.observe_flow_where(frames, &Filter::any())
-    }
-
     /// R311y616 (§1.1f) — the same fold, over the records a selector picks.
     ///
     /// ONE fold rather than a filtered copy beside the unfiltered one:
-    /// [`Self::observe_flow`] passes [`Filter::any`], which is the identity, so
-    /// the filtered and unfiltered paths cannot drift apart.
+    /// R311y709 — there is now exactly ONE spelling of that. A
+    /// `observe_flow(frames)` delegating to `observe_flow_where(frames,
+    /// &Filter::any())` sat beside this method with zero callers anywhere in
+    /// the workspace, while every production path reached the identity through
+    /// [`aggregate`], which delegates to [`aggregate_where`] the same way one
+    /// layer up. Two spellings of one delegation, one of them never exercised.
     ///
     /// ## What the filter does NOT touch
     ///
@@ -2605,7 +2603,7 @@ pub(crate) mod tests {
     /// datagram per record, and aggregate the result.
     ///
     /// Deliberately the whole pipeline — packet bytes in, table out. A test
-    /// that handed `observe_flow` a `Vec<PassiveFrame>` it built itself would
+    /// that handed `observe_flow_where` a `Vec<PassiveFrame>` it built itself would
     /// pass on a build where `Dissection` never produces one.
     fn aggregate_datagrams(records: &[(bool, Vec<u8>)]) -> ThroughputTable {
         let mut d = Dissection::new();

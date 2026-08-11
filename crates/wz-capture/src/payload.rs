@@ -652,11 +652,6 @@ impl PayloadCensus {
         self.selection
     }
 
-    /// Fold one flow's frames in.
-    pub fn observe_flow(&mut self, frames: &[wz_session_core::passive::PassiveFrame]) {
-        self.observe_flow_where(frames, &crate::filter::Filter::any())
-    }
-
     /// R311y618 (§1.1q) — the same census, over the payloads a selector picks.
     ///
     /// A rejected payload is not inspected, not counted and not a finding. That

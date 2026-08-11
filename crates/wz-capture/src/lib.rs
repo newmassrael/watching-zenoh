@@ -1486,6 +1486,78 @@ impl DissectionLimits {
     }
 }
 
+#[cfg(test)]
+mod live_tap_tests {
+    use super::*;
+
+    /// R311y709 (G2) — THE LIVE-TAP PRESET BOUNDS EVERY AXIS, AND A NEW AXIS
+    /// BREAKS THIS TEST AT COMPILE TIME.
+    ///
+    /// MEASURED: `DissectionLimits::for_live_tap` had ZERO references anywhere
+    /// in the workspace -- no caller, no test -- while two doc comments send a
+    /// deployment to it as "a starting point". So nothing established that it
+    /// still is one.
+    ///
+    /// A preset of numbers cannot lie about behaviour, but it can rot in one
+    /// specific way, and that way is silent: add a field to `DissectionLimits`
+    /// and this preset leaves it `None`, so the "starting point for a live tap"
+    /// quietly stops bounding an axis a long-running process now grows on. That
+    /// is the [`DissectionDrops`] rule turned inward -- a bound that is not
+    /// there is worse than one that is, because nothing reports its absence.
+    ///
+    /// The destructuring below is EXHAUSTIVE -- no `..` -- which is the whole
+    /// mechanism: a new field does not make this test fail, it makes it not
+    /// compile, and the author adding the field is the one who decides what the
+    /// live tap should bound it at.
+    #[test]
+    fn the_live_tap_preset_bounds_every_axis_it_has() {
+        let DissectionLimits {
+            reassembly_window_ms,
+            frames_per_flow,
+            stream_bytes_per_direction,
+            skipped_packets,
+            max_flows,
+            max_pending_fragments,
+            max_scout_askers,
+        } = DissectionLimits::for_live_tap();
+
+        for (name, bound) in [
+            (
+                "reassembly_window_ms",
+                reassembly_window_ms.map(|v| v as usize),
+            ),
+            ("frames_per_flow", frames_per_flow),
+            ("stream_bytes_per_direction", stream_bytes_per_direction),
+            ("skipped_packets", skipped_packets),
+            ("max_flows", max_flows),
+            ("max_pending_fragments", max_pending_fragments),
+            ("max_scout_askers", max_scout_askers),
+        ] {
+            let Some(v) = bound else {
+                panic!("{name} is unbounded in the live-tap preset");
+            };
+            assert!(v > 0, "{name} is bounded at zero, which taps nothing");
+        }
+    }
+
+    /// R311y709 (G2) — AND IT REACHES A DISSECTION.
+    ///
+    /// The other half of "zero references": a preset nobody installs is not
+    /// known to be installable. This is the cheapest statement that it is, and
+    /// it reads the limits back rather than trusting the constructor -- a
+    /// `with_limits` that dropped its argument would pass a test that only
+    /// checked the call did not panic.
+    #[test]
+    fn the_live_tap_preset_installs_and_reads_back() {
+        let d = Dissection::with_limits(DissectionLimits::for_live_tap());
+        assert_eq!(
+            d.limits(),
+            DissectionLimits::for_live_tap(),
+            "the dissection must carry the limits it was given"
+        );
+    }
+}
+
 /// R311y709 (§1.2a) — BYTES RECOVERED AGAINST BYTES HANDED TO A DECODER.
 ///
 /// # The question this answers

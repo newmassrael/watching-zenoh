@@ -54,7 +54,8 @@
 //!
 //! ## Memory, without a new constant
 //!
-//! Open exchanges live only for the duration of one [`Self::observe_flow`] call
+//! Open exchanges live only for the duration of one
+//! [`ExchangeTable::observe_flow_where`] call
 //! and are keyed within that flow, so the map is bounded by the number of
 //! `Request` records in the frames the caller handed in — which the caller
 //! already bounds through [`crate::Limits::frames_per_flow`]. A consumer that
@@ -302,16 +303,6 @@ impl ExchangeTable {
     /// An empty table.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Fold one flow's frames in, in capture order.
-    ///
-    /// The unit is a FLOW and not a frame for the reason
-    /// [`crate::agg::ThroughputTable::observe_flow`] gives: request ids and
-    /// keyexpr ids are both per-session spaces, and one map across two sessions
-    /// would correlate a request with a stranger's reply.
-    pub fn observe_flow(&mut self, frames: &[PassiveFrame]) {
-        self.observe_flow_where(frames, &Filter::any())
     }
 
     /// R311y618 (§1.1q) — the same correlation, over the exchanges a selector
