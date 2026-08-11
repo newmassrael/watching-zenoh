@@ -172,7 +172,7 @@ impl Default for QuicLimits {
 /// a secret and not a cipher suite, the secret's LENGTH pins the hash and
 /// through it the candidates, and the AEAD tag settles which by opening a
 /// packet. 48 bytes is SHA384 and unique; 32 leaves two.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SpaceKeys {
     candidates: Vec<QuicKeys>,
 }
@@ -327,13 +327,19 @@ impl QuicFlowOpener {
     /// check [`Self::open`] already settles the cipher suite and the key
     /// generation with, rather than the guess "whoever spoke first".
     ///
-    /// # The limit this mode has, stated rather than discovered
+    /// # Key updates ARE followed, since R311y710
     ///
-    /// Key updates are not followed here. The generation ladder is per
-    /// direction and this mode has not established which direction is which
-    /// until a packet opens, so the rungs are left uninstalled. A mid-connection
-    /// capture that spans a rekey opens the packets before it and refuses the
-    /// ones after — refuses, not misreads.
+    /// R311y709 shipped this mode with the generation ladder uninstalled,
+    /// because the ladder is per direction and this mode does not know which
+    /// direction is which until a packet opens. The collapse [`Self::open`]
+    /// gained at R311y710 removes the difficulty: the index the AEAD picks out
+    /// of the base is dropped from every rung too, so the ladder carries both
+    /// parties exactly as the base does.
+    ///
+    /// It STOPS at the first generation either party is missing, which keeps
+    /// every rung laid out identically to the base. A log recording more updates
+    /// for one side than the other is followed as far as the shorter side goes
+    /// and refuses past it — refuses, not misreads.
     pub fn declaring_short_connection_id_len(mut self, len: usize) -> Self {
         self.short_connection_id_len = [Some(len), Some(len)];
         self.adopt_lone_identity();
@@ -379,10 +385,45 @@ impl QuicFlowOpener {
         if derived.is_empty() {
             return;
         }
+        // R311y710 (Y2) — AND THE GENERATION LADDER, in the SAME candidate order.
+        //
+        // R311y709 left this uninstalled and said so: the ladder is per
+        // direction and this mode has not established which direction is which,
+        // so a mid-connection capture spanning a rekey refused everything after
+        // it. The collapse this round added to `open` is what makes it
+        // installable -- once the AEAD picks an index out of the base, that same
+        // index is dropped from every generation, so the ladder can carry both
+        // parties exactly as the base does.
+        //
+        // The ladder STOPS at the first generation either party is missing,
+        // which keeps every installed rung laid out identically to the base. A
+        // log recording more updates for one side than the other follows the
+        // shorter side and refuses past it -- refuses, not misreads.
+        let mut ladder: Vec<SpaceKeys> = Vec::new();
+        for generation in 1.. {
+            let mut rung: Vec<QuicKeys> = Vec::new();
+            let mut complete = true;
+            for is_server in [false, true] {
+                match secrets
+                    .application_secrets(is_server)
+                    .into_iter()
+                    .nth(generation)
+                    .and_then(|(_, secret)| SpaceKeys::from_secret(secret))
+                {
+                    Some(keys) => rung.extend(keys.candidates),
+                    None => complete = false,
+                }
+            }
+            if !complete || rung.len() != derived.len() {
+                break;
+            }
+            ladder.push(SpaceKeys { candidates: rung });
+        }
         for index in [0usize, 1] {
             self.keys[index][PacketSpace::OneRtt.index()] = Some(SpaceKeys {
                 candidates: derived.clone(),
             });
+            self.one_rtt_generations[index] = ladder.clone();
         }
         self.client_random = Some(only);
         self.identity_adopted = true;
@@ -553,6 +594,28 @@ impl QuicFlowOpener {
                         let winner = keys.candidates.remove(candidate);
                         keys.candidates.clear();
                         keys.candidates.push(winner);
+                        // R311y710 — AND THE LADDER COLLAPSES WITH IT.
+                        //
+                        // MEASURED: it did not, and the ladder is read through
+                        // `candidates.first()`, so a connection that settled on
+                        // the SECOND candidate opened everything up to its key
+                        // update and refused every packet after it with
+                        // `NotAuthenticated` -- a wrong-suite failure wearing a
+                        // wrong-key face. The existing rekey test used the first
+                        // suite and could not see it.
+                        //
+                        // The lists are derived from the same secret in the same
+                        // suite order, so the index that won the base is the
+                        // index that wins every generation.
+                        if space == PacketSpace::OneRtt {
+                            for generation in &mut self.one_rtt_generations[d] {
+                                if generation.candidates.len() > candidate {
+                                    let winner = generation.candidates.remove(candidate);
+                                    generation.candidates.clear();
+                                    generation.candidates.push(winner);
+                                }
+                            }
+                        }
                     }
                     return self.deliver(direction, space, opened);
                 }
@@ -1182,6 +1245,53 @@ mod tests {
         );
     }
 
+    /// R311y710 (Y2) — AND A MID-CONNECTION CAPTURE FOLLOWS A KEY UPDATE.
+    ///
+    /// R311y709 shipped this mode with the generation ladder uninstalled and
+    /// documented the consequence: a capture spanning a rekey opened the packets
+    /// before it and refused the ones after. That limit is now gone, and the
+    /// thing that removed it is the ladder collapse `open` gained this round --
+    /// once the AEAD picks an index out of the base, the same index is dropped
+    /// from every rung, so the ladder can carry BOTH parties exactly as the base
+    /// does and neither has to be known in advance.
+    ///
+    /// The pre-rekey packet is asserted first because it is the population: a
+    /// build where nothing opens at all would satisfy the interesting assertion
+    /// by never reaching it.
+    #[test]
+    fn a_mid_connection_capture_follows_a_key_update() {
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_add(41));
+        let mut opener =
+            QuicFlowOpener::new(log_for(&random, 2)).declaring_short_connection_id_len(SCID.len());
+        assert!(opener.identity_adopted(), "the log holds one connection");
+
+        let generation0 = QuicKeys::derive(Suite::Aes128GcmSha256, &application_secret(false, 0));
+        let generation1 = QuicKeys::derive(Suite::Aes128GcmSha256, &application_secret(false, 1))
+            .with_header_protection_of(&generation0);
+
+        let payload = stream_frame(0, 0, b"before ");
+        let (h, o) = short_header(&SCID, 0);
+        let before = opener.push_datagram(Direction::A, &protect(&generation0, 0, &h, o, &payload));
+        assert!(
+            matches!(before.as_slice(), [PacketOutcome::Opened { .. }]),
+            "the population: the pre-update packet opens: {before:?}"
+        );
+
+        let payload = stream_frame(0, 7, b"after");
+        let (h, o) = short_header(&SCID, 1);
+        let after = opener.push_datagram(Direction::A, &protect(&generation1, 1, &h, o, &payload));
+        assert!(
+            matches!(after.as_slice(), [PacketOutcome::Opened { .. }]),
+            "and so does the one past the key update, which R311y709 refused: \
+             {after:?}"
+        );
+        assert_eq!(
+            opener.census()[0].stream_bytes,
+            12,
+            "both halves of the stream came out"
+        );
+    }
+
     /// R311y698 (§1.2a) — a datagram carrying TWO packets is opened as two.
     ///
     /// A client's first flight is routinely an Initial and a Handshake packet
@@ -1314,6 +1424,60 @@ mod tests {
     /// would fail to unmask the first packet of every generation, and the
     /// failure arrives as a wrong packet number — so it reads as a bad key
     /// rather than a bad rule, which is the kind of mistake that survives.
+    #[test]
+    fn a_rekeyed_connection_on_the_second_suite_is_followed_too() {
+        // R311y710 — the same shape as the test below, on the OTHER suite.
+        //
+        // An NSS key log records a secret and not a cipher suite, so a 32-byte
+        // secret admits two: AES-128-GCM and ChaCha20-Poly1305, in that order,
+        // and the AEAD settles which. Every rekey test here used the FIRST, and
+        // the defect lived in the second: the base candidates collapsed to the
+        // winner and the generation ladder did not, while the ladder is read
+        // through `candidates.first()`. So a ChaCha connection opened everything
+        // up to its key update and refused everything after it as
+        // `NotAuthenticated` -- which sends a reader to their key log for a
+        // fault that is in this reader.
+        //
+        // The population assertion in the middle is what makes the arm mean
+        // something: without it a build that refused BOTH generations would
+        // fail on the same line for the opposite reason.
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(11));
+        let (client_initial, server_initial) = QuicKeys::initial(QuicVersion::V1, &ICID);
+        let mut opener = QuicFlowOpener::new(log_for(&random, 2));
+
+        let hello = client_hello(&random);
+        let payload = crypto_frame(0, &hello);
+        let (h, o) = long_header(LongHeader::INITIAL, &ICID, &[], payload.len(), 0);
+        opener.push_datagram(Direction::A, &protect(&client_initial, 0, &h, o, &payload));
+        let reply = crypto_frame(0, b"\x02\x00\x00\x04....");
+        let (h, o) = long_header(LongHeader::INITIAL, &[], &SCID, reply.len(), 0);
+        opener.push_datagram(Direction::B, &protect(&server_initial, 0, &h, o, &reply));
+
+        let generation0 =
+            QuicKeys::derive(Suite::Chacha20Poly1305Sha256, &application_secret(false, 0));
+        let generation1 =
+            QuicKeys::derive(Suite::Chacha20Poly1305Sha256, &application_secret(false, 1))
+                .with_header_protection_of(&generation0);
+
+        let payload = stream_frame(0, 0, b"before ");
+        let (h, o) = short_header(&SCID, 0);
+        let first = opener.push_datagram(Direction::A, &protect(&generation0, 0, &h, o, &payload));
+        assert!(
+            matches!(first.as_slice(), [PacketOutcome::Opened { .. }]),
+            "the population: generation 0 must open on the second suite: {first:?}"
+        );
+
+        let payload = stream_frame(0, 7, b"after");
+        let (h, o) = short_header(&SCID, 1);
+        let outcomes =
+            opener.push_datagram(Direction::A, &protect(&generation1, 1, &h, o, &payload));
+        assert!(
+            matches!(outcomes.as_slice(), [PacketOutcome::Opened { .. }]),
+            "the ladder must follow the suite that was SETTLED, not the first \
+             one the secret admits: {outcomes:?}"
+        );
+    }
+
     #[test]
     fn a_rekeyed_connection_is_followed_into_the_next_generation() {
         let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(11));

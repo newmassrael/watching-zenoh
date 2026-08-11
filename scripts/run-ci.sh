@@ -5521,6 +5521,8 @@ layer_c1bx_tls_record_oracle() {
         quic::connection::tests::a_connection_is_followed_from_its_connection_id_to_a_one_rtt_stream \
         quic::connection::tests::a_short_header_needs_a_length_only_the_handshake_states \
         quic::connection::tests::a_mid_connection_capture_opens_on_a_declared_length_and_never_on_a_guess \
+        quic::connection::tests::a_mid_connection_capture_follows_a_key_update \
+        quic::connection::tests::a_rekeyed_connection_on_the_second_suite_is_followed_too \
         quic::connection::tests::a_datagram_that_coalesces_two_packets_opens_both \
         quic::connection::tests::a_space_with_no_key_is_refused_differently_from_a_key_that_failed \
         quic::connection::tests::a_rekeyed_connection_is_followed_into_the_next_generation \
