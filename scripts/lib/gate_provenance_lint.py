@@ -104,8 +104,17 @@ import inventory_kinds
 # gates and then reported `feature_implies.py` as undeclared when it had said
 # `R311n (no register item)` all along. What this gate is for is the ITEM, so
 # the round pattern must not become a second, accidental convention.
+#
+# R311y750 (N40) — the item half is a comma-separated LIST, not a single item.
+# One gate can answer for more than one register entry: the self-report gate
+# closes N40 (nothing gated the sweep) and N41 (its vocabulary was guessed) in
+# one mechanism, because measuring the vocabulary is what makes the gate
+# possible. Citing only one of them would make the other unfindable by `--emit`,
+# which is the join the register's open/closed column is supposed to be
+# mechanical through. A one-item citation parses exactly as before.
+_ITEM = r"(?:§[^,)]{1,24}|N\d{1,2}|CENSUS|no register item)"
 PROVENANCE = re.compile(
-    r"R\d+[a-z]{0,3}(?:-\d+)?\d*\s*\(\s*(?:§[^)]{1,24}|N\d{1,2}|CENSUS|no register item)\s*\)"
+    rf"R\d+[a-z]{{0,3}}(?:-\d+)?\d*\s*\(\s*{_ITEM}(?:\s*,\s*{_ITEM})*\s*\)"
 )
 
 HEADER_LINES = 60
@@ -138,6 +147,11 @@ def citation(path: Path) -> str | None:
     return inner[inner.index("(") + 1 : inner.rindex(")")].strip()
 
 
+def items(cite: str) -> list[str]:
+    """The individual register items a citation names (R311y750, N40)."""
+    return [part.strip() for part in cite.split(",") if part.strip()]
+
+
 def complies(path: Path) -> bool:
     return citation(path) is not None
 
@@ -158,13 +172,14 @@ def emit(scripts: list[Path]) -> int:
     rows: list[tuple[str, str]] = []
     none_count = 0
     for p in scripts:
-        item = citation(p)
-        if item is None:
+        cite = citation(p)
+        if cite is None:
             continue
-        if item == "no register item":
+        if cite == "no register item":
             none_count += 1
             continue
-        rows.append((item, p.name))
+        for item in items(cite):
+            rows.append((item, p.name))
 
     for item, name in sorted(rows):
         print(f"{item}\t{name}")
@@ -256,15 +271,18 @@ def main() -> int:
             declared += 1
         # A carry citation must name an item the store actually holds. §-items
         # and CENSUS stay shape-only until the base list migrates.
-        if registered is not None and item and item.startswith("N") and item[1:].isdigit():
-            if f"debt-carry-{item}" not in registered:
-                failures.append(
-                    f"{path.name}: cites `{item}`, which the store's debt "
-                    f"inventory does not hold. Register it "
-                    f"(`add-inventory-entry --id debt-carry-{item}`) or correct "
-                    f"the citation -- a citation nothing can resolve is the "
-                    f"shape R311y741 could not catch"
-                )
+        if registered is not None and item:
+            for one in items(item):
+                if not (one.startswith("N") and one[1:].isdigit()):
+                    continue
+                if f"debt-carry-{one}" not in registered:
+                    failures.append(
+                        f"{path.name}: cites `{one}`, which the store's debt "
+                        f"inventory does not hold. Register it "
+                        f"(`add-inventory-entry --id debt-carry-{one}`) or correct "
+                        f"the citation -- a citation nothing can resolve is the "
+                        f"shape R311y741 could not catch"
+                    )
         if ok and path.name in BASELINE:
             failures.append(
                 f"{path.name}: now carries its provenance citation -- remove it "

@@ -105,7 +105,11 @@ fn payload_of(outcome: &Outcome) -> String {
 /// Printed whether or not there is a destination, and whether or not there is
 /// an alert, on the rule `render` follows for a plan: what is about to go out
 /// is shown FIRST, and the value shown is the value that goes.
-pub fn render(alert: Option<&Alert>, connect: Option<&str>) -> String {
+///
+/// R311y750 (carry N3) — `destinations` is a LIST, so "nowhere to send it" is
+/// the empty case rather than a `None`. The distinction the two silences draw is
+/// unchanged; what changed is that an operator can name more than one.
+pub fn render(alert: Option<&Alert>, destinations: &[String]) -> String {
     let mut s = String::new();
     match alert {
         None => {
@@ -123,11 +127,11 @@ pub fn render(alert: Option<&Alert>, connect: Option<&str>) -> String {
             s.push_str(&format!("  payload: {} byte(s)\n", a.payload.len()));
         }
     }
-    match (alert, connect) {
+    match (alert, destinations.is_empty()) {
         // The two silences a reader must be able to tell apart: nothing to
         // send, and nowhere to send it.
-        (Some(_), None) => s.push_str("  NOT SENT -- no --connect destination\n"),
-        (None, Some(to)) => s.push_str(&format!("  nothing sent to {to}\n")),
+        (Some(_), true) => s.push_str("  NOT SENT -- no --connect destination\n"),
+        (None, false) => s.push_str(&format!("  nothing sent to {}\n", destinations.join(", "))),
         _ => {}
     }
     s
@@ -179,12 +183,22 @@ mod tests {
     #[test]
     fn a_complete_capture_raises_no_alert_and_the_page_says_so() {
         assert_eq!(alert_for(&outcome(&[]), DEFAULT_KEYEXPR), None);
-        let page = render(None, None);
+        let page = render(None, &[]);
         assert!(page.contains("alert: none"), "{page}");
+        let one = vec!["tcp/h:7447".to_string()];
         assert!(
-            render(None, Some("tcp/h:7447")).contains("nothing sent to tcp/h:7447"),
+            render(None, &one).contains("nothing sent to tcp/h:7447"),
             "a destination with nothing to send must be distinguishable from \
              no destination"
+        );
+        // R311y750 (carry N3) — and EVERY destination is named, not just the
+        // first. An operator who fanned to two routers and reads one name has
+        // been told the wrong thing about where their alert would have gone.
+        let two = vec!["tcp/h:7447".to_string(), "tcp/i:7447".to_string()];
+        let page = render(None, &two);
+        assert!(
+            page.contains("nothing sent to tcp/h:7447, tcp/i:7447"),
+            "{page}"
         );
     }
 
@@ -210,7 +224,7 @@ mod tests {
             "{\"complete\":false,\"reasons\":[\"packets_skipped\",\"sn_missing\"],\
              \"decrypted_flows\":1,\"undecrypted_flows\":2}"
         );
-        let page = render(Some(&a), None);
+        let page = render(Some(&a), &[]);
         assert!(
             page.contains("packets_skipped") && page.contains("sn_missing"),
             "{page}"

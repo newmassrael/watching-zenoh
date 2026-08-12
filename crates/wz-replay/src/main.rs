@@ -27,7 +27,10 @@ USAGE:
 OPTIONS:
     --connect <locator>
                       DIAL this peer and actually publish the plan, e.g.
-                      `tcp/127.0.0.1:7447`. Without it nothing is sent
+                      `tcp/127.0.0.1:7447`. Without it nothing is sent.
+                      REPEATABLE under --alert, which fans the notification to
+                      every destination named; a replay plays once and refuses
+                      more than one
     --keylog <file>   an NSS key log, so encrypted flows contribute samples
     --select <keyexpr>
                       replay only samples whose keyexpr matches. zenoh's own
@@ -60,8 +63,16 @@ OPTIONS:
                       which do not apply to a notification
     --alert-key <keyexpr>
                       where the alert goes (default `wz/alert`)
+    --alert-retries <n>
+                      tries per destination, counting the first (default 3).
+                      0 is REFUSED -- it would send nothing and report an
+                      outage
+    --alert-backoff-ms <ms>
+                      wait between tries of one destination (default 500).
+                      Never waited after the last try
 
-Exit: 0 the plan was produced (or played), 2 this tool failed.
+Exit: 0 the plan was produced (or played), 2 this tool failed. An alert that
+      was not delivered to every destination named is a failure.
 ";
 
 fn main() -> ExitCode {
@@ -79,9 +90,14 @@ fn main() -> ExitCode {
     let mut select: Option<String> = None;
     let mut side: Option<wz_session_core::passive::Direction> = None;
     let mut keylog: Option<String> = None;
-    let mut connect: Option<String> = None;
+    // R311y750 (carry N3) — a LIST. One destination was the alerting path's
+    // first shape and the reason carry N3 called it "wrong for a watchdog": the
+    // node an alert is about is often the node that cannot forward it.
+    let mut connect: Vec<String> = Vec::new();
     let mut alert = false;
     let mut alert_key: Option<String> = None;
+    let mut alert_retries: Option<u32> = None;
+    let mut alert_backoff_ms: Option<u64> = None;
     // R311y716 ([REDACTED-REQ]) — the plan-shaping options an alert must REFUSE. A
     // notification is not a replay: `--fuzz` has nothing to mutate, `--select`
     // nothing to select from, and `--speed` nothing to space out. Accepting
@@ -126,8 +142,16 @@ fn main() -> ExitCode {
                 None => return bad("--keylog needs a file"),
             },
             "--connect" => match value() {
-                Some(v) => connect = Some(v),
+                Some(v) => connect.push(v),
                 None => return bad("--connect needs a locator, e.g. tcp/127.0.0.1:7447"),
+            },
+            "--alert-retries" => match value().and_then(|v| v.parse::<u32>().ok()) {
+                Some(v) => alert_retries = Some(v),
+                None => return bad("--alert-retries needs a whole number of tries"),
+            },
+            "--alert-backoff-ms" => match value().and_then(|v| v.parse::<u64>().ok()) {
+                Some(v) => alert_backoff_ms = Some(v),
+                None => return bad("--alert-backoff-ms needs milliseconds"),
             },
             "--select" => match value() {
                 Some(v) => select = Some(v),
@@ -182,6 +206,43 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    // R311y750 (carry N3) — the delivery knobs follow `--alert-key`'s rule: an
+    // option that shapes a notification this run does not raise is REFUSED, not
+    // ignored. An operator who typed `--alert-retries 5` on a replay would
+    // otherwise believe their replay retries.
+    if !alert && (alert_retries.is_some() || alert_backoff_ms.is_some()) {
+        eprintln!(
+            "wz-replay: --alert-retries / --alert-backoff-ms shape an alert's \
+             delivery and this run raises none. Add --alert, or drop \
+             them.\n\n{USAGE}"
+        );
+        return ExitCode::from(2);
+    }
+    // A replay plays ONCE. Two destinations would either double-publish the
+    // capture or silently use the first, and both are worse than saying so.
+    if !alert && connect.len() > 1 {
+        eprintln!(
+            "wz-replay: {} --connect destinations, and a replay plays once. \
+             Name one, or use --alert, which fans to every destination.\n\n{USAGE}",
+            connect.len()
+        );
+        return ExitCode::from(2);
+    }
+    let policy = match wz_replay::delivery::RetryPolicy::new(
+        alert_retries.unwrap_or_else(|| wz_replay::delivery::RetryPolicy::default().attempts()),
+        alert_backoff_ms
+            .unwrap_or_else(|| wz_replay::delivery::RetryPolicy::default().backoff_millis()),
+    ) {
+        Some(policy) => policy,
+        None => {
+            eprintln!(
+                "wz-replay: --alert-retries 0 would send nothing and then \
+                 report every destination unreachable. Use 1 for a single \
+                 try.\n\n{USAGE}"
+            );
+            return ExitCode::from(2);
+        }
+    };
     if alert && !plan_shaping.is_empty() {
         eprintln!(
             "wz-replay: --alert does not replay, so {} shape{} nothing. \
@@ -228,7 +289,8 @@ fn main() -> ExitCode {
             alert_key
                 .as_deref()
                 .unwrap_or(wz_replay::alert::DEFAULT_KEYEXPR),
-            connect.as_deref(),
+            &connect,
+            policy,
             path,
         );
     }
@@ -261,10 +323,10 @@ fn main() -> ExitCode {
         eprintln!("wz-replay: {why}");
         return ExitCode::from(2);
     }
-    let Some(connect) = connect else {
+    let Some(connect) = connect.first() else {
         return ExitCode::SUCCESS;
     };
-    run_live(&connect, plan)
+    run_live(connect, plan)
 }
 
 /// R311y716 ([REDACTED-REQ]) — judge the capture, print the verdict, and deliver it
@@ -277,7 +339,8 @@ fn run_alert(
     capture: &[u8],
     keylog: Option<&[u8]>,
     key: &str,
-    connect: Option<&str>,
+    connect: &[String],
+    policy: wz_replay::delivery::RetryPolicy,
     path: &str,
 ) -> ExitCode {
     // EVERY PLANE, and this is the whole correctness of the alert. The verdict
@@ -316,13 +379,54 @@ fn run_alert(
     };
     let alert = wz_replay::alert::alert_for(&outcome, key);
     print!("{}", wz_replay::alert::render(alert.as_ref(), connect));
-    match (alert, connect) {
-        (Some(a), Some(to)) => run_live(to, wz_replay::alert::as_plan(&a)),
-        // Nothing to send, or nowhere to send it. Both are ordinary outcomes
-        // and neither is a failure of this tool; `render` above has already
-        // told the operator which one happened.
-        _ => ExitCode::SUCCESS,
+    let Some(a) = alert else {
+        // Nothing to send. An ordinary outcome and not a failure of this tool;
+        // `render` above has already said so.
+        return ExitCode::SUCCESS;
+    };
+    if connect.is_empty() {
+        // Nowhere to send it -- also ordinary, and also already on the page.
+        return ExitCode::SUCCESS;
     }
+    // R311y750 (carry N3) — every destination, each retried per `policy`. The
+    // send and the wait are handed in, which is what lets `delivery`'s tests
+    // measure the schedule without a network; here they are the real ones.
+    let plan = wz_replay::alert::as_plan(&a);
+    let report = wz_replay::delivery::deliver(
+        connect,
+        policy,
+        |to| send_alert(to, plan.clone()),
+        |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
+    );
+    print!("{}", wz_replay::delivery::render(&report));
+    if report.all_delivered() {
+        ExitCode::SUCCESS
+    } else {
+        // A destination the operator NAMED and the alert did not reach. Exit 2
+        // rather than 0: the run whose whole purpose is to raise an alarm did
+        // not raise it everywhere it was told to.
+        ExitCode::from(2)
+    }
+}
+
+/// One delivery attempt, as [`wz_replay::delivery::deliver`] wants it.
+///
+/// The `live`-off build refuses here for the same reason `run_live` does, and
+/// the refusal arrives as a per-destination FAILURE rather than as an early
+/// exit — the delivery page then names it beside any other destination, which
+/// is the shape an operator reading one page needs.
+#[cfg(feature = "live")]
+fn send_alert(to: &str, plan: wz_replay::Plan) -> Result<usize, String> {
+    wz_replay::live::run(to, plan).map_err(|why| format!("{why}"))
+}
+
+#[cfg(not(feature = "live"))]
+fn send_alert(_to: &str, _plan: wz_replay::Plan) -> Result<usize, String> {
+    Err(
+        "this binary was built without the `live` feature; nothing was sent. \
+         Rebuild with `--features live` (it is on by default)"
+            .to_string(),
+    )
 }
 
 /// R311y702 — dial and play.

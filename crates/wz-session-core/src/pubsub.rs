@@ -703,20 +703,6 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         self.subscribers.is_empty()
     }
 
-    /// R121j-5c — borrow the peer keyexpr alias table for cross-
-    /// registry use. The `QueryableRegistry` (wz-runtime-tokio)
-    /// resolves inbound `Request(Query)` keyexpr through the same
-    /// peer mapping that the subscriber side populated via
-    /// [`absorb_declare`](Self::absorb_declare) on inbound
-    /// `Declare(DeclKexpr|UndeclKexpr)`. Lending the table by
-    /// reference avoids dual-write bookkeeping (one DECLARE absorbed
-    /// once, observed by both registries) without requiring
-    /// `Arc<Mutex<…>>` shared state.
-    #[cfg(feature = "alloc")]
-    pub fn peer_keyexpr_table(&self) -> &HashMap<u64, String> {
-        &self.peer_keyexpr_table
-    }
-
     /// R311y739 — install OUR id space, the `M=0` half of the pair.
     ///
     /// Call once at bring-up with the session's own outbound-mapping surface
@@ -752,12 +738,17 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// R311y739 — BOTH id spaces, for this registry and for every consumer the
     /// observer fans the table into.
     ///
-    /// This is the accessor the fan should use rather than
-    /// [`peer_keyexpr_table`](Self::peer_keyexpr_table): handing a consumer the
-    /// bare peer table hands it a resolver that silently refuses every `M=0`
-    /// alias, which is the defect R311y739 exists to remove. The peer table
-    /// accessor survives for the one caller that genuinely needs the raw map —
-    /// a `DeclKexpr` absorb binds INTO the peer's space and into no other.
+    /// R311y750 (carry N38) — this is the ONLY way out of this registry to
+    /// either id space. There used to be a second, weaker one beside it
+    /// (`peer_keyexpr_table`, which lent the bare peer map), and handing a
+    /// consumer that map hands it a resolver silently refusing every `M=0`
+    /// alias — the defect R311y739 exists to remove. It survived that round on
+    /// a justification that was not merely unused but IMPOSSIBLE: it was kept
+    /// "for the caller that binds INTO the peer's space", and it lends a `&`,
+    /// so no caller could ever have bound through it. `absorb_declare` reaches
+    /// the field, as it always did. A consumer that must READ the raw peer half
+    /// now goes through [`MappingSpaces::peer`], which cannot be reached
+    /// without first holding the pair.
     #[cfg(feature = "alloc")]
     pub fn mapping_spaces(&self) -> MappingSpaces<'_> {
         match &self.own_mapping_space {
@@ -772,13 +763,14 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// `None` if no `DeclKexpr` for `id` has arrived (or an
     /// `UndeclKexpr` retracted it).
     ///
-    /// The full [`Self::peer_keyexpr_table`] accessor remains for
-    /// cross-registry borrow (the canonical zero-clone path used by
-    /// `QueryableRegistry` and other in-process observers); this
+    /// The cross-registry zero-clone path is [`Self::mapping_spaces`] (R311y739
+    /// widened it to the PAIR, and R311y750 made it the only door); this
     /// single-id form is the ergonomic application-facing surface for
     /// callers that only need one resolution per call site and
     /// prefer an owned `String` over keeping the registry borrow
-    /// live. Mirrors zenoh-pico's `_z_get_resource_by_id` lookup on
+    /// live. It reads the PEER half by name and by contract — an inbound
+    /// `M=0` alias is not its question and is not silently answered here.
+    /// Mirrors zenoh-pico's `_z_get_resource_by_id` lookup on
     /// the inbound side
     /// (`vendor/zenoh-pico/src/session/resource.c`).
     ///
@@ -3045,6 +3037,59 @@ mod tests {
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 
+    /// R311y750 (carry N38) — the peer half has ONE door out of this registry,
+    /// and that door does not answer the pair's question.
+    ///
+    /// N38 carried a zero-caller accessor, `SubscriberRegistry`'s bare
+    /// `peer_keyexpr_table()`, kept for "the caller that binds INTO the peer's
+    /// space". No such caller could ever have existed: it lent a `&`, and the
+    /// binding site reaches the field. What a zero-caller accessor costs is not
+    /// the dead code — it is that the WEAKER of two doors stays in reach of a
+    /// consumer who only wants to read something, and reading the peer half
+    /// where the pair was needed is a confident wrong answer, not a miss.
+    ///
+    /// THE DISCRIMINATOR is that wrong answer made real: id 7 is declared by
+    /// the peer as `theirs/seven` and by US as `ours/seven`. The narrow half
+    /// yields the peer's literal; the pair, asked about an `M=0` alias for the
+    /// same id, yields ours. A test that only checked "the table is readable"
+    /// would pass with the two spaces swapped.
+    #[test]
+    fn the_peer_half_is_reachable_only_through_the_pair_and_cannot_answer_for_it() {
+        let mut registry = SubscriberRegistry::new();
+        registry.set_own_mapping_space(own_space(7, "ours/seven"));
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(7, "theirs/seven"))),
+            Reliability::Reliable,
+        );
+
+        // ONE door: what `absorb_declare` bound is what the pair yields.
+        assert_eq!(
+            registry.mapping_spaces().peer().get(&7).map(|s| &**s),
+            Some("theirs/seven"),
+            "the pair's peer half IS the table the DeclKexpr absorb binds into",
+        );
+        // The single-id resolver reads that same table, so the two readers
+        // cannot drift apart into two tables holding two answers.
+        assert_eq!(
+            registry.resolve_inbound_mapping(7).as_deref(),
+            Some("theirs/seven"),
+            "the single-id form names the PEER half by contract",
+        );
+
+        // The half is NOT the pair, and this is the half's whole hazard: an
+        // `M=0` alias for the SAME id resolves in our space, which the peer
+        // table neither holds nor can be asked about.
+        let spaces = registry.mapping_spaces();
+        assert!(spaces.has_own(), "the own space was installed above");
+        let own_alias = push_with_own_mapping_id(7, None);
+        assert_eq!(
+            resolve_wireexpr_in(&own_alias.keyexpr.body, spaces).as_deref(),
+            Some("ours/seven"),
+            "an M=0 alias names OUR space; substituting the peer half here \
+             would have answered `theirs/seven` with full confidence",
+        );
+    }
+
     #[test]
     fn declare_then_push_with_mapping_id_resolves_via_table() {
         // Models the zenoh-pico z_put flow: peer first declares
@@ -3290,7 +3335,7 @@ mod tests {
             let body = body.try_into_owned().unwrap();
             registry.absorb_declare(&body);
             assert!(
-                registry.peer_keyexpr_table().is_empty(),
+                registry.mapping_spaces().peer().is_empty(),
                 "{name} arm must not mutate the peer keyexpr table"
             );
         }

@@ -530,8 +530,13 @@ mod tests {
     /// measured. This is that measurement for the peer-DECLARE(Subscriber)
     /// plane, and it is not redundant with the shared-resolver tests: what it
     /// rules out is this registry reaching for the peer table by some other
-    /// route (the weaker `peer_keyexpr_table()` accessor is still in reach),
-    /// which no test of the resolver in isolation can see.
+    /// route, which no test of the resolver in isolation can see.
+    ///
+    /// R311y750 (carry N38) — the route this named, `SubscriberRegistry`'s bare
+    /// `peer_keyexpr_table()`, is gone; the raw peer half is now reachable only
+    /// through the pair. That narrows what this test has to watch for without
+    /// retiring it: a registry can still read the peer half through
+    /// `MappingSpaces::peer` after being handed both.
     ///
     /// THE DISCRIMINATOR is the collision: id 7 exists in BOTH spaces under
     /// different literals, so reading the wrong one is a confident WRONG

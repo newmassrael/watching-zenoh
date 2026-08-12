@@ -407,16 +407,21 @@ impl ApplicationLayerObserver {
         // peer_keyexpr_table so downstream consumers see a fresh
         // mapping snapshot on the same iteration.
         //
-        // R310.5b — the `peer_table` binding (and the
-        // `peer_keyexpr_table()` getter call) is itself gated on the
-        // consumer-features union. When no consumer arm is active
-        // (rare, e.g. preset-mcu-minimal-class with all declare-* /
+        // R310.5b — the `peer_table` binding (and the getter call behind it) is
+        // itself gated on the consumer-features union. When no consumer arm is
+        // active (rare, e.g. preset-mcu-minimal-class with all declare-* /
         // liveliness-* / query-queryable / query-reply off), the
         // getter is not called and no `_peer_table` rebinding is
         // needed. The prior `cfg(not(...)) let _peer_table = ...;`
         // companion was a textbook miss — calling a getter only to
         // discard its result and silence a lint is uglier than
         // simply not calling it.
+        //
+        // R311y750 (carry N38) — this sentence used to NAME the getter as
+        // `peer_keyexpr_table()`, and had done so since R311y739 replaced that
+        // call with `mapping_spaces()` one line below. A comment naming a call
+        // its own function no longer makes is the expired-blocker class
+        // (`scripts/lib/expired_blocker_lint.py`) pointed at a method name.
         self.subscribers.dispatch_iteration_event(event);
         // R311dz — the `query-reply` arm of the AP crate translates to
         // `any(codec-response, codec-response-final)` here: the z_get-side

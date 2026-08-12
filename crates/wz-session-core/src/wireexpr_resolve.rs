@@ -241,14 +241,22 @@ impl<'a> MappingSpaces<'a> {
         }
     }
 
-    /// The peer's space as a raw table, for a caller that must BIND into it
-    /// rather than resolve against it — a `DeclKexpr` registers `id -> literal`
-    /// in the peer's space and in no other.
+    /// The peer's half as a raw table, for a caller that must INSPECT it rather
+    /// than resolve one reference against it — enumerating what the peer has
+    /// declared, which no single-reference resolution can answer.
     ///
-    /// No production caller yet: `SubscriberRegistry::absorb_declare` reaches
-    /// its own field directly. Kept because a pair type that cannot yield either
-    /// half is the shape a future relay would have to re-add, and pinned by a
-    /// test so a zero-caller accessor cannot be quietly wrong.
+    /// R311y750 (carry N38) — the doc this replaces said it was for a caller
+    /// that must BIND into the table, and that was not a missing caller but an
+    /// impossible one: this yields a `&`, so nothing could ever have bound
+    /// through it. The binding site (`SubscriberRegistry::absorb_declare`)
+    /// reaches its own field, which is the only shape an insert can take.
+    ///
+    /// It is deliberately the NARROW half and cannot stand in for the pair: it
+    /// answers about the peer's space only, so a caller reaching for it to
+    /// resolve a reference re-creates the wrong-space read
+    /// [`resolve_wireexpr_in`] exists to prevent. That is also why it is
+    /// reachable only THROUGH the pair — a consumer holding it has already been
+    /// handed the `M=0` half it would otherwise silently refuse.
     pub fn peer(&self) -> &'a HashMap<u64, String> {
         self.peer
     }

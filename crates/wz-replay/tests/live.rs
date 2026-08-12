@@ -246,9 +246,18 @@ async fn the_alert_reaches_a_peer_and_a_clean_capture_sends_it_nothing() {
         out.status.success(),
         "the alert must exit clean: {stdout}\n{stderr}"
     );
+    // R311y750 (carry N3) — the delivery page, not the replay sink's line. It
+    // is asserted with the DESTINATION and the ATTEMPT COUNT in it: one attempt
+    // is the claim that the first dial reached a peer that was already up, and
+    // a page saying `after 2 attempt(s)` here would mean the retry loop had
+    // covered for a real defect on the way in.
     assert!(
-        stdout.contains("1 of 1 emission(s) sent to"),
+        stdout.contains("delivery: 1 of 1 destination(s)"),
         "and say that it went: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("tcp/{addr} -- 1 emission(s) after 1 attempt(s)")),
+        "naming the destination and what it took: {stdout}"
     );
 
     // THE CLAIM: the peer decoded the notification, under the operator's key,
@@ -313,6 +322,152 @@ async fn the_alert_reaches_a_peer_and_a_clean_capture_sends_it_nothing() {
         quiet.lock().expect("not poisoned").is_empty(),
         "a complete capture must not even dial"
     );
+}
+
+/// R311y750 (carry N3) — the alert FANS to every destination, retries the one
+/// that will not answer, and reports the shortfall as a failure.
+///
+/// # Why this is a separate test and not another arm of the one above
+///
+/// That test proves an alert reaches a peer. This one proves what happens when
+/// one of the peers is not there, which is the case carry N3 was actually about
+/// ("one transport, one destination, no retry -- right for a capture-file tool,
+/// wrong for a watchdog"). The node an alert is ABOUT is often the node that
+/// cannot forward it, so a watchdog with one destination has its single point of
+/// failure exactly where the fault is.
+///
+/// # The three properties, and what each rules out
+///
+/// * `1 of 2` — the dead destination did not take the live one down with it. A
+///   loop that stops at the first failure would deliver nothing here, and would
+///   have passed a suite that only ever named reachable peers.
+/// * `after 2 attempt(s)` on the dead one, `after 1` on the live one — the
+///   retry ran, and it ran only where it was needed. A policy applied
+///   unconditionally would show two attempts on both.
+/// * exit 2 — a named destination that was not reached is a fault. A watchdog
+///   that exits 0 with half its fan-out unreachable has taught its reader to
+///   ignore the signal it exists to give.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_alert_fans_to_every_destination_and_retries_the_one_that_is_down() {
+    let scratch = std::env::temp_dir().join(format!("wz-replay-fan-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).expect("a scratch directory");
+    let short = scratch.join("aliased.pcapng");
+    std::fs::write(&short, fixture::aliased_capture(false)).expect("a fixture");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let live_addr = listener.local_addr().expect("local_addr");
+    // A port nothing listens on: bound to learn a free one, then RELEASED. The
+    // alternative -- a hard-coded port -- is the flaky one, because a port this
+    // suite does not own may well have something on it.
+    let dead_addr = {
+        let doomed = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = doomed.local_addr().expect("local_addr");
+        drop(doomed);
+        addr
+    };
+
+    let heard: Heard = Arc::new(Mutex::new(Vec::new()));
+    let recorder = heard.clone();
+
+    let acceptor = async move {
+        let (stream, _peer) = listener.accept().await.expect("accept");
+        let clock = TokioTime::new();
+        let OpenedSession {
+            mut engine,
+            actions,
+            inbound,
+            writer_handle,
+            clock: _,
+        } = accept_and_open_session(
+            DialedLink::Tcp(stream),
+            peer_init_params(),
+            clock,
+            None,
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("the alert opens a session this peer accepts");
+
+        let mut driver = inbound;
+        let timeouts = SessionTimeouts::spec_defaults();
+        let _ = drive_session_until_terminal(
+            &mut driver,
+            &actions,
+            &mut engine,
+            Some(ITER_CAP),
+            &clock,
+            &timeouts,
+            |event: IterationEvent<'_>| {
+                let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event
+                else {
+                    return;
+                };
+                for message in messages {
+                    if let Some(sample) = keyexpr_and_payload(message) {
+                        recorder.lock().expect("not poisoned").push(sample);
+                    }
+                }
+            },
+        )
+        .await;
+        drop(actions);
+        writer_handle.drain().await;
+    };
+
+    let alerting = async {
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_wz-replay"))
+            .arg(&short)
+            .arg("--alert")
+            .arg("--connect")
+            .arg(format!("tcp/{live_addr}"))
+            .arg("--connect")
+            .arg(format!("tcp/{dead_addr}"))
+            .arg("--alert-retries")
+            .arg("2")
+            // Short on purpose: this is the retry SCHEDULE's only appearance in
+            // wall-clock, and its shape is measured in `delivery`'s unit tests.
+            .arg("--alert-backoff-ms")
+            .arg("10")
+            .output()
+            .await
+            .expect("the binary runs")
+    };
+
+    let (_, out) = tokio::join!(acceptor, alerting);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let heard = heard.lock().expect("not poisoned").clone();
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a destination that was named and not reached is a failure: \
+         {stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("delivery: 1 of 2 destination(s)"),
+        "the live destination must still have been delivered to: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "tcp/{live_addr} -- 1 emission(s) after 1 attempt(s)"
+        )),
+        "the reachable one takes ONE attempt: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("tcp/{dead_addr} -- FAILED after 2 attempt(s)")),
+        "the unreachable one is retried to the policy's limit and then named: \
+         {stdout}"
+    );
+    // AND THE PEER DECODED IT. Without this the assertions above could all hold
+    // over a tool that printed a delivery page and sent nothing.
+    assert_eq!(
+        heard.len(),
+        1,
+        "the live peer must have decoded exactly one notification: {heard:?}"
+    );
+    assert_eq!(heard[0].0, "wz/alert", "under the default key");
 }
 
 /// R311y702 — a build without `live` REFUSES `--connect` instead of printing

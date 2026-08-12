@@ -45,6 +45,15 @@ use wz_analyze::{Sample, Samples};
 /// send it, which is the rule `--connect` already follows.
 pub mod alert;
 
+/// R311y750 (carry N3) — WHERE the alert goes, and what happens when it does
+/// not arrive.
+///
+/// UNGATED for the same reason [`alert`] is: which destinations were tried, how
+/// often, and with what waits between is a pure function of a policy and an
+/// injected send. Keeping it out of [`live`] is what makes the retry schedule a
+/// measured property instead of one argued from the code.
+pub mod delivery;
+
 #[cfg(feature = "live")]
 pub mod live;
 

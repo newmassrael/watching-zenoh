@@ -1661,6 +1661,20 @@ PY
     # Enforcement MEASURED by re-introducing one of the eight verbatim, not by
     # observing that the script runs.
     python3 scripts/lib/expired_blocker_lint.py || return 1
+    # R311y750 (carry N40, carry N41) — the SELF-REPORT gate, the expired-blocker
+    # lint's sibling one axis over: that one asks whether a stated blocker has
+    # DISSOLVED, in three C-ABI crates; this one asks whether a comment declaring
+    # work undone is TRACKED anywhere, across every crate. N41 is why it took a
+    # measurement first — the sweep vocabulary was three guessed phrases matching
+    # 24 lines, while `deferred` (458), `follow-up` (107) and `not yet` (91) had
+    # never been searched, and are almost entirely design prose. Gating raw
+    # vocabulary would have produced a gate nobody kept on, so the measured
+    # census is PRINTED and only the strong tier is gated. Enforcement MEASURED
+    # four ways: a planted untracked `TODO` reds naming both its phrases, a
+    # baselined site that gains a citation reds asking the carry to shrink, a
+    # stale baseline entry reds, and an empty population FAILs instead of
+    # passing.
+    python3 scripts/lib/self_report_lint.py || return 1
     # R311y581 — the UNWIRED-LANE gate: a lane in run-ci.sh but not in
     # ci.yml's --layer set runs ONLY in a local full sweep. Seven were found,
     # one of them created by the round that closed the sibling debt. See the
