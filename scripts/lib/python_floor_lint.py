@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R311y606 — reject a gate script the HOSTED runner's python cannot run.
+"""R311y606 (no register item) — reject a gate script the HOSTED runner's python cannot run.
 
 ## The defect this closes
 

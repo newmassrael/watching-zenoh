@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# atom_test_graph.py — DERIVE the atom-code <-> test reference graph (Layer A3).
+# R311y339 (no register item) — DERIVE the atom-code <-> test reference graph (Layer A3).
 #
 # Why this exists:
 #   A3's own docstring says the implementation tag is "earned by CODE READ". That

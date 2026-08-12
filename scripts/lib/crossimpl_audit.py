@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R311y259 — Layer A4: join the catalog to the cross-impl proof corpus.
+"""R311y259 (no register item) — Layer A4: join the catalog to the cross-impl proof corpus.
 
 Driven by scripts/audit-crossimpl-proof.sh, which documents the motivation and the
 seven invariants. This module is the join itself.

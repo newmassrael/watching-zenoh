@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Find comments whose stated BLOCKER has expired.
+"""R311y561 (no register item) — find comments whose stated BLOCKER has expired.
 
 ## The class this exists for
 

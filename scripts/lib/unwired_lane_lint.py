@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R311y581 — the UNWIRED-LANE gate.
+"""R311y581 (no register item) — the UNWIRED-LANE gate.
 
 A lane registered in `scripts/run-ci.sh` but absent from
 `.github/workflows/ci.yml`'s `--layer` set runs ONLY in a local full sweep.

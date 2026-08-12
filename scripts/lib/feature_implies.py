@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R311n — wz facade → wz-runtime-tokio feature transitive-puller resolver.
+"""R311n (no register item) — wz facade → wz-runtime-tokio feature transitive-puller resolver.
 
 Reads `cargo metadata --format-version=1 --no-deps` JSON from stdin and
 emits shell-sourceable assignments naming, for every wz-runtime-tokio

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# schema-pin-gate.sh — the atomic-store schema pin gate, shared by
+# R311y418 (no register item) — the atomic-store schema pin gate, shared by
 # .githooks/pre-commit and .githooks/pre-push (R311y418).
 #
 # WHAT IT GRADES: whether the atomic store that a given git tree carries can be

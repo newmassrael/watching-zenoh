@@ -1123,6 +1123,181 @@ mod tests {
             assert_eq!(r_q_fired.load(Ordering::SeqCst), 1);
             assert_eq!(l_fired.load(Ordering::SeqCst), 1);
         }
+
+        /// R311y742 (N51) — the own-space witness AT THE FAN, not per registry.
+        ///
+        /// R311y740 measured every plane individually: given the pair, each one
+        /// reads the space the `M` bit names. What no per-registry test can see
+        /// is the EDGE — that `dispatch_event` actually hands the pair over
+        /// rather than the bare peer table. The type forces the parameter, but
+        /// a fan that passed `MappingSpaces::peer_only(&self.peer_table)` would
+        /// type-check perfectly and silently restore the R311y739 defect on
+        /// every plane at once.
+        ///
+        /// So this drives ONE `IterationEvent` carrying four planes' messages,
+        /// each naming id 7 with `M=0`, and requires all four to resolve OUR
+        /// literal. THE DISCRIMINATOR is the collision: the peer has declared
+        /// id 7 as `theirs/x` in the same registry, so a fan that handed over
+        /// the peer table alone would resolve a confident WRONG keyexpr on all
+        /// four rather than dropping them.
+        #[test]
+        fn an_own_space_alias_resolves_through_the_fan_on_every_plane() {
+            use alloc::string::ToString;
+            use hashbrown::HashMap;
+            use std::sync::Mutex;
+            use wz_session_core_test_support::{decl_kexpr, declare_envelope_decl_kexpr};
+
+            let mut observer = ApplicationLayerObserver::new();
+
+            // OUR space: id 7 -> `ours/x`.
+            let mut own = HashMap::new();
+            own.insert(7u64, "ours/x".to_string());
+            observer
+                .subscribers
+                .set_own_mapping_space(std::sync::Arc::new(own));
+
+            // THE PEER's space: the same id 7, a different literal. Absorbed
+            // through the ordinary inbound DeclKexpr path, not injected.
+            observer.dispatch_event(IterationEvent::Poll(&make_outcome(vec![
+                NetworkMessage::Declare(Box::new(declare_envelope_decl_kexpr(decl_kexpr(
+                    7, "theirs/x",
+                )))),
+            ])));
+
+            let ours_fired = Arc::new(AtomicUsize::new(0));
+            let theirs_fired = Arc::new(AtomicUsize::new(0));
+            let o = ours_fired.clone();
+            observer.subscribers.register("ours/x", move |_p| {
+                o.fetch_add(1, Ordering::SeqCst);
+            });
+            let t = theirs_fired.clone();
+            observer.subscribers.register("theirs/x", move |_p| {
+                t.fetch_add(1, Ordering::SeqCst);
+            });
+
+            let seen: Arc<Mutex<alloc::vec::Vec<alloc::string::String>>> =
+                Arc::new(Mutex::new(alloc::vec::Vec::new()));
+            let s1 = seen.clone();
+            observer
+                .remote_subscribers
+                .on_subscriber_declared(move |d| s1.lock().unwrap().push(d.keyexpr().to_string()));
+            let s2 = seen.clone();
+            observer
+                .remote_queryables
+                .on_queryable_declared(move |d| s2.lock().unwrap().push(d.keyexpr().to_string()));
+            let s3 = seen.clone();
+            observer
+                .liveliness
+                .on_token_declared(move |d| s3.lock().unwrap().push(d.keyexpr().to_string()));
+
+            observer.dispatch_event(IterationEvent::Poll(&make_outcome(vec![
+                NetworkMessage::Push(Box::new(push_own_alias(7))),
+                NetworkMessage::Declare(Box::new(decl_subscriber_own_alias(1, 7))),
+                NetworkMessage::Declare(Box::new(decl_queryable_own_alias(2, 7))),
+                NetworkMessage::Declare(Box::new(decl_token_own_alias(3, 7))),
+            ])));
+
+            assert_eq!(
+                ours_fired.load(Ordering::SeqCst),
+                1,
+                "the Push plane resolved id 7 in OUR space",
+            );
+            assert_eq!(
+                theirs_fired.load(Ordering::SeqCst),
+                0,
+                "a fan handing over the peer table alone would have fired this one",
+            );
+            let seen = seen.lock().unwrap();
+            assert_eq!(
+                *seen,
+                vec![
+                    "ours/x".to_string(),
+                    "ours/x".to_string(),
+                    "ours/x".to_string()
+                ],
+                "declare-subscriber / declare-queryable / liveliness all resolved \
+                 in OUR space through the fan",
+            );
+        }
+
+        /// ANTI-VACUITY twin: the SAME frame with no own space installed
+        /// resolves nothing on any of the four planes. Without this the test
+        /// above would still pass if the peer table happened to be empty.
+        #[test]
+        fn without_an_own_space_the_fan_refuses_the_same_frame_on_every_plane() {
+            use alloc::string::ToString;
+            use std::sync::Mutex;
+            use wz_session_core_test_support::{decl_kexpr, declare_envelope_decl_kexpr};
+
+            let mut observer = ApplicationLayerObserver::new();
+            observer.dispatch_event(IterationEvent::Poll(&make_outcome(vec![
+                NetworkMessage::Declare(Box::new(declare_envelope_decl_kexpr(decl_kexpr(
+                    7, "theirs/x",
+                )))),
+            ])));
+
+            let fired = Arc::new(AtomicUsize::new(0));
+            let f = fired.clone();
+            observer.subscribers.register("theirs/x", move |_p| {
+                f.fetch_add(1, Ordering::SeqCst);
+            });
+            let seen: Arc<Mutex<alloc::vec::Vec<alloc::string::String>>> =
+                Arc::new(Mutex::new(alloc::vec::Vec::new()));
+            let s1 = seen.clone();
+            observer
+                .remote_subscribers
+                .on_subscriber_declared(move |d| s1.lock().unwrap().push(d.keyexpr().to_string()));
+
+            observer.dispatch_event(IterationEvent::Poll(&make_outcome(vec![
+                NetworkMessage::Push(Box::new(push_own_alias(7))),
+                NetworkMessage::Declare(Box::new(decl_subscriber_own_alias(1, 7))),
+            ])));
+
+            assert_eq!(
+                fired.load(Ordering::SeqCst),
+                0,
+                "an M=0 alias must refuse with no own space -- never fall back \
+                 to the peer's table",
+            );
+            assert!(seen.lock().unwrap().is_empty());
+        }
+
+        // `M=0` (`Mapping::Receiver`) fixtures: the id names OUR space. Local
+        // to this module because the cross-talk suite above deliberately uses
+        // the id=0 LITERAL form, which consults no space at all.
+        fn push_own_alias(mapping_id: u64) -> wz_codecs::push::PushOwned {
+            use wz_codecs::push::Push;
+            Push {
+                keyexpr: Wireexpr {
+                    body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                        id: mapping_id,
+                        suffix_len: None,
+                        suffix: None,
+                    }),
+                },
+                ..Push::default()
+            }
+            .try_into_owned()
+            .unwrap()
+        }
+
+        fn decl_subscriber_own_alias(id: u64, mapping_id: u64) -> wz_codecs::declare::DeclareOwned {
+            wz_session_core_test_support::declare_envelope_decl_subscriber(
+                wz_session_core_test_support::decl_subscriber_nonlocal(id, mapping_id, None),
+            )
+        }
+
+        fn decl_queryable_own_alias(id: u64, mapping_id: u64) -> wz_codecs::declare::DeclareOwned {
+            wz_session_core_test_support::declare_envelope_decl_queryable(
+                wz_session_core_test_support::decl_queryable_nonlocal(id, mapping_id, None),
+            )
+        }
+
+        fn decl_token_own_alias(id: u64, mapping_id: u64) -> wz_codecs::declare::DeclareOwned {
+            wz_session_core_test_support::declare_envelope_decl_token(
+                wz_session_core_test_support::decl_token_nonlocal(id, mapping_id, None),
+            )
+        }
     }
 
     #[cfg(feature = "query-queryable")]

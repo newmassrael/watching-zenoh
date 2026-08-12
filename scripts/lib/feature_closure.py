@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R311y259 — enabled-feature closure: ask cargo, do not re-implement cargo.
+"""R311y259 (no register item) — enabled-feature closure: ask cargo, do not re-implement cargo.
 
 This is the SECOND ARM of the cross-impl proof gate (Layer A4), and it is what makes
 the axis derived rather than asserted.

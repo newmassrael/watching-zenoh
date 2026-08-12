@@ -113,6 +113,58 @@ fn _session_link_actions_composes_on_lwip<C: ClockSource>(
 ) {
 }
 
+/// R311y742 (N50) — install this session's OWN keyexpr id space into an
+/// application registry, on the MCU profile.
+///
+/// The AP does this inside `Session::new` (R311y739) for the reason R236 moved
+/// the zid install there: the fact is authoritative at construction, so making
+/// the application ask for it only creates a way to forget. The MCU has no such
+/// single owner — `run_session` takes the actions bundle and hands decoded
+/// batches to an `on_event` closure, and the registry belongs to the
+/// application — so this is the named place to do it, one line, at bring-up:
+///
+/// ```ignore
+/// install_own_mapping_space(&mut observer.subscribers, &actions);
+/// ```
+///
+/// Without it an MCU node that calls `send_declare_keyexpr` drops every Push
+/// the peer names with that alias, because zenoh PREFERS the receiver's own
+/// expr id and stamps it `Mapping::Receiver` (`dispatcher/resource.rs:625`).
+/// That is the defect R311y739 closed on the AP side and R311y740 unwalled here.
+///
+/// ## Why this is gated to targets WITHOUT atomic pointers
+///
+/// R311y742 measured the shape and found a real limit, stated rather than
+/// hidden. `CoopRuntime::ActionsHandle` is `Rc<SessionLinkActions<..>>` on
+/// EVERY MCU target, but
+/// [`SharedOwnMappingSpace`](wz_session_core::wireexpr_resolve::SharedOwnMappingSpace)
+/// is keyed on `target_has_atomic = "ptr"` — so it is `Rc` on thumbv6m and
+/// `Arc` on the other six (M3 / M4F / M7 / M23 / M33 / RISC-V IMAC). An `Rc`
+/// cannot become an `Arc` to the same allocation, so on those six the coop
+/// profile has no install path at all, and this function correctly does not
+/// exist there rather than pretending to.
+///
+/// Closing that needs the alias keyed on the CONCURRENCY MODEL (does this build
+/// share the registry across tasks?) instead of on the target's atomics, which
+/// means a named feature rather than a `cfg` — a change that moves the declared
+/// cargo-feature surface the A3 / A5 inventory gates count, so it is its own
+/// round. Carry N52.
+#[cfg(not(target_has_atomic = "ptr"))]
+pub fn install_own_mapping_space<C, T, S>(
+    registry: &mut wz_session_core::pubsub::SubscriberRegistry<S>,
+    actions: &Rc<SessionLinkActions<CoopRuntime<C>, T>>,
+) where
+    // `'static` on both parameters is not incidental: `dyn OwnMappingSpace`
+    // carries an implicit `+ 'static`, so the erased handle must outlive any
+    // borrow the registry could hand out. Stated here rather than left to the
+    // caller to discover from an E0310 at the call site.
+    C: ClockSource + 'static,
+    T: wz_runtime_core::TimeSource + 'static,
+    S: wz_session_core::sink::SampleSink,
+{
+    registry.set_own_mapping_space(actions.clone());
+}
+
 /// LinkSink fixity. Mirrors the AP-side
 /// `tokio_session_runtime_link_sink_bounds_compile` regression assert,
 /// but pins the *opposite* auto-trait shape: the MCU sink is `Clone`

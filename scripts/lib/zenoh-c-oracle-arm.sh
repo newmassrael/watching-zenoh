@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Print which zenoh-c ABI ARM the installed oracle at $1 (a prefix) is.
+# R311y566 (no register item) — print which zenoh-c ABI ARM the installed
+# oracle at $1 (a prefix) is.
 #
 # zenoh-c's `Z_FEATURE_UNSTABLE_API` and `Z_FEATURE_SHARED_MEMORY` are
 # INDEPENDENT axes and both move opaque type sizes, so "the installed zenoh-c"

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Drive `zenoh-c-oracle-arm.sh` on ALL FOUR feature combinations plus the
+# R311y566 (no register item) — drive `zenoh-c-oracle-arm.sh` on ALL FOUR
+# feature combinations plus the
 # no-config case, against synthesised prefixes.
 #
 # The point is that it drives the SHIPPING implementation. The first cut of the

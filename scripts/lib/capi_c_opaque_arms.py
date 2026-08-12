@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""§5.27 api-compat-c — check ONE cdylib arm against upstream's own size table.
+"""R311y540 (§5.27) — api-compat-c: check ONE cdylib arm against upstream's own size table.
 
 R311y540. Layer C1cc's footprint leg compares wz against the INSTALLED
 `zenoh_opaque.h`, which exists for exactly one feature arm — whichever build the

@@ -57,10 +57,19 @@ from pathlib import Path
 # over, and taking it is what says "I resolve keyexprs against the pair".
 FAN_PARAM = re.compile(r"impl\s+Into<MappingSpaces<")
 
-# The registry that OWNS the pair reaches it through its own accessor rather
-# than taking it as a parameter, so it would otherwise be invisible here --
-# and it is the one plane R311y739 did witness.
-OWNER_ACCESSOR = re.compile(r"self\.mapping_spaces\(\)")
+# Two more consumers reach the pair through an ACCESSOR rather than taking it
+# as a parameter, so a parameter-only scan misses both:
+#
+#   * the registry that OWNS the pair (`self.mapping_spaces()`) -- the one
+#     plane R311y739 did witness; and
+#   * the FAN itself (`self.subscribers.mapping_spaces()`), added R311y742.
+#     The fan is not a plane, but it is the single edge every plane depends on:
+#     a `dispatch_event` that handed over `peer_only(..)` would type-check and
+#     silently restore the R311y739 defect on all of them at once. Requiring
+#     its own witness pair is what stops that witness being deleted quietly --
+#     MEASURED: reverting the fan to the peer table alone reds it, and the
+#     per-registry witnesses stay green, because none of them can see the edge.
+OWNER_ACCESSOR = re.compile(r"\.mapping_spaces\(\)")
 
 # `wireexpr_resolve.rs` DEFINES `MappingSpaces`; it is the resolver under test,
 # not a plane that consumes it. Its own suite pins the resolver's arms.

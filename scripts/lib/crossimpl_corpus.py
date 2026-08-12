@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R311y259 — the CROSS-IMPL PROOF corpus: one predicate, two consumers.
+"""R311y259 (no register item) — the CROSS-IMPL PROOF corpus: one predicate, two consumers.
 
 This module answers two questions about `crates/wz-integration-tests/tests/*.rs`,
 and it is the SINGLE definition of both. Layer C0 (test discipline) and Layer A4

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R311y608 — one module name may be declared once per file scope.
+"""R311y608 (no register item) — one module name may be declared once per file scope.
 
 THE DEFECT THIS EXISTS FOR. R311y607 added `pub mod scouting;` to
 `wz-session-core/src/lib.rs`, which already declared `pub mod scouting { ... }`

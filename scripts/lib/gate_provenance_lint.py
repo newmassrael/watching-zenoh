@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R311y741 (N43) -- a gate must say WHICH open item it closes.
+"""R311y741 (N43) -- a gate must say WHICH register item it answers for.
+
+R311y742 refined the wording, because the first form said "closes" and that was
+too narrow to be true. `count_guard_lint.py` IS the measurement for base item
+§7.1, and §7.1 is still OPEN -- it reports 53 bare guards, 22 checked, 31 out of
+scope every run. A gate like that is exactly what the register needs to find,
+and "closes" would have forced it to either lie or stay silent. What the
+citation names is the item this gate ANSWERS FOR: it closed the item, or it
+stands as the item's standing measurement.
 
 ## The problem this is the structural half of
 
@@ -24,8 +32,10 @@ with a provenance citation:
 
     R311y<round> (<item>)      e.g. R311y621 (§7.14), R311y736 (N28)
 
-or, when the gate genuinely closes no register item -- a census tool, a
-build-support scanner -- the explicit escape hatch:
+where `<item>` is a §-numbered base item, a carry `N<nn>`, or `CENSUS` for the
+domain-census axis. When the gate answers for no register item at all -- and
+most predate the register, closing a DEFECT found that round rather than a
+listed debt -- the explicit escape hatch:
 
     R311y<round> (no register item)
 
@@ -42,18 +52,25 @@ that the gate truly closes it. A citation can therefore be wrong; it cannot
 be absent. That is a smaller guarantee than it looks like it should be, and
 pretending otherwise would be the failure mode this file exists to fight.
 
-## Baseline, and why it is a SET
+## Baseline, and why it is now EMPTY
 
-22 scripts predate the convention. Retrofitting them means investigating what
-each closed -- exactly the cost this lint exists to stop paying -- so they are
-carried in an explicit baseline rather than silently exempted. The baseline is
-a SET of names, not a count: a count is satisfied by any 22 scripts, so one
-new undeclared gate could hide behind one retrofitted one. Membership is
-checked in BOTH directions, so the baseline cannot rot:
+R311y741 carried the 22 pre-convention gates in a named baseline because
+retrofitting them meant investigating what each closed. R311y742 did that
+investigation and it was far cheaper than feared: every one of those files
+ALREADY stated what it was for, usually under a heading like "the defect this
+closes". Eighteen answered `(no register item)` -- they close a defect found in
+their own round, not a listed debt -- and four named an item: `§5.27` twice,
+`§7.1` for the count-guard measurement, and `CENSUS` for the domain census.
+
+The baseline stays as a mechanism at size zero rather than being deleted. An
+empty set that is still CHECKED in both directions is what stops the list
+silently regrowing; deleting it would leave the next hurried gate with nowhere
+to be caught. It is NOT an exemption list to add to -- the way off it is the
+citation:
 
   * a script here that now complies      -> FAIL, remove it from the baseline
   * a script here that no longer exists  -> FAIL, remove it from the baseline
-  * a script not here that does not comply -> FAIL, name what it closes
+  * a script not here that does not comply -> FAIL, name what it answers for
 """
 
 from __future__ import annotations
@@ -62,42 +79,29 @@ import re
 import sys
 from pathlib import Path
 
-# `R311y<round> (<item>)` where <item> is a §-item, a carry N<nn>, or the
-# explicit no-item declaration. Anchored to a citation so a bare round number
-# in running prose does not satisfy it.
+# `R<round> (<item>)` where <item> is a §-item, a carry N<nn>, CENSUS, or the
+# explicit no-item declaration. Anchored to a citation so a bare round number in
+# running prose does not satisfy it.
+#
+# The round half is deliberately loose. This tree's round ids are not one shape:
+# `R290`, `R121d`, `R311n`, `R311di-13` and `R311y740` are all in use, and
+# R311y742 found that out the hard way -- a `R311y\d+` form retrofitted 21 of 22
+# gates and then reported `feature_implies.py` as undeclared when it had said
+# `R311n (no register item)` all along. What this gate is for is the ITEM, so
+# the round pattern must not become a second, accidental convention.
 PROVENANCE = re.compile(
-    r"R311y\d+\s*\(\s*(?:§[^)]{1,24}|N\d{1,2}|no register item)\s*\)"
+    r"R\d+[a-z]{0,3}(?:-\d+)?\d*\s*\(\s*(?:§[^)]{1,24}|N\d{1,2}|CENSUS|no register item)\s*\)"
 )
 
 HEADER_LINES = 60
 
-# Scripts that predate R311y741. NOT an exemption list to grow -- every entry
-# is a gate whose closed item nobody recorded, and the only correct way off
-# this list is to write the citation.
-BASELINE = {
-    "apfull_membership.py",
-    "atom_test_graph.py",
-    "capi_c_coverage.py",
-    "capi_c_opaque_arms.py",
-    "count_guard_lint.py",
-    "crossimpl_audit.py",
-    "crossimpl_corpus.py",
-    "discarded_evidence_lint.py",
-    "dissect_feature_census.py",
-    "dissect_name_census.py",
-    "domain_census.py",
-    "duplicate_module_lint.py",
-    "expired_blocker_lint.py",
-    "feature_closure.py",
-    "feature_implies.py",
-    "python_floor_lint.py",
-    "unsequenced_probe_lint.py",
-    "unwired_lane_lint.py",
-    "nda-scan.sh",
-    "schema-pin-gate.sh",
-    "test-zenoh-c-oracle-arm.sh",
-    "zenoh-c-oracle-arm.sh",
-}
+# EMPTY as of R311y742: all 22 pre-convention gates were retrofitted from what
+# each file's own header already said it closed, so the baseline has nothing
+# left to carry. It stays as a named, both-directions-checked mechanism rather
+# than being deleted -- the next gate written in a hurry lands here or nowhere,
+# and an empty set that is still CHECKED is what keeps the list from silently
+# regrowing. NOT an exemption list to add to: the way off it is the citation.
+BASELINE: set[str] = set()
 
 
 def gate_scripts(lib_root: Path) -> list[Path]:
@@ -108,10 +112,52 @@ def gate_scripts(lib_root: Path) -> list[Path]:
     )
 
 
-def complies(path: Path) -> bool:
+def citation(path: Path) -> str | None:
+    """The item this gate answers for, or None when it carries no citation."""
     with path.open(encoding="utf-8") as fh:
         head = "".join(line for _, line in zip(range(HEADER_LINES), fh))
-    return PROVENANCE.search(head) is not None
+    m = PROVENANCE.search(head)
+    if m is None:
+        return None
+    inner = m.group(0)
+    return inner[inner.index("(") + 1 : inner.rindex(")")].strip()
+
+
+def complies(path: Path) -> bool:
+    return citation(path) is not None
+
+
+def emit(scripts: list[Path]) -> int:
+    """R311y742 (N49) -- walk the citations the OTHER way.
+
+    The lint alone makes every gate declare its item; that is only half of what
+    carry N43 wanted. The half that makes the register's open/closed column
+    mechanical is being able to ask "which gate answers §7.1?" and get an
+    answer without reading 34 files. This prints one `<item>\tTAB\t<script>`
+    row per citing gate, sorted, so the register can be joined against the tree
+    instead of remembered.
+
+    Gates that answer for no register item are counted but not listed as items
+    -- they are the majority and listing them would bury the four that matter.
+    """
+    rows: list[tuple[str, str]] = []
+    none_count = 0
+    for p in scripts:
+        item = citation(p)
+        if item is None:
+            continue
+        if item == "no register item":
+            none_count += 1
+            continue
+        rows.append((item, p.name))
+
+    for item, name in sorted(rows):
+        print(f"{item}\t{name}")
+    print(
+        f"# {len(rows)} gate(s) answer for a register item; "
+        f"{none_count} declare none; {len(scripts)} scanned",
+    )
+    return 0
 
 
 def main() -> int:
@@ -129,6 +175,12 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+
+    if len(sys.argv) == 2 and sys.argv[1] == "--emit":
+        return emit(scripts)
+    if len(sys.argv) != 1:
+        print("usage: gate_provenance_lint.py [--emit]", file=sys.stderr)
+        return 2
 
     names = {p.name for p in scripts}
     failures = []
