@@ -1675,6 +1675,22 @@ PY
     # stale baseline entry reds, and an empty population FAILs instead of
     # passing.
     python3 scripts/lib/self_report_lint.py || return 1
+    # R311y751 (carry N54) — the STORE-READER LANE gate. Four gates read the
+    # atomic store through `mnemosyne-cli`, and most hosted jobs deliberately do
+    # not install it (~88s, split out in R311y428). R311y743 grew a store read on
+    # `gate_provenance_lint` and reddened every hosted run until R311y747 armed
+    # the halves; every local run stayed green throughout, because a dev box has
+    # the tool on PATH. R311y747 armed the four it knew about and left the FIFTH
+    # unprotected, which is this. The population is READ from the scripts (a
+    # store read is an import of `inventory_kinds`, an invocation of the CLI, or
+    # the sidecar path) and the lane map is built from INVOCATION lines, not from
+    # mentions -- matching names made every lane reach every gate. Enforcement
+    # MEASURED four ways: a store reader no lane runs reds, a store-reading lane
+    # missing from the provisioning job reds by name, that lane present but
+    # unarmed reds, and a missing input FAILs. The second of those did not red at
+    # first: the step's own COMMENT explains why its `WZ_*_REQUIRE` is set, and
+    # the matcher read the explanation as the setting.
+    python3 scripts/lib/store_reader_lane_lint.py >/dev/null || return 1
     # R311y581 — the UNWIRED-LANE gate: a lane in run-ci.sh but not in
     # ci.yml's --layer set runs ONLY in a local full sweep. Seven were found,
     # one of them created by the round that closed the sibling debt. See the
