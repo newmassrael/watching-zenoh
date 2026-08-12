@@ -6061,6 +6061,18 @@ layer_c1bo_dissect_c_abi() {
             crates/wz-capi-dissect/tests/c_abi_consumer.c 2>&1)" || {
             echo "  C1bo FAIL: the header does not compile as C++"; echo "$out"; return 1; }
     }
+
+    # R311y748 (N55) — and the SYMBOL SET is pinned to the revision number.
+    # Placed HERE because this is where the release cdylib exists: the gate
+    # reads both halves out of that artifact (nm for the set, a ctypes call for
+    # the number) rather than out of the source an author just edited. The
+    # header's contract says the revision moves when a symbol does, and until
+    # this ran nothing checked it -- this round nearly shipped a new symbol
+    # under the old number on the strength of a doc comment that had drifted
+    # from the header.
+    command -v nm >/dev/null 2>&1 || {
+        echo "  C1bo FAIL: nm is absent, so the ABI symbol set cannot be read"; return 1; }
+    python3 scripts/lib/capi_abi_pin.py || return 1
     return 0
 }
 

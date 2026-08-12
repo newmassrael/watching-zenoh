@@ -33,7 +33,11 @@
 int main(void) {
     /* The symbol/memory-contract revision. A consumer refuses a library whose
      * memory rules moved; this asserts the value the header was written for. */
-    CHECK(wz_dissect_abi_version() == 1, "abi version is %d, expected 1",
+    /* R311y748 -- 2 since wz_dissect_pcap_summary_bounded joined the symbol
+     * set. This header's contract is the symbol SET, not a symbol's signature,
+     * so adding one moves the revision; the two statements of that contract had
+     * drifted and were reconciled in the same round. */
+    CHECK(wz_dissect_abi_version() == 2, "abi version is %d, expected 2",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
@@ -106,6 +110,32 @@ int main(void) {
     CHECK(strstr(summary, "\"capture_reported_drops\":null") != NULL,
           "silence reported as a figure: %s", summary);
     wz_dissect_string_free(summary);
+
+    /* R311y748 -- and the BOUNDED door is reachable from C at all. A
+     * `#[no_mangle] pub extern "C"` function that only Rust tests call is not
+     * known to be linkable: the Rust side proves what the caps DO (an eviction
+     * that the unbounded door cannot report), and this proves the symbol
+     * survives into the cdylib a consumer ships against. The two claims are
+     * separate and this file owns the second one.
+     *
+     * The same hand-laid pcap: too small for any cap to bite, which is right
+     * here -- what is under test is the symbol and its contract, not the
+     * bound. */
+    char *bounded = NULL;
+    rc = wz_dissect_pcap_summary_bounded(pcap, sizeof pcap, &bounded);
+    CHECK(rc == WZ_DISSECT_OK, "bounded summary rc=%d", rc);
+    CHECK(bounded != NULL, "OK came back with no string");
+    CHECK(strstr(bounded, "\"dropped_by_limits\"") != NULL,
+          "the bounded door must still report what its caps cost: %s", bounded);
+    wz_dissect_string_free(bounded);
+
+    /* Same memory rule, same refusals: a bad capture is a code here too. */
+    bounded = NULL;
+    rc = wz_dissect_pcap_summary_bounded(truncated, sizeof truncated, &bounded);
+    CHECK(rc == WZ_DISSECT_ERR_BAD_CAPTURE, "bounded truncated rc=%d", rc);
+    CHECK(bounded == NULL, "a bad capture handed back a string");
+    rc = wz_dissect_pcap_summary_bounded(NULL, 0, &bounded);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "bounded null bytes rc=%d", rc);
 
     printf("  C1bo: C consumer linked the cdylib and read the tree\n");
     return 0;

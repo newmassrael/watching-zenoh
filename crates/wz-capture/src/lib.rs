@@ -4441,8 +4441,38 @@ impl Dissection {
         quic_udp_ports: &[u16],
         serial_linktypes: &[u32],
     ) -> Result<Self, pcap::PcapError> {
+        Self::from_pcap_declaring_bounded(
+            bytes,
+            quic_udp_ports,
+            serial_linktypes,
+            DissectionLimits::default(),
+        )
+    }
+
+    /// R311y748 — the same, under a caller's own [`DissectionLimits`].
+    ///
+    /// # Why a file reader takes limits at all
+    ///
+    /// `DissectionLimits::default()` is every field `None`, and that is right
+    /// for the common case this crate was built for: a file ENDS, so keeping
+    /// all of it is bounded by the file. It stops being right the moment the
+    /// file is larger than the reader's memory, and until this existed the only
+    /// answer was "read it anyway" — the caller could state a bound to
+    /// [`Self::with_limits`] and then had no way to feed a capture FILE through
+    /// it, because every `from_*` constructor here called [`Self::new`].
+    ///
+    /// So the bound becomes an argument rather than a second dissection type.
+    /// What it costs is stated by the same [`DissectionDrops`] the live tap uses
+    /// — a bound that bites is never silent — which is why this is a parameter
+    /// and not a truncation the reader performs quietly.
+    pub fn from_pcap_declaring_bounded(
+        bytes: &[u8],
+        quic_udp_ports: &[u16],
+        serial_linktypes: &[u32],
+        limits: DissectionLimits,
+    ) -> Result<Self, pcap::PcapError> {
         let file = pcap::parse(bytes)?;
-        let mut out = Self::new();
+        let mut out = Self::with_limits(limits);
         out.declared_serial_linktypes = serial_linktypes.to_vec();
         // Declared BEFORE the first packet, which is the whole point: a flow is
         // established as QUIC by its first datagram, so a declaration arriving
@@ -4487,8 +4517,24 @@ impl Dissection {
         quic_udp_ports: &[u16],
         serial_linktypes: &[u32],
     ) -> Result<Self, pcapng::PcapngError> {
+        Self::from_pcapng_declaring_bounded(
+            bytes,
+            quic_udp_ports,
+            serial_linktypes,
+            DissectionLimits::default(),
+        )
+    }
+
+    /// R311y748 — the same, under a caller's own [`DissectionLimits`]. See
+    /// [`Self::from_pcap_declaring_bounded`] for why a file reader takes them.
+    pub fn from_pcapng_declaring_bounded(
+        bytes: &[u8],
+        quic_udp_ports: &[u16],
+        serial_linktypes: &[u32],
+        limits: DissectionLimits,
+    ) -> Result<Self, pcapng::PcapngError> {
         let file = pcapng::parse(bytes)?;
-        let mut out = Self::new();
+        let mut out = Self::with_limits(limits);
         out.declared_serial_linktypes = serial_linktypes.to_vec();
         // See `from_pcap_declaring_quic`: before the first packet, not after.
         out.declared_quic_ports = quic_udp_ports.to_vec();
@@ -4576,13 +4622,42 @@ impl Dissection {
         quic_udp_ports: &[u16],
         serial_linktypes: &[u32],
     ) -> Result<Self, CaptureError> {
+        Self::from_capture_declaring_bounded(
+            bytes,
+            quic_udp_ports,
+            serial_linktypes,
+            DissectionLimits::default(),
+        )
+    }
+
+    /// R311y748 — the format-dispatching reader, under a caller's own bounds.
+    ///
+    /// See [`Self::from_pcap_declaring_bounded`] for why a file reader takes
+    /// limits. This is the one every other bounded entry point should go
+    /// through, including the C ABI's: the dispatch on magic is the same fact
+    /// whether or not a bound is stated, and writing it twice is how the two
+    /// formats came to disagree about anything before.
+    pub fn from_capture_declaring_bounded(
+        bytes: &[u8],
+        quic_udp_ports: &[u16],
+        serial_linktypes: &[u32],
+        limits: DissectionLimits,
+    ) -> Result<Self, CaptureError> {
         if pcapng::looks_like_pcapng(bytes) {
-            Self::from_pcapng_declaring(bytes, quic_udp_ports, serial_linktypes)
+            Self::from_pcapng_declaring_bounded(bytes, quic_udp_ports, serial_linktypes, limits)
                 .map_err(CaptureError::Pcapng)
         } else {
-            Self::from_pcap_declaring(bytes, quic_udp_ports, serial_linktypes)
+            Self::from_pcap_declaring_bounded(bytes, quic_udp_ports, serial_linktypes, limits)
                 .map_err(CaptureError::Pcap)
         }
+    }
+
+    /// R311y748 — [`Self::from_capture`], under a caller's own bounds.
+    pub fn from_capture_bounded(
+        bytes: &[u8],
+        limits: DissectionLimits,
+    ) -> Result<Self, CaptureError> {
+        Self::from_capture_declaring_bounded(bytes, &[], &[], limits)
     }
 
     pub fn from_capture_declaring_quic(

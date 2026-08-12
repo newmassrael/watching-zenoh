@@ -61,15 +61,26 @@ pub const WZ_DISSECT_ERR_BAD_CAPTURE: c_int = -2;
 /// The bytes were not a decodable transport message.
 pub const WZ_DISSECT_ERR_DECODE: c_int = -3;
 
-/// The ABI revision. Bumped when a SYMBOL's signature or the memory contract
-/// changes — NOT when the JSON gains fields, which is the whole point of
-/// handing back JSON.
+/// The ABI revision. Bumped when the SYMBOL SET or the memory contract changes
+/// — NOT when the JSON gains fields, which is the whole point of handing back
+/// JSON.
+///
+/// R311y748 — 1 → 2, ADDING `wz_dissect_pcap_summary_bounded`. And the wording
+/// above moved with it, because the two statements of this one contract had
+/// drifted apart: `wz_dissect.h` says the version moves "when a SYMBOL or the
+/// memory rule changes", and this doc had narrowed that to a symbol's
+/// SIGNATURE. Under the narrow reading a new symbol is free; under the
+/// committed one it is not, and the committed one is right for the reason the
+/// narrow one cannot answer — adding a symbol raises exactly one question for a
+/// consumer ("does this library have it?"), and a version that does not move is
+/// unable to answer it. An existing consumer is unaffected either way, which is
+/// what makes this a widening rather than a break.
 ///
 /// # Safety
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    1
+    2
 }
 
 /// Release a string this library returned. Passing null is a no-op, so a
@@ -166,6 +177,61 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary(
         Ok(d) => d,
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
+    write_string(summary_json(&dissection), out)
+}
+
+/// R311y748 — the same summary, read under the BOUNDED preset, so a C caller
+/// can state that its memory is finite.
+///
+/// # The gap this closes
+///
+/// [`wz_dissect_pcap_summary`] reads through `Dissection::from_capture`, whose
+/// limits are `DissectionLimits::default()` — every field `None`. No cap can
+/// bite behind that door, so the `dropped_by_limits` group it reports is five
+/// structural zeros for every input that will ever reach it, which R311y746
+/// measured and pinned. A counter that is structurally always zero is not a
+/// counter, which is the same judgement R311y608 made about
+/// `capture_reported_drops` over `from_pcap` alone.
+///
+/// # Why a NAMED PRESET rather than a limits struct
+///
+/// This ABI's stated design is a self-describing document instead of a struct
+/// tree, and a limits struct passed across the boundary would freeze nine
+/// fields' layout into it — so the next axis `DissectionLimits` grows becomes
+/// an ABI break rather than a preset edit. The preset is
+/// `DissectionLimits::for_live_tap`, this tree's one bounded configuration,
+/// and what it cost is reported through the same `dropped_by_limits` group:
+/// bounded is never silent here either.
+///
+/// # The ABI version MOVES for this, 1 → 2
+///
+/// `wz_dissect.h` says the version moves "when a SYMBOL or the memory rule
+/// changes", and this is a new symbol. See [`wz_dissect_abi_version`] for why
+/// the narrower reading its own doc had drifted to was the wrong one. Existing
+/// consumers are unaffected — every input that reached
+/// [`wz_dissect_pcap_summary`] still reaches it with the same shape, and
+/// nothing about memory ownership changed.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes and `out` must be a
+/// writable pointer to a `*mut c_char`. Neither may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_summary_bounded(
+    bytes: *const u8,
+    len: usize,
+    out: *mut *mut c_char,
+) -> c_int {
+    if bytes.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    let dissection =
+        match Dissection::from_capture_bounded(input, wz_capture::DissectionLimits::for_live_tap())
+        {
+            Ok(d) => d,
+            Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
+        };
     write_string(summary_json(&dissection), out)
 }
 
@@ -574,6 +640,66 @@ mod tests {
         );
     }
 
+    /// Drive the bounded summary the way C does.
+    fn call_summary_bounded(bytes: &[u8]) -> Result<String, c_int> {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_pcap_summary_bounded(bytes.as_ptr(), bytes.len(), &mut out) };
+        if rc != WZ_DISSECT_OK {
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// R311y748 — AND THE BOUNDED DOOR MAKES THAT GROUP A MEASUREMENT.
+    ///
+    /// The pair with the test above is the point, and they are driven off ONE
+    /// capture for that reason: the same bytes through the unbounded entry
+    /// report five zeros and 1 025 living flows, and through the bounded one
+    /// report an eviction. A single-sided assertion here would be satisfied by
+    /// a library that had simply started counting something.
+    #[test]
+    fn the_bounded_door_reports_a_bound_that_bit() {
+        let payload = [1u8, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let over_tap_cap = 1_025usize;
+        let packets: Vec<Vec<u8>> = (0..over_tap_cap)
+            .map(|i| {
+                let mut p = tcp_packet(1000, &payload);
+                let port = 20_000u16 + i as u16;
+                p[34..36].copy_from_slice(&port.to_be_bytes());
+                p
+            })
+            .collect();
+        let frames: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u32, 0u32, p.as_slice()))
+            .collect();
+        let file = wz_capture::pcap::write(1, &frames);
+
+        let bounded = call_summary_bounded(&file).expect("the capture reads");
+        assert!(
+            bounded.contains("\"flows\":1"),
+            "the live-tap flow cap must bite and be reported: {bounded}"
+        );
+        // The SAME bytes through the unbounded door, so the difference is the
+        // caps and not the capture.
+        let unbounded = call_summary(&file).expect("the capture reads");
+        assert!(
+            unbounded.contains("\"flows\":0"),
+            "the unbounded door must still report no bite: {unbounded}"
+        );
+        assert_ne!(
+            bounded, unbounded,
+            "two doors that answer identically would mean the caps never reached the reader"
+        );
+    }
+
     /// A scouting exchange must not read as an empty flow.
     ///
     /// R311y607 gave a datagram flow a second list and the summary reported
@@ -890,6 +1016,9 @@ mod tests {
     /// NOT move when a walker adds fields.
     #[test]
     fn the_abi_version_is_readable() {
-        assert_eq!(wz_dissect_abi_version(), 1);
+        // R311y748 — 2 since `wz_dissect_pcap_summary_bounded` joined the
+        // symbol set. The header's contract is the symbol SET, not a symbol's
+        // signature; see `wz_dissect_abi_version`.
+        assert_eq!(wz_dissect_abi_version(), 2);
     }
 }

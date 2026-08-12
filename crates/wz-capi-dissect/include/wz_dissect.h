@@ -48,6 +48,21 @@ int wz_dissect_transport_message(const unsigned char *bytes, size_t len,
  * with wz_dissect_transport_message. */
 int wz_dissect_pcap_summary(const unsigned char *bytes, size_t len, char **out);
 
+/* R311y748 (ABI 2) — the same summary, read under BOUNDED memory.
+ *
+ * wz_dissect_pcap_summary states no caps, so nothing in its
+ * health.dropped_by_limits group can ever be non-zero however large the
+ * capture is. This one reads under wz's live-tap preset, which is the
+ * configuration whose caps bite, so a caller whose memory is finite has a
+ * door — and what the bound cost is reported through that same group rather
+ * than discarded quietly.
+ *
+ * A NAMED PRESET and not a limits struct: this ABI hands back a
+ * self-describing document instead of a struct tree precisely so that the
+ * next axis wz bounds is a preset edit rather than an ABI break. */
+int wz_dissect_pcap_summary_bounded(const unsigned char *bytes, size_t len,
+                                    char **out);
+
 #ifdef __cplusplus
 }
 #endif
