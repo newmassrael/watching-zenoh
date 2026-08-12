@@ -237,11 +237,23 @@ _IS_CLEAN_OLD = """    pub fn is_clean(&self) -> bool {
     }"""
 
 
-def _relax_field(field: str) -> str:
-    """`is_clean` that forgives ONE of `field`, and nothing else."""
+def _relax_field(*fields: str) -> str:
+    """`is_clean` that forgives ONE of each named field, and nothing else.
+
+    R311y730 (N22) — several fields at once, because some COUNTERS ARE COUPLED.
+    All three producers of `halted_batches` and `unparsed_bytes` raise them in
+    one `if`, so a capture holding a single halt has both at one; relaxing
+    either alone leaves the other holding the plane unclean and the mutant
+    survives no matter what any fixture does. Asking about the PAIR is the
+    question a fixture can answer, which is R311y716's lesson in the small: when
+    legs are coupled, move the unit rather than demand an impossible isolation.
+    """
+    body = "\n".join(
+        f"        relaxed.{f} = relaxed.{f}.saturating_sub(1);" for f in fields
+    )
     return f"""    pub fn is_clean(&self) -> bool {{
         let mut relaxed = *self;
-        relaxed.{field} = relaxed.{field}.saturating_sub(1);
+{body}
         relaxed == Self::default()
     }}"""
 
@@ -271,17 +283,17 @@ PREDICATES = [
     # anyway: each field is a different way for the plane to be short.
     *[
         (
-            f"ThroughputGaps.is_clean/{f}",
+            f"ThroughputGaps.is_clean/{'+'.join(fs)}",
             "crates/wz-capture/src/agg.rs",
             _IS_CLEAN_OLD,
             _IS_CLEAN_OLD,
-            _relax_field(f),
+            _relax_field(*fs),
         )
-        for f in (
-            "halted_batches",
-            "unparsed_bytes",
-            "undecompressible_batches",
-            "unresolvable_fragments",
+        # The first is a PAIR because those two counters cannot move apart.
+        for fs in (
+            ("halted_batches", "unparsed_bytes"),
+            ("undecompressible_batches",),
+            ("unresolvable_fragments",),
         )
     ],
     *[
@@ -319,20 +331,6 @@ PREDICATES = [
 # None of these is claimed to be IMPOSSIBLE. They are unbuilt, which is a
 # different sentence and the honest one.
 UNWITNESSED = {
-    "drops.any/frames": "a capture that discards exactly ONE frame -- the bound "
-    "tests overshoot their cap on purpose, so every one of them drops many",
-    "drops.any/stream_bytes": "a trim that gives up exactly ONE byte; trimming "
-    "works in segments, so a one-byte fixture has to be built at that boundary",
-    "drops.any/skipped": "a skip LIST that overflows by exactly one, which is a "
-    "different counter from `health().packets_skipped` and has no fixture of "
-    "its own at the bound",
-    "drops.any/scouting": "a scouting list that overflows by exactly one; the "
-    "existing bound test fills it well past the cap",
-    "ThroughputGaps.is_clean/halted_batches": "a capture holding exactly ONE "
-    "halted batch -- the compressed fixture halts several",
-    "ThroughputGaps.is_clean/unparsed_bytes": "a batch leaving exactly ONE byte "
-    "unparsed on the throughput plane; the datagram twin of this was paid at "
-    "R311y728, but that one reaches `unaccounted_batch_bytes`, not this counter",
 }
 
 

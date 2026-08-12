@@ -8146,6 +8146,116 @@ mod datagram_tests {
         );
     }
 
+    /// R311y730 (N22) — EVERY BOUND COUNTER, AT EXACTLY ONE DISCARD.
+    ///
+    /// The mutation sweep's predicate layer relaxes `DissectionDrops::any` by
+    /// one per counter and requires a test to redden. Four of them survived it,
+    /// and the reason is visible in every bound test around this one: they
+    /// overshoot their cap on purpose — thirty SCOUTs against a cap of three,
+    /// ten frames against three — because what they are about is WHICH entries
+    /// survive. Nothing in the tree landed on the boundary, so a reader that
+    /// stopped reporting the FIRST discard would have passed the whole suite.
+    ///
+    /// Each arm is its own dissection and asserts the OTHER counters are zero,
+    /// because `any()` is a disjunction: a second non-zero counter would keep
+    /// the verdict up on its own and the arm would prove nothing about this one.
+    #[test]
+    fn each_bound_counter_is_witnessed_at_exactly_one() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+
+        // FRAMES: a cap of three, and a fourth frame.
+        let pkt = udp_packet([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, &keepalive);
+        let mut d = Dissection::with_limits(DissectionLimits {
+            frames_per_flow: Some(3),
+            ..DissectionLimits::default()
+        });
+        for i in 0..4 {
+            d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+        }
+        assert_eq!(
+            (d.drops().frames, d.drops().skipped, d.drops().scouting),
+            (1, 0, 0),
+            "exactly one frame, and nothing else: {:?}",
+            d.drops()
+        );
+        assert_eq!(d.drops().stream_bytes, 0);
+        assert_eq!(
+            crate::report::CaptureReport::of(&d).reasons(),
+            alloc::vec![crate::report::VerdictReason::BoundsDiscarded],
+            "one discarded frame is the whole of this verdict"
+        );
+
+        // SKIPPED: a cap of one, and a second unreadable packet.
+        let mut d = Dissection::with_limits(DissectionLimits {
+            skipped_packets: Some(1),
+            ..DissectionLimits::default()
+        });
+        for i in 0..2 {
+            d.push_packet(250, i, &[0xAA; 20]);
+        }
+        assert_eq!(
+            (d.drops().skipped, d.drops().frames, d.drops().scouting),
+            (1, 0, 0),
+            "exactly one skip record, and nothing else: {:?}",
+            d.drops()
+        );
+        assert_eq!(
+            crate::report::CaptureReport::of(&d).reasons(),
+            alloc::vec![
+                crate::report::VerdictReason::PacketsSkipped,
+                crate::report::VerdictReason::BoundsDiscarded,
+            ],
+            "MEASURED: a capture that drops a skip RECORD necessarily skipped \
+             packets too, so both legs are up and the pin has to name both"
+        );
+
+        // SCOUTING: the same cap, and a fourth SCOUT.
+        let scout = [wz_session_core::wire_const::S_MID_SCOUT, 0x00, 0x01, 0x00];
+        let mut d = Dissection::with_limits(DissectionLimits {
+            frames_per_flow: Some(3),
+            ..DissectionLimits::default()
+        });
+        for i in 0..4 {
+            let pkt = udp_packet([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, &scout);
+            d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+        }
+        assert_eq!(
+            (d.drops().scouting, d.drops().frames, d.drops().skipped),
+            (1, 0, 0),
+            "exactly one SCOUT, and nothing else: {:?}",
+            d.drops()
+        );
+        assert_eq!(
+            crate::report::CaptureReport::of(&d).reasons(),
+            alloc::vec![crate::report::VerdictReason::BoundsDiscarded],
+            "one discarded SCOUT is the whole of this verdict"
+        );
+
+        // STREAM BYTES: a direction budget, and one byte past it.
+        let payload = [0x11u8; 8];
+        let mut d = Dissection::with_limits(DissectionLimits {
+            stream_bytes_per_direction: Some(payload.len() - 1),
+            ..DissectionLimits::default()
+        });
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(0, &payload));
+        assert_eq!(
+            (d.drops().stream_bytes, d.drops().frames, d.drops().skipped),
+            (1, 0, 0),
+            "exactly one byte, and nothing else: {:?}",
+            d.drops()
+        );
+        assert_eq!(
+            crate::report::CaptureReport::of(&d).reasons(),
+            alloc::vec![
+                crate::report::VerdictReason::BoundsDiscarded,
+                crate::report::VerdictReason::Desyncs,
+            ],
+            "MEASURED: trimming the head of a stream loses the framing with it, \
+             so the desync is this fixture's own consequence and the pin names \
+             both. Severing the bound still reds this line on the first name"
+        );
+    }
+
     /// R311y651 (§4.4) — the SCOUTING list is bounded, and by the same limit
     /// the frame list beside it is.
     ///

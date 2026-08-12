@@ -2843,6 +2843,59 @@ mod tests {
         );
     }
 
+    /// R311y730 (N22) — A HALTED BATCH, AT EXACTLY ONE, ON EVERY PLANE THAT
+    /// COUNTS ONE.
+    ///
+    /// `halted_batches` and `unparsed_bytes` move TOGETHER -- all three
+    /// producers raise them in one `if` -- so relaxing either alone leaves the
+    /// other holding the plane unclean, and the sweep asks about the PAIR. This
+    /// is the capture that answers it: one FRAME carrying a one-byte record
+    /// under a network MID this build cannot decode, which halts the walk with
+    /// exactly one byte behind it.
+    ///
+    /// Measured, and it is why the earlier fixtures could not serve: the
+    /// undecompressible-batch capture raises neither counter at all, and a
+    /// two-byte unknown record gives `unparsed_bytes` 2.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_halted_batch_reaches_every_plane_at_exactly_one() {
+        let wire = crate::datagram_tests::frame_carrying(&[0x1F]);
+        let mut d = crate::Dissection::new();
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &crate::datagram_tests::udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire),
+        );
+        let t = crate::agg::aggregate(&d);
+        let e = crate::exchange::exchanges(&d);
+        let pl = crate::payload::payloads(&d);
+        assert_eq!(
+            (
+                t.gaps().halted_batches,
+                t.gaps().unparsed_bytes,
+                e.unread().halted_batches,
+                e.unread().unparsed_bytes,
+                pl.gaps().halted_batches,
+                pl.gaps().unparsed_bytes,
+            ),
+            (1, 1, 1, 1, 1, 1),
+            "one halt and one unparsed byte, on all three planes that count them"
+        );
+        assert_eq!(
+            CaptureReport::of(&d)
+                .with_throughput(&t)
+                .with_exchanges(&e)
+                .with_payloads(&pl)
+                .reasons(),
+            alloc::vec![
+                VerdictReason::ThroughputGaps,
+                VerdictReason::ExchangeUnread,
+                VerdictReason::PayloadGaps,
+            ],
+            "the halt shortens exactly these three planes"
+        );
+    }
+
     /// R311y729 (N20) — EVERY EXCHANGE GAP COUNTER, AT EXACTLY ONE.
     ///
     /// The mutation sweep's predicate layer relaxes `ExchangeGaps::is_clean` by
