@@ -161,6 +161,53 @@ impl OwnMappingSpace for HashMap<u64, String> {
     }
 }
 
+/// The shared handle an installed [`OwnMappingSpace`] is held by — one pointer
+/// per concurrency profile, chosen by the target rather than by a feature.
+///
+/// R311y740. The space is INSTALLED, not owned (see
+/// [`SubscriberRegistry::set_own_mapping_space`](crate::pubsub::SubscriberRegistry::set_own_mapping_space)):
+/// the live table lives on the session's actions bundle and the registry only
+/// holds a second handle to it. So the handle has to be whatever refcounted
+/// pointer that profile already shares the bundle through, and the two profiles
+/// do not agree:
+///
+/// - **AP** (`x86_64` and every target with `target_has_atomic = "ptr"`) shares
+///   the bundle as `Arc<SessionLinkActions<..>>` because the drive task may move
+///   across worker threads, so the handle is `Arc` and carries `Send + Sync`.
+/// - **MCU** (ARMv6-M / Cortex-M0+) has no atomic pointer CAS, so
+///   `alloc::sync::Arc` is *absent from `alloc` entirely* on that target — code
+///   that merely NAMES it fails to compile. That profile already shares the same
+///   bundle as `Rc<SessionLinkActions<..>>` (the `SessionRuntime::ActionsHandle`
+///   GAT — named rather than linked, because that associated type is itself
+///   feature-gated and the link would dangle in every subset without it),
+///   its drive loop is single-task, and `Rc` lowers to plain loads / stores.
+///
+/// This is the same per-profile-pointer split the bundle handle and `LinkSink`
+/// already make, for the same reason and with the same discipline: each profile
+/// carries exactly the auto-traits and refcount cost its concurrency model
+/// needs, and neither profile pays for the other's.
+///
+/// ## Alternatives rejected
+///
+/// - **`#[cfg(target_has_atomic = "ptr")]` on the field** (the
+///   `response_sink.rs` shape) would compile, but it deletes the surface on
+///   M0 rather than porting it: an MCU that declares a keyexpr would go back to
+///   dropping every `M=0` alias the peer names back at it — the exact defect
+///   R311y739 closed, silently reintroduced on one profile.
+/// - **`portable_atomic_util::Arc`** would keep one uniform type, but it buys
+///   an atomic refcount (critical-section-bracketed on M0) for a bundle that a
+///   single-task loop never shares across tasks, and adds a dependency
+///   wz-session-core does not otherwise carry. `Rc` is the correct lowering for
+///   that model, which is why the bundle handle itself already uses it.
+#[cfg(target_has_atomic = "ptr")]
+pub type SharedOwnMappingSpace = alloc::sync::Arc<dyn OwnMappingSpace + Send + Sync>;
+
+/// See the `target_has_atomic = "ptr"` arm for the full rationale: ARMv6-M has
+/// no `alloc::sync::Arc` to name, and its single-task drive loop shares the
+/// session bundle as `Rc` already.
+#[cfg(not(target_has_atomic = "ptr"))]
+pub type SharedOwnMappingSpace = alloc::rc::Rc<dyn OwnMappingSpace>;
+
 /// The TWO id spaces a face can consult, carried side by side.
 ///
 /// This is zenoh's `FaceState` shape: `remote_mappings` and `local_mappings`

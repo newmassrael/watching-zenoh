@@ -603,6 +603,98 @@ mod tests {
         assert_eq!(inj.calls[0].1, "");
     }
 
+    /// R311y740 (N37) — the `M=0` (`Mapping::Receiver`) twin of [`put_push`]:
+    /// the mapping id names OUR space, not the peer's.
+    fn put_push_own_alias(mapping_id: u64, payload: &[u8]) -> wz_codecs::push::PushOwned {
+        use wz_codecs::push::{Push, PushOwnedVariant};
+        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+        use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+        let mut push = Push {
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                    id: mapping_id,
+                    suffix_len: None,
+                    suffix: None,
+                }),
+            },
+            ..Push::default()
+        }
+        .try_into_owned()
+        .unwrap();
+        if let PushOwnedVariant::CodecZenohMsgPut(ref mut put) = push.body {
+            put.payload_len = payload.len() as u64;
+            put.payload = crate::codec_owned::owned_bytes(payload).unwrap();
+        }
+        push
+    }
+
+    /// R311y740 (N37) — the own-space WITNESS for the SWITCHBOARD plane. This
+    /// plane is fanned by a separate observer method
+    /// (`dispatch_switchboard`, kept apart from `dispatch_event` because it
+    /// threads the engine ingress port), so it needs its own measurement.
+    ///
+    /// THE DISCRIMINATOR is the collision plus two disjoint rows: id 7
+    /// resolves `ours/temp` in our space and `theirs/temp` in the peer's, and
+    /// a row is registered for each. A wrong-space read injects the OTHER
+    /// domain event — the statechart takes a transition it was never asked
+    /// for, which is the ACL boundary this registry exists to police.
+    #[test]
+    fn an_own_space_alias_resolves_in_our_space_on_the_switchboard_plane() {
+        use crate::driver_loop::IterationEvent;
+        use crate::wireexpr_resolve::MappingSpaces;
+        use hashbrown::HashMap;
+
+        let mut board = SwitchboardRegistry::new();
+        board.register("ours/temp", "ours_update");
+        board.register("theirs/temp", "theirs_update");
+        let mut inj = RecordingInjector::default();
+
+        let mut peer: HashMap<u64, String> = HashMap::new();
+        peer.insert(7, "theirs/temp".to_string());
+        let mut own: HashMap<u64, String> = HashMap::new();
+        own.insert(7, "ours/temp".to_string());
+
+        let outcome = frame_event(put_push_own_alias(7, b"22.0"));
+        let fired = board.dispatch_iteration_event(
+            IterationEvent::Poll(&outcome),
+            MappingSpaces::with_own(&peer, &own),
+            &mut inj,
+        );
+
+        assert_eq!(fired, 1);
+        assert_eq!(
+            inj.calls[0].0, "ours_update",
+            "an M=0 alias names OUR space; reading the peer's would have \
+             injected `theirs_update` into the statechart",
+        );
+    }
+
+    /// ANTI-VACUITY twin: with only the peer's space the same Push resolves
+    /// nothing and NO event is injected.
+    #[test]
+    fn without_an_own_space_the_switchboard_plane_refuses_the_same_alias() {
+        use crate::driver_loop::IterationEvent;
+        use hashbrown::HashMap;
+
+        let mut board = SwitchboardRegistry::new();
+        board.register("ours/temp", "ours_update");
+        board.register("theirs/temp", "theirs_update");
+        let mut inj = RecordingInjector::default();
+
+        let mut peer: HashMap<u64, String> = HashMap::new();
+        peer.insert(7, "theirs/temp".to_string());
+
+        let outcome = frame_event(put_push_own_alias(7, b"22.0"));
+        let fired = board.dispatch_iteration_event(IterationEvent::Poll(&outcome), &peer, &mut inj);
+
+        assert_eq!(
+            fired, 0,
+            "with no own space an M=0 alias must refuse -- never fall back to \
+             the peer's table",
+        );
+        assert!(inj.calls.is_empty());
+    }
+
     #[test]
     fn wire_inbound_push_non_matching_injects_nothing() {
         use crate::driver_loop::IterationEvent;

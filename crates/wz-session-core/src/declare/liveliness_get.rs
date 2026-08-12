@@ -558,6 +558,62 @@ mod tests {
         assert!(!reg.unregister(7), "double-unregister is idempotent");
     }
 
+    /// R311y740 (N37) — the own-space WITNESS for the liveliness-GET reply
+    /// plane. This registry ingests a SOLICITED `Declare(DeclToken)`
+    /// correlated by `interest_id`, so it is a separate entry point from the
+    /// declarer / subscriber planes even though the record type is shared.
+    ///
+    /// THE DISCRIMINATOR is the collision: id 7 is in BOTH spaces under
+    /// different literals, so a wrong-space read delivers a confident wrong
+    /// keyexpr to the requester rather than dropping the reply.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_own_space_alias_resolves_in_our_space_on_the_liveliness_get_plane() {
+        let mut reg = LivelinessGetRegistry::new();
+        let replies: Captured = Arc::new(Mutex::new(Vec::new()));
+        let finals: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(9, None, make_get(replies.clone(), finals.clone()))
+            .unwrap();
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/token".to_string());
+        let mut own = HashMap::new();
+        own.insert(7u64, "ours/token".to_string());
+
+        let declare = declare_envelope_decl_token_with_interest(decl_token_nonlocal(1, 7, None), 9);
+        reg.dispatch_declare(&declare, MappingSpaces::with_own(&peer, &own));
+
+        assert_eq!(
+            *replies.lock().unwrap(),
+            vec![(9u64, "ours/token".to_string())],
+            "an M=0 alias names OUR space; reading the peer's would have \
+             delivered `theirs/token` to the requester",
+        );
+    }
+
+    /// ANTI-VACUITY twin: with only the peer's space the same reply refuses.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn without_an_own_space_the_liveliness_get_plane_refuses_the_same_alias() {
+        let mut reg = LivelinessGetRegistry::new();
+        let replies: Captured = Arc::new(Mutex::new(Vec::new()));
+        let finals: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(9, None, make_get(replies.clone(), finals.clone()))
+            .unwrap();
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/token".to_string());
+
+        let declare = declare_envelope_decl_token_with_interest(decl_token_nonlocal(1, 7, None), 9);
+        reg.dispatch_declare(&declare, &peer);
+
+        assert!(
+            replies.lock().unwrap().is_empty(),
+            "with no own space an M=0 alias must refuse -- never fall back to \
+             the peer's table",
+        );
+    }
+
     #[test]
     fn duplicate_register_rejected() {
         let mut reg = LivelinessGetRegistry::new();

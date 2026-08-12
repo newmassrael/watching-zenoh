@@ -283,6 +283,66 @@ mod tests {
         assert_eq!(reg.on_undecl_len(), 0);
     }
 
+    /// R311y740 (N37) — the own-space WITNESS for the peer-DECLARE(Token)
+    /// plane. Sibling of the declare-subscriber / declare-queryable pairs.
+    ///
+    /// THE DISCRIMINATOR is the collision: id 7 is in BOTH spaces under
+    /// different literals, so a wrong-space read fires a confident wrong
+    /// keyexpr rather than nothing.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[test]
+    fn an_own_space_alias_resolves_in_our_space_on_the_liveliness_token_plane() {
+        let mut reg = LivelinessRegistry::new();
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_cb = captured.clone();
+        reg.on_token_declared(move |decl| {
+            captured_for_cb
+                .lock()
+                .unwrap()
+                .push(decl.keyexpr().to_string());
+        });
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/token".to_string());
+        let mut own = HashMap::new();
+        own.insert(7u64, "ours/token".to_string());
+
+        let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token_nonlocal(1, 7, None));
+        reg.dispatch_declare(&body, MappingSpaces::with_own(&peer, &own));
+
+        assert_eq!(
+            *captured.lock().unwrap(),
+            vec!["ours/token".to_string()],
+            "an M=0 alias names OUR space; reading the peer's would have \
+             resolved `theirs/token`",
+        );
+    }
+
+    /// ANTI-VACUITY twin: with only the peer's space the same record refuses.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[test]
+    fn without_an_own_space_the_liveliness_token_plane_refuses_the_same_alias() {
+        let mut reg = LivelinessRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_for_cb = fired.clone();
+        reg.on_token_declared(move |_decl| {
+            fired_for_cb.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/token".to_string());
+
+        let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token_nonlocal(1, 7, None));
+        reg.dispatch_declare(&body, &peer);
+
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "with no own space an M=0 alias must refuse -- never fall back to \
+             the peer's table",
+        );
+    }
+
     #[test]
     fn on_token_undeclared_increments_undeclare_count() {
         let mut reg = LivelinessRegistry::new();

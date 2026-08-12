@@ -1504,6 +1504,115 @@ mod tests {
         .unwrap()
     }
 
+    /// R311y740 (N37) — the `M=0` (`Mapping::Receiver`) twin of
+    /// [`response_reply_put`]: the mapping id names OUR space, not the peer's.
+    fn response_reply_put_nonlocal(
+        rid: u64,
+        mapping_id: u64,
+        suffix: Option<&str>,
+        payload: &[u8],
+    ) -> ResponseOwned {
+        let suffix_len = suffix.map(|s| s.len() as u64);
+        let keyexpr = Wireexpr {
+            body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                id: mapping_id,
+                suffix_len,
+                suffix,
+            }),
+        };
+        let reply = Reply {
+            body: ReplyVariant::CodecZenohMsgPut(MsgPut {
+                payload_len: payload.len() as u64,
+                payload,
+                ..MsgPut::default()
+            }),
+            ..Reply::default()
+        };
+        Response {
+            request_id: rid,
+            keyexpr,
+            body: ResponseVariant::CodecZenohReply(reply),
+            ..Response::default()
+        }
+        .try_into_owned()
+        .unwrap()
+    }
+
+    /// R311y740 (N37) — the own-space WITNESS for the inbound REPLY plane.
+    ///
+    /// The reply plane is correlated by `rid`, so a wrong-space read does not
+    /// misroute the callback: it hands the getter a WRONG keyexpr for a reply
+    /// it does receive. That is the more dangerous shape (the caller believes
+    /// it), so the assertion is on the literal itself.
+    ///
+    /// THE DISCRIMINATOR is the collision: id 7 is in BOTH spaces under
+    /// different literals.
+    #[test]
+    fn an_own_space_alias_resolves_in_our_space_on_the_reply_plane() {
+        let mut reg = ReplyRegistry::new();
+        let captured: Arc<Mutex<Vec<InboundReply>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_cb = captured.clone();
+        reg.register(
+            42,
+            1,
+            None,
+            move |reply| {
+                captured_cb
+                    .lock()
+                    .unwrap()
+                    .push(InboundReply::from_view(reply))
+            },
+            |_| {},
+        );
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/temp".to_string());
+        let mut own = HashMap::new();
+        own.insert(7u64, "ours/temp".to_string());
+
+        let resp = response_reply_put_nonlocal(42, 7, None, b"21.0");
+        reg.dispatch_response(&resp, MappingSpaces::with_own(&peer, &own));
+
+        let snapshot = captured.lock().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(
+            snapshot[0].keyexpr_literal, "ours/temp",
+            "an M=0 alias names OUR space; reading the peer's would have \
+             handed the getter `theirs/temp` for a reply it did receive",
+        );
+    }
+
+    /// ANTI-VACUITY twin: with only the peer's space the same Response
+    /// resolves nothing and the reply is dropped rather than mislabelled.
+    #[test]
+    fn without_an_own_space_the_reply_plane_refuses_the_same_alias() {
+        let mut reg = ReplyRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        reg.register(
+            42,
+            1,
+            None,
+            move |_reply| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
+            |_| {},
+        );
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/temp".to_string());
+
+        let resp = response_reply_put_nonlocal(42, 7, None, b"21.0");
+        reg.dispatch_response(&resp, &peer);
+
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "with no own space an M=0 alias must refuse -- never fall back to \
+             the peer's table",
+        );
+    }
+
     #[test]
     fn empty_registry_dispatch_is_noop() {
         let mut reg = ReplyRegistry::new();

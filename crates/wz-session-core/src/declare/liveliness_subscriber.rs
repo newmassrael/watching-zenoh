@@ -675,6 +675,75 @@ mod tests {
         assert!(!reg.unregister(7), "double-unregister is idempotent");
     }
 
+    /// R311y740 (N37) — the own-space WITNESS for the liveliness-SUBSCRIBER
+    /// plane. Distinct from the declarer plane's witness even though both
+    /// ingest `DeclToken`: this registry resolves the keyexpr and then MATCHES
+    /// it against registered patterns, so a wrong-space read changes which
+    /// slot fires, not merely what string it carries.
+    ///
+    /// THE DISCRIMINATOR is the collision plus two disjoint patterns: id 7
+    /// resolves `ours/dev` in our space and `theirs/dev` in the peer's, and a
+    /// slot is registered for each. Reading the wrong space fires the OTHER
+    /// subscriber.
+    #[test]
+    fn an_own_space_alias_resolves_in_our_space_on_the_liveliness_subscriber_plane() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let ours: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        let theirs: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "ours/*", false, make_subscriber(ours.clone()))
+            .unwrap();
+        reg.register(2, "theirs/*", false, make_subscriber(theirs.clone()))
+            .unwrap();
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/dev".to_string());
+        let mut own = HashMap::new();
+        own.insert(7u64, "ours/dev".to_string());
+
+        let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token_nonlocal(42, 7, None));
+        reg.dispatch_declare(&body, MappingSpaces::with_own(&peer, &own));
+
+        assert_eq!(
+            ours.lock().unwrap().len(),
+            1,
+            "an M=0 alias names OUR space; id 7 is `ours/dev` there",
+        );
+        assert_eq!(
+            theirs.lock().unwrap().len(),
+            0,
+            "reading the peer's space for an M=0 alias would have fired this \
+             subscriber instead",
+        );
+    }
+
+    /// ANTI-VACUITY twin: with only the peer's space the same record fires
+    /// NEITHER slot — so the witness above measures the installed own space,
+    /// not merely that some table held id 7.
+    #[test]
+    fn without_an_own_space_the_liveliness_subscriber_plane_refuses_the_same_alias() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let ours: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        let theirs: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "ours/*", false, make_subscriber(ours.clone()))
+            .unwrap();
+        reg.register(2, "theirs/*", false, make_subscriber(theirs.clone()))
+            .unwrap();
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/dev".to_string());
+
+        let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token_nonlocal(42, 7, None));
+        reg.dispatch_declare(&body, &peer);
+
+        assert_eq!(ours.lock().unwrap().len(), 0);
+        assert_eq!(
+            theirs.lock().unwrap().len(),
+            0,
+            "with no own space an M=0 alias must refuse -- never fall back to \
+             the peer's table",
+        );
+    }
+
     #[test]
     fn duplicate_register_rejected() {
         let mut reg = LivelinessSubscriberRegistry::new();

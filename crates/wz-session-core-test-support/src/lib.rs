@@ -180,6 +180,34 @@ pub fn decl_queryable(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclQue
     .unwrap()
 }
 
+/// R311y740 (N37) — the `M=0` (`Mapping::Receiver`) twin of
+/// [`decl_queryable`]: the mapping id names OUR space, not the peer's. Sibling
+/// of [`decl_subscriber_nonlocal`]; see [`decl_token_nonlocal`] for the token
+/// plane. A zenoh peer emits this shape for any id WE declared, because
+/// `get_best_key` prefers the receiver's own expr id
+/// (`dispatcher/resource.rs:625`).
+pub fn decl_queryable_nonlocal(
+    id: u64,
+    mapping_id: u64,
+    suffix: Option<&str>,
+) -> DeclQueryableOwned {
+    let suffix_len = suffix.map(|s| s.len() as u64);
+    let keyexpr = Wireexpr {
+        body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+            id: mapping_id,
+            suffix_len,
+            suffix,
+        }),
+    };
+    DeclQueryable {
+        id,
+        keyexpr,
+        ..DeclQueryable::default()
+    }
+    .try_into_owned()
+    .unwrap()
+}
+
 pub fn undecl_queryable(id: u64) -> UndeclQueryableOwned {
     UndeclQueryable {
         id,
@@ -193,6 +221,28 @@ pub fn decl_token(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclTokenOw
     let suffix_len = suffix.map(|s| s.len() as u64);
     let keyexpr = Wireexpr {
         body: WireexprVariant::WireexprLocal(WireexprLocal {
+            id: mapping_id,
+            suffix_len,
+            suffix,
+        }),
+    };
+    DeclToken {
+        id,
+        keyexpr,
+        ..DeclToken::default()
+    }
+    .try_into_owned()
+    .unwrap()
+}
+
+/// R311y740 (N37) — the `M=0` (`Mapping::Receiver`) twin of [`decl_token`]:
+/// the mapping id names OUR space. Sibling of [`decl_subscriber_nonlocal`] /
+/// [`decl_queryable_nonlocal`]; the liveliness declarer, subscriber and get
+/// planes all ingest `DeclToken`, so one fixture serves the three.
+pub fn decl_token_nonlocal(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclTokenOwned {
+    let suffix_len = suffix.map(|s| s.len() as u64);
+    let keyexpr = Wireexpr {
+        body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
             id: mapping_id,
             suffix_len,
             suffix,

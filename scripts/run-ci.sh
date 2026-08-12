@@ -1589,6 +1589,13 @@ PY
     # MEASURED: dropping the serial list from the enumeration reds it by name,
     # and the revert returns OK.
     python3 scripts/lib/message_producer_lint.py || return 1
+    # R311y740 (carry N37) — the OWN-SPACE WITNESS gate, static half. A plane
+    # that takes the `MappingSpaces` pair but carries no witness pair is
+    # caught here in milliseconds; Layer C1own additionally proves the
+    # witnesses actually RUN (a suite behind the wrong feature union selects
+    # zero tests and reports green). Both halves read the plane population out
+    # of the code, so a tenth consumer arrives already counted.
+    python3 scripts/lib/own_space_witness_lint.py >/dev/null || return 1
     # R311y704 (§1.1n) — the DATAGRAM-HALF gate. `Dissection::flows()` is the
     # TCP half and `datagram_flows()` is the other one; a reader that walks the
     # first and forgets the second produces an EMPTY result over a multicast or
@@ -4416,6 +4423,53 @@ layer_c1g_cargo_test_observer() {
     (cd crates \
         && cargo test -p wz-session-core --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet)
+}
+
+# ─── Layer C1own — the own-space (M=0) witness lane (R311y740, carry N37) ─
+#
+# R311y739 made the observer fan hand every consumer BOTH keyexpr id spaces
+# and let the type enforce it (a bare `&HashMap` consumer no longer compiles).
+# What no type can say is that each plane then READS the space the `M` bit
+# named — a registry may accept `MappingSpaces` and resolve by some other
+# route, and the compiler is satisfied. y739 measured ONE plane end-to-end
+# (Push) and argued the other nine from their sharing `resolve_wireexpr_in`;
+# that argument was the entire evidence, which is what carry N37 recorded.
+#
+# This lane is the measurement. `own_space_witness_lint.py` derives the plane
+# population FROM THE CODE (every module taking `impl Into<MappingSpaces<'a>>`,
+# plus the registry that owns the pair) and requires each to carry a witness
+# PAIR: a positive that resolves an `M=0` alias whose id COLLIDES in both
+# spaces — so a wrong-space read is a confident wrong keyexpr, not silence —
+# and an anti-vacuity twin proving the same fixture resolves nothing when only
+# the peer's space is supplied.
+#
+# The feature union below is NOT decoration. Each of these suites sits behind
+# its own module gate, and a lane that names the wrong features selects zero
+# tests and reports green (R311y739 did exactly that to a strip-prefix suite).
+# So cargo's executed-test list is fed BACK to the lint via `--executed`, which
+# compares SETS: a witness that exists in the source but did not run is a FAIL
+# naming the test. Hence no `--quiet` here — the lane needs the per-test lines.
+#
+# MEASURED three ways: renaming a plane's positive witness reds it by file,
+# dropping `switchboard` from the union reds it by test name, and the revert
+# returns OK.
+layer_c1own_own_space_witnesses() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "  Layer C1own FAIL: python3 not on PATH — the witness lint cannot run" >&2
+        return 1
+    fi
+    python3 scripts/lib/own_space_witness_lint.py >/dev/null || return 1
+    local log
+    log="$(mktemp)"
+    if ! (cd crates && cargo test -p wz-session-core --features codec-push,codec-declare,codec-response,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,query-queryable,query-attachment,query-selector-parameters,query-reply-err,query-reply,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber,liveliness-get,switchboard own_space) >"$log" 2>&1; then
+        cat "$log" >&2
+        rm -f "$log"
+        return 1
+    fi
+    local rc=0
+    python3 scripts/lib/own_space_witness_lint.py --executed "$log" >/dev/null || rc=1
+    rm -f "$log"
+    return "$rc"
 }
 
 # ─── Layer C1h — wz-session-core arbitrary-subset composability matrix ─
@@ -11434,6 +11488,7 @@ run_layer C1d layer_c1d_cargo_test_pubsub || overall=1
 run_layer C1e layer_c1e_cargo_test_query || overall=1
 run_layer C1f layer_c1f_cargo_test_reply || overall=1
 run_layer C1g layer_c1g_cargo_test_observer || overall=1
+run_layer C1own layer_c1own_own_space_witnesses || overall=1
 run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1
 run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1

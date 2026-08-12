@@ -125,7 +125,13 @@ use crate::wireexpr_resolve::resolve_wireexpr_in;
 // including one with no wire-dispatch consumer compiled in, whereas the
 // resolver call above is reached only from those consumers.
 #[cfg(feature = "alloc")]
-use crate::wireexpr_resolve::{MappingSpaces, OwnMappingSpace};
+// R311y740 — `OwnMappingSpace` itself is no longer NAMED by this module: the
+// field and its setter go through the per-profile `SharedOwnMappingSpace`
+// alias, which spells the `dyn` type per target. It survives only in doc links
+// here, and those are fully qualified (an import kept alive by doc links alone
+// is an `unused_imports` error under this workspace's `-D warnings`, and the
+// subset lanes are where that surfaces).
+use crate::wireexpr_resolve::{MappingSpaces, SharedOwnMappingSpace};
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
 // R311gb (Track 2) — these wire-dispatch-supporting imports feed the
@@ -264,7 +270,8 @@ pub struct SubscriberRegistry<C: SampleSink> {
     /// between. Installed (not owned) so there is exactly ONE copy of the fact:
     /// the table itself lives on `SessionActions::outbound_mappings`, written by
     /// `send_declare_keyexpr` and pruned by `send_undeclare_kexpr`, and this
-    /// handle reads it through [`OwnMappingSpace::resolve_own_mapping`]. A
+    /// handle reads it through
+    /// [`OwnMappingSpace::resolve_own_mapping`](crate::wireexpr_resolve::OwnMappingSpace::resolve_own_mapping). A
     /// mirrored `HashMap` here would go stale on the first undeclare.
     ///
     /// `None` is the honest state for a face that declares no aliases of its own
@@ -278,8 +285,14 @@ pub struct SubscriberRegistry<C: SampleSink> {
     /// `dispatcher/resource.rs:625`), so a zenoh peer starts naming OUR ids with
     /// `M=0` the moment we declare one. Absent the install, every such Push was
     /// dropped.
+    ///
+    /// R311y740 — held through the per-profile
+    /// [`SharedOwnMappingSpace`]
+    /// alias (AP `Arc`, ARMv6-M `Rc`) rather than a hard-coded
+    /// `alloc::sync::Arc`, which is absent from `alloc` on Cortex-M0+ and
+    /// walled the whole crate off that target.
     #[cfg(feature = "alloc")]
-    own_mapping_space: Option<alloc::sync::Arc<dyn OwnMappingSpace + Send + Sync>>,
+    own_mapping_space: Option<SharedOwnMappingSpace>,
     /// R231 — this session's own zid prefix (1..=16 bytes),
     /// negotiated during the session-FSM open handshake. When set,
     /// [`dispatch_push`](Self::dispatch_push) suppresses wire-arrived
@@ -716,11 +729,15 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// core cannot construct for itself. (Named rather than linked — that method
     /// is `transport-shm`-gated, so a link would dangle in every subset without
     /// the feature, and this one is only `alloc`-gated.)
+    ///
+    /// R311y740 — the handle type is the per-profile
+    /// [`SharedOwnMappingSpace`] (AP `Arc<dyn .. + Send + Sync>`, ARMv6-M
+    /// `Rc<dyn ..>`), so an MCU profile can install the very `Rc` bundle
+    /// handle it already holds. (Bare label: the alias is imported into this
+    /// module, so an explicit target is a `redundant_explicit_link_target`
+    /// error under this workspace's deny-warnings docs policy.)
     #[cfg(feature = "alloc")]
-    pub fn set_own_mapping_space(
-        &mut self,
-        space: alloc::sync::Arc<dyn OwnMappingSpace + Send + Sync>,
-    ) {
+    pub fn set_own_mapping_space(&mut self, space: SharedOwnMappingSpace) {
         self.own_mapping_space = Some(space);
     }
 

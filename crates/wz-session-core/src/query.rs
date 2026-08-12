@@ -1951,10 +1951,14 @@ mod tests {
         // Construct a minimal Request whose body is a default Query.
         // The Local arm (zero-init mapping = LOCAL on the zenoh-pico
         // side, mirrored by push_with_keyexpr at pubsub.rs:398-415) is
-        // the canonical default; both arms surface (id, suffix)
-        // identically through dispatch's WireexprVariant match
-        // (pubsub.rs:292-294), so the test only needs one arm to
-        // exercise the dispatch logic.
+        // the canonical default, and it is the `M=1` / PEER-space arm.
+        //
+        // R311y740 — the two arms are NOT interchangeable any more, and this
+        // comment used to say they were. Since R311y739 the variant tag IS
+        // the mapping bit: `WireexprLocal` reads the peer's space,
+        // `WireexprNonlocal` reads OURS. A test that wants the other space
+        // uses `request_query_nonlocal` below; one that only cares about
+        // (id, suffix) plumbing keeps using this.
         let suffix_len = suffix.map(|s| s.len() as u64);
         let keyexpr = Wireexpr {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
@@ -2039,6 +2043,109 @@ mod tests {
         }
         .try_into_owned()
         .unwrap()
+    }
+
+    /// R311y740 (N37) — the `M=0` (`Mapping::Receiver`) twin of
+    /// [`request_query`]: the mapping id names OUR space, not the peer's.
+    fn request_query_nonlocal(rid: u64, mapping_id: u64, suffix: Option<&str>) -> RequestOwned {
+        let suffix_len = suffix.map(|s| s.len() as u64);
+        let keyexpr = Wireexpr {
+            body: wz_codecs::wireexpr::WireexprVariant::WireexprNonlocal(
+                wz_codecs::wireexpr_nonlocal::WireexprNonlocal {
+                    id: mapping_id,
+                    suffix_len,
+                    suffix,
+                },
+            ),
+        };
+        Request {
+            header: 0x1c,
+            rid,
+            keyexpr,
+            extensions: None,
+            body: RequestVariant::CodecZenohQuery(Query::default()),
+        }
+        .try_into_owned()
+        .unwrap()
+    }
+
+    /// R311y740 (N37) — the own-space WITNESS for the inbound QUERY plane.
+    ///
+    /// THE DISCRIMINATOR is the collision plus two disjoint queryables: id 7
+    /// resolves `ours/temp` in our space and `theirs/temp` in the peer's, and
+    /// a queryable is registered for each. A wrong-space read runs the OTHER
+    /// handler and answers a query that was never asked of it.
+    #[test]
+    fn an_own_space_alias_resolves_in_our_space_on_the_query_plane() {
+        let mut reg = QueryableRegistry::new();
+        let ours = Arc::new(AtomicUsize::new(0));
+        let theirs = Arc::new(AtomicUsize::new(0));
+        let o = ours.clone();
+        reg.register("ours/temp", move |_query, responder| {
+            o.fetch_add(1, Ordering::SeqCst);
+            responder.reply(b"42.0");
+        });
+        let t = theirs.clone();
+        reg.register("theirs/temp", move |_query, responder| {
+            t.fetch_add(1, Ordering::SeqCst);
+            responder.reply(b"0.0");
+        });
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/temp".to_string());
+        let mut own = HashMap::new();
+        own.insert(7u64, "ours/temp".to_string());
+
+        let req = request_query_nonlocal(7, 7, None);
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, MappingSpaces::with_own(&peer, &own), &mut replies);
+
+        assert_eq!(
+            ours.load(Ordering::SeqCst),
+            1,
+            "an M=0 alias names OUR space; id 7 is `ours/temp` there",
+        );
+        assert_eq!(
+            theirs.load(Ordering::SeqCst),
+            0,
+            "reading the peer's space for an M=0 alias would have run this \
+             queryable instead",
+        );
+    }
+
+    /// ANTI-VACUITY twin: with only the peer's space the same Request
+    /// resolves nothing and NEITHER queryable runs.
+    #[test]
+    fn without_an_own_space_the_query_plane_refuses_the_same_alias() {
+        let mut reg = QueryableRegistry::new();
+        let ours = Arc::new(AtomicUsize::new(0));
+        let theirs = Arc::new(AtomicUsize::new(0));
+        let o = ours.clone();
+        reg.register("ours/temp", move |_q, r| {
+            o.fetch_add(1, Ordering::SeqCst);
+            r.reply(b"42.0");
+        });
+        let t = theirs.clone();
+        reg.register("theirs/temp", move |_q, r| {
+            t.fetch_add(1, Ordering::SeqCst);
+            r.reply(b"0.0");
+        });
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/temp".to_string());
+
+        let req = request_query_nonlocal(7, 7, None);
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &peer, &mut replies);
+
+        assert_eq!(ours.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            theirs.load(Ordering::SeqCst),
+            0,
+            "with no own space an M=0 alias must refuse -- never fall back to \
+             the peer's table",
+        );
+        assert!(replies.is_empty());
     }
 
     #[test]

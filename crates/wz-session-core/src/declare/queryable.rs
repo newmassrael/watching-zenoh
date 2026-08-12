@@ -412,6 +412,67 @@ mod tests {
 
     use crate::network_message::NetworkMessage;
 
+    /// R311y740 (N37) — the own-space WITNESS for the peer-DECLARE(Queryable)
+    /// plane. Sibling of the declare-subscriber pair; see that one for why a
+    /// per-plane measurement is not redundant with the shared-resolver tests.
+    ///
+    /// THE DISCRIMINATOR is the collision: id 7 is in BOTH spaces under
+    /// different literals, so a wrong-space read is a confident wrong keyexpr,
+    /// not silence.
+    #[test]
+    fn an_own_space_alias_resolves_in_our_space_on_the_declare_queryable_plane() {
+        let mut reg = RemoteQueryableRegistry::new();
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_cb = captured.clone();
+        reg.on_queryable_declared(move |decl| {
+            captured_for_cb
+                .lock()
+                .unwrap()
+                .push(decl.keyexpr().to_string());
+        });
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/q".to_string());
+        let mut own = HashMap::new();
+        own.insert(7u64, "ours/q".to_string());
+
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable_nonlocal(1, 7, None));
+        reg.dispatch_declare(&body, MappingSpaces::with_own(&peer, &own));
+
+        assert_eq!(
+            *captured.lock().unwrap(),
+            vec!["ours/q".to_string()],
+            "an M=0 alias names OUR space; reading the peer's would have \
+             resolved `theirs/q`",
+        );
+    }
+
+    /// ANTI-VACUITY twin: with only the peer's space the same record refuses.
+    #[test]
+    fn without_an_own_space_the_declare_queryable_plane_refuses_the_same_alias() {
+        let mut reg = RemoteQueryableRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_for_cb = fired.clone();
+        reg.on_queryable_declared(move |_decl| {
+            fired_for_cb.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/q".to_string());
+
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable_nonlocal(1, 7, None));
+        reg.dispatch_declare(&body, &peer);
+
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "with no own space an M=0 alias must refuse -- never fall back to \
+             the peer's table",
+        );
+    }
+
     #[test]
     fn queryable_empty_registry_dispatch_is_noop() {
         let mut reg = RemoteQueryableRegistry::new();

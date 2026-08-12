@@ -717,4 +717,114 @@ mod tests {
         reg.respond_to_interest(&interest, &HashMap::new(), &mut pending);
         assert_eq!(count(&pending), (1, 1));
     }
+
+    /// R311y740 (N37) — the own-space WITNESS for the local-token INTEREST
+    /// plane. This is the declarer-side responder: it resolves the inbound
+    /// Interest's keyexpr and replays the LOCAL tokens that match it, so a
+    /// wrong-space read changes which of our own tokens we hand back.
+    ///
+    /// THE DISCRIMINATOR is the collision plus two disjoint held tokens: id 7
+    /// resolves `ours/**` in our space and `theirs/**` in the peer's, and one
+    /// token is registered under each prefix. Reading the wrong space replays
+    /// the OTHER token — a confident wrong answer, not silence.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_own_space_alias_resolves_in_our_space_on_the_local_token_interest_plane() {
+        use alloc::string::ToString;
+        use wz_codecs::interest_body::InterestBodyOwned;
+        use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
+        use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
+
+        let mut reg = LocalTokenRegistry::new();
+        reg.register(1, "ours/tok").unwrap();
+        reg.register(2, "theirs/tok").unwrap();
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/**".to_string());
+        let mut own = HashMap::new();
+        own.insert(7u64, "ours/**".to_string());
+
+        // M=0 (`WireexprNonlocal`) with no inline suffix: the id alone.
+        let interest = InterestOwned {
+            header: 0x19 | 0x20, // CURRENT
+            interest_id: 42,
+            body: Some(InterestBodyOwned {
+                header: 0x08, // tokens bit
+                keyexpr: Some(WireexprOwned {
+                    body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
+                        id: 7,
+                        suffix_len: None,
+                        suffix: None,
+                    }),
+                }),
+            }),
+            extensions: None,
+        };
+
+        let mut pending = new_pending();
+        reg.respond_to_interest(
+            &interest,
+            crate::wireexpr_resolve::MappingSpaces::with_own(&peer, &own),
+            &mut pending,
+        );
+
+        assert_eq!(
+            count(&pending),
+            (1, 1),
+            "exactly one token matches `ours/**` -- the interest resolved in \
+             OUR space",
+        );
+        assert!(
+            pending
+                .iter()
+                .any(|i| matches!(i, DeclResponseItem::Token { token_id: 1, .. })),
+            "token 1 is the `ours/tok` one; staging token 2 would mean the \
+             interest was resolved out of the peer's space",
+        );
+    }
+
+    /// ANTI-VACUITY twin: with only the peer's space the same Interest
+    /// resolves nothing, so NO token is replayed (the bare `Final` still
+    /// terminates the chain — an unresolvable interest is not a hang).
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn without_an_own_space_the_local_token_interest_plane_refuses_the_same_alias() {
+        use alloc::string::ToString;
+        use wz_codecs::interest_body::InterestBodyOwned;
+        use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
+        use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
+
+        let mut reg = LocalTokenRegistry::new();
+        reg.register(1, "ours/tok").unwrap();
+        reg.register(2, "theirs/tok").unwrap();
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/**".to_string());
+
+        let interest = InterestOwned {
+            header: 0x19 | 0x20,
+            interest_id: 42,
+            body: Some(InterestBodyOwned {
+                header: 0x08,
+                keyexpr: Some(WireexprOwned {
+                    body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
+                        id: 7,
+                        suffix_len: None,
+                        suffix: None,
+                    }),
+                }),
+            }),
+            extensions: None,
+        };
+
+        let mut pending = new_pending();
+        reg.respond_to_interest(&interest, &peer, &mut pending);
+
+        assert_eq!(
+            count(&pending),
+            (0, 0),
+            "with no own space an M=0 alias must refuse -- never fall back to \
+             the peer's table (which would have replayed `theirs/tok`)",
+        );
+    }
 }

@@ -522,6 +522,80 @@ mod tests {
         );
     }
 
+    /// R311y740 (N37) — the own-space WITNESS for this plane.
+    ///
+    /// R311y739 wired both id spaces into the observer fan and proved the
+    /// resolution end-to-end on the Push plane only; every other plane was
+    /// *argued* correct from sharing `resolve_wireexpr_in` rather than
+    /// measured. This is that measurement for the peer-DECLARE(Subscriber)
+    /// plane, and it is not redundant with the shared-resolver tests: what it
+    /// rules out is this registry reaching for the peer table by some other
+    /// route (the weaker `peer_keyexpr_table()` accessor is still in reach),
+    /// which no test of the resolver in isolation can see.
+    ///
+    /// THE DISCRIMINATOR is the collision: id 7 exists in BOTH spaces under
+    /// different literals, so reading the wrong one is a confident WRONG
+    /// keyexpr rather than a silent `None`. Both upstreams number their
+    /// mappings from 1, so that is the realistic failure.
+    #[test]
+    fn an_own_space_alias_resolves_in_our_space_on_the_declare_subscriber_plane() {
+        let mut reg = RemoteSubscriberRegistry::new();
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_cb = captured.clone();
+        reg.on_subscriber_declared(move |decl| {
+            captured_for_cb
+                .lock()
+                .unwrap()
+                .push(decl.keyexpr().to_string());
+        });
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/sub".to_string());
+        let mut own = HashMap::new();
+        own.insert(7u64, "ours/sub".to_string());
+
+        // M=0 (`WireexprNonlocal`) names OUR space.
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber_nonlocal(1, 7, None));
+        reg.dispatch_declare(&body, MappingSpaces::with_own(&peer, &own));
+
+        assert_eq!(
+            *captured.lock().unwrap(),
+            vec!["ours/sub".to_string()],
+            "an M=0 alias names OUR space; reading the peer's would have \
+             resolved `theirs/sub`",
+        );
+    }
+
+    /// ANTI-VACUITY twin of
+    /// [`an_own_space_alias_resolves_in_our_space_on_the_declare_subscriber_plane`].
+    /// With only the peer's space the SAME record resolves nothing, so the
+    /// witness above is measuring the installed own space rather than any
+    /// table happening to hold id 7.
+    #[test]
+    fn without_an_own_space_the_declare_subscriber_plane_refuses_the_same_alias() {
+        let mut reg = RemoteSubscriberRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_for_cb = fired.clone();
+        reg.on_subscriber_declared(move |_decl| {
+            fired_for_cb.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "theirs/sub".to_string());
+
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber_nonlocal(1, 7, None));
+        reg.dispatch_declare(&body, &peer);
+
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "with no own space an M=0 alias must refuse -- never fall back to \
+             the peer's table",
+        );
+    }
+
     #[test]
     fn undeclare_callback_fires_on_undecl_subscriber() {
         let mut reg = RemoteSubscriberRegistry::new();
