@@ -557,6 +557,14 @@ jobs:
         # tests never exercise.
         run: bash scripts/run-ci.sh --layer C1g
 
+      - name: Layer C1own — the own-space (M=0) witness lane (R311y740)
+        # R311y744 — wired here, one round LATE. R311y740 registered the lane
+        # in run-ci.sh and did not add it to this file, so it ran only in a
+        # local full sweep; Layer C0's unwired-lane gate (R311y581) caught it
+        # on the hosted run, which is exactly the job it exists for. The lane
+        # needs no provisioning beyond the toolchain this job already has.
+        run: bash scripts/run-ci.sh --layer C1own
+
       - name: Layer C1h — wz-session-core arbitrary-subset composability matrix
         # R311ea — the C1c-g lanes each build wz-session-core under ONE
         # maximal feature union, so a gating regression that only shows in
