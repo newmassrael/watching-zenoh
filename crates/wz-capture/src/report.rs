@@ -2827,6 +2827,20 @@ mod tests {
                 leg.name()
             );
         }
+        // R311y727 (N19) — AND THE WHOLE LIST, which the containment claims
+        // above cannot say. They hold while every other leg fires too, so a
+        // guard that widened would pass under them; this is the sentence that
+        // says what is NOT in the verdict.
+        assert_eq!(
+            reasons,
+            alloc::vec![
+                VerdictReason::ThroughputGaps,
+                VerdictReason::ExchangeUnread,
+                VerdictReason::PayloadGaps,
+            ],
+            "the undecompressible batch shortens these three planes and \
+             nothing else"
+        );
     }
 
     /// R311y716 (§C G1) — a reply whose request this capture never saw.
@@ -2857,6 +2871,14 @@ mod tests {
             reasons.contains(&VerdictReason::ExchangeGaps),
             "a reply attributable to nothing is a row this page does not hold: \
              {reasons:?}"
+        );
+        // R311y727 (N19) — and it is the ONLY leg here, which is what makes
+        // the claim above load-bearing against a widened guard as well as a
+        // severed one.
+        assert_eq!(
+            reasons,
+            alloc::vec![VerdictReason::ExchangeGaps],
+            "the orphan is the whole of this verdict"
         );
     }
 
@@ -3385,15 +3407,23 @@ mod tests {
         // R311y725 (N2) — the unanswered query is a leg of the verdict, and it
         // is named here because nothing else named it. The exchange plane is
         // attached ALONE so the reason cannot be another plane's.
+        let exchanges_alone = CaptureReport::of(&d)
+            .with_exchanges(&all_exchanges)
+            .reasons();
         assert!(
-            CaptureReport::of(&d)
-                .with_exchanges(&all_exchanges)
-                .reasons()
-                .contains(&VerdictReason::ExchangesUnclosed),
-            "{:?}",
-            CaptureReport::of(&d)
-                .with_exchanges(&all_exchanges)
-                .reasons()
+            exchanges_alone.contains(&VerdictReason::ExchangesUnclosed),
+            "{exchanges_alone:?}"
+        );
+        // R311y727 (N19) — the whole list, so this witness also holds the
+        // other exchange legs QUIET rather than only naming its own.
+        assert_eq!(
+            exchanges_alone,
+            alloc::vec![
+                VerdictReason::ExchangeGaps,
+                VerdictReason::ExchangesUnclosed,
+            ],
+            "MEASURED, not assumed: this fixture also orphans a response, so \
+             the plane is short two ways and the pin has to name both"
         );
         assert_eq!(all_payloads.payloads(), 2);
         assert!(all.to_text().contains("other/drop"));
@@ -3791,6 +3821,26 @@ mod tests {
             "and the reader is told in the rendering: {}",
             r.to_text()
         );
+        // R311y728 (N18) — AND LITERALLY ONE BYTE, which the paragraph above
+        // CLAIMS ("add ONE application byte and it is not") and no arm here
+        // did: every one of them recovers 25 or 7. A guard reading `> 1` where
+        // `> 0` was meant fires on all of them identically, so the boundary
+        // sweep found this leg with nothing holding its threshold -- a reader
+        // that quietly stopped reporting the single-byte shortfall would have
+        // passed the whole suite.
+        let single = crate::quic::QuicDecryption {
+            stream_bytes: 1,
+            ..open
+        };
+        let r = CaptureReport::of(&d).with_quic_decryption(&single);
+        assert_eq!(
+            r.reasons(),
+            alloc::vec![VerdictReason::QuicBytesNobodyDecodes],
+            "one recovered byte nobody read is a floor, and it is the whole of \
+             this verdict: {}",
+            r.to_text()
+        );
+
         // The RFC 9221 half reaches the same verdict by the same rule -- zenoh's
         // quic-datagram link puts application bytes there and no reader takes
         // them out either.

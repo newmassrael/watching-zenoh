@@ -1641,6 +1641,20 @@ PY
     # thirteen of twenty-three legs exercised and none of them named; all
     # thirteen were bound in the same round.
     python3 scripts/lib/verdict_reason_lint.py || return 1
+    # R311y727 (N19) — the VERDICT-ASSERTION gate, and it is about the shape of
+    # the claim rather than its existence. `reasons()` answers with a SET, so
+    # `contains(&VerdictReason::X)` holds while every OTHER leg fires too: a
+    # suite of containment claims watches a guard run away in silence. The
+    # mutation sweep measured the cost -- five plane legs killed by exactly one
+    # test each on the widen axis, against sixteen apiece elsewhere -- and the
+    # thin ones were thin because their own witnesses only claimed containment.
+    #
+    # Static because the invariant is "this test also PINS the list", which the
+    # test cannot observe about itself. Enforcement MEASURED twice: deleting one
+    # pin reds it, and replacing that pin with a comment and a string holding
+    # the same text reds it too (R311y717's lesson -- a gate a comment can
+    # satisfy is a gate that grades prose).
+    python3 scripts/lib/verdict_assertion_lint.py || return 1
     return 0
 }
 
@@ -1653,17 +1667,26 @@ PY
 # binding nothing; R311y725 bound thirteen unnamed legs and still proved only
 # that they are mentioned.
 #
-# R311y727 (N16) — and it now asks the question from BOTH sides. `sever` stops
-# the leg being raised at all; `widen` makes every capture raise it. A guard
-# that is too wide keeps its push, keeps reddening the fixtures that trip it,
-# and walks through a severing sweep untouched — which is why R311y726 wrote
-# the gap down rather than claiming the leg was pinned.
+# R311y727 (N16, N18) — and it now asks the question from THREE sides, which
+# are the three ways a guard fails rather than three spellings of one:
+#
+#   * `sever`    — never true. Does anything notice the reason going away?
+#   * `widen`    — always true. Does anything notice it arriving over captures
+#                  that are fine?
+#   * `boundary` — the threshold one step in. Does any fixture trip this leg
+#                  with the SMALLEST possible evidence?
+#
+# The first two are the extremes and a guard wrong by a STEP sits between them,
+# untouched by both: `> 1` where `> 0` was meant keeps firing on every fixture
+# that trips the leg hard, and goes quiet only on the capture holding a single
+# instance. `boundary` reaches 15 of the 23 legs; the other 8 guard on
+# `.any()` / `!is_clean()` / `!is_decisive()`, which hold no threshold to move,
+# and the sweep NAMES them rather than passing over them in silence.
 #
 # Its own layer rather than a line in C0 because the cost is a different order:
 # C0 is 18s of static scanning and this compiles and runs the suite once per
-# mutant. MEASURED locally at 2m16s over 23 severings with a warm cache; the
-# second operator doubles the population to 46, which is the shape of a lane,
-# not of a lint.
+# mutant. MEASURED at 68s over 23 severings (R311y726), 127s over 46, and the
+# third operator adds 15 more — the shape of a lane, not of a lint.
 layer_c0mut_verdict_legs() {
     # A gate that cannot read its input must not report green -- the rule Layer
     # C0 already applies to python3, and this lane IS a python program.

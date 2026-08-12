@@ -5375,6 +5375,17 @@ mod datagram_tests {
                 && reasons.contains(&crate::report::VerdictReason::Desyncs),
             "the hole and the splice it caused must BOTH be named: {reasons:?}"
         );
+        // R311y727 (N19) — and the WHOLE list. The containment claim above
+        // holds while every other leg fires too, so on its own it cannot
+        // notice a guard that widened.
+        assert_eq!(
+            reasons,
+            alloc::vec![
+                crate::report::VerdictReason::GapsForced,
+                crate::report::VerdictReason::Desyncs
+            ],
+            "the forced gap and the desync it caused, and nothing else"
+        );
         let resync = f.session.resync_accounting(Direction::A);
         assert_eq!(resync.desyncs, 1, "the splice is DETECTED, not decoded");
         assert_eq!(resync.recoveries, 1, "and the framing is found again");
@@ -6640,8 +6651,16 @@ mod datagram_tests {
             wz_session_core::wire_const::T_MID_KEEP_ALIVE
         ];
 
+        // R311y728 (N18) — THE SMALLEST EVIDENCE. Both arms above lose more
+        // than one byte, so a guard reading `> 1` where `> 0` was meant would
+        // call this capture whole and every test would agree with it: the
+        // boundary sweep measured exactly that and this arm is what kills it.
+        // One trailing byte is the least a batch can be short by.
+        let smallest = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE, 0x00];
+
         for (name, wire, expected, frames) in [
             ("offender", &offender, 2u64, 1usize),
+            ("smallest", &smallest, 1u64, 1usize),
             ("control", &clean, 0u64, 2usize),
         ] {
             let mut datagram = Dissection::new();
@@ -6699,6 +6718,16 @@ mod datagram_tests {
                 expected > 0,
                 "{name}: the batch shortfall is this fixture's own leg: {:?}",
                 report.reasons()
+            );
+            // R311y727 (N19) -- and the WHOLE list, not just this leg.
+            assert_eq!(
+                report.reasons(),
+                if expected > 0 {
+                    alloc::vec![crate::report::VerdictReason::UnaccountedBatchBytes]
+                } else {
+                    alloc::vec![]
+                },
+                "{name}: the batch shortfall is the whole of this verdict"
             );
             assert_eq!(
                 report.is_complete(),
@@ -7260,6 +7289,38 @@ mod datagram_tests {
         assert!(
             reasons.contains(&crate::report::VerdictReason::SnMissing),
             "two frames the sender numbered are not in this capture, and the              page must say so: {reasons:?}"
+        );
+        // R311y727 (N19) -- and the WHOLE list, so this witness holds every
+        // other leg QUIET as well as naming its own.
+        assert_eq!(
+            reasons,
+            alloc::vec![crate::report::VerdictReason::SnMissing],
+            "the wire's own accounting is the only thing short here"
+        );
+
+        // R311y728 (N18) — AND THE SMALLEST EVIDENCE. The capture above loses
+        // TWO frames, so a guard reading `> 1` where `> 0` was meant still
+        // fires on it and nothing in the suite would notice the reader had
+        // stopped reporting a SINGLE lost frame. The boundary sweep measured
+        // exactly that survival. One gap is the least the wire can report, and
+        // it is the case an operator most needs told.
+        let mut one = Dissection::new();
+        let mut at = 0usize;
+        feed(&mut one, true, &init_datagram(false, &[]), &mut at);
+        feed(&mut one, false, &init_datagram(true, &[]), &mut at);
+        feed(&mut one, true, &open_datagram(false), &mut at);
+        feed(&mut one, false, &open_datagram(true), &mut at);
+        for sn in [0u8, 1, 3] {
+            feed(&mut one, true, &frame(sn), &mut at);
+        }
+        one.finish();
+        let fh = one.framing_health();
+        assert_eq!(fh.sn_missing, 1, "frame 2 alone: {fh:?}");
+        assert_eq!(
+            crate::report::CaptureReport::of(&one).reasons(),
+            alloc::vec![crate::report::VerdictReason::SnMissing],
+            "one frame is enough to make the totals a floor, and it is the \
+             whole of this verdict"
         );
     }
 
@@ -7857,6 +7918,13 @@ mod datagram_tests {
             "{:?}",
             crate::report::CaptureReport::of(&d).reasons()
         );
+        // R311y727 (N19) -- and the WHOLE list, so this witness holds every
+        // other leg QUIET as well as naming its own.
+        assert_eq!(
+            crate::report::CaptureReport::of(&d).reasons(),
+            alloc::vec![crate::report::VerdictReason::BoundsDiscarded],
+            "the bound is the whole of this verdict"
+        );
 
         // THE SECOND LEG, and it earned its place by falsification: never
         // writing `last_activity` at all leaves the sweep above green, because
@@ -7975,6 +8043,13 @@ mod datagram_tests {
             "bytes a bound refused are bytes nobody decodes: {:?}",
             report.reasons()
         );
+        // R311y727 (N19) -- and the WHOLE list, so this witness holds every
+        // other leg QUIET as well as naming its own.
+        assert_eq!(
+            report.reasons(),
+            alloc::vec![report::VerdictReason::QuicBytesNobodyDecodes],
+            "the refused offer is the whole of this verdict"
+        );
 
         // THE CONTROL. At exactly the bound nothing is refused, and with every
         // recovered byte fed and framed the same verdict is silent -- so the
@@ -7998,6 +8073,13 @@ mod datagram_tests {
                 .contains(&report::VerdictReason::QuicBytesNobodyDecodes),
             "ANTI-VACUITY: an unrefused capture must not raise it: {:?}",
             report.reasons()
+        );
+        // R311y727 (N19) -- and the WHOLE list, so this witness holds every
+        // other leg QUIET as well as naming its own.
+        assert_eq!(
+            report.reasons(),
+            alloc::vec![],
+            "and the control capture is short of NOTHING"
         );
     }
 
@@ -8245,6 +8327,13 @@ mod datagram_tests {
             "the deadline is the leg this fixture trips: {:?}",
             rep.reasons()
         );
+        // R311y727 (N19) -- and the WHOLE list, so this witness holds every
+        // other leg QUIET as well as naming its own.
+        assert_eq!(
+            rep.reasons(),
+            alloc::vec![crate::report::VerdictReason::ExpiredChains],
+            "the deadline is the whole of this verdict"
+        );
         assert!(
             rep.to_json()
                 .contains(
@@ -8374,6 +8463,13 @@ mod datagram_tests {
                 .contains(&crate::report::VerdictReason::AbandonedChains),
             "a chain still open at the end is its own leg: {:?}",
             crate::report::CaptureReport::of(&d).reasons()
+        );
+        // R311y727 (N19) -- and the WHOLE list, so this witness holds every
+        // other leg QUIET as well as naming its own.
+        assert_eq!(
+            crate::report::CaptureReport::of(&d).reasons(),
+            alloc::vec![crate::report::VerdictReason::AbandonedChains],
+            "the chain left open is the whole of this verdict"
         );
         // R311y713 (§B7/§B6) — and WHAT WAS IN IT, and WHOSE it was. Three
         // rounds recorded that the bytes of a lost chain were counted by
@@ -9259,6 +9355,13 @@ mod ws_flow_tests {
             reasons.contains(&crate::report::VerdictReason::WsDesyncs),
             "the WebSocket framing was lost and found, and the page must say \
              so: {reasons:?}"
+        );
+        // R311y727 (N19) -- and the WHOLE list, so this witness holds every
+        // other leg QUIET as well as naming its own.
+        assert_eq!(
+            reasons,
+            alloc::vec![crate::report::VerdictReason::WsDesyncs],
+            "the WebSocket desync is the whole of this verdict"
         );
     }
 

@@ -134,21 +134,113 @@ def widen(pristine: str, variant: str) -> str:
     return GUARD.sub(rewrite, pristine)
 
 
-# Name, mutation, what a survivor means. The third field is the sentence the
-# failure prints, because "SURVIVED" means a different defect per operator and
-# one generic message would send the reader to the wrong fix.
+# A comparison against a literal, which is what almost every guard here is.
+LITERAL_CMP = re.compile(r">\s*(\d+)\b")
+
+
+def tighten(cond: str) -> str | None:
+    """`cond` with its threshold moved ONE step, or None if it has no threshold.
+
+    Two shapes, in order:
+
+      * `.. > <literal> ..` becomes `.. > <literal + 1> ..`, which reaches the
+        comparisons written inside a closure (`is_some_and(|q| q.x > 0)`) as
+        well as the plain ones.
+      * a single TOP-LEVEL `>` between two expressions becomes
+        `lhs > (rhs) + 1`. Depth-aware, so a `>` inside a call's arguments is
+        not mistaken for the comparison.
+
+    Ambiguity returns None rather than guessing: two literal comparisons in one
+    guard could be tightened two ways and picking one silently would make this
+    operator's question unstatable.
+    """
+    hits = list(LITERAL_CMP.finditer(cond))
+    if len(hits) == 1:
+        m = hits[0]
+        return f"{cond[: m.start()]}> {int(m.group(1)) + 1}{cond[m.end() :]}"
+    if len(hits) > 1:
+        return None
+    depth, at, seen = 0, -1, 0
+    for i, ch in enumerate(cond):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == ">" and depth == 0:
+            if i + 1 < len(cond) and cond[i + 1] == "=":
+                continue
+            if i and cond[i - 1] in "-=<>":
+                continue
+            at, seen = i, seen + 1
+    if seen == 1:
+        return f"{cond[:at]}> ({cond[at + 1 :].strip()}) + 1"
+    return None
+
+
+def boundary(pristine: str, variant: str) -> str | None:
+    """Operator 3 — the leg's threshold moves ONE step.
+
+    R311y727 (N18) — `sever` and `widen` are the two EXTREMES of a guard: never
+    true and always true. A guard wrong by a step sits between them, and both
+    extremes step right over it. `> 1` where `> 0` was meant keeps firing on
+    every fixture that trips the leg hard and stays quiet exactly where the
+    right guard was quiet -- the one capture it now misses is the one holding a
+    single instance of the thing.
+
+    So this asks a question the other two cannot: is there a fixture that trips
+    this leg with the SMALLEST possible evidence? A suite whose every fixture
+    loses three packets never notices a reader that stopped reporting one.
+
+    Returns None when the guard holds no threshold to move -- `drops().any()`,
+    `!gaps().is_clean()`. That is a fact about the guard, not a failure, and it
+    is reported by name rather than skipped.
+    """
+    reached = False
+
+    def rewrite(m: re.Match) -> str:
+        nonlocal reached
+        if m.group("variant") != variant:
+            return m.group(0)
+        tightened = tighten(m.group("cond"))
+        if tightened is None:
+            return m.group(0)
+        reached = True
+        return f"{m.group('indent')}if {tightened} {{\n{m.group('push')}"
+
+    out = GUARD.sub(rewrite, pristine)
+    return out if reached else None
+
+
+# Name, mutation, what a survivor means, whether EVERY leg must be reachable.
+#
+# The third field is the sentence the failure prints, because "SURVIVED" means a
+# different defect per operator and one generic message sends the reader to the
+# wrong fix. The fourth separates two very different kinds of unreachability: a
+# leg `sever` or `widen` cannot reach is a hole in this TOOL and fails the run,
+# while a guard with no threshold in it is simply not a question `boundary` can
+# ask -- reported by name, never silently skipped.
 OPERATORS = (
     (
         "sever",
         sever,
         "every test passed with this leg SEVERED, so nothing in the suite "
         "depends on it being raised",
+        True,
     ),
     (
         "widen",
         widen,
         "every test passed with this leg's guard WIDENED to always fire, so "
         "no test holds it quiet over a capture that is fine",
+        True,
+    ),
+    (
+        "boundary",
+        boundary,
+        "every test passed with this leg's threshold moved ONE step, so no "
+        "fixture trips it with the smallest possible evidence -- a reader that "
+        "stopped reporting the single-instance case would go unnoticed",
+        False,
     ),
 )
 
@@ -362,6 +454,7 @@ def main() -> int:
     shutil.copy2(source_path, backup_path)
     survivors: list[tuple[str, str, str]] = []
     broken: list[tuple[str, str, str]] = []
+    unasked: list[tuple[str, str]] = []
     evidence: dict[tuple[str, str], list[str]] = {}
     try:
         print(
@@ -394,8 +487,12 @@ def main() -> int:
         print("  baseline green", flush=True)
 
         for variant in raised:
-            for op_name, mutate, survived_means in OPERATORS:
+            for op_name, mutate, survived_means, must_reach in OPERATORS:
                 mutant = mutate(pristine, variant)
+                if mutant is None:
+                    # Not a question this operator can ask of this guard.
+                    unasked.append((variant, op_name))
+                    continue
                 if mutant == pristine:
                     broken.append(
                         (variant, op_name, f"the `{op_name}` produced no change")
@@ -461,6 +558,20 @@ def main() -> int:
             return 1
         backup_path.unlink(missing_ok=True)
 
+    if unasked:
+        # Printed on the way to OK, never instead of it. An operator that
+        # cannot reach a guard has to say so out loud: a summary that counted
+        # only what it asked would read as coverage it does not have.
+        by_op: dict[str, list[str]] = {}
+        for variant, op_name in unasked:
+            by_op.setdefault(op_name, []).append(variant)
+        for op_name, variants in sorted(by_op.items()):
+            print(
+                f"  [{op_name}] NOT ASKED of {len(variants)} leg(s) whose "
+                "guard holds no threshold to move: " + ", ".join(sorted(variants)),
+                flush=True,
+            )
+
     if broken:
         print("verdict-leg mutation: FAIL", file=sys.stderr)
         for variant, op_name, why in broken:
@@ -495,12 +606,14 @@ def main() -> int:
         return 1
 
     least = min(len(v) for v in evidence.values()) if evidence else 0
-    ops = ", ".join(name for name, _fn, _why in OPERATORS)
+    ops = ", ".join(name for name, _fn, _why, _reach in OPERATORS)
     print(
         ("verdict-leg mutation PROBE: OK for " if only else "verdict-leg mutation: OK (")
         + f"{len(raised)} leg(s) × {len(OPERATORS)} operator(s) [{ops}] = "
-        f"{len(evidence)} mutant(s), every one killed by at least {least} "
-        f"test(s); suite = {' '.join(packages)}"
+        f"{len(evidence)} mutant(s) asked"
+        + (f", {len(unasked)} not applicable" if unasked else "")
+        + f", every one killed by at least {least} test(s); "
+        f"suite = {' '.join(packages)}"
         + (
             " — A PARTIAL POPULATION: this says nothing about the other legs"
             if only

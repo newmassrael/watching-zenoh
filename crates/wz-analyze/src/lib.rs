@@ -6970,6 +6970,13 @@ mod quic_pass_tests {
             "the bytes were decoded, so this reason must be gone -- reasons: {:?}",
             outcome.reasons
         );
+        // R311y727 (N19) -- and the WHOLE list, which an absence claim about
+        // one leg cannot give: it says nothing about the other twenty-two.
+        assert_eq!(
+            outcome.reasons,
+            Vec::new(),
+            "and NOTHING else is short about this capture either"
+        );
         assert!(
             !rendered.contains("were recovered and NOT decoded"),
             "and the sentence with it: {rendered}"
@@ -7271,6 +7278,13 @@ mod quic_pass_tests {
                 .contains(&wz_capture::report::VerdictReason::QuicBytesNobodyDecodes),
             "the datagram bytes were read, so this reason must be gone: {:?}",
             outcome.reasons
+        );
+        // R311y727 (N19) -- and the WHOLE list, which an absence claim about
+        // one leg cannot give: it says nothing about the other twenty-two.
+        assert_eq!(
+            outcome.reasons,
+            Vec::new(),
+            "and NOTHING else is short about this capture either"
         );
         // AND THE FIELD WALK reads the SINK's copy rather than re-reading the
         // packet, which holds the QUIC ciphertext.
