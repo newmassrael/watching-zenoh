@@ -1812,8 +1812,25 @@ impl DissectionLimits {
             quic_streams_per_flow: Some(16),
             // A handshake is the FIRST thing a serial link does, so a line that
             // has read 256 frames without one is a tap that started mid-session
-            // and will never see it. Far past the two or three frames a
-            // captured handshake takes, and far short of a leak.
+            // and will never see it.
+            //
+            // R311y758 (carry N9) — "the two or three frames a captured
+            // handshake takes" used to sit here as an estimate, and it is now
+            // MEASURED at ONE frame for pico's ordinary connect and TWO for the
+            // worst ordering its RESET retry can produce
+            // (`a_captured_handshake_settles_within_two_frames_of_picos_connect_loop`,
+            // which reads this very field so a copy cannot drift from it).
+            //
+            // The measurement also bounds what is left to judge. `_z_send_serial`
+            // is reachable only after `_z_connect_serial` returns OK
+            // (`vendor/zenoh-pico/.../serial_protocol.c:255-280`), so the number
+            // of DATA frames ahead of a handshake is 0 with bring-up captured and
+            // unbounded without it — never a value in between. 256 therefore buys
+            // nothing on the first case (any ceiling >= 2 does) and everything on
+            // the second, where the choice is memory against how long a
+            // mid-session tap waits before committing. That residue is a
+            // deployment trade rather than a protocol fact, and it is the whole
+            // of what stays unmeasured here.
             serial_frames_before_attribution: Some(256),
         }
     }

@@ -443,6 +443,107 @@ mod tests {
         );
     }
 
+    /// R311y758 (carry N9) — HOW MANY FRAMES A CAPTURED HANDSHAKE ACTUALLY
+    /// TAKES, measured against pico's own connect loop.
+    ///
+    /// `serial_frames_before_attribution = 256` was carried as a JUDGEMENT
+    /// because no serial deployment capture exists in this tree to measure it
+    /// against. That framing was half right, and this is the half nobody had
+    /// asked: the bound answers TWO questions and the protocol answers one of
+    /// them outright.
+    ///
+    /// `_z_connect_serial`
+    /// (`vendor/zenoh-pico/src/link/transport/upper/serial_protocol.c:255-280`)
+    /// sends a bare `INIT` and blocks until it reads `INIT|ACK`, retrying on
+    /// `RESET`; `_z_send_serial` — the DATA path — is reachable only after that
+    /// function returns `_Z_RES_OK`. So on any line, the handshake strictly
+    /// precedes the first data frame. The count of data frames ahead of the
+    /// handshake is therefore 0 for a capture that includes link bring-up and
+    /// UNBOUNDED for a tap that starts mid-session. There is no value in
+    /// between, which is why no capture could have produced a tuned figure:
+    /// the number is not a property of serial traffic at all.
+    ///
+    /// What IS measurable is how deep into a capture the settle happens when the
+    /// handshake IS present, and this measures it: ONE frame in pico's ordinary
+    /// path, TWO in its worst retry ordering. The field doc's "two or three
+    /// frames" was the right order and had never been run.
+    ///
+    /// So a bound of 1 already covers pico's ordinary path and 2 covers every
+    /// ordering its loop can produce; 256 is three orders above the measured
+    /// need, and the residue it buys is entirely the mid-session-tap case, which
+    /// is a memory-versus-latency choice rather than a protocol fact. The
+    /// remaining judgement is now NAMED as that, and it is a much smaller claim
+    /// than "256 is unmeasured".
+    #[test]
+    fn a_captured_handshake_settles_within_two_frames_of_picos_connect_loop() {
+        // pico's ORDINARY path: the initiator's bare INIT is the first thing on
+        // the line, and it alone names a side.
+        let mut ordinary = SerialLine::with_limit(Some(1));
+        ordinary.push(7, 0, &encode_frame(SERIAL_FLAG_INIT, &[]).expect("encodes"));
+        assert!(
+            ordinary.census().roles_witnessed,
+            "one frame settles pico's ordinary connect: {:?}",
+            ordinary.census()
+        );
+        assert!(
+            !ordinary.census().committed_positionally,
+            "and it settled by MEASUREMENT, not by the ceiling"
+        );
+
+        // pico's WORST ordering: `_z_connect_serial` retries on RESET, and RESET
+        // proves no side (`role_of` is None for it). A capture that opens on the
+        // responder's RESET therefore needs one more frame before a role lands.
+        let mut retried = SerialLine::with_limit(Some(2));
+        let reset = encode_frame(SERIAL_FLAG_RESET, &[]).expect("encodes");
+        retried.push(9, 0, &reset);
+        assert!(
+            !retried.census().roles_witnessed,
+            "RESET is a handshake frame that names nobody"
+        );
+        retried.push(7, 1, &encode_frame(SERIAL_FLAG_INIT, &[]).expect("encodes"));
+        assert!(
+            retried.census().roles_witnessed,
+            "two frames is the deepest pico's own loop can push the settle"
+        );
+        assert_eq!(
+            retried.census().handshake_frames,
+            2,
+            "and BOTH were handshake frames -- the retry never puts data ahead \
+             of the settle, which is what makes the 0-or-unbounded split hold"
+        );
+
+        // THE BOUNDARY, measured rather than assumed: a ceiling of 0 commits on
+        // the frame it is reading, so even a handshake-first capture is lost.
+        // This is what makes "any bound at or above 1 is harmless to a capture
+        // that includes bring-up" a measurement instead of a restatement.
+        let mut too_tight = SerialLine::with_limit(Some(0));
+        too_tight.push(7, 0, &encode_frame(SERIAL_FLAG_INIT, &[]).expect("encodes"));
+        assert!(
+            too_tight.census().committed_positionally && !too_tight.census().roles_witnessed,
+            "a ceiling of 0 refuses the handshake in its own first frame: {:?}",
+            too_tight.census()
+        );
+
+        // AND THE SHIPPED VALUE IS ON THE SAFE SIDE OF THAT BOUNDARY, read from
+        // the preset rather than restated here -- a copy of the number would
+        // pass while the preset moved underneath it.
+        let shipped = crate::DissectionLimits::for_live_tap()
+            .serial_frames_before_attribution
+            .expect("the live-tap preset bounds this axis");
+        assert!(
+            shipped >= 2,
+            "the live-tap ceiling ({shipped}) must clear the measured worst \
+             ordering of pico's connect loop"
+        );
+        let mut at_shipped = SerialLine::with_limit(Some(shipped));
+        at_shipped.push(9, 0, &reset);
+        at_shipped.push(7, 1, &encode_frame(SERIAL_FLAG_INIT, &[]).expect("encodes"));
+        assert!(
+            at_shipped.census().roles_witnessed && !at_shipped.census().committed_positionally,
+            "so the shipped preset settles the worst ordering by measurement"
+        );
+    }
+
     /// R311y722 — THE BOUND COMMITS RATHER THAN DISCARDS, and a late handshake
     /// cannot flip a line that has already committed.
     ///

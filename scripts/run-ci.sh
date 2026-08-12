@@ -1701,6 +1701,24 @@ PY
     # first: the step's own COMMENT explains why its `WZ_*_REQUIRE` is set, and
     # the matcher read the explanation as the setting.
     python3 scripts/lib/store_reader_lane_lint.py >/dev/null || return 1
+    # R311y758 (carry N53) — the ATOM DENOMINATOR gate. A5 prints "201 of 213
+    # atoms" and A3 prints "atoms=213"; both NUMERATORS are checked to death and
+    # nothing checked the denominator. R311y743 widened `inventory_kinds.is_atom`
+    # while moving the debt register into the store, A5 printed "201 of 215" and
+    # exited 0 — a growing denominator makes every individual assertion EASIER,
+    # so no gate over it could notice. Pinning the number would red on every
+    # legitimate atom addition and decay into a reflex edit, so the check is two
+    # INDEPENDENT discriminators naming the same SET: by prefix (the predicate
+    # y743 widened) and by section_ref binding (an atom is bound to the section
+    # that specifies it; a bundle or a debt item is not, and cannot be).
+    # Enforcement MEASURED five ways: the literal y743 shape (the debt prefix
+    # unknown to the predicate) reds printing "286 by prefix, 213 by
+    # section_ref"; the same widening as an overlap reds on the partition; an
+    # atom losing its binding reds in the OPPOSITE direction; an empty store
+    # FAILs instead of passing every set comparison vacuously; and an unreadable
+    # store FAILs under WZ_C0_REQUIRE while skipping without it. Each revert
+    # returns OK.
+    python3 scripts/lib/inventory_denominator_lint.py >/dev/null || return 1
     # R311y581 — the UNWIRED-LANE gate: a lane in run-ci.sh but not in
     # ci.yml's --layer set runs ONLY in a local full sweep. Seven were found,
     # one of them created by the round that closed the sibling debt. See the
