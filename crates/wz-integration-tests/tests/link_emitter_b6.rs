@@ -76,6 +76,28 @@ fn emit_link_c11(scxml_name: &str) -> Option<String> {
 
     let out_dir = tempfile::tempdir().expect("create tempdir");
     let status = Command::new(&bin)
+        // R311y756 — the FOURTH site that spawns sce-codegen and therefore the
+        // fourth that had to name its resource directories. `--workspace-root`
+        // does not carry the Jinja2 templates or the XSD schemas; those resolve
+        // against wherever the binary believes it lives, which is a fact about
+        // the machine. On a build host this test died with `Cannot find Jinja2
+        // templates` while passing here — the shape this workspace calls "a gate
+        // verified here may not run there".
+        .env(
+            "SCE_TEMPLATE_DIR",
+            std::env::var_os("SCE_TEMPLATE_DIR").unwrap_or_else(|| {
+                sce_workspace()
+                    .join("tools")
+                    .join("codegen")
+                    .join("templates")
+                    .into_os_string()
+            }),
+        )
+        .env(
+            "SCE_SCHEMAS_DIR",
+            std::env::var_os("SCE_SCHEMAS_DIR")
+                .unwrap_or_else(|| sce_workspace().join("schemas").into_os_string()),
+        )
         .arg("--workspace-root")
         .arg(sce_workspace())
         .arg("generate")

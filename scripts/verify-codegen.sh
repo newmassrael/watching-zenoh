@@ -83,6 +83,21 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCE_CODEGEN="$ROOT/vendor/sce/target/release/sce-codegen"
 
+# R311y756 — THE TWO RESOURCE DIRECTORIES, NAMED RATHER THAN SEARCHED.
+#
+# sce-codegen looks for its Jinja2 templates and its XSD schemas relative to
+# wherever it thinks it is installed, and falls back through several guesses. On
+# a build host every guess missed: `Cannot find Jinja2 templates` killed all six
+# backends and `schemas/sce-forge.xsd not found` silently DOWNGRADED validation
+# to "parsed structurally, sce: attributes unchecked" — a warning, which is the
+# worse half, because a gate that quietly stops checking still prints green.
+#
+# Both live in the vendored checkout this script already resolves, so both are
+# stated. `export`, because the binary reads them from the environment, and only
+# when unset — a caller who has a reason to point elsewhere still can.
+export SCE_TEMPLATE_DIR="${SCE_TEMPLATE_DIR:-$ROOT/vendor/sce/tools/codegen/templates}"
+export SCE_SCHEMAS_DIR="${SCE_SCHEMAS_DIR:-$ROOT/vendor/sce/schemas}"
+
 if [[ $# -lt 1 || $# -gt 2 ]]; then
     echo "usage: $0 <scxml> [<sce-upstream-fixture>]" >&2
     exit 2
@@ -166,7 +181,22 @@ emit() {
         extra_args+=("--go-module-prefix" "$GO_MOD_PREFIX")
     fi
 
+    # R311y756 — NAME THE WORKSPACE ROOT; do not let it be discovered.
+    #
+    # sce-codegen resolves it as `--workspace-root` -> `$SCE_WORKSPACE_ROOT` ->
+    # `CARGO_MANIFEST_DIR/..` (baked in when the binary was compiled) -> a walk up
+    # from the cwd. Every one of those is a fact about the MACHINE rather than
+    # about this repository, and on 2026-08-12 the last three all missed on a
+    # build host: all six backends failed with `workspace root not detected`, and
+    # the Jinja2 templates under it went unfound with them, taking Layers B, B2
+    # and C1 down. The same tree passes here, which is the signature of a gate
+    # that depends on where it runs.
+    #
+    # This script already knows the answer — `$ROOT/vendor/sce` is the vendored
+    # checkout it just ran the binary out of — so it says it. One argument turns
+    # an ambient lookup into a stated fact.
     "$SCE_CODEGEN" generate \
+        --workspace-root "$ROOT/vendor/sce" \
         --language "$backend" \
         --output-dir "$out" \
         "${extra_args[@]}" \

@@ -420,6 +420,29 @@ fn emit_ast(
     let scxml = src.join(format!("{stem}.scxml"));
     let ast = out_dir.join(format!("{stem}.ast.json"));
     let mut cmd = Command::new(bin);
+    // R311y756 — the THIRD call site that needed the resource directories named,
+    // and the reason to state it here rather than once somewhere central: each of
+    // these spawns sce-codegen itself, so each inherits whatever the ambient
+    // environment happens to hold. `--workspace-root` was already passed here and
+    // was NOT enough — templates and schemas resolve on their own path — so this
+    // one still died with `Cannot find Jinja2 templates` on a build host after
+    // the other two were fixed. Derived from the workspace this function is
+    // already given; an explicit setting by the caller still wins.
+    cmd.env(
+        "SCE_TEMPLATE_DIR",
+        std::env::var_os("SCE_TEMPLATE_DIR").unwrap_or_else(|| {
+            workspace
+                .join("tools")
+                .join("codegen")
+                .join("templates")
+                .into_os_string()
+        }),
+    )
+    .env(
+        "SCE_SCHEMAS_DIR",
+        std::env::var_os("SCE_SCHEMAS_DIR")
+            .unwrap_or_else(|| workspace.join("schemas").into_os_string()),
+    );
     cmd.arg("--workspace-root")
         .arg(workspace)
         .arg("generate")

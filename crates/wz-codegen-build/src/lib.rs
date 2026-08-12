@@ -112,6 +112,36 @@ impl Codegen {
     fn run_generate(&self, stem: &str, resource_dir: &Path, out_dir: &Path) {
         let scxml_path = resource_dir.join(format!("{stem}.scxml"));
         let status = Command::new(&self.sce_codegen)
+            // R311y756 — the RESOURCE directories too, not only the root.
+            //
+            // `--workspace-root` tells sce-codegen where the workspace is; it
+            // does NOT tell it where its Jinja2 templates and XSD schemas live,
+            // and those are resolved separately against wherever the binary
+            // thinks it was installed. On a build host every one of those
+            // guesses missed and every emit died with `Cannot find Jinja2
+            // templates`, taking Layers B2 and C1 with it — while the identical
+            // tree passed here, which is the signature of a resolution that
+            // depends on the machine rather than on the repository.
+            //
+            // The paths are derived from the workspace this struct already
+            // holds, so nothing new has to be configured or kept in step. Set
+            // rather than overridden: a caller with a reason to point elsewhere
+            // keeps it.
+            .env(
+                "SCE_TEMPLATE_DIR",
+                std::env::var_os("SCE_TEMPLATE_DIR").unwrap_or_else(|| {
+                    self.sce_workspace
+                        .join("tools")
+                        .join("codegen")
+                        .join("templates")
+                        .into_os_string()
+                }),
+            )
+            .env(
+                "SCE_SCHEMAS_DIR",
+                std::env::var_os("SCE_SCHEMAS_DIR")
+                    .unwrap_or_else(|| self.sce_workspace.join("schemas").into_os_string()),
+            )
             .arg("--workspace-root")
             .arg(&self.sce_workspace)
             .arg("generate")

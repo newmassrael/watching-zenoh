@@ -1296,8 +1296,18 @@ layer_b2_regen_diff() {
         echo "Layer B2 SKIP (xtask build failed — libxml2/sce-build toolchain absent?)"
         return 0
     fi
-    if ! cargo run --manifest-path xtask/Cargo.toml --quiet -- regen >/dev/null 2>&1; then
-        echo "Layer B2 FAIL: xtask regen errored" >&2
+    # R311y756 — KEEP WHAT IT SAID. This discarded both streams and printed four
+    # words, so a failure carried no evidence and learning anything meant running
+    # it again — the shape guard rule F2 exists for, inside this repo's own gate.
+    # MEASURED: on a build host B2 failed here and the log held nothing but
+    # `xtask regen errored`; the cause could not be read at all.
+    local regen_log="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/b2-xtask-regen.log"
+    mkdir -p "$(dirname "$regen_log")" 2>/dev/null || true
+    if ! cargo run --manifest-path xtask/Cargo.toml --quiet -- regen \
+        >"$regen_log" 2>&1; then
+        echo "Layer B2 FAIL: xtask regen errored — its output follows" >&2
+        tail -40 "$regen_log" >&2
+        echo "  full: $regen_log" >&2
         return 1
     fi
     local dirty
