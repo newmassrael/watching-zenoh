@@ -79,9 +79,17 @@ xtask/target/
 docs/GENERATED.md
 
 # Local Claude Code state — settings.local.json, scheduled_tasks.lock,
-# transcripts, etc. Team-shared .claude/settings.json (if introduced)
-# would carve out via an explicit `!.claude/settings.json` exception.
-.claude/
+# transcripts, etc.
+#
+# `.claude/*` and NOT `.claude/`: git cannot re-include a file whose parent
+# DIRECTORY is excluded, so the `!` exception below is inert under the
+# directory form. The comment here used to promise a carve-out in exactly that
+# unusable shape; matching the entries instead makes it work.
+.claude/*
+# The remote-build declaration is a REPOSITORY fact — what may be offloaded to
+# a build machine and what may not — rather than local state. A clone without
+# it cannot offload anything, and the skill reads it from the repo root.
+!.claude/remote-build.toml
 
 # Activity logs (local working notes; outside mnemosyne workspace).
 # Cross-session handoff lives in the atomic changelog (audit-traced);

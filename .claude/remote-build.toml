@@ -1,0 +1,66 @@
+# Remote-build declaration for watching-zenoh (R311y737).
+#
+# WHAT THIS FILE IS FOR. The remote-build skill refuses to guess: a repository
+# says what it needs and what verifies it, and the machine registry — which
+# lives OUTSIDE this repository — says where that can run. No machine name
+# appears here. This repo is public, and a machine name tells a reader nothing
+# a spec does not tell them better.
+#
+# ─── WHY MOST OF THIS REPO'S GATES CANNOT GO REMOTE ─────────────────
+#
+# `run-ci.sh` is NOT a candidate for offloading, and that is a property of the
+# gates rather than of their cost. `round-runner.sh` already writes the reason
+# down under "WHY THIS MACHINE AND NOT A CLOUD RUNNER", and it applies here:
+#
+#   * the pico oracle needs `target/zenoh-pico-build/lib/libzenohpico.so`,
+#     built from the vendored source on the machine that runs the lane;
+#   * the SSOT gates need `mnemosyne-cli` at the pinned rev on PATH;
+#   * the footprint lanes read THIS box's ARM toolchain — a different gcc
+#     changes the numbers (measured: -8 / -36 bytes between 13.2.1 and CI's
+#     10.3.1), so a remote pass is a pass of a different measurement;
+#   * the push gate reads `.git/wz-nda-terms.txt`, which by design exists only
+#     on this machine.
+#
+# A machine without those reports green on checks that never ran, which is the
+# single failure this workspace spends most of its gates preventing. So what
+# goes remote is the COMPILE-AND-TEST weight, and the verdict-bearing gates
+# stay here.
+#
+# ─── AND WHY THE WHOLE WORKSPACE CANNOT BE BUILT AT ONCE ────────────
+#
+# `cargo test --workspace` does not build in this tree and that is deliberate:
+# `sce-rust-runtime` carries a `compile_error!` for feature combinations the
+# workspace unification produces, and `wz-session-lwip` forces
+# `wz-session-core/no_std` through non-optional deps, which cannot coexist with
+# the std runtime `wz-runtime-tokio` pulls. Per-package is the only shape that
+# builds, which is why the commands below name packages.
+
+send = "tracked"
+
+# `/crates/target` is a SYMLINK into ~/.buildcache — rsyncing it lands a broken
+# link on the far side (skill rule 1). `/vendor/sce/target` is the codegen
+# toolchain's own build dir and is rebuilt where it is used.
+exclude = ["/crates/target", "/vendor/sce/target", "/.round"]
+
+needs = ["cargo"]
+
+# libxml2 is pulled in by `sce-build`, which the codegen path links against.
+# Only needed if a remote command reaches the xtask regen; the test commands
+# below do not, and this is listed so a machine that lacks it says so early.
+packages = ["libxml2-dev"]
+
+# Measured on the local box rather than guessed: 31 GB total went 13 GB into
+# swap running this tree's test build, so ~44 GB is the honest working figure.
+# The tree itself reaches 42 GB after a full gate.
+min_ram_gb = 48
+min_free_gb = 60
+
+[commands]
+# The four crates that carry this workspace's analyzer weight and its longest
+# compiles. Named individually because `--workspace` cannot build (see above).
+build = "cd crates && cargo test -p wz-capture -p wz-analyze -p wz-replay -p wz-session-core --no-run"
+verify = "cd crates && cargo test -p wz-capture -p wz-analyze -p wz-replay -p wz-session-core --no-fail-fast"
+
+# `peak_gb_per_task` is deliberately absent: nobody has measured what one test
+# of this tree holds at its peak, and a number nobody measured would be read as
+# one that someone did.
