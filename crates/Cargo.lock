@@ -2590,6 +2590,7 @@ dependencies = [
  "tokio-serial",
  "wz",
  "wz-capi-pico",
+ "wz-capture",
  "wz-codecs",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",

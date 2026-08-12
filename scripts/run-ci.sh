@@ -7377,6 +7377,36 @@ layer_ewire_pico_wire_dissection() {
     echo "  Ewire: the analyzer parsed a real zenoh-pico session end to end"
 }
 
+# R311y760 (carry N65) — the same witness against the OTHER reference
+# implementation. Ewire closed "every analyzer witness is self-authored" for
+# zenoh-pico and explicitly did NOT close it for stock zenoh: the two are
+# separate encoders and the roles swap, so the pico capture's foreign half is a
+# CLIENT's and this one's is a ROUTER's. Its first run dissected
+# `[Init, Open, Frame, Frame, Frame]` from zenohd against `[Init, Open]` from wz
+# -- three messages a router chose to send, which no pico witness can produce,
+# and every one of them parsed.
+#
+# SEPARATE LANE rather than a leg of Ewire because the prerequisite differs: this
+# needs `zenohd`, that needs the pico CLI, and folding them would make either
+# missing binary skip both.
+#
+# Falsification MEASURED: bypassing the tap (dialling zenohd directly) reds with
+# `the tap never saw both directions` -- the session succeeds either way and only
+# the recording tells them apart.
+layer_ewirez_zenohd_wire_dissection() {
+    local zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}"
+    (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
+    if [[ ! -x "$zenohd" ]]; then
+        _z_unavailable "zenohd not built ($zenohd; run: bash scripts/build-zenohd.sh)" || return 1
+        return 0
+    fi
+    _runci_guarded_test "Ewirez stock-zenohd dissection" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenohd_wire_dissection -- --ignored --quiet --test-threads=1 \
+        || return 1
+    echo "  Ewirez: the analyzer parsed a real zenohd session end to end"
+}
+
 layer_e_ap_demo_round_trip() {
     # R311y478 — z_pong joins the guarded set. It is the counterparty for the
     # §5.27 drop-in round-trip leg, and it arrived AFTER the other four, so a
@@ -11729,6 +11759,7 @@ run_layer C1cd layer_c1cd_api_compat_c_attachment || overall=1
 run_layer C1by layer_c1by_replay_engine || overall=1
 run_layer Epico layer_epico_library_oracles || overall=1
 run_layer Ewire layer_ewire_pico_wire_dissection || overall=1
+run_layer Ewirez layer_ewirez_zenohd_wire_dissection || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1
 run_layer E3 layer_e3_router_multi_peer || overall=1

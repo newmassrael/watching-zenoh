@@ -4234,3 +4234,174 @@ mod tests {
         assert_eq!(line_with(captured, "no such needle"), None);
     }
 }
+
+/// R311y759 (carry N65) — the WIRE TAP: bytes a foreign implementation wrote,
+/// carried to the analyzer without a capture hook and without `CAP_NET_RAW`.
+///
+/// ## Why this exists at all
+///
+/// Measured at R311y759: the analyzer carried 649 passing tests and ZERO of them
+/// used bytes wz did not author. No `.pcap` in the tree, no `include_bytes!` of a
+/// real capture, no lane feeding a foreign process's output to `wz-capture` —
+/// while Layers Z and E were already driving a real `zenohd` and a real
+/// zenoh-pico. A decoder graded only against its own encoder cannot detect a
+/// misreading the two share, which is the one failure this workspace's rule
+/// ("the oracle anchor is stock traffic, not wz") exists to prevent.
+///
+/// ## The shape
+///
+/// A relay sits between the two processes: each side dials or accepts as it
+/// normally would, and every byte is recorded as it is forwarded. No production
+/// code learns about capture — a witness satisfied by a hook that exists only for
+/// it proves nothing — and no privileged socket is involved, which is what keeps
+/// `wz_runtime_tokio::live_capture`'s AF_PACKET tap `#[ignore]`d and unrunnable
+/// in CI.
+///
+/// ## The envelope is synthesised, and that is stated rather than implied
+///
+/// STOCK: every byte above TCP. SYNTHESISED: Ethernet / IPv4 / TCP, because a
+/// userspace relay cannot observe headers the kernel wrote. The envelope is the
+/// vehicle and not the claim — decapsulation already has coverage over seven link
+/// types, and what had never been tested is the layer above it.
+pub mod wire_tap {
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
+
+    /// Which endpoint wrote a recorded segment.
+    ///
+    /// Named by ROLE rather than by implementation, because the roles swap
+    /// between witnesses: against zenoh-pico the foreign process dials and wz
+    /// accepts, and against `zenohd` it is the other way round.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Side {
+        /// Written by whoever DIALLED the proxy.
+        FromDialer,
+        /// Written by whoever the proxy dialled — the upstream listener.
+        FromListener,
+    }
+
+    /// Segments in the order the proxy forwarded them, which is the order the
+    /// wire carried them. Interleaving across directions is preserved because
+    /// the handshake's alternation is part of what is being witnessed.
+    pub type Recording = Arc<Mutex<Vec<(Side, Vec<u8>)>>>;
+
+    fn pump(mut from: TcpStream, mut to: TcpStream, side: Side, log: Recording) {
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            match from.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    // Record BEFORE forwarding. A segment forwarded but not
+                    // recorded shrinks the capture silently, which makes every
+                    // downstream assertion weaker instead of failing.
+                    let segment = buf[..n].to_vec();
+                    log.lock().expect("recording lock").push((side, segment));
+                    if to.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = to.shutdown(Shutdown::Write);
+    }
+
+    /// Start a relay in front of `upstream_port`. Returns the port to dial and
+    /// the recording both directions land in.
+    ///
+    /// One connection only: every witness built on this relays a single session,
+    /// and accepting a second would interleave two streams into one recording
+    /// with no way to tell them apart.
+    pub fn tap_proxy(upstream_port: u16) -> (u16, Recording) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind tap proxy");
+        let port = listener.local_addr().expect("proxy addr").port();
+        let log: Recording = Arc::new(Mutex::new(Vec::new()));
+        let log_thread = Arc::clone(&log);
+        std::thread::spawn(move || {
+            let Ok((client, _)) = listener.accept() else {
+                return;
+            };
+            let Ok(server) = TcpStream::connect(("127.0.0.1", upstream_port)) else {
+                return;
+            };
+            let c_read = client.try_clone().expect("clone client");
+            let c_write = client;
+            let s_read = server.try_clone().expect("clone server");
+            let s_write = server;
+            let up_log = Arc::clone(&log_thread);
+            let down_log = Arc::clone(&log_thread);
+            let up = std::thread::spawn(move || pump(c_read, s_write, Side::FromDialer, up_log));
+            let down =
+                std::thread::spawn(move || pump(s_read, c_write, Side::FromListener, down_log));
+            let _ = up.join();
+            let _ = down.join();
+        });
+        (port, log)
+    }
+
+    const ETHERTYPE_IPV4: u16 = 0x0800;
+    const IPPROTO_TCP: u8 = 6;
+
+    /// Wrap one recorded segment as Ethernet / IPv4 / TCP.
+    ///
+    /// Checksums are left zero: `wz-capture`'s TCP path does not verify them, so
+    /// computing them would assert nothing this harness is about. The lengths and
+    /// sequence numbers ARE real, because reassembly reads them.
+    fn tcp_packet(src_port: u16, dst_port: u16, seq: u32, payload: &[u8]) -> Vec<u8> {
+        let mut pkt = Vec::with_capacity(14 + 20 + 20 + payload.len());
+        pkt.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x02]);
+        pkt.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x01]);
+        pkt.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
+        let total_len = (20 + 20 + payload.len()) as u16;
+        pkt.extend_from_slice(&[0x45, 0x00]);
+        pkt.extend_from_slice(&total_len.to_be_bytes());
+        pkt.extend_from_slice(&[0x00, 0x00, 0x40, 0x00, 64, IPPROTO_TCP, 0x00, 0x00]);
+        pkt.extend_from_slice(&[127, 0, 0, 1]);
+        pkt.extend_from_slice(&[127, 0, 0, 1]);
+        pkt.extend_from_slice(&src_port.to_be_bytes());
+        pkt.extend_from_slice(&dst_port.to_be_bytes());
+        pkt.extend_from_slice(&seq.to_be_bytes());
+        pkt.extend_from_slice(&0u32.to_be_bytes());
+        pkt.extend_from_slice(&[0x50, 0x18]);
+        pkt.extend_from_slice(&8192u16.to_be_bytes());
+        pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        pkt.extend_from_slice(payload);
+        pkt
+    }
+
+    /// Turn a recording into a pcap, preserving forwarding order.
+    ///
+    /// The two ports are the SYNTHESISED endpoints, not the real ones: the real
+    /// dialer port is ephemeral and the proxy sits between, so neither side's
+    /// actual port describes the conversation being reconstructed.
+    pub fn synthesise_pcap(
+        recording: &[(Side, Vec<u8>)],
+        dialer_port: u16,
+        listener_port: u16,
+    ) -> Vec<u8> {
+        let mut dialer_seq: u32 = 1;
+        let mut listener_seq: u32 = 1;
+        let mut packets: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+        for (index, (side, bytes)) in recording.iter().enumerate() {
+            let pkt = match side {
+                Side::FromDialer => {
+                    let p = tcp_packet(dialer_port, listener_port, dialer_seq, bytes);
+                    dialer_seq = dialer_seq.wrapping_add(bytes.len() as u32);
+                    p
+                }
+                Side::FromListener => {
+                    let p = tcp_packet(listener_port, dialer_port, listener_seq, bytes);
+                    listener_seq = listener_seq.wrapping_add(bytes.len() as u32);
+                    p
+                }
+            };
+            packets.push((1, index as u32, pkt));
+        }
+        let borrowed: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .map(|(s, f, p)| (*s, *f, p.as_slice()))
+            .collect();
+        wz_capture::pcap::write(wz_capture::link::LINKTYPE_ETHERNET, &borrowed)
+    }
+}

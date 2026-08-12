@@ -49,6 +49,14 @@ path = "src/lib.rs"
 # lane; `libc` was already in `crates/Cargo.lock` via wz-runtime-tokio.
 [dependencies]
 libc = "0.2"
+# R311y760 — the analyzer, promoted from dev-dependencies because the wire-tap
+# harness in `src/lib.rs` synthesises the pcap envelope and therefore needs it at
+# LIB scope. It lives in one place on purpose: the envelope rules (link type,
+# per-direction sequence numbers) are a single fact, and two copies of them would
+# drift the moment one witness needed a different link. Same reasoning as
+# `inventory_kinds` for the inventory predicate. This crate is test-only and
+# reaches no footprint / MCU / no_std lane, so the dependency costs nothing there.
+wz-capture = { path = "../wz-capture" }
 
 [dev-dependencies]
 # R311y498 — the §5.27 api-compat-c layout gate dlopens wz's OWN cdylib to read
@@ -68,12 +76,6 @@ wz-codecs = { path = "../wz-codecs", features = ["codec-serial"] }
 # one of its three clients, so the measurement lives in ONE file beside the
 # pico + demo legs it is compared against (rlib crate-type makes this linkable).
 wz-capi-pico = { path = "../wz-capi-pico" }
-# R311y759 — the analyzer, so a capture of REAL zenoh-pico bytes can be handed to
-# it in the same test that produced them. Every other dissection witness in this
-# workspace feeds wz-capture bytes wz itself synthesised; this crate is where a
-# foreign process can be made to speak, so it is the only place the analyzer can
-# be pointed at traffic it did not author.
-wz-capture = { path = "../wz-capture" }
 # W3 no-alloc bounded mirror migration — tests build owned-mirror
 # heapless fields via the `codec_bound::bounded_{bytes,string}` helpers
 # (the same idiom production code uses at decode boundaries).

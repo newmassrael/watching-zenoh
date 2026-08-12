@@ -1485,6 +1485,20 @@ jobs:
           WZ_Z_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer Z
 
+      - name: Layer Ewirez — the analyzer, on bytes a real zenohd wrote
+        # R311y760 (carry N65) — the sibling of Layer Ewire against the OTHER
+        # reference implementation. Ewire closed the self-authored-fixture hole
+        # for zenoh-pico and explicitly not for stock zenoh: the roles swap, so
+        # the foreign half here is what a ROUTER writes. Its first run dissected
+        # three router-side Frames that no pico witness can produce.
+        #
+        # Wired HERE because this job is what builds and guarantees zenohd; the
+        # same `WZ_Z_REQUIRE` reasoning applies, and the lane's own prereq check
+        # turns an absent binary into a FAIL under it.
+        env:
+          WZ_Z_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer Ewirez
+
       - name: Layer M — multicast loopback + wz<->pico multicast interop (R311y421)
         # WHY THIS LANE MOVED FROM OPT-IN TO HOSTED. Layer A4 reports three atoms
         # sitting in the headline `proven` with NO hosted witness of any kind; for

@@ -76,11 +76,7 @@
 //! The assertions that DID carry the falsification are the flow count and the
 //! both-halves count.
 
-use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wz_capture::Dissection;
@@ -88,149 +84,9 @@ use wz_integration_tests::common::{
     graceful_terminate, read_captured, spawn_on_ephemeral_port, wait_for_substring,
     wz_ap_demo_binary, zenoh_pico_cli_binary,
 };
+use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Side};
 use wz_session_core::inbound::InboundFrame;
 use wz_session_core::passive::Direction;
-
-/// Which half of the relayed connection a recorded segment came from.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Side {
-    /// Written by the real zenoh-pico process.
-    FromPico,
-    /// Written by `wz-ap-demo`.
-    FromWz,
-}
-
-/// Segments in the order the proxy forwarded them, which is the order the wire
-/// carried them. Interleaving is preserved across directions on purpose: a
-/// per-direction accumulation would lose the handshake's alternation, and the
-/// dissector's stream assembler is per-direction anyway.
-type Recording = Arc<Mutex<Vec<(Side, Vec<u8>)>>>;
-
-/// Relay one direction, recording what passes. Ends on EOF or error, and
-/// half-closes the far side so the peer sees the same shutdown it would have.
-fn pump(mut from: TcpStream, mut to: TcpStream, side: Side, log: Recording, done: Arc<AtomicBool>) {
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        match from.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                // Record BEFORE forwarding: a segment that is forwarded and not
-                // recorded would silently shrink the capture, and the assertion
-                // downstream reads as weaker rather than failing.
-                let segment = buf[..n].to_vec();
-                log.lock().expect("recording lock").push((side, segment));
-                if to.write_all(&buf[..n]).is_err() {
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    let _ = to.shutdown(Shutdown::Write);
-    done.store(true, Ordering::SeqCst);
-}
-
-/// A TCP relay in front of `upstream_port`. Returns the port to dial and the
-/// recording both directions land in.
-fn tap_proxy(upstream_port: u16) -> (u16, Recording) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind tap proxy");
-    let port = listener.local_addr().expect("proxy addr").port();
-    let log: Recording = Arc::new(Mutex::new(Vec::new()));
-    let log_thread = Arc::clone(&log);
-    std::thread::spawn(move || {
-        let (client, _) = match listener.accept() {
-            Ok(pair) => pair,
-            Err(_) => return,
-        };
-        let server = match TcpStream::connect(("127.0.0.1", upstream_port)) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let (c_read, c_write) = (
-            client.try_clone().expect("clone client"),
-            client.try_clone().expect("clone client"),
-        );
-        let (s_read, s_write) = (
-            server.try_clone().expect("clone server"),
-            server.try_clone().expect("clone server"),
-        );
-        let up_done = Arc::new(AtomicBool::new(false));
-        let down_done = Arc::new(AtomicBool::new(false));
-        let up_log = Arc::clone(&log_thread);
-        let down_log = Arc::clone(&log_thread);
-        let up = std::thread::spawn({
-            let done = Arc::clone(&up_done);
-            move || pump(c_read, s_write, Side::FromPico, up_log, done)
-        });
-        let down = std::thread::spawn({
-            let done = Arc::clone(&down_done);
-            move || pump(s_read, c_write, Side::FromWz, down_log, done)
-        });
-        let _ = up.join();
-        let _ = down.join();
-    });
-    (port, log)
-}
-
-const ETHERTYPE_IPV4: u16 = 0x0800;
-const IPPROTO_TCP: u8 = 6;
-
-/// Wrap one recorded segment as Ethernet / IPv4 / TCP.
-///
-/// Checksums are left zero: `wz-capture`'s TCP path does not verify them (there
-/// is no checksum check in `crates/wz-capture/src/tcp.rs`), and computing them
-/// here would assert nothing this witness is about. The lengths and sequence
-/// numbers ARE real, because reassembly reads them.
-fn tcp_packet(src_port: u16, dst_port: u16, seq: u32, payload: &[u8]) -> Vec<u8> {
-    let mut pkt = Vec::with_capacity(14 + 20 + 20 + payload.len());
-    // Ethernet: two locally-administered MACs, which is what a loopback-side
-    // synthesis can honestly claim.
-    pkt.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x02]);
-    pkt.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x01]);
-    pkt.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
-    let total_len = (20 + 20 + payload.len()) as u16;
-    pkt.extend_from_slice(&[0x45, 0x00]);
-    pkt.extend_from_slice(&total_len.to_be_bytes());
-    pkt.extend_from_slice(&[0x00, 0x00, 0x40, 0x00, 64, IPPROTO_TCP, 0x00, 0x00]);
-    pkt.extend_from_slice(&[127, 0, 0, 1]);
-    pkt.extend_from_slice(&[127, 0, 0, 1]);
-    pkt.extend_from_slice(&src_port.to_be_bytes());
-    pkt.extend_from_slice(&dst_port.to_be_bytes());
-    pkt.extend_from_slice(&seq.to_be_bytes());
-    pkt.extend_from_slice(&0u32.to_be_bytes()); // ack — unused by reassembly here
-    pkt.extend_from_slice(&[0x50, 0x18]); // data offset 5 words, PSH|ACK
-    pkt.extend_from_slice(&8192u16.to_be_bytes());
-    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-    pkt.extend_from_slice(payload);
-    pkt
-}
-
-/// Turn the recording into a pcap, preserving forwarding order.
-fn synthesise_pcap(recording: &[(Side, Vec<u8>)], pico_port: u16, wz_port: u16) -> Vec<u8> {
-    let mut from_pico_seq: u32 = 1;
-    let mut from_wz_seq: u32 = 1;
-    let mut packets: Vec<(u32, u32, Vec<u8>)> = Vec::new();
-    for (index, (side, bytes)) in recording.iter().enumerate() {
-        let pkt = match side {
-            Side::FromPico => {
-                let p = tcp_packet(pico_port, wz_port, from_pico_seq, bytes);
-                from_pico_seq = from_pico_seq.wrapping_add(bytes.len() as u32);
-                p
-            }
-            Side::FromWz => {
-                let p = tcp_packet(wz_port, pico_port, from_wz_seq, bytes);
-                from_wz_seq = from_wz_seq.wrapping_add(bytes.len() as u32);
-                p
-            }
-        };
-        packets.push((1, index as u32, pkt));
-    }
-    let borrowed: Vec<(u32, u32, &[u8])> = packets
-        .iter()
-        .map(|(s, f, p)| (*s, *f, p.as_slice()))
-        .collect();
-    wz_capture::pcap::write(wz_capture::link::LINKTYPE_ETHERNET, &borrowed)
-}
 
 /// A short name for a parsed transport message, for the assertion messages.
 fn frame_name(frame: &InboundFrame) -> &'static str {
@@ -312,12 +168,12 @@ fn the_analyzer_parses_every_message_a_real_zenoh_pico_session_puts_on_the_wire(
     );
     let from_pico: usize = segments
         .iter()
-        .filter(|(s, _)| *s == Side::FromPico)
+        .filter(|(s, _)| *s == Side::FromDialer)
         .map(|(_, b)| b.len())
         .sum();
     let from_wz: usize = segments
         .iter()
-        .filter(|(s, _)| *s == Side::FromWz)
+        .filter(|(s, _)| *s == Side::FromListener)
         .map(|(_, b)| b.len())
         .sum();
     assert!(
