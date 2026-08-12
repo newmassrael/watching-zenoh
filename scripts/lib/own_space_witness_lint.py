@@ -5,9 +5,10 @@
 witness pair.
 
 (The `R311y<round> (<item>)` opening is the convention carry N43 is about: a
-gate that does not name what it closes leaves the register unable to tell,
-mechanically, whether that item is still open. 10 of 33 gate scripts in
-`scripts/lib` follow it as of this round.)
+gate that does not name what it answers for leaves the register unable to tell,
+mechanically, whether that item is still open. Enforced since R311y741, and
+since R311y743 the carry half of a citation is resolved against the store's
+debt inventory rather than merely shape-checked.)
 
 ## What it closes
 

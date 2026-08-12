@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import os
+
+import inventory_kinds
 import re
 import sys
 from pathlib import Path
@@ -465,9 +467,11 @@ def main() -> int:
 
     status: dict[str, str] = {}
     reason: dict[str, str] = {}
+    # R311y743 — the atom/preset/debt line comes from `inventory_kinds`, the
+    # ONE definition all four consumers share, rather than a fourth inline copy.
     for e in entries:
-        aid = e.get("id") or e.get("inventory_id")
-        if not aid or aid.startswith("preset-"):
+        aid = inventory_kinds.entry_id(e)
+        if not aid or not inventory_kinds.is_atom(aid):
             continue
         status[aid] = e.get("status")
         # session-matching's reason is JSON null, not "" -- a .split() on it throws.

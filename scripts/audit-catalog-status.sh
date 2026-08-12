@@ -114,19 +114,26 @@ INV_FILE="$(mktemp)"
 trap 'rm -f "$INV_FILE"' EXIT
 mnemosyne-cli query --list-inventory --json 2>/dev/null >"$INV_FILE"
 
-INV_FILE="$INV_FILE" python3 - <<'PY'
+INV_FILE="$INV_FILE" A3_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" python3 - <<'PY'
 import json, os, re, subprocess, sys
 
 inv = json.load(open(os.environ["INV_FILE"]))
 entries = inv if isinstance(inv, list) else inv.get("entries", inv.get("inventory", []))
 
-# atom -> (status, section_ref), excluding presets (bundles, not atoms)
+# atom -> (status, section_ref). R311y743 — the atom/preset/debt line is drawn
+# by scripts/lib/inventory_kinds.py, the ONE definition all four inventory
+# consumers share; conflating the kinds is how R311y315's banner reported 219
+# atoms when the store has 213.
+sys.path.insert(0, os.path.join(os.path.dirname(os.environ["A3_SCRIPT_DIR"]), "lib"))
+sys.path.insert(0, os.path.join(os.environ["A3_SCRIPT_DIR"], "lib"))
+import inventory_kinds
+
 atoms = {}
 section_ref = {}
 reason = {}
 for e in entries:
-    aid = e.get("id") or e.get("inventory_id")
-    if not aid or aid.startswith("preset-"):
+    aid = inventory_kinds.entry_id(e)
+    if not aid or not inventory_kinds.is_atom(aid):
         continue
     atoms[aid] = e.get("status")
     section_ref[aid] = e.get("section_ref")

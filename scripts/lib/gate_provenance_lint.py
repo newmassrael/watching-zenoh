@@ -44,13 +44,25 @@ closes nothing" from "nobody wrote it down", and it was that ambiguity, not
 the absence of an item, that made the register unmaintainable. Declaring
 "nothing" costs one line and is a real answer.
 
-## What this CANNOT check, stated plainly
+## The citation is checked against the REGISTER (R311y743, carry N48)
 
-The register lives in the operator's notes, not in this repository, so this
-lint validates the SHAPE of the citation and never that the item exists or
-that the gate truly closes it. A citation can therefore be wrong; it cannot
-be absent. That is a smaller guarantee than it looks like it should be, and
-pretending otherwise would be the failure mode this file exists to fight.
+R311y741 could only check the SHAPE of a citation, because the register lived
+in the operator's notes rather than in the tree — so `(§9.9)` passed. R311y743
+moved the carry axis into the atomic store's INVENTORY, the same record type
+the 213 atoms already use, under a `debt-` prefix. A `N<nn>` citation is now
+resolved against `debt-carry-N<nn>`: naming an item the store does not hold is
+a FAIL that prints the id.
+
+Why the store and not a text file: the two debt axes in this project have
+opposite drift histories. The atoms are typed, section-bound inventory entries
+that four gates re-derive, and four independent re-measurements produced
+identical numbers; the register's lists were prose, and R311y739 could
+re-establish the open/closed state of four of roughly two hundred. The
+difference is the mechanism, not the content.
+
+STILL SHAPE-ONLY: `§N.N` base items and `CENSUS`. The §F base list has not
+migrated yet, so a `(§9.9)` citation still passes. That is the remaining half
+of N48 and it is stated here rather than implied by silence.
 
 ## Baseline, and why it is now EMPTY
 
@@ -78,6 +90,8 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+
+import inventory_kinds
 
 # `R<round> (<item>)` where <item> is a §-item, a carry N<nn>, CENSUS, or the
 # explicit no-item declaration. Anchored to a citation so a bare round number in
@@ -182,14 +196,40 @@ def main() -> int:
         print("usage: gate_provenance_lint.py [--emit]", file=sys.stderr)
         return 2
 
+    # R311y743 (N48) — resolve every carry citation against the store. A gate
+    # that cannot read its input must not report green, so an unreadable
+    # inventory is a FAIL rather than a skipped check.
+    try:
+        registered = set(inventory_kinds.debt())
+    except Exception as exc:  # noqa: BLE001 - the reason is reported, not swallowed
+        print(
+            f"gate-provenance: FAIL -- cannot read the store inventory ({exc}). "
+            f"The citation check cannot run, and a gate that cannot read its "
+            f"input must not pass.",
+            file=sys.stderr,
+        )
+        return 1
+
     names = {p.name for p in scripts}
     failures = []
     declared = 0
 
     for path in scripts:
-        ok = complies(path)
+        item = citation(path)
+        ok = item is not None
         if ok:
             declared += 1
+        # A carry citation must name an item the store actually holds. §-items
+        # and CENSUS stay shape-only until the base list migrates.
+        if item and item.startswith("N") and item[1:].isdigit():
+            if f"debt-carry-{item}" not in registered:
+                failures.append(
+                    f"{path.name}: cites `{item}`, which the store's debt "
+                    f"inventory does not hold. Register it "
+                    f"(`add-inventory-entry --id debt-carry-{item}`) or correct "
+                    f"the citation -- a citation nothing can resolve is the "
+                    f"shape R311y741 could not catch"
+                )
         if ok and path.name in BASELINE:
             failures.append(
                 f"{path.name}: now carries its provenance citation -- remove it "
@@ -223,8 +263,8 @@ def main() -> int:
 
     print(
         f"gate-provenance OK -- {declared} of {len(scripts)} gate script(s) "
-        f"declare what they close; {len(BASELINE)} carried from before the "
-        f"convention"
+        f"declare what they answer for; {len(registered)} debt item(s) registered; "
+        f"{len(BASELINE)} carried from before the convention"
     )
     return 0
 

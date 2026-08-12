@@ -45,6 +45,8 @@ then delete the row. Removing a row without an audit is silence-bypass.
 
 import json
 import subprocess
+
+import inventory_kinds
 import sys
 
 # Domains whose list already disagreed with the store at R311y315. A row is a
@@ -124,14 +126,12 @@ def store_atoms():
     bundles. Layer A3 draws the same line ("excluding presets (bundles, not
     atoms)") and prints the atom count; conflating the two is how R311y315's
     banner reported the store as having 219 atoms when it has 213.
+
+    R311y743 — the line itself now lives in `inventory_kinds`, shared by all
+    four consumers, so a third entry kind cannot be counted as an atom by
+    whichever consumer forgot to filter it.
     """
-    out = subprocess.run(
-        ["mnemosyne-cli", "query", "--list-inventory", "--json"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    return {r["id"] for r in json.loads(out) if not r["id"].startswith("preset-")}
+    return set(inventory_kinds.atoms())
 
 
 def audit(manifest_dir):

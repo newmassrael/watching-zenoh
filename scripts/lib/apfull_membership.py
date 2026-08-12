@@ -50,6 +50,8 @@ Usage:
 import json
 import os
 import subprocess
+
+import inventory_kinds
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -235,22 +237,17 @@ def closure(features, root):
 
 
 def inventory():
-    """atom id -> {status, reason}, presets excluded (they are bundles, not atoms)."""
-    out = subprocess.run(
-        ["mnemosyne-cli", "query", "--list-inventory", "--json"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        check=True,
-    ).stdout
-    data = json.loads(out)
-    entries = data if isinstance(data, list) else data.get("entries", data.get("inventory", []))
-    atoms = {}
-    for e in entries:
-        aid = e.get("id") or e.get("inventory_id")
-        if not aid or aid.startswith("preset-"):
-            continue
-        atoms[aid] = {"status": e.get("status"), "reason": (e.get("reason") or "")}
-    return atoms
+    """atom id -> {status, reason}.
+
+    R311y743 — the atom/preset/debt line is drawn by `inventory_kinds`, the ONE
+    definition all four inventory consumers share. It used to be spelled inline
+    here and in three other places; conflating the kinds is how R311y315's
+    banner reported 219 atoms when the store has 213.
+    """
+    return {
+        aid: {"status": e.get("status"), "reason": (e.get("reason") or "")}
+        for aid, e in inventory_kinds.atoms().items()
+    }
 
 
 def main():
