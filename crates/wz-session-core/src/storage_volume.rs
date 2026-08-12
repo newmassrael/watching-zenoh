@@ -107,7 +107,17 @@ pub trait Volume {
     /// heterogeneous storages behind the [`StorageBackend`] seam. A config-agnostic
     /// backend (e.g. in-memory) may ignore `config`; applying the config's
     /// `key_expr` / `strip_prefix` / `complete` above the backend is the storage
-    /// manager / service's job — NOT yet wired (the R311y55 carry's follow-up).
+    /// manager / service's job.
+    ///
+    /// R311y739 — that job IS done, and this doc said "NOT yet wired" long after
+    /// it stopped being true. Measured in `wz-runtime-tokio::storage_service`:
+    /// `key_expr` at `:251`, `strip_prefix` threaded into
+    /// `StorageState::with_strip_prefix` at `:178`, `complete` into
+    /// `QueryableOptions::with_complete` at `:287`, with
+    /// `queryable_complete_resolves_per_gate` and the six
+    /// `storage_strip_prefix::tests` as witnesses. A stale "not wired" note is
+    /// the same hazard as a missing one pointed the other way: it reopens
+    /// finished work.
     fn create_storage(
         &self,
         config: &StorageConfig,
@@ -138,8 +148,9 @@ impl Volume for MemoryVolume {
         // Always succeeds: a fresh in-memory store, config-agnostic. zenoh's
         // MemoryBackend likewise just makes a store (it retains the config only for
         // its admin-status, which wz's kernel seam does not carry); applying the
-        // config's key_expr / strip_prefix / complete is the manager/service's job
-        // and is NOT yet wired (a documented follow-up).
+        // config's key_expr / strip_prefix / complete is the manager/service's
+        // job, and R311y739 measured that it does all three -- see the trait
+        // method's doc for the call sites and their witnesses.
         Ok(Box::new(MemoryStorage::new()))
     }
 }
