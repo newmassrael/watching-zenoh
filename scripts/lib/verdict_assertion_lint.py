@@ -196,6 +196,51 @@ def is_test(masked: str, fn_start: int) -> bool:
     return bool(TEST_ATTR.search(masked[head:fn_start]))
 
 
+def test_scopes(masked: str) -> list[tuple[int, int]]:
+    """Byte ranges of every `#[cfg(test)] mod ..` block.
+
+    R311y729 (N21) — the population is TEST CODE, not functions carrying a test
+    attribute, and the difference is a hole rather than a nuance. A test that
+    moves its claim into a helper takes the claim out of a `#[test]` function,
+    and the earlier rule then asked about NEITHER: the test no longer names a
+    leg and the helper is not a test. The gate would have gone quiet exactly
+    when the code got harder to read.
+
+    Scoping by `cfg(test)` also keeps production code out, which the attribute
+    was doing incidentally: `CaptureReport::reasons` itself reads the list and
+    names every leg, and it is not a claim about anything.
+    """
+    out: list[tuple[int, int]] = []
+    # `test` as a TOKEN anywhere in the cfg, and any visibility on the module.
+    # Matching the literal `#[cfg(test)] mod` dropped
+    # `agg.rs::a_hand_folded_plane_cannot_decide_an_elapsed_term`, whose module
+    # is `#[cfg(all(test, feature = "network-codecs"))] pub(crate) mod tests` --
+    # the fifth time in two rounds that this gate's population was narrower
+    # than the thing it claims to check, and the only reason it surfaced is
+    # that the count moved 20 to 19.
+    for m in re.finditer(
+        r"#\[cfg\([^\]]*\btest\b[^\]]*\)\]\s*"
+        r"(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{",
+        masked,
+    ):
+        depth, j = 0, m.end() - 1
+        while j < len(masked):
+            if masked[j] == "{":
+                depth += 1
+            elif masked[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        out.append((m.start(), j + 1))
+    return out
+
+
+def calls(body: str, names: set[str]) -> set[str]:
+    """Which of `names` this body calls."""
+    return {n for n in names if re.search(rf"\b{re.escape(n)}\s*\(", body)}
+
+
 # An empty list, in the spellings this workspace uses. Equality against one is
 # the STRONGEST pin there is -- it says every leg is quiet -- and the first
 # version of this gate rejected it, because it looked only for `vec![`.
@@ -263,28 +308,51 @@ def main() -> int:
         masked = mask(src)
         rel = str(path.relative_to(REPO_ROOT))
         fns = list(functions(masked))
-        # Helpers that pin the list themselves, so calling one is as good as
-        # writing the assertion inline.
-        helpers = {
-            name
-            for name, start, end in fns
-            if not is_test(masked, start) and pins_the_list(masked[start:end])
+        # An integration test file IS test scope, all of it. Keying only on
+        # `#[cfg(test)] mod` dropped `wz-replay/tests/live.rs` -- the alert e2e,
+        # which is one of the tests this gate most wants to ask about -- because
+        # a file under `tests/` needs no such module. The population narrowed
+        # silently and the count went 20 to 19, which is the only reason it was
+        # noticed.
+        whole_file = "tests" in path.parts or "benches" in path.parts
+        scopes = test_scopes(masked)
+        in_tests = (lambda _at: True) if whole_file else (
+            lambda at: any(a <= at < b for a, b in scopes)
+        )
+        # Every function in test scope, by name, with what it does.
+        pinning = {
+            name for name, start, end in fns
+            if in_tests(start) and pins_the_list(masked[start:end])
         }
+        all_test_fns = {name for name, start, _e in fns if in_tests(start)}
+        # Who calls whom, within this file's test scope. R311y729 (N21) — a
+        # claim and its pin may sit in different functions, and the pin counts
+        # from either direction: a helper that pins is as good as an inline
+        # assertion, and a helper that CLAIMS is covered by the caller that
+        # pins, because they run together.
+        callers_of: dict[str, set[str]] = {}
+        for name, start, end in fns:
+            if not in_tests(start):
+                continue
+            for callee in calls(masked[start:end], all_test_fns - {name}):
+                callers_of.setdefault(callee, set()).add(name)
         for name, start, end in fns:
             body = masked[start:end]
+            if not in_tests(start):
+                continue
             if not READS_LIST.search(body):
                 continue
             named = sorted(set(NAMES_LEG.findall(body)))
             if not named:
-                continue
-            if not is_test(masked, start):
                 continue
             checked += 1
             if (rel, name) in ALLOW:
                 continue
             if pins_the_list(body):
                 continue
-            if any(re.search(rf"\b{re.escape(h)}\s*\(", body) for h in helpers):
+            if calls(body, pinning):
+                continue
+            if callers_of.get(name, set()) & pinning:
                 continue
             line = src.count("\n", 0, start) + 1
             bare.append((rel, line, name, named))

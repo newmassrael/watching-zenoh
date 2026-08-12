@@ -211,6 +211,161 @@ def boundary(pristine: str, variant: str) -> str | None:
     return out if reached else None
 
 
+# ─── The PREDICATE layer (R311y729, N20) ────────────────────────────
+#
+# Eight of the twenty-three guards hold no threshold of their own: they ask
+# `drops().any()`, `!gaps().is_clean()`, `!selection().is_decisive()`. R311y728
+# named them and moved on, which was honest and left the most interesting legs
+# -- the plane and bounds ones, whose fixtures are hardest to reduce to a single
+# instance -- with no boundary question at all.
+#
+# The thresholds are one level down, inside those predicates, so this follows
+# the call ONE STEP and moves them there. What that buys is the same question in
+# a different unit: not "does a fixture trip THIS LEG with the smallest
+# evidence" but "does any test depend on this PREDICATE's threshold". The unit
+# is deliberately not the leg -- three legs share `is_decisive`, so a mutant
+# there is answered by any of them, and claiming otherwise would be this tool
+# reporting a precision it does not have.
+#
+# Each recipe is an exact (anchor, old, new) inside one function. A recipe whose
+# `old` no longer matches, or matches twice, FAILS the run rather than being
+# skipped: the predicate moved, and a stale recipe silently mutating nothing is
+# the population-of-zero green in its purest form.
+
+_IS_CLEAN_OLD = """    pub fn is_clean(&self) -> bool {
+        *self == Self::default()
+    }"""
+
+
+def _relax_field(field: str) -> str:
+    """`is_clean` that forgives ONE of `field`, and nothing else."""
+    return f"""    pub fn is_clean(&self) -> bool {{
+        let mut relaxed = *self;
+        relaxed.{field} = relaxed.{field}.saturating_sub(1);
+        relaxed == Self::default()
+    }}"""
+
+
+PREDICATES = [
+    # `DissectionDrops::any` -- six counters ORed. Each is its own question:
+    # "is there a capture that gave up exactly one of THESE".
+    *[
+        (
+            f"drops.any/{f}",
+            "crates/wz-capture/src/lib.rs",
+            "pub fn any(&self) -> bool {",
+            f"self.{f} > 0",
+            f"self.{f} > 1",
+        )
+        for f in (
+            "frames",
+            "stream_bytes",
+            "skipped",
+            "flows",
+            "scouting",
+            "scout_askers",
+        )
+    ],
+    # The two gap structs compare against `default()`, so there is no threshold
+    # to move -- the relaxation has to be per FIELD, which is the right unit
+    # anyway: each field is a different way for the plane to be short.
+    *[
+        (
+            f"ThroughputGaps.is_clean/{f}",
+            "crates/wz-capture/src/agg.rs",
+            _IS_CLEAN_OLD,
+            _IS_CLEAN_OLD,
+            _relax_field(f),
+        )
+        for f in (
+            "halted_batches",
+            "unparsed_bytes",
+            "undecompressible_batches",
+            "unresolvable_fragments",
+        )
+    ],
+    *[
+        (
+            f"ExchangeGaps.is_clean/{f}",
+            "crates/wz-capture/src/exchange.rs",
+            _IS_CLEAN_OLD,
+            _IS_CLEAN_OLD,
+            _relax_field(f),
+        )
+        for f in (
+            "orphan_responses",
+            "unstamped",
+            "non_monotonic",
+            "unattributed_requests",
+        )
+    ],
+    (
+        "Selection.is_decisive/undecided",
+        "crates/wz-capture/src/filter.rs",
+        "pub fn is_decisive(&self) -> bool {",
+        "self.undecided == 0",
+        "self.undecided <= 1",
+    ),
+]
+
+
+# Predicate thresholds NO fixture in this tree reaches at exactly one, each with
+# why it is not paid yet. Registered rather than tolerated: every one is printed
+# on the way to OK, so the list is read every run, and a survivor that is NOT on
+# it still fails. R311y729 measured nine survivors and paid the three that could
+# be reduced to a single instance today (the exchange gap counters); these six
+# need a fixture built around the bound rather than a fixture adjusted.
+#
+# None of these is claimed to be IMPOSSIBLE. They are unbuilt, which is a
+# different sentence and the honest one.
+UNWITNESSED = {
+    "drops.any/frames": "a capture that discards exactly ONE frame -- the bound "
+    "tests overshoot their cap on purpose, so every one of them drops many",
+    "drops.any/stream_bytes": "a trim that gives up exactly ONE byte; trimming "
+    "works in segments, so a one-byte fixture has to be built at that boundary",
+    "drops.any/skipped": "a skip LIST that overflows by exactly one, which is a "
+    "different counter from `health().packets_skipped` and has no fixture of "
+    "its own at the bound",
+    "drops.any/scouting": "a scouting list that overflows by exactly one; the "
+    "existing bound test fills it well past the cap",
+    "ThroughputGaps.is_clean/halted_batches": "a capture holding exactly ONE "
+    "halted batch -- the compressed fixture halts several",
+    "ThroughputGaps.is_clean/unparsed_bytes": "a batch leaving exactly ONE byte "
+    "unparsed on the throughput plane; the datagram twin of this was paid at "
+    "R311y728, but that one reaches `unaccounted_batch_bytes`, not this counter",
+}
+
+
+def _function_span(text: str, anchor: str) -> tuple[int, int]:
+    """Byte range of the function body opened by `anchor`."""
+    at = text.index(anchor)
+    depth, j = 0, text.index("{", at)
+    while j < len(text):
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        j += 1
+    return at, j + 1
+
+
+def apply_predicate(text: str, anchor: str, old: str, new: str) -> str | None:
+    """`text` with `old` -> `new` inside `anchor`'s function, or None if the
+    recipe no longer describes the code."""
+    if anchor not in text:
+        return None
+    if anchor == old:
+        # The whole-function form: the anchor IS what gets replaced.
+        return text.replace(old, new, 1) if text.count(old) == 1 else None
+    start, end = _function_span(text, anchor)
+    body = text[start:end]
+    if body.count(old) != 1:
+        return None
+    return text[:start] + body.replace(old, new, 1) + text[end:]
+
+
 # Name, mutation, what a survivor means, whether EVERY leg must be reachable.
 #
 # The third field is the sentence the failure prints, because "SURVIVED" means a
@@ -450,11 +605,34 @@ def main() -> int:
             return 1
         raised = [only]
 
+    # Every file this run can touch, held together. R311y729 (N20) added the
+    # predicate layer, which mutates three files outside `report.rs`, and a
+    # restore that covered only the first would leave the others rewritten.
+    touched = [SOURCE] + sorted({Path(rel) for _l, rel, *_r in PREDICATES})
+    pristine_of = {
+        rel: (REPO_ROOT / rel).read_text(encoding="utf-8") for rel in touched
+    }
+    backup_of = {
+        rel: backup_path.parent / (str(rel).replace("/", "__") + ".pristine")
+        for rel in touched
+    }
+    for rel, bk in backup_of.items():
+        if bk.exists():
+            print(
+                f"verdict-leg mutation: FAIL — {bk} exists, which means a "
+                "previous run died with a MUTANT on disk. Compare it against "
+                f"{rel}, restore by hand, delete the backup, and run again.",
+                file=sys.stderr,
+            )
+            return 1
+
     backup_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_path, backup_path)
+    for rel, bk in backup_of.items():
+        shutil.copy2(REPO_ROOT / rel, bk)
     survivors: list[tuple[str, str, str]] = []
     broken: list[tuple[str, str, str]] = []
     unasked: list[tuple[str, str]] = []
+    registered: list[tuple[str, str]] = []
     evidence: dict[tuple[str, str], list[str]] = {}
     try:
         print(
@@ -545,18 +723,115 @@ def main() -> int:
                         + (f" (e.g. {names[0]})" if names else ""),
                         flush=True,
                     )
-    finally:
+
+        # ─── The predicate layer (N20) ───────────────────────────────
+        #
+        # `report.rs` FIRST, because the loop above leaves its LAST mutant on
+        # disk and every predicate mutant would then be measured on top of it.
+        # This was not reasoned about -- the first run reported all fifteen
+        # predicate mutants killed, and running one by hand showed zero failing
+        # tests. The kills were the leftover leg mutant, not the predicate: a
+        # gate reporting green for a reason that has nothing to do with what it
+        # claims to measure.
         source_path.write_text(pristine, encoding="utf-8")
-        restored = source_path.read_text(encoding="utf-8")
-        if restored != pristine:
+        #
+        # Reported apart from the legs because the UNIT is different: a
+        # threshold here belongs to a predicate that several legs share, so a
+        # kill says "some test depends on this threshold", not "this leg is
+        # pinned at its boundary". Conflating the two would claim a precision
+        # this does not have.
+        if PREDICATES:
             print(
-                f"verdict-leg mutation: FAIL — {SOURCE} did not restore to its "
-                "original bytes. The backup is still at "
-                f"{BACKUP}; restore it by hand.",
+                f"  predicate thresholds: {len(PREDICATES)} mutant(s), one "
+                "step each",
+                flush=True,
+            )
+        for label, rel, p_anchor, p_old, p_new in PREDICATES:
+            at = REPO_ROOT / Path(rel)
+            base = pristine_of[Path(rel)]
+            mutant = apply_predicate(base, p_anchor, p_old, p_new)
+            if mutant is None or mutant == base:
+                broken.append(
+                    (
+                        label,
+                        "predicate",
+                        "the recipe no longer describes the code -- the "
+                        "predicate moved and a stale recipe mutates nothing",
+                    )
+                )
+                continue
+            at.write_text(mutant, encoding="utf-8")
+            verdict, output = run_suite(packages)
+            at.write_text(base, encoding="utf-8")
+            if verdict == "uncompilable":
+                broken.append(
+                    (label, "predicate", f"the mutant does not compile\n{output[-1500:]}")
+                )
+            elif verdict in ("hung", "unrun"):
+                broken.append((label, "predicate", f"{verdict}: {output[-1500:]}"))
+            elif verdict == "green":
+                if label in UNWITNESSED:
+                    registered.append((label, UNWITNESSED[label]))
+                    print(
+                        f"  {label} [predicate]: unwitnessed (registered)",
+                        flush=True,
+                    )
+                else:
+                    survivors.append(
+                        (
+                            label,
+                            "predicate",
+                            "every test passed with this predicate forgiving "
+                            "ONE -- no fixture reaches this counter at a "
+                            "single instance, and it is not registered as "
+                            "unwitnessed",
+                        )
+                    )
+                    print(f"  {label} [predicate]: SURVIVED", flush=True)
+            else:
+                names = failing_tests(output)
+                evidence[(label, "predicate")] = names
+                print(
+                    f"  {label} [predicate]: killed by {len(names)} test(s)"
+                    + (f" (e.g. {names[0]})" if names else ""),
+                    flush=True,
+                )
+
+    finally:
+        for rel, text in pristine_of.items():
+            at = REPO_ROOT / rel
+            at.write_text(text, encoding="utf-8")
+            if at.read_text(encoding="utf-8") != text:
+                print(
+                    f"verdict-leg mutation: FAIL — {rel} did not restore to "
+                    f"its original bytes. The backup is at {backup_of[rel]}; "
+                    "restore it by hand.",
+                    file=sys.stderr,
+                )
+                return 1
+        for bk in backup_of.values():
+            bk.unlink(missing_ok=True)
+
+    stale = sorted(set(UNWITNESSED) - {lbl for lbl, _r, *_x in PREDICATES})
+    if stale:
+        print("verdict-leg mutation: FAIL", file=sys.stderr)
+        for lbl in stale:
+            print(
+                f"  `{lbl}` is registered as unwitnessed and is not a "
+                "predicate this sweep mutates -- the register has outlived "
+                "the recipe it excuses",
                 file=sys.stderr,
             )
-            return 1
-        backup_path.unlink(missing_ok=True)
+        return 1
+
+    if registered:
+        print(
+            f"  {len(registered)} predicate threshold(s) REGISTERED as "
+            "unwitnessed, each awaiting a fixture at the bound:",
+            flush=True,
+        )
+        for lbl, why in registered:
+            print(f"    {lbl} — {why}", flush=True)
 
     if unasked:
         # Printed on the way to OK, never instead of it. An operator that
@@ -611,6 +886,7 @@ def main() -> int:
         ("verdict-leg mutation PROBE: OK for " if only else "verdict-leg mutation: OK (")
         + f"{len(raised)} leg(s) × {len(OPERATORS)} operator(s) [{ops}] = "
         f"{len(evidence)} mutant(s) asked"
+        + (f" (incl. {len(PREDICATES)} predicate threshold(s))" if PREDICATES else "")
         + (f", {len(unasked)} not applicable" if unasked else "")
         + f", every one killed by at least {least} test(s); "
         f"suite = {' '.join(packages)}"

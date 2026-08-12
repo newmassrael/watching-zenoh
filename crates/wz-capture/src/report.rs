@@ -2843,6 +2843,84 @@ mod tests {
         );
     }
 
+    /// R311y729 (N20) — EVERY EXCHANGE GAP COUNTER, AT EXACTLY ONE.
+    ///
+    /// The mutation sweep's predicate layer relaxes `ExchangeGaps::is_clean` by
+    /// one per field and requires a test to redden. Three fields survived it:
+    /// every fixture in this tree trips them TWO or more at a time -- the
+    /// orphan test below feeds a reply AND its close, so `orphan_responses` is
+    /// never 1 anywhere -- and a reader that stopped counting the FIRST of each
+    /// would have passed the whole suite.
+    ///
+    /// Each arm is its own dissection, because the counter has to be one and
+    /// not one-of-several for the boundary to be pinned.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn each_exchange_gap_counter_is_witnessed_at_exactly_one() {
+        use crate::exchange::tests as fx;
+
+        // ORPHAN, alone: the reply without its close. The pair is what makes
+        // every other fixture here count two.
+        let d = fx::dissect(&[(
+            false,
+            Some(10),
+            fx::response_reply(9, fx::sender_space(0, Some("mid/session")), b"x"),
+        )]);
+        let ex = crate::exchange::exchanges(&d);
+        assert_eq!(
+            ex.gaps().orphan_responses,
+            1,
+            "exactly one, or this arm measures nothing the existing test does not"
+        );
+        assert_eq!(
+            CaptureReport::of(&d).with_exchanges(&ex).reasons(),
+            alloc::vec![VerdictReason::ExchangeGaps],
+            "and it is the whole of the verdict"
+        );
+
+        // UNSTAMPED, alone: one exchange that completes, carrying no clock.
+        let d = fx::dissect(&[
+            (true, None, fx::request_query(1, fx::sender_space(0, None))),
+            (
+                false,
+                None,
+                fx::response_reply(1, fx::sender_space(0, None), b"x"),
+            ),
+            (false, None, fx::response_final(1)),
+        ]);
+        let ex = crate::exchange::exchanges(&d);
+        assert_eq!(ex.gaps().unstamped, 1, "one exchange, and it has no clock");
+        assert_eq!(ex.gaps().orphan_responses, 0, "and nothing is orphaned");
+        assert_eq!(
+            CaptureReport::of(&d).with_exchanges(&ex).reasons(),
+            alloc::vec![VerdictReason::ExchangeGaps],
+            "an unstamped exchange is the whole of this verdict"
+        );
+
+        // NON-MONOTONIC, alone: one exchange whose reply precedes its request.
+        let d = fx::dissect(&[
+            (
+                true,
+                Some(20),
+                fx::request_query(1, fx::sender_space(0, None)),
+            ),
+            (
+                false,
+                Some(10),
+                fx::response_reply(1, fx::sender_space(0, None), b"x"),
+            ),
+            (false, Some(30), fx::response_final(1)),
+        ]);
+        let ex = crate::exchange::exchanges(&d);
+        assert_eq!(ex.gaps().non_monotonic, 1, "one exchange, and it runs back");
+        assert_eq!(ex.gaps().unstamped, 0, "and it is stamped throughout");
+        assert_eq!(
+            CaptureReport::of(&d).with_exchanges(&ex).reasons(),
+            alloc::vec![VerdictReason::ExchangeGaps],
+            "a backwards exchange is the whole of this verdict"
+        );
+    }
+
     /// R311y716 (§C G1) — a reply whose request this capture never saw.
     ///
     /// The exchange plane's own GAPS leg, distinct from its `unread` above: the
