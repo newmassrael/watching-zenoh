@@ -87,6 +87,7 @@ citation:
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -199,16 +200,50 @@ def main() -> int:
     # R311y743 (N48) — resolve every carry citation against the store. A gate
     # that cannot read its input must not report green, so an unreadable
     # inventory is a FAIL rather than a skipped check.
+    #
+    # R311y747 (N54) — AND THIS GATE HAS TWO HALVES WITH DIFFERENT INPUTS, which
+    # is what R311y743 did not notice when it added the store read. The SHAPE
+    # half reads only the gate scripts; the RESOLUTION half reads the store
+    # through `mnemosyne-cli`. Layer C0 runs on the hosted job that DELIBERATELY
+    # does not provision that tool -- the install is ~88s and was split out to
+    # the Layers A+B job for exactly that reason -- so an unconditional FAIL
+    # reddened every hosted run from R311y743 on, while every local run stayed
+    # green because a dev box has the tool on PATH.
+    #
+    # So the halves are armed separately, in this tree's own idiom: absent tool
+    # is a SKIP of the RESOLUTION half where nothing provisions it, and a FAIL
+    # under `WZ_C0_REQUIRE`, which ci.yml sets on the job that DOES provision it
+    # (the same rule as WZ_A3_REQUIRE / WZ_A5_REQUIRE: a lane that skips where
+    # its input is provisioned is a provisioning regression wearing a green
+    # badge). The shape half runs unconditionally either way -- it never needed
+    # the store, and silencing it too would have been the wider hole.
+    registered: set[str] | None
     try:
         registered = set(inventory_kinds.debt())
     except Exception as exc:  # noqa: BLE001 - the reason is reported, not swallowed
+        if os.environ.get("WZ_C0_REQUIRE"):
+            print(
+                f"gate-provenance: FAIL -- required (WZ_C0_REQUIRE set) but the "
+                f"store inventory cannot be read ({exc}). The citation check "
+                f"cannot run, and a gate that cannot read its input must not "
+                f"pass where its input is provisioned.",
+                file=sys.stderr,
+            )
+            return 1
+        registered = None
+        # STDERR, and that is load-bearing rather than a style choice: run-ci
+        # invokes this gate with `>/dev/null`, so a skip announced on stdout is
+        # a skip nobody can see -- which is the exact shape ("a half that goes
+        # quiet reads as a half that passed") this arming exists to avoid.
+        # MEASURED: the notice was invisible in the Layer C0 log until it moved
+        # here.
         print(
-            f"gate-provenance: FAIL -- cannot read the store inventory ({exc}). "
-            f"The citation check cannot run, and a gate that cannot read its "
-            f"input must not pass.",
+            f"gate-provenance: RESOLUTION HALF SKIPPED -- the store inventory "
+            f"is unreadable here ({exc}); the shape half below still runs, and "
+            f"the hosted job that provisions mnemosyne-cli runs this half under "
+            f"WZ_C0_REQUIRE",
             file=sys.stderr,
         )
-        return 1
 
     names = {p.name for p in scripts}
     failures = []
@@ -221,7 +256,7 @@ def main() -> int:
             declared += 1
         # A carry citation must name an item the store actually holds. §-items
         # and CENSUS stay shape-only until the base list migrates.
-        if item and item.startswith("N") and item[1:].isdigit():
+        if registered is not None and item and item.startswith("N") and item[1:].isdigit():
             if f"debt-carry-{item}" not in registered:
                 failures.append(
                     f"{path.name}: cites `{item}`, which the store's debt "
@@ -261,9 +296,18 @@ def main() -> int:
         )
         return 1
 
+    # R311y747 (N54) — the resolution half's state is IN THE OK LINE, not only
+    # in the skip notice above it. A reader scanning for the green word must be
+    # able to see which halves earned it, or a permanently-skipped half reads as
+    # a passing one.
+    resolved = (
+        f"{len(registered)} debt item(s) registered"
+        if registered is not None
+        else "citation resolution SKIPPED (no store here)"
+    )
     print(
         f"gate-provenance OK -- {declared} of {len(scripts)} gate script(s) "
-        f"declare what they answer for; {len(registered)} debt item(s) registered; "
+        f"declare what they answer for; {resolved}; "
         f"{len(BASELINE)} carried from before the convention"
     )
     return 0

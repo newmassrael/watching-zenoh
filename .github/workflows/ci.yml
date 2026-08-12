@@ -804,6 +804,25 @@ jobs:
           WZ_A5_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer A5
 
+      - name: Layer C0 (armed) — gate provenance citations resolve
+        # R311y747. Layer C0 also runs on the "validate + verify + test" job,
+        # where it is the SHAPE half only: that job deliberately does not
+        # install mnemosyne-cli (~88s, split out here in R311y428), and
+        # R311y743 gave `gate_provenance_lint` a store read without noticing.
+        # It then FAILED every hosted run from that commit on while every local
+        # run stayed green, because a dev box has the tool on PATH -- Layer C0
+        # is the failing step in runs 31581576586 and 31582103148.
+        #
+        # So the citation half is armed HERE, where its input exists, by the
+        # same rule as WZ_A3_REQUIRE / WZ_A5_REQUIRE above: a lane that SKIPs
+        # where the job provisions its input is a provisioning regression
+        # wearing a green badge. Running the whole lane twice rather than
+        # lifting one gate out of it keeps `unwired_lane_lint`'s subject a
+        # LANE, and the second run costs ~5s.
+        env:
+          WZ_C0_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer C0
+
       - name: Layer B — verify-codegen.sh per codec
         run: bash scripts/run-ci.sh --layer B
 
