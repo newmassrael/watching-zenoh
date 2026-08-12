@@ -118,7 +118,7 @@ set -euo pipefail
 # config parses. MNEMOSYNE_MAX_SCHEMA stays 44 because 44 is what the NEW rev
 # reads (see below) — the pairing rule binds a ceiling that moves alone, not a
 # rev that moves alone.
-MNEMOSYNE_REV="a886cd0f25682056b4f0fb1d88be89356180f32a"
+MNEMOSYNE_REV="183a17a5254f27a246ef20e858de1523e0088815"
 
 # The pinned rev's CURRENT_SCHEMA_VERSION: the HIGHEST atomic-store schema this
 # CLI can read. Verified at the pin, not inherited from prose —
@@ -150,13 +150,18 @@ MNEMOSYNE_REV="a886cd0f25682056b4f0fb1d88be89356180f32a"
 # `on_disk_version > CURRENT_SCHEMA_VERSION`. Reading the constant matters even
 # when the store already says 44, because the store proves only what some
 # writer produced, never what the pinned READER accepts.
-# R311y462 — UNCHANGED at 44, and re-read at the new rev rather than carried:
-# `git show a886cd0f:crates/mnemosyne-atomic/src/lib.rs:1688` defines
-# `CURRENT_SCHEMA_VERSION: u32 = 44`, and :1972 still rejects
-# `on_disk_version > CURRENT_SCHEMA_VERSION`. verify-mnemosyne-pin.sh then
-# confirms it from the installed binary's own `describe-schema --json`, so the
-# number is asserted twice and inherited zero times.
-MNEMOSYNE_MAX_SCHEMA="44"
+# R311y738 — MOVED to 46 with the rev, and re-read at the new rev rather than
+# carried: `crates/mnemosyne-atomic/src/lib.rs:1782` at 183a17a5 defines
+# `CURRENT_SCHEMA_VERSION: u32 = 46`, and the installed binary's own
+# `describe-schema` answers 46 as well — asserted twice, inherited zero times.
+#
+# WHY THIS BUMP HAPPENED AT ALL, which is the part worth keeping: the shared
+# `~/.cargo/bin/mnemosyne-cli` had already moved to 183a17a5 (schema 46) while
+# this repo still pinned a886cd0f/44, and `.githooks/pre-commit` refused every
+# commit until the two agreed. The store was still at 44, so nothing had been
+# migrated past the pinned reader — the hook stopped it BEFORE the mutate that
+# R311y401, y406 and y416 each let through.
+MNEMOSYNE_MAX_SCHEMA="46"
 
 cargo install --git https://github.com/newmassrael/mnemosyne \
   --rev "$MNEMOSYNE_REV" --bin mnemosyne-cli --force mnemosyne-cli
