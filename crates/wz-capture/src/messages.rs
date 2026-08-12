@@ -114,9 +114,22 @@ impl MessageList {
 /// `#[must_use]` type that panics when dropped unconsumed. This is that, for
 /// the message lists.
 ///
-/// A caller takes the frame with [`Self::take`], which is what discharges the
-/// obligation; dropping the receipt without doing so is a bug in the caller and
-/// says so at the moment it happens rather than as a wrong number in a report.
+/// R311y746 (debt-carry-N11) — the receipt is consumable ONLY by
+/// [`DroppedFrameCensus::absorb`], which is why that type lives in this module.
+///
+/// R311y723 left `take` public, and the obligation it discharged was only
+/// "somebody holds this frame" — a caller could take the frame and drop it, and
+/// the census would read a floor as a total while every guard here stayed
+/// silent. That is the same silence one step later, which is what the register
+/// carried as N11.
+///
+/// So the frame no longer has a public exit. `take` is private to this module
+/// and its single caller is the census, exactly as R311y713's `exit::Exiting`
+/// is constructible only by a flow table and consumable only by `ExitCarry`
+/// (named in prose rather than linked: that module is private, and a public doc
+/// linking into it is what `rustdoc::private_intra_doc_links` reds on). The
+/// counters and the receipt share one privacy boundary, so "removed" and
+/// "counted" cannot come apart.
 #[must_use = "the discarded message must be counted"]
 #[derive(Debug)]
 pub struct Discarded {
@@ -129,7 +142,10 @@ pub struct Discarded {
 impl Discarded {
     /// Take the discarded message, discharging the obligation to account for
     /// it.
-    pub fn take(mut self) -> PassiveFrame {
+    ///
+    /// PRIVATE to this module (R311y746): the census below is the only caller,
+    /// so there is no way to get the frame out without the count moving.
+    fn take(mut self) -> PassiveFrame {
         // Emptying the option IS the discharge: `self` drops at the end of this
         // call and its destructor then sees a receipt with nothing left to
         // account for. No second flag, and no `mem::forget` -- a receipt that
@@ -137,6 +153,128 @@ impl Discarded {
         self.frame
             .take()
             .expect("a receipt holds its frame until it is taken, once")
+    }
+}
+
+/// R311y713 (§B10) — what the transport messages a BOUND discarded had said.
+///
+/// [`crate::DissectionDrops::frames`] counts them and nothing named them, so a
+/// dissection that trimmed a busy flow could not answer the one question the
+/// trim raises: was that a hundred keepalives, or the `Close` that explains why
+/// the session ended. The count says a bound bit; this says what it bit.
+///
+/// TRANSPORT messages only. A scouting datagram discarded by the same limit is
+/// counted in [`crate::DissectionDrops::scouting`] and is not censused here,
+/// because it is a different message space (`ScoutingFrame`) and folding the
+/// two would produce a total that belongs to neither.
+///
+/// R311y746 (debt-carry-N11) — LIVES HERE, beside [`Discarded`], and its
+/// buckets are PRIVATE. Both directions are closed by that one move: a receipt
+/// cannot reach a frame except through [`Self::absorb`], and a bucket cannot be
+/// moved except by a receipt. It sat in `lib.rs` with public fields and a
+/// private `add`, which closed neither.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DroppedFrameCensus {
+    init: usize,
+    open: usize,
+    close: usize,
+    keep_alive: usize,
+    frame: usize,
+    fragment: usize,
+    join: usize,
+    unknown: usize,
+    undecodable: usize,
+}
+
+impl DroppedFrameCensus {
+    /// R311y746 — retire one discarded message: the receipt goes in, the count
+    /// comes out, and there is no other door onto either.
+    pub fn absorb(&mut self, receipt: Discarded) {
+        let f = receipt.take();
+        match &f.frame {
+            Ok(wz_session_core::inbound::InboundFrame::Init { .. }) => self.init += 1,
+            Ok(wz_session_core::inbound::InboundFrame::Open { .. }) => self.open += 1,
+            Ok(wz_session_core::inbound::InboundFrame::Close { .. }) => self.close += 1,
+            Ok(wz_session_core::inbound::InboundFrame::KeepAlive { .. }) => self.keep_alive += 1,
+            Ok(wz_session_core::inbound::InboundFrame::Frame { .. }) => self.frame += 1,
+            // The VARIANT is gated on `reassembly`, and the ACCESSOR below is
+            // not: a reader of this census must not have to know which features
+            // this binary carries (R311y655). Without the feature a `0x06`
+            // decodes as `Unknown { mid: 6 }` and is counted there, which is the
+            // honest reading -- this build did not recognise it as a fragment.
+            #[cfg(feature = "reassembly")]
+            Ok(wz_session_core::inbound::InboundFrame::Fragment { .. }) => self.fragment += 1,
+            Ok(wz_session_core::inbound::InboundFrame::Join { .. }) => self.join += 1,
+            Ok(wz_session_core::inbound::InboundFrame::Unknown { .. }) => self.unknown += 1,
+            Err(_) => self.undecodable += 1,
+        }
+    }
+
+    /// Session establishment, both halves.
+    pub fn init(&self) -> usize {
+        self.init
+    }
+
+    /// Session opening, both halves.
+    pub fn open(&self) -> usize {
+        self.open
+    }
+
+    /// Session teardown — the one whose loss changes what a reader concludes.
+    pub fn close(&self) -> usize {
+        self.close
+    }
+
+    /// Keepalives, which is what a long trim is usually made of.
+    pub fn keep_alive(&self) -> usize {
+        self.keep_alive
+    }
+
+    /// Data frames.
+    pub fn frame(&self) -> usize {
+        self.frame
+    }
+
+    /// Fragments of one. Structurally present on a build without `reassembly`,
+    /// where it stays zero and the messages are counted as [`Self::unknown`].
+    pub fn fragment(&self) -> usize {
+        self.fragment
+    }
+
+    /// R311y608 — the multicast JOIN, which is how a peer announces itself on a
+    /// group and therefore the one whose loss changes what a LATER message on
+    /// that group is read as.
+    pub fn join(&self) -> usize {
+        self.join
+    }
+
+    /// Messages whose MID this reader does not know. Not an error: an unknown
+    /// message is a fact about the wire, and a bound discarding one is worth
+    /// telling apart from a bound discarding a keepalive.
+    pub fn unknown(&self) -> usize {
+        self.unknown
+    }
+
+    /// Messages this reader had already failed to decode. Kept apart from the
+    /// rest: a bound discarding garbage and a bound discarding a `Close` are
+    /// different findings.
+    pub fn undecodable(&self) -> usize {
+        self.undecodable
+    }
+
+    /// Every discarded message this censused — the figure that must equal
+    /// [`crate::DissectionDrops::frames`], and the assertion that keeps the two
+    /// from drifting into two different stories about one trim.
+    pub fn total(&self) -> usize {
+        self.init
+            + self.open
+            + self.close
+            + self.keep_alive
+            + self.frame
+            + self.fragment
+            + self.join
+            + self.unknown
+            + self.undecodable
     }
 }
 
@@ -185,11 +323,16 @@ mod tests {
     /// that hand-built one would break on every field this crate adds and
     /// would prove nothing about the type under test.
     fn frame() -> PassiveFrame {
+        // A KeepAlive: MID 0x04 with every flag clear.
+        frame_with_mid(0x04)
+    }
+
+    /// The same, for whichever MID a test needs to land in a named bucket.
+    fn frame_with_mid(mid: u8) -> PassiveFrame {
         let mut session = wz_session_core::passive::PassiveSession::new();
         let mut out = session.next_datagram_on(
             wz_session_core::passive::Direction::A,
-            // A KeepAlive: MID 0x04 with every flag clear.
-            &[0x04],
+            &[mid],
             7,
             wz_session_core::passive::LinkHandshake::Absent,
         );
@@ -215,17 +358,67 @@ mod tests {
         let _ = list.discard_oldest();
     }
 
-    /// And the discharge: taking it is what makes the drop legal.
+    /// R311y746 (debt-carry-N11) — AND THE DISCHARGE IS THE COUNT ITSELF.
+    ///
+    /// R311y723's discharge was `take`, which handed the frame to the caller
+    /// and trusted it to census the frame afterwards — so a caller could take
+    /// and drop, leaving every guard here quiet while the census read a floor
+    /// as a total. `absorb` is the only door now, and it is the census's, so
+    /// "removed from the list" and "counted" are one act rather than two.
     #[test]
-    fn taking_the_receipt_discharges_the_obligation() {
+    fn absorbing_the_receipt_discharges_the_obligation() {
         let mut list = MessageList::new();
         list.push(frame());
-        let gone = list.discard_oldest().expect("a message to discard").take();
+        let mut census = DroppedFrameCensus::default();
+        census.absorb(list.discard_oldest().expect("a message to discard"));
+        assert!(list.is_empty(), "the list no longer holds it");
+        assert_eq!(census.total(), 1, "and the census does");
+        assert_eq!(census.keep_alive(), 1, "in the bucket the message names");
+    }
+
+    /// The other half: the buckets DISCRIMINATE, so a total that moved is not
+    /// evidence on its own.
+    ///
+    /// A census that folded every message into one bucket would satisfy the
+    /// test above exactly as well, and would answer the question the census
+    /// exists for — was it keepalives, or the `Close` — with a wrong name every
+    /// time. Three bytes that must land in three different buckets, asserted as
+    /// a SET rather than one at a time.
+    ///
+    /// The three are chosen for what separates them, and MEASURED rather than
+    /// assumed: `0x04` is a whole KeepAlive; `0x1f` is past every MID this
+    /// reader knows, so it is `unknown` by construction rather than by a
+    /// decoder failing; and a bare `0x03` is a CLOSE whose body is not there,
+    /// which this reader reports as `undecodable`. That last one is the pair
+    /// the doc on these buckets exists for — a bound discarding garbage and a
+    /// bound discarding a `Close` are different findings, and a census that
+    /// could not tell them apart would say the wrong one.
+    #[test]
+    fn the_census_names_what_it_counted_rather_than_only_how_many() {
+        let mut list = MessageList::new();
+        for mid in [0x03u8, 0x04, 0x1f] {
+            list.push(frame_with_mid(mid));
+        }
+        let mut census = DroppedFrameCensus::default();
+        for _ in 0..3 {
+            census.absorb(list.discard_oldest().expect("a message to discard"));
+        }
         assert_eq!(
-            gone.stream_offset, 7,
-            "the caller gets the frame it must count"
+            (
+                census.keep_alive(),
+                census.unknown(),
+                census.undecodable(),
+                census.total()
+            ),
+            (1, 1, 1, 3),
+            "three distinct messages must be named apart: {census:?}"
         );
-        assert!(list.is_empty(), "and the list no longer holds it");
+        assert_eq!(
+            census.close(),
+            0,
+            "and a truncated CLOSE must not be reported as a CLOSE that was \
+             read: {census:?}"
+        );
     }
 
     /// An empty list answers `None` rather than panicking — a bound that cannot

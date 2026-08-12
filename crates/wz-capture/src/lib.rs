@@ -2033,6 +2033,51 @@ mod live_tap_tests {
             "the dissection must carry the limits it was given"
         );
     }
+
+    /// R311y746 (debt-carry-N11) — AND IT REPORTS THE BOUND IT BIT.
+    ///
+    /// The two tests above establish that the preset bounds every axis and that
+    /// a dissection carries it. Neither runs a capture THROUGH it, and that
+    /// third gap is where a real divergence lived undetected: `health()` copied
+    /// the raw drop counters while `drops()` composed `flows` from the
+    /// retirement count (R311y713 §B1), so the single preset whose caps
+    /// actually bite had no test that read a bite back through either door.
+    ///
+    /// This is the `DissectionDrops` rule applied to the preset itself: a bound
+    /// that bites and reports nothing is worse than no bound, because nothing
+    /// says the numbers beside it are a floor. Asserted through BOTH readers,
+    /// since one of them is the one that was wrong.
+    #[test]
+    fn the_live_tap_preset_reports_the_bound_it_bit() {
+        let limits = DissectionLimits::for_live_tap();
+        let cap = limits
+            .max_flows_per_table
+            .expect("the preset bounds the flow table");
+        let mut d = Dissection::with_limits(limits);
+        // One length-prefixed KeepAlive: the smallest complete framed message,
+        // so each flow carries a decoded message rather than bare bytes.
+        let msg = [1u8, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        // One 5-tuple past the cap. The SOURCE PORT is what distinguishes them
+        // and it sits at the start of the TCP header: 14 bytes of Ethernet, 20
+        // of IPv4.
+        for i in 0..=cap {
+            let mut p = crate::datagram_tests::tcp_packet(1000, &msg);
+            let port = 20_000u16 + i as u16;
+            p[34..36].copy_from_slice(&port.to_be_bytes());
+            d.push_packet(crate::link::LINKTYPE_ETHERNET, i, &p);
+        }
+        assert_eq!(
+            d.flows().len(),
+            cap,
+            "the preset's flow cap must have bitten, or this proves nothing"
+        );
+        assert_eq!(d.drops().flows, 1, "and the bite must be counted");
+        assert_eq!(
+            d.health().drops,
+            d.drops(),
+            "both readers of the ledger report the same bite"
+        );
+    }
 }
 
 /// R311y709 (§1.2a) — BYTES RECOVERED AGAINST BYTES HANDED TO A DECODER.
@@ -2096,82 +2141,11 @@ impl ByteResidue {
     }
 }
 
-/// R311y713 (§B10) — what the transport messages a BOUND discarded had said.
-///
-/// [`DissectionDrops::frames`] counts them and nothing names them, so a
-/// dissection that trimmed a busy flow could not answer the one question the
-/// trim raises: was that a hundred keepalives, or the `Close` that explains
-/// why the session ended. The count says a bound bit; this says what it bit.
-///
-/// TRANSPORT messages only. A scouting datagram discarded by the same limit is
-/// counted in [`DissectionDrops::scouting`] and is not censused here, because
-/// it is a different message space (`ScoutingFrame`) and folding the two would
-/// produce a total that belongs to neither.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DroppedFrameCensus {
-    /// Session establishment, both halves.
-    pub init: usize,
-    /// Session opening, both halves.
-    pub open: usize,
-    /// Session teardown — the one whose loss changes what a reader concludes.
-    pub close: usize,
-    /// Keepalives, which is what a long trim is usually made of.
-    pub keep_alive: usize,
-    /// Data frames.
-    pub frame: usize,
-    /// Fragments of one.
-    pub fragment: usize,
-    /// R311y608 — the multicast JOIN, which is how a peer announces itself on
-    /// a group and therefore the one whose loss changes what a LATER message
-    /// on that group is read as.
-    pub join: usize,
-    /// Messages whose MID this reader does not know. Not an error: an unknown
-    /// message is a fact about the wire, and a bound discarding one is worth
-    /// telling apart from a bound discarding a keepalive.
-    pub unknown: usize,
-    /// Messages this reader had already failed to decode. Kept apart from the
-    /// rest: a bound discarding garbage and a bound discarding a `Close` are
-    /// different findings.
-    pub undecodable: usize,
-}
-
-impl DroppedFrameCensus {
-    /// Fold one discarded frame in.
-    fn add(&mut self, f: &PassiveFrame) {
-        match &f.frame {
-            Ok(wz_session_core::inbound::InboundFrame::Init { .. }) => self.init += 1,
-            Ok(wz_session_core::inbound::InboundFrame::Open { .. }) => self.open += 1,
-            Ok(wz_session_core::inbound::InboundFrame::Close { .. }) => self.close += 1,
-            Ok(wz_session_core::inbound::InboundFrame::KeepAlive { .. }) => self.keep_alive += 1,
-            Ok(wz_session_core::inbound::InboundFrame::Frame { .. }) => self.frame += 1,
-            // The VARIANT is gated on `reassembly`, and the FIELD above is not:
-            // a reader of this census must not have to know which features this
-            // binary carries (R311y655). Without the feature a `0x06` decodes as
-            // `Unknown { mid: 6 }` and is counted there, which is the honest
-            // reading — this build did not recognise it as a fragment.
-            #[cfg(feature = "reassembly")]
-            Ok(wz_session_core::inbound::InboundFrame::Fragment { .. }) => self.fragment += 1,
-            Ok(wz_session_core::inbound::InboundFrame::Join { .. }) => self.join += 1,
-            Ok(wz_session_core::inbound::InboundFrame::Unknown { .. }) => self.unknown += 1,
-            Err(_) => self.undecodable += 1,
-        }
-    }
-
-    /// Every discarded message this censused — the figure that must equal
-    /// [`DissectionDrops::frames`], and the assertion that keeps the two from
-    /// drifting into two different stories about one trim.
-    pub fn total(&self) -> usize {
-        self.init
-            + self.open
-            + self.close
-            + self.keep_alive
-            + self.frame
-            + self.fragment
-            + self.join
-            + self.unknown
-            + self.undecodable
-    }
-}
+// R311y746 (debt-carry-N11) — `DroppedFrameCensus` moved to `messages`, beside
+// the `Discarded` receipt it is now the sole consumer of. Re-exported here so
+// `wz_capture::DroppedFrameCensus` keeps resolving; see that module for why the
+// two types share one privacy boundary.
+pub use messages::DroppedFrameCensus;
 
 /// R311y713 (§B4) — pick the flow to evict: the LEAST RECENTLY ACTIVE, by the
 /// capture's own clock where every candidate has one.
@@ -2812,7 +2786,14 @@ impl Dissection {
             transport_checksum_invalid: self.checksums[4],
             transport_checksum_absent: self.checksums[5],
             packets_skipped: self.skipped.len() + self.drops.skipped,
-            drops: self.drops,
+            // R311y746 (debt-carry-N11) — `self.drops()` and NOT the raw field.
+            // `drops()` composes `flows` from the retirement count (R311y713
+            // §B1) and this line copied the field beside it, so every consumer
+            // that asks through `health()` — including the C ABI's `health`
+            // JSON, which is the shipped surface — read a hard zero for the
+            // eviction count while `drops()` read the truth. One ledger, and
+            // both doors now go through the one composition.
+            drops: self.drops(),
         }
     }
 
@@ -3493,7 +3474,7 @@ impl Dissection {
                 let Some(receipt) = stream.frames.discard_oldest() else {
                     break;
                 };
-                self.dropped_frames.add(&receipt.take());
+                self.dropped_frames.absorb(receipt);
                 self.drops.frames += 1;
             }
         }
@@ -4057,7 +4038,7 @@ impl Dissection {
                     let Some(receipt) = flow.frames.discard_oldest() else {
                         break;
                     };
-                    self.dropped_frames.add(&receipt.take());
+                    self.dropped_frames.absorb(receipt);
                 }
                 self.drops.frames += cut;
             }
@@ -4388,14 +4369,14 @@ impl Dissection {
                     let Some(receipt) = flow.quic_datagrams.discard_oldest() else {
                         return;
                     };
-                    self.dropped_frames.add(&receipt.take());
+                    self.dropped_frames.absorb(receipt);
                     self.drops.frames += 1;
                 }
                 _ => {
                     let Some(receipt) = flow.frames.discard_oldest() else {
                         return;
                     };
-                    self.dropped_frames.add(&receipt.take());
+                    self.dropped_frames.absorb(receipt);
                     self.drops.frames += 1;
                 }
             }
@@ -7154,6 +7135,55 @@ mod datagram_tests {
         );
     }
 
+    /// R311y746 (debt-carry-N11) — ONE drop ledger, and both doors onto it must
+    /// answer with the same numbers.
+    ///
+    /// [`Dissection::drops`] COMPOSES `flows` from the retirement count rather
+    /// than reading the raw field (R311y713 §B1), and [`Dissection::health`] was
+    /// written beside it copying `self.drops` straight through. So the same
+    /// question asked through `health().drops` answered zero where `drops()`
+    /// answered the eviction count — two readers of one fact, disagreeing, which
+    /// is the shape this crate has closed four times at other seams and had left
+    /// open at this one.
+    ///
+    /// Asserted as an EQUALITY between the two doors rather than against a
+    /// literal: a literal would have to be restated every time a composed field
+    /// is added, and restating it is exactly how the second door fell behind.
+    #[test]
+    fn the_two_doors_onto_the_drop_ledger_agree() {
+        let msg = framed_keepalive();
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows_per_table: Some(1),
+            frames_per_flow: Some(1),
+            ..DissectionLimits::default()
+        });
+        // Two 5-tuples, so the cap evicts; several messages on each, so the
+        // per-flow frame cap bites as well. Both composed counters move.
+        let a = tcp_packet(1000, &msg);
+        d.push_packet(LINKTYPE_ETHERNET, 0, &a);
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &tcp_packet(1000 + msg.len() as u32, &msg),
+        );
+        let mut b = tcp_packet(2000, &msg);
+        b[26] = 99;
+        d.push_packet(LINKTYPE_ETHERNET, 2, &b);
+        assert!(
+            d.drops().flows > 0,
+            "the fixture must evict, or it proves nothing"
+        );
+        assert!(
+            d.drops().frames > 0,
+            "the fixture must trim a frame, or it proves nothing"
+        );
+        assert_eq!(
+            d.health().drops,
+            d.drops(),
+            "health() and drops() are two doors onto one ledger"
+        );
+    }
+
     /// R311y713 (§B1) — the flow cap must give a leaving flow the SAME exit
     /// `finish` gives it, and forcing the open gap is part of that exit.
     ///
@@ -7504,8 +7534,8 @@ mod datagram_tests {
             "the census and the count must be two views of one trim"
         );
         assert!(c.total() > 0, "the fixture must actually trip the bound");
-        assert_eq!(c.close, 1, "and the CLOSE must be named as gone: {c:?}");
-        assert_eq!(c.keep_alive, c.total() - 1, "the rest were keepalives");
+        assert_eq!(c.close(), 1, "and the CLOSE must be named as gone: {c:?}");
+        assert_eq!(c.keep_alive(), c.total() - 1, "the rest were keepalives");
 
         let rep = crate::report::CaptureReport::of(&d);
         assert!(

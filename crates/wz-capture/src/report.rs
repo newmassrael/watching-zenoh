@@ -1022,15 +1022,15 @@ impl<'a> CaptureReport<'a> {
                  \"close\":{},\"keep_alive\":{},\"frame\":{},\"fragment\":{},\
                  \"join\":{},\"unknown\":{},\"undecodable\":{}}}",
                 c.total(),
-                c.init,
-                c.open,
-                c.close,
-                c.keep_alive,
-                c.frame,
-                c.fragment,
-                c.join,
-                c.unknown,
-                c.undecodable
+                c.init(),
+                c.open(),
+                c.close(),
+                c.keep_alive(),
+                c.frame(),
+                c.fragment(),
+                c.join(),
+                c.unknown(),
+                c.undecodable()
             ));
         }
         // The figure the CAPTURE FILE reports about itself, which is a
@@ -1151,15 +1151,15 @@ impl<'a> CaptureReport<'a> {
                      (init {}, open {}, close {}, keepalive {}, frame {}, \
                      fragment {}, join {}, unknown {}, undecodable {})\n",
                     c.total(),
-                    c.init,
-                    c.open,
-                    c.close,
-                    c.keep_alive,
-                    c.frame,
-                    c.fragment,
-                    c.join,
-                    c.unknown,
-                    c.undecodable
+                    c.init(),
+                    c.open(),
+                    c.close(),
+                    c.keep_alive(),
+                    c.frame(),
+                    c.fragment(),
+                    c.join(),
+                    c.unknown(),
+                    c.undecodable()
                 ));
             }
         }

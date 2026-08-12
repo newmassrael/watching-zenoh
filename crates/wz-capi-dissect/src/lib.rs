@@ -518,6 +518,62 @@ mod tests {
         }
     }
 
+    /// R311y746 — the `dropped_by_limits` group this boundary emits is a group
+    /// of STRUCTURAL zeros, and that is a fact about the entry point rather
+    /// than about the capture.
+    ///
+    /// [`Dissection::from_capture`] takes `DissectionLimits::default()`, whose
+    /// every field is `None` (a file ends, so keeping all of it is bounded), so
+    /// no cap can bite behind this door however large the capture is. The test
+    /// above satisfies itself with the KEYS being present; this one pins the
+    /// reason the values under them are always zero, so a later reader does not
+    /// mistake the zeros for a measurement of a healthy capture.
+    ///
+    /// A capture LARGER than the live-tap preset's own flow cap is what makes
+    /// the point: 1 025 distinct 5-tuples would evict once under
+    /// `DissectionLimits::for_live_tap`, and here they all survive.
+    #[test]
+    fn the_drop_group_at_this_boundary_is_structurally_zero() {
+        // A framed KeepAlive: a 2-byte length prefix and the message, which is
+        // what makes each packet a flow with a decodable message on it.
+        let payload = [1u8, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        // One flow past `DissectionLimits::for_live_tap().max_flows_per_table`.
+        let over_tap_cap = 1_025usize;
+        let packets: Vec<Vec<u8>> = (0..over_tap_cap)
+            .map(|i| {
+                let mut p = tcp_packet(1000, &payload);
+                // The SOURCE PORT is what makes each a distinct 5-tuple, and it
+                // sits at the start of the TCP header: 14 bytes of Ethernet, 20
+                // of IPv4.
+                let port = 20_000u16 + i as u16;
+                p[34..36].copy_from_slice(&port.to_be_bytes());
+                p
+            })
+            .collect();
+        let frames: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u32, 0u32, p.as_slice()))
+            .collect();
+        let file = wz_capture::pcap::write(1, &frames);
+
+        let json = call_summary(&file).expect("the capture reads");
+        assert!(
+            json.contains(
+                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
+                 \"flows\":0,\"scout_askers\":0}"
+            ),
+            "an entry point that states no caps must report no bite: {json}"
+        );
+        // And the capture really was over the live tap's cap, or the zero above
+        // would be a zero about nothing.
+        assert_eq!(
+            json.matches("{\"frames\":1}").count(),
+            over_tap_cap,
+            "every 5-tuple must have survived, or this proves nothing"
+        );
+    }
+
     /// A scouting exchange must not read as an empty flow.
     ///
     /// R311y607 gave a datagram flow a second list and the summary reported
