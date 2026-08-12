@@ -225,12 +225,31 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// The counter the spawned function bumps, so the test observes that the
+    /// The counter the spawned function bumps, so a test observes that the
     /// thread RAN rather than only that the calls returned.
-    static RAN: AtomicU32 = AtomicU32::new(0);
-
-    unsafe extern "C" fn bump(_arg: *mut c_void) -> *mut c_void {
-        RAN.fetch_add(1, Ordering::SeqCst);
+    ///
+    /// R311y753 — the counter arrives through `arg`, and it used to be a
+    /// process-global `static`. THAT WAS A RACE, and a loud one: three tests in
+    /// this module hand `bump` to a task, one of them
+    /// ([`drop_detaches_rather_than_joining`]) DETACHES its thread on purpose,
+    /// and a detached thread bumping a shared counter lands wherever it lands —
+    /// including between the join test's reset and its read, which then sees 2.
+    /// MEASURED at 132 failures in 200 runs of `task::` before this change; a
+    /// 32-core build machine surfaced it first because more of the suite is
+    /// genuinely concurrent there.
+    ///
+    /// Using `arg` rather than a mutex is the correct fix and not only the
+    /// convenient one: it is the mechanism the C ABI already has for handing a
+    /// task its own state, every call site passed null, and so NOTHING in this
+    /// tree proved that pointer reaches the callback at all. The fix and the
+    /// missing coverage are the same edit.
+    unsafe extern "C" fn bump(arg: *mut c_void) -> *mut c_void {
+        if !arg.is_null() {
+            // SAFETY: every caller passes a pointer to an `AtomicU32` that
+            // outlives the spawned thread -- joined before the frame ends, or
+            // deliberately leaked where the thread is detached.
+            unsafe { (*(arg as *const AtomicU32)).fetch_add(1, Ordering::SeqCst) };
+        }
         std::ptr::null_mut()
     }
 
@@ -240,7 +259,9 @@ mod tests {
     /// would race the thread and pass on a slow machine while proving nothing.
     #[test]
     fn a_task_runs_and_join_waits_for_it() {
-        RAN.store(0, Ordering::SeqCst);
+        // OWNED BY THIS TEST (R311y753). The join below is what makes a stack
+        // local sound here: the thread cannot outlive it.
+        let ran = AtomicU32::new(0);
         let mut task = crate::abi::z_owned_task_t::null_value();
         // SAFETY: `task` is a live stack slot and `bump` is a real function.
         let rc = unsafe {
@@ -248,7 +269,7 @@ mod tests {
                 &mut task,
                 std::ptr::null(),
                 Some(bump),
-                std::ptr::null_mut(),
+                &ran as *const AtomicU32 as *mut c_void,
             )
         };
         assert_eq!(rc, Z_OK);
@@ -258,7 +279,7 @@ mod tests {
         // SAFETY: a live moved task.
         assert_eq!(unsafe { z_task_join(&mut moved) }, Z_OK);
         assert_eq!(
-            RAN.load(Ordering::SeqCst),
+            ran.load(Ordering::SeqCst),
             1,
             "join returned before the spawned function had run"
         );
@@ -301,7 +322,12 @@ mod tests {
     /// cleared without blocking.
     #[test]
     fn drop_detaches_rather_than_joining() {
-        RAN.store(0, Ordering::SeqCst);
+        // LEAKED ON PURPOSE (R311y753). This task is DETACHED, so its thread may
+        // write to the counter after this function returns; a stack local would
+        // be a use-after-free the moment the frame goes away, and a shared
+        // `static` is the race this round removed. A leak bounded by the test
+        // binary's life is the honest price of a thread with no completion.
+        let ran: &'static AtomicU32 = Box::leak(Box::new(AtomicU32::new(0)));
         let mut task = crate::abi::z_owned_task_t::null_value();
         // SAFETY: as above.
         unsafe {
@@ -310,7 +336,7 @@ mod tests {
                     &mut task,
                     std::ptr::null(),
                     Some(bump),
-                    std::ptr::null_mut()
+                    ran as *const AtomicU32 as *mut c_void
                 ),
                 Z_OK
             );
@@ -321,8 +347,10 @@ mod tests {
                 "drop gravestones the slot"
             );
         }
-        // No assertion on RAN here, and that is the point: a detached task has
-        // no completion this thread can observe, so asserting on it would be
-        // exactly the race the join test avoids.
+        // No assertion on the counter here, and that is the point: a detached
+        // task has no completion this thread can observe, so asserting on it
+        // would be exactly the race the join test avoids. What R311y753 changed
+        // is that the unobservable write now lands in THIS test's own counter
+        // instead of one its siblings read.
     }
 }

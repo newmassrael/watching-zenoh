@@ -14,20 +14,37 @@ exclude = ["/crates/target", "/target"]
 
 needs = ["cargo", "python3", "git"]
 
-# MEASURED on the 32-core / 125 GB build machine at R311y752, and the reason
-# this list exists rather than a shrug: WITHOUT THESE, `run-ci.sh` does not fail
-# -- it SKIPS, and a sweep that skips half its lanes reports the same green as
-# one that ran them. Absent there: shellcheck, arm-none-eabi-gcc, qemu-arm,
-# zenohd, and every non-x86 rustup target.
+# MEASURED by RUNNING the full sweep there once (R311y752/y753, sentinel
+# `REMOTE_BUILD_EXIT=1`), which corrected two guesses this file made before the
+# run:
 #
-# The consequence, stated so no one has to rediscover it: that machine is
-# STRONGER than a laptop for the x86 lanes (feature matrix, C1*, E*) and WEAKER
-# for the cross-compile and interop ones. Layers G / Q / Z belong on a host that
-# has the arm toolchain, or on hosted CI.
+#   * Layer G does NOT skip -- it FAILS. G.1-G.5 are pure Rust and pass; G.6
+#     dies in `lwip-sys`'s build script with no cross C compiler
+#     (`CC_thumbv7em_none_eabihf = None`). "Absent tool" and "absent tool that
+#     stops a lane" are different states and this file said the wrong one.
+#   * The whole E* interop family SKIPS -- E, E2, E5..E15, Epico, C1bp -- for
+#     one reason: the zenoh-pico CLI is not BUILT there. That is the pico/AP
+#     evidence, so a sweep on this host says nothing about it.
+#
+# Also skipped there: Layers A / A3 / A4 / A5 and C0's resolution half
+# (mnemosyne-cli), 0.2 shellcheck + actionlint, C1bs (CAP_NET_RAW), C1cd / C1ce
+# (zenoh-c oracles), C2 deploy, Q / Qz (arm gcc + qemu), Z (zenohd), and the
+# footprint feature-subset deltas.
+#
+# So: STRONGER for the x86 crate lanes and the lints, and NOT a substitute for
+# the cross-compile or interop ones. A green here is not a green.
+#
+# Two of these are BUILD steps rather than apt packages, which is why they are
+# named in the comment as well: `bash scripts/build-zenoh-pico-cli.sh` and
+# `bash scripts/build-zenohd.sh`. `sce-codegen` additionally fails there with
+# `workspace root not detected`, which takes Layers B, B2 and C1 with it -- the
+# two tests C1 names pass locally, so it is provisioning, not the tree.
 packages = [
     "shellcheck",
+    "actionlint",
     "gcc-arm-none-eabi",
     "qemu-user",
+    "qemu-system-arm",
 ]
 
 min_ram_gb = 16
