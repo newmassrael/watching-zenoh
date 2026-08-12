@@ -7385,11 +7385,16 @@ layer_ewire_pico_wire_dissection() {
 #
 # R311y761 CORRECTED what this lane's first run was reported to have found. The
 # labels were written down rather than derived from the flow key, and they were
-# swapped: zenohd sent `[Init, Open]` and the three Frames were wz's own. The
-# standing result is that stock-zenohd bytes reach the dissector and every
-# message parses -- NOT that a router-originated message beyond the handshake
-# has been seen. This wz declares no subscription, so zenohd has nothing to
-# declare back.
+# swapped: zenohd sent `[Init, Open]` and the three Frames were wz's own.
+#
+# R311y762 (carry N67) adds the leg that DOES reach router-originated messages,
+# and the two are each other's control: they differ in exactly one thing, whether
+# the router has anything to route. Leg 1's wz declares nothing and zenohd sends
+# `[Init, Open]`; leg 2's wz declares a subscription while a SECOND wz publishes
+# straight at zenohd, off the tap, and zenohd sends `[Init, Open, Frame, Frame]`.
+# The publisher's own bytes never touch the recording, so those Frames are the
+# router's. Its first failure was `session open failed: Terminal` -- the demo
+# carries a HARDCODED zid, so the second instance needs `--zid`.
 #
 # SEPARATE LANE rather than a leg of Ewire because the prerequisite differs: this
 # needs `zenohd`, that needs the pico CLI, and folding them would make either
@@ -7405,11 +7410,11 @@ layer_ewirez_zenohd_wire_dissection() {
         _z_unavailable "zenohd not built ($zenohd; run: bash scripts/build-zenohd.sh)" || return 1
         return 0
     fi
-    _runci_guarded_test "Ewirez stock-zenohd dissection" 1 \
+    _runci_guarded_test "Ewirez stock-zenohd dissection" 2 \
         cargo test -p wz-integration-tests \
         --test zenohd_wire_dissection -- --ignored --quiet --test-threads=1 \
         || return 1
-    echo "  Ewirez: the analyzer parsed a real zenohd session end to end"
+    echo "  Ewirez: the analyzer parsed a real zenohd session, idle and routing"
 }
 
 layer_e_ap_demo_round_trip() {
