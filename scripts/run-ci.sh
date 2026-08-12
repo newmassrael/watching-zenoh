@@ -7381,10 +7381,15 @@ layer_ewire_pico_wire_dissection() {
 # implementation. Ewire closed "every analyzer witness is self-authored" for
 # zenoh-pico and explicitly did NOT close it for stock zenoh: the two are
 # separate encoders and the roles swap, so the pico capture's foreign half is a
-# CLIENT's and this one's is a ROUTER's. Its first run dissected
-# `[Init, Open, Frame, Frame, Frame]` from zenohd against `[Init, Open]` from wz
-# -- three messages a router chose to send, which no pico witness can produce,
-# and every one of them parsed.
+# CLIENT's and this one's is a ROUTER's.
+#
+# R311y761 CORRECTED what this lane's first run was reported to have found. The
+# labels were written down rather than derived from the flow key, and they were
+# swapped: zenohd sent `[Init, Open]` and the three Frames were wz's own. The
+# standing result is that stock-zenohd bytes reach the dissector and every
+# message parses -- NOT that a router-originated message beyond the handshake
+# has been seen. This wz declares no subscription, so zenohd has nothing to
+# declare back.
 #
 # SEPARATE LANE rather than a leg of Ewire because the prerequisite differs: this
 # needs `zenohd`, that needs the pico CLI, and folding them would make either

@@ -88,6 +88,15 @@ use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Side};
 use wz_session_core::inbound::InboundFrame;
 use wz_session_core::passive::Direction;
 
+/// The synthesised endpoint ports. NOT the real ones (the dialer's is ephemeral
+/// and the proxy sits between). They are named because they decide which half
+/// `Direction::A` is: `FlowKey` orders endpoints by `(addr, port)` and both
+/// addresses are 127.0.0.1, so the lower port is `low` and `low` is `A`.
+/// R311y761 found the sibling zenohd witness reporting its two halves under
+/// SWAPPED labels for exactly this reason.
+const DIALER_PORT: u16 = 40_000;
+const LISTENER_PORT: u16 = 7447;
+
 /// A short name for a parsed transport message, for the assertion messages.
 fn frame_name(frame: &InboundFrame) -> &'static str {
     match frame {
@@ -182,7 +191,7 @@ fn the_analyzer_parses_every_message_a_real_zenoh_pico_session_puts_on_the_wire(
          {from_wz} from wz"
     );
 
-    let pcap = synthesise_pcap(&segments, 40_000, 7447);
+    let pcap = synthesise_pcap(&segments, DIALER_PORT, LISTENER_PORT);
     let dissection = Dissection::from_pcap(&pcap).expect("the synthesised pcap parses");
     let flows = dissection.flows();
     assert_eq!(
@@ -217,13 +226,40 @@ fn the_analyzer_parses_every_message_a_real_zenoh_pico_session_puts_on_the_wire(
         failures.join("\n  ")
     );
 
-    let a_side = parsed.iter().filter(|(d, _)| *d == Direction::A).count();
-    let b_side = parsed.iter().filter(|(d, _)| *d == Direction::B).count();
-    assert!(
-        a_side > 0 && b_side > 0,
-        "both halves must be read, not just the one wz wrote: A={a_side} \
-         B={b_side}, parsed {parsed:?}"
+    // WHICH HALF IS WHICH, DERIVED rather than assumed (R311y761). wz is the
+    // LISTENER here and pico dials, so wz holds the lower synthesised port and
+    // is `Direction::A`. The port order the mapping rests on is asserted, not
+    // written down -- the sibling zenohd witness reported its halves swapped
+    // because it stated the mapping instead of computing it.
+    assert_eq!(
+        (flow.flow.low.port, flow.flow.high.port),
+        (u32::from(LISTENER_PORT), u32::from(DIALER_PORT)),
+        "the synthesised ports decide which half is Direction::A"
     );
+    let (wz_side, pico_side) = (Direction::A, Direction::B);
+    let named = |want: Direction| -> Vec<&str> {
+        parsed
+            .iter()
+            .filter(|(d, _)| *d == want)
+            .map(|(_, n)| *n)
+            .collect()
+    };
+    assert!(
+        !named(wz_side).is_empty() && !named(pico_side).is_empty(),
+        "both halves must be read: wz={:?} pico={:?}",
+        named(wz_side),
+        named(pico_side)
+    );
+    // The z_put's sample is PICO's, so it must land on pico's half. Asserting
+    // the side and not merely the presence is what the zenohd correction taught:
+    // a Frame on the wrong half would have read as success.
+    assert!(
+        named(pico_side).iter().any(|n| *n == "Frame"),
+        "the real z_put's sample did not arrive on pico's half: {:?}",
+        named(pico_side)
+    );
+    eprintln!("pico -> wz message set (dissected): {:?}", named(pico_side));
+    eprintln!("wz -> pico message set (dissected): {:?}", named(wz_side));
 
     // The handshake is the part pico authored most independently, so name it
     // rather than resting on a total. Both directions carry an Init and an Open.
@@ -238,8 +274,4 @@ fn the_analyzer_parses_every_message_a_real_zenoh_pico_session_puts_on_the_wire(
             );
         }
     }
-    assert!(
-        parsed.iter().any(|(_, n)| *n == "Frame"),
-        "the z_put's sample never reached the dissector as a Frame: {parsed:?}"
-    );
 }

@@ -34,18 +34,29 @@
 //! stock zenohd. SYNTHESISED: the Ethernet / IPv4 / TCP envelope, because a
 //! userspace relay cannot see headers the kernel wrote.
 //!
-//! ## What the first run found
+//! ## What the runs found, and the correction R311y761 had to make
 //!
-//! `zenohd -> wz` dissected as `[Init, Open, Frame, Frame, Frame]` and
-//! `wz -> zenohd` as `[Init, Open]`. THE THREE ROUTER-SIDE FRAMES ARE THE POINT:
-//! a pico client emits nothing of the kind, so no witness in this tree had ever
-//! handed the dissector a message a router chose to send. Every one parsed.
+//! R311y760 reported `zenohd -> wz = [Init, Open, Frame, Frame, Frame]` and
+//! called those three Frames "what a router chose to send". THEY WERE wz's.
+//! `Direction::A` is the half whose segments arrive `from_low`, and `low` is the
+//! lesser endpoint by `(addr, port)` — with both addresses 127.0.0.1 that is
+//! decided entirely by the two port numbers this test synthesises, and the
+//! labels were written down instead of derived. Measured with the mapping
+//! computed from the flow key:
 //!
-//! The asymmetry is also honest evidence and is NOT asserted away: wz's own
-//! `--publish` does not appear as a Frame in this capture, so the sample either
-//! left after the teardown or never left at all. That is carried rather than
-//! papered over — this witness is about what zenohd emits, and reading the wz
-//! half as complete would be a claim the capture does not support.
+//! * `zenohd -> wz` = `[Init, Open]`
+//! * `wz -> zenohd` = `[Init, Open, Frame, Frame, Frame]`
+//!
+//! So the standing result is narrower than R311y760 claimed and one carry it
+//! opened was false. What IS established: bytes a stock zenohd wrote reach the
+//! dissector and every message parses. What is NOT: any router-originated
+//! message beyond the handshake — this wz declares no subscription, so zenohd
+//! has nothing to declare back, and `[Init, Open]` is the whole of what it sent.
+//!
+//! The publish, meanwhile, was on the wire the entire time. `debt-carry-N66`
+//! ("wz's --publish does not appear as a Frame") was an artefact of the swapped
+//! label, and the assertion at the end of this test now pins it so the claim
+//! cannot rest on a printed line nobody re-reads.
 //!
 //! ## Falsification
 //!
@@ -66,6 +77,13 @@ use wz_integration_tests::common::{
 use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Recording, Side};
 use wz_session_core::inbound::InboundFrame;
 use wz_session_core::passive::Direction;
+
+/// The synthesised endpoint ports. They are NOT the real ones (the real dialer
+/// port is ephemeral and the proxy sits between), and they are named here
+/// because they decide which half `Direction::A` names -- `FlowKey` orders its
+/// endpoints by `(addr, port)` and both addresses are 127.0.0.1.
+const DIALER_PORT: u16 = 40_000;
+const LISTENER_PORT: u16 = 7447;
 
 /// A short name for a parsed transport message.
 ///
@@ -199,7 +217,7 @@ fn the_analyzer_parses_every_message_a_real_zenohd_puts_on_the_wire() {
          {from_zenohd} from zenohd"
     );
 
-    let pcap = synthesise_pcap(&segments, 40_000, 7447);
+    let pcap = synthesise_pcap(&segments, DIALER_PORT, LISTENER_PORT);
     let dissection = Dissection::from_pcap(&pcap).expect("the synthesised pcap parses");
     let flows = dissection.flows();
     assert_eq!(
@@ -253,22 +271,48 @@ fn the_analyzer_parses_every_message_a_real_zenohd_puts_on_the_wire() {
         }
     }
 
-    // WHAT THE ROUTER SENT, printed rather than asserted. This is the message set
-    // no witness in this tree had ever seen, and pinning it on the first run
-    // would freeze whatever this particular zenohd build happened to emit --
-    // a golden-fixture reflex the dissect census already refuses elsewhere.
-    let router_side: Vec<&str> = parsed
-        .iter()
-        .filter(|(d, _)| *d == Direction::B)
-        .map(|(_, n)| *n)
-        .collect();
-    eprintln!("zenohd -> wz message set (dissected): {router_side:?}");
-    eprintln!("wz -> zenohd message set (dissected): {:?}", {
-        let v: Vec<&str> = parsed
+    // ── WHICH HALF IS WHICH, DERIVED RATHER THAN ASSUMED ──────────────────
+    // `Direction::A` is the half whose segments come `from_low`, and `low` is
+    // the lesser endpoint by `(addr, port)` (`FlowKey`, link.rs:144-148). Both
+    // endpoints here are 127.0.0.1, so the ORDER IS DECIDED BY THE PORT NUMBERS
+    // this test picked for the synthesised envelope -- which means a reader who
+    // assumes "A is the dialer" is right or wrong depending on two constants
+    // chosen for unrelated reasons.
+    //
+    // R311y761: the first version of this test assumed exactly that and printed
+    // both message sets under SWAPPED labels, and the round entry that followed
+    // reported wz's own Frames as the router's. So the mapping is now COMPUTED
+    // from the key and asserted, rather than written down.
+    let low_port = flow.flow.low.port;
+    let high_port = flow.flow.high.port;
+    assert_eq!(
+        (low_port, high_port),
+        (u32::from(LISTENER_PORT), u32::from(DIALER_PORT)),
+        "the synthesised ports decide which half is Direction::A, so this test \
+         pins them: zenohd (the listener) is the LOW endpoint here"
+    );
+    // zenohd is the listener and the listener is `low`, so A is zenohd -> wz.
+    let (zenohd_side, wz_side) = (Direction::A, Direction::B);
+    let named = |want: Direction| -> Vec<&str> {
+        parsed
             .iter()
-            .filter(|(d, _)| *d == Direction::A)
+            .filter(|(d, _)| *d == want)
             .map(|(_, n)| *n)
-            .collect();
-        v
-    });
+            .collect()
+    };
+    eprintln!(
+        "zenohd -> wz message set (dissected): {:?}",
+        named(zenohd_side)
+    );
+    eprintln!("wz -> zenohd message set (dissected): {:?}", named(wz_side));
+
+    // THE PUBLISH REACHED THE WIRE, and this is the assertion that says so.
+    // R311y760 recorded "wz's --publish does not appear as a Frame" as carry
+    // N66; it was there all along, under the other label. Asserting it here is
+    // what stops the claim from depending on a printed line nobody re-reads.
+    assert!(
+        named(wz_side).iter().any(|n| *n == "Frame"),
+        "wz ran with --publish and no Frame was dissected on its half: {:?}",
+        named(wz_side)
+    );
 }

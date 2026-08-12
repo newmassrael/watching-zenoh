@@ -1489,8 +1489,9 @@ jobs:
         # R311y760 (carry N65) — the sibling of Layer Ewire against the OTHER
         # reference implementation. Ewire closed the self-authored-fixture hole
         # for zenoh-pico and explicitly not for stock zenoh: the roles swap, so
-        # the foreign half here is what a ROUTER writes. Its first run dissected
-        # three router-side Frames that no pico witness can produce.
+        # the foreign half here is what a ROUTER writes. R311y761 corrected the
+        # first run's report: the direction labels were swapped, zenohd sent
+        # [Init, Open], and the three Frames were wz's own.
         #
         # Wired HERE because this job is what builds and guarantees zenohd; the
         # same `WZ_Z_REQUIRE` reasoning applies, and the lane's own prereq check
