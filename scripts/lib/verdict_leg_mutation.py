@@ -334,50 +334,106 @@ UNWITNESSED = {
 }
 
 
-# Which (accessor, predicate) pairs the recipes above are known to cover.
+# Which (TYPE, predicate) pairs the recipes above cover.
 #
-# R311y731 (N23) — the recipes are hand-written, and until this round nothing
-# noticed a guard that started calling a predicate NOBODY mutates. A stale
-# recipe already died loudly; a MISSING one was silent, and silence in this
-# gate reads as coverage.
+# R311y731 (N23) made this check exist; R311y732 (N24) raises it from names to
+# TYPES, which is what it needed to actually answer the question. Keying on the
+# accessor name accepted `(gaps, is_clean)` for any struct reached through a
+# method called `gaps` -- and this tree already has two: `ExchangeTable::gaps`
+# returns `ExchangeGaps` while `PayloadCensus::gaps` and `ThroughputTable::gaps`
+# return `ThroughputGaps`. A third type behind the same name would have walked
+# straight through.
 #
-# The pair rather than the bare method name, because `gaps().is_clean()` and
-# `unread().is_clean()` reach different structs through the same method and a
-# name-only check would accept a third one. The honest limit is stated rather
-# than hidden: this still keys on NAMES, so a new accessor returning a new type
-# whose predicate happens to be called `is_clean` would be accepted by the pair
-# `(gaps, is_clean)` if it were reached through `gaps()`. Resolving that needs
-# the type, which no regex has.
-COVERED_CALLS = {
-    ("drops", "any"),
-    ("gaps", "is_clean"),
-    ("unread", "is_clean"),
-    ("selection", "is_decisive"),
+# The type is READ FROM THE DECLARATION rather than inferred: an accessor's
+# return type is written down at its `fn`, and a recipe sits inside an `impl`
+# block that names the type it mutates. Neither needs type inference, which is
+# what made R311y731 stop at names.
+COVERED_TYPES = {
+    ("DissectionDrops", "any"),
+    ("ThroughputGaps", "is_clean"),
+    ("ExchangeGaps", "is_clean"),
+    ("Selection", "is_decisive"),
 }
 
-# Adapters, which are not predicates: the comparison inside them is reached by
-# `boundary` directly, so a guard ending in one is not asking anything of a
-# threshold somewhere else.
+# A no-argument method call. Adapters (`is_some_and(..)`, `map_or(..)`) carry
+# arguments and so never match -- their inner comparison is `boundary`'s job,
+# not a predicate's.
 CALL = re.compile(r"\.(\w+)\(\)")
 
+# An accessor's declared return type, and the `impl` a recipe sits in.
+RETURNS = re.compile(r"\bfn\s+{name}\s*\(\s*&self\s*\)\s*->\s*([\w:]+)")
+IMPL = re.compile(r"^impl(?:<[^>]*>)?\s+([A-Za-z_]\w*)", re.M)
 
-def uncovered_calls(pristine: str, unreached: set[str]) -> list[tuple[str, str, str]]:
-    """`(variant, accessor, predicate)` for guards calling something unmutated.
 
-    Only guards `boundary` could not reach are asked: a guard holding its own
-    threshold is answered where it stands and does not depend on a predicate's.
+def _last_segment(path: str) -> str:
+    return path.rsplit("::", 1)[-1]
+
+
+_SOURCES: list[str] | None = None
+
+
+def _crate_sources() -> list[str]:
+    """Every crate source, read once. The type lookup runs per guard and this
+    keeps it from re-reading the tree each time."""
+    global _SOURCES
+    if _SOURCES is None:
+        _SOURCES = [
+            p.read_text(encoding="utf-8", errors="replace")
+            for p in sorted((REPO_ROOT / "crates").rglob("*.rs"))
+            if "target" not in p.parts
+        ]
+    return _SOURCES
+
+
+def accessor_types(accessor: str) -> set[str]:
+    """Every type an accessor of this name is declared to return.
+
+    ALL of them, not one: two structs in this tree answer to `gaps()`, and
+    picking either would be this tool guessing which receiver a guard held.
+    Requiring every candidate to be covered is the conservative direction.
     """
-    out: list[tuple[str, str, str]] = []
-    for g in GUARD.finditer(pristine):
-        variant = g.group("variant")
-        if variant not in unreached:
+    pattern = re.compile(RETURNS.pattern.format(name=re.escape(accessor)))
+    out: set[str] = set()
+    for text in _crate_sources():
+        for hit in pattern.finditer(text):
+            out.add(_last_segment(hit.group(1)))
+    return out
+
+
+def recipe_types() -> set[tuple[str, str]]:
+    """`(type, predicate)` for each recipe, read from its `impl` block."""
+    out: set[tuple[str, str]] = set()
+    for _label, rel, anchor, _old, _new in PREDICATES:
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        if anchor not in text:
             continue
+        at = text.index(anchor)
+        name = re.search(r"fn (\w+)\(", anchor)
+        impls = IMPL.findall(text[:at])
+        if name and impls:
+            out.add((impls[-1], name.group(1)))
+    return out
+
+
+def uncovered_calls(pristine: str) -> list[tuple[str, str, str, str]]:
+    """`(variant, accessor, type, predicate)` for guards leaning on an unmutated
+    threshold.
+
+    EVERY guard is asked, not only the ones `boundary` cannot reach. R311y731
+    filtered on reachability as a proxy for "depends on a predicate", and the
+    two come apart the moment a guard has two clauses: `x > 0 && !y.is_clean()`
+    is reached by `boundary` on the first half and its second half would never
+    be asked about.
+    """
+    out: list[tuple[str, str, str, str]] = []
+    for g in GUARD.finditer(pristine):
         calls = CALL.findall(g.group("cond"))
         if len(calls) < 2:
             continue
         accessor, predicate = calls[-2], calls[-1]
-        if (accessor, predicate) not in COVERED_CALLS:
-            out.append((variant, accessor, predicate))
+        for ty in accessor_types(accessor) or {f"<unknown:{accessor}>"}:
+            if (ty, predicate) not in COVERED_TYPES:
+                out.append((g.group("variant"), accessor, ty, predicate))
     return out
 
 
@@ -648,42 +704,34 @@ def main() -> int:
     # otherwise the declaration silences the check while nothing is swept --
     # the same failure the register's stale check exists to stop, on the other
     # side of the same list.
-    recipe_predicates = {
-        hit.group(1)
-        for _l, _r, a, *_x in PREDICATES
-        if (hit := re.search(r"fn (\w+)\(", a))
-    }
-    orphan_pairs = sorted(
-        (acc, pred) for acc, pred in COVERED_CALLS if pred not in recipe_predicates
-    )
+    declared = recipe_types()
+    orphan_pairs = sorted(COVERED_TYPES - declared)
     if orphan_pairs:
         print("verdict-leg mutation: FAIL", file=sys.stderr)
-        for acc, pred in orphan_pairs:
+        for ty, pred in orphan_pairs:
             print(
-                f"  COVERED_CALLS declares `{acc}().{pred}()` covered, and no "
-                "recipe mutates a predicate by that name",
+                f"  COVERED_TYPES declares `{ty}::{pred}` covered, and no "
+                "recipe mutates it",
                 file=sys.stderr,
             )
         return 1
 
-    unreached_set = {v for v in raised if boundary(pristine, v) is None}
-    uncovered = uncovered_calls(pristine, unreached_set)
+    uncovered = uncovered_calls(pristine)
     if uncovered:
         print("verdict-leg mutation: FAIL", file=sys.stderr)
-        for variant, accessor, predicate in uncovered:
+        for variant, accessor, ty, predicate in uncovered:
             print(
                 f"  `VerdictReason::{variant}` guards on "
-                f"`{accessor}().{predicate}()`, which holds a threshold this "
-                "sweep does not mutate and is not in COVERED_CALLS",
+                f"`{accessor}().{predicate}()`, which reaches `{ty}` -- a "
+                "threshold this sweep does not mutate and is not in "
+                "COVERED_TYPES",
                 file=sys.stderr,
             )
         print(
-            "\nThe `boundary` operator cannot reach this guard, so the "
-            "threshold it depends on\nlives inside that predicate. Add a "
-            "recipe for it to PREDICATES and declare the pair in\n"
-            "COVERED_CALLS -- or, if the predicate genuinely holds no "
-            "threshold, declare the pair\nwith that reason. Silence here "
-            "reads as coverage.",
+            "\nThe threshold this guard depends on lives inside that "
+            "predicate, one level\ndown. Add a recipe for it to PREDICATES "
+            "and declare the (type, predicate) pair\nin COVERED_TYPES. "
+            "Silence here reads as coverage.",
             file=sys.stderr,
         )
         return 1
