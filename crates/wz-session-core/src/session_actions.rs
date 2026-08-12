@@ -108,11 +108,14 @@ use crate::namespace::NamespaceIngress;
 ))]
 use crate::reliability::Reliability;
 use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
+// R311y739 — this bundle owns `outbound_mappings`, so it IS the `M=0` id space
+// an inbound resolver consults.
 use crate::send_declare_error::SendDeclareError;
 use crate::send_wire_error::SendWireError;
 use crate::session_fsm_unicast::SessionFsmUnicastActions as SessionFsmUnicastActionsTrait;
 use crate::session_init_params::SessionInitParams;
 use crate::signing_key::generate_cookie_hmac_sha256;
+use crate::wireexpr_resolve::OwnMappingSpace;
 
 // inbound parse (handle_inbound)
 use crate::inbound::{parse_inbound_consuming, InboundFrame};
@@ -1297,6 +1300,23 @@ pub fn default_init_patch_ext_entry() -> ExtEntryOwned {
 // segregation lets a partial runtime sink (the multicast reply loop)
 // implement only `ResponseSink` without being forced to satisfy the
 // liveliness concerns.
+// R311y739 — the outbound mapping table IS our id space, so the actions bundle
+// that owns it is the thing an inbound resolver should be handed. Declaring it
+// through the trait (rather than copying the table into the registry) keeps ONE
+// copy of the fact: `send_declare_keyexpr` inserts and `send_undeclare_kexpr`
+// removes, and a resolution one microsecond later sees both.
+//
+// A pure delegation to the existing R234 read side. The pairing matters more
+// than the body: `resolve_outbound_mapping` was already the publish path's
+// answer to "what did I alias id N to", and this makes the RECEIVE path ask the
+// same question of the same table — before R311y739 the receive path could not
+// ask it at all, so a peer naming our id was answered `None` and dropped.
+impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R, T> {
+    fn resolve_own_mapping(&self, id: u64) -> Option<String> {
+        self.resolve_outbound_mapping(id)
+    }
+}
+
 impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T> {
     #[cfg(feature = "codec-response")]
     fn send_response(&self, response: ResponseOwned) {

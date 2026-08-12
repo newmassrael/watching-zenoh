@@ -7,17 +7,12 @@
 //! (`_z_liveliness_process_token_declare` /
 //! `_z_liveliness_process_token_undeclare` upstream).
 
-// R311gb (Track 2) — String / HashMap back the `alloc` wire-dispatch
-// params; the no-alloc control plane stores observers in a `BoundedVec`
-// and fires through the borrowed `DeclView` seam. (No `declared` table /
-// `has_matching` here — liveliness is a pure observer fan-out.)
-// String / HashMap appear only in the `all(codec-declare, alloc)` wire-
-// dispatch params (no `declared` membership table here), so they carry
-// that gate rather than bare `alloc`.
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use alloc::string::String;
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use hashbrown::HashMap;
+// R311gb (Track 2) — the no-alloc control plane stores observers in a
+// `BoundedVec` and fires through the borrowed `DeclView` seam. (No `declared`
+// table / `has_matching` here — liveliness is a pure observer fan-out.)
+// R311y739 — `String` / `HashMap` were here for the wire-dispatch params alone,
+// which now take `impl Into<MappingSpaces>`; nothing in this file's own code
+// names either type any more. The suite below imports both for itself.
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
@@ -33,7 +28,7 @@ use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use crate::wireexpr_resolve::resolve_wireexpr;
+use crate::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
 
 /// Application-layer registry tracking the peer's outbound
 /// `DeclToken` / `UndeclToken` records — the liveliness layer in
@@ -144,14 +139,15 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     /// R311gb (Track 2) — `all(codec-declare, alloc)`-gated wire dispatch;
     /// funnels through the no-heap fire SSOT.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare(
+    pub fn dispatch_declare<'a>(
         &mut self,
         body: &DeclareOwnedVariant,
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         match body {
             DeclareOwnedVariant::CodecZenohDeclToken(decl) => {
-                let resolved = match resolve_wireexpr(&decl.keyexpr.body, peer_keyexpr_table) {
+                let resolved = match resolve_wireexpr_in(&decl.keyexpr.body, peer_keyexpr_table) {
                     Some(s) => s,
                     None => return,
                 };
@@ -171,11 +167,12 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
 
     /// Drain a `Vec<NetworkMessage>` through [`Self::dispatch_declare`].
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_messages(
+    pub fn dispatch_messages<'a>(
         &mut self,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         for message in messages {
             if let NetworkMessage::Declare(decl) = message {
                 self.dispatch_declare(&decl.body, peer_keyexpr_table);
@@ -185,11 +182,12 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
 
     /// `IterationEvent` adapter; mirror of the other Remote* registries.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_iteration_event(
+    pub fn dispatch_iteration_event<'a>(
         &mut self,
         event: IterationEvent<'_>,
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
             self.dispatch_messages(messages, peer_keyexpr_table);
         }

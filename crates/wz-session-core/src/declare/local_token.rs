@@ -89,8 +89,9 @@ use wz_codecs::wireexpr_local::WireexprLocal;
 
 #[cfg(feature = "alloc")]
 use alloc::string::String;
-#[cfg(feature = "alloc")]
-use hashbrown::HashMap;
+// R311y739 -- the wire-dispatch params take `impl Into<MappingSpaces>` now,
+// so this file's own code no longer names `HashMap`; the suites below import
+// it themselves to stand in for the peer's id space.
 
 #[cfg(feature = "alloc")]
 use wz_codecs::interest::InterestOwned;
@@ -100,7 +101,7 @@ use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 #[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
 #[cfg(feature = "alloc")]
-use crate::wireexpr_resolve::resolve_wireexpr;
+use crate::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
 
 /// One staged declarer-side interest-response record. The no-heap
 /// replacement for the prior owned `DeclareOwned` staging: it carries
@@ -313,12 +314,13 @@ impl LocalTokenRegistry {
     /// Interest whose keyexpr references an undeclared peer mapping drops
     /// silently (same policy as the peer-side registries).
     #[cfg(feature = "alloc")]
-    pub fn respond_to_interest(
+    pub fn respond_to_interest<'a>(
         &self,
         interest: &InterestOwned,
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         if !interest.c() {
             // No CURRENT bit (read via the generated `<sce:flags>` `c()`
             // accessor -- the SSOT for that bit, not a hand-rolled mask):
@@ -340,7 +342,7 @@ impl LocalTokenRegistry {
             return;
         }
         let pattern: Option<String> = match &body.keyexpr {
-            Some(w) => match resolve_wireexpr(&w.body, peer_keyexpr_table) {
+            Some(w) => match resolve_wireexpr_in(&w.body, peer_keyexpr_table) {
                 Some(p) => Some(p),
                 // Unresolvable mapping id — drop silently.
                 None => return,
@@ -355,12 +357,13 @@ impl LocalTokenRegistry {
     /// `dispatch_messages`. `alloc`-gated (consumes owned messages +
     /// resolves keyexprs).
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages(
+    pub fn dispatch_messages<'a>(
         &self,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         for message in messages {
             if let NetworkMessage::Interest(interest) = message {
                 self.respond_to_interest(interest, peer_keyexpr_table, pending);
@@ -372,12 +375,13 @@ impl LocalTokenRegistry {
     /// Non-`FramePayload` events (Lease branch, non-poll outcomes) are
     /// no-ops. `alloc`-gated (consumes owned messages).
     #[cfg(feature = "alloc")]
-    pub fn dispatch_iteration_event(
+    pub fn dispatch_iteration_event<'a>(
         &self,
         event: IterationEvent<'_>,
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
             self.dispatch_messages(messages, peer_keyexpr_table, pending);
         }
@@ -462,6 +466,7 @@ mod tests {
     //! `alloc` inbound-parse path is exercised through `InterestOwned`.
 
     use super::*;
+    use hashbrown::HashMap;
 
     /// Count `(tokens, finals)` staged in `pending`.
     fn count(

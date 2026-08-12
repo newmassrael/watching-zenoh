@@ -119,7 +119,13 @@ use crate::registry_error::RegisterError;
         feature = "codec-declare"
     )
 ))]
-use crate::wireexpr_resolve::resolve_wireexpr;
+use crate::wireexpr_resolve::resolve_wireexpr_in;
+// R311y739 — the two-space PAIR is `alloc`-gated only: the `own_mapping_space`
+// field and the `mapping_spaces()` accessor exist in every `alloc` profile,
+// including one with no wire-dispatch consumer compiled in, whereas the
+// resolver call above is reached only from those consumers.
+#[cfg(feature = "alloc")]
+use crate::wireexpr_resolve::{MappingSpaces, OwnMappingSpace};
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
 // R311gb (Track 2) — these wire-dispatch-supporting imports feed the
@@ -254,6 +260,26 @@ pub struct SubscriberRegistry<C: SampleSink> {
     /// (subscription table + matching) does not depend on it.
     #[cfg(feature = "alloc")]
     peer_keyexpr_table: HashMap<u64, String>,
+    /// R311y739 — OUR id space, the other half of the pair the `M` bit picks
+    /// between. Installed (not owned) so there is exactly ONE copy of the fact:
+    /// the table itself lives on `SessionActions::outbound_mappings`, written by
+    /// `send_declare_keyexpr` and pruned by `send_undeclare_kexpr`, and this
+    /// handle reads it through [`OwnMappingSpace::resolve_own_mapping`]. A
+    /// mirrored `HashMap` here would go stale on the first undeclare.
+    ///
+    /// `None` is the honest state for a face that declares no aliases of its own
+    /// — a relay, or a session before bring-up — and it keeps the pre-R311y739
+    /// answer: an `M=0` ALIAS refuses rather than being read out of the peer's
+    /// table. `M=0` LITERALS (`id == 0`) never consulted a space and are
+    /// unaffected either way.
+    ///
+    /// Why it matters that this is usually `Some`: zenoh PREFERS the id the peer
+    /// declared when rendering a keyexpr back at it (`get_best_key`,
+    /// `dispatcher/resource.rs:625`), so a zenoh peer starts naming OUR ids with
+    /// `M=0` the moment we declare one. Absent the install, every such Push was
+    /// dropped.
+    #[cfg(feature = "alloc")]
+    own_mapping_space: Option<alloc::sync::Arc<dyn OwnMappingSpace + Send + Sync>>,
     /// R231 — this session's own zid prefix (1..=16 bytes),
     /// negotiated during the session-FSM open handshake. When set,
     /// [`dispatch_push`](Self::dispatch_push) suppresses wire-arrived
@@ -447,6 +473,8 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             next_id: 1,
             #[cfg(feature = "alloc")]
             peer_keyexpr_table: HashMap::new(),
+            #[cfg(feature = "alloc")]
+            own_mapping_space: None,
             #[cfg(feature = "alloc")]
             own_zid: None,
             #[cfg(feature = "transport-shm")]
@@ -676,6 +704,51 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         &self.peer_keyexpr_table
     }
 
+    /// R311y739 — install OUR id space, the `M=0` half of the pair.
+    ///
+    /// Call once at bring-up with the session's own outbound-mapping surface
+    /// (`Session::new` does it automatically from its `SessionLinkActions`); the
+    /// registry then answers an `M=0` alias out of the right table instead of
+    /// dropping the message. Idempotent — a second install replaces the first,
+    /// which is what a session re-init wants.
+    ///
+    /// The sibling of `set_shm_resolver`: an AP-injected capability the no_std
+    /// core cannot construct for itself. (Named rather than linked — that method
+    /// is `transport-shm`-gated, so a link would dangle in every subset without
+    /// the feature, and this one is only `alloc`-gated.)
+    #[cfg(feature = "alloc")]
+    pub fn set_own_mapping_space(
+        &mut self,
+        space: alloc::sync::Arc<dyn OwnMappingSpace + Send + Sync>,
+    ) {
+        self.own_mapping_space = Some(space);
+    }
+
+    /// R311y739 — release the installed own space; `M=0` aliases refuse again.
+    /// Paired with [`set_own_mapping_space`](Self::set_own_mapping_space) for
+    /// session teardown / re-init, exactly as `clear_own_zid` pairs its install.
+    #[cfg(feature = "alloc")]
+    pub fn clear_own_mapping_space(&mut self) {
+        self.own_mapping_space = None;
+    }
+
+    /// R311y739 — BOTH id spaces, for this registry and for every consumer the
+    /// observer fans the table into.
+    ///
+    /// This is the accessor the fan should use rather than
+    /// [`peer_keyexpr_table`](Self::peer_keyexpr_table): handing a consumer the
+    /// bare peer table hands it a resolver that silently refuses every `M=0`
+    /// alias, which is the defect R311y739 exists to remove. The peer table
+    /// accessor survives for the one caller that genuinely needs the raw map —
+    /// a `DeclKexpr` absorb binds INTO the peer's space and into no other.
+    #[cfg(feature = "alloc")]
+    pub fn mapping_spaces(&self) -> MappingSpaces<'_> {
+        match &self.own_mapping_space {
+            Some(own) => MappingSpaces::with_own(&self.peer_keyexpr_table, &**own),
+            None => MappingSpaces::peer_only(&self.peer_keyexpr_table),
+        }
+    }
+
     /// R237 — single-id resolver mirroring R234
     /// `SessionLinkActions::resolve_outbound_mapping` (wz-runtime-tokio).
     /// Returns the literal keyexpr the peer declared for `id`, or
@@ -811,7 +884,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             return;
         }
         let pattern: Option<String> = match &body.keyexpr {
-            Some(w) => match resolve_wireexpr(&w.body, &self.peer_keyexpr_table) {
+            Some(w) => match resolve_wireexpr_in(&w.body, self.mapping_spaces()) {
                 Some(p) => Some(p),
                 None => return,
             },
@@ -1057,7 +1130,11 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         // never declared — drop silently rather than fire on a partial
         // keyexpr (R125c2: the tagged-union arms are folded inside the
         // resolver; both carry the same id + Option<suffix> fields).
-        let resolved: String = match resolve_wireexpr(&push.keyexpr.body, &self.peer_keyexpr_table)
+        // R311y739 — resolved against BOTH id spaces: an `M=0` alias names an id
+        // WE declared and is answered out of the installed own space, never out
+        // of the peer's (both sides number from 1, so the wrong space would very
+        // likely FIND an entry and fire the wrong subscriber).
+        let resolved: String = match resolve_wireexpr_in(&push.keyexpr.body, self.mapping_spaces())
         {
             Some(r) => r,
             None => return,
@@ -1442,7 +1519,13 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                 // table[id] + suffix). If the inner reference is
                 // unresolvable we skip — recording a partial entry
                 // would later mis-fire subscriber matches.
-                if let Some(literal) = resolve_wireexpr(&d.keyexpr.body, &self.peer_keyexpr_table) {
+                // R311y739 — the INNER reference resolves against both spaces
+                // (the peer may alias an id it learned from us), while the
+                // BINDING `d.id -> literal` goes into the peer's space and only
+                // there: `d.id` is a number the PEER minted. Bound to a `let`
+                // before the insert so the immutable spaces borrow ends first.
+                let literal = resolve_wireexpr_in(&d.keyexpr.body, self.mapping_spaces());
+                if let Some(literal) = literal {
                     self.peer_keyexpr_table.insert(d.id, literal);
                 }
             }
@@ -2767,6 +2850,182 @@ mod tests {
         }
         .try_into_owned()
         .unwrap()
+    }
+
+    /// An `M=0` (`Mapping::Receiver`) aliased Push — the id names OUR space.
+    /// This is what a zenoh peer emits for an id we declared, because
+    /// `get_best_key` prefers `ctx.remote_expr_id` and stamps it
+    /// `Mapping::Receiver` (`dispatcher/resource.rs:625`).
+    fn push_with_own_mapping_id(mapping_id: u64, inline_suffix: Option<&str>) -> PushOwned {
+        Push {
+            keyexpr: wz_codecs::wireexpr::Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(
+                    wz_codecs::wireexpr_nonlocal::WireexprNonlocal {
+                        id: mapping_id,
+                        suffix_len: inline_suffix.map(|s| s.len() as u64),
+                        suffix: inline_suffix,
+                    },
+                ),
+            },
+            ..Push::default()
+        }
+        .try_into_owned()
+        .unwrap()
+    }
+
+    /// R311y739 — OUR id space as a bare table, installed on the registry.
+    fn own_space(id: u64, literal: &str) -> alloc::sync::Arc<HashMap<u64, String>> {
+        let mut t = HashMap::new();
+        t.insert(id, literal.to_string());
+        alloc::sync::Arc::new(t)
+    }
+
+    /// R311y739 — an `M=0` alias fires the subscriber registered against the
+    /// literal WE declared for that id.
+    ///
+    /// THE DISCRIMINATOR is the peer declaration of the SAME id 4 under a
+    /// different literal: if the resolver read the wrong space it would resolve
+    /// `peer/only/temp` and fire the OTHER subscriber, so a swapped lookup is
+    /// caught as a wrong fire rather than as silence.
+    #[test]
+    fn an_own_space_alias_fires_the_subscriber_that_matches_our_literal() {
+        let mut registry = SubscriberRegistry::new();
+        registry.set_own_mapping_space(own_space(4, "ours/temp"));
+
+        let ours = Arc::new(AtomicUsize::new(0));
+        let theirs = Arc::new(AtomicUsize::new(0));
+        let (o, t) = (ours.clone(), theirs.clone());
+        registry.register("ours/temp", move |_| {
+            o.fetch_add(1, Ordering::SeqCst);
+        });
+        registry.register("peer/only/temp", move |_| {
+            t.fetch_add(1, Ordering::SeqCst);
+        });
+
+        // The PEER declares id 4 too, under its own literal. Both spaces now
+        // hold 4, which is the collision the mapping bit exists to resolve.
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(4, "peer/only/temp"))),
+            Reliability::Reliable,
+        );
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_with_own_mapping_id(4, None))),
+            Reliability::Reliable,
+        );
+
+        assert_eq!(
+            ours.load(Ordering::SeqCst),
+            1,
+            "an M=0 alias names OUR space; id 4 is `ours/temp` there",
+        );
+        assert_eq!(
+            theirs.load(Ordering::SeqCst),
+            0,
+            "reading the peer's space for an M=0 alias is the wrong-space read \
+             -- it would have fired this subscriber instead",
+        );
+    }
+
+    /// ANTI-VACUITY twin. With NO own space installed the same Push resolves
+    /// nothing and fires nobody — so the test above is measuring the install,
+    /// not merely that some table was consulted. This is also the pre-R311y739
+    /// behaviour, i.e. the defect this round removed: the peer's traffic was
+    /// silently dropped.
+    #[test]
+    fn without_an_installed_own_space_the_same_alias_fires_nobody() {
+        let mut registry = SubscriberRegistry::new();
+        let ours = Arc::new(AtomicUsize::new(0));
+        let theirs = Arc::new(AtomicUsize::new(0));
+        let (o, t) = (ours.clone(), theirs.clone());
+        registry.register("ours/temp", move |_| {
+            o.fetch_add(1, Ordering::SeqCst);
+        });
+        registry.register("peer/only/temp", move |_| {
+            t.fetch_add(1, Ordering::SeqCst);
+        });
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(4, "peer/only/temp"))),
+            Reliability::Reliable,
+        );
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_with_own_mapping_id(4, None))),
+            Reliability::Reliable,
+        );
+        assert_eq!(ours.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            theirs.load(Ordering::SeqCst),
+            0,
+            "no own space must mean NO resolution -- never a fallback read of \
+             the peer's table, which holds id 4",
+        );
+    }
+
+    /// The install is releasable, and releasing it restores the refusal. Pins
+    /// that the two states are reachable in both directions from one registry,
+    /// so a session re-init cannot leave a stale space answering for ids the
+    /// new session never declared.
+    #[test]
+    fn clearing_the_own_space_restores_the_refusal() {
+        let mut registry = SubscriberRegistry::new();
+        registry.set_own_mapping_space(own_space(4, "ours/temp"));
+        let ours = Arc::new(AtomicUsize::new(0));
+        let o = ours.clone();
+        registry.register("ours/temp", move |_| {
+            o.fetch_add(1, Ordering::SeqCst);
+        });
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_with_own_mapping_id(4, None))),
+            Reliability::Reliable,
+        );
+        assert_eq!(ours.load(Ordering::SeqCst), 1);
+
+        registry.clear_own_mapping_space();
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_with_own_mapping_id(4, None))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            ours.load(Ordering::SeqCst),
+            1,
+            "after clear, the same alias must resolve nothing again",
+        );
+    }
+
+    /// The suffix composes on the `M=0` arm too: `ours/` + `temp`.
+    #[test]
+    fn an_own_space_alias_composes_its_inline_suffix() {
+        let mut registry = SubscriberRegistry::new();
+        registry.set_own_mapping_space(own_space(6, "ours/"));
+        let fired = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        registry.register("ours/temp", move |_| {
+            f.fetch_add(1, Ordering::SeqCst);
+        });
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_with_own_mapping_id(6, Some("temp")))),
+            Reliability::Reliable,
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+    }
+
+    /// An `M=0` LITERAL (`id == 0`) consults no space at all, so it kept
+    /// working before this round and must keep working now. The regression
+    /// guard: the overwhelming majority of wire keyexprs take this path, and
+    /// keying the refusal on the ARM rather than on `id != 0` would silence
+    /// them all.
+    #[test]
+    fn an_own_space_literal_needs_no_install() {
+        let mut registry = SubscriberRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        registry.register("home/temp", move |_| {
+            f.fetch_add(1, Ordering::SeqCst);
+        });
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_with_own_mapping_id(0, Some("home/temp")))),
+            Reliability::Reliable,
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 
     #[test]

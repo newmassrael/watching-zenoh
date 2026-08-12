@@ -119,8 +119,9 @@ use sce_forge_runtime::codec::CodecError;
 // records staged into the `alloc` reply accumulator), so their imports
 // carry that exact gate (deny-warnings clean in a `codec-request`-OFF or
 // no-`alloc` subset).
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
-use hashbrown::HashMap;
+// R311y739 -- the wire-dispatch params take `impl Into<MappingSpaces>` now,
+// so this file's own code no longer names `HashMap`; the suites below import
+// it themselves to stand in for the peer's id space.
 
 // R311dx — SCE owned-view absorb: decoded inbound Query / Request bodies
 // are held / dispatched as the lifetime-free `*Owned` mirrors; the reply
@@ -145,7 +146,7 @@ use wz_codecs::request::{RequestOwned, RequestOwnedVariant};
 // `alloc`-gated). The dispatch / loopback / registration paths only stage
 // entries into `Vec<QueryReply>` and do not need codec-response.
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
-use crate::wireexpr_resolve::resolve_wireexpr;
+use crate::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
 #[cfg(all(feature = "codec-response", feature = "alloc"))]
 use wz_codecs::response::ResponseOwned;
 
@@ -1465,12 +1466,13 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// (wire-data-helper exemption to R311g1 signature stability,
     /// mirror of `SubscriberRegistry::dispatch_push`). Gate carried by
     /// the enclosing `#[cfg(all(codec-request, alloc))] impl`.
-    pub fn dispatch_request(
+    pub fn dispatch_request<'a>(
         &mut self,
         request: &RequestOwned,
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         replies: &mut Vec<QueryReply>,
     ) -> DispatchOutcome {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         // Only the Query body arm triggers application-visible
         // dispatch — see scope note above. zenoh's wire entry never enters its
         // Query arm for these bodies either (session.rs:2771).
@@ -1484,7 +1486,8 @@ impl<C: QuerySink> QueryableRegistry<C> {
         // None -> drop, covering the empty form + an undeclared id).
         // zenoh's twin exit: `Err(err) => error!("Received Query for unknown
         // key_expr")` returns before `handle_query`, so no Final is owed.
-        let resolved: String = match resolve_wireexpr(&request.keyexpr.body, peer_keyexpr_table) {
+        let resolved: String = match resolve_wireexpr_in(&request.keyexpr.body, peer_keyexpr_table)
+        {
             Some(r) => r,
             None => return DispatchOutcome::NOT_DISPATCHED,
         };
@@ -1707,13 +1710,14 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// this layer per the scope note on
     /// [`Self::dispatch_request`]; they do not enqueue a Final
     /// either.
-    pub fn dispatch_messages(
+    pub fn dispatch_messages<'a>(
         &mut self,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending_replies: &mut Vec<QueryReply>,
         pending_final_rids: &mut Vec<u64>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         // R311dx — the whole registry impl is `codec-request`-gated, so
         // `NetworkMessage::Request` (itself a `codec-request` variant) is
         // always present here; the prior R311r `#[cfg(not(codec-request))]`
@@ -1766,13 +1770,14 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// of [`crate::pubsub::SubscriberRegistry::dispatch_iteration_event`]
     /// for the queryable side. Other `IterationEvent` variants
     /// (`Lease`, non-FramePayload Poll outcomes) are no-ops.
-    pub fn dispatch_iteration_event(
+    pub fn dispatch_iteration_event<'a>(
         &mut self,
         event: IterationEvent<'_>,
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending_replies: &mut Vec<QueryReply>,
         pending_final_rids: &mut Vec<u64>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
             self.dispatch_messages(
                 messages,
@@ -1907,6 +1912,7 @@ pub fn response_final_for(rid: u64) -> ResponseFinalOwned {
 ))]
 mod tests {
     use super::*;
+    use hashbrown::HashMap;
     // R311gb-3b — `Box` lives here (not at module level): its only uses
     // are the `NetworkMessage::Request(Box::new(..))` fixtures below, and
     // this module's gate is exactly the full query feature set, so the
@@ -4023,6 +4029,7 @@ mod request_decode_isolation_tests {
     use super::*;
     use alloc::vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use hashbrown::HashMap;
     use std::sync::Arc;
     use std::sync::Mutex;
     use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};

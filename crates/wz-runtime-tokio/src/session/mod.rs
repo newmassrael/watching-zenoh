@@ -1373,6 +1373,32 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         });
     }
 
+    /// R311y739 — install OUR keyexpr id space on the inbound registries, so an
+    /// `M=0` (`Mapping::Receiver`) alias resolves against the ids this session
+    /// declared instead of being dropped.
+    ///
+    /// [`Session::new`] calls this automatically with the session's own actions
+    /// handle; the method stays public for the same two scenarios
+    /// [`Session::set_own_zid`] does — an application that resolves its aliases
+    /// through a surface of its own, and a re-init flow after
+    /// [`Session::clear_own_mapping_space`].
+    pub fn set_own_mapping_space(
+        &self,
+        space: Arc<dyn wz_session_core::wireexpr_resolve::OwnMappingSpace + Send + Sync>,
+    ) {
+        R::with_mutex_mut(&self.observer, |observer| {
+            observer.subscribers.set_own_mapping_space(space);
+        });
+    }
+
+    /// R311y739 — release the installed own space; `M=0` aliases refuse again
+    /// (the pre-R311y739 answer). The `clear_own_zid` sibling.
+    pub fn clear_own_mapping_space(&self) {
+        R::with_mutex_mut(&self.observer, |observer| {
+            observer.subscribers.clear_own_mapping_space();
+        });
+    }
+
     /// R231 — release the previously-installed own zid (paired with
     /// [`Session::set_own_zid`]). After clear, every wire-arrived
     /// Push fires its matching subscribers; the self-echo guard
@@ -1604,7 +1630,18 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         actions: Arc<SessionLinkActions<R, T>>,
         observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
         clock: Arc<T>,
-    ) -> Self {
+    ) -> Self
+    where
+        // R311y739 — the own-mapping install below hands the actions bundle to
+        // the observer as a shared trait object, and the observer must stay
+        // `Send` (it crosses into the drive task), so `Arc<Self>` needs the
+        // bundle `Send + Sync + 'static`. Stated as ONE honest bound on the
+        // composite rather than as three on `R`'s associated types: it is the
+        // property the install actually needs, and every real runtime that
+        // constructs a `Session` (all of them go through `TokioSession::new`)
+        // already has it.
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
         // R236 — read the local zid from SessionInitParams BEFORE moving
         // `actions` into the transport sum, so the dedup install below needs
         // no fallible re-projection of a value this ctor builds as `Unicast`
@@ -1652,6 +1689,20 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         if !zid.is_empty() {
             let _ = session.set_own_zid(zid);
         }
+        // R311y739 — hand the inbound registries OUR id space, so a peer that
+        // names an id WE declared (`M=0`, which zenoh PREFERS emitting once we
+        // have declared one) resolves instead of being dropped.
+        //
+        // Installed HERE rather than left to the application for the same reason
+        // R236 moved the zid install here: the fact is already authoritative at
+        // construction — the actions bundle owns `outbound_mappings` and this
+        // ctor is holding it — so making the application ask for it would only
+        // create a way to forget. Unconditional: an empty table simply resolves
+        // nothing, which is the same answer as no install, and the table fills
+        // in later as `send_declare_keyexpr` runs.
+        let own_space: Arc<dyn wz_session_core::wireexpr_resolve::OwnMappingSpace + Send + Sync> =
+            session.actions().clone();
+        session.set_own_mapping_space(own_space);
         session
     }
 

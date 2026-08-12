@@ -128,10 +128,9 @@ mod alloc_impl {
     use crate::reliability::Reliability;
     use crate::sample_kind::SampleKind;
     use crate::sink::{BorrowedSample, SampleView};
-    use crate::wireexpr_resolve::resolve_wireexpr;
+    use crate::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
     use alloc::string::String;
     use alloc::vec::Vec;
-    use hashbrown::HashMap;
     use wz_codecs::push::PushOwnedVariant;
 
     /// One `keyexpr-pattern -> domain-event` row of the AP dynamic
@@ -294,12 +293,13 @@ mod alloc_impl {
         /// Push messages drive injection; every other `IterationEvent`
         /// (Lease, non-Push records) is a no-op. This is the wire-inbound
         /// (ACL = wire -> domain) path; local self-publishes do not inject.
-        pub fn dispatch_iteration_event(
+        pub fn dispatch_iteration_event<'a>(
             &self,
             event: IterationEvent<'_>,
-            peer_table: &HashMap<u64, String>,
+            peer_table: impl Into<MappingSpaces<'a>>,
             injector: &mut dyn EventInjector,
         ) -> usize {
+            let peer_table = peer_table.into();
             let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
                 messages, reliable, ..
             }) = event
@@ -312,7 +312,7 @@ mod alloc_impl {
                 let NetworkMessage::Push(push) = message else {
                     continue;
                 };
-                let Some(resolved) = resolve_wireexpr(&push.keyexpr.body, peer_table) else {
+                let Some(resolved) = resolve_wireexpr_in(&push.keyexpr.body, peer_table) else {
                     continue;
                 };
                 // kind + payload are extracted faithfully: a signal row reads

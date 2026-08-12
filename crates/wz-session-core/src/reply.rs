@@ -94,11 +94,12 @@ use alloc::string::ToString;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-// HashMap (peer-keyexpr table) is a param of the `alloc` wire-dispatch
-// methods (`dispatch_response` / `dispatch_messages`), so its import is
-// `alloc`-gated.
-#[cfg(feature = "alloc")]
-use hashbrown::HashMap;
+// R311y739 — the wire-dispatch methods now take `impl Into<MappingSpaces>`
+// rather than a bare peer table, so this file's own code no longer names
+// `HashMap`. The suites below still build one to stand in for the peer's space
+// and import it themselves: each test module carries its own feature gate, so a
+// file-level import would go unused in every subset that compiles the lib but
+// not that suite.
 
 // R311gb (Track 2) — bounded backing + the capacity SSOT for the no-alloc
 // pending table.
@@ -125,7 +126,12 @@ use crate::registry_error::RegisterError;
 // publisher markers. `query-reply` implies `codec-response`, so the
 // outer `codec-response` requirement holds in every arm of the `any`.
 #[cfg(all(feature = "codec-response", feature = "alloc"))]
-use crate::wireexpr_resolve::resolve_wireexpr;
+use crate::wireexpr_resolve::resolve_wireexpr_in;
+// R311y739 — the two-space PAIR is `alloc`-only: the `dispatch_messages` /
+// `dispatch_iteration_event` signatures name it under that gate alone, while
+// only the `Response` arm inside them resolves and so carries `codec-response`.
+#[cfg(feature = "alloc")]
+use crate::wireexpr_resolve::MappingSpaces;
 #[cfg(all(
     feature = "codec-response",
     feature = "alloc",
@@ -878,12 +884,13 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// dispatch entry point elides in a `codec-response`-OFF subset
     /// (the loopback `deliver_local_reply` keeps the registry useful).
     #[cfg(all(feature = "codec-response", feature = "alloc"))]
-    pub fn dispatch_response(
+    pub fn dispatch_response<'a>(
         &mut self,
         response: &ResponseOwned,
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
-        let resolved = match resolve_wireexpr(&response.keyexpr.body, peer_keyexpr_table) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
+        let resolved = match resolve_wireexpr_in(&response.keyexpr.body, peer_keyexpr_table) {
             Some(s) => s,
             None => return,
         };
@@ -1199,11 +1206,12 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// (Push / Request / Declare / Interest / Oam / Unknown) are
     /// no-ops here.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages(
+    pub fn dispatch_messages<'a>(
         &mut self,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         // R311s / R311dy — `NetworkMessage::{Response,ResponseFinal}` are
         // cfg-gated on `codec-response` / `codec-response-final`; the
         // dispatch arms match. `peer_keyexpr_table` is consumed only by
@@ -1239,11 +1247,12 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// for the z_get-side. Other `IterationEvent` variants
     /// (`Lease`, non-FramePayload Poll outcomes) are no-ops.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_iteration_event(
+    pub fn dispatch_iteration_event<'a>(
         &mut self,
         event: IterationEvent<'_>,
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
             self.dispatch_messages(messages, peer_keyexpr_table);
         }
@@ -1372,6 +1381,7 @@ impl ReplyRegistry<ConsolidatingSink<BoxedReplySink>> {
 ))]
 mod tests {
     use super::*;
+    use hashbrown::HashMap;
     // no_std test prelude: the std prelude (Box / String / Vec / vec!)
     // is absent under `#![no_std]`, so the alloc forms are imported
     // explicitly; the host-run callback-capture cells use `std::sync`.
@@ -2974,6 +2984,7 @@ mod tests {
 mod decode_isolation_tests {
     use super::*;
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use hashbrown::HashMap;
     use std::sync::Arc;
     use wz_codecs::encoding::Encoding;
     use wz_codecs::err::Err as ErrBody;
@@ -3172,6 +3183,7 @@ mod decode_isolation_tests {
 ))]
 mod reply_timestamp_decode_isolation_tests {
     use super::*;
+    use hashbrown::HashMap;
     use std::sync::{Arc, Mutex};
 
     /// A wire `Response(Reply(Put))` carrying an inline timestamp (time +

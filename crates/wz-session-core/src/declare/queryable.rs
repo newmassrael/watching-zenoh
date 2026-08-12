@@ -39,7 +39,7 @@ use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use crate::wireexpr_resolve::resolve_wireexpr;
+use crate::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
 
 /// Application-layer registry tracking the peer's outbound
 /// `DeclQueryable` / `UndeclQueryable` records. Q-side mirror of
@@ -271,14 +271,15 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// updates the `alloc` `declared` table then funnels through the
     /// no-heap fire SSOT.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare(
+    pub fn dispatch_declare<'a>(
         &mut self,
         body: &DeclareOwnedVariant,
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         match body {
             DeclareOwnedVariant::CodecZenohDeclQueryable(decl) => {
-                let resolved = match resolve_wireexpr(&decl.keyexpr.body, peer_keyexpr_table) {
+                let resolved = match resolve_wireexpr_in(&decl.keyexpr.body, peer_keyexpr_table) {
                     Some(s) => s,
                     None => return,
                 };
@@ -320,11 +321,12 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// Drain a `Vec<NetworkMessage>` through [`Self::dispatch_declare`].
     /// Mirror of the sibling registries.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_messages(
+    pub fn dispatch_messages<'a>(
         &mut self,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         for message in messages {
             if let NetworkMessage::Declare(decl) = message {
                 self.dispatch_declare(&decl.body, peer_keyexpr_table);
@@ -334,11 +336,12 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
 
     /// `IterationEvent` adapter; mirror of the sibling registries.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_iteration_event(
+    pub fn dispatch_iteration_event<'a>(
         &mut self,
         event: IterationEvent<'_>,
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
             self.dispatch_messages(messages, peer_keyexpr_table);
         }

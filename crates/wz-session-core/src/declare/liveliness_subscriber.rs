@@ -94,7 +94,12 @@ use crate::keyexpr_match::{keyexpr_pattern_matches, MAX_KEYEXPR_CHUNKS};
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use crate::wireexpr_resolve::resolve_wireexpr;
+use crate::wireexpr_resolve::resolve_wireexpr_in;
+// R311y739 — the two-space PAIR is `alloc`-only: `dispatch_messages` /
+// `dispatch_iteration_event` name it in their signatures under that gate alone,
+// while only the `Declare` arm inside them resolves and so carries `codec-declare`.
+#[cfg(feature = "alloc")]
+use crate::wireexpr_resolve::MappingSpaces;
 
 // R311ek / R311gb — the pure-data sample types are codec-agnostic +
 // no_std; `BoxedLivelinessSampleSink` (the heap adapter) is `alloc`-gated.
@@ -359,14 +364,15 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// resolution, then funnels through the no-heap
     /// [`dispatch_sample_borrowed`](Self::dispatch_sample_borrowed) SSOT.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare(
+    pub fn dispatch_declare<'a>(
         &mut self,
         body: &DeclareOwnedVariant,
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         match body {
             DeclareOwnedVariant::CodecZenohDeclToken(decl) => {
-                let resolved = match resolve_wireexpr(&decl.keyexpr.body, peer_keyexpr_table) {
+                let resolved = match resolve_wireexpr_in(&decl.keyexpr.body, peer_keyexpr_table) {
                     Some(s) => s,
                     None => return,
                 };
@@ -504,11 +510,12 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// sends, so the snapshot-complete signal never fired on a real
     /// wz<->wz / wz<->pico exchange.)
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages(
+    pub fn dispatch_messages<'a>(
         &mut self,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         // R311q — `peer_keyexpr_table` is only consumed inside the
         // cfg-gated `NetworkMessage::Declare` arm below; the
         // explicit `let _ = ...` on the codec-declare-OFF build
@@ -573,11 +580,12 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// no-ops here (the liveliness signal path lives entirely in the
     /// `Declare` / `Interest` MIDs).
     #[cfg(feature = "alloc")]
-    pub fn dispatch_iteration_event(
+    pub fn dispatch_iteration_event<'a>(
         &mut self,
         event: IterationEvent<'_>,
-        peer_keyexpr_table: &HashMap<u64, String>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
             self.dispatch_messages(messages, peer_keyexpr_table);
         }

@@ -829,6 +829,166 @@ fn clear_own_zid_forwards_to_subscriber_registry() {
     );
 }
 
+// ── R311y739 Session::new auto-wire of OUR keyexpr id space ──
+
+/// Build an `IterationEvent`-shaped inbound Push whose keyexpr is an `M=0`
+/// (`Mapping::Receiver`) alias — an id that names OUR space. This is the exact
+/// wire shape a zenoh peer emits once we have declared a keyexpr, because
+/// `get_best_key` prefers `ctx.remote_expr_id` and stamps it `Mapping::Receiver`
+/// (`zenoh/src/net/routing/dispatcher/resource.rs:625`).
+#[cfg(all(feature = "codec-push", feature = "declare-keyexpr"))]
+fn inbound_push_aliased_in_our_space(
+    mapping_id: u64,
+    payload: &[u8],
+) -> wz_session_core::driver_loop::DriverLoopOutcome {
+    let push = wz_codecs::push::Push {
+        keyexpr: wz_codecs::wireexpr::Wireexpr {
+            body: wz_codecs::wireexpr::WireexprVariant::WireexprNonlocal(
+                wz_codecs::wireexpr_nonlocal::WireexprNonlocal {
+                    id: mapping_id,
+                    suffix_len: None,
+                    suffix: None,
+                },
+            ),
+        },
+        body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+            payload,
+            ..Default::default()
+        }),
+        ..wz_codecs::push::Push::default()
+    }
+    .try_into_owned()
+    .expect("fixture Push is representable");
+    wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
+        reliable: true,
+        sn: 0,
+        messages: vec![wz_session_core::network_message::NetworkMessage::Push(
+            Box::new(push),
+        )],
+        has_ext: false,
+        extensions: Vec::new(),
+    }
+}
+
+/// R311y739 — THE WIRING PROOF, and it is deliberately end-to-end rather than a
+/// field read: `Session::new` installs the actions bundle as our id space, a
+/// later `send_declare_keyexpr` writes into that same bundle, and an inbound
+/// `M=0` alias for the declared id fires the subscriber.
+///
+/// Wired is not driven. An assertion that the slot is `Some(..)` would pass
+/// against an install of the WRONG object, against a table that never fills,
+/// and against a resolver that ignores the install. Firing the callback is the
+/// claim that all three hold at once.
+///
+/// Before R311y739 this Push was dropped: the registry held only the peer's
+/// space and an `M=0` alias resolved to `None`.
+#[cfg(all(
+    feature = "codec-push",
+    feature = "declare-keyexpr",
+    feature = "pubsub-put"
+))]
+#[test]
+fn an_inbound_alias_in_our_own_space_fires_a_subscriber_after_session_new() {
+    let (session, _driver) = build_session();
+    session
+        .actions()
+        .send_declare_keyexpr(7, "home/temp")
+        .expect("hardcoded canonical literal keyexpr");
+
+    let fired = Arc::new(AtomicUsize::new(0));
+    let fired_cb = fired.clone();
+    let _sub = session.declare_subscriber("home/temp", SubscribeOptions::default(), move |_| {
+        fired_cb.fetch_add(1, Ordering::SeqCst);
+    });
+
+    let outcome = inbound_push_aliased_in_our_space(7, b"22.5");
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        1,
+        "an M=0 alias for an id THIS session declared must resolve to \
+         `home/temp` and fire -- `Session::new` wires our id space, and \
+         `send_declare_keyexpr` fills it",
+    );
+}
+
+/// ANTI-VACUITY twin. Releasing the install restores the pre-R311y739 refusal,
+/// so the test above is measuring the INSTALL rather than some unconditional
+/// resolution. The declaration and the subscriber are identical; only the
+/// install differs.
+#[cfg(all(
+    feature = "codec-push",
+    feature = "declare-keyexpr",
+    feature = "pubsub-put"
+))]
+#[test]
+fn the_same_alias_fires_nobody_once_our_space_is_released() {
+    let (session, _driver) = build_session();
+    session
+        .actions()
+        .send_declare_keyexpr(7, "home/temp")
+        .expect("hardcoded canonical literal keyexpr");
+    session.clear_own_mapping_space();
+
+    let fired = Arc::new(AtomicUsize::new(0));
+    let fired_cb = fired.clone();
+    let _sub = session.declare_subscriber("home/temp", SubscribeOptions::default(), move |_| {
+        fired_cb.fetch_add(1, Ordering::SeqCst);
+    });
+
+    let outcome = inbound_push_aliased_in_our_space(7, b"22.5");
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        0,
+        "with no own space the alias resolves nothing -- this is what every \
+         such Push did before R311y739",
+    );
+}
+
+/// R311y739 — the install tracks the table's RETRACTIONS, because it is the
+/// table itself and not a copy of it. `send_undeclare_kexpr` prunes the entry
+/// and the very next inbound alias for that id stops resolving.
+///
+/// This is the assertion a mirrored `HashMap` inside the registry would fail:
+/// it would have been filled at declare time and never told about the prune.
+#[cfg(all(
+    feature = "codec-push",
+    feature = "declare-keyexpr",
+    feature = "declare-undeclare",
+    feature = "pubsub-put"
+))]
+#[test]
+fn an_undeclared_alias_stops_resolving_without_a_second_install() {
+    let (session, _driver) = build_session();
+    session
+        .actions()
+        .send_declare_keyexpr(7, "home/temp")
+        .expect("hardcoded canonical literal keyexpr");
+
+    let fired = Arc::new(AtomicUsize::new(0));
+    let fired_cb = fired.clone();
+    let _sub = session.declare_subscriber("home/temp", SubscribeOptions::default(), move |_| {
+        fired_cb.fetch_add(1, Ordering::SeqCst);
+    });
+
+    let outcome = inbound_push_aliased_in_our_space(7, b"22.5");
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    assert_eq!(fired.load(Ordering::SeqCst), 1, "resolves while declared");
+
+    session.actions().send_undeclare_kexpr(7);
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        1,
+        "after the retraction the same alias must resolve nothing -- the \
+         registry reads the live table, never a snapshot of it",
+    );
+}
+
 // ── R236 Session::new auto-wire from SessionInitParams.zid ──
 
 #[test]

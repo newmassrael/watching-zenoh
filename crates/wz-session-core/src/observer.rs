@@ -433,7 +433,13 @@ impl ApplicationLayerObserver {
             feature = "codec-response",
             feature = "codec-response-final",
         ))]
-        let peer_table = self.subscribers.peer_keyexpr_table();
+        // R311y739 — the fan hands over BOTH id spaces, not the peer's table.
+        // Every consumer below resolves keyexprs the same way the subscriber
+        // registry just did, so an `M=0` alias (an id WE declared, which zenoh
+        // PREFERS naming back at us) reaches the right table on every plane
+        // instead of only on the Push plane. The binding keeps its name: it is
+        // still the snapshot the subscribers registry refreshed this iteration.
+        let peer_table = self.subscribers.mapping_spaces();
 
         // Consumer registries — all read the shared peer_table that
         // the subscribers registry just updated. The queryable side
@@ -524,7 +530,7 @@ impl ApplicationLayerObserver {
     ) -> usize {
         self.switchboard.dispatch_iteration_event(
             event,
-            self.subscribers.peer_keyexpr_table(),
+            self.subscribers.mapping_spaces(),
             injector,
         )
     }
