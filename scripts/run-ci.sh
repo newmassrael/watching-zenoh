@@ -1596,6 +1596,18 @@ PY
     # zero tests and reports green). Both halves read the plane population out
     # of the code, so a tenth consumer arrives already counted.
     python3 scripts/lib/own_space_witness_lint.py >/dev/null || return 1
+    # R311y741 (carry N43) — the PROVENANCE gate: a gate script must name the
+    # open-debt item it closes. R311y739 re-counted the ~196 base items and
+    # could re-establish the open/closed state of FOUR, because nothing in the
+    # tree points back at an item — so deciding "is §7.1 still open?" repeats
+    # the investigation that opened it. `solo_plane_page_lint.py` has shown the
+    # fix since R311y621 (`R311y621 (§7.14)` on its first line); 11 of 33 gates
+    # followed it and nothing required it. The 22 that predate the convention
+    # are carried in a named BASELINE checked in BOTH directions, so it can
+    # only shrink. MEASURED three ways: an undeclared new gate reds by name, a
+    # baselined gate that gains its citation reds asking for the baseline to
+    # shrink, and a stale baseline entry reds — each revert returns OK.
+    python3 scripts/lib/gate_provenance_lint.py >/dev/null || return 1
     # R311y704 (§1.1n) — the DATAGRAM-HALF gate. `Dissection::flows()` is the
     # TCP half and `datagram_flows()` is the other one; a reader that walks the
     # first and forgets the second produces an EMPTY result over a multicast or
