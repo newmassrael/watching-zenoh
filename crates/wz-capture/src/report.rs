@@ -893,7 +893,9 @@ impl<'a> CaptureReport<'a> {
                          \"flows_identity_adopted\":{},\
                          \"framing\":{{\"bytes_fed\":{},\"messages\":{},\
                          \"bytes_undecoded\":{},\"streams_refused\":{},\
-                         \"flow_absent\":{},\"handshake_offers\":{}}},\
+                         \"flow_absent\":{},\"handshake_offers\":{},\
+                         \"appends_not_walked\":{},\
+                         \"messages_straddling_offers\":{}}},\
                          \"application_unread\":{}}}",
                         k.flows_opened > 0 && k.flows_opened == k.flows_offered,
                         k.flows_offered,
@@ -919,6 +921,14 @@ impl<'a> CaptureReport<'a> {
                         k.framing.streams_refused,
                         k.framing.flow_absent,
                         k.framing.handshake_offers,
+                        // R311y749 (N6) — MEASURED MISSING: six of this
+                        // struct's fields were emitted and `appends_not_walked`
+                        // was not, so the one counter that says a `--fields`
+                        // listing is short could not be read by a consumer of
+                        // this export at all. `messages_straddling_offers`
+                        // lands beside it rather than behind the same silence.
+                        k.framing.appends_not_walked,
+                        k.framing.messages_straddling_offers,
                         // The number the verdict itself consults, emitted so a
                         // consumer branching on `complete` can see WHY without
                         // re-deriving a subtraction this file owns.
@@ -4205,5 +4215,71 @@ mod tests {
              be able to tell 'checked' from 'this build has no such field': \
              {j_checked}"
         );
+    }
+
+    /// R311y749 (debt-carry-N6) — EVERY `QuicStreamFeed` FIELD REACHES THE
+    /// EXPORT, and a new one cannot be added without deciding.
+    ///
+    /// MEASURED: six of the seven were emitted and `appends_not_walked` was
+    /// not, so the single counter that says a `--fields` listing is SHORT could
+    /// not be read by a consumer of this export at all. That is the failure the
+    /// emit's own comment argues against one line above it — "25 bytes
+    /// recovered" and "25 bytes recovered, read, and yielding nothing" are
+    /// different findings — applied to the field it forgot.
+    ///
+    /// Two mechanisms, because either alone is weak. The exhaustive
+    /// destructuring makes a NEW field a COMPILE error rather than a silent
+    /// omission (the shape `every_quic_stream_field_is_classified` already uses
+    /// one module over). The DISTINCT VALUES make the assertion about the
+    /// pairing rather than about presence: a render that emitted the right keys
+    /// with each other's values would satisfy a key-only check.
+    #[test]
+    fn every_quic_stream_feed_field_reaches_the_export() {
+        let feed = crate::quic::QuicStreamFeed {
+            bytes_fed: 11,
+            messages: 22,
+            flow_absent: 33,
+            streams_refused: 44,
+            handshake_offers: 55,
+            bytes_undecoded: 66,
+            appends_not_walked: 77,
+            messages_straddling_offers: 88,
+        };
+        // The compile-time half: a field added to `QuicStreamFeed` and not
+        // named here does not compile, so the author adding it is the one who
+        // decides whether the export carries it.
+        let crate::quic::QuicStreamFeed {
+            bytes_fed,
+            messages,
+            flow_absent,
+            streams_refused,
+            handshake_offers,
+            bytes_undecoded,
+            appends_not_walked,
+            messages_straddling_offers,
+        } = feed;
+
+        let d = crate::Dissection::default();
+        let quic = crate::quic::QuicDecryption {
+            framing: feed,
+            ..crate::quic::QuicDecryption::default()
+        };
+        let json = CaptureReport::of(&d).with_quic_decryption(&quic).to_json();
+
+        for (key, value) in [
+            ("bytes_fed", bytes_fed),
+            ("messages", messages),
+            ("flow_absent", flow_absent),
+            ("streams_refused", streams_refused),
+            ("handshake_offers", handshake_offers),
+            ("bytes_undecoded", bytes_undecoded),
+            ("appends_not_walked", appends_not_walked),
+            ("messages_straddling_offers", messages_straddling_offers),
+        ] {
+            assert!(
+                json.contains(&alloc::format!("\"{key}\":{value}")),
+                "the export must carry {key} with ITS OWN value {value}: {json}"
+            );
+        }
     }
 }

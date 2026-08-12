@@ -3437,7 +3437,11 @@ impl Dissection {
         // Read BEFORE the offer is added: this is what says whether the frames
         // about to be produced are offset into `bytes` or into a longer stream
         // `bytes` is only the tail of.
-        let from_zero = stream.fed[dir_index(direction)] == 0;
+        // R311y749 (N6) — the stream coordinate of this offer's FIRST byte.
+        // R311y718 read the same fact as a bool (`fed == 0`) because it only
+        // had to decide whether to walk; the number is what lets an appending
+        // offer be walked instead of refused.
+        let base = stream.fed[dir_index(direction)];
         stream.fed[dir_index(direction)] += bytes.len() as u64;
         feed.bytes_fed += bytes.len();
         let before = stream.frames.len();
@@ -3460,7 +3464,10 @@ impl Dissection {
                 break;
             }
         }
-        feed.messages += stream.frames.len() - before;
+        // Read BEFORE the cap loop below, which discards from the FRONT: after
+        // a trim the count is still right and the index `before` is not.
+        let added = stream.frames.len() - before;
+        feed.messages += added;
         // R311y719 — and the list is BOUNDED, against the same ceiling every
         // other decoded-message list on this flow answers to. Its own loop
         // rather than a share of `enforce_datagram_message_cap` because the
@@ -3480,18 +3487,50 @@ impl Dissection {
         }
         // OFFERED here, for the same reason the TLS half offers where it does:
         // this is the one window in which the bytes, the frames and the frames'
-        // coordinates into those bytes all exist together. No remap follows --
-        // a recovered QUIC stream has no ciphertext record to point back at, so
-        // the offsets stay in the space the caller can resolve them in.
-        if from_zero {
+        // coordinates into those bytes all exist together.
+        //
+        // R311y749 (N6) — AND AN APPENDING OFFER IS WALKED TOO, by making the
+        // contract true rather than by giving up on it. `DecryptedStream`
+        // promises that a frame's `stream_offset` indexes `plaintext`; a
+        // frame's offset is absolute within its direction's stream, so the two
+        // agree only at `base == 0`. The frames this offer produced are
+        // therefore REBASED for the duration of the call and restored after it,
+        // which leaves every other reader of this stream in absolute space.
+        //
+        // The window is computed from the COUNT this offer added rather than
+        // from `before`, because the cap loop above discards from the FRONT:
+        // after a trim, `before` names a frame that is no longer there.
+        let window_start = stream.frames.len().saturating_sub(added);
+        // A message that began in bytes an earlier offer carried has its head in
+        // bytes nothing holds any more, so no coordinate can address it. At most
+        // one, and it is the first: every later message starts where the
+        // previous ended. The other-direction guard is defensive — this offer
+        // pushed on one direction — and costs one comparison.
+        let mut walk_from = window_start;
+        while walk_from < stream.frames.len()
+            && (stream.frames[walk_from].direction != direction
+                || (stream.frames[walk_from].stream_offset as u64) < base)
+        {
+            walk_from += 1;
+            feed.messages_straddling_offers += 1;
+        }
+        if walk_from < stream.frames.len() {
+            let shift = base as usize;
+            for f in stream.frames[walk_from..].iter_mut() {
+                f.stream_offset -= shift;
+            }
             sink.on_plaintext(DecryptedStream {
                 flow,
                 direction,
                 plaintext: bytes,
-                frames: &stream.frames[before..],
+                frames: &stream.frames[walk_from..],
                 record_origins: &[],
             });
-        } else if stream.frames.len() > before {
+            for f in stream.frames[walk_from..].iter_mut() {
+                f.stream_offset += shift;
+            }
+        } else if added > 0 {
+            // Framed, and addressable by nothing: the whole window straddled.
             feed.appends_not_walked += 1;
         }
         // R311y709 — the flow's recovered/fed ledger. A QUIC flow's `fed` was
@@ -8185,6 +8224,185 @@ mod datagram_tests {
             report.reasons(),
             alloc::vec![],
             "and the control capture is short of NOTHING"
+        );
+    }
+
+    /// R311y749 (debt-carry-N6) — A SECOND OFFER ON ONE STREAM IS WALKED, in
+    /// the coordinate space the sink contract promises.
+    ///
+    /// # What was wrong, and why it was only half wrong
+    ///
+    /// [`PlaintextSink::on_recovered_datagram`]'s doc states the rule this
+    /// turns on: in a [`DecryptedStream`] a frame's `stream_offset` is an offset
+    /// INTO `plaintext`, which is what lets a sink slice the message out. A
+    /// frame's offset is absolute within its direction's recovered stream, so
+    /// the two agree only while an offer starts at zero. R311y718 saw that and
+    /// refused to walk an appending offer at all, counting it in
+    /// `appends_not_walked` — right, because naming the wrong bytes as a
+    /// message's fields is worse than naming none.
+    ///
+    /// It left a live tap with NO field walk, though: a tap feeds a stream
+    /// incrementally, so every offer after the first was counted and dropped.
+    /// The fix is to make the contract true rather than to give up on it — the
+    /// offered frames are rebased into this offer's space, so a sink slices
+    /// correctly, and restored afterwards so every other reader still sees
+    /// absolute coordinates.
+    ///
+    /// The assertion is the SLICE and not the number: an offset that merely
+    /// changed would satisfy a `!= 3` check while still naming the wrong bytes.
+    #[test]
+    fn a_second_offer_on_one_quic_stream_is_walked_in_its_own_space() {
+        /// A sink that keeps what it was shown, since the claim is about what
+        /// reached one.
+        #[derive(Default)]
+        struct Recorder {
+            /// `(plaintext, the offered frames' offsets)` per call.
+            calls: alloc::vec::Vec<(alloc::vec::Vec<u8>, alloc::vec::Vec<usize>)>,
+        }
+        impl PlaintextSink for Recorder {
+            fn on_plaintext(&mut self, stream: DecryptedStream<'_>) {
+                self.calls.push((
+                    stream.plaintext.to_vec(),
+                    stream.frames.iter().map(|f| f.stream_offset).collect(),
+                ));
+            }
+            fn on_recovered_datagram(&mut self, _d: RecoveredDatagram<'_>) {}
+        }
+
+        let unit = framed_keepalive();
+        let mut d = Dissection::with_limits(DissectionLimits::for_live_tap());
+        let pkt = udp_packet([10, 0, 0, 1], 4433, [10, 0, 0, 2], 7447, &[]);
+        d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
+        let flow = d.datagram_flows()[0].flow;
+
+        let mut sink = Recorder::default();
+        let first = d.feed_quic_stream_with_sink(flow, Direction::A, 7, false, &unit, &mut sink);
+        assert_eq!(first.messages, 1, "the first offer must decode its unit");
+        let second = d.feed_quic_stream_with_sink(flow, Direction::A, 7, false, &unit, &mut sink);
+        assert_eq!(second.messages, 1, "and so must the second");
+        assert_eq!(
+            second.appends_not_walked, 0,
+            "an appending offer whose messages are all inside it is walkable"
+        );
+
+        assert_eq!(sink.calls.len(), 2, "both offers must reach the sink");
+        for (i, (plaintext, offsets)) in sink.calls.iter().enumerate() {
+            assert_eq!(plaintext.as_slice(), unit.as_slice(), "call {i}");
+            assert_eq!(offsets.len(), 1, "call {i}: one message each");
+            let at = offsets[0];
+            // THE SLICE. `plaintext[at..]` must BE the message, which is the
+            // one thing an absolute offset could not deliver: the second
+            // offer's frame is at 3 in stream space and `plaintext` is 3 bytes
+            // long, so the old coordinate did not merely mislead — it did not
+            // land in the buffer at all.
+            assert!(
+                at < plaintext.len(),
+                "call {i}: offset {at} is outside the offered bytes"
+            );
+            assert_eq!(
+                &plaintext[at..],
+                unit.as_slice(),
+                "call {i}: the offset must name the message's first byte"
+            );
+        }
+
+        // AND THE FLOW'S OWN COORDINATES ARE UNTOUCHED. The rebase is for the
+        // duration of the offer; a reader of the stream afterwards must still
+        // see absolute offsets, or this fix would have traded one wrong
+        // coordinate space for another.
+        let stream = &d.datagram_flows()[0].quic_streams[0];
+        assert_eq!(
+            stream
+                .frames
+                .iter()
+                .map(|f| f.stream_offset)
+                .collect::<alloc::vec::Vec<_>>(),
+            alloc::vec![0, unit.len()],
+            "the stream's own frames stay in stream space"
+        );
+    }
+
+    /// R311y749 (debt-carry-N6) — AND THE MESSAGE THAT SPANS THE BOUNDARY IS
+    /// COUNTED RATHER THAN MIS-ADDRESSED.
+    ///
+    /// The other half of the fix above, and the half that keeps it honest. A
+    /// message whose head arrived in an earlier offer has those bytes nowhere:
+    /// a recovered QUIC stream is framed, not buffered. No coordinate can point
+    /// a sink at its fields, so it is excluded from the walk and named in
+    /// [`quic::QuicStreamFeed::messages_straddling_offers`] — the rule R311y718
+    /// applied to a whole offer, kept for the one message it is still true of.
+    ///
+    /// Both legs in one fixture because they differ by one byte of input: a
+    /// second offer that carries ONLY the tail of a straddling message walks
+    /// nothing at all, and the same offer plus a whole message walks that one.
+    #[test]
+    fn a_message_that_spans_two_quic_offers_is_named_not_walked() {
+        #[derive(Default)]
+        struct Recorder {
+            calls: alloc::vec::Vec<(alloc::vec::Vec<u8>, alloc::vec::Vec<usize>)>,
+        }
+        impl PlaintextSink for Recorder {
+            fn on_plaintext(&mut self, stream: DecryptedStream<'_>) {
+                self.calls.push((
+                    stream.plaintext.to_vec(),
+                    stream.frames.iter().map(|f| f.stream_offset).collect(),
+                ));
+            }
+            fn on_recovered_datagram(&mut self, _d: RecoveredDatagram<'_>) {}
+        }
+        let unit = framed_keepalive();
+        let open = |d: &mut Dissection| {
+            let pkt = udp_packet([10, 0, 0, 1], 4433, [10, 0, 0, 2], 7447, &[]);
+            d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
+            d.datagram_flows()[0].flow
+        };
+
+        // LEG ONE — the offer carries only the straddler's tail, so the walk has
+        // nothing it can address and the whole offer is unwalked.
+        let mut d = Dissection::with_limits(DissectionLimits::for_live_tap());
+        let flow = open(&mut d);
+        let mut sink = Recorder::default();
+        // The length prefix alone: the framer stalls, holding a message whose
+        // body has not arrived.
+        let head =
+            d.feed_quic_stream_with_sink(flow, Direction::A, 1, false, &unit[..2], &mut sink);
+        assert_eq!(head.messages, 0, "a prefix alone must decode nothing");
+        assert_eq!(sink.calls.len(), 0, "and offer nothing to walk");
+        let tail =
+            d.feed_quic_stream_with_sink(flow, Direction::A, 1, false, &unit[2..], &mut sink);
+        assert_eq!(tail.messages, 1, "the tail completes the message");
+        assert_eq!(
+            (tail.messages_straddling_offers, tail.appends_not_walked),
+            (1, 1),
+            "its head is in bytes nothing holds, so it is named and the offer \
+             is unwalked"
+        );
+        assert_eq!(sink.calls.len(), 0, "nothing addressable reached the sink");
+
+        // LEG TWO — the same tail followed by a WHOLE message in one offer. The
+        // straddler is still named; the message inside the offer is walked, at
+        // the offset that slices it out of these bytes.
+        let mut e = Dissection::with_limits(DissectionLimits::for_live_tap());
+        let flow = open(&mut e);
+        let mut sink = Recorder::default();
+        e.feed_quic_stream_with_sink(flow, Direction::A, 1, false, &unit[..2], &mut sink);
+        let mut rest = alloc::vec::Vec::from(&unit[2..]);
+        rest.extend_from_slice(&unit);
+        let both = e.feed_quic_stream_with_sink(flow, Direction::A, 1, false, &rest, &mut sink);
+        assert_eq!(both.messages, 2, "the completed one and the whole one");
+        assert_eq!(
+            (both.messages_straddling_offers, both.appends_not_walked),
+            (1, 0),
+            "one message is unaddressable and the offer is still walked"
+        );
+        assert_eq!(sink.calls.len(), 1, "the walkable half reached the sink");
+        let (plaintext, offsets) = &sink.calls[0];
+        assert_eq!(plaintext.as_slice(), rest.as_slice());
+        assert_eq!(offsets.len(), 1, "only the addressable message is offered");
+        assert_eq!(
+            &plaintext[offsets[0]..],
+            unit.as_slice(),
+            "and its offset slices the message out of THESE bytes"
         );
     }
 

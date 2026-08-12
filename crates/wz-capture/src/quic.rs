@@ -493,16 +493,36 @@ pub struct QuicStreamFeed {
     /// capture whose recovered bytes were pushed into a stall is short by them
     /// exactly as one nobody offered at all is.
     pub bytes_undecoded: usize,
-    /// Offers that APPENDED to a stream and whose messages were therefore
-    /// framed but not offered to the field sink.
+    /// Offers whose messages were framed but reached no field sink.
     ///
-    /// Zero for the analyzer's own pass, which offers each direction of each
-    /// stream exactly once. Nonzero says a `--fields` listing is short by those
-    /// messages, and it is a count rather than a silence because the
-    /// alternative — walking a tail at an offset into the whole — names the
-    /// wrong bytes as a message's fields. See
-    /// [`crate::Dissection::feed_quic_stream_with_sink`].
+    /// R311y749 (N6) — NARROWED, and the narrowing is the fix. R311y718 raised
+    /// this for EVERY appending offer, because a frame's offset is absolute
+    /// within its direction's stream while `plaintext` is only what that offer
+    /// added, and walking a tail at an offset into the whole names the wrong
+    /// bytes as a message's fields. A live tap feeds incrementally, so that
+    /// refusal cost it every field walk after the first.
+    ///
+    /// An appending offer is now REBASED into its own coordinate space and
+    /// walked, so this counts only the offer that genuinely cannot be addressed
+    /// — one whose every new message began in bytes an earlier offer carried,
+    /// which are gone. See [`Self::messages_straddling_offers`] for the partial
+    /// case and [`crate::Dissection::feed_quic_stream_with_sink`] for the rule.
     pub appends_not_walked: usize,
+    /// R311y749 (N6) — messages a walked offer could NOT address, because they
+    /// began before its first byte.
+    ///
+    /// A message that spans an offer boundary has its head in bytes this
+    /// dissection no longer holds — a recovered QUIC stream is framed, not
+    /// buffered — so no coordinate can point a sink at its fields. At most one
+    /// per offer, and it is the first: every later message starts where the
+    /// previous one ended.
+    ///
+    /// Its own counter rather than a share of [`Self::appends_not_walked`]
+    /// because the two are different findings. That one says a whole offer went
+    /// unwalked; this says a walk happened and is short by a named number, which
+    /// is the difference between "the listing is missing a section" and "the
+    /// listing is missing a line".
+    pub messages_straddling_offers: usize,
 }
 
 impl QuicStreamFeed {
@@ -514,6 +534,7 @@ impl QuicStreamFeed {
         self.streams_refused += other.streams_refused;
         self.handshake_offers += other.handshake_offers;
         self.appends_not_walked += other.appends_not_walked;
+        self.messages_straddling_offers += other.messages_straddling_offers;
         // See the field: a stream's leftover is a property of its final state,
         // so folding it must not accumulate. `max` keeps a fold over offers
         // agreeing with a single set from the finished dissection.
