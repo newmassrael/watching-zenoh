@@ -1,4 +1,4 @@
-// SCE-MAP: fragment:32
+// SCE-MAP: fragment:32 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none

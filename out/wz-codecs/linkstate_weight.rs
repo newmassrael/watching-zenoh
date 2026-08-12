@@ -1,4 +1,4 @@
-// SCE-MAP: linkstate_weight:34
+// SCE-MAP: linkstate_weight:34 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none

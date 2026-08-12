@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: e812b8b9426089658c190b079d72f4505398532fde65fe2c41c3ec6148939d1b
-// template-hash: 894d11dad693c1040e16152130c83103ca132cfd62152461f0760e932c41c490
+// template-hash: 56bec87d0124f368b72ecb45f170dc38a324027a2fa3663195c8aeaa13f5d24d
 // generated-at: 0
 
 
@@ -63,7 +63,7 @@
 // `clippy::suspicious`, `clippy::perf`) remain at warn so any genuine bug
 // the generator emits still surfaces.
 
-// SCE-MAP: reassembly_slot.scxml:74
+// SCE-MAP: reassembly_slot.scxml:74 :: _machine
 
 use core::time::Duration;
 use sce_rust_runtime::{Engine, StatePolicy};
@@ -421,15 +421,15 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
 
 
     // W3C SCXML 3.7: Execute <onentry> actions for a state
-    #[doc = "SCE-MAP: reassembly_slot.scxml:74"]
-// SCE-MAP: reassembly_slot.scxml:74
+    #[doc = "SCE-MAP: reassembly_slot.scxml:74 :: _machine"]
+// SCE-MAP: reassembly_slot.scxml:74 :: _machine
     fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>) {
 
     }
 
     // W3C SCXML 3.8: Execute <onexit> actions for a state
-    #[doc = "SCE-MAP: reassembly_slot.scxml:74"]
-// SCE-MAP: reassembly_slot.scxml:74
+    #[doc = "SCE-MAP: reassembly_slot.scxml:74 :: _machine"]
+// SCE-MAP: reassembly_slot.scxml:74 :: _machine
     fn execute_exit_actions(
         &mut self,
         state: Self::State,
@@ -441,8 +441,8 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
 
 
     // W3C SCXML 3.13: Evaluate guards and take a matching transition
-    #[doc = "SCE-MAP: reassembly_slot.scxml:74"]
-// SCE-MAP: reassembly_slot.scxml:74
+    #[doc = "SCE-MAP: reassembly_slot.scxml:74 :: _machine"]
+// SCE-MAP: reassembly_slot.scxml:74 :: _machine
     fn process_transition(
         &mut self,
         current_state: &mut Self::State,
@@ -459,8 +459,8 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     }
 
     // W3C SCXML 3.13: Execute transition actions (called between exit and entry)
-    #[doc = "SCE-MAP: reassembly_slot.scxml:74"]
-// SCE-MAP: reassembly_slot.scxml:74
+    #[doc = "SCE-MAP: reassembly_slot.scxml:74 :: _machine"]
+// SCE-MAP: reassembly_slot.scxml:74 :: _machine
     fn execute_transition_actions(&mut self, engine: &mut sce_rust_runtime::Engine<Self>) {
         if !self.has_transition_actions {
             return;
@@ -471,6 +471,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             ReassemblySlotState::Aborted => {
                 match self.last_transition_index {
                     0 => {
+                        // SCE-MAP: reassembly_slot.scxml:162 :: Aborted :: _transition_0
                         // W3C SCXML 3.13: Transition 0 actions
 
             // W3C SCXML G.7: <sce:action name="reset_slot">
@@ -482,6 +483,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             ReassemblySlotState::Complete => {
                 match self.last_transition_index {
                     0 => {
+                        // SCE-MAP: reassembly_slot.scxml:147 :: Complete :: _transition_0
                         // W3C SCXML 3.13: Transition 0 actions
 
             // W3C SCXML G.7: <sce:action name="reset_slot">
@@ -493,12 +495,14 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             ReassemblySlotState::Empty => {
                 match self.last_transition_index {
                     0 => {
+                        // SCE-MAP: reassembly_slot.scxml:107 :: Empty :: _transition_0
                         // W3C SCXML 3.13: Transition 0 actions
 
             // W3C SCXML G.7: <sce:action name="begin_chain">
             self.actions.begin_chain();
                     }
                     1 => {
+                        // SCE-MAP: reassembly_slot.scxml:110 :: Empty :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
 
             // W3C SCXML G.7: <sce:action name="begin_chain">
@@ -513,42 +517,49 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             ReassemblySlotState::Receiving => {
                 match self.last_transition_index {
                     0 => {
+                        // SCE-MAP: reassembly_slot.scxml:121 :: Receiving :: _transition_0
                         // W3C SCXML 3.13: Transition 0 actions
 
             // W3C SCXML G.7: <sce:action name="append_fragment_payload">
             self.actions.append_fragment_payload();
                     }
                     1 => {
+                        // SCE-MAP: reassembly_slot.scxml:124 :: Receiving :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
 
             // W3C SCXML G.7: <sce:action name="finalize_message">
             self.actions.finalize_message();
                     }
                     2 => {
+                        // SCE-MAP: reassembly_slot.scxml:127 :: Receiving :: _transition_2
                         // W3C SCXML 3.13: Transition 2 actions
 
             // W3C SCXML G.7: <sce:action name="abort_ooo">
             self.actions.abort_ooo();
                     }
                     3 => {
+                        // SCE-MAP: reassembly_slot.scxml:130 :: Receiving :: _transition_3
                         // W3C SCXML 3.13: Transition 3 actions
 
             // W3C SCXML G.7: <sce:action name="abort_peer_drop">
             self.actions.abort_peer_drop();
                     }
                     4 => {
+                        // SCE-MAP: reassembly_slot.scxml:133 :: Receiving :: _transition_4
                         // W3C SCXML 3.13: Transition 4 actions
 
             // W3C SCXML G.7: <sce:action name="abort_evicted">
             self.actions.abort_evicted();
                     }
                     5 => {
+                        // SCE-MAP: reassembly_slot.scxml:136 :: Receiving :: _transition_5
                         // W3C SCXML 3.13: Transition 5 actions
 
             // W3C SCXML G.7: <sce:action name="abort_codec">
             self.actions.abort_codec();
                     }
                     6 => {
+                        // SCE-MAP: reassembly_slot.scxml:139 :: Receiving :: _transition_6
                         // W3C SCXML 3.13: Transition 6 actions
 
             // W3C SCXML G.7: <sce:action name="record_timeout">
@@ -560,6 +571,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             ReassemblySlotState::TimedOut => {
                 match self.last_transition_index {
                     0 => {
+                        // SCE-MAP: reassembly_slot.scxml:154 :: TimedOut :: _transition_0
                         // W3C SCXML 3.13: Transition 0 actions
 
             // W3C SCXML G.7: <sce:action name="reset_slot">

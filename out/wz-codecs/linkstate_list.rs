@@ -1,4 +1,4 @@
-// SCE-MAP: linkstate_list:36
+// SCE-MAP: linkstate_list:36 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none

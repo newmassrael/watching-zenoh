@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: d841d580f68f0ffa7856ca901e5c655a89caf324841c2e035c76a51a543cfe92
-// template-hash: 894d11dad693c1040e16152130c83103ca132cfd62152461f0760e932c41c490
+// template-hash: 56bec87d0124f368b72ecb45f170dc38a324027a2fa3663195c8aeaa13f5d24d
 // generated-at: 0
 
 
@@ -56,7 +56,7 @@
 // `clippy::suspicious`, `clippy::perf`) remain at warn so any genuine bug
 // the generator emits still surfaces.
 
-// SCE-MAP: sensor_monitor.scxml:25
+// SCE-MAP: sensor_monitor.scxml:25 :: _machine
 
 use core::time::Duration;
 use sce_rust_runtime::{Engine, StatePolicy};
@@ -381,15 +381,15 @@ impl StatePolicy for SensorMonitorPolicy {
 
 
     // W3C SCXML 3.7: Execute <onentry> actions for a state
-    #[doc = "SCE-MAP: sensor_monitor.scxml:25"]
-// SCE-MAP: sensor_monitor.scxml:25
+    #[doc = "SCE-MAP: sensor_monitor.scxml:25 :: _machine"]
+// SCE-MAP: sensor_monitor.scxml:25 :: _machine
     fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>) {
 
     }
 
     // W3C SCXML 3.8: Execute <onexit> actions for a state
-    #[doc = "SCE-MAP: sensor_monitor.scxml:25"]
-// SCE-MAP: sensor_monitor.scxml:25
+    #[doc = "SCE-MAP: sensor_monitor.scxml:25 :: _machine"]
+// SCE-MAP: sensor_monitor.scxml:25 :: _machine
     fn execute_exit_actions(
         &mut self,
         state: Self::State,
@@ -401,8 +401,8 @@ impl StatePolicy for SensorMonitorPolicy {
 
 
     // W3C SCXML 3.13: Evaluate guards and take a matching transition
-    #[doc = "SCE-MAP: sensor_monitor.scxml:25"]
-// SCE-MAP: sensor_monitor.scxml:25
+    #[doc = "SCE-MAP: sensor_monitor.scxml:25 :: _machine"]
+// SCE-MAP: sensor_monitor.scxml:25 :: _machine
     fn process_transition(
         &mut self,
         current_state: &mut Self::State,
@@ -419,8 +419,8 @@ impl StatePolicy for SensorMonitorPolicy {
     }
 
     // W3C SCXML 3.13: Execute transition actions (called between exit and entry)
-    #[doc = "SCE-MAP: sensor_monitor.scxml:25"]
-// SCE-MAP: sensor_monitor.scxml:25
+    #[doc = "SCE-MAP: sensor_monitor.scxml:25 :: _machine"]
+// SCE-MAP: sensor_monitor.scxml:25 :: _machine
     fn execute_transition_actions(&mut self, engine: &mut sce_rust_runtime::Engine<Self>) {
         // W3C SCXML 3.13: No transition actions in this state machine
         let _ = engine;

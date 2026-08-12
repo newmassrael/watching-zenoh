@@ -1,4 +1,4 @@
-// SCE-MAP: ext_envelope:56
+// SCE-MAP: ext_envelope:56 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none

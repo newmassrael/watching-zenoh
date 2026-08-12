@@ -1,4 +1,4 @@
-// SCE-MAP: serial_envelope:57
+// SCE-MAP: serial_envelope:57 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none

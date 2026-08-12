@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: 4c8405d45b084ed00fc84ee03f1da64a6569947bc99d231b158b2502274cb589
-// template-hash: 894d11dad693c1040e16152130c83103ca132cfd62152461f0760e932c41c490
+// template-hash: 56bec87d0124f368b72ecb45f170dc38a324027a2fa3663195c8aeaa13f5d24d
 // generated-at: 0
 
 
@@ -63,7 +63,7 @@
 // `clippy::suspicious`, `clippy::perf`) remain at warn so any genuine bug
 // the generator emits still surfaces.
 
-// SCE-MAP: scouting.scxml:88
+// SCE-MAP: scouting.scxml:88 :: _machine
 
 use core::time::Duration;
 use sce_rust_runtime::{Engine, StatePolicy};
@@ -358,15 +358,15 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
 
 
     // W3C SCXML 3.7: Execute <onentry> actions for a state
-    #[doc = "SCE-MAP: scouting.scxml:88"]
-// SCE-MAP: scouting.scxml:88
+    #[doc = "SCE-MAP: scouting.scxml:88 :: _machine"]
+// SCE-MAP: scouting.scxml:88 :: _machine
     fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>) {
 
     }
 
     // W3C SCXML 3.8: Execute <onexit> actions for a state
-    #[doc = "SCE-MAP: scouting.scxml:88"]
-// SCE-MAP: scouting.scxml:88
+    #[doc = "SCE-MAP: scouting.scxml:88 :: _machine"]
+// SCE-MAP: scouting.scxml:88 :: _machine
     fn execute_exit_actions(
         &mut self,
         state: Self::State,
@@ -378,8 +378,8 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
 
 
     // W3C SCXML 3.13: Evaluate guards and take a matching transition
-    #[doc = "SCE-MAP: scouting.scxml:88"]
-// SCE-MAP: scouting.scxml:88
+    #[doc = "SCE-MAP: scouting.scxml:88 :: _machine"]
+// SCE-MAP: scouting.scxml:88 :: _machine
     fn process_transition(
         &mut self,
         current_state: &mut Self::State,
@@ -396,8 +396,8 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
     }
 
     // W3C SCXML 3.13: Execute transition actions (called between exit and entry)
-    #[doc = "SCE-MAP: scouting.scxml:88"]
-// SCE-MAP: scouting.scxml:88
+    #[doc = "SCE-MAP: scouting.scxml:88 :: _machine"]
+// SCE-MAP: scouting.scxml:88 :: _machine
     fn execute_transition_actions(&mut self, engine: &mut sce_rust_runtime::Engine<Self>) {
         if !self.has_transition_actions {
             return;
@@ -408,12 +408,14 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
             ScoutingState::AwaitingHello => {
                 match self.last_transition_index {
                     0 => {
+                        // SCE-MAP: scouting.scxml:128 :: AwaitingHello :: _transition_0
                         // W3C SCXML 3.13: Transition 0 actions
 
             // W3C SCXML G.7: <sce:action name="record_hello_and_emit">
             self.actions.record_hello_and_emit();
                     }
                     1 => {
+                        // SCE-MAP: scouting.scxml:131 :: AwaitingHello :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
 
             // W3C SCXML G.7: <sce:action name="emit_scout_timeout">
@@ -425,6 +427,7 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
             ScoutingState::Idle => {
                 match self.last_transition_index {
                     0 => {
+                        // SCE-MAP: scouting.scxml:104 :: Idle :: _transition_0
                         // W3C SCXML 3.13: Transition 0 actions
 
             // W3C SCXML G.7: <sce:action name="scout_emit">
@@ -436,6 +439,7 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
             ScoutingState::Sending => {
                 match self.last_transition_index {
                     1 => {
+                        // SCE-MAP: scouting.scxml:114 :: Sending :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
 
             // W3C SCXML G.7: <sce:action name="diag_scout_tx_failed">

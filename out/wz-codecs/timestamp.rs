@@ -1,4 +1,4 @@
-// SCE-MAP: timestamp:42
+// SCE-MAP: timestamp:42 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none

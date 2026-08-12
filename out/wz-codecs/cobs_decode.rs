@@ -1,4 +1,4 @@
-// SCE-MAP: cobs_decode:53
+// SCE-MAP: cobs_decode:53 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
 // Runtime: none

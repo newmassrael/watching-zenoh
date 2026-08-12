@@ -1,4 +1,4 @@
-// SCE-MAP: msg_del:76
+// SCE-MAP: msg_del:76 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none

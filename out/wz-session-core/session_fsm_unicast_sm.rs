@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: 4c8405d45b084ed00fc84ee03f1da64a6569947bc99d231b158b2502274cb589
-// template-hash: 894d11dad693c1040e16152130c83103ca132cfd62152461f0760e932c41c490
+// template-hash: 56bec87d0124f368b72ecb45f170dc38a324027a2fa3663195c8aeaa13f5d24d
 // generated-at: 0
 
 
@@ -63,7 +63,7 @@
 // `clippy::suspicious`, `clippy::perf`) remain at warn so any genuine bug
 // the generator emits still surfaces.
 
-// SCE-MAP: session_fsm_unicast.scxml:83
+// SCE-MAP: session_fsm_unicast.scxml:83 :: _machine
 
 use core::time::Duration;
 use sce_rust_runtime::{Engine, StatePolicy};
@@ -471,11 +471,12 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
 
 
     // W3C SCXML 3.7: Execute <onentry> actions for a state
-    #[doc = "SCE-MAP: session_fsm_unicast.scxml:83"]
-// SCE-MAP: session_fsm_unicast.scxml:83
+    #[doc = "SCE-MAP: session_fsm_unicast.scxml:83 :: _machine"]
+// SCE-MAP: session_fsm_unicast.scxml:83 :: _machine
     fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>) {
         match state {
             SessionFsmUnicastState::Closed => {
+                // SCE-MAP: session_fsm_unicast.scxml:209 :: Closed :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -488,6 +489,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
             }
             SessionFsmUnicastState::Closing => {
+                // SCE-MAP: session_fsm_unicast.scxml:201 :: Closing :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -497,6 +499,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
             }
             SessionFsmUnicastState::Established => {
+                // SCE-MAP: session_fsm_unicast.scxml:174 :: Established :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -515,6 +518,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
             }
             SessionFsmUnicastState::GotInitAck => {
+                // SCE-MAP: session_fsm_unicast.scxml:126 :: GotInitAck :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -524,6 +528,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
             }
             SessionFsmUnicastState::LinkOpening => {
+                // SCE-MAP: session_fsm_unicast.scxml:99 :: LinkOpening :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -533,6 +538,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
             }
             SessionFsmUnicastState::SentInitAck => {
+                // SCE-MAP: session_fsm_unicast.scxml:154 :: SentInitAck :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -542,6 +548,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
             }
             SessionFsmUnicastState::SentInitSyn => {
+                // SCE-MAP: session_fsm_unicast.scxml:117 :: SentInitSyn :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -551,6 +558,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
             }
             SessionFsmUnicastState::SentOpenAck => {
+                // SCE-MAP: session_fsm_unicast.scxml:160 :: SentOpenAck :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -565,8 +573,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     }
 
     // W3C SCXML 3.8: Execute <onexit> actions for a state
-    #[doc = "SCE-MAP: session_fsm_unicast.scxml:83"]
-// SCE-MAP: session_fsm_unicast.scxml:83
+    #[doc = "SCE-MAP: session_fsm_unicast.scxml:83 :: _machine"]
+// SCE-MAP: session_fsm_unicast.scxml:83 :: _machine
     fn execute_exit_actions(
         &mut self,
         state: Self::State,
@@ -575,6 +583,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     ) {
         match state {
             SessionFsmUnicastState::Established => {
+                // SCE-MAP: session_fsm_unicast.scxml:174 :: Established :: _state_body
                 // W3C SCXML 3.9: onexit block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.9: error stops block)
                 'action_block: {
@@ -593,8 +602,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
 
 
     // W3C SCXML 3.13: Evaluate guards and take a matching transition
-    #[doc = "SCE-MAP: session_fsm_unicast.scxml:83"]
-// SCE-MAP: session_fsm_unicast.scxml:83
+    #[doc = "SCE-MAP: session_fsm_unicast.scxml:83 :: _machine"]
+// SCE-MAP: session_fsm_unicast.scxml:83 :: _machine
     fn process_transition(
         &mut self,
         current_state: &mut Self::State,
@@ -630,8 +639,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     }
 
     // W3C SCXML 3.13: Execute transition actions (called between exit and entry)
-    #[doc = "SCE-MAP: session_fsm_unicast.scxml:83"]
-// SCE-MAP: session_fsm_unicast.scxml:83
+    #[doc = "SCE-MAP: session_fsm_unicast.scxml:83 :: _machine"]
+// SCE-MAP: session_fsm_unicast.scxml:83 :: _machine
     fn execute_transition_actions(&mut self, engine: &mut sce_rust_runtime::Engine<Self>) {
         if !self.has_transition_actions {
             return;
@@ -642,6 +651,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::Accepting => {
                 match self.last_transition_index {
                     1 => {
+                        // SCE-MAP: session_fsm_unicast.scxml:167 :: Accepting :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_invalid">
@@ -653,24 +663,28 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::Established => {
                 match self.last_transition_index {
                     0 => {
+                        // SCE-MAP: session_fsm_unicast.scxml:185 :: Established :: _transition_0
                         // W3C SCXML 3.13: Transition 0 actions
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
             self.actions.set_close_reason_generic();
                     }
                     1 => {
+                        // SCE-MAP: session_fsm_unicast.scxml:188 :: Established :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_expired">
             self.actions.set_close_reason_expired();
                     }
                     2 => {
+                        // SCE-MAP: session_fsm_unicast.scxml:191 :: Established :: _transition_2
                         // W3C SCXML 3.13: Transition 2 actions
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_invalid">
             self.actions.set_close_reason_invalid();
                     }
                     3 => {
+                        // SCE-MAP: session_fsm_unicast.scxml:194 :: Established :: _transition_3
                         // W3C SCXML 3.13: Transition 3 actions
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_unresponsive">
@@ -682,6 +696,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::GotInitAck => {
                 match self.last_transition_index {
                     1 => {
+                        // SCE-MAP: session_fsm_unicast.scxml:131 :: GotInitAck :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
@@ -693,6 +708,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::LinkOpening => {
                 match self.last_transition_index {
                     1 => {
+                        // SCE-MAP: session_fsm_unicast.scxml:104 :: LinkOpening :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
@@ -704,6 +720,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::Opening => {
                 match self.last_transition_index {
                     0 => {
+                        // SCE-MAP: session_fsm_unicast.scxml:135 :: Opening :: _transition_0
                         // W3C SCXML 3.13: Transition 0 actions
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_invalid">
@@ -715,6 +732,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::SentInitSyn => {
                 match self.last_transition_index {
                     1 => {
+                        // SCE-MAP: session_fsm_unicast.scxml:122 :: SentInitSyn :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_generic">

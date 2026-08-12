@@ -1,4 +1,4 @@
-// SCE-MAP: crc32:49
+// SCE-MAP: crc32:49 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
 // Runtime: none
