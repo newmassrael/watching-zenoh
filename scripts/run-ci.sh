@@ -7760,14 +7760,76 @@ layer_g_cross_compile_cortex_m() {
         # the lwip-sys consumer. The check still proves the cross-real
         # path on the entire ARM lineup, which is the mechanical gate
         # preset-cortex-m4-default catalog truthfulness depends on.
+        # R311y757 — ASK, do not assume. This skipped riscv32imac unconditionally
+        # while SAYING `riscv32-unknown-elf-gcc not installed on this host`, so
+        # the sentence was a claim about a machine nobody had asked. The moment a
+        # host has the toolchain the message becomes false and the lane still
+        # skips — a gate that cannot be satisfied is not a gate.
+        #
+        # AND THE NAME WAS WRONG FOR EVERY DISTRO THAT SHIPS ONE: Ubuntu offers
+        # `gcc-riscv64-unknown-elf`, whose binary is `riscv64-unknown-elf-gcc`
+        # and which emits 32-bit code under `-march=rv32imac`. There is no
+        # `riscv32-unknown-elf-gcc` to install, so the original name could only
+        # ever be absent. Both spellings are accepted, in that order.
+        _riscv_cc=""
+        _cc_env=()
         if [[ "$t" == "riscv32imac-unknown-none-elf" ]]; then
-            echo "  G.6 cross-real lwip-sys $t SKIP (riscv32-unknown-elf-gcc not installed on this host)"
+            for _c in riscv32-unknown-elf-gcc riscv64-unknown-elf-gcc; do
+                command -v "$_c" >/dev/null 2>&1 && { _riscv_cc="$_c"; break; }
+            done
+            # SCOPED TO THIS TARGET. The probe and the export both live inside
+            # the riscv arm on purpose: `_riscv_cc` is set on every pass of this
+            # loop otherwise, and an unconditional `TARGET_CC` would hand a
+            # RISC-V compiler to the ARM builds — a wrong fix that would have
+            # looked like a working one until the whole lineup broke.
+            # AND THE C LIBRARY'S HEADERS, which the ARM lineup never needed.
+            # `gcc-arm-none-eabi` bundles newlib inside its own sysroot, so a
+            # bare `-march=` is enough there. The riscv package does not: it
+            # advertises an `rv32imac/ilp32` multilib and ships picolibc as a
+            # SEPARATE tree, so the compiler runs and then cannot find
+            # `string.h`. MEASURED, after the compiler was already being invoked
+            # correctly — `fatal error: string.h: No such file or directory`.
+            # One path, so a test rather than a loop (shellcheck SC2043 caught
+            # the loop-over-one this was first written as).
+            _rv_libc=""
+            [[ -d /usr/lib/picolibc/riscv64-unknown-elf/include ]] \
+                && _rv_libc=/usr/lib/picolibc/riscv64-unknown-elf/include
+            [[ -n "$_riscv_cc" ]] && _cc_env=(
+                "TARGET_CC=$_riscv_cc"
+                "CFLAGS=-march=rv32imac -mabi=ilp32${_rv_libc:+ -isystem $_rv_libc} -ffreestanding"
+            )
+        fi
+        # R311y757 — THE C HALF IS SOLVED; THE BINDGEN HALF IS NOT, and the skip
+        # now says which. `lwip-sys` is two stages: `cc` compiles lwIP, then
+        # BINDGEN parses the headers through libclang. With the toolchain and
+        # picolibc named above, stage 1 compiles for rv32imac — measured — and
+        # stage 2 stops at `unknown target triple
+        # 'riscv32imac-unknown-none-elf'`, which libclang does not know. That is
+        # a bindgen target-mapping job, not a package to install, so the lane
+        # skips with the reason it actually has instead of a guess about a
+        # missing compiler.
+        if [[ "$t" == "riscv32imac-unknown-none-elf" ]]; then
+            if [[ -z "$_riscv_cc" ]]; then
+                echo "  G.6 cross-real lwip-sys $t SKIP (no riscv bare-metal C toolchain: tried riscv32-unknown-elf-gcc, riscv64-unknown-elf-gcc)"
+            else
+                echo "  G.6 cross-real lwip-sys $t SKIP (C stage builds with $_riscv_cc; bindgen/libclang rejects the triple)"
+            fi
+        # R311y757 — HAND THE COMPILER TO THE LANE THAT NEEDS IT. Finding it is
+        # not the same as it being used: the `cc` crate looks for
+        # `CC_riscv32imac_unknown_none_elf` and finds nothing, because the binary
+        # this distro installs is named `riscv64-unknown-elf-gcc` and emits
+        # 32-bit code under `-march=rv32imac`. MEASURED: with the toolchain
+        # present but unnamed, G.6 failed with `CC_riscv32imac_unknown_none_elf =
+        # None`. `TARGET_CC` is set only for the riscv target, so the ARM lineup
+        # keeps resolving its own compiler exactly as before.
         elif (cd crates && \
                 WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+                env "${_cc_env[@]}" \
                 cargo build -p wz-link-lwip \
                     --target "$t" --quiet) && \
              (cd crates && \
                 WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+                env "${_cc_env[@]}" \
                 cargo build -p wz \
                     --target "$t" --no-default-features \
                     --features runtime-coop --quiet); then
@@ -7883,8 +7945,19 @@ layer_g_cross_compile_cortex_m() {
         # non-riscv target including thumbv6m (Vec-backed, no Arc), the M0
         # fragment reach. Built via the facade (not -p wz-session-lwip direct)
         # so the public composition surface is what is tested, like Build 3/4.
+        # R311y757 — probed, not assumed; see G.6 above for why the old name
+        # could never have been present on a distro that ships one.
+        _riscv_cc=""
+        for _c in riscv32-unknown-elf-gcc riscv64-unknown-elf-gcc; do
+            command -v "$_c" >/dev/null 2>&1 && { _riscv_cc="$_c"; break; }
+        done
+        # R311y757 — same two stages, same wall; see G.6 for the measurement.
         if [[ "$t" == "riscv32imac-unknown-none-elf" ]]; then
-            echo "  G.11 session-lwip cross-real $t SKIP (riscv32-unknown-elf-gcc not installed on this host)"
+            if [[ -z "$_riscv_cc" ]]; then
+                echo "  G.11 session-lwip cross-real $t SKIP (no riscv bare-metal C toolchain: tried riscv32-unknown-elf-gcc, riscv64-unknown-elf-gcc)"
+            else
+                echo "  G.11 session-lwip cross-real $t SKIP (C stage builds with $_riscv_cc; bindgen/libclang rejects the triple)"
+            fi
         elif (cd crates && \
                 WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
                 cargo build -p wz-session-lwip \
