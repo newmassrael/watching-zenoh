@@ -70,6 +70,24 @@ SRCS = [
     ROOT / "crates" / "wz-replay" / "src",
 ]
 
+# R311y752 (carry N12) — individual FILES, for a subject that moved out from
+# under a directory.
+#
+# `messages.rs` held this gate's two registered sites and moved to
+# `wz-session-core::passive_messages` in that round. Adding the whole crate was
+# MEASURED first and adds 61 unrelated findings -- retain/remove sites across
+# `bounded`, `decl_sink`, `liveliness_get` and the rest -- so widening here would
+# have meant registering 61 sites in one hurried pass, which is the shape an
+# allow-list stops meaning anything in. Naming the file keeps the gate's SUBJECT
+# identical across the move, which is what a move must not change.
+#
+# The residue, stated: a NEW discard site elsewhere in wz-session-core is
+# unwatched. It was unwatched before the move too, so this is not a regression --
+# but widening the scan to that crate is a real gap and its own round's work.
+SRC_FILES = [
+    ROOT / "crates" / "wz-session-core" / "src" / "passive_messages.rs",
+]
+
 REMOVAL = re.compile(r"\.(drain|remove|pop|pop_front|swap_remove|retain)\s*\(")
 
 # Anything that counts, censuses or hands the removed value to something that
@@ -101,7 +119,7 @@ ACCOUNTING = (
 # excuse another crate's site.
 ALLOWED = [
     (
-        "wz-capture/messages.rs",
+        "wz-session-core/passive_messages.rs",
         "frame: Some(self.0.remove(0)),",
         "R311y723 — THE DOOR ITSELF. This removal accounts for nothing on "
         "purpose: it hands back a `#[must_use] Discarded` whose destructor "
@@ -110,7 +128,7 @@ ALLOWED = [
         "site that makes every other site impossible to get wrong",
     ),
     (
-        "wz-capture/messages.rs",
+        "wz-session-core/passive_messages.rs",
         "out.remove(0)",
         "R311y723 — a TEST fixture taking the single decoded frame out of the "
         "observer's return value. Nothing captured is discarded: the vector is "
@@ -245,15 +263,18 @@ def windows(text):
 
 def main():
     missing = [str(d) for d in SRCS if not d.is_dir()]
+    missing += [str(f) for f in SRC_FILES if not f.is_file()]
     if missing:
         # A scan whose subject moved must FAIL rather than report zero: an
-        # empty population is the shape a gate goes quiet in.
-        print(f"discard-site: not a directory: {missing}", file=sys.stderr)
+        # empty population is the shape a gate goes quiet in. This is what
+        # caught the R311y752 move -- twice, once as a stale ALLOWED entry and
+        # once as a named file that had gone.
+        print(f"discard-site: not readable: {missing}", file=sys.stderr)
         return 2
     findings = []
     seen_allowed = set()
     total = 0
-    paths = sorted(p for d in SRCS for p in d.rglob("*.rs"))
+    paths = sorted({p for d in SRCS for p in d.rglob("*.rs")} | set(SRC_FILES))
     for path in paths:
         text = path.read_text(encoding="utf-8")
         for line_no, stripped, window in windows(text):
@@ -298,7 +319,8 @@ def main():
         return 1
 
     print(
-        f"discard-site OK: {total} removal site(s) across {len(SRCS)} crate(s), "
+        f"discard-site OK: {total} removal site(s) across {len(SRCS)} crate(s) "
+        f"and {len(SRC_FILES)} named file(s), "
         f"{len(ALLOWED)} registered as owing nothing"
     )
     return 0

@@ -5886,6 +5886,19 @@ layer_c1bx_tls_record_oracle() {
 layer_c1bz_docs_resolve() {
     local crate count expected budget failed=0 seen=""
     # crate:expected-broken-links. Absent from this list means ZERO is expected.
+    #
+    # ONE `crate:count` PER LINE AND NOTHING ELSE -- this string is read
+    # field-by-field, so a `#` comment inside it is parsed as a crate name.
+    # MEASURED (R311y752): a five-line rationale added between two entries made
+    # the lane red with "the budget names purpose, which is not a workspace
+    # member". Rationale goes here, above the assignment.
+    #
+    # R311y752: wz-session-core 275 -> 274. R311y750 removed a
+    # `[peer_keyexpr_table]` link along with the accessor it named (carry N38)
+    # and did not run this lane, so run 31592906800 redded here. The budget is
+    # watched in BOTH directions deliberately -- a deletion that lowers the
+    # count has to say so, which is what turned an unnoticed doc edit into a
+    # named debt instead of a silent drift.
     budget="
         wz-ap-demo:13
         wz-capi-c:56
@@ -5896,7 +5909,7 @@ layer_c1bz_docs_resolve() {
         wz-routing-graph:6
         wz-runtime-coop:19
         wz-runtime-tokio:190
-        wz-session-core:275
+        wz-session-core:274
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
     "

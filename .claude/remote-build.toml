@@ -1,66 +1,42 @@
-# Remote-build declaration for watching-zenoh (R311y737).
-#
-# WHAT THIS FILE IS FOR. The remote-build skill refuses to guess: a repository
-# says what it needs and what verifies it, and the machine registry — which
-# lives OUTSIDE this repository — says where that can run. No machine name
-# appears here. This repo is public, and a machine name tells a reader nothing
-# a spec does not tell them better.
-#
-# ─── WHY MOST OF THIS REPO'S GATES CANNOT GO REMOTE ─────────────────
-#
-# `run-ci.sh` is NOT a candidate for offloading, and that is a property of the
-# gates rather than of their cost. `round-runner.sh` already writes the reason
-# down under "WHY THIS MACHINE AND NOT A CLOUD RUNNER", and it applies here:
-#
-#   * the pico oracle needs `target/zenoh-pico-build/lib/libzenohpico.so`,
-#     built from the vendored source on the machine that runs the lane;
-#   * the SSOT gates need `mnemosyne-cli` at the pinned rev on PATH;
-#   * the footprint lanes read THIS box's ARM toolchain — a different gcc
-#     changes the numbers (measured: -8 / -36 bytes between 13.2.1 and CI's
-#     10.3.1), so a remote pass is a pass of a different measurement;
-#   * the push gate reads `.git/wz-nda-terms.txt`, which by design exists only
-#     on this machine.
-#
-# A machine without those reports green on checks that never ran, which is the
-# single failure this workspace spends most of its gates preventing. So what
-# goes remote is the COMPILE-AND-TEST weight, and the verdict-bearing gates
-# stay here.
-#
-# ─── AND WHY THE WHOLE WORKSPACE CANNOT BE BUILT AT ONCE ────────────
-#
-# `cargo test --workspace` does not build in this tree and that is deliberate:
-# `sce-rust-runtime` carries a `compile_error!` for feature combinations the
-# workspace unification produces, and `wz-session-lwip` forces
-# `wz-session-core/no_std` through non-optional deps, which cannot coexist with
-# the std runtime `wz-runtime-tokio` pulls. Per-package is the only shape that
-# builds, which is why the commands below name packages.
+# R311y752 — what this repository needs from a build machine, and nothing about
+# WHICH machine. Addresses live in `~/.claude/remote-build/hosts.toml`, outside
+# this tree, so a public repo never carries them (remote-build SKILL rule 11).
 
+# Tracked files only. This repo's history has already paid for an accidental
+# disclosure once, and `all` would send whatever is sitting untracked in the
+# working tree to another host.
 send = "tracked"
 
-# `/crates/target` is a SYMLINK into ~/.buildcache — rsyncing it lands a broken
-# link on the far side (skill rule 1). `/vendor/sce/target` is the codegen
-# toolchain's own build dir and is rebuilt where it is used.
-exclude = ["/crates/target", "/vendor/sce/target", "/.round"]
+# Belt and braces: `crates/target` is a SYMLINK into ~/.buildcache (SKILL rule
+# 1) and would arrive as a broken link. `git ls-files` already omits both, so
+# these entries are here to survive a future switch to `send = "all"`.
+exclude = ["/crates/target", "/target"]
 
-needs = ["cargo"]
+needs = ["cargo", "python3", "git"]
 
-# libxml2 is pulled in by `sce-build`, which the codegen path links against.
-# Only needed if a remote command reaches the xtask regen; the test commands
-# below do not, and this is listed so a machine that lacks it says so early.
-packages = ["libxml2-dev"]
+# MEASURED on the 32-core / 125 GB build machine at R311y752, and the reason
+# this list exists rather than a shrug: WITHOUT THESE, `run-ci.sh` does not fail
+# -- it SKIPS, and a sweep that skips half its lanes reports the same green as
+# one that ran them. Absent there: shellcheck, arm-none-eabi-gcc, qemu-arm,
+# zenohd, and every non-x86 rustup target.
+#
+# The consequence, stated so no one has to rediscover it: that machine is
+# STRONGER than a laptop for the x86 lanes (feature matrix, C1*, E*) and WEAKER
+# for the cross-compile and interop ones. Layers G / Q / Z belong on a host that
+# has the arm toolchain, or on hosted CI.
+packages = [
+    "shellcheck",
+    "gcc-arm-none-eabi",
+    "qemu-user",
+]
 
-# Measured on the local box rather than guessed: 31 GB total went 13 GB into
-# swap running this tree's test build, so ~44 GB is the honest working figure.
-# The tree itself reaches 42 GB after a full gate.
-min_ram_gb = 48
-min_free_gb = 60
+min_ram_gb = 16
+min_free_gb = 20
 
 [commands]
-# The four crates that carry this workspace's analyzer weight and its longest
-# compiles. Named individually because `--workspace` cannot build (see above).
-build = "cd crates && cargo test -p wz-capture -p wz-analyze -p wz-replay -p wz-session-core --no-run"
-verify = "cd crates && cargo test -p wz-capture -p wz-analyze -p wz-replay -p wz-session-core --no-fail-fast"
-
-# `peak_gb_per_task` is deliberately absent: nobody has measured what one test
-# of this tree holds at its peak, and a number nobody measured would be read as
-# one that someone did.
+# NOT `cargo test --workspace`: this tree refuses a whole-workspace build on
+# purpose (`sce-rust-runtime` raises a `compile_error!`), so the workspace form
+# fails for a reason that has nothing to do with the change under test.
+# `run-ci.sh` is the repo's own full gate and the thing local pushes deliberately
+# do not run.
+verify = "bash scripts/run-ci.sh"

@@ -889,6 +889,25 @@ pub mod extfragment;
 ))]
 pub mod passive;
 
+// R311y752 (carry N12) — the container decoded messages are held in, moved down
+// from `wz-capture::messages`. Gated exactly as `passive` above, because that is
+// where `PassiveFrame` comes from and this module is a list of them plus the
+// discard receipt and census that share its privacy boundary.
+//
+// DELIBERATELY UNDOCUMENTED ON THIS LINE, and the reason is R311y724's: an outer
+// `///` on a `mod` declaration is concatenated with the module's own `//!` docs
+// and the merged block then resolves its intra-doc links in THIS scope, so every
+// link the module makes to its own items reds under C1bz's zero broken-link
+// budget. The module's note is in its own file.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-frame"
+))]
+pub mod passive_messages;
+
 /// R311y579 (G3 + G6-serde) — the LEAF-SCALAR field walker: a dissection that
 /// reports, per scalar, the byte span it was decoded from, in a wz-owned view
 /// model that can carry `serde` derives the codegen'd mirrors cannot. Gated on

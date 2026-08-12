@@ -92,9 +92,17 @@ pub mod quic;
 // its own items (`MessageList`, `Discarded`, the `Deref` it imports) becomes
 // `no item named ... in scope` and C1bz reds with a broken-link budget of
 // zero. Measured: four broken links appeared the moment this line gained a
-// doc comment and vanished when it lost one. The module's note is in
-// `messages.rs`, which is where it belongs.
-pub mod messages;
+// doc comment and vanished when it lost one. The module's note is in the
+// module's own file, which is where it belongs.
+//
+// R311y752 (carry N12) — and that file is now
+// `wz-session-core::passive_messages`. Not one line of it named a capture type,
+// while every line named a session-core one, so it sat a layer above everything
+// it was made of. Re-exported under the old path rather than renamed at the
+// call sites: `messages::MessageList` is what this crate's fields say and what
+// the producer gate reads, and moving a type is not a reason to also move every
+// sentence about it.
+pub use wz_session_core::passive_messages as messages;
 /// R311y617 (§1.1f) — the PAYLOAD sub-decoder: what is INSIDE a Put, judged
 /// against the encoding the sender declared rather than rendered on its word.
 ///

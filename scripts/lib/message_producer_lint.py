@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R311y722 (§1.1f) — every list of decoded messages is in the enumeration the
-census planes walk.
+"""R311y722 (§1.1f, N10) — every list of decoded messages is in the enumeration
+the census planes walk.
 
 ## The omission this ends, counted
 
@@ -25,9 +25,20 @@ R311y721 replaced the five call sites with one enumeration
    form the serial list had one round earlier — matched nothing, and so would
    `[Vec<PassiveFrame>; 2]` or a map of them. Widening the regex would have
    chased shapes forever, so R311y723 made the population a NAME instead:
-   decoded messages live in `MessageList` (`wz-capture/src/messages.rs`), whose
-   deref target is a SLICE, so growth and removal have exactly one door each.
-   A field that holds messages says `MessageList` whatever it is wrapped in.
+   decoded messages live in `MessageList` (`wz-session-core/src/passive_messages.rs`
+   since R311y752, `wz-capture/src/messages.rs` before it), whose deref target is
+   a SLICE, so growth and removal have exactly one door each. A field that holds
+   messages says `MessageList` whatever it is wrapped in.
+3. It read a NAME, and carry N10 recorded the two ways to hold one without
+   saying it: a type ALIAS (`type Frames = MessageList;` then `frames: Frames`)
+   and a TRAIT OBJECT (`Box<dyn Frames>` where the trait's signatures mention
+   the type). R311y752 computes both, to a fixpoint, and folds them into the
+   producer pattern. MEASURED: planting one of each reds the gate by field name,
+   and R311y723's pattern applied to the same tree matches neither.
+
+   Both sets are EMPTY in this tree today, and are COUNTED and printed for that
+   reason. An empty set that was computed is a measurement; an empty set that
+   was assumed is the blind spot.
 
 ## What this layer is FOR, given the other two
 
@@ -69,7 +80,26 @@ ENUMERATION = "message_lists"
 # `kept: [MessageList; 2]`, `by_id: BTreeMap<u64, MessageList>` and
 # `rows: Vec<(Origin, MessageList)>` all match, where a shape-based pattern
 # caught only the first.
-PRODUCER_TYPE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*([^=]*\bMessageList\b[^=]*),\s*$")
+PRODUCER_TYPE_TEMPLATE = r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*([^=]*\b(?:%s)\b[^=]*),\s*$"
+
+# R311y752 (carry N10) — the two things a NAME-based scan still could not see,
+# and they were the register's words for this item: a `MessageList` behind a type
+# ALIAS, and one behind a TRAIT OBJECT. Both are computed rather than assumed,
+# and both are EMPTY in this tree today -- which is why each is counted and
+# printed. An empty set that is computed is a measurement; an empty set that is
+# assumed is the blind spot.
+#
+# `type Frames = MessageList;` then `frames: Frames,` defeats a scan looking for
+# the type's own name. Resolved to a fixpoint, so an alias of an alias counts.
+TYPE_ALIAS = re.compile(
+    r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?type\s+(\w+)\s*(?:<[^>]*>)?\s*=\s*([^;]*);"
+)
+
+# A trait whose signatures mention the type is a way to HOLD one without naming
+# it: `Box<dyn Frames>` is a field that produces messages and says so nowhere.
+# The remedy is not to guess -- it is to treat `dyn <that trait>` as a producer
+# type too, so such a field lands in the same population as a direct one.
+TRAIT_OPEN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?trait\s+(\w+)")
 
 # A struct LITERAL field looks identical to a declaration -- `frames:
 # messages::MessageList::new(),` beside `frames: messages::MessageList,` -- and
@@ -130,6 +160,68 @@ def method_bodies(text: str) -> dict[str, str]:
     return out
 
 
+def block_bodies(text: str, opener: re.Pattern[str]) -> dict[str, str]:
+    """Every `trait X { .. }` body, brace-counted, keyed by name."""
+    out: dict[str, str] = {}
+    lines = text.splitlines()
+    at = 0
+    while at < len(lines):
+        match = opener.match(lines[at])
+        if not match:
+            at += 1
+            continue
+        name = match.group(1)
+        depth = 0
+        started = False
+        body: list[str] = []
+        while at < len(lines):
+            line = lines[at]
+            depth += line.count("{") - line.count("}")
+            if "{" in line:
+                started = True
+            body.append(line)
+            at += 1
+            if started and depth <= 0:
+                break
+        if started:
+            out.setdefault(name, "\n".join(body))
+    return out
+
+
+def widen_population(texts: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """Every spelling a field can use to hold decoded messages.
+
+    Returns (patterns, aliases, dyn_traits). `MessageList` is always in it; the
+    other two are computed to a fixpoint over the whole workspace, so an alias
+    of an alias, and a trait whose signature mentions one, are both reached.
+    """
+    known = {"MessageList"}
+    aliases: set[str] = set()
+    for _ in range(8):  # a fixpoint in practice; bounded so a cycle cannot hang
+        grew = False
+        for text in texts:
+            for name, rhs in TYPE_ALIAS.findall(text):
+                if name in known:
+                    continue
+                if any(re.search(r"\b%s\b" % re.escape(k), rhs) for k in known):
+                    known.add(name)
+                    aliases.add(name)
+                    grew = True
+        if not grew:
+            break
+
+    dyn_traits: set[str] = set()
+    for text in texts:
+        for name, body in block_bodies(text, TRAIT_OPEN).items():
+            if name in known:
+                continue
+            if any(re.search(r"\b%s\b" % re.escape(k), body) for k in known):
+                dyn_traits.add(name)
+
+    patterns = sorted(known) + [f"dyn\\s+{re.escape(t)}" for t in sorted(dyn_traits)]
+    return patterns, sorted(aliases), sorted(dyn_traits)
+
+
 def main() -> int:
     files = sorted(CRATES.rglob("*.rs"))
     # Vendored trees are somebody else's code and carry no planes of ours.
@@ -138,14 +230,41 @@ def main() -> int:
         print(f"message-producer lint: FAIL no sources under {CRATES}")
         return 1
 
+    texts = {path: path.read_text(encoding="utf-8") for path in files}
+    patterns, aliases, dyn_traits = widen_population(list(texts.values()))
+    producer_type = re.compile(PRODUCER_TYPE_TEMPLATE % "|".join(patterns))
+
+    # The type's OWN definition is not a field of it. Found MECHANICALLY rather
+    # than by a hard-coded file name (R311y752): the name was `messages.rs`, the
+    # module moved to `wz-session-core::passive_messages` in the same round, and
+    # a skip naming a file that no longer exists is the expired-blocker class
+    # wearing a constant.
+    # Comment lines are excluded here for the reason they are excluded below: the
+    # phrase appears in prose across this workspace, and a doc block naming the
+    # struct would make the anchor ambiguous and FAIL a clean tree.
+    definition = {
+        path
+        for path, text in texts.items()
+        if any(
+            re.match(r"^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+MessageList\b", line)
+            for line in text.splitlines()
+            if not line.strip().startswith("//")
+        )
+    }
+    if len(definition) != 1:
+        print(
+            "message-producer lint: FAIL expected exactly one file defining "
+            "`struct MessageList`, found %d. The population's anchor is "
+            "ambiguous and this gate cannot speak for it." % len(definition)
+        )
+        return 1
+
     producers: list[tuple[str, str]] = []
     bodies: dict[str, str] = {}
     for path in files:
-        text = path.read_text(encoding="utf-8")
+        text = texts[path]
         bodies.update(method_bodies(text))
-        # The type's OWN definition is not a field of it. By file name, because
-        # the module is one file.
-        if path.name == "messages.rs":
+        if path in definition:
             continue
         depth = 0
         in_struct = False
@@ -159,7 +278,7 @@ def main() -> int:
                 in_struct = True
                 depth = 0
             if in_struct:
-                found = PRODUCER_TYPE.match(line)
+                found = producer_type.match(line)
                 if found:
                     producers.append(
                         (path.relative_to(REPO_ROOT).as_posix(), found.group(1))
@@ -217,7 +336,8 @@ def main() -> int:
 
     print(
         "message-producer lint: OK (%d list(s) of decoded messages, all reached by `%s`; "
-        "%d exempt)" % (len(producers), ENUMERATION, len(EXEMPT))
+        "%d exempt; %d alias(es) and %d trait object(s) in the population)"
+        % (len(producers), ENUMERATION, len(EXEMPT), len(aliases), len(dyn_traits))
     )
     return 0
 

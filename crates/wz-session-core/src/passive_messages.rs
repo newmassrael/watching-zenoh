@@ -3,9 +3,33 @@
 
 //! R311y723 (§1.1f) — the one type decoded transport messages are held in.
 //!
+//! # Where this lives, and why it moved (R311y752, carry N12)
+//!
+//! It was `wz-capture::messages` until R311y752, one layer above everything it
+//! is made of: a [`MessageList`] is a list of [`crate::passive::PassiveFrame`],
+//! [`Discarded`] carries one, and every arm of
+//! [`DroppedFrameCensus::absorb`] matches a [`crate::inbound::InboundFrame`].
+//! Not one line of it named a capture type — the pcap reading, the flow table
+//! and the TLS half were never involved — so a consumer that wanted to census
+//! decoded messages had to take the capture crate to name the type they come
+//! in.
+//!
+//! The three types moved TOGETHER, and that is the load-bearing part rather
+//! than a tidiness: R311y746 (carry N11) closed the discard obligation by
+//! putting the receipt's private `take` and the census that consumes it behind
+//! ONE privacy boundary. Moving [`MessageList`] alone would have left
+//! `discard_oldest` producing a receipt whose only legal consumer was in
+//! another crate, which is that boundary deleted. A move that has to keep an
+//! invariant intact is a move of everything the invariant spans.
+//!
+//! Cross-crate references in these docs are PROSE, not intra-doc links: the
+//! census planes are in `wz-capture`, which depends on this crate and not the
+//! other way round, so a link would name a crate this one must not know.
+//!
 //! # What this replaces, and why a type rather than a wider check
 //!
-//! Four census planes walk one enumeration ([`crate::Dissection::message_lists`],
+//! Four census planes walk one enumeration (`Dissection::message_lists` in
+//! `wz-capture`,
 //! R311y721) and a gate reds when a `Vec<PassiveFrame>` field is outside it
 //! (R311y722). Asked what that gate could not see, the honest answer was two
 //! things, and the SECOND was the larger: the gate's population was a container
@@ -42,12 +66,10 @@
 //! y650, y656) before R311y713 ended the same shape for flow exits by making it
 //! a type. This is that ending, applied to the other list.
 
-extern crate alloc;
-
 use alloc::vec::Vec;
 use core::ops::{Deref, DerefMut};
 
-use wz_session_core::passive::PassiveFrame;
+use crate::passive::PassiveFrame;
 
 /// Decoded transport messages, in the order the observer produced them.
 ///
@@ -158,13 +180,13 @@ impl Discarded {
 
 /// R311y713 (§B10) — what the transport messages a BOUND discarded had said.
 ///
-/// [`crate::DissectionDrops::frames`] counts them and nothing named them, so a
+/// `DissectionDrops::frames` (`wz-capture`) counts them and nothing named them, so a
 /// dissection that trimmed a busy flow could not answer the one question the
 /// trim raises: was that a hundred keepalives, or the `Close` that explains why
 /// the session ended. The count says a bound bit; this says what it bit.
 ///
 /// TRANSPORT messages only. A scouting datagram discarded by the same limit is
-/// counted in [`crate::DissectionDrops::scouting`] and is not censused here,
+/// counted in `DissectionDrops::scouting` (`wz-capture`) and is not censused here,
 /// because it is a different message space (`ScoutingFrame`) and folding the
 /// two would produce a total that belongs to neither.
 ///
@@ -192,20 +214,32 @@ impl DroppedFrameCensus {
     pub fn absorb(&mut self, receipt: Discarded) {
         let f = receipt.take();
         match &f.frame {
-            Ok(wz_session_core::inbound::InboundFrame::Init { .. }) => self.init += 1,
-            Ok(wz_session_core::inbound::InboundFrame::Open { .. }) => self.open += 1,
-            Ok(wz_session_core::inbound::InboundFrame::Close { .. }) => self.close += 1,
-            Ok(wz_session_core::inbound::InboundFrame::KeepAlive { .. }) => self.keep_alive += 1,
-            Ok(wz_session_core::inbound::InboundFrame::Frame { .. }) => self.frame += 1,
+            Ok(crate::inbound::InboundFrame::Init { .. }) => self.init += 1,
+            Ok(crate::inbound::InboundFrame::Open { .. }) => self.open += 1,
+            Ok(crate::inbound::InboundFrame::Close { .. }) => self.close += 1,
+            // R311y752 — GATED ON THE VARIANT'S OWN FEATURE, exactly as
+            // `Fragment` below has been since R311y655, and newly necessary
+            // rather than newly correct: in `wz-capture` this module was always
+            // compiled with a dependency that turned `codec-keep-alive` and
+            // `codec-join` on, so the arms could name variants unconditionally.
+            // Here the profile is whatever the consumer chose, and a build
+            // without the feature decodes the MID as `Unknown` and counts it
+            // there -- the honest reading, and the accessor stays ungated so a
+            // reader of this census never has to know which features the binary
+            // carries.
+            #[cfg(feature = "codec-keep-alive")]
+            Ok(crate::inbound::InboundFrame::KeepAlive { .. }) => self.keep_alive += 1,
+            Ok(crate::inbound::InboundFrame::Frame { .. }) => self.frame += 1,
             // The VARIANT is gated on `reassembly`, and the ACCESSOR below is
             // not: a reader of this census must not have to know which features
             // this binary carries (R311y655). Without the feature a `0x06`
             // decodes as `Unknown { mid: 6 }` and is counted there, which is the
             // honest reading -- this build did not recognise it as a fragment.
             #[cfg(feature = "reassembly")]
-            Ok(wz_session_core::inbound::InboundFrame::Fragment { .. }) => self.fragment += 1,
-            Ok(wz_session_core::inbound::InboundFrame::Join { .. }) => self.join += 1,
-            Ok(wz_session_core::inbound::InboundFrame::Unknown { .. }) => self.unknown += 1,
+            Ok(crate::inbound::InboundFrame::Fragment { .. }) => self.fragment += 1,
+            #[cfg(feature = "codec-join")]
+            Ok(crate::inbound::InboundFrame::Join { .. }) => self.join += 1,
+            Ok(crate::inbound::InboundFrame::Unknown { .. }) => self.unknown += 1,
             Err(_) => self.undecodable += 1,
         }
     }
@@ -263,7 +297,7 @@ impl DroppedFrameCensus {
     }
 
     /// Every discarded message this censused — the figure that must equal
-    /// [`crate::DissectionDrops::frames`], and the assertion that keeps the two
+    /// `DissectionDrops::frames` (`wz-capture`), and the assertion that keeps the two
     /// from drifting into two different stories about one trim.
     pub fn total(&self) -> usize {
         self.init
@@ -329,12 +363,12 @@ mod tests {
 
     /// The same, for whichever MID a test needs to land in a named bucket.
     fn frame_with_mid(mid: u8) -> PassiveFrame {
-        let mut session = wz_session_core::passive::PassiveSession::new();
+        let mut session = crate::passive::PassiveSession::new();
         let mut out = session.next_datagram_on(
-            wz_session_core::passive::Direction::A,
+            crate::passive::Direction::A,
             &[mid],
             7,
-            wz_session_core::passive::LinkHandshake::Absent,
+            crate::passive::LinkHandshake::Absent,
         );
         assert_eq!(
             out.len(),
