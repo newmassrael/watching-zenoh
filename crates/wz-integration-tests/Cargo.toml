@@ -68,6 +68,12 @@ wz-codecs = { path = "../wz-codecs", features = ["codec-serial"] }
 # one of its three clients, so the measurement lives in ONE file beside the
 # pico + demo legs it is compared against (rlib crate-type makes this linkable).
 wz-capi-pico = { path = "../wz-capi-pico" }
+# R311y759 — the analyzer, so a capture of REAL zenoh-pico bytes can be handed to
+# it in the same test that produced them. Every other dissection witness in this
+# workspace feeds wz-capture bytes wz itself synthesised; this crate is where a
+# foreign process can be made to speak, so it is the only place the analyzer can
+# be pointed at traffic it did not author.
+wz-capture = { path = "../wz-capture" }
 # W3 no-alloc bounded mirror migration — tests build owned-mirror
 # heapless fields via the `codec_bound::bounded_{bytes,string}` helpers
 # (the same idiom production code uses at decode boundaries).

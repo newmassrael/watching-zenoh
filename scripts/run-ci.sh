@@ -7339,6 +7339,44 @@ layer_epico_library_oracles() {
     echo "  Epico: wz and the real libzenohpico agree where they are pinned to"
 }
 
+# R311y759 — the ANALYZER, pointed at bytes wz did not author.
+#
+# Measured before this lane existed: 649 passing tests across wz-analyze,
+# wz-capture, wz-tls-record and wz-replay; ZERO .pcap files in the tree; ZERO
+# `include_bytes!` of a real capture; and no lane feeding a foreign process's
+# output to the dissector. Layers Z and E drive real zenohd and real pico, and
+# not one byte of what they emit ever reached wz-capture. So the entire analyzer
+# witness surface graded the decoder against bytes wz's own encoder produced,
+# which is the one comparison that cannot detect a shared misreading — the
+# workspace's own rule ("the oracle anchor is stock traffic, not wz") with
+# nothing enforcing it.
+#
+# The bytes are taken by RELAYING a real z_put through an in-test TCP proxy, so
+# no production code learns about capture and the witness cannot be satisfied by
+# a hook that exists only for it. It also needs no CAP_NET_RAW, which is what
+# keeps live_capture's AF_PACKET tap unrunnable in CI.
+#
+# Falsification MEASURED, probes removed after: an empty recording reds on the
+# flow count, and a byte flipped near the start of a pico segment reds with
+# `A=3 B=0` (the damaged direction VANISHES rather than arriving as errors).
+# A byte flipped at the end of the last segment correctly PASSES — that is a
+# payload. The Err-rejecting assertion is therefore not yet shown reachable, and
+# the test's own header says so rather than implying it fired.
+layer_ewire_pico_wire_dissection() {
+    # BUILD FIRST, GUARD SECOND — the Layer E9 rule: a wz artifact is never a
+    # reason to skip, only the FOREIGN binary is.
+    (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
+    if [[ ! -x target/zenoh-pico-cli/z_put ]]; then
+        _pico_cli_unavailable "Layer Ewire" || return 1
+        return 0
+    fi
+    _runci_guarded_test "Ewire stock-byte dissection" 1 \
+        cargo test -p wz-integration-tests \
+        --test pico_wire_dissection -- --ignored --quiet --test-threads=1 \
+        || return 1
+    echo "  Ewire: the analyzer parsed a real zenoh-pico session end to end"
+}
+
 layer_e_ap_demo_round_trip() {
     # R311y478 — z_pong joins the guarded set. It is the counterparty for the
     # §5.27 drop-in round-trip leg, and it arrived AFTER the other four, so a
@@ -11690,6 +11728,7 @@ run_layer C1ce layer_c1ce_api_compat_c_shm_oracle || overall=1
 run_layer C1cd layer_c1cd_api_compat_c_attachment || overall=1
 run_layer C1by layer_c1by_replay_engine || overall=1
 run_layer Epico layer_epico_library_oracles || overall=1
+run_layer Ewire layer_ewire_pico_wire_dissection || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1
 run_layer E3 layer_e3_router_multi_peer || overall=1

@@ -1127,6 +1127,18 @@ jobs:
         # carried that as §11.9 and nothing changed it until now.
         run: bash scripts/run-ci.sh --layer Epico
 
+      - name: Layer Ewire — the analyzer, on bytes a real zenoh-pico wrote
+        # R311y759 — until this lane, every one of the analyzer's 649 witnesses
+        # graded the dissector against bytes wz itself synthesised: no .pcap
+        # existed in the tree, no capture was `include_bytes!`d, and no lane fed
+        # a foreign process's output to wz-capture. A misreading shared by wz's
+        # encoder and decoder was therefore invisible to the whole suite.
+        #
+        # A real `z_put` is relayed through an in-test TCP proxy and the recorded
+        # stream is dissected, so the decoder faces an encoder it never saw.
+        # Wired HERE because this job builds the zenoh-pico CLI it drives.
+        run: bash scripts/run-ci.sh --layer Ewire
+
       - name: Layer E2 — facade-subset e2e vs zenoh-pico CLIs
         # The six wz-e2e-* SUBSET binaries: each pins an explicit atom list and
         # interoperates with a real pico CLI, which is what makes their proofs

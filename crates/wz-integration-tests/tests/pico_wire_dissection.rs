@@ -1,0 +1,389 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! R311y759 — the analyzer, pointed at bytes wz did NOT author.
+//!
+//! ## The gap this closes, measured rather than argued
+//!
+//! The analyzer's witness surface is large and it was, until this file, entirely
+//! self-referential. Measured at R311y759: 649 passing tests across `wz-analyze`,
+//! `wz-capture`, `wz-tls-record` and `wz-replay`; ZERO `.pcap` files anywhere in
+//! the tree; ZERO `include_bytes!` of a real capture; and no lane pointing a real
+//! `zenohd` or zenoh-pico at the dissector. Layers Z and E DO drive foreign
+//! processes, and not one byte of what those processes emit reaches `wz-capture`.
+//!
+//! Every one of those 649 witnesses therefore grades the dissector against bytes
+//! `wz` synthesised from its own understanding of the wire. That is not a weak
+//! test — it is a test of the wrong thing: a misreading in wz's encoder is
+//! reproduced exactly by wz's decoder, and the whole suite stays green while the
+//! analyzer misreads real traffic in the same direction. The workspace's own rule
+//! says so ("the oracle anchor is stock zenoh/pico traffic, not wz"), and nothing
+//! enforced it.
+//!
+//! ## Why a TAP PROXY rather than a capture hook
+//!
+//! The bytes are taken by relaying the connection through an in-test TCP proxy:
+//! the real `z_put` dials the proxy, the proxy dials `wz-ap-demo --listen`, and
+//! each direction is recorded as it is forwarded. No production code changes —
+//! nothing in `wz-runtime-tokio` learns about capture, so this witness cannot be
+//! satisfied by a hook that only exists for it. It also needs no `CAP_NET_RAW`,
+//! which is what keeps `live_capture`'s AF_PACKET tap `#[ignore]`d and unrunnable
+//! in CI.
+//!
+//! ## What is stock here and what is synthesised — stated, not implied
+//!
+//! STOCK: every byte of zenoh above TCP, in both directions. The client half is
+//! written by a real `libzenohpico` process; the server half is wz's, which is
+//! the half being graded, and it is graded by a decoder that never saw the
+//! encoder's intent.
+//!
+//! SYNTHESISED: the Ethernet / IPv4 / TCP envelope, because a userspace relay
+//! cannot observe headers the kernel wrote. This is deliberately the part that
+//! does NOT matter for this witness: decapsulation and reassembly already have
+//! their own coverage over seven link types, and re-proving them is not the
+//! point. What has never been tested is the layer above — that wz's transport
+//! decoder consumes a foreign encoder's output — and the envelope is only the
+//! vehicle that carries those bytes to it.
+//!
+//! ## The assertion that matters
+//!
+//! Not "a flow appeared". A flow appears for any two hosts exchanging anything.
+//! The load-bearing assertion is that EVERY transport message parses: the run is
+//! rejected if any frame in either direction comes back `Err`, and the count of
+//! successfully parsed messages must be non-trivial in BOTH directions. An
+//! unparsed byte here is a real finding about the analyzer, which is exactly what
+//! a self-authored fixture can never produce.
+//!
+//! ## What the falsification established, and what it did NOT
+//!
+//! Measured at R311y759 by damaging the recording before synthesis, each probe
+//! removed afterwards:
+//!
+//! * EMPTY recording -> reds on the flow count (`got 0`), so a capture that
+//!   silently records nothing cannot pass as a clean run.
+//! * A byte flipped near the START of the first pico segment -> reds with
+//!   `A=3 B=0`: the damage desynchronises that direction's assembler and the
+//!   half DISAPPEARS rather than arriving as errors. The both-halves assertion
+//!   is what catches it.
+//! * A byte flipped at the END of the last pico segment -> PASSES, correctly:
+//!   that lands in a payload, and a payload's contents are not the transport
+//!   decoder's business.
+//!
+//! So the `Err`-rejecting assertion is NOT yet shown to be reachable — neither
+//! probe produced a single `Err` frame; damage either vanished a direction or
+//! changed nothing. It is kept because it is the statement this witness exists
+//! to make, and stated as unproven rather than described as if it had fired.
+//! The assertions that DID carry the falsification are the flow count and the
+//! both-halves count.
+
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use wz_capture::Dissection;
+use wz_integration_tests::common::{
+    graceful_terminate, read_captured, spawn_on_ephemeral_port, wait_for_substring,
+    wz_ap_demo_binary, zenoh_pico_cli_binary,
+};
+use wz_session_core::inbound::InboundFrame;
+use wz_session_core::passive::Direction;
+
+/// Which half of the relayed connection a recorded segment came from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Side {
+    /// Written by the real zenoh-pico process.
+    FromPico,
+    /// Written by `wz-ap-demo`.
+    FromWz,
+}
+
+/// Segments in the order the proxy forwarded them, which is the order the wire
+/// carried them. Interleaving is preserved across directions on purpose: a
+/// per-direction accumulation would lose the handshake's alternation, and the
+/// dissector's stream assembler is per-direction anyway.
+type Recording = Arc<Mutex<Vec<(Side, Vec<u8>)>>>;
+
+/// Relay one direction, recording what passes. Ends on EOF or error, and
+/// half-closes the far side so the peer sees the same shutdown it would have.
+fn pump(mut from: TcpStream, mut to: TcpStream, side: Side, log: Recording, done: Arc<AtomicBool>) {
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match from.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                // Record BEFORE forwarding: a segment that is forwarded and not
+                // recorded would silently shrink the capture, and the assertion
+                // downstream reads as weaker rather than failing.
+                let segment = buf[..n].to_vec();
+                log.lock().expect("recording lock").push((side, segment));
+                if to.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = to.shutdown(Shutdown::Write);
+    done.store(true, Ordering::SeqCst);
+}
+
+/// A TCP relay in front of `upstream_port`. Returns the port to dial and the
+/// recording both directions land in.
+fn tap_proxy(upstream_port: u16) -> (u16, Recording) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind tap proxy");
+    let port = listener.local_addr().expect("proxy addr").port();
+    let log: Recording = Arc::new(Mutex::new(Vec::new()));
+    let log_thread = Arc::clone(&log);
+    std::thread::spawn(move || {
+        let (client, _) = match listener.accept() {
+            Ok(pair) => pair,
+            Err(_) => return,
+        };
+        let server = match TcpStream::connect(("127.0.0.1", upstream_port)) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let (c_read, c_write) = (
+            client.try_clone().expect("clone client"),
+            client.try_clone().expect("clone client"),
+        );
+        let (s_read, s_write) = (
+            server.try_clone().expect("clone server"),
+            server.try_clone().expect("clone server"),
+        );
+        let up_done = Arc::new(AtomicBool::new(false));
+        let down_done = Arc::new(AtomicBool::new(false));
+        let up_log = Arc::clone(&log_thread);
+        let down_log = Arc::clone(&log_thread);
+        let up = std::thread::spawn({
+            let done = Arc::clone(&up_done);
+            move || pump(c_read, s_write, Side::FromPico, up_log, done)
+        });
+        let down = std::thread::spawn({
+            let done = Arc::clone(&down_done);
+            move || pump(s_read, c_write, Side::FromWz, down_log, done)
+        });
+        let _ = up.join();
+        let _ = down.join();
+    });
+    (port, log)
+}
+
+const ETHERTYPE_IPV4: u16 = 0x0800;
+const IPPROTO_TCP: u8 = 6;
+
+/// Wrap one recorded segment as Ethernet / IPv4 / TCP.
+///
+/// Checksums are left zero: `wz-capture`'s TCP path does not verify them (there
+/// is no checksum check in `crates/wz-capture/src/tcp.rs`), and computing them
+/// here would assert nothing this witness is about. The lengths and sequence
+/// numbers ARE real, because reassembly reads them.
+fn tcp_packet(src_port: u16, dst_port: u16, seq: u32, payload: &[u8]) -> Vec<u8> {
+    let mut pkt = Vec::with_capacity(14 + 20 + 20 + payload.len());
+    // Ethernet: two locally-administered MACs, which is what a loopback-side
+    // synthesis can honestly claim.
+    pkt.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x02]);
+    pkt.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x01]);
+    pkt.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
+    let total_len = (20 + 20 + payload.len()) as u16;
+    pkt.extend_from_slice(&[0x45, 0x00]);
+    pkt.extend_from_slice(&total_len.to_be_bytes());
+    pkt.extend_from_slice(&[0x00, 0x00, 0x40, 0x00, 64, IPPROTO_TCP, 0x00, 0x00]);
+    pkt.extend_from_slice(&[127, 0, 0, 1]);
+    pkt.extend_from_slice(&[127, 0, 0, 1]);
+    pkt.extend_from_slice(&src_port.to_be_bytes());
+    pkt.extend_from_slice(&dst_port.to_be_bytes());
+    pkt.extend_from_slice(&seq.to_be_bytes());
+    pkt.extend_from_slice(&0u32.to_be_bytes()); // ack — unused by reassembly here
+    pkt.extend_from_slice(&[0x50, 0x18]); // data offset 5 words, PSH|ACK
+    pkt.extend_from_slice(&8192u16.to_be_bytes());
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    pkt.extend_from_slice(payload);
+    pkt
+}
+
+/// Turn the recording into a pcap, preserving forwarding order.
+fn synthesise_pcap(recording: &[(Side, Vec<u8>)], pico_port: u16, wz_port: u16) -> Vec<u8> {
+    let mut from_pico_seq: u32 = 1;
+    let mut from_wz_seq: u32 = 1;
+    let mut packets: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+    for (index, (side, bytes)) in recording.iter().enumerate() {
+        let pkt = match side {
+            Side::FromPico => {
+                let p = tcp_packet(pico_port, wz_port, from_pico_seq, bytes);
+                from_pico_seq = from_pico_seq.wrapping_add(bytes.len() as u32);
+                p
+            }
+            Side::FromWz => {
+                let p = tcp_packet(wz_port, pico_port, from_wz_seq, bytes);
+                from_wz_seq = from_wz_seq.wrapping_add(bytes.len() as u32);
+                p
+            }
+        };
+        packets.push((1, index as u32, pkt));
+    }
+    let borrowed: Vec<(u32, u32, &[u8])> = packets
+        .iter()
+        .map(|(s, f, p)| (*s, *f, p.as_slice()))
+        .collect();
+    wz_capture::pcap::write(wz_capture::link::LINKTYPE_ETHERNET, &borrowed)
+}
+
+/// A short name for a parsed transport message, for the assertion messages.
+fn frame_name(frame: &InboundFrame) -> &'static str {
+    match frame {
+        InboundFrame::Init { .. } => "Init",
+        InboundFrame::Open { .. } => "Open",
+        InboundFrame::Close { .. } => "Close",
+        InboundFrame::KeepAlive { .. } => "KeepAlive",
+        InboundFrame::Frame { .. } => "Frame",
+        InboundFrame::Fragment { .. } => "Fragment",
+        InboundFrame::Join { .. } => "Join",
+        // EXHAUSTIVE on purpose (no `_ =>`): a new transport message added to
+        // the enum must be named here, because this witness reports what a
+        // foreign encoder actually emitted and a catch-all would quietly file a
+        // brand-new message type as "something".
+        InboundFrame::Unknown { .. } => "Unknown",
+    }
+}
+
+/// THE WITNESS: a real zenoh-pico session, relayed and dissected.
+// wz-proves: session-unicast-accept pico->wz
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo + zenoh-pico CLI); Layer Ewire runs via --ignored"]
+fn the_analyzer_parses_every_message_a_real_zenoh_pico_session_puts_on_the_wire() {
+    let demo = wz_ap_demo_binary();
+    let z_put = zenoh_pico_cli_binary("z_put");
+
+    let demo_stderr = tempfile::tempfile().expect("tempfile for demo stderr");
+    let (mut demo_guard, mut demo_reader, wz_port) = spawn_on_ephemeral_port(
+        &demo,
+        &["--listen", "127.0.0.1:0", "--key", "demo/**"],
+        "listening on 127.0.0.1:",
+        "wz-ap-demo (--listen, behind the tap proxy)",
+        demo_stderr,
+    );
+
+    let (proxy_port, recording) = tap_proxy(wz_port);
+
+    let mut capture = tempfile::tempfile().expect("zenoh-pico z_put capture");
+    let put = Command::new(&z_put)
+        .args([
+            "-e",
+            &format!("tcp/127.0.0.1:{proxy_port}"),
+            "-k",
+            "demo/tapped",
+            "-v",
+            "hello-through-the-tap",
+        ])
+        .stdout(capture.try_clone().expect("clone capture"))
+        .stderr(capture.try_clone().expect("clone capture"))
+        .status()
+        .expect("spawn zenoh-pico z_put");
+    assert!(
+        put.success(),
+        "the real zenoh-pico z_put exited {put:?} against the tapped acceptor -- \
+         no session means no stock bytes to dissect. Its output was:\n{}",
+        read_captured(&mut capture)
+    );
+
+    let fired = "SUBSCRIBER FIRED";
+    let delivered = wait_for_substring(&mut demo_reader, fired, Duration::from_secs(10));
+    delivered.expect(
+        "wz-ap-demo never delivered the relayed sample, so the recording below \
+         would be a partial handshake rather than a session",
+    );
+    graceful_terminate(demo_guard.child_mut(), Duration::from_secs(5));
+
+    // Give the relay threads their EOF before reading the log.
+    std::thread::sleep(Duration::from_millis(200));
+    let segments = recording.lock().expect("recording lock").clone();
+
+    // ── ANTI-VACUITY FIRST ────────────────────────────────────────────────
+    // Every assertion below is satisfied by an empty capture, so the floor
+    // comes before the comparisons rather than after them.
+    assert!(
+        !segments.is_empty(),
+        "the tap recorded NOTHING -- the proxy was bypassed or never accepted, \
+         and an empty capture would satisfy every parse assertion below"
+    );
+    let from_pico: usize = segments
+        .iter()
+        .filter(|(s, _)| *s == Side::FromPico)
+        .map(|(_, b)| b.len())
+        .sum();
+    let from_wz: usize = segments
+        .iter()
+        .filter(|(s, _)| *s == Side::FromWz)
+        .map(|(_, b)| b.len())
+        .sum();
+    assert!(
+        from_pico > 0 && from_wz > 0,
+        "a one-way recording is not a session: {from_pico} byte(s) from pico, \
+         {from_wz} from wz"
+    );
+
+    let pcap = synthesise_pcap(&segments, 40_000, 7447);
+    let dissection = Dissection::from_pcap(&pcap).expect("the synthesised pcap parses");
+    let flows = dissection.flows();
+    assert_eq!(
+        flows.len(),
+        1,
+        "one relayed connection is one flow; got {} -- a different count means \
+         the synthesised envelope split the stream",
+        flows.len()
+    );
+    let flow = &flows[0];
+
+    // ── THE LOAD-BEARING ASSERTION ────────────────────────────────────────
+    // Every transport message a foreign encoder produced must parse. This is
+    // the statement no self-authored fixture can make.
+    let mut parsed: Vec<(Direction, &'static str)> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    for frame in flow.frames.iter() {
+        match &frame.frame {
+            Ok(f) => parsed.push((frame.direction, frame_name(f))),
+            Err(e) => failures.push(format!(
+                "{:?} at stream_offset {}: {e:?}",
+                frame.direction, frame.stream_offset
+            )),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the analyzer FAILED to parse {} message(s) that a real zenoh-pico \
+         session put on the wire -- this is a finding about wz's decoder, not \
+         about the fixture:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    );
+
+    let a_side = parsed.iter().filter(|(d, _)| *d == Direction::A).count();
+    let b_side = parsed.iter().filter(|(d, _)| *d == Direction::B).count();
+    assert!(
+        a_side > 0 && b_side > 0,
+        "both halves must be read, not just the one wz wrote: A={a_side} \
+         B={b_side}, parsed {parsed:?}"
+    );
+
+    // The handshake is the part pico authored most independently, so name it
+    // rather than resting on a total. Both directions carry an Init and an Open.
+    for direction in [Direction::A, Direction::B] {
+        for expected in ["Init", "Open"] {
+            assert!(
+                parsed
+                    .iter()
+                    .any(|(d, n)| *d == direction && *n == expected),
+                "no {expected} parsed on {direction:?}; the session cannot have \
+                 completed without one on each half. Parsed: {parsed:?}"
+            );
+        }
+    }
+    assert!(
+        parsed.iter().any(|(_, n)| *n == "Frame"),
+        "the z_put's sample never reached the dissector as a Frame: {parsed:?}"
+    );
+}
