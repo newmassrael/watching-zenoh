@@ -389,6 +389,69 @@ if [[ -z "$repo_root" ]]; then
 fi
 cd "$repo_root" || exit 2
 
+# ─── Artefact collection (R311y736, N28) ────────────────────────────
+#
+# WHEN `WZ_ARTIFACT_LOG` IS SET, every cargo invocation below also reports the
+# files cargo considers its outputs, into that log. The reaper then keeps
+# exactly those and deletes the rest -- cargo's own declaration in place of the
+# mtime comparison `cargo-sweep` uses, which is the last approximation in that
+# tool (R311y734 carried it as N28).
+#
+# A SHELL FUNCTION AND NOT 939 EDITS. `run-ci.sh` calls `cargo` 939 times and
+# MEASURED zero of them go through `command cargo`, an absolute path, or a
+# `bash -c` subshell -- so defining the name here reaches all of them, including
+# the ones inside `( cd crates && ... )` subshells, which inherit functions.
+#
+# THE ORIGINAL COMMAND RUNS UNCHANGED, and that is not a detail: this file's 53
+# count guards read `^test result: ok. N passed` out of cargo's output, and the
+# feature-subset lanes count `: test` lines from `-- --list`. Both come from the
+# TEST BINARY rather than from cargo, so `--message-format=json` does not
+# disturb them (measured) -- but re-running the command afterwards is still the
+# safer shape, because it cannot disturb anything at all.
+#
+# The re-query costs 0.089s against a warm cache, so ~939 of them is about 80
+# seconds on top of a full gate that already takes 71 minutes.
+if [[ -n "${WZ_ARTIFACT_LOG:-}" ]]; then
+    : >"$WZ_ARTIFACT_LOG"
+
+    _wz_collect() {
+        local sub="${1:-}"
+        case "$sub" in
+        test | build | check | clippy) ;;
+        *) return 0 ;;  # fmt, metadata, tree: nothing is produced
+        esac
+
+        local a args=() has_mf=0 has_norun=0
+        for a in "$@"; do
+            case "$a" in
+            --message-format*) has_mf=1 ;;
+            --no-run) has_norun=1 ;;
+            esac
+        done
+        # Everything up to `--`: the test filter behind it is the binary's
+        # business and `--message-format` may not follow it.
+        for a in "$@"; do
+            [[ "$a" == "--" ]] && break
+            args+=("$a")
+        done
+        # MEASURED: cargo REJECTS a repeated `--no-run` and a repeated
+        # `--message-format`, so both are added only when absent.
+        [[ "$sub" == test && $has_norun -eq 0 ]] && args+=(--no-run)
+        [[ $has_mf -eq 0 ]] && args+=(--message-format=json)
+
+        command cargo "${args[@]}" 2>/dev/null |
+            python3 "$repo_root/scripts/lib/artifact_filenames.py" \
+                >>"$WZ_ARTIFACT_LOG" 2>/dev/null || true
+    }
+
+    cargo() {
+        command cargo "$@"
+        local rc=$?
+        _wz_collect "$@"
+        return "$rc"
+    }
+fi
+
 # ─── production logging: complete, clean, leveled ──────────────────
 # Force cargo/rustc to line-oriented, color-free, progress-bar-free output so a
 # captured log is clean text in EVERY sink (tty / redirect / pipe): a `\r`

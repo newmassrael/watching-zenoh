@@ -80,6 +80,9 @@ STAMP="$PROJECT/sweep.timestamp"
 MAX_SHARE=60
 RUN_CI="$ROOT/scripts/run-ci.sh"
 LOGS="$TARGET/run-ci-logs"
+# Where `run-ci.sh` writes the paths cargo declared, when WZ_ARTIFACT_LOG is
+# set to it. Its presence is what lifts the reap from mtime to exact.
+ARTIFACTS="${WZ_ARTIFACT_LOG:-$TARGET/.artifact-log}"
 
 usage() {
     cat >&2 <<'USAGE'
@@ -121,6 +124,68 @@ size_kb() {
 }
 
 human() { numfmt --to=iec --suffix=B --format='%.1f' $((${1:-0} * 1024)) 2>/dev/null || echo "${1:-0} KB"; }
+
+# The exact reap, as its own function so the caller can choose the path before
+# paying for either. Takes the tree size and the caller's `--apply`.
+exact_reap() {
+    local before="$1" apply="$2"
+    # EXACT when cargo's own declaration is available, mtime otherwise, and it
+    # says which. R311y736 (N28) -- `cargo --message-format=json` names every
+    # artefact of a build INCLUDING cached ones, so a gate run with
+    # WZ_ARTIFACT_LOG set leaves a keep-set that needs no approximation. Without
+    # that log this falls back to cargo-sweep's mtime comparison, which is what
+    # the tool did before and is still better than nothing.
+    declared=$(sort -u "$ARTIFACTS" | grep -c "^$TARGET/debug/deps/" || true)
+    if [ "${declared:-0}" -lt 1 ]; then
+        echo "sweep-target: FAIL — $ARTIFACTS names no artefact under" >&2
+        echo "  $TARGET/debug/deps, so an exact reap would delete all of" >&2
+        echo "  them. Collect with WZ_ARTIFACT_LOG during a FULL gate." >&2
+        exit 1
+    fi
+    echo "  exact mode: $declared declared artefact(s) under debug/deps"
+    keep=$(mktemp)
+    doomed=$(mktemp)
+    sort -u "$ARTIFACTS" >"$keep"
+    # MEASURE FIRST. The exact path used to delete straight away, which
+    # walked around the share limit entirely: an artefact log from ONE lane
+    # names a few hundred files and would condemn every other file in
+    # deps/. Probed with a single-lane log, which is exactly how it was
+    # found -- the collection log's SIZE is not evidence of its coverage.
+    : >"$doomed"
+    while IFS= read -r f; do
+        grep -qxF "$f" "$keep" || echo "$f" >>"$doomed"
+    done < <(find "$TARGET/debug/deps" -maxdepth 1 -type f 2>/dev/null)
+    dkb=$(xargs -r stat -c %s <"$doomed" 2>/dev/null |
+        awk '{s+=$1} END {printf "%d", s/1024}')
+    dshare=$((before > 0 ? dkb * 100 / before : 100))
+    echo "  would remove $(wc -l <"$doomed") file(s), $(human "${dkb:-0}") — ${dshare}% of the tree"
+    if [ "$dshare" -gt "$MAX_SHARE" ]; then
+        rm -f "$keep" "$doomed"
+        echo "sweep-target: REFUSING — ${dshare}% is over the ${MAX_SHARE}% limit." >&2
+        echo "  An artefact log that covers only part of the gate condemns" >&2
+        echo "  everything the rest of it built. Collect with" >&2
+        echo "  WZ_ARTIFACT_LOG across a FULL run-ci run." >&2
+        exit 1
+    fi
+    if [ "$apply" != "--apply" ]; then
+        rm -f "$keep" "$doomed"
+        echo "  (dry run; pass --apply to remove)"
+        return 0
+    fi
+    removed=0
+    freed=0
+    while IFS= read -r f; do
+        sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
+        rm -f "$f"
+        removed=$((removed + 1))
+        freed=$((freed + sz / 1024))
+    done <"$doomed"
+    rm -f "$keep" "$doomed"
+    after=$(size_kb "$TARGET")
+    echo "sweep-target: exact reap removed $removed file(s), $(human "$freed")"
+    echo "sweep-target: $(human "$before") -> $(human "$after")"
+    return 0
+}
 
 case "${1:-}" in
 stamp)
@@ -165,6 +230,18 @@ reap)
     echo "sweep-target: proof of a full gate — $(basename "$proof") ($registered lanes)"
 
     before=$(size_kb "$TARGET")
+
+    # EXACT PATH FIRST, and it does not consult cargo-sweep at all: scanning a
+    # 24 GB tree for mtimes costs minutes and answers a question this path is
+    # not asking. R311y736 (N28) -- with cargo's own declaration in hand the
+    # keep-set is known, so the only measurement needed is of what falls
+    # outside it.
+    if [ -s "$ARTIFACTS" ]; then
+        exact_reap "$before" "${2:-}"
+        exit $?
+    fi
+
+    echo "  mtime mode: no artefact log at $ARTIFACTS"
     # cargo-sweep prints the amount it would remove; ask it first, always.
     would=$(cargo sweep --dry-run --file "$PROJECT" 2>&1 | sed -n 's/.*Would clean: \(.*\) from.*/\1/p' | tail -1)
     echo "sweep-target: target is $(human "$before"), reap would remove ${would:-unknown}"
@@ -196,6 +273,7 @@ PY
         echo "  (dry run; pass --apply to remove)"
         exit 0
     fi
+
     cargo sweep --file "$PROJECT" >/dev/null
     after=$(size_kb "$TARGET")
     echo "sweep-target: $(human "$before") -> $(human "$after")"
