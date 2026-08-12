@@ -37,11 +37,31 @@
 # feature matrix grows.
 #
 # THE HAZARD, AND WHY THIS REFUSES RATHER THAN DOCUMENTS IT. Reaping after a
-# PARTIAL build deletes everything the partial build did not touch -- which is
-# most of the tree. A comment saying "only run this after a full gate" is an
-# obligation written as prose, and this workspace has measured what happens to
-# those. So the reap MEASURES what it is about to remove and refuses when the
-# share crosses a threshold, which is exactly the shape a partial build takes.
+# PARTIAL build deletes everything that build did not touch -- which is most of
+# the tree. A comment saying "only run this after a full gate" is an obligation
+# written as prose and this workspace has measured what becomes of those, so the
+# precondition is CHECKED: a reap requires a run-ci log, newer than the stamp,
+# in which the number of lanes that passed equals the number `run-ci.sh`
+# registers. That is the tree's own count on both sides rather than a threshold
+# someone chose, and a partial run cannot satisfy it -- `--layer 0 --layer C0`
+# logs 1 lane against 135 registered.
+#
+# WHY NOT SOMETHING FULLY DETERMINISTIC. cargo will name its artefacts exactly,
+# even for cached units: `--message-format=json` reports `filenames` for every
+# unit with `fresh: true`. Collecting those across a gate run would replace the
+# mtime heuristic entirely -- and it needs that flag on all 939 cargo
+# invocations in `run-ci.sh`. A single missed injection silently marks that
+# lane's output unused, which trades a heuristic for a quieter failure. The
+# `--unit-graph` route was checked and does not help: it describes units
+# logically (pkg_id, features, profile) and names no file or hash. A
+# `rustc-wrapper` is worse still, because a fresh unit never invokes rustc at
+# all.
+#
+# The residue this accepts, stated rather than hidden: the reap itself still
+# rests on cargo-sweep's mtime comparison, so a unit cargo re-used without
+# touching its fingerprint could be removed. The cost of being wrong is a
+# rebuild, not a wrong answer -- which is why this is a heuristic worth keeping
+# and the precondition above is worth enforcing.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -55,9 +75,11 @@ TARGET="$ROOT/crates/target"
 PROJECT="$ROOT/crates"
 STAMP="$PROJECT/sweep.timestamp"
 
-# Above this share of the tree, a reap is far more likely to be a partial build
-# than a genuine accumulation, and it stops to be told which.
+# A second, cruder net BEHIND the precondition, not in place of it: even after a
+# full gate, a reap this large means something is wrong with the stamp.
 MAX_SHARE=60
+RUN_CI="$ROOT/scripts/run-ci.sh"
+LOGS="$TARGET/run-ci-logs"
 
 usage() {
     cat >&2 <<'USAGE'
@@ -115,6 +137,33 @@ reap)
         echo "  'sweep-target.sh stamp' BEFORE the gate run, not after." >&2
         exit 1
     fi
+    # THE PRECONDITION, checked rather than trusted: a full gate run, finished
+    # AFTER the stamp. Both numbers come from the tree -- lanes registered in
+    # run-ci.sh, lanes reported passed in its log.
+    registered=$(grep -c "^run_layer " "$RUN_CI")
+    proof=""
+    if [ -d "$LOGS" ]; then
+        while IFS= read -r log; do
+            [ "$log" -nt "$STAMP" ] || continue
+            grep -q "all required layers pass" "$log" || continue
+            passed=$(grep -c "INFO  Layer .* pass" "$log")
+            if [ "$passed" -eq "$registered" ]; then
+                proof="$log"
+                break
+            fi
+        done < <(find "$LOGS" -name '*.log' -newer "$STAMP" -printf '%T@ %p\n' 2>/dev/null |
+            sort -rn | cut -d' ' -f2-)
+    fi
+    if [ -z "$proof" ]; then
+        echo "sweep-target: FAIL — no FULL run-ci log newer than the stamp." >&2
+        echo "  run-ci.sh registers $registered lane(s); a reap needs a log in" >&2
+        echo "  which that many passed, finished after the stamp. A partial run" >&2
+        echo "  ('--layer X') leaves everything it did not touch looking unused," >&2
+        echo "  which is what this refuses to act on." >&2
+        exit 1
+    fi
+    echo "sweep-target: proof of a full gate — $(basename "$proof") ($registered lanes)"
+
     before=$(size_kb "$TARGET")
     # cargo-sweep prints the amount it would remove; ask it first, always.
     would=$(cargo sweep --dry-run --file "$PROJECT" 2>&1 | sed -n 's/.*Would clean: \(.*\) from.*/\1/p' | tail -1)
