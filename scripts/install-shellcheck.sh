@@ -59,7 +59,14 @@ if [[ -z "$version" || -z "$sha256" ]]; then
     exit 1
 fi
 
-have="$(shellcheck --version 2>/dev/null | awk '/^version:/ {print $2}')"
+# R311y754 — `|| true`, and it is not belt-and-braces. Under this file's own
+# `set -euo pipefail`, an ABSENT shellcheck makes this pipeline exit 127 and
+# takes the script down BEFORE it installs anything -- so the installer could
+# not run on the one machine that needs it, a host without shellcheck. The
+# `2>/dev/null` already says the intent was "empty when absent"; pipefail
+# overrode it. MEASURED on a build machine: rc=127, no output at all, and the
+# trace ends at `+ have=`.
+have="$(shellcheck --version 2>/dev/null | awk '/^version:/ {print $2}' || true)"
 if [[ "$have" == "$version" && $force -eq 0 ]]; then
     echo "install-shellcheck: shellcheck $version already on PATH ($(command -v shellcheck))"
     exit 0
