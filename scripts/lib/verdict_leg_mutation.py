@@ -334,6 +334,53 @@ UNWITNESSED = {
 }
 
 
+# Which (accessor, predicate) pairs the recipes above are known to cover.
+#
+# R311y731 (N23) — the recipes are hand-written, and until this round nothing
+# noticed a guard that started calling a predicate NOBODY mutates. A stale
+# recipe already died loudly; a MISSING one was silent, and silence in this
+# gate reads as coverage.
+#
+# The pair rather than the bare method name, because `gaps().is_clean()` and
+# `unread().is_clean()` reach different structs through the same method and a
+# name-only check would accept a third one. The honest limit is stated rather
+# than hidden: this still keys on NAMES, so a new accessor returning a new type
+# whose predicate happens to be called `is_clean` would be accepted by the pair
+# `(gaps, is_clean)` if it were reached through `gaps()`. Resolving that needs
+# the type, which no regex has.
+COVERED_CALLS = {
+    ("drops", "any"),
+    ("gaps", "is_clean"),
+    ("unread", "is_clean"),
+    ("selection", "is_decisive"),
+}
+
+# Adapters, which are not predicates: the comparison inside them is reached by
+# `boundary` directly, so a guard ending in one is not asking anything of a
+# threshold somewhere else.
+CALL = re.compile(r"\.(\w+)\(\)")
+
+
+def uncovered_calls(pristine: str, unreached: set[str]) -> list[tuple[str, str, str]]:
+    """`(variant, accessor, predicate)` for guards calling something unmutated.
+
+    Only guards `boundary` could not reach are asked: a guard holding its own
+    threshold is answered where it stands and does not depend on a predicate's.
+    """
+    out: list[tuple[str, str, str]] = []
+    for g in GUARD.finditer(pristine):
+        variant = g.group("variant")
+        if variant not in unreached:
+            continue
+        calls = CALL.findall(g.group("cond"))
+        if len(calls) < 2:
+            continue
+        accessor, predicate = calls[-2], calls[-1]
+        if (accessor, predicate) not in COVERED_CALLS:
+            out.append((variant, accessor, predicate))
+    return out
+
+
 def _function_span(text: str, anchor: str) -> tuple[int, int]:
     """Byte range of the function body opened by `anchor`."""
     at = text.index(anchor)
@@ -589,6 +636,54 @@ def main() -> int:
         print(
             "verdict-leg mutation: FAIL — no crate owns any binding, so the "
             "sweep would run no tests at all.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Every predicate an unreachable guard leans on must be one the recipes
+    # mutate. Checked BEFORE anything runs, like every other population claim
+    # in this file.
+    # And a declaration cannot outrun the recipe it claims. Every pair in
+    # COVERED_CALLS must name a predicate some recipe actually mutates,
+    # otherwise the declaration silences the check while nothing is swept --
+    # the same failure the register's stale check exists to stop, on the other
+    # side of the same list.
+    recipe_predicates = {
+        hit.group(1)
+        for _l, _r, a, *_x in PREDICATES
+        if (hit := re.search(r"fn (\w+)\(", a))
+    }
+    orphan_pairs = sorted(
+        (acc, pred) for acc, pred in COVERED_CALLS if pred not in recipe_predicates
+    )
+    if orphan_pairs:
+        print("verdict-leg mutation: FAIL", file=sys.stderr)
+        for acc, pred in orphan_pairs:
+            print(
+                f"  COVERED_CALLS declares `{acc}().{pred}()` covered, and no "
+                "recipe mutates a predicate by that name",
+                file=sys.stderr,
+            )
+        return 1
+
+    unreached_set = {v for v in raised if boundary(pristine, v) is None}
+    uncovered = uncovered_calls(pristine, unreached_set)
+    if uncovered:
+        print("verdict-leg mutation: FAIL", file=sys.stderr)
+        for variant, accessor, predicate in uncovered:
+            print(
+                f"  `VerdictReason::{variant}` guards on "
+                f"`{accessor}().{predicate}()`, which holds a threshold this "
+                "sweep does not mutate and is not in COVERED_CALLS",
+                file=sys.stderr,
+            )
+        print(
+            "\nThe `boundary` operator cannot reach this guard, so the "
+            "threshold it depends on\nlives inside that predicate. Add a "
+            "recipe for it to PREDICATES and declare the pair in\n"
+            "COVERED_CALLS -- or, if the predicate genuinely holds no "
+            "threshold, declare the pair\nwith that reason. Silence here "
+            "reads as coverage.",
             file=sys.stderr,
         )
         return 1
