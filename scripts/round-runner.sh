@@ -53,6 +53,7 @@ permission_mode="acceptEdits"
 round_timeout=$(( 4 * 60 * 60 ))
 dry_run=0
 stream=1
+reap=1
 
 usage() {
     cat <<'USAGE'
@@ -67,6 +68,7 @@ usage: scripts/round-runner.sh [options]
                         Streaming is the DEFAULT because plain -p writes the log
                         in ONE go at the end: a round that dies mid-way leaves an
                         EMPTY log, which is exactly when you want to read it.
+  --no-reap             skip the build-artefact reap around each round
   --dry-run             print the command that would run, then exit
   -h, --help            this
 
@@ -102,6 +104,7 @@ while [[ $# -gt 0 ]]; do
         --permission-mode) permission_mode="$2"; shift 2 ;;
         --prompt)          prompt_file="$2"; shift 2 ;;
         --no-stream)       stream=0; shift ;;
+        --no-reap)         reap=0; shift ;;
         --dry-run)         dry_run=1; shift ;;
         -h|--help)         usage; exit 0 ;;
         *) echo "round-runner: unknown option $1" >&2; usage >&2; exit 2 ;;
@@ -133,6 +136,46 @@ if [[ $dry_run -eq 1 ]]; then
     exit 0
 fi
 
+# ─── Build-artefact reap, around each round (R311y735, N26) ─────────
+#
+# WHY IT IS SAFE TO DO THIS UNATTENDED, which it was not before R311y734.
+# `sweep-target.sh reap` requires PROOF that a full gate ran since the stamp: a
+# run-ci log, newer than it, whose passed-lane count equals the number
+# run-ci.sh registers. A round that ran a partial gate — which is most rounds —
+# cannot satisfy that, so the reap refuses and the tree is untouched. The
+# automation therefore needs no threshold of its own and carries no number
+# anyone chose: rounds that happen to run the full gate get their artefacts
+# reaped, and every other round pays one refusal message.
+#
+# IT SAYS WHY IT DECLINED. A reap that skipped in silence would read as "there
+# was nothing to reap", which is the failure mode this workspace keeps
+# measuring in its own gates.
+sweep="$repo_root/scripts/sweep-target.sh"
+
+reap_stamp() {
+    [[ $reap -eq 1 && -x "$sweep" ]] || return 0
+    bash "$sweep" stamp >/dev/null 2>&1 ||
+        echo "round-runner: could not stamp for the reap; the tree is untouched."
+}
+
+reap_after() {
+    [[ $reap -eq 1 && -x "$sweep" ]] || return 0
+    # `|| rc=$?` and not a bare assignment: under `set -e` a command
+    # substitution that exits non-zero kills the RUNNER before `$?` can be
+    # read, and a declined reap exits non-zero BY DESIGN. Probed: the first
+    # version of this hook ended the round loop on the ordinary case.
+    local out rc=0
+    out="$(bash "$sweep" reap --apply 2>&1)" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        echo "round-runner: reap — $(tail -1 <<<"$out")"
+    else
+        # Not a failure of the round. The common case is "this round did not
+        # run the full gate", which is exactly when reaping would be wrong.
+        echo "round-runner: reap declined — $(grep -m1 'FAIL\|REFUSING' <<<"$out" |
+            sed 's/^sweep-target: //')"
+    fi
+}
+
 # Single instance. Two runners would interleave commits, ledger appends and
 # pushes on one branch; the ledger alone is a single JSON with a monotonic
 # `Round N`, so a second writer is a corruption, not a slowdown.
@@ -155,6 +198,7 @@ while (( round < max_rounds )); do
     rm -f "$status_file"
 
     echo "round-runner: round $round/$max_rounds -> $log"
+    reap_stamp
     set +e
     # </dev/null: with no stdin `claude -p` waits 3s for piped input that is
     # never coming, once per round, and says so on stderr.
@@ -185,6 +229,7 @@ while (( round < max_rounds )); do
 
     verdict="$(head -1 "$status_file")"
     echo "round-runner: round $round verdict: $verdict"
+    reap_after
     sed -n '2,$p' "$status_file"
 
     case "$verdict" in
