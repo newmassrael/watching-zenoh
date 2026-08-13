@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # The PREVIOUS hosted run's verdict, read by a program instead of by a person.
 #
-# R311y765 (carry N70). This repository's operating rule is "push and continue;
+# R311y765 (N70). This repository's operating rule is "push and continue;
 # read the previous run at the START of the next round, and pay a red off as its
 # own round". The rule is right — waiting on hosted CI cost whole rounds of
 # wall-clock — but its enforcement was a human step, and R311y764 measured that
