@@ -289,7 +289,15 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 #     the atom's first witness for the CURRENT-interest terminator specifically,
 #     and the requester is the one consumer in either upstream that observably
 #     waits for it (pico's write filter ignores the message; see R311y777).
-FOREIGN_ADJUDICATOR_LINKS = 823
+# R311y781 takes it to 824. `adminspace-read` gains a second adjudicating test:
+#   * `adminspace-read` <- wz_router_adminspace_read_deny_seen_by_pico_z_get -- a
+#     real zenoh-pico `z_get` against a `--no-admin-read` wz ROUTER, which until
+#     this round could not deny at all (its admin host hardcoded `read: true`).
+#     The atom's existing witness is the PEER deny (E6g); this one speaks for the
+#     router tier, where `answer_router_admin_query`'s own gate lives and where the
+#     suppressed legs -- linkstate DOT and route-successor -- exist only on a
+#     two-router federation. A different host, a different answerer, same atom.
+FOREIGN_ADJUDICATOR_LINKS = 824
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

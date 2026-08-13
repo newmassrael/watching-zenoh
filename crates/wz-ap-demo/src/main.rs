@@ -565,7 +565,6 @@ fn main() -> ExitCode {
                 router_hat_listen,
                 dial_targets,
                 connect_after,
-                multicast_qos,
                 zid_override,
                 // R311y406 — a `--router-hat tls/...` / `quic/...` threads its server
                 // cert via the same flags the other listen paths use.
@@ -575,13 +574,24 @@ fn main() -> ExitCode {
                     quic_cert: parse_pair(rest, "--quic-cert"),
                     quic_key: parse_pair(rest, "--quic-key"),
                 },
-                // R311y454 — `--multicast-locator udp/<group>:<port>[#iface=<name>]`:
-                // the router's data-plane multicast group, spelled as a LOCATOR so the
-                // `#iface=` tail is honoured by the same parser every unicast locator
-                // uses. Absent => the historical hardcoded group, unnarrowed. Validated
-                // in `run_router_hat_until` (which owns the group defaults) and a bad
-                // value is a hard error there, not a silent default.
-                parse_pair(rest, "--multicast-locator"),
+                crate::runner::RouterHatOpts {
+                    multicast_qos,
+                    // R311y454 — `--multicast-locator udp/<group>:<port>[#iface=<name>]`:
+                    // the router's data-plane multicast group, spelled as a LOCATOR so
+                    // the `#iface=` tail is honoured by the same parser every unicast
+                    // locator uses. Absent => the historical hardcoded group,
+                    // unnarrowed. Validated in `run_router_hat_until` (which owns the
+                    // group defaults) and a bad value is a hard error there, not a
+                    // silent default.
+                    multicast_locator: parse_pair(rest, "--multicast-locator"),
+                    // R311y781 (§5.23 adminspace-read) — the SAME `--no-admin-read` the
+                    // peer mode parses, now reaching the router-hat admin host. Until
+                    // this round that host hardcoded `read: true`, so no shipping wz
+                    // ROUTER could apply the gate at all — the residual the y780 round
+                    // named and left open. Parsed identically (a bare presence flag) so
+                    // one spelling means one thing across run-modes.
+                    no_admin_read: rest.iter().any(|a| a == "--no-admin-read"),
+                },
             );
         }
         #[cfg(not(feature = "router-hat-router"))]
@@ -2005,12 +2015,13 @@ fn run_router_hat_mode(
     listen: String,
     dial_targets: Vec<String>,
     connect_after: Option<(u64, Vec<String>)>,
-    multicast_qos: bool,
     zid_override: Option<Vec<u8>>,
     cert_paths: crate::runner::AcceptCertPaths,
-    // R311y454 — `--multicast-locator`, the router's data-plane group as a locator
-    // so its `#iface=` tail reaches the multicast honor.
-    multicast_locator: Option<String>,
+    // R311y781 — the CLI-derived behaviour knobs (`--multicast-qos`,
+    // `--multicast-locator`, `--no-admin-read`), bundled so this entry point stays
+    // inside `clippy::too_many_arguments` as knobs accrue. See
+    // [`RouterHatOpts`](crate::runner::RouterHatOpts).
+    opts: crate::runner::RouterHatOpts,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -2024,10 +2035,9 @@ fn run_router_hat_mode(
         &listen,
         &dial_targets,
         connect_after,
-        multicast_qos,
         zid_override,
         &cert_paths,
-        multicast_locator.as_deref(),
+        &opts,
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

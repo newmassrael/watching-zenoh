@@ -1220,6 +1220,15 @@ jobs:
       - name: Layer E7c — adminspace-router-linkstate cross-node e2e
         run: bash scripts/run-ci.sh --layer E7c
 
+      # R311y781. Wired here in the SAME commit that adds the lane, for the reason
+      # E6e/E7/E8t above record: a proof that runs only in the local pre-push full
+      # sweep is a proof nothing gates. This one DOES need the foreign binary (a
+      # pico z_get), which is why it sits in this job rather than the plain one;
+      # the lane itself skips when z_get is absent, and WZ_PICO_REQUIRE escalates
+      # that skip to a failure here.
+      - name: Layer E7g — adminspace-read GET gate on the router tier (pico z_get)
+        run: bash scripts/run-ci.sh --layer E7g
+
       - name: Layer E8 — router-hat data plane vs a zenoh-pico subscriber
         run: bash scripts/run-ci.sh --layer E8
 

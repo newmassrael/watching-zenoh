@@ -3820,25 +3820,57 @@ async fn run_peer_until(
 /// crossed this router), and the deterministic shutdown counterparts (so a test
 /// asserts on teardown output without racing the 250 ms tick). Runs until the
 /// graceful-shutdown signal (SIGTERM / SIGINT).
+/// R311y781 — the router-hat run-mode's CLI-derived behaviour knobs, bundled into
+/// one parameter object. Introduce-Parameter-Object, the same move `PeerOpts`
+/// (R311y47) and `SessionDriveConfig` made before it, and for the same reason: the
+/// `--no-admin-read` knob this round adds pushed the entry points past
+/// `clippy::too_many_arguments`, and the repo's recorded preference is to bundle
+/// rather than widen the allow. Both `run_router_hat` and `run_router_hat_until`
+/// carried that allow before this; both are now within the limit without it, so two
+/// pre-existing suppressions are retired alongside.
+///
+/// Only the knobs belong here. `listen` / `dial_targets` / `connect_after` /
+/// `zid_override` are the node's IDENTITY and TOPOLOGY, and `cert_paths` is its own
+/// cross-mode bundle reused by the peer entry points — mixing those in would make a
+/// bag rather than an object.
 #[cfg(feature = "router-hat-router")]
-#[allow(clippy::too_many_arguments)]
+#[derive(Default)]
+pub(crate) struct RouterHatOpts {
+    /// R311y232 (transport-qos ACTIVATION) — offer the per-priority multicast QoS
+    /// conduit on the router's data-plane group (`--multicast-qos`). Consumed only
+    /// by the `router-multicast-faces` spawns; a build without that face has no
+    /// group to offer QoS on. Plain `bool` (not `transport-qos`-gated) so the
+    /// run-mode surface stays feature-stable.
+    pub multicast_qos: bool,
+    /// R311y454 — `--multicast-locator udp/<group>:<port>[#iface=<name>]`: the
+    /// router's data-plane group spelled as a LOCATOR, so its `#iface=` tail is
+    /// honoured by the same parser every unicast locator uses. `None` keeps the
+    /// demo's historical hardcoded group with no interface narrowing.
+    pub multicast_locator: Option<String>,
+    /// R311y781 (§5.23 adminspace-read) — `--no-admin-read` DENIES this router's
+    /// admin GET gate, the router twin of the peer flag. Until this round the
+    /// router admin host hardcoded `read: true`, so the gate existed and no
+    /// shipping wz ROUTER applied it; the permit now rides the same live
+    /// `WzConfig::admin_permissions` slice the peer host reads, re-resolved per GET.
+    pub no_admin_read: bool,
+}
+
+#[cfg(feature = "router-hat-router")]
 pub(crate) async fn run_router_hat(
     listen: &str,
     dial_targets: &[String],
     connect_after: Option<(u64, Vec<String>)>,
-    multicast_qos: bool,
     zid_override: Option<Vec<u8>>,
     cert_paths: &AcceptCertPaths,
-    multicast_locator: Option<&str>,
+    opts: &RouterHatOpts,
 ) -> io::Result<()> {
     run_router_hat_until(
         listen,
         dial_targets,
         connect_after,
-        multicast_qos,
         zid_override,
         cert_paths,
-        multicast_locator,
+        opts,
         shutdown_signal(),
     )
     .await
@@ -3850,18 +3882,10 @@ pub(crate) async fn run_router_hat(
 /// SIGTERM/SIGINT signal. [`run_router_hat`] is the production wrapper that passes
 /// [`shutdown_signal`]. The router-hat twin of [`run_router_until`] / [`run_peer_until`].
 #[cfg(feature = "router-hat-router")]
-#[allow(clippy::too_many_arguments)]
 async fn run_router_hat_until(
     listen: &str,
     dial_targets: &[String],
     connect_after: Option<(u64, Vec<String>)>,
-    // R311y232 (transport-qos ACTIVATION) — offer the per-priority multicast QoS
-    // conduit on the router's data-plane group (the `--multicast-qos` demo flag).
-    // Consumed only by the `router-multicast-faces` egress/ingress spawns below;
-    // a build without that face has no group to offer QoS on. Plain `bool` (not
-    // `transport-qos`-gated) so the run-mode signature stays feature-stable — the
-    // caller passes `false` when `transport-qos` is off.
-    multicast_qos: bool,
     // Optional `--zid <hex>` override: pin this router's routing zid instead of
     // deriving it from the ephemeral listen port. The mesh MASTER election (HRW over
     // shared_nodes) keys on zid, so a deterministic zid makes a federation e2e's
@@ -3869,22 +3893,29 @@ async fn run_router_hat_until(
     zid_override: Option<Vec<u8>>,
     // R311y406 — the server cert a `--router-hat tls/...` / `quic/...` presents.
     cert_paths: &AcceptCertPaths,
-    // R311y454 — `--multicast-locator udp/<group>:<port>[#iface=<name>]`: the
-    // router's data-plane group, parsed by the shared locator parser so its
-    // `#iface=` tail reaches the multicast join + egress pin. `None` keeps the
-    // demo's historical hardcoded group with no interface narrowing.
-    multicast_locator: Option<&str>,
+    // R311y781 — the CLI-derived behaviour knobs (`--multicast-qos`,
+    // `--multicast-locator`, `--no-admin-read`); see [`RouterHatOpts`].
+    opts: &RouterHatOpts,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> io::Result<()> {
     use crate::args::NodeKind;
+    // The multicast knobs are consumed only by the `router-multicast-faces`
+    // egress/ingress spawns, so a build without that face has neither a group to
+    // offer QoS on nor one to narrow. They stay in the bundle (rather than being
+    // cfg-gated fields) so the run-mode surface is feature-stable.
+    let multicast_qos = opts.multicast_qos;
+    let multicast_locator = opts.multicast_locator.as_deref();
+    // Same shape, one feature over: the admin permit is consumed only by the router
+    // admin host below, which is `adminspace-router-linkstate`-gated. The FIELD stays
+    // unconditional so the bundle is feature-stable; the local discard is what keeps
+    // a build without those legs warning-clean.
+    let no_admin_read = opts.no_admin_read;
     #[cfg(not(feature = "router-multicast-faces"))]
     let _ = multicast_qos;
-    // R311y454 — same shape as the `multicast_qos` discard above: the group locator
-    // is consumed only by the multicast egress/ingress spawns, so a build without
-    // that face has no group to narrow. Kept in the signature (rather than
-    // cfg-gated) so the run-mode signature stays feature-stable.
     #[cfg(not(feature = "router-multicast-faces"))]
     let _ = multicast_locator;
+    #[cfg(not(feature = "adminspace-router-linkstate"))]
+    let _ = no_admin_read;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::Zid;
@@ -4213,7 +4244,31 @@ async fn run_router_hat_until(
         let queryable_key = admin_queryable_key(&zid_hex, whatami_str);
         let routers_view = forwarder.routers_net_view();
         let peers_view = forwarder.peers_net_view();
+        // R311y781 — the router's permit source, closing the y780 residual. The SAME
+        // shape the peer host uses: one shared `WzConfig` whose live
+        // `admin_permissions` slice both admin ctxs re-read per GET, seeded once from
+        // `--no-admin-read`. A router that answered its adminspace unconditionally was
+        // the last shipping wz node the gate could not reach.
+        let admin_cfg = std::rc::Rc::new(std::cell::RefCell::new(
+            wz::runtime_tokio::config::WzConfig::from_init_params(&params).with_admin_permissions(
+                wz::runtime_tokio::adminspace::AdminSpacePermissions {
+                    read: !no_admin_read,
+                    ..Default::default()
+                },
+            ),
+        ));
+        log::info!(
+            "wz-ap-demo router-hat: adminspace read permit = {}",
+            wz::runtime_tokio::admin_read_permit(&admin_cfg.borrow().admin_permissions())
+        );
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+            // Resolved per GET off the shared config, exactly as the peer host does —
+            // zenoh re-reads the live config inside its admin handler
+            // (net/runtime/adminspace.rs:456-457). ONE read feeds BOTH the root ctx
+            // and the router-tier ctx below, so a permit change can never leave the
+            // two halves of one GET disagreeing.
+            let admin_read =
+                wz::runtime_tokio::admin_read_permit(&admin_cfg.borrow().admin_permissions());
             // Root local_data / config / metrics via the shared SSOT (config "{}" +
             // sessions[] empty are named deferrals on the pure router).
             let ctx = AdminAnswerCtx {
@@ -4221,13 +4276,7 @@ async fn run_router_hat_until(
                 whatami: whatami_str,
                 version: &version,
                 locators: &locators,
-                // This run-mode has NO permit source: `--router-hat` parses no
-                // `--no-admin-read` and holds no shared WzConfig, so the gate is
-                // hardcoded permissive here where the `--config-queryable` peer host
-                // resolves it live. Naming it rather than leaving a bare literal: the
-                // missing piece is the flag + a config instance on this run-mode, not
-                // the gate itself (`answer_admin_query` honours `read` from any host).
-                read: true,
+                read: admin_read,
             };
             // R311y237 — the router node's compiled-in plugin registry.
             #[cfg(feature = "adminspace-plugins-handlers")]
@@ -4252,8 +4301,8 @@ async fn run_router_hat_until(
                 routers_dot: Some(&routers_dot),
                 peers_dot: Some(&peers_dot),
                 successors: &successors,
-                // Same missing permit source as the root ctx above.
-                read: true,
+                // The SAME resolved permit as the root ctx — read once above.
+                read: admin_read,
             };
             if answer_router_admin_query(view, out, &rctx) == AdminAnswerOutcome::DeniedRead {
                 log::error!(
@@ -5411,7 +5460,7 @@ mod router_quic_cert_tests {
 
 #[cfg(all(test, feature = "router-hat-router", feature = "quic"))]
 mod router_hat_quic_cert_tests {
-    use super::{run_router_hat_until, AcceptCertPaths};
+    use super::{run_router_hat_until, AcceptCertPaths, RouterHatOpts};
 
     /// R311y406 — the `--router-hat quic/` cert-threading discriminator: run_router_hat
     /// (via its testable inner run_router_hat_until) now ADMITS a quic listen when the
@@ -5451,13 +5500,13 @@ mod router_hat_quic_cert_tests {
             "quic/127.0.0.1:0",
             &[],
             None,
-            false,
             None,
             &cert_paths,
-            // R311y456 — no `--multicast-locator`: this test asserts the quic
-            // listen ADMIT, and the historical hardcoded group is the right
-            // default for it.
-            None,
+            // R311y456 — the DEFAULT knobs: no `--multicast-locator` (this test
+            // asserts the quic listen ADMIT, and the historical hardcoded group is
+            // the right default for it) and a permissive admin read (the zenoh
+            // PermissionsConf default) — the gate is not what is under test here.
+            &RouterHatOpts::default(),
             std::future::ready(()),
         )
         .await;
@@ -5507,10 +5556,9 @@ mod router_hat_failfast_tests {
             &listen,
             &[],
             None,
-            false,
             None,
             &super::AcceptCertPaths::default(),
-            None,
+            &super::RouterHatOpts::default(),
         )
         .await
         .expect_err("a non-IP unixpipe --router-hat without --zid must fail fast");

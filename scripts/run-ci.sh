@@ -10768,6 +10768,40 @@ layer_e7c_router_adminspace_linkstate() {
         --test wz_router_hat_adminspace_linkstate_interop -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E7g — adminspace-read GET gate on the ROUTER tier (vs zenoh-pico) ────
+#
+# R311y781. The router twin of Layer E6g. R311y780 made the admin permit a per-GET
+# read off a live WzConfig, but only on the peer hosts; the router host still
+# hardcoded `read: true` — not because the gate was unhonoured (both answerers
+# consult `ctx.read` from whatever host passes it) but because `--router-hat` parsed
+# no permit flag and held no config, so there was no source to resolve. The
+# `adminspace-read` atom's residual said exactly that: "no shipping wz router applies
+# the gate". This lane is the foreign witness that one now does.
+#
+# Its own binary, NOT E7's: E7 builds `router-hat-router,adminspace-router-linkstate,
+# routing-token-tables` with no `adminspace-read`, and cargo uplifts every feature
+# variant of one --bin to a single path (R311y269), so a variant is only safe inside
+# the lane that built it. `adminspace-read` is what makes `admin_read_permit` return
+# the flag's value instead of a constant `true`, so without it here the test would
+# pass vacuously against a permissive node — the exact shape this repo keeps getting
+# bitten by.
+#
+# The test federates TWO routers and waits for `routers-net converged (2 node(s))`
+# before querying, reproducing the positive twin's setup exactly: only then are the
+# linkstate DOT and the route-successor table non-trivial, so their absence is a
+# DENIAL and not an emptiness. Guarded on the FOREIGN binary only (R311y265);
+# WZ_PICO_REQUIRE escalates the skip.
+layer_e7g_router_adminspace_read_deny() {
+    (cd crates && cargo build -p wz-ap-demo \
+        --features router-hat-router,adminspace-router-linkstate,adminspace-read --quiet) || return 1
+    if [[ -x target/zenoh-pico-cli/z_get ]]; then
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_router_hat_adminspace_read_deny_to_pico_zget -- --ignored --quiet) || return 1
+    else
+        _pico_cli_unavailable "Layer E7g (pico router adminspace read-deny z_get)" || return 1
+    fi
+}
+
 # ─── Layer E7u — router-hat (TRUE Router) forwarding OVER UNIXPIPE (R311y396) ──
 #
 # The PRODUCT-CODE counterpart of Layer E5u (which proved the star --router over
@@ -11905,6 +11939,7 @@ run_layer E6h layer_e6h_adminspace_config_hotreload || overall=1
 run_layer E7 layer_e7_router_hat || overall=1
 run_layer E7b layer_e7b_router_connect_reconcile || overall=1
 run_layer E7c layer_e7c_router_adminspace_linkstate || overall=1
+run_layer E7g layer_e7g_router_adminspace_read_deny || overall=1
 run_layer E7u layer_e7u_router_hat_unixpipe_forward || overall=1
 run_layer E8 layer_e8_router_hat_pico || overall=1
 run_layer E8t layer_e8t_router_hat_hlc_stamp_pico || overall=1
