@@ -2085,6 +2085,18 @@ layer_c0d_doclink_dependents() {
         return 1
     fi
 
+    # R311y796 — THE BLIND SPOT IS PINNED AT ZERO rather than described. A doc
+    # link emitted by a macro, or written into a `#[doc = "..."]` attribute,
+    # lands at the EXPANSION site rather than in the file the expander reads, so
+    # the crate edge it creates is missed. Measured empty this round -- 14
+    # macros do emit linked docs and none of those links names a foreign wz
+    # crate -- and the machinery is live, so emptiness is a fact about today
+    # that has to be re-checked rather than a property to assert once.
+    if ! python3 "$script" --check-blind-spots; then
+        echo "  Layer C0d FAIL: the expander's blind spot is no longer empty (above)" >&2
+        return 1
+    fi
+
     echo "  doclink-dependents gate: OK (four spellings expand -- qualified" \
         "wz-runtime-tokio, unqualified wz-statechart-bridge, re-export wz-capi-core," \
         "glob wz-session-core; wz-ap-demo expands to itself; an empty set is refused)"

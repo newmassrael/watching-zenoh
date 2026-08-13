@@ -46,12 +46,25 @@ the larger half. This time the three measured very differently:
     enumerate. 6 sites, 1 crate pair, 1 missed edge (wz-session-core ->
     wz-session-core-test-support).
 
-WHAT IT STILL CANNOT SEE: a re-export written through a module path this reader
-does not follow (`pub use crate::inner::Thing` where `inner` re-exported it), and
-anything a macro generates. Neither is measured.
+R311y796 MEASURED THE LAST TWO AND ALL THREE PARTS CAME BACK EMPTY:
+
+  * MODULE-PATH re-export (`pub use crate::inner::Thing`) -- 37 such identifiers
+    over 2 crates and NONE traces to a wz crate. The concern was also
+    structurally wrong: the map below is keyed by CRATE, not by file, so a
+    `pub use wz_x::Thing` anywhere in the crate already registers it and the
+    module path inside that crate never mattered.
+  * `#[doc = "..."]` attributes -- 19 sites, 0 containing a link at all.
+  * MACRO-generated docs -- 14 `macro_rules!` DO emit doc comments carrying
+    links, and 0 of those links name a foreign wz crate.
+
+The third is live machinery that merely happens to point inward today, so its
+emptiness is PINNED by `--check-blind-spots` (run-ci Layer C0d) rather than
+asserted in prose. The check lives here because this reader is the authority on
+what it cannot see; a gate elsewhere would drift from it.
 
 USAGE
     doclink_dependents.py <crate-name>...
+    doclink_dependents.py --check-blind-spots
 
 A name that is not a workspace member passes through unchanged: the caller owns
 its own crate-set discipline, and the lane that consumes this refuses an unknown
@@ -170,10 +183,93 @@ def edges(crates_dir: pathlib.Path) -> dict:
     return graph
 
 
+# R311y796 — a doc comment EMITTED BY A MACRO is invisible to `edges()`: the
+# link sits inside a macro body, and the crate it lands in is the expansion site
+# rather than the file this reader is looking at. Measured empty (14 macros emit
+# linked docs, 0 of the links name a foreign wz crate), and empty is what this
+# pins -- the machinery is live, so the emptiness is a fact about today rather
+# than a property of the language.
+MACRO_BODY = re.compile(r"macro_rules!\s+(\w+)\s*\{(.*?)\n\}", re.S)
+ANY_LINK = re.compile(r"\[`?([A-Za-z_][A-Za-z0-9_:]*)`?\]")
+DOC_ATTR = re.compile(r'#\[doc\s*=\s*"([^"]*)"')
+
+
+def check_blind_spots(crates_dir: pathlib.Path) -> int:
+    """0 when this reader's known blind spots hold nothing; 1 when they do."""
+    findings = []
+    for source, lines in read_files(crates_dir):
+        text = "\n".join(lines)
+        imported = {}
+        for line in lines:
+            m = USE.match(line)
+            if m:
+                for ident in IDENT.findall(m.group(2)):
+                    imported[ident] = m.group(1)
+
+        def foreign(target: str):
+            head = target.split("::")[0]
+            if head.startswith("wz_"):
+                return head
+            return imported.get(head)
+
+        # A `#[doc = "..."]` body carrying a link.
+        for line in lines:
+            for body in DOC_ATTR.findall(line):
+                for target in ANY_LINK.findall(body):
+                    owner = foreign(target)
+                    if owner:
+                        findings.append(f"{source}: #[doc] attribute links [{target}] -> {owner}")
+
+        # A macro body emitting a doc comment that carries a link.
+        if "macro_rules!" in text:
+            for m in MACRO_BODY.finditer(text):
+                for line in m.group(2).splitlines():
+                    if "#[doc" not in line and "///" not in line:
+                        continue
+                    for target in ANY_LINK.findall(line):
+                        owner = foreign(target)
+                        if owner:
+                            findings.append(
+                                f"{source}: macro {m.group(1)}! emits [{target}] -> {owner}"
+                            )
+
+    if findings:
+        print(
+            "doclink_dependents: BLIND SPOT NOW OCCUPIED -- "
+            f"{len(findings)} doc link(s) this reader cannot attribute:",
+            file=sys.stderr,
+        )
+        for f in sorted(set(findings)):
+            print(f"  - {f}", file=sys.stderr)
+        print(
+            "  A link emitted by a macro, or written in a #[doc] attribute, lands in the\n"
+            "  EXPANSION site rather than in the file read here, so the crate edge it\n"
+            "  creates is missed and pre-push gate 4 measures one crate too few. This was\n"
+            "  measured empty at R311y796; it is not any more. Teach edges() to read the\n"
+            "  spelling above, or record why that edge does not need the gate.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("doclink_dependents: blind spots empty (no macro- or attribute-emitted doc link "
+          "names a foreign wz crate)")
+    return 0
+
+
 def main(argv) -> int:
     if not argv:
-        print("doclink_dependents: usage: doclink_dependents.py <crate-name>...", file=sys.stderr)
+        print(
+            "doclink_dependents: usage: doclink_dependents.py <crate-name>... |"
+            " --check-blind-spots",
+            file=sys.stderr,
+        )
         return 2
+
+    if argv[0] == "--check-blind-spots":
+        if len(argv) != 1:
+            print("doclink_dependents: --check-blind-spots takes no other argument", file=sys.stderr)
+            return 2
+        return check_blind_spots(repo_root() / "crates")
 
     root = repo_root()
     graph = edges(root / "crates")
