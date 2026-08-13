@@ -10019,6 +10019,26 @@ layer_e3_router_multi_peer() {
     (cd crates && cargo build -p wz-ap-demo --features routing-router --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_multi_peer -- --ignored --quiet) || return 1
+    # R311y778 — the DeclareFinal witness, and it needs `routing-routes` ON TOP
+    # of `routing-router`: without it the router installs `NoOpForwarder` and
+    # there is no `RouteTable` to own `record_interest`, so the fixture would
+    # prove nothing while looking identical. Built as a SECOND binary rather
+    # than widening the build above, because that build is Layer E4's negative
+    # twin's reference for "routing-router alone" and widening it would blur
+    # what that lane rejects.
+    #
+    # The requester is a real zenoh-pico `z_get_liveliness`. It is the ONE
+    # consumer in either upstream that acts on a Final
+    # (`src/session/liveliness.c:248-252` unregisters the pending query); pico's
+    # write filter ignores the message entirely, which is why R311y777 retracted
+    # the queryable victim R311y773 had named. Timing is the discriminator:
+    # terminated the get finishes in ~0.2s, unterminated it waits out pico's
+    # `Z_GET_TIMEOUT_DEFAULT` of 10s. Measured both ways -- suppressing the emit
+    # takes the same fixture past its 5s bound.
+    (cd crates && cargo build -p wz-ap-demo --features routing-router,routing-routes --quiet) \
+        || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_terminates_a_pico_liveliness_get -- --ignored --quiet) || return 1
 }
 
 # ─── Layer E4 — routing-router catalog-truthfulness reject gate (R311qa) ─

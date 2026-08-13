@@ -282,7 +282,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 #     registry, the feature gate, the router gate and the foreign process. The
 #     pair is what makes each specific: damaging the querier's emit reds only
 #     its own witness.
-FOREIGN_ADJUDICATOR_LINKS = 822
+# R311y778 takes it to 823. `declare-final` had ONE adjudicating test before
+# this (it is on the SINGLE-ADJUDICATOR list) and gains a second here:
+#   * `declare-final` <- wz_router_terminates_a_pico_liveliness_get -- a real
+#     zenoh-pico `z_get_liveliness` against a wz `routing-routes` router. It is
+#     the atom's first witness for the CURRENT-interest terminator specifically,
+#     and the requester is the one consumer in either upstream that observably
+#     waits for it (pico's write filter ignores the message; see R311y777).
+FOREIGN_ADJUDICATOR_LINKS = 823
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
