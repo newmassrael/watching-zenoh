@@ -275,7 +275,7 @@ fn wz_liveliness_history_replays_a_zenohd_routed_pico_token() {
 /// choose the token, so if either upstream stopped reusing the id the arm would
 /// pass for a NEW reason -- and the round's claim would have quietly changed
 /// without failing. That is the failure mode a same-impl fixture cannot see.
-// wz-proves: liveliness-history wz->zenohd late subscriber
+// wz-proves: liveliness-history wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo + zenohd + zenoh-pico z_liveliness CLI); Layer Z runs via --ignored"]
 fn wz_liveliness_history_replays_locally_to_a_late_second_subscriber_behind_zenohd() {
