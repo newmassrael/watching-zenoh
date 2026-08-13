@@ -6183,6 +6183,9 @@ layer_c1bx_tls_record_oracle() {
 # those twelve, of which 465 are two crates.
 layer_c1bz_docs_resolve() {
     local crate count expected budget failed=0 seen=""
+    # BEFORE the loop, because a bad subset name would otherwise select nothing
+    # and the loop would report clean over an empty population.
+    _c1bz_check_subset || return 1
     # crate:expected-broken-links. Absent from this list means ZERO is expected.
     #
     # ONE `crate:count` PER LINE AND NOTHING ELSE -- this string is read
@@ -6235,8 +6238,26 @@ layer_c1bz_docs_resolve() {
             fi
             failed=1
         fi
-    done < <( (cd crates && cargo metadata --no-deps --format-version 1 2>/dev/null) |
-        python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"]]')
+    done < <(_c1bz_crate_list)
+
+    # R311y792 — the stale-budget-line half is skipped under a SUBSET run,
+    # because it cannot be judged from one: every unmeasured crate would look
+    # like a budget naming a non-member. The subset run is therefore a WEAKER
+    # claim than the full lane and says so rather than printing the same line.
+    if [[ -n "${WZ_C1BZ_ONLY:-}" ]]; then
+        # The population, not the exit status, is the tell — the same rule every
+        # count-guarded lane here follows. `_c1bz_check_subset` has already
+        # refused an unknown name, so an empty `seen` here means the filter
+        # matched nothing for a reason nothing else has named.
+        if [[ -z "${seen// /}" ]]; then
+            echo "  C1bz FAIL: WZ_C1BZ_ONLY='${WZ_C1BZ_ONLY}' measured NO crate" >&2
+            return 1
+        fi
+        [[ $failed -eq 0 ]] || return 1
+        echo "  C1bz (subset:${seen} ): these crates' docs resolve, or spend exactly" \
+            "their budget — the stale-budget-line check needs the full lane"
+        return 0
+    fi
 
     # A budget line naming a crate the workspace no longer has is a budget nobody
     # is reading. Same reason the orphan ledger rejects a resolved entry.
@@ -6251,6 +6272,59 @@ layer_c1bz_docs_resolve() {
 
     [[ $failed -eq 0 ]] || return 1
     echo "  C1bz: every workspace crate's docs resolve, or spend exactly their budget"
+}
+
+# R311y792 — which crates C1bz measures. Every workspace member by default;
+# exactly `WZ_C1BZ_ONLY` when that is set, so the pre-push hook can spend ~one
+# crate's `cargo doc` instead of fifty-odd.
+#
+# A name in `WZ_C1BZ_ONLY` that is NOT a workspace member is a hard FAIL rather
+# than an empty measurement: the caller that passes one has computed a crate set
+# and got it wrong, and "measured nothing" must never read as "measured clean".
+# That is the same rule as the budget's own non-member check below, applied to
+# the other end of the pipe.
+# It is a PURE FILTER and CANNOT refuse, deliberately: it is consumed through
+# `< <(...)`, where a non-zero return is invisible to the caller and an empty
+# stream would run the loop zero times and leave the lane green. Rejection
+# therefore lives in `_c1bz_check_subset` below, which runs BEFORE the loop and
+# can actually fail it.
+_c1bz_crate_list() {
+    local members member want
+    members="$(_c1bz_members)"
+    if [[ -z "${WZ_C1BZ_ONLY:-}" ]]; then
+        printf '%s\n' "$members"
+        return 0
+    fi
+    for member in $members; do
+        for want in ${WZ_C1BZ_ONLY}; do
+            [[ "$member" == "$want" ]] && printf '%s\n' "$member"
+        done
+    done
+}
+
+_c1bz_members() {
+    (cd crates && cargo metadata --no-deps --format-version 1 2>/dev/null) |
+        python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"]]'
+}
+
+# R311y792 — refuse a `WZ_C1BZ_ONLY` that names something the workspace does not
+# have. A caller passing one has computed a crate set and got it wrong, and the
+# failure mode is the silent one: an unmatched name simply measures nothing, and
+# "measured nothing" would print the same green line as "measured clean".
+_c1bz_check_subset() {
+    local members want
+    [[ -n "${WZ_C1BZ_ONLY:-}" ]] || return 0
+    members="$(_c1bz_members)"
+    if [[ -z "$members" ]]; then
+        echo "  C1bz FAIL: cargo metadata listed no workspace member" >&2
+        return 1
+    fi
+    for want in ${WZ_C1BZ_ONLY}; do
+        if ! grep -qx -- "$want" <<<"$members"; then
+            echo "  C1bz FAIL: WZ_C1BZ_ONLY names '$want', which is not a workspace member" >&2
+            return 1
+        fi
+    done
 }
 
 

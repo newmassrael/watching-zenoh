@@ -1987,8 +1987,27 @@ jobs:
     # moves rather than the runner because the post-lane `df -h` R311y424 added
     # reports 68G free, which removes the disk argument that put every previous
     # overflow on its own machine.
+    # R311y792 — THIS JOB IS THE SECOND ONE AT ITS TIME CEILING, and nothing
+    # knew. Measured over the completed CI runs ending at 31750463524: 10
+    # successful runs spanning 2039-2328s against the 2700s budget, median
+    # 2208s — 82% at the median and 86% at the max, which is the band the `ci`
+    # job was in when run 31711867852 was cancelled. The margin step at the
+    # bottom of this job is therefore not decoration; it is expected to fire.
+    #
+    # WHEN IT FIRES, THE REMEDY IS A SPLIT, and the shape is already measured:
+    # this job has NO hot step (the largest, C1ay, is 227s of 2216s = 10%), so
+    # it is a long tail of 54 lanes rather than one lane to peel. That makes it
+    # the footprint job's problem, not the `ci` job's, and the footprint job's
+    # answer -- a `shard` matrix over the lane list -- is the one that fits.
+    # Peeling the five heaviest (C1ay 227s, C1y 189s, C1am 150s, C1j 142s,
+    # C1z 137s = 845s, 38%) into a sibling is the cheaper interim.
     timeout-minutes: 45
     steps:
+      - name: Budget stamp — start this job's own clock
+        # R311y792 — read by the margin step at the bottom. See the `ci` job's
+        # step of the same name for why it is FIRST.
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
       - name: Checkout (with submodules)
         # `recursive`: wz-session-core compiles against sce_forge_runtime from
         # vendor/sce, so the lanes below do not build without it.
@@ -2360,6 +2379,25 @@ jobs:
       - name: Disk headroom after the lanes (measurement, not a gate — R311y424)
         if: always()
         run: df -h /
+
+      - name: Budget margin — this job may not approach its timeout in silence
+        # R311y792 — the second job to carry this, and the FIRST that is
+        # expected to trip it. See the header above for the measurement (82%
+        # median, 86% max of the 2700s budget) and for why the remedy when it
+        # fires is a shard split rather than a bigger number.
+        #
+        # The threshold is the same 90% the `ci` job uses, deliberately: this
+        # job's own budget was already RAISED once (30 -> 45 at y425) and the
+        # doctrine that raise predates says the next move is a split. A
+        # per-job threshold tuned to sit above today's measurement would be
+        # the raise again, wearing a gate's clothes.
+        #
+        # The disk step above is the model for what this is NOT: that one
+        # reports and never fails, because free space has no ceiling this
+        # workflow can enforce. Time has one, and a cancel at that ceiling
+        # grades nothing.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90
 
   transport-modes:
     name: transport-MODE lanes (the §5.1 mode axis)

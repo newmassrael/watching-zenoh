@@ -198,9 +198,15 @@ git config core.hooksPath .githooks
   orphan / frozen-ledger violation before origin; re-run past
   pre-commit because amends / rebases change post-commit state; an
   absent `mnemosyne-cli` is a hard FAIL since R311y418, not the SKIP
-  it was) — and (3) `cargo test -p <crate>` for ONLY the crates the
+  it was) — (3) `cargo test -p <crate>` for ONLY the crates the
   push's diff changes (default features; crate DIR → package name via
-  its Cargo.toml). The FULL validation surface — the feature-subset
+  its Cargo.toml) — and (4) **Layer C1bz over those same crates**
+  (R311y792), the doc-link budget, via `WZ_C1BZ_ONLY`. A doc comment
+  is the one edit `cargo test` structurally cannot fail on, and the
+  class was paid for twice (R311y787, R311y790) before it got a gate;
+  a count ABOVE budget is a link the push added (fix the link, never
+  the budget), a count BELOW it is one the push removed (lower the
+  budget in that same commit). The FULL validation surface — the feature-subset
   matrix, C2 clippy, Layers B/B2 codegen, F/G/Q/Z footprint /
   cross-compile / interop, every non-default combo — is the HOSTED
   CI's job: it runs on every push to main and is the single full

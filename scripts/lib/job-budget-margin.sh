@@ -26,6 +26,23 @@
 # answered there by Layer C0i. Here the answer is the same shape: the logic is
 # one script, and run-ci Layer C0b drives both arms.
 #
+# WHICH JOBS CARRY IT, and this is a MEASUREMENT rather than a policy. Over the
+# completed CI runs ending at 31750463524, successful jobs against their own
+# `timeout-minutes` (max of the observed band):
+#
+#     feature-gate NEG lanes   2328s / 2700s   86%   <- instrumented (y792)
+#     validate + verify + test 1730s / 1800s   96%   <- instrumented (y791),
+#                                                       and ~62% after the
+#                                                       y791 C0mut split
+#     cross-compile + QEMU      687s / 2700s   25%
+#     cross-impl proof lanes   1245s / 7200s   17%
+#     Zephyr cooperative boot   250s / 3600s    7%
+#
+# The bottom three are not instrumented and should not be: a gate that cannot
+# plausibly fire teaches nobody anything, and adding it everywhere would make
+# the two that matter look like boilerplate. Re-measure before assuming this
+# table still holds -- that is exactly how the `ci` job's "26m22s" rotted.
+#
 # USAGE
 #   job-budget-margin.sh <start-epoch-file> <budget-seconds> <alarm-percent>
 #

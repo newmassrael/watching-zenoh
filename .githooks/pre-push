@@ -8,6 +8,10 @@
 #   2. mnemosyne-cli validate-workspace   — the SSOT integrity gate (seconds).
 #   3. cargo test -p <crate>              — for ONLY the crates this push
 #                                           changes (default features).
+#   4. Layer C1bz over those same crates  — R311y792; the doc-link budget.
+#                                           A doc comment is the one thing a
+#                                           `cargo test` cannot fail on, and
+#                                           the class cost two rounds.
 # The FULL validation surface — the feature-subset matrix, clippy, codegen
 # (Layers B/B2), footprint (F), cross-compile (G), QEMU (Q), interop (Z),
 # every non-default feature combo — is the HOSTED CI's job. It runs on every
@@ -342,5 +346,39 @@ if [[ $fail -ne 0 ]]; then
     exit 1
 fi
 
-echo "pre-push: changed-crate tests passed; full validation continues on hosted CI."
+echo "pre-push: changed-crate tests passed."
+
+# ─── gate 4 — changed-crate DOC LINKS (R311y792) ────────────────────
+# The rule this encodes: a round that writes a doc comment owes Layer C1bz.
+# Nothing said so, and the class has now been paid for TWICE — R311y787 fixed
+# doc links it had just added, and R311y790 added two more (a link to a private
+# helper and one to a cfg-gated method), which redded run 31732246052 and cost
+# R311y791 a whole repayment round.
+#
+# It belongs HERE and not on the hosted side because the hosted gate already
+# existed and already worked. What was missing is that nothing local ran it, and
+# this hook had already computed the exact crate set it needs — the same `pkgs`
+# gate 3 just tested. `WZ_C1BZ_ONLY` spends one `cargo doc -p` per changed crate
+# (~6s for a small one) instead of the ~2min full sweep.
+#
+# It reuses the LANE rather than re-deriving the budget: the budget numbers are
+# the lane's, and a second copy here would drift from them the first time one
+# moved. That is the same reason gate 2 shells out to `mnemosyne-cli` instead of
+# reading the store.
+#
+# Deliberately NOT covered, and hosted CI still is: a crate this push did not
+# touch whose links broke because a name it links TO moved. The subset is the
+# cheap 90%, not the gate.
+echo "pre-push: checking changed-crate doc links (Layer C1bz, subset): ${pkgs[*]}"
+if ! WZ_C1BZ_ONLY="${pkgs[*]}" bash scripts/run-ci.sh --layer C1bz; then
+    echo "" >&2
+    echo "pre-push: changed-crate doc links failed — fix before push." >&2
+    echo "          A count ABOVE budget is a link this push added: fix the link," >&2
+    echo "          do not raise the budget. A count BELOW it is a link this push" >&2
+    echo "          removed: lower the budget in this same commit." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
+echo "pre-push: changed-crate tests + doc links passed; full validation continues on hosted CI."
 exit 0
