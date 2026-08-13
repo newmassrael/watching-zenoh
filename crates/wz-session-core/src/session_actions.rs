@@ -189,6 +189,17 @@ use crate::declare::local_token::build_token_reply;
 use crate::declare_build::*;
 #[cfg(feature = "declare-interest")]
 use crate::interest_build::*;
+// R311y771 — `InterestKinds` named explicitly, not left to the glob above.
+// The glob is gated on `declare-interest`; the type appears in the SIGNATURE
+// of `send_interest_kinds`, and a cfg'd import behind a signature gated on a
+// DIFFERENT cfg compiles in every lane that happens to carry both and breaks
+// the ones that do not. Layer C1bz caught it as `cannot find type
+// InterestKinds` while building the docs of nine downstream crates, none of
+// which name the type — the first lane in this tree to build that subset.
+// `alloc` is the honest gate: `interest_build` carries exactly that one,
+// because an Interest is an `InterestOwned`.
+#[cfg(feature = "alloc")]
+use crate::interest_build::InterestKinds;
 #[cfg(feature = "codec-push")]
 use crate::push_build::*;
 #[cfg(feature = "codec-request")]
@@ -5783,6 +5794,223 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = (interest_id, keyexpr_mapping_id, keyexpr_suffix);
     }
 
+    /// R311y771 — encode + dispatch an `Interest` asking the peer for its
+    /// SUBSCRIBER declarations matching `(keyexpr_mapping_id,
+    /// keyexpr_suffix)`. The emit wz never had: until this round every
+    /// `InterestOwned` leaving this crate carried `TO` and only `TO`, so a
+    /// zenoh router — which propagates a subscriber declaration to a face
+    /// ONLY if that face registered an interest with `options.subscribers()`
+    /// (`hat/router/pubsub.rs:120-125`) — sent wz nothing, silently, and
+    /// `RemoteSubscriberRegistry` stayed empty against zenohd no matter how
+    /// many subscribers the far side declared.
+    ///
+    /// `current` requests the peer's CURRENT matching set (replayed as
+    /// `interest_id`-tagged `Declare(DeclSubscriber)` records terminated by
+    /// a `DeclFinal`) and `future` keeps the interest live for subsequent
+    /// declare / undeclare events. zenoh uses BOTH from
+    /// `declare_publisher_inner` (`api/session.rs:1370-1377`,
+    /// `InterestMode::CurrentFuture`), which is what a matching listener
+    /// wants: the current set seeds the verdict, the future stream drives
+    /// the transitions.
+    ///
+    /// Reliable channel — same SN-window ordering reason as every other
+    /// declaration-plane emit: the peer must observe the Interest before the
+    /// declarations it asks for, or its interest table resolves to no-match
+    /// and the replay is silently skipped.
+    ///
+    /// Terminated by [`Self::send_interest_final`] with the same
+    /// `interest_id` — there is no dedicated subscriber-interest final,
+    /// exactly as pico prunes any cached `_Z_N_INTEREST` by id.
+    ///
+    /// R311g1 — signature-stability: body cfg, signature stable. Returns
+    /// `Err(FeatureDisabled)` when `declare-interest` is off; the caller
+    /// cannot treat the absence as harmless, because a matching listener
+    /// declared without the Interest is one that will never fire.
+    pub fn send_interest_subscribers(
+        &self,
+        interest_id: u64,
+        current: bool,
+        future: bool,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) -> Result<(), SendWireError> {
+        // Signature-stable per R311g1; the BODY carries the `alloc` gate that
+        // `InterestKinds` and every Interest builder sit behind. A no-alloc
+        // build has no `InterestOwned` to emit, which is a build-time choice
+        // the caller observes as a runtime reject.
+        #[cfg(feature = "alloc")]
+        {
+            self.send_interest_kinds(
+                interest_id,
+                InterestKinds::SUBSCRIBERS,
+                current,
+                future,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+            )
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
+            let _ = (
+                interest_id,
+                current,
+                future,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+            );
+            Err(SendWireError::FeatureDisabled)
+        }
+    }
+
+    /// R311y771 — the QUERYABLE-plane twin of
+    /// [`Self::send_interest_subscribers`]. zenoh emits it from
+    /// `declare_querier_inner` (`api/session.rs:1428-1435`) and its router
+    /// gates queryable propagation on `options.queryables()` the same way
+    /// (`hat/router/queries.rs:255-259`); what it feeds on the wz side is
+    /// `RemoteQueryableRegistry`, behind `Querier::get_matching_status` and
+    /// the querier-scoped matching listener.
+    pub fn send_interest_queryables(
+        &self,
+        interest_id: u64,
+        current: bool,
+        future: bool,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) -> Result<(), SendWireError> {
+        // Same `alloc`-in-the-body shape as the subscriber wrapper above.
+        #[cfg(feature = "alloc")]
+        {
+            self.send_interest_kinds(
+                interest_id,
+                InterestKinds::QUERYABLES,
+                current,
+                future,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+            )
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
+            let _ = (
+                interest_id,
+                current,
+                future,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+            );
+            Err(SendWireError::FeatureDisabled)
+        }
+    }
+
+    /// The emit SSOT the two wrappers above share — one dispatch, one cache
+    /// append, so the subscriber and queryable planes cannot drift into two
+    /// slightly different send paths. Public because an arbitrary
+    /// [`InterestKinds`](crate::interest_build::InterestKinds) union is a
+    /// legitimate thing to send (see
+    /// [`crate::interest_build::build_interest_kinds`]): a caller wanting
+    /// both planes should spend ONE interest id and ONE Final, not two.
+    ///
+    /// Deliberately NOT extended to the token kind. `TOKENS` is expressible
+    /// through this door and will encode correctly, but the two liveliness
+    /// wrappers own their own reconnect-cache shapes
+    /// (`LivelinessSubscriberInterest` / `LivelinessGetInterest`) which carry
+    /// the `history` flag this one does not; routing a token interest here
+    /// would cache it under the wrong variant and replay it with the wrong
+    /// mode. The type cannot forbid it, so it is stated.
+    ///
+    /// `alloc`-gated rather than signature-stable, and that is a deliberate
+    /// exception to R311g1: the signature NAMES `InterestKinds`, which lives
+    /// in the `alloc`-gated `interest_build` because an Interest IS an
+    /// `InterestOwned`. A signature that survives into a feature state where
+    /// its own parameter type does not exist is not stability, it is a build
+    /// break — the shape Layer C1bz caught this round. The two named wrappers
+    /// above stay signature-stable, because their parameters are scalars, and
+    /// they are what a caller reaches for.
+    #[cfg(feature = "alloc")]
+    pub fn send_interest_kinds(
+        &self,
+        interest_id: u64,
+        kinds: InterestKinds,
+        current: bool,
+        future: bool,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) -> Result<(), SendWireError> {
+        #[cfg(feature = "declare-interest")]
+        {
+            let interest = build_interest_kinds(
+                interest_id,
+                kinds,
+                current,
+                future,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+            )?;
+            self.dispatch_interest(interest, /*reliable=*/ true)?;
+            self.cache_matching_interest(
+                interest_id,
+                kinds,
+                current,
+                future,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+            );
+            Ok(())
+        }
+        #[cfg(not(feature = "declare-interest"))]
+        {
+            let _ = (
+                interest_id,
+                kinds,
+                current,
+                future,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+            );
+            Err(SendWireError::FeatureDisabled)
+        }
+    }
+
+    /// R311y771 — append the post-emit reconnect-replay cache entry for a
+    /// subscriber / queryable Interest. The session-level counterpart to the
+    /// matching-listener seam emit, mirroring
+    /// [`Self::cache_subscriber_interest`]. Signature-stable: a no-op
+    /// without `session-reconnect` per R311g1.
+    ///
+    /// A reconnect gives us a NEW face and zenoh keeps `remote_interests`
+    /// PER FACE, so without this replay the peer stops feeding the registry
+    /// while every matching listener stays registered — the silent half-dead
+    /// state.
+    #[cfg(all(feature = "declare-interest", feature = "alloc"))]
+    pub fn cache_matching_interest(
+        &self,
+        interest_id: u64,
+        kinds: InterestKinds,
+        current: bool,
+        future: bool,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) {
+        #[cfg(feature = "session-reconnect")]
+        self.cache_declaration(CachedDeclaration::MatchingInterest {
+            interest_id,
+            kinds,
+            current,
+            future,
+            mapping_id: keyexpr_mapping_id,
+            suffix: keyexpr_suffix.map(ToString::to_string),
+        });
+        #[cfg(not(feature = "session-reconnect"))]
+        let _ = (
+            interest_id,
+            kinds,
+            current,
+            future,
+            keyexpr_mapping_id,
+            keyexpr_suffix,
+        );
+    }
+
     /// R279 — encode + dispatch an `Interest(Final)` (no C, no F)
     /// network-message terminating a previously emitted Interest
     /// stream. Mirror of zenoh-pico's
@@ -6501,6 +6729,35 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 }
                 #[cfg(not(feature = "declare-interest"))]
                 let _ = (interest_id, mapping_id, suffix);
+            }
+            CachedDeclaration::MatchingInterest {
+                interest_id,
+                kinds,
+                current,
+                future,
+                mapping_id,
+                suffix,
+            } => {
+                #[cfg(feature = "declare-interest")]
+                {
+                    let interest = build_interest_kinds(
+                        interest_id,
+                        kinds,
+                        current,
+                        future,
+                        mapping_id,
+                        suffix.as_deref(),
+                    )
+                    .map_err(|e| ReplayDeclarationsError::Interest(e.into()))?;
+                    #[cfg(feature = "routing-namespace")]
+                    let interest = self
+                        .namespace_egress_interest(interest)
+                        .map_err(|e| ReplayDeclarationsError::Interest(e.into()))?;
+                    self.dispatch_interest(interest, /*reliable=*/ true)
+                        .map_err(ReplayDeclarationsError::Interest)?;
+                }
+                #[cfg(not(feature = "declare-interest"))]
+                let _ = (interest_id, kinds, current, future, mapping_id, suffix);
             }
         }
         Ok(())

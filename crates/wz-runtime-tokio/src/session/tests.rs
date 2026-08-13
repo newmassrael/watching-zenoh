@@ -7036,6 +7036,249 @@ fn querier_matching_listener_fires_on_remote_queryable_transitions() {
     assert!(listener.undeclare());
 }
 
+// ── R311y771 the matching listener ASKS for what it watches ──
+
+/// R311y771 THE DISCRIMINATOR at the session tier. A publisher's matching
+/// listener now puts an `Interest` on the wire asking the peer for its
+/// SUBSCRIBER declarations, because a zenoh router propagates a subscriber
+/// declaration to a face only when that face's own `remote_interests` carries
+/// `options.subscribers()` and matches the resource
+/// (`hat/router/pubsub.rs:120-125`). Before this round wz emitted only TOKEN
+/// interests, so `RemoteSubscriberRegistry` — and every matching listener
+/// standing on it — stayed permanently empty against zenohd, silently.
+///
+/// Asserted on the BYTES THAT LEFT, not on a builder call: the expectation is
+/// encoded independently and searched for inside the recorded transport
+/// frame. And the TOKEN form of the same keyexpr is asserted ABSENT in the
+/// same test — without that, an emit that kept the old `TO` byte would still
+/// satisfy "one interest frame was sent".
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-subscriber",
+    feature = "declare-interest",
+    feature = "codec-declare"
+))]
+#[test]
+fn a_publisher_matching_listener_asks_the_peer_for_subscriber_declarations() {
+    use wz_session_core::interest_build::{
+        build_interest_liveliness_subscriber, build_interest_subscribers,
+    };
+
+    let (session, driver) = build_session();
+    mark_session_established(&session);
+    let baseline = driver.frame_count();
+
+    let pubr = session.declare_publisher("home/temp", PublishOptions::put());
+    let listener = pubr
+        .declare_matching_listener(|_| {})
+        .expect("session-matching + declare-interest are on in this lane");
+
+    assert_eq!(
+        driver.frame_count(),
+        baseline + 1,
+        "declaring the listener must emit exactly one frame -- the Interest",
+    );
+    let frame = driver.frame_bytes(baseline);
+
+    // The id comes from the HANDLE, not a hardcoded 0: an emit that allocated
+    // one id and reported another would still satisfy a literal expectation.
+    let id = listener.interest_id();
+    let wanted = build_interest_subscribers(
+        id,
+        /*current=*/ true,
+        /*future=*/ true,
+        /*mapping_id=*/ 0,
+        Some("home/temp"),
+    )
+    .unwrap()
+    .try_as_borrowed()
+    .expect("test: <=N exts by construction")
+    .encode_to_vec();
+    assert!(
+        frame.windows(wanted.len()).any(|w| w == wanted),
+        "the emitted frame must carry a SUBSCRIBERS Interest for the \
+         publisher's keyexpr; frame was {frame:02x?}",
+    );
+
+    // ANTI-VACUITY: the byte that matters is the KIND bit, so the token form
+    // of the identical keyexpr and mode must NOT be what went out.
+    let token_form = build_interest_liveliness_subscriber(
+        id,
+        /*history=*/ true,
+        /*mapping_id=*/ 0,
+        Some("home/temp"),
+    )
+    .unwrap()
+    .try_as_borrowed()
+    .expect("test: <=N exts by construction")
+    .encode_to_vec();
+    assert!(
+        !frame.windows(token_form.len()).any(|w| w == token_form),
+        "a TOKENS interest is what wz used to send and is not what a router \
+         gates subscriber propagation on",
+    );
+    assert_eq!(
+        driver.frame_reliability(baseline),
+        Reliability::Reliable,
+        "the Interest must precede the declarations it asks for, so it rides \
+         the reliable channel like every other declaration-plane emit",
+    );
+}
+
+/// The QUERYABLE-plane twin, and the anti-vacuity PAIR for the test above: a
+/// third distinct kind bit, so an emit hardcoded to either of the other two
+/// cannot satisfy both tests. Router gate: `hat/router/queries.rs:255-259`.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-queryable",
+    feature = "declare-interest",
+    feature = "codec-declare"
+))]
+#[test]
+fn a_querier_matching_listener_asks_the_peer_for_queryable_declarations() {
+    use wz_session_core::interest_build::{build_interest_queryables, build_interest_subscribers};
+
+    let (session, driver) = build_session();
+    mark_session_established(&session);
+    let baseline = driver.frame_count();
+
+    let querier = session.declare_querier("demo/**", QueryOptions::default());
+    let listener = querier
+        .declare_matching_listener(|_| {})
+        .expect("session-matching + declare-interest are on in this lane");
+
+    assert_eq!(driver.frame_count(), baseline + 1);
+    let frame = driver.frame_bytes(baseline);
+    let id = listener.interest_id();
+
+    let wanted = build_interest_queryables(id, true, true, 0, Some("demo/**"))
+        .unwrap()
+        .try_as_borrowed()
+        .expect("test: <=N exts by construction")
+        .encode_to_vec();
+    assert!(
+        frame.windows(wanted.len()).any(|w| w == wanted),
+        "the emitted frame must carry a QUERYABLES Interest; frame was {frame:02x?}",
+    );
+
+    let subscriber_form = build_interest_subscribers(id, true, true, 0, Some("demo/**"))
+        .unwrap()
+        .try_as_borrowed()
+        .expect("test: <=N exts by construction")
+        .encode_to_vec();
+    assert!(
+        !frame
+            .windows(subscriber_form.len())
+            .any(|w| w == subscriber_form),
+        "a querier must not ask for SUBSCRIBERS -- that would widen what the \
+         router forwards to this face beyond what the watch reads",
+    );
+}
+
+/// Undeclaring the listener RETRACTS the interest. Without this the peer keeps
+/// streaming declarations into a registry no watch reads for the rest of the
+/// session — the leak that is the whole reason the emit lives on the listener
+/// (which has a lifecycle) rather than on `declare_publisher` (which has
+/// none).
+///
+/// The Final is matched BY ID against the id the declare allocated, so a
+/// retract that named some other interest would fail here rather than merely
+/// producing "some second frame".
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-subscriber",
+    feature = "declare-interest",
+    feature = "codec-declare"
+))]
+#[test]
+fn undeclaring_a_matching_listener_retracts_the_interest_it_declared() {
+    use wz_session_core::interest_build::build_interest_final;
+
+    let (session, driver) = build_session();
+    mark_session_established(&session);
+    let pubr = session.declare_publisher("home/temp", PublishOptions::put());
+    let listener = pubr
+        .declare_matching_listener(|_| {})
+        .expect("session-matching + declare-interest are on in this lane");
+    let declared_id = listener.interest_id();
+    let after_declare = driver.frame_count();
+
+    assert!(listener.undeclare(), "undeclare removes the watch");
+
+    assert_eq!(
+        driver.frame_count(),
+        after_declare + 1,
+        "undeclare must emit exactly one frame -- the Interest(Final)",
+    );
+    let expected = build_interest_final(declared_id)
+        .try_as_borrowed()
+        .expect("Final carries no exts")
+        .encode_to_vec();
+    let frame = driver.frame_bytes(after_declare);
+    assert!(
+        frame.windows(expected.len()).any(|w| w == expected),
+        "the retract must name the id the declare allocated ({declared_id}); \
+         frame was {frame:02x?}",
+    );
+}
+
+/// TWO listeners on one session take TWO interest ids, and each retracts its
+/// OWN. Pinned because the handle carries an id it did not itself allocate:
+/// if the wire id were taken from the registry's watch-list slot instead of
+/// `alloc_next_interest_id`, both listeners would collide on the peer's
+/// interest table and the first undeclare would retract the second's stream.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-interest",
+    feature = "codec-declare"
+))]
+#[test]
+fn two_matching_listeners_take_two_interest_ids_and_retract_their_own() {
+    use wz_session_core::interest_build::build_interest_final;
+
+    let (session, driver) = build_session();
+    mark_session_established(&session);
+
+    let pubr = session.declare_publisher("home/temp", PublishOptions::put());
+    let first = pubr
+        .declare_matching_listener(|_| {})
+        .expect("declare-interest is on in this lane");
+    let querier = session.declare_querier("demo/**", QueryOptions::default());
+    let second = querier
+        .declare_matching_listener(|_| {})
+        .expect("declare-interest is on in this lane");
+
+    let (a, b) = (first.interest_id(), second.interest_id());
+    assert_ne!(
+        a, b,
+        "each listener must hold its own wire interest id -- a shared id \
+         means one undeclare kills the other's stream",
+    );
+
+    let before = driver.frame_count();
+    assert!(second.undeclare());
+    let retract = driver.frame_bytes(before);
+    let expected_b = build_interest_final(b)
+        .try_as_borrowed()
+        .expect("Final carries no exts")
+        .encode_to_vec();
+    let expected_a = build_interest_final(a)
+        .try_as_borrowed()
+        .expect("Final carries no exts")
+        .encode_to_vec();
+    assert!(
+        retract.windows(expected_b.len()).any(|w| w == expected_b),
+        "the second listener's undeclare must retract ITS id ({b})",
+    );
+    assert!(
+        !retract.windows(expected_a.len()).any(|w| w == expected_a),
+        "and must not retract the first listener's id ({a}), which is still \
+         watching",
+    );
+}
+
 /// R311kz — the F-6 deferred-fire contract end-to-end: the callback
 /// runs OUTSIDE the observer mutex, so it may re-enter observer-locking
 /// session APIs. The callback here (1) polls `get_matching_status`

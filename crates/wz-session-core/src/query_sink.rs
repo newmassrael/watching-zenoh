@@ -438,8 +438,15 @@ pub trait ReplyOut {
     /// (`message.c:263`), which is pico's EMIT rule and not the protocol:
     /// zenoh's `Del` declares `ext_attachment` at its own ext id
     /// (`zenoh-protocol/src/zenoh/del.rs:47,60`), and
-    /// [`QueryResponder::send_reply_keyed_del_meta`](crate::query::QueryResponder::send_reply_keyed_del_meta)
-    /// — the impl every production path routes through — now stages it.
+    /// `QueryResponder::send_reply_keyed_del_meta` — the impl every
+    /// production path routes through — now stages it.
+    ///
+    /// R311y771 — that name is a CODE SPAN and not a link on purpose:
+    /// `QueryResponder` lives behind `query-queryable`, which this trait does
+    /// not require, so an intra-doc link to it is unresolved in every subset
+    /// without that feature (Layer C1bz measured it as the one broken link
+    /// R311y769 added). A link that resolves in some feature subsets and not
+    /// others is a gate that fires on a build nobody ran.
     ///
     /// THE DEFAULT BELOW STILL DROPS IT, and cannot do otherwise: it chains to
     /// [`Self::reply_keyed_del_sourced`] / [`Self::reply_keyed_del`], neither of

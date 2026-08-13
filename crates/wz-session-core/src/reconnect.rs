@@ -233,6 +233,37 @@ pub enum CachedDeclaration {
         mapping_id: u64,
         suffix: Option<String>,
     },
+    /// R311y771 — `send_interest_subscribers` / `send_interest_queryables`:
+    /// an Interest asking the peer for its SUBSCRIBER and/or QUERYABLE
+    /// declarations. Pruned by `send_interest_final(interest_id)` like the
+    /// two liveliness forms.
+    ///
+    /// Replayed for the same reason the liveliness subscriber Interest is,
+    /// and it is not optional here: a zenoh router keeps its
+    /// `remote_interests` per FACE (`hat/router/pubsub.rs:120-125` reads
+    /// `face_hat!(dst_face).remote_interests`), so a reconnect gives us a
+    /// NEW face with an empty interest set. Without the replay, every
+    /// matching listener that survived the reconnect would keep firing off a
+    /// registry the peer has silently stopped feeding.
+    ///
+    /// `kinds` is the TYPED
+    /// [`InterestKinds`](crate::interest_build::InterestKinds), not a raw
+    /// `u8`: a `u8` field
+    /// here could hold `0` (an Interest asking for nothing) or a stray
+    /// `R`/`N`/`M`/`A` bit, neither of which the builder can produce, and the
+    /// replay would then emit a message no live declare path could. That is
+    /// the second-id-space shape — the cache is a REPLAY of what was sent,
+    /// so it must not be able to say more than the send could. `reconnect`
+    /// is gated on `alloc` + `session-unicast` and `interest_build` only on
+    /// `alloc`, so the type is always in scope here.
+    MatchingInterest {
+        interest_id: u64,
+        kinds: crate::interest_build::InterestKinds,
+        current: bool,
+        future: bool,
+        mapping_id: u64,
+        suffix: Option<String>,
+    },
 }
 
 impl CachedDeclaration {
@@ -243,7 +274,8 @@ impl CachedDeclaration {
     pub fn interest_id(&self) -> Option<u64> {
         match self {
             Self::LivelinessSubscriberInterest { interest_id, .. }
-            | Self::LivelinessGetInterest { interest_id, .. } => Some(*interest_id),
+            | Self::LivelinessGetInterest { interest_id, .. }
+            | Self::MatchingInterest { interest_id, .. } => Some(*interest_id),
             _ => None,
         }
     }

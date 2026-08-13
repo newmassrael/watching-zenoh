@@ -82,9 +82,45 @@ pub struct MatchingListener<R: SessionRuntime = TokioRuntime, T: TimeSource = To
         any(feature = "declare-subscriber", feature = "declare-queryable")
     ))]
     pub(super) cell: MatchingListenerCell<R>,
+    /// R311y771 — the id of the `Interest` this listener's declare emitted to
+    /// ask the peer for the declarations the watch is fed by, so
+    /// [`undeclare`](Self::undeclare) can terminate it with the matching
+    /// `Interest(Final)`.
+    ///
+    /// A SEPARATE id space from the handle's `id` field, which is the registry's
+    /// watch-list slot and never leaves the process. Reusing the watch id on
+    /// the wire would collide with the session's own interest counter (both
+    /// start low and count up) and retract somebody else's interest —
+    /// `alloc_next_interest_id` is the only issuer of the wire id.
+    ///
+    /// Gated with the emit itself: without `declare-interest` no Interest was
+    /// sent, so there is no id to hold and nothing to Final.
+    #[cfg(all(
+        feature = "session-matching",
+        feature = "declare-interest",
+        any(feature = "declare-subscriber", feature = "declare-queryable")
+    ))]
+    pub(super) interest_id: u64,
 }
 
 impl<R: SessionRuntime, T: TimeSource> MatchingListener<R, T> {
+    /// R311y771 — the wire id of the `Interest` this listener declared, the
+    /// one [`undeclare`](Self::undeclare) retracts. Mirrors
+    /// `LivelinessSubscriber::interest_id`.
+    ///
+    /// Public because it is the only handle on a per-listener piece of PEER
+    /// state: a caller correlating an inbound `interest_id`-tagged
+    /// `Declare(DeclFinal)` — the terminator of the CURRENT-mode replay this
+    /// interest requested — has nothing else to match it against.
+    #[cfg(all(
+        feature = "session-matching",
+        feature = "declare-interest",
+        any(feature = "declare-subscriber", feature = "declare-queryable")
+    ))]
+    pub fn interest_id(&self) -> u64 {
+        self.interest_id
+    }
+
     /// Remove the watch — the callback will not fire again. Returns
     /// whether a watch was removed (`false` = already removed, e.g. a
     /// clone of the underlying session undeclared it first).
@@ -106,6 +142,24 @@ impl<R: SessionRuntime, T: TimeSource> MatchingListener<R, T> {
             any(feature = "declare-subscriber", feature = "declare-queryable")
         ))]
         self.cell.kill();
+        // R311y771 — retract the Interest the declare emitted, BEFORE the
+        // watch comes off. Ordering matters in one direction only: a
+        // declaration that races in after the Final but before the
+        // unregister lands on a watch that is still installed and fires a
+        // legitimate transition, whereas the reverse order would leave a
+        // window in which the peer is still streaming into a registry no
+        // watch reads — the same leak the missing Final would be permanently.
+        //
+        // No error channel: `undeclare` answers "was a watch removed", and a
+        // transport already down cannot be told about the retract anyway —
+        // the peer's interest table dies with the session. This mirrors
+        // `send_interest_final`'s own F2 contract.
+        #[cfg(all(
+            feature = "session-matching",
+            feature = "declare-interest",
+            any(feature = "declare-subscriber", feature = "declare-queryable")
+        ))]
+        self.session.actions().send_interest_final(self.interest_id);
         // Each arm rides its variant's gate (see [`MatchingScope`]); a
         // variant that cannot be constructed has no arm, and with both
         // off this is the zero-arm match on an uninhabited enum.
@@ -132,6 +186,16 @@ pub enum MatchingListenerError {
     /// into. The method signature stays visible so callers observe the
     /// build-time choice as a runtime reject instead of a missing symbol.
     FeatureDisabled,
+    /// R311y771 — the Interest that asks the peer for the declarations this
+    /// watch is FED BY could not be emitted, so no listener was registered.
+    ///
+    /// Surfaced rather than swallowed because the failure is invisible from
+    /// the application's side: a listener whose Interest never reached a
+    /// zenoh router is registered against a registry the router will never
+    /// feed (`hat/router/pubsub.rs:120-125` gates propagation on the face's
+    /// own interest), so it simply never fires — indistinguishable from
+    /// "nothing matched yet".
+    Wire(wz_session_core::send_wire_error::SendWireError),
 }
 
 impl core::fmt::Display for MatchingListenerError {
@@ -142,6 +206,11 @@ impl core::fmt::Display for MatchingListenerError {
                  (or the backing declare-subscriber / declare-queryable \
                  registry feature) is OFF in this build (signature-stability \
                  contract — build-time choice observed as runtime reject)",
+            ),
+            Self::Wire(e) => write!(
+                f,
+                "declare_matching_listener: the backing Interest emit failed \
+                 ({e}); no watch was registered",
             ),
         }
     }

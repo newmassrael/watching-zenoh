@@ -1097,11 +1097,55 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
                 obs.remote_queryables
                     .declare_matching_listener(&self.keyexpr, sink)
             });
+            // R311y771 — the QUERYABLE-plane twin of the emit in
+            // `Publisher::declare_matching_listener`; read its comment for
+            // the register-first ordering, the rollback, and the recorded
+            // divergence from zenoh's emit site. The router gate here is
+            // `hat/router/queries.rs:255-259`, which requires
+            // `options.queryables()`, and zenoh's own emit is in
+            // `declare_querier_inner` (`api/session.rs:1428-1435`).
+            #[cfg(feature = "declare-interest")]
+            let interest_id = {
+                let interest_id = self.session.actions().alloc_next_interest_id();
+                let emit = wz_session_core::interest_build::build_interest_queryables(
+                    interest_id,
+                    /*current=*/ true,
+                    /*future=*/ true,
+                    /*keyexpr_mapping_id=*/ 0,
+                    Some(&self.keyexpr),
+                )
+                .map_err(wz_session_core::send_wire_error::SendWireError::Codec)
+                .and_then(|interest| {
+                    self.session.send_network_message(
+                        wz_session_core::network_message::NetworkMessage::Interest(interest),
+                        /*reliable=*/ true,
+                        /*express=*/ false,
+                    )
+                });
+                if let Err(e) = emit {
+                    cell.kill();
+                    R::with_mutex_mut(&self.session.observer, |obs| {
+                        obs.remote_queryables.undeclare_matching_listener(id)
+                    });
+                    return Err(MatchingListenerError::Wire(e));
+                }
+                self.session.actions().cache_matching_interest(
+                    interest_id,
+                    wz_session_core::interest_build::InterestKinds::QUERYABLES,
+                    /*current=*/ true,
+                    /*future=*/ true,
+                    /*keyexpr_mapping_id=*/ 0,
+                    Some(&self.keyexpr),
+                );
+                interest_id
+            };
             let listener = MatchingListener {
                 session: self.session.clone(),
                 id,
                 scope: MatchingScope::RemoteQueryables,
                 cell,
+                #[cfg(feature = "declare-interest")]
+                interest_id,
             };
             // Deliver an already-matching registration's staged fire on the
             // registering thread; see `Publisher::declare_matching_listener`

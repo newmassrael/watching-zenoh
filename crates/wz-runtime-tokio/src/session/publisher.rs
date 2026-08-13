@@ -167,6 +167,21 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
     /// this session's observer directly must pair each dispatch with a
     /// `drain_deferred_fires()` call or deferred listeners starve.
     ///
+    /// R311y771 — declaring a listener EMITS an `Interest` asking the peer
+    /// for its subscriber declarations, and [`MatchingListener::undeclare`]
+    /// retracts it with the matching `Interest(Final)`. That emit is what
+    /// makes the watch work against a zenoh ROUTER, which forwards a
+    /// subscriber declaration to a face only if that face registered such an
+    /// interest (`hat/router/pubsub.rs:120-125`). A failed emit is surfaced
+    /// as `Err(MatchingListenerError::Wire)` with NO watch registered, rather
+    /// than a listener that can never fire.
+    ///
+    /// WITHOUT `declare-interest` the listener still registers and no
+    /// Interest is sent — a real degradation, but deliberately not a refusal:
+    /// a wz peer pushes its declarations unsolicited, so a wz-to-wz session
+    /// keeps working, and only a router-mediated topology goes quiet. That
+    /// is the one build state in which this handle carries no `interest_id`.
+    ///
     /// R310.5c / R311g1 — the signature is always visible; the body
     /// rejects typed (`Err(FeatureDisabled)`) when `session-matching`
     /// or the backing `declare-subscriber` registry is off.
@@ -192,11 +207,76 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
                 obs.remote_subscribers
                     .declare_matching_listener(&self.keyexpr, sink)
             });
+            // R311y771 — ASK THE PEER FOR THE DECLARATIONS THIS WATCH IS FED
+            // BY. Without it the watch is registered against a registry a
+            // zenoh router will never fill: propagation to a face is gated on
+            // that face's own `remote_interests` carrying `options
+            // .subscribers()` and matching the resource
+            // (`hat/router/pubsub.rs:120-125`). Emitted AFTER the register so
+            // a CURRENT-mode replay that arrives immediately finds the watch
+            // already installed — the same register-first ordering the
+            // liveliness subscriber declare uses, and for the same race.
+            //
+            // DIVERGENCE FROM ZENOH, deliberate and recorded: zenoh emits
+            // this Interest from `declare_publisher_inner`
+            // (`api/session.rs:1370-1377`), one per publisher. wz's
+            // `declare_publisher` is an infallible by-value handle with no id
+            // and no undeclare, so it can carry neither a failed emit nor the
+            // `Interest(Final)` that retracts one; emitting there would leak
+            // an interest on the peer for the life of the session. The
+            // matching listener is the surface that both CONSUMES the
+            // resulting declarations and has a lifecycle to hang the Final
+            // on. What this does not cover is stated with it: a bare
+            // `get_matching_status()` poll with no listener declared still
+            // sees an empty remote set against a router.
+            #[cfg(feature = "declare-interest")]
+            let interest_id = {
+                let interest_id = self.session.actions().alloc_next_interest_id();
+                let emit = wz_session_core::interest_build::build_interest_subscribers(
+                    interest_id,
+                    /*current=*/ true,
+                    /*future=*/ true,
+                    /*keyexpr_mapping_id=*/ 0,
+                    Some(&self.keyexpr),
+                )
+                .map_err(wz_session_core::send_wire_error::SendWireError::Codec)
+                .and_then(|interest| {
+                    self.session.send_network_message(
+                        wz_session_core::network_message::NetworkMessage::Interest(interest),
+                        /*reliable=*/ true,
+                        /*express=*/ false,
+                    )
+                });
+                if let Err(e) = emit {
+                    // Roll the registration back exactly as the liveliness
+                    // declare's Finding-B rollback does: kill the cell first
+                    // (suppressing anything staged in the register->send
+                    // window), drop the orphaned watch, surface the error. A
+                    // watch left installed here would be one the peer was
+                    // never asked to feed.
+                    cell.kill();
+                    R::with_mutex_mut(&self.session.observer, |obs| {
+                        obs.remote_subscribers.undeclare_matching_listener(id)
+                    });
+                    return Err(MatchingListenerError::Wire(e));
+                }
+                self.session.actions().cache_matching_interest(
+                    interest_id,
+                    wz_session_core::interest_build::InterestKinds::SUBSCRIBERS,
+                    /*current=*/ true,
+                    /*future=*/ true,
+                    /*keyexpr_mapping_id=*/ 0,
+                    Some(&self.keyexpr),
+                );
+                interest_id
+            };
             let listener = MatchingListener {
                 session: self.session.clone(),
                 id,
                 scope: MatchingScope::RemoteSubscribers,
                 cell,
+                #[cfg(feature = "declare-interest")]
+                interest_id,
             };
             // An already-matching registration STAGED a `true` fire inside the
             // registry (pico's fire-before-insert), and a staged fire that

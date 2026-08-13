@@ -123,23 +123,111 @@ pub fn build_interest_liveliness_get(
     )
 }
 
-/// SSOT for the liveliness-token `Interest` body-header flag composition
-/// (`KE | TO | R | N | M`) shared by the subscriber + get paths. The
-/// only difference between the two is the outer `Interest.header` C
-/// (CURRENT) / F (FUTURE) bits, surfaced here as the `current` / `future`
-/// params. Keeping one constructor avoids the body-header bitset drifting
-/// between the two callers.
+/// WHICH DECLARATION KINDS an `Interest` asks the peer for — the `S`, `Q`
+/// and `T` bits of the `InterestBody` header, and nothing else.
+///
+/// The kind bits are the ONLY part of that header a caller chooses. `KE`
+/// (bit 0) and `R` (bit 4) are implied by wz always attaching a keyexpr, and
+/// `N` / `M` are derived from the wireexpr the builder composes — deriving
+/// them rather than accepting them is what zenoh does too, in
+/// `Interest::options` (`zenoh-protocol/src/network/interest.rs:198-209`,
+/// which adds `RESTRICTED` / `NAMED` / `MAPPING` from `wire_expr` after the
+/// caller has supplied only the kinds). A caller that could set them
+/// independently could emit `R=0, N=1`, which the protocol comment at
+/// `interest.rs:131-136` forbids ("If R==0 then N should be set to 0").
+///
+/// Bit values are the wire's, shared by all three implementations:
+/// `S=0x02`, `Q=0x04`, `T=0x08` — zenoh's `InterestOptions::SUBSCRIBERS`
+/// / `QUERYABLES` / `TOKENS` (`interest.rs:248-251`), zenoh-pico's
+/// `_Z_INTEREST_FLAG_*` and wz's own generated
+/// `InterestBodyOwned::su` / `qu` / `to` accessors
+/// (`out/wz-codecs/interest_body.rs`).
+///
+/// AGGREGATE (`A`, bit 7) is deliberately ABSENT from this type rather than
+/// merely unused: it is not a kind (it asks for the matching kinds to be
+/// answered as ONE reply, not for a fourth kind of declaration), and wz has
+/// no aggregate reply staging — see the `liveliness-token` inventory atom,
+/// whose aggregate residual records why the obvious implementation regresses
+/// a paid-for MCU footprint fix. A `const AGGREGATE` here would read as
+/// "supported".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct InterestKinds(u8);
+
+impl InterestKinds {
+    /// Peer SUBSCRIBER declarations (`S`). zenoh emits this from
+    /// `declare_publisher_inner` (`zenoh/src/api/session.rs:1373-1374`); a
+    /// zenoh ROUTER propagates a subscriber declaration to a face ONLY if
+    /// that face registered an interest carrying this bit
+    /// (`hat/router/pubsub.rs:120-125`), which is why a wz face that never
+    /// emits it sees an empty remote-subscriber set against zenohd.
+    pub const SUBSCRIBERS: Self = Self(0x02);
+
+    /// Peer QUERYABLE declarations (`Q`). zenoh emits this from
+    /// `declare_querier_inner` (`api/session.rs:1431-1432`) and its router
+    /// gates queryable propagation on it the same way
+    /// (`hat/router/queries.rs:255-259`).
+    pub const QUERYABLES: Self = Self(0x04);
+
+    /// Peer liveliness TOKEN declarations (`T`) — the kind wz has always
+    /// emitted, via [`build_interest_liveliness_subscriber`] /
+    /// [`build_interest_liveliness_get`].
+    pub const TOKENS: Self = Self(0x08);
+
+    /// The raw `S|Q|T` bits, for composition into the body header.
+    ///
+    /// Deliberately no constructor from a raw `u8`: the only values this
+    /// type may hold are unions of the three constants, and a `from_bits`
+    /// would let a caller smuggle `R` / `N` / `M` / `A` into the kind
+    /// position where they would silently overwrite the derived bits.
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+}
+
+// THE EMPTY SET IS UNREPRESENTABLE, and that is the whole guard: this type
+// has no `empty()`, no `Default`, and no `from_bits`, so the only values a
+// caller can build are unions of the three constants above and every one of
+// them has at least one kind bit. An Interest naming NO kind would be a leak
+// with no observable effect — the peer registers an interest that can never
+// match a declaration and only a Final clears it — and zenoh cannot express
+// it either (each of its emit sites names a kind literally). Making it
+// unconstructible is preferred over a runtime reject because there is no
+// honest `CodecError` variant for it: the encoder would happily write the
+// byte, so the refusal is a protocol judgement, not an encoding failure.
+
+impl core::ops::BitOr for InterestKinds {
+    type Output = Self;
+
+    /// Union — `SUBSCRIBERS | QUERYABLES` is one Interest asking for both,
+    /// exactly as zenoh's `InterestOptions` adds its flags together.
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+/// SSOT for the RESTRICTED `Interest` body-header flag composition
+/// (`KE | <kinds> | R | N | M`) shared by every builder in this module. The
+/// callers differ only in the kind bits and in the outer `Interest.header`
+/// C (CURRENT) / F (FUTURE) bits, surfaced here as `kinds` / `current` /
+/// `future`. Keeping one constructor is what stops the body-header bitset
+/// drifting between the token, subscriber and queryable paths — the three
+/// share every bit except the kind.
 ///
 /// N/M bit positions on `InterestBody.header` (bits 5 and 6) coincide
 /// with the C/F positions on the outer `Interest.header`; that is
 /// intentional and matches zenoh-pico's `_Z_INTEREST_FLAG_COPY_MASK`
 /// reorder (the two `header` bytes are distinct wire bytes, so no
-/// collision). The inner body sets KE (carries a keyexpr), TO (wants
-/// token records), and R (restricted to the attached keyexpr); SU/QU/AG
-/// stay clear (the liveliness-token path does not interest on peer
-/// subscribers / queryables / aggregated keyexprs).
-fn build_liveliness_token_interest(
+/// collision). The inner body always sets KE (carries a keyexpr) and R
+/// (restricted to the attached keyexpr); AG stays clear (wz stages no
+/// aggregate reply — see [`InterestKinds`]).
+///
+/// `keyexpr_suffix.is_some()` is the ONLY source of N and the `Local`
+/// wireexpr arm the only source of M, both derived here rather than passed:
+/// see [`InterestKinds`] for why the protocol forbids the combinations a
+/// caller-supplied form would allow.
+fn build_restricted_interest(
     interest_id: u64,
+    kinds: InterestKinds,
     current: bool,
     future: bool,
     keyexpr_mapping_id: u64,
@@ -157,7 +245,6 @@ fn build_liveliness_token_interest(
     let f_flag = if future { 0x40u8 } else { 0x00u8 };
 
     let ke_flag = 0x01u8;
-    let to_flag = 0x08u8;
     let r_flag = 0x10u8;
     let n_flag = if keyexpr_suffix.is_some() {
         0x20u8
@@ -165,7 +252,7 @@ fn build_liveliness_token_interest(
         0x00u8
     };
     let m_flag = 0x40u8; // Local arm (M=1)
-    let body_header = ke_flag | to_flag | r_flag | n_flag | m_flag;
+    let body_header = ke_flag | kinds.bits() | r_flag | n_flag | m_flag;
 
     Ok(InterestOwned {
         header: wire_const::N_MID_INTEREST | c_flag | f_flag,
@@ -182,6 +269,134 @@ fn build_liveliness_token_interest(
         }),
         extensions: None,
     })
+}
+
+/// The liveliness-token arm of [`build_restricted_interest`] — kinds fixed
+/// to [`InterestKinds::TOKENS`]. Kept as a named wrapper because the two
+/// public liveliness builders differ only in C / F and share this kind
+/// choice; inlining it would restate `TOKENS` at both.
+fn build_liveliness_token_interest(
+    interest_id: u64,
+    current: bool,
+    future: bool,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+) -> Result<InterestOwned, CodecError> {
+    build_restricted_interest(
+        interest_id,
+        InterestKinds::TOKENS,
+        current,
+        future,
+        keyexpr_mapping_id,
+        keyexpr_suffix,
+    )
+}
+
+/// Build an `Interest` asking the peer for its SUBSCRIBER declarations
+/// matching `(keyexpr_mapping_id, keyexpr_suffix)` — the emit wz was missing
+/// entirely until R311y771, and the reason a wz face peered with zenohd saw
+/// an EMPTY remote-subscriber set no matter how many subscribers the far side
+/// declared.
+///
+/// The gate is on the ROUTER, not on wz: `hat/router/pubsub.rs:120-125`
+/// propagates a subscriber declaration to a destination face only if that
+/// face's own `remote_interests` holds one with `options.subscribers()`
+/// matching the resource. No interest, no declarations — silently, with no
+/// error anywhere. The data plane is unaffected either way (a `Put` carries
+/// its keyexpr inline), so what this restores is the DECLARATION plane:
+/// `RemoteSubscriberRegistry`, and with it `get_matching_status` and the
+/// matching listeners built on top of it.
+///
+/// zenoh emits the same message from `declare_publisher_inner` with
+/// `options: KEYEXPRS + SUBSCRIBERS` and `mode: CurrentFuture`
+/// (`zenoh/src/api/session.rs:1370-1377`); `RESTRICTED` / `NAMED` /
+/// `MAPPING` are added by `Interest::options` from the attached
+/// `wire_expr`, which is exactly what the shared header SSOT derives (the
+/// private `build_restricted_interest`, named rather than linked: a public
+/// doc linking a private item is a Layer C1bz finding).
+///
+/// `current` requests the peer's CURRENT matching set (replayed as
+/// `interest_id`-tagged declarations terminated by a `DeclFinal`) and
+/// `future` keeps the interest live for subsequent declare / undeclare
+/// events; the pair spans the three non-Final modes of `InterestMode`
+/// (`Current`, `Future`, `CurrentFuture`). Do NOT pass both clear to reach
+/// a Final: the outer header would read as `Mode::Final` while a body is
+/// still attached, and upstream neither writes it (`zenoh-codec/src/network/
+/// interest.rs:69`) nor reads it (`:130`) in that mode, so the body bytes
+/// would be parsed as the NEXT message. [`build_interest_final`] is the
+/// Final, and it emits no body at all.
+pub fn build_interest_subscribers(
+    interest_id: u64,
+    current: bool,
+    future: bool,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+) -> Result<InterestOwned, CodecError> {
+    build_restricted_interest(
+        interest_id,
+        InterestKinds::SUBSCRIBERS,
+        current,
+        future,
+        keyexpr_mapping_id,
+        keyexpr_suffix,
+    )
+}
+
+/// Build an `Interest` asking the peer for its QUERYABLE declarations
+/// matching `(keyexpr_mapping_id, keyexpr_suffix)` — the queryable-plane
+/// twin of [`build_interest_subscribers`], gated by the router the same way
+/// (`hat/router/queries.rs:255-259` requires `options.queryables()` on a
+/// matching face interest before it propagates a queryable declaration).
+///
+/// zenoh emits it from `declare_querier_inner` with `options: KEYEXPRS +
+/// QUERYABLES`, `mode: CurrentFuture` (`api/session.rs:1428-1435`).
+///
+/// What it feeds on the wz side is `RemoteQueryableRegistry` — the backing
+/// of `Querier::get_matching_status` and the querier-scoped matching
+/// listener.
+pub fn build_interest_queryables(
+    interest_id: u64,
+    current: bool,
+    future: bool,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+) -> Result<InterestOwned, CodecError> {
+    build_restricted_interest(
+        interest_id,
+        InterestKinds::QUERYABLES,
+        current,
+        future,
+        keyexpr_mapping_id,
+        keyexpr_suffix,
+    )
+}
+
+/// Build an `Interest` for an arbitrary UNION of declaration kinds — the
+/// general form the three fixed-kind builders above specialise.
+///
+/// Public because the union is genuinely expressible upstream (zenoh's
+/// `InterestOptions` is additive and its `ALL` constant is
+/// `KEYEXPRS|SUBSCRIBERS|QUERYABLES|TOKENS`,
+/// `zenoh-protocol/src/network/interest.rs:253-259`) and a caller that wants
+/// both planes should send ONE Interest rather than two — two interests mean
+/// two ids, two Finals, and two independent `DeclFinal` terminations to
+/// correlate.
+pub fn build_interest_kinds(
+    interest_id: u64,
+    kinds: InterestKinds,
+    current: bool,
+    future: bool,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+) -> Result<InterestOwned, CodecError> {
+    build_restricted_interest(
+        interest_id,
+        kinds,
+        current,
+        future,
+        keyexpr_mapping_id,
+        keyexpr_suffix,
+    )
 }
 
 /// R279 — build an `Interest(Final)` network-message (C=0, F=0) that
@@ -418,5 +633,234 @@ mod tests {
             vec![wire_const::N_MID_INTEREST, 0xC8, 0x01],
             "InterestFinal multi-byte VLE id wire bytes must match zenoh-pico reference",
         );
+    }
+
+    /// R311y771 THE DISCRIMINATOR for the subscriber plane. The one byte that
+    /// decides whether a zenoh router will ever send this face a subscriber
+    /// declaration is the body header's `S` bit, and it must be `S` — not
+    /// `T`, which is what every wz Interest carried before this round.
+    ///
+    /// Expected body header = KE(0x01) | SU(0x02) | R(0x10) | N(0x20) |
+    /// M(0x40) = `0x73`. Held against the TOKEN form's `0x79` in the same
+    /// test so the two are a DIFFERENCE and not merely two constants: if the
+    /// kind bit were dropped from the SSOT both would read `0x71` and each
+    /// assertion alone would still look meaningful.
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn a_subscribers_interest_sets_the_subscriber_bit_where_the_token_form_sets_the_token_bit() {
+        let subs = build_interest_subscribers(
+            7,
+            /*current=*/ true,
+            /*future=*/ true,
+            /*mapping_id=*/ 0,
+            Some("demo/**"),
+        )
+        .unwrap();
+        let mut expected = vec![
+            0x79u8, // outer: MID(0x19) | C(0x20) | F(0x40) -- CurrentFuture
+            0x07,   // VLE(interest_id=7)
+            0x73,   // body: KE | SU | R | N | M   <- SU(0x02), NOT TO(0x08)
+            0x00,   // wireexpr.id VLE(0) literal sentinel
+            0x07,   // suffix_len VLE(7)
+        ];
+        expected.extend_from_slice(b"demo/**");
+        assert_eq!(
+            subs.wire(),
+            expected,
+            "a SUBSCRIBERS Interest must carry S=1 in the body header",
+        );
+
+        // The same call shape on the token path differs in EXACTLY that byte.
+        let tokens = build_interest_liveliness_subscriber(
+            7,
+            /*history=*/ true,
+            /*mapping_id=*/ 0,
+            Some("demo/**"),
+        )
+        .unwrap();
+        let (subs_body, tok_body) = (
+            subs.body.as_ref().expect("C||F set -> body present").header,
+            tokens
+                .body
+                .as_ref()
+                .expect("C||F set -> body present")
+                .header,
+        );
+        assert_eq!(
+            subs_body ^ tok_body,
+            InterestKinds::SUBSCRIBERS.bits() | InterestKinds::TOKENS.bits(),
+            "the two forms must differ in the KIND bits and nothing else -- a \
+             difference anywhere else means the shared header SSOT drifted",
+        );
+        assert_eq!(
+            subs.header, tokens.header,
+            "the outer C/F header is a mode, not a kind, and must be identical",
+        );
+    }
+
+    /// The queryable plane, and the ANTI-VACUITY pair for the test above: `Q`
+    /// is a THIRD distinct bit, so a builder that ignored its `kinds`
+    /// argument and hardcoded one value cannot satisfy both tests.
+    ///
+    /// Expected body header = KE | QU(0x04) | R | N | M = `0x75`.
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn a_queryables_interest_sets_only_the_queryable_bit() {
+        let qabl = build_interest_queryables(
+            9,
+            /*current=*/ true,
+            /*future=*/ true,
+            /*mapping_id=*/ 0,
+            Some("demo/**"),
+        )
+        .unwrap();
+        let body = qabl.body.as_ref().expect("C||F set -> body present").header;
+        assert_eq!(body, 0x75, "body must be KE | QU | R | N | M");
+        assert_eq!(
+            body & InterestKinds::SUBSCRIBERS.bits(),
+            0,
+            "S must be CLEAR -- a queryable interest that also asked for \
+             subscribers would silently widen what the router forwards",
+        );
+        assert_eq!(body & InterestKinds::TOKENS.bits(), 0, "T must be CLEAR",);
+    }
+
+    /// The three kind constants are the THREE WIRE BITS the two upstreams
+    /// agree on, pinned as a SET rather than one at a time: zenoh's
+    /// `InterestOptions::SUBSCRIBERS` / `QUERYABLES` / `TOKENS`
+    /// (`zenoh-protocol/src/network/interest.rs:249-251` = `1<<1`, `1<<2`,
+    /// `1<<3`) and wz's own generated `InterestBodyOwned::su` / `qu` / `to`
+    /// accessors, which is where a codegen change would land.
+    ///
+    /// Pinned through the GENERATED `su()` / `qu()` / `to()` READERS, not
+    /// through the literals: a test that only compared `0x02 == 0x02` would
+    /// pass even if the codec moved the bit, because both sides of that
+    /// comparison are this file's. Here the classification comes from the
+    /// codec and the bytes come from the builder, so a disagreement between
+    /// them fails.
+    ///
+    /// All THREE readers are asserted on all THREE builders — the full
+    /// 3x3 — because a one-sided check ("the subscriber form reads `su`")
+    /// is satisfied by a builder that sets every bit.
+    #[cfg(feature = "codec-declare")]
+    fn kind_readers(msg: &InterestOwned) -> (bool, bool, bool) {
+        let body = msg.body.as_ref().expect("C||F set -> body present");
+        (body.su(), body.qu(), body.to())
+    }
+
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn the_kind_constants_are_the_bits_the_generated_codec_reads() {
+        assert_eq!(
+            kind_readers(&build_interest_subscribers(1, true, true, 0, Some("a")).unwrap()),
+            (true, false, false),
+            "the SUBSCRIBERS builder must read as su-only through the codec",
+        );
+        assert_eq!(
+            kind_readers(&build_interest_queryables(1, true, true, 0, Some("a")).unwrap()),
+            (false, true, false),
+            "the QUERYABLES builder must read as qu-only through the codec",
+        );
+        assert_eq!(
+            kind_readers(&build_interest_liveliness_get(1, 0, Some("a")).unwrap()),
+            (false, false, true),
+            "the token builder must still read as to-only -- this round must \
+             not have moved the kind it already had",
+        );
+        assert_eq!(
+            kind_readers(
+                &build_interest_kinds(
+                    1,
+                    InterestKinds::SUBSCRIBERS | InterestKinds::QUERYABLES,
+                    true,
+                    true,
+                    0,
+                    Some("a"),
+                )
+                .unwrap()
+            ),
+            (true, true, false),
+            "a union must read as BOTH through the codec, not as one of them",
+        );
+    }
+
+    /// A UNION is one Interest with two kind bits, not two Interests. Pinned
+    /// because the union is the shape a caller wanting both planes should
+    /// reach for (one id, one Final) and because `BitOr` is the only way to
+    /// reach a multi-kind value at all.
+    ///
+    /// Expected body header = KE | SU | QU | R | N | M = `0x77`.
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn a_union_of_kinds_rides_one_interest() {
+        let both = build_interest_kinds(
+            4,
+            InterestKinds::SUBSCRIBERS | InterestKinds::QUERYABLES,
+            /*current=*/ true,
+            /*future=*/ true,
+            /*mapping_id=*/ 0,
+            Some("demo/**"),
+        )
+        .unwrap();
+        let body = both.body.as_ref().expect("C||F set -> body present").header;
+        assert_eq!(body, 0x77, "body must be KE | SU | QU | R | N | M");
+        assert_eq!(
+            body & InterestKinds::TOKENS.bits(),
+            0,
+            "a union that was never asked for tokens must not carry T",
+        );
+    }
+
+    /// The MODE axis is independent of the kind axis, and all three non-Final
+    /// modes are reachable on the new builders. Without this the C/F pair
+    /// would be pinned only at the value both liveliness callers happen to
+    /// use, and a builder that hardcoded `CurrentFuture` would pass every
+    /// other test in this module.
+    ///
+    /// The body header is asserted CONSTANT across the three so the mode
+    /// cannot be leaking into the kind byte.
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn every_non_final_mode_is_reachable_without_touching_the_kind_byte() {
+        let cases = [
+            (true, true, 0x79u8),  // CurrentFuture: MID | C | F
+            (true, false, 0x39u8), // Current:       MID | C
+            (false, true, 0x59u8), // Future:        MID | F
+        ];
+        for (current, future, outer) in cases {
+            let msg = build_interest_subscribers(1, current, future, 0, Some("a")).unwrap();
+            assert_eq!(
+                msg.header, outer,
+                "outer header for (current={current}, future={future})",
+            );
+            assert_eq!(
+                msg.body.as_ref().expect("C||F set -> body present").header,
+                0x73,
+                "the kind byte must not move with the mode",
+            );
+        }
+    }
+
+    /// N and M are DERIVED, never supplied — the alias / composite / literal
+    /// axis behaves on the new builders exactly as it does on the token ones.
+    /// This is the regression guard that the generalisation did not lose the
+    /// wireexpr derivation while moving the kind bits out.
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn the_wireexpr_derivation_survives_the_kind_generalisation() {
+        // Pure alias: no suffix -> N clear. body = KE | SU | R | M = 0x53.
+        let alias = build_interest_subscribers(5, false, true, /*mapping_id=*/ 11, None).unwrap();
+        assert_eq!(
+            alias.wire(),
+            vec![0x59u8, 0x05, 0x53, 0x0B],
+            "alias form must clear N and carry the mapping id verbatim",
+        );
+
+        // Composite: alias + tail -> N set. body = KE | SU | R | N | M = 0x73.
+        let composite =
+            build_interest_subscribers(5, false, true, /*mapping_id=*/ 11, Some("/tail")).unwrap();
+        let mut expected = vec![0x59u8, 0x05, 0x73, 0x0B, 0x05];
+        expected.extend_from_slice(b"/tail");
+        assert_eq!(composite.wire(), expected);
     }
 }
