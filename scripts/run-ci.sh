@@ -9364,6 +9364,24 @@ layer_z_zenohd_interop() {
     # pins transport-fragmentation.
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_fragment_rx_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+    # R311y774 — the SUBSCRIBERS Interest, judged by the router that decides
+    # whether wz hears anything. Registered HERE and not in Layer E for the
+    # standard reason: the fixture needs a real zenohd, and its test name
+    # carries the `zenohd` token ON PURPOSE so Layer E's sweep skips it rather
+    # than reding on a machine with no router.
+    #
+    # This is the one topology in which the interest is load-bearing. Directly
+    # peered, pico pushes declarations unsolicited and the sibling
+    # `wz_matching_status_driven_by_pico_zsub` (Layer E) passes with or without
+    # it; behind a router, `hat/router/pubsub.rs:120-125` forwards a subscriber
+    # declaration only to a face whose own interest asked for one. MEASURED as a
+    # red->green split on ONE feature edge: the identical fixture times out at
+    # 25s against a demo whose `session-matching` did not pull `declare-interest`
+    # and passes once it does, with pico's Puts flowing in BOTH runs -- so the
+    # data plane was never the difference.
+    _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_matching_status_through_zenohd_router -- --ignored --quiet --test-threads=1 \
+        || return 1
     # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked
     # against wz's cdylib, must report a REAL zenohd's zid under "Routers IDs".
     #

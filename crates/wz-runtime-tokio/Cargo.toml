@@ -1213,7 +1213,21 @@ session-reconnect = ["wz-session-core/session-reconnect"]
 # default-on in pico's CMake cache): forwards the wz-session-core watch
 # machinery; the Publisher/Querier declare_matching_listener methods are
 # signature-stable and reject typed with this off (R311g1).
-session-matching = ["wz-session-core/session-matching"]
+#
+# R311y774 — PULLS `declare-interest`, and that is a correctness dependency
+# rather than a convenience. A zenoh router forwards a subscriber declaration
+# to a face only when that face's own `remote_interests` carries a matching
+# `options.subscribers()` (`hat/router/pubsub.rs:120-125`), so behind a router
+# a matching listener with no Interest emit is INERT — it registers, nothing
+# arrives, and it never fires. MEASURED, not argued: the same
+# `wz_matching_status_through_zenohd_router` fixture times out at 25s on a
+# `preset-ap-client` demo (which shipped `session-matching` WITHOUT
+# `declare-interest`) and passes on `preset-ap-full`, with a real zenohd
+# deciding and pico's Puts flowing in both -- so the data plane was never the
+# difference. Declaring it here rather than adding the feature to each preset
+# keeps the dependency with the feature that needs it; a preset cannot now
+# ship the listener without the message that makes it work.
+session-matching = ["wz-session-core/session-matching", "declare-interest"]
 # R311cc — pubsub domain wire-up. 9 atomic features (Cargo.toml
 # authoring intent: "11 atomic, 9 active / 2 reserved"). After the
 # R311du SubscriberRegistry move + R311fv attachment SSOT, only TWO
