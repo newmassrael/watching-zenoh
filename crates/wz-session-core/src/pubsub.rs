@@ -1464,6 +1464,57 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         fired
     }
 
+    /// R311y788 — the SESSION-LOCAL half of a publisher's matching
+    /// status: `true` iff at least one subscriber registered on THIS
+    /// session would receive a local publish on `publish_keyexpr`.
+    ///
+    /// Two filters, both of them the ones
+    /// [`local_publish`](Self::local_publish) already applies, so a
+    /// `true` here means a real delivery rather than a mere table entry:
+    /// the subscriber's own `allowed_origin` must permit a local origin
+    /// (a `Locality::Remote` subscriber is not a matching target for its
+    /// own session's publisher), and the two keyexprs must INTERSECT as
+    /// patterns — both sides may be wildcards, which is why this is
+    /// [`keyexpr_intersect_patterns`] and not the one-sided
+    /// [`keyexpr_pattern_matches`] the dispatch path uses against a
+    /// literal sample keyexpr.
+    ///
+    /// This is zenoh-pico's local-target count rather than zenoh's:
+    /// pico gates on the subscriber's `_allowed_origin` before counting
+    /// (`vendor/zenoh-pico/src/net/filtering.c:386-397`), while zenoh
+    /// reads only the keyexpr (`zenoh/src/api/session.rs:1876-1897`) and
+    /// so can report a match no local publish would reach. `P=` for the
+    /// matching atom is pico, and the stricter answer is also the one
+    /// that agrees with this registry's own delivery rule.
+    ///
+    /// The PUBLISHER-side locality gate is the caller's, exactly as it
+    /// is for [`local_publish`](Self::local_publish) — pico's
+    /// `ctx->allow_local` (`filtering.c:66`, `:127`).
+    #[cfg(feature = "alloc")]
+    pub fn has_local_matching(&self, publish_keyexpr: &str) -> bool {
+        let mut publish_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+        for c in publish_keyexpr.split('/') {
+            // A keyexpr deeper than the declared bound cannot be
+            // represented, so it matches nothing — the same conservative
+            // answer `keyexpr_pattern_matches` gives an over-deep target.
+            if publish_chunks.push(c).is_err() {
+                return false;
+            }
+        }
+        self.subscribers.iter().any(|subscriber| {
+            if !subscriber.allowed_origin.allows_local() {
+                return false;
+            }
+            let mut chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+            for c in subscriber.pattern.split('/') {
+                if chunks.push(c).is_err() {
+                    return false;
+                }
+            }
+            keyexpr_intersect_patterns(&chunks, &publish_chunks)
+        })
+    }
+
     /// R227 — self-publish loopback entry point. Routes `sample`
     /// through the same locality + pattern-match dispatch as a
     /// wire-arrived Push, but with `is_remote = false` so subscribers
@@ -3407,6 +3458,83 @@ mod tests {
             "Locality::Remote suppresses loopback (allows_local() == false)"
         );
         assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    // ── R311y788 — has_local_matching, the SESSION-LOCAL half of a
+    // publisher's matching status. Each case pairs the predicate with the
+    // delivery it is supposed to predict, so a divergence between "would
+    // match" and "would fire" fails the test rather than passing quietly.
+
+    #[test]
+    fn has_local_matching_sees_a_session_local_subscriber() {
+        use crate::locality::Locality;
+        let mut registry = SubscriberRegistry::new();
+        registry.register_with_locality("home/temp", Locality::SessionLocal, |_s| {});
+        assert!(
+            registry.has_local_matching("home/temp"),
+            "a SessionLocal subscriber is a local matching target"
+        );
+        // The prediction agrees with the delivery.
+        let sample = Sample::new_put("home/temp", b"1".to_vec());
+        assert_eq!(registry.local_publish(&sample), 1);
+    }
+
+    #[test]
+    fn has_local_matching_ignores_a_remote_only_subscriber() {
+        // The DISCRIMINATOR against reading the table alone: the entry is
+        // there and intersects, and it still is not a local target, because
+        // `local_publish` would not fire it (pico gates the local count on
+        // `_z_locality_allows_local(sub->_allowed_origin)`).
+        use crate::locality::Locality;
+        let mut registry = SubscriberRegistry::new();
+        registry.register_with_locality("home/temp", Locality::Remote, |_s| {});
+        assert!(
+            !registry.has_local_matching("home/temp"),
+            "a Remote-only subscriber is not a target for its own session's publisher"
+        );
+        let sample = Sample::new_put("home/temp", b"1".to_vec());
+        assert_eq!(
+            registry.local_publish(&sample),
+            0,
+            "and the delivery agrees"
+        );
+    }
+
+    #[test]
+    fn has_local_matching_is_a_two_pattern_intersection() {
+        // Both sides may be wildcards — this is `intersect`, not the
+        // one-sided `matches` the dispatch path runs against a literal
+        // sample keyexpr. `home/*/temp` and `home/kitchen/**` share
+        // `home/kitchen/temp`, so a publisher on the latter matches.
+        use crate::locality::Locality;
+        let mut registry = SubscriberRegistry::new();
+        registry.register_with_locality("home/*/temp", Locality::Any, |_s| {});
+        assert!(registry.has_local_matching("home/kitchen/**"));
+        assert!(
+            !registry.has_local_matching("garden/kitchen/temp"),
+            "a disjoint keyexpr does not match"
+        );
+    }
+
+    #[test]
+    fn has_local_matching_is_false_on_an_empty_registry() {
+        // Anti-vacuity: the true cases above must be caused by the
+        // subscriber, not by a predicate that answers true for anything.
+        let registry: SubscriberRegistry<crate::pubsub::BoxedSink> = SubscriberRegistry::new();
+        assert!(!registry.has_local_matching("home/temp"));
+    }
+
+    #[test]
+    fn has_local_matching_follows_the_undeclare() {
+        use crate::locality::Locality;
+        let mut registry = SubscriberRegistry::new();
+        let id = registry.register_with_locality("home/temp", Locality::Any, |_s| {});
+        assert!(registry.has_local_matching("home/temp"));
+        assert!(registry.unregister(id));
+        assert!(
+            !registry.has_local_matching("home/temp"),
+            "the last local subscriber leaving flips the verdict back"
+        );
     }
 
     #[test]

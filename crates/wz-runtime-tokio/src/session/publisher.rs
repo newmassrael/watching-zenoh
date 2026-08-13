@@ -125,9 +125,22 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
     /// (consumers had to themselves cfg-gate every call site).
     pub fn get_matching_status(&self) -> MatchingStatus {
         // R311dd — observer access via R::with_mutex_mut closure form.
+        //
+        // R311y788 — BOTH halves, each gated by this publisher's own
+        // `locality`, which until this round was typed and unread here.
+        // pico computes exactly this: `state` is ACTIVE (no match) only
+        // when the remote target list is empty AND `local_targets == 0`
+        // (`vendor/zenoh-pico/src/net/filtering.c:71`), with each half
+        // admitted by `allow_local` / `allow_remote` derived from the
+        // publisher's locality (`:66`, `:261-262`). Before this round wz
+        // consulted the remote registry only, so a publisher whose only
+        // subscriber sat on its own session reported `false` while its
+        // own `put` delivered to it.
         #[cfg(feature = "declare-subscriber")]
         let matching = R::with_mutex_mut(&self.session.observer, |obs| {
-            obs.remote_subscribers.has_matching(&self.keyexpr)
+            let locality = self.options.allowed_destination;
+            (locality.allows_remote() && obs.remote_subscribers.has_matching(&self.keyexpr))
+                || (locality.allows_local() && obs.subscribers.has_local_matching(&self.keyexpr))
         });
         #[cfg(not(feature = "declare-subscriber"))]
         let matching = false;
@@ -204,8 +217,15 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
                 }));
             });
             let id = R::with_mutex_mut(&self.session.observer, |obs| {
+                // R311y788 — seed with the SAME verdict the poll reports, so
+                // registration and `get_matching_status` cannot disagree at
+                // the instant the listener is created. The local half is
+                // gated on this publisher's own locality, exactly as the
+                // poll gates it.
+                let local = self.options.allowed_destination.allows_local()
+                    && obs.subscribers.has_local_matching(&self.keyexpr);
                 obs.remote_subscribers
-                    .declare_matching_listener(&self.keyexpr, sink)
+                    .declare_matching_listener_seeded(&self.keyexpr, local, sink)
             });
             // R311y771 — ASK THE PEER FOR THE DECLARATIONS THIS WATCH IS FED
             // BY. Without it the watch is registered against a registry a
@@ -418,9 +438,15 @@ impl<R: SessionRuntime, T: TimeSource> PublisherAliased<R, T> {
             }
         };
         // R311dd — observer access via R::with_mutex_mut closure form.
+        // R311y788 — both halves under this publisher's locality, the
+        // same rule as the literal `Publisher::get_matching_status`; the
+        // alias only changes WHICH keyexpr is asked about.
         #[cfg(feature = "declare-subscriber")]
         let matching = R::with_mutex_mut(&self.session.observer, |obs| {
-            obs.remote_subscribers.has_matching(&_effective_keyexpr)
+            let locality = self.options.allowed_destination;
+            (locality.allows_remote() && obs.remote_subscribers.has_matching(&_effective_keyexpr))
+                || (locality.allows_local()
+                    && obs.subscribers.has_local_matching(&_effective_keyexpr))
         });
         #[cfg(not(feature = "declare-subscriber"))]
         let matching = false;

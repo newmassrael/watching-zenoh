@@ -457,9 +457,21 @@ impl ApplicationLayerObserver {
             &mut self.pending_replies,
             &mut self.pending_final_rids,
         );
+        // R311y788 — the remote-subscriber fan carries the SESSION-LOCAL
+        // half of the matching verdict. Both halves are sibling fields of
+        // this struct and the local one is read-only here, so the disjoint
+        // borrow is what lets the fact stay in one place instead of being
+        // mirrored into the remote registry. Without it an inbound remote
+        // undeclare re-evaluates a watch that a local subscriber is holding
+        // true and fires a false it should not.
         #[cfg(feature = "declare-subscriber")]
-        self.remote_subscribers
-            .dispatch_iteration_event(event, peer_table);
+        {
+            let subscribers = &self.subscribers;
+            self.remote_subscribers
+                .dispatch_iteration_event_with_local(event, peer_table, &|k| {
+                    subscribers.has_local_matching(k)
+                });
+        }
         #[cfg(feature = "declare-queryable")]
         self.remote_queryables
             .dispatch_iteration_event(event, peer_table);

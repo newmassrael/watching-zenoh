@@ -215,9 +215,44 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// [`Self::undeclare_matching_listener`].
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     pub fn declare_matching_listener(&mut self, keyexpr: &str, sink: BoxedMatchingSink) -> u64 {
-        let initial = self.has_matching(keyexpr);
+        self.declare_matching_listener_seeded(keyexpr, false, sink)
+    }
+
+    /// R311y788 — [`Self::declare_matching_listener`] with the
+    /// session-local half of the current verdict supplied by the caller.
+    ///
+    /// The seed decides whether registration fires (pico fires `true` at
+    /// registration when already matching,
+    /// `vendor/zenoh-pico/src/net/filtering.c:341-357`), so it has to be
+    /// the SAME verdict the poll reports or the two disagree about the
+    /// instant the listener was created — a publisher whose only match is
+    /// a subscriber on its own session would poll `true` and then be told
+    /// `true` again by a spurious registration fire.
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    pub fn declare_matching_listener_seeded(
+        &mut self,
+        keyexpr: &str,
+        local_matching: bool,
+        sink: BoxedMatchingSink,
+    ) -> u64 {
+        let initial = self.has_matching(keyexpr) || local_matching;
         self.matching_watches
             .register(String::from(keyexpr), initial, sink)
+    }
+
+    /// R311y788 — re-evaluate every matching watch after a change this
+    /// registry cannot see: a subscriber declared or undeclared on THIS
+    /// session. The remote half is read from this registry's own
+    /// membership; `local_matching` supplies the local half. Returns the
+    /// number of watches whose verdict flipped (and therefore fired).
+    ///
+    /// The remote counterpart needs no such entry point — an inbound
+    /// declaration already arrives through
+    /// [`Self::dispatch_declare_with_local`], which re-evaluates.
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    pub fn reevaluate_matching(&mut self, local_matching: &dyn Fn(&str) -> bool) -> usize {
+        self.matching_watches
+            .reevaluate(|k| declared_intersects(&self.declared, k) || local_matching(k))
     }
 
     /// R311kh — remove a matching-listener watch. Returns whether one
@@ -275,7 +310,34 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        self.dispatch_declare_with_local(body, peer_keyexpr_table, &|_| false)
+    }
+
+    /// R311y788 — [`Self::dispatch_declare`] with the SESSION-LOCAL half
+    /// of the matching verdict supplied by the caller.
+    ///
+    /// A matching watch is a predicate over "does anything match", and
+    /// this registry only knows the REMOTE half; the local subscriptions
+    /// live on the sibling
+    /// [`SubscriberRegistry`](crate::pubsub::SubscriberRegistry). Passing
+    /// the local half in rather than mirroring it here keeps one copy of
+    /// that fact — and it has to be passed on THIS path, not only at
+    /// registration, because a watch held `true` by a local subscriber
+    /// must not be flipped to `false` by an unrelated remote undeclare.
+    ///
+    /// [`Self::dispatch_declare`] delegates here with a `false` local
+    /// half, which is the honest answer for a caller that has no local
+    /// subscriber table in reach. The production fan
+    /// ([`crate::observer::SessionObserver`]) passes the real one.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_declare_with_local<'a>(
+        &mut self,
+        body: &DeclareOwnedVariant,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        local_matching: &dyn Fn(&str) -> bool,
+    ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
+        let _ = &local_matching;
         match body {
             DeclareOwnedVariant::CodecZenohDeclSubscriber(decl) => {
                 let resolved = match resolve_wireexpr_in(&decl.keyexpr.body, peer_keyexpr_table) {
@@ -300,7 +362,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
                 // through the free-fn consult.
                 #[cfg(feature = "session-matching")]
                 self.matching_watches
-                    .reevaluate(|k| declared_intersects(&self.declared, k));
+                    .reevaluate(|k| declared_intersects(&self.declared, k) || local_matching(k));
             }
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl) => {
                 // R290 — drop the membership entry first so a
@@ -312,7 +374,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
                 // R311kh — see the DeclSubscriber arm.
                 #[cfg(feature = "session-matching")]
                 self.matching_watches
-                    .reevaluate(|k| declared_intersects(&self.declared, k));
+                    .reevaluate(|k| declared_intersects(&self.declared, k) || local_matching(k));
             }
             // Other sub-variants do not reach this registry.
             _ => {}
@@ -330,10 +392,23 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        self.dispatch_messages_with_local(messages, peer_keyexpr_table, &|_| false)
+    }
+
+    /// R311y788 — [`Self::dispatch_messages`] carrying the session-local
+    /// half of the matching verdict; see
+    /// [`Self::dispatch_declare_with_local`].
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_messages_with_local<'a>(
+        &mut self,
+        messages: &[NetworkMessage],
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        local_matching: &dyn Fn(&str) -> bool,
+    ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         for message in messages {
             if let NetworkMessage::Declare(decl) = message {
-                self.dispatch_declare(&decl.body, peer_keyexpr_table);
+                self.dispatch_declare_with_local(&decl.body, peer_keyexpr_table, local_matching);
             }
         }
     }
@@ -349,9 +424,24 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        self.dispatch_iteration_event_with_local(event, peer_keyexpr_table, &|_| false)
+    }
+
+    /// R311y788 — [`Self::dispatch_iteration_event`] carrying the
+    /// session-local half of the matching verdict; see
+    /// [`Self::dispatch_declare_with_local`]. This is the entry point the
+    /// production observer fan uses, so both runtime profiles get the
+    /// local half without either of them mirroring the local table.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_iteration_event_with_local<'a>(
+        &mut self,
+        event: IterationEvent<'_>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        local_matching: &dyn Fn(&str) -> bool,
+    ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages(messages, peer_keyexpr_table);
+            self.dispatch_messages_with_local(messages, peer_keyexpr_table, local_matching);
         }
     }
 }

@@ -1445,11 +1445,25 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         let (cell, sink) = self.deferred_sample_sink(callback);
         // R311de — observer access via R::with_mutex_mut closure form.
         let id = R::with_mutex_mut(&self.observer, |observer| {
-            observer.subscribers.register_with_locality(
+            let id = observer.subscribers.register_with_locality(
                 keyexpr.to_string(),
                 options.allowed_origin,
                 sink,
-            )
+            );
+            // R311y788 — a LOCAL declaration can flip a publisher's
+            // matching status just as an inbound remote one can, and pico
+            // reports both (`_z_write_filter_ctx_add_local_match`,
+            // `vendor/zenoh-pico/src/net/filtering.c:87-92`). The remote
+            // registry owns the watches, so it is driven here with the
+            // local half read from the sibling field.
+            #[cfg(all(feature = "declare-subscriber", feature = "session-matching"))]
+            {
+                let subscribers = &observer.subscribers;
+                observer
+                    .remote_subscribers
+                    .reevaluate_matching(&|k| subscribers.has_local_matching(k));
+            }
+            id
         });
         (id, cell)
     }

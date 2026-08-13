@@ -241,7 +241,23 @@ impl<R: SessionRuntime> Subscriber<R> {
         // PoisonError::into_inner; MCU: no poison concept under panic =
         // abort).
         R::with_mutex_mut(&self.observer, |observer| {
-            observer.subscribers.unregister(self.id)
+            let removed = observer.subscribers.unregister(self.id);
+            // R311y788 — the undeclare twin of the declare-side
+            // re-evaluation (pico `_z_write_filter_ctx_remove_local_match`,
+            // `vendor/zenoh-pico/src/net/filtering.c:94-101`): dropping the
+            // last local subscriber must flip a publisher's matching status
+            // back to false. Runs even when `removed` is false — an already
+            // absent id leaves the verdict unchanged, so the re-evaluation
+            // fires nothing, and branching on it would only add a way to
+            // skip it.
+            #[cfg(all(feature = "declare-subscriber", feature = "session-matching"))]
+            {
+                let subscribers = &observer.subscribers;
+                observer
+                    .remote_subscribers
+                    .reevaluate_matching(&|k| subscribers.has_local_matching(k));
+            }
+            removed
         })
     }
 }

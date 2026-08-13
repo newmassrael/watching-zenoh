@@ -4932,6 +4932,95 @@ fn publisher_get_matching_status_true_when_peer_pattern_covers_publisher_literal
     );
 }
 
+// ── R311y788 — the SESSION-LOCAL half of matching status. Until this
+// round `get_matching_status` consulted the remote registry only, so a
+// publisher whose only subscriber sat on its own session reported false
+// while its own `put` delivered to that subscriber.
+
+#[cfg(all(feature = "declare-subscriber", feature = "pubsub-allow-loop"))]
+#[test]
+fn publisher_get_matching_status_true_for_a_session_local_subscriber() {
+    use crate::session::subscriber::SubscribeOptions;
+    let (session, _driver) = build_session();
+    let publisher = session.declare_publisher("home/temp", PublishOptions::put());
+    assert_eq!(
+        publisher.get_matching_status(),
+        MatchingStatus { matching: false },
+        "nothing declared anywhere yet"
+    );
+    let _sub = session.declare_subscriber("home/temp", SubscribeOptions::default(), move |_| {});
+    assert_eq!(
+        publisher.get_matching_status(),
+        MatchingStatus { matching: true },
+        "a subscriber on THIS session is a matching target — no peer involved"
+    );
+}
+
+#[cfg(all(feature = "declare-subscriber", feature = "pubsub-allow-loop"))]
+#[test]
+fn publisher_get_matching_status_ignores_local_when_destination_is_remote() {
+    // The DISCRIMINATOR for reading the publisher's locality: same local
+    // subscriber, same keyexpr, and a publisher that has declared it will
+    // never deliver locally. pico gates its local count on `allow_local`
+    // (`vendor/zenoh-pico/src/net/filtering.c:66`).
+    use crate::session::subscriber::SubscribeOptions;
+    use wz_session_core::locality::Locality;
+    let (session, _driver) = build_session();
+    let publisher = session.declare_publisher(
+        "home/temp",
+        PublishOptions::put().with_locality(Locality::Remote),
+    );
+    let _sub = session.declare_subscriber("home/temp", SubscribeOptions::default(), move |_| {});
+    assert_eq!(
+        publisher.get_matching_status(),
+        MatchingStatus { matching: false },
+        "a Remote-destination publisher does not count its own session's subscriber"
+    );
+}
+
+#[cfg(all(feature = "declare-subscriber", feature = "pubsub-allow-loop"))]
+#[test]
+fn publisher_get_matching_status_ignores_a_remote_only_local_subscriber() {
+    // The other side of the same gate: the SUBSCRIBER refuses local
+    // origins, so it is not a target for its own session's publisher even
+    // though the keyexprs intersect.
+    use crate::session::subscriber::SubscribeOptions;
+    use wz_session_core::locality::Locality;
+    let (session, _driver) = build_session();
+    let publisher = session.declare_publisher("home/temp", PublishOptions::put());
+    let _sub = session.declare_subscriber(
+        "home/temp",
+        SubscribeOptions::default().with_allowed_origin(Locality::Remote),
+        move |_| {},
+    );
+    assert_eq!(
+        publisher.get_matching_status(),
+        MatchingStatus { matching: false },
+        "a Remote-origin subscriber is not reached by a local publish, so it does not match"
+    );
+}
+
+#[cfg(all(feature = "declare-subscriber", feature = "pubsub-allow-loop"))]
+#[test]
+fn publisher_get_matching_status_false_again_after_the_local_subscriber_drops() {
+    use crate::session::subscriber::SubscribeOptions;
+    let (session, _driver) = build_session();
+    let publisher = session.declare_publisher("home/temp", PublishOptions::put());
+    {
+        let _sub =
+            session.declare_subscriber("home/temp", SubscribeOptions::default(), move |_| {});
+        assert_eq!(
+            publisher.get_matching_status(),
+            MatchingStatus { matching: true }
+        );
+    }
+    assert_eq!(
+        publisher.get_matching_status(),
+        MatchingStatus { matching: false },
+        "the subscriber's RAII drop unregisters it and the verdict follows"
+    );
+}
+
 #[cfg(feature = "declare-subscriber")]
 #[test]
 fn publisher_get_matching_status_false_after_peer_undeclare() {
