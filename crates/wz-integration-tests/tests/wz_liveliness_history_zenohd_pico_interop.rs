@@ -77,6 +77,13 @@ const SAMPLE_TIMEOUT: Duration = Duration::from_secs(20);
 /// A sleep here would leave "the token was late" and "history did nothing" looking
 /// identical from the sample side.
 fn run_arm(history: bool) -> String {
+    run_arm_inner(history, false)
+}
+
+/// R311y791 — `late = true` adds `--liveliness-subscribe-on-sample`, so wz
+/// declares a SECOND history subscriber from inside the first one's callback,
+/// once a PUT has proven this session already holds the token.
+fn run_arm_inner(history: bool, late: bool) -> String {
     let demo = wz_ap_demo_binary();
     let z_liveliness = zenoh_pico_cli_binary("z_liveliness");
 
@@ -131,6 +138,9 @@ fn run_arm(history: bool) -> String {
     if history {
         cmd.arg("--liveliness-subscribe-history");
     }
+    if late {
+        cmd.arg("--liveliness-subscribe-on-sample").arg(SUB_FILTER);
+    }
     let mut demo_child = ChildGuard::wrap(
         "wz-ap-demo (--connect zenohd --liveliness-subscribe)",
         cmd.env("RUST_LOG", "info")
@@ -158,7 +168,17 @@ fn run_arm(history: bool) -> String {
         );
     }
 
-    let expected = format!("LIVELINESS SAMPLE PUT filter='{SUB_FILTER}' keyexpr='{PICO_TOKEN}'");
+    // R311y791 — the LATE arm waits for the late subscriber's own line, not
+    // slot 0's. Waiting on slot 0 and then reading the buffer would race the
+    // very sample under test: the late subscriber is declared BY slot 0's
+    // callback, so its line cannot exist yet at the moment slot 0's does.
+    // `slot=late` is the marker because the token_id in between is the
+    // router's to choose and must not be pinned here.
+    let expected = if late {
+        "slot=late".to_string()
+    } else {
+        format!("LIVELINESS SAMPLE PUT filter='{SUB_FILTER}' keyexpr='{PICO_TOKEN}'")
+    };
     let outcome = if history {
         wait_for_substring(&mut demo_stderr_reader, &expected, SAMPLE_TIMEOUT)
     } else {
@@ -180,7 +200,12 @@ fn run_arm(history: bool) -> String {
     let _ = zenohd.child_mut().kill();
     let _ = zenohd.child_mut().wait();
 
-    if history {
+    // R311y791 — the LATE arm is deliberately EXEMPT from this panic. It has
+    // three assertions of its own that separate "slot 0 never fired" from "the
+    // late subscriber was never declared" from "it was declared and got
+    // nothing", and panicking here on the timeout would hide all three behind
+    // one generic message — which is exactly what the falsify run showed.
+    if history && !late {
         if let Err(captured) = outcome {
             panic!(
                 "history=true, and pico's token was NOT replayed. Expected {expected:?} -- \
@@ -211,6 +236,81 @@ fn wz_liveliness_history_replays_a_zenohd_routed_pico_token() {
     assert!(
         captured.contains(&expected),
         "the replay arrived but not with pico's token -- expected {expected:?}.\n\
+         --- captured wz-ap-demo stderr ---\n{captured}"
+    );
+}
+
+/// R311y791 — THE FOREIGN WITNESS for R311y790's declare-time replay, and the
+/// only test in the corpus where the replay is the sole thing that can deliver
+/// the sample.
+///
+/// ## Why a SECOND subscriber, and why it must be declared LATE
+///
+/// A subscriber declared before the session is driven has an empty
+/// `peer_token_table`, so the replay has nothing to replay and slot 0 is served
+/// entirely by zenohd's answer to its CURRENT interest. The replay only becomes
+/// load-bearing for a subscriber declared once the session ALREADY holds the
+/// token — which is why the demo arms this one on the first PUT rather than on
+/// a timer.
+///
+/// ## Why zenohd cannot serve the late one, established by direct read
+///
+/// zenohd DOES answer the late CURRENT interest — `declare_token_interest`
+/// (`hat/router/token.rs:992-1071`) walks `router_tokens` and sends a
+/// `DeclareToken` per match, with no "already declared to this face" guard.
+/// What it cannot do is make that a NEW token: `make_token_id`
+/// (`:978-990`) reuses `local_tokens[res]` whenever the mode is future-bearing,
+/// and `CurrentFuture` is, so the late reply carries THE SAME id as slot 0's.
+/// wz's first-declaration-wins guard (R311y769) then drops it, exactly as it
+/// must — re-firing on a repeat id would tell an application that counts
+/// presence that one token appeared twice.
+///
+/// So the late subscriber's sample cannot come off the wire. It comes from
+/// `LivelinessSubscriberRegistry::register`'s replay or it does not come.
+///
+/// ## What this pins that the wz-internal tests cannot
+///
+/// The five R311y790 tests fix the id-reuse and the drop as wz's own
+/// assumptions. This one lets a real zenohd choose the id and a real pico
+/// choose the token, so if either upstream stopped reusing the id the arm would
+/// pass for a NEW reason -- and the round's claim would have quietly changed
+/// without failing. That is the failure mode a same-impl fixture cannot see.
+// wz-proves: liveliness-history wz->zenohd late subscriber
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo + zenohd + zenoh-pico z_liveliness CLI); Layer Z runs via --ignored"]
+fn wz_liveliness_history_replays_locally_to_a_late_second_subscriber_behind_zenohd() {
+    let captured = run_arm_inner(true, true);
+
+    let first = format!("LIVELINESS SAMPLE PUT filter='{SUB_FILTER}' keyexpr='{PICO_TOKEN}'");
+    assert!(
+        captured.contains(&first),
+        "slot 0 never saw pico's token, so the late subscriber was never armed and this \
+         arm tested nothing -- expected {first:?}.\n\
+         --- captured wz-ap-demo stderr ---\n{captured}"
+    );
+    // ANTI-VACUITY: without this, a build that never declares the late
+    // subscriber at all would fail the sample assertion below for the wrong
+    // reason and read as the same defect.
+    assert!(
+        captured.contains("LATE LIVELINESS SUBSCRIBER declared"),
+        "the late subscriber was never declared, so its silence below would mean nothing.\n\
+         --- captured wz-ap-demo stderr ---\n{captured}"
+    );
+
+    // Both halves must be on ONE line: `token_id` sits between them and is the
+    // router's to choose, so the pair is matched per-line rather than as one
+    // substring. A `slot=late` line naming some OTHER keyexpr would not do.
+    let late_line = captured.lines().find(|l| {
+        l.contains("slot=late")
+            && l.contains("LIVELINESS SAMPLE PUT")
+            && l.contains(&format!("keyexpr='{PICO_TOKEN}'"))
+    });
+    assert!(
+        late_line.is_some(),
+        "the LATE subscriber got no history for pico's token. zenohd answers its interest \
+         with the id it already used for this resource (make_token_id reuses \
+         local_tokens[res] for a future-bearing mode), so wz drops that reply as a repeat \
+         -- the declare-time replay is the only path left, and it did not run.\n\
          --- captured wz-ap-demo stderr ---\n{captured}"
     );
 }

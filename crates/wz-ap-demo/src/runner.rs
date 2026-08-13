@@ -110,7 +110,16 @@ use crate::teardown;
 /// frame is enqueued.
 struct SessionHandles {
     _subscriber: Option<Subscriber>,
-    _liveliness_subscriber: Option<LivelinessSubscriber>,
+    /// R311y791 — a LIST: `--liveliness-subscribe` is repeatable, so one
+    /// session can hold several. Every handle drops at the same scope the
+    /// single one did, in declaration order.
+    _liveliness_subscribers: Vec<LivelinessSubscriber>,
+    /// R311y791 — the `--liveliness-subscribe-on-sample` handle, declared from
+    /// inside a callback and therefore reachable only through shared state.
+    /// Held at the same scope as its siblings so its `Interest(Final)` goes out
+    /// with theirs; the `Mutex` is the callback's write end, not concurrency
+    /// this demo otherwise needs.
+    _late_liveliness_subscribers: Arc<Mutex<Vec<LivelinessSubscriber>>>,
     _queryable: Option<Queryable>,
     /// R311y347 — `--matching-log`'s publisher + its matching listener. Held here
     /// for a reason the other handles do not have: the listener must OUTLIVE the
@@ -815,8 +824,9 @@ fn install_session_handles(
     // `--history-max` would have pushed this signature to eight parameters; the
     // bundle is the shape the rest of the file already uses (`PublisherSpec`,
     // `QueryRoleSpec`, `RemoteLogSpec`) and it takes the count DOWN, not up.
-    let liveliness_subscriber_keyexpr = declare_spec.liveliness_subscriber_keyexpr.as_deref();
+    let liveliness_subscriber_keyexpr = declare_spec.liveliness_subscriber_keyexpr.as_slice();
     let liveliness_subscriber_history = declare_spec.liveliness_subscriber_history;
+    let liveliness_subscribe_on_sample = declare_spec.liveliness_subscriber_on_sample.as_deref();
     let advanced_subscriber_keyexpr = declare_spec.advanced_subscriber_keyexpr.as_deref();
     // R311y449 — the three `#[cfg_attr(not(feature = "advanced"),
     // allow(unused_variables))]` attributes that sat on the next three bindings
@@ -877,44 +887,141 @@ fn install_session_handles(
         }
     });
 
-    let liveliness_subscriber = liveliness_subscriber_keyexpr.map(|filter| {
-        let owned_filter = filter.to_string();
-        let key_for_callback = owned_filter.clone();
-        // R311q — declare_liveliness_subscriber now returns
-        // `Result<LivelinessSubscriber, LivelinessSubscriberAliasError>`
-        // for surface parity with the aliased entry point. wz-ap-demo
-        // builds with default features (liveliness-subscriber ON), so
-        // the only Err variant the caller can hit here is
-        // `FeatureDisabled` — impossible on this build. `.expect` is
-        // the textbook shape because a panic at this site would
-        // indicate a default-features misconfiguration, which is a
-        // build-system bug rather than a runtime condition.
-        // R311ph — `#[non_exhaustive]` LivelinessSubscriberOptions can't be
-        // built with literal syntax outside its crate; set the public `history`
-        // field on the default instead. `history = true` (--liveliness-subscribe-history)
-        // makes the subscriber order-independent of token declare time.
-        let mut liveliness_options = LivelinessSubscriberOptions::default();
-        liveliness_options.history = liveliness_subscriber_history;
-        session
-            .declare_liveliness_subscriber(
-                owned_filter,
-                liveliness_options,
-                move |sample: LivelinessSample<'_>| {
-                    let kind_str = match sample.kind {
-                        LivelinessSampleKind::Put => "PUT",
-                        LivelinessSampleKind::Delete => "DELETE",
-                    };
-                    log::info!(
-                        "wz-ap-demo: LIVELINESS SAMPLE {} filter='{}' keyexpr='{}' token_id={}",
-                        kind_str,
-                        key_for_callback,
-                        sample.keyexpr,
-                        sample.token_id,
-                    );
-                },
-            )
-            .expect("liveliness-subscriber feature is ON in wz-ap-demo default build")
-    });
+    // R311y791 — ONE subscriber per `--liveliness-subscribe` occurrence, all on
+    // this single session and in argv order, so the handles drop together at
+    // `run_demo` scope exactly as the single one did.
+    //
+    // The ORDER is what a caller can rely on, and the SLOT INDEX is what the
+    // log line carries, because the interesting case is the LATER subscriber:
+    // against a zenoh router the second CURRENT token interest from one face is
+    // answered with the id the router already used for that resource
+    // (`make_token_id` reuses `local_tokens[res]`, hat/router/token.rs:978-990),
+    // so wz's first-declaration-wins guard drops that reply and everything the
+    // later subscriber sees comes from the R311y790 local replay.
+    // R311y791 — `--liveliness-subscribe-on-sample <keyexpr>`: the LATE
+    // subscriber, declared from inside the first subscriber's callback the
+    // moment a `Put` proves this session already knows a token.
+    //
+    // The trigger is an OBSERVABLE, not a sleep, and that is the whole point:
+    // the precondition this flag exists to create is "the registry already
+    // holds the token", and a timer would leave "the token was late" and "the
+    // replay did nothing" looking identical from the sample side — the same
+    // reason the interop fixture gates pico on its own declaration banner.
+    //
+    // Declaring a subscriber from inside a liveliness callback is SAFE by
+    // construction and not a liberty taken here: R311lg made the sample plane
+    // ride the deferred-fire queue precisely so the callback runs OUTSIDE the
+    // observer lock and may re-enter any observer-locking session API. This is
+    // that guarantee's first use in the demo.
+    let late_liveliness: Arc<Mutex<Vec<LivelinessSubscriber>>> = Arc::new(Mutex::new(Vec::new()));
+    let liveliness_subscribers: Vec<_> = liveliness_subscriber_keyexpr
+        .iter()
+        .enumerate()
+        .map(|(slot, filter)| {
+            let owned_filter = filter.to_string();
+            let key_for_callback = owned_filter.clone();
+            // Only slot 0 carries the late-declare trigger: the flag names ONE
+            // extra subscriber, so arming every slot would make the count depend
+            // on which sample happened to land first.
+            let on_sample_keyexpr = if slot == 0 {
+                liveliness_subscribe_on_sample.map(|s| s.to_string())
+            } else {
+                None
+            };
+            let late_sink = late_liveliness.clone();
+            let session_for_late = session.clone();
+            // R311q — declare_liveliness_subscriber now returns
+            // `Result<LivelinessSubscriber, LivelinessSubscriberAliasError>`
+            // for surface parity with the aliased entry point. wz-ap-demo
+            // builds with default features (liveliness-subscriber ON), so
+            // the only Err variant the caller can hit here is
+            // `FeatureDisabled` — impossible on this build. `.expect` is
+            // the textbook shape because a panic at this site would
+            // indicate a default-features misconfiguration, which is a
+            // build-system bug rather than a runtime condition.
+            // R311ph — `#[non_exhaustive]` LivelinessSubscriberOptions can't be
+            // built with literal syntax outside its crate; set the public `history`
+            // field on the default instead. `history = true` (--liveliness-subscribe-history)
+            // makes the subscriber order-independent of token declare time.
+            let mut liveliness_options = LivelinessSubscriberOptions::default();
+            liveliness_options.history = liveliness_subscriber_history;
+            session
+                .declare_liveliness_subscriber(
+                    owned_filter,
+                    liveliness_options,
+                    move |sample: LivelinessSample<'_>| {
+                        let kind_str = match sample.kind {
+                            LivelinessSampleKind::Put => "PUT",
+                            LivelinessSampleKind::Delete => "DELETE",
+                        };
+                        // R311y791 — `slot=` is APPENDED, never spliced into the
+                        // middle. Four fixtures match this line, two of them on
+                        // the exact string through `token_id=N`; a slot inserted
+                        // before that point renames the log line for all of them.
+                        log::info!(
+                            "wz-ap-demo: LIVELINESS SAMPLE {} filter='{}' keyexpr='{}' \
+                         token_id={} slot={}",
+                            kind_str,
+                            key_for_callback,
+                            sample.keyexpr,
+                            sample.token_id,
+                            slot,
+                        );
+                        // The late declare fires ONCE, on the first Put. A Delete
+                        // proves the opposite of the precondition (the token is
+                        // gone), so it must not arm it.
+                        if sample.kind != LivelinessSampleKind::Put {
+                            return;
+                        }
+                        let Some(late_keyexpr) = on_sample_keyexpr.as_ref() else {
+                            return;
+                        };
+                        let mut held = late_sink.lock().expect("late liveliness handle mutex");
+                        if !held.is_empty() {
+                            return;
+                        }
+                        let mut late_options = LivelinessSubscriberOptions::default();
+                        late_options.history = true;
+                        let late_filter_for_log = late_keyexpr.clone();
+                        match session_for_late.declare_liveliness_subscriber(
+                            late_keyexpr.clone(),
+                            late_options,
+                            move |late: LivelinessSample<'_>| {
+                                let late_kind = match late.kind {
+                                    LivelinessSampleKind::Put => "PUT",
+                                    LivelinessSampleKind::Delete => "DELETE",
+                                };
+                                // Same shape as its siblings, `slot=late` in the
+                                // slot position -- one line format, one parser.
+                                log::info!(
+                                    "wz-ap-demo: LIVELINESS SAMPLE {} filter='{}' keyexpr='{}' \
+                                 token_id={} slot=late",
+                                    late_kind,
+                                    late_filter_for_log,
+                                    late.keyexpr,
+                                    late.token_id,
+                                );
+                            },
+                        ) {
+                            Ok(handle) => {
+                                held.push(handle);
+                                log::info!(
+                                    "wz-ap-demo: LATE LIVELINESS SUBSCRIBER declared on '{}' \
+                                 (triggered by a PUT on '{}')",
+                                    late_keyexpr,
+                                    sample.keyexpr,
+                                );
+                            }
+                            Err(e) => log::warn!(
+                                "wz-ap-demo: late liveliness subscriber declare rejected for \
+                             keyexpr='{late_keyexpr}': {e}"
+                            ),
+                        }
+                    },
+                )
+                .expect("liveliness-subscriber feature is ON in wz-ap-demo default build")
+        })
+        .collect();
 
     let queryable = queryable_spec.and_then(|spec| {
         let QueryableSpec {
@@ -1187,7 +1294,8 @@ fn install_session_handles(
 
     SessionHandles {
         _subscriber: subscriber,
-        _liveliness_subscriber: liveliness_subscriber,
+        _liveliness_subscribers: liveliness_subscribers,
+        _late_liveliness_subscribers: late_liveliness,
         _queryable: queryable,
         _publisher: publisher,
         _matching_listener: matching_listener,

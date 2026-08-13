@@ -245,6 +245,28 @@ pub(crate) fn parse_pair(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
+/// R311y791 — every occurrence of a repeatable `--flag <value>` pair, in argv
+/// order. [`parse_pair`] returns the FIRST and silently discards the rest,
+/// which is the right shape for a flag that names one thing (one endpoint, one
+/// token) and the wrong one for a flag that names a SET.
+///
+/// Argv order is preserved and load-bearing for the caller that needed this:
+/// `--liveliness-subscribe` declares one subscriber per occurrence on ONE
+/// session, and "the second subscriber" is only a meaningful phrase if the
+/// order the operator wrote is the order the demo declares in.
+pub(crate) fn parse_pairs(args: &[String], flag: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == flag {
+            if let Some(v) = it.next() {
+                out.push(v.clone());
+            }
+        }
+    }
+    out
+}
+
 /// R311y786 — parse `--connect-retry <init_ms>,<max_ms>,<factor>` into the
 /// outbound re-dial schedule (zenoh's `connect.retry`:
 /// `period_init_ms` / `period_max_ms` / `period_increase_factor`). Absent =>
@@ -599,7 +621,18 @@ pub(crate) struct DeclareEmitSpec {
     /// peer-facing side) because a single demo instance can act as
     /// token publisher + token subscriber simultaneously on a wz↔wz
     /// round-trip.
-    pub(crate) liveliness_subscriber_keyexpr: Option<String>,
+    /// R311y791 — REPEATABLE. One subscriber is declared per entry, in argv
+    /// order, all on the SAME session. Empty = no liveliness subscriber, which
+    /// is what the absent flag used to mean as `None`.
+    ///
+    /// It became a list for a witness that needs exactly two on one session:
+    /// a zenoh router answers a second CURRENT token interest from the same
+    /// face with the id it already used for that resource (`make_token_id`
+    /// reuses `local_tokens[res]` whenever the mode is future-bearing,
+    /// `hat/router/token.rs:978-990`), so wz's own first-declaration-wins
+    /// guard drops the reply and the second subscriber is served entirely by
+    /// the local replay (R311y790).
+    pub(crate) liveliness_subscriber_keyexpr: Vec<String>,
     /// R311y775 — `--querier-matching-log <keyexpr>`: declare a
     /// [`wz::runtime_tokio::session::Querier`] on `keyexpr` plus a
     /// `Querier::declare_matching_listener`, and log every matching-status
@@ -628,6 +661,18 @@ pub(crate) struct DeclareEmitSpec {
     /// the leg-7 interop ordering race (a late-arriving `history = false`
     /// subscriber would miss an already-alive token).
     pub(crate) liveliness_subscriber_history: bool,
+    /// R311y791 — `--liveliness-subscribe-on-sample <keyexpr>`: declare ONE
+    /// more liveliness subscriber (always `history = true`) from inside the
+    /// first subscriber's callback, the moment a `Put` proves this session
+    /// already knows a token.
+    ///
+    /// Separate from the repeatable `--liveliness-subscribe` because the two
+    /// differ in WHEN, and when is the whole observable: subscribers named by
+    /// that flag are declared before the session is driven, so their
+    /// `peer_token_table` is empty and there is nothing to replay. This one is
+    /// declared after, which is the only arrangement in which the R311y790
+    /// declare-time replay is the thing under test.
+    pub(crate) liveliness_subscriber_on_sample: Option<String>,
     /// R311y442 — `--advanced-subscribe <keyexpr>`: declare an
     /// [`wz::runtime_tokio::AdvancedSubscriber`] with a STARTUP HISTORY GET, so a
     /// subscriber that joins after a publisher has already published recovers the

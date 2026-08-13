@@ -164,15 +164,29 @@ pub(crate) fn print_usage() {
     eprintln!("    --declare-token <keyexpr>");
     eprintln!("                             send a single Declare(DeclToken) on this keyexpr");
     eprintln!("                             literal once the session reaches Established");
-    eprintln!("    --liveliness-subscribe <keyexpr>");
+    eprintln!("    --liveliness-subscribe <keyexpr>   [repeatable]");
     eprintln!("                             declare a liveliness subscriber on <keyexpr> (R280);");
     eprintln!("                             emits one Interest(KE|TO|R|F) on Established and");
-    eprintln!("                             logs 'LIVELINESS SAMPLE PUT/DELETE' on every matching");
-    eprintln!("                             peer DeclToken / UndeclToken arrival");
+    eprintln!("                             logs 'LIVELINESS SAMPLE slot=<n> PUT/DELETE' on every");
+    eprintln!("                             matching peer DeclToken / UndeclToken arrival.");
+    eprintln!(
+        "                             Repeat for several subscribers on ONE session; slot=<n>"
+    );
+    eprintln!("                             is the argv position");
     eprintln!("    --liveliness-subscribe-history");
     eprintln!("                             declare the liveliness subscriber with history=true");
     eprintln!("                             (replay CURRENT alive tokens on subscription, not");
     eprintln!("                             just future declares); order-independent observer");
+    eprintln!("    --liveliness-subscribe-on-sample <keyexpr>");
+    eprintln!("                             declare ONE more liveliness subscriber (history=true)");
+    eprintln!(
+        "                             from inside the first one's callback, on the first PUT"
+    );
+    eprintln!("                             -- i.e. once this session already KNOWS a token. Logs");
+    eprintln!(
+        "                             'LIVELINESS SAMPLE slot=late'. The declare-time replay"
+    );
+    eprintln!("                             is the only thing that can serve it (R311y790/y791)");
     eprintln!("    --advanced-subscribe <keyexpr>");
     eprintln!("                             declare an AdvancedSubscriber on <keyexpr> whose");
     eprintln!("                             STARTUP HISTORY GET drains every matching publisher's");

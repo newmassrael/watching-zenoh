@@ -103,9 +103,9 @@ use crate::args::parse_repeated;
 #[cfg(feature = "scouting-active")]
 use crate::args::DEMO_ZID;
 use crate::args::{
-    parse_pair, AdvancedPublishSpec, DeclareEmitSpec, LivelinessGetSpec, PublisherSpec,
-    PushOperation, QueryEmitSpec, QueryRoleSpec, QueryableReply, QueryableSpec, RemoteLogSpec,
-    ReplyConsumerSpec, Role, DEFAULT_SCOUT_BUDGET_MS,
+    parse_pair, parse_pairs, AdvancedPublishSpec, DeclareEmitSpec, LivelinessGetSpec,
+    PublisherSpec, PushOperation, QueryEmitSpec, QueryRoleSpec, QueryableReply, QueryableSpec,
+    RemoteLogSpec, ReplyConsumerSpec, Role, DEFAULT_SCOUT_BUDGET_MS,
 };
 use crate::runner::run_demo;
 use crate::usage::{print_usage, ABOUT};
@@ -1001,11 +1001,17 @@ fn main() -> ExitCode {
     // liveliness subscriber on the literal keyexpr pattern. Emits one
     // outbound Interest once Established and logs every matching peer
     // DeclToken / UndeclToken sample to stderr.
-    let liveliness_subscribe_opt = parse_pair(rest, "--liveliness-subscribe");
+    // R311y791 — REPEATABLE: one subscriber per occurrence, all on this one
+    // session, in argv order.
+    let liveliness_subscribe_opt = parse_pairs(rest, "--liveliness-subscribe");
     // R311ph — `--liveliness-subscribe-history` declares the liveliness
     // subscriber with `history = true` (replay current alive tokens on
     // subscription), so an observer is order-independent of token declare time.
     let liveliness_subscribe_history = rest.iter().any(|a| a == "--liveliness-subscribe-history");
+    // R311y791 — `--liveliness-subscribe-on-sample <keyexpr>` declares one MORE
+    // liveliness subscriber, from inside the first one's callback, once a Put
+    // has proven the session already knows a token.
+    let liveliness_subscribe_on_sample = parse_pair(rest, "--liveliness-subscribe-on-sample");
     // R311y775 — `--querier-matching-log <keyexpr>` declares a Querier plus a
     // `Querier::declare_matching_listener` on that keyexpr. The QUERYABLE-plane
     // twin of `--matching-log`; valued rather than bare because a querier carries
@@ -1277,7 +1283,7 @@ fn main() -> ExitCode {
         && queryable_opt.is_none()
         && query_opt.is_none()
         && declare_token_opt.is_none()
-        && liveliness_subscribe_opt.is_none()
+        && liveliness_subscribe_opt.is_empty()
         && liveliness_get_opt.is_none()
         && !on_remote_sub_log
         && !on_remote_q_log
@@ -1666,8 +1672,8 @@ fn main() -> ExitCode {
     if let Some(d) = &declare_token_opt {
         log::info!("declare-token = {d}");
     }
-    if let Some(d) = &liveliness_subscribe_opt {
-        log::info!("liveliness-subscribe = {d}");
+    for (i, d) in liveliness_subscribe_opt.iter().enumerate() {
+        log::info!("liveliness-subscribe[{i}] = {d}");
     }
     if on_remote_sub_log {
         log::info!("on-remote-subscriber-log = true");
@@ -1733,6 +1739,7 @@ fn main() -> ExitCode {
         token_keyexpr: declare_token_opt,
         liveliness_subscriber_keyexpr: liveliness_subscribe_opt,
         liveliness_subscriber_history: liveliness_subscribe_history,
+        liveliness_subscriber_on_sample: liveliness_subscribe_on_sample,
         querier_matching_log_keyexpr: querier_matching_log_opt,
         advanced_subscriber_keyexpr: advanced_subscribe_opt,
         advanced_history_max,
