@@ -63,7 +63,7 @@ const QUERYABLE_KEY: &str = "demo/**";
 /// deferred-fire drain runs on the sweep task's 100ms cadence.
 const MATCHING_TIMEOUT: Duration = Duration::from_secs(25);
 
-// wz-proves: declare-interest queryables-interest through a router
+// wz-proves: declare-interest zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (zenohd + wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored"]
 fn a_wz_querier_matching_listener_behind_zenohd_learns_of_a_pico_queryable() {

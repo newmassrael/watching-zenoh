@@ -68,7 +68,7 @@ const SUB_KEY: &str = "demo/**";
 /// worse than no test at all, and the same reasoning sets the sibling's bound.
 const MATCHING_TIMEOUT: Duration = Duration::from_secs(25);
 
-// wz-proves: declare-interest subscribers-interest through a router
+// wz-proves: declare-interest zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (zenohd + wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored"]
 fn a_wz_matching_listener_behind_zenohd_learns_of_a_pico_subscriber() {
