@@ -717,10 +717,16 @@ jobs:
         # `always()` so a run that goes red elsewhere still reports its margin.
         # A run killed BY the timeout cannot reach this step at all — that is
         # the case this exists to prevent, not to diagnose.
-        # R311y794 — the 4th argument is the FLOOR. This job is post-split at
-        # ~62%, so 30 is slack; it is passed anyway because the number that
-        # would make it fire is a FUTURE split, and a job peeled down to
-        # nothing should be told to give its budget back.
+        # R311y794 — the 4th argument is the FLOOR. The number that would make
+        # it fire is a FUTURE split; a job peeled down to nothing should be
+        # told to give its budget back.
+        #
+        # R311y795 MEASURED THE SPLIT: run 31751783653 put this job at 1066s,
+        # 59% of budget, against 1730s (96%) before the C0mut peel. The y791
+        # prediction was ~62%. 30 stays here rather than dropping to the 20 its
+        # siblings took, because this job's own spread is narrow (1639s median
+        # / 1730s max pre-split) and 59% sits twice as far above 30 as the
+        # variance.
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 30
 
@@ -2402,12 +2408,17 @@ jobs:
         # workflow can enforce. Time has one, and a cancel at that ceiling
         # grades nothing.
         #
-        # R311y794 — the 4th argument is the FLOOR. The y793 split took this
-        # job to ~50%, so 30 is slack today; it is what will speak up if a
-        # later split takes it far enough down that 45 minutes stops being a
-        # ceiling anything can reach.
+        # R311y795 — the FLOOR is 20, not the 30 y794 first wrote, and the
+        # correction comes from a field measurement rather than taste. Run
+        # 31751783653 put this job at 1683s where the ten-run band ending at
+        # 31750463524 was 2039-2328s: the real spread is 1683-2328s, i.e. 645s
+        # wide. Subtract the y793 split's 856s and the post-split band is
+        # roughly 827-1472s — 31%-55% of this budget. A floor of 30% sits 17s
+        # under the low end of that, so it would have fired on runner variance
+        # and taught the reader to ignore it. 20% (540s) clears the band; the
+        # 90% alarm (2430s) clears the high end by nearly as much.
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90 30
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90 20
 
   # ─────────────────────────────────────────────────────────────────
   # R311y793 — the ROUTING + ADMINSPACE job. Eight lanes peeled off
@@ -2494,10 +2505,16 @@ jobs:
         # written for. y793 gave this job 45 minutes for its COLD first run
         # against a warm estimate of 856s, and wrote down that nothing would
         # ever make anyone lower it again. The floor is that thing: once the
-        # cache is warm and this lands near 30%, the step fails and says to give
-        # the budget back, in the same commit that reads it.
+        # cache is warm, the step fails and says to give the budget back, in
+        # the same commit that reads it.
+        #
+        # R311y795 — 20 rather than 30, for the reason the feature-gates job
+        # records: the warm estimate here is ~960s with prep, which is 36% of
+        # this budget, and the sibling job's measured spread is 645s wide. A
+        # floor of 30% (810s) would be inside that noise before it was inside
+        # the signal. 20% is 540s.
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90 30
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90 20
 
   transport-modes:
     name: transport-MODE lanes (the §5.1 mode axis)
