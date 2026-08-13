@@ -4370,6 +4370,103 @@ pub mod wire_tap {
         pkt
     }
 
+    /// What a single-byte damage sweep found, by outcome.
+    ///
+    /// The three counts are kept apart because they answer different questions
+    /// and one of them is the answer: `vanished` and `still_clean` are both
+    /// "the Err arm was not reached", and collapsing them would hide that the
+    /// first is the analyzer refusing to frame at all while the second is the
+    /// analyzer correctly not caring.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct DamageSweep {
+        /// Byte positions visited. Zero means the verdict is about nothing.
+        pub swept: usize,
+        /// Positions where at least one frame came back `Err`.
+        pub yielded_err: usize,
+        /// Positions where the damaged half produced no frames at all — the
+        /// assembler desynchronised and the direction disappeared.
+        pub vanished: usize,
+        /// Positions the decoder had no objection to, which is usually correct:
+        /// a byte inside a payload is not the transport decoder's business.
+        pub still_clean: usize,
+    }
+
+    /// Flip every byte of one half of a recording in turn and classify what the
+    /// dissector does with the result.
+    ///
+    /// R311y764 (carry N64). Both wire witnesses reject any transport message
+    /// that comes back `Err`, and R311y759 measured that TWO hand-picked damage
+    /// offsets never reached that arm — one desynchronised a direction into
+    /// disappearing, the other landed in a payload and correctly changed
+    /// nothing. So the assertion those witnesses exist to make was carried as
+    /// unproven: a check nobody has seen fire may be a check that cannot fire,
+    /// and then its green is a statement about nothing.
+    ///
+    /// Two offsets are not an answer to that, so this sweeps the space. It
+    /// establishes EXISTENCE and deliberately reports no offset — an offset
+    /// would be pinned to one handshake's length and would drift the first time
+    /// the foreign implementation changed it.
+    ///
+    /// `side` is the half to damage, and it should be the FOREIGN one: damaging
+    /// wz's own bytes would ask whether wz's decoder objects to wz's encoder,
+    /// which is the self-witness this whole harness exists to escape.
+    pub fn sweep_single_byte_damage(
+        recording: &[(Side, Vec<u8>)],
+        side: Side,
+        dialer_port: u16,
+        listener_port: u16,
+    ) -> DamageSweep {
+        let mut sweep = DamageSweep::default();
+        for seg_index in 0..recording.len() {
+            if recording[seg_index].0 != side {
+                continue;
+            }
+            for byte_index in 0..recording[seg_index].1.len() {
+                let mut damaged = recording.to_vec();
+                damaged[seg_index].1[byte_index] ^= 0xFF;
+                sweep.swept += 1;
+                let pcap = synthesise_pcap(&damaged, dialer_port, listener_port);
+                let Ok(dissection) = wz_capture::Dissection::from_pcap(&pcap) else {
+                    sweep.vanished += 1;
+                    continue;
+                };
+                let flows = dissection.flows();
+                let Some(flow) = flows.first() else {
+                    sweep.vanished += 1;
+                    continue;
+                };
+                // The damaged half is whichever direction carries the port the
+                // damaged side was synthesised onto. Derived from the flow key
+                // for the same reason the witnesses derive their labels: `low`
+                // is the lesser endpoint by (addr, port), so with one address
+                // it is decided by the two port constants (R311y761).
+                let damaged_port = u32::from(match side {
+                    Side::FromDialer => dialer_port,
+                    Side::FromListener => listener_port,
+                });
+                let damaged_direction = if flow.flow.low.port == damaged_port {
+                    wz_capture::Direction::A
+                } else {
+                    wz_capture::Direction::B
+                };
+                let errors = flow.frames.iter().filter(|f| f.frame.is_err()).count();
+                let surviving = flow
+                    .frames
+                    .iter()
+                    .filter(|f| f.direction == damaged_direction)
+                    .count();
+                if errors > 0 {
+                    sweep.yielded_err += 1;
+                } else if surviving == 0 {
+                    sweep.vanished += 1;
+                } else {
+                    sweep.still_clean += 1;
+                }
+            }
+        }
+        sweep
+    }
+
     /// Turn a recording into a pcap, preserving forwarding order.
     ///
     /// The two ports are the SYNTHESISED endpoints, not the real ones: the real

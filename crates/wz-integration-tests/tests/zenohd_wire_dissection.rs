@@ -87,6 +87,14 @@
 //! assertion reads what the batch actually holds rather than passing on any
 //! non-empty list. The idle leg's `[]` is the other half of that binding — a
 //! `records_on` that returned junk would red there.
+//!
+//! And the `Err`-rejecting assertion is shown REACHABLE on these bytes rather
+//! than assumed to be (carry N64, which was filed against the pico witness and
+//! is the same question here about a different encoder). Every byte of zenohd's
+//! half is flipped in turn: on a representative run over its 68 bytes, 6
+//! positions reach the `Err` arm, 3 vanish the direction, 59 change nothing.
+//! Existence is asserted, never an offset — the counts move with the
+//! handshake's length.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -96,7 +104,9 @@ use wz_integration_tests::common::{
     read_captured, wait_for_substring, wait_for_tcp_accept_alive, wz_ap_demo_binary, zenohd_binary,
     ChildGuard, PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
 };
-use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Recording, Side};
+use wz_integration_tests::wire_tap::{
+    sweep_single_byte_damage, synthesise_pcap, tap_proxy, Recording, Side,
+};
 use wz_session_core::inbound::InboundFrame;
 use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
 use wz_session_core::passive::Direction;
@@ -411,6 +421,28 @@ fn the_analyzer_parses_every_message_a_real_zenohd_puts_on_the_wire() {
         "an IDLE zenohd sent record(s) to a face that declares nothing: \
          {idle_records:?}. The routing witness reads a `Push` here as proof of \
          routing, and that reading depends on this half being silent"
+    );
+
+    // ── AND IS THE Err ARM REACHABLE ON THESE BYTES? (R311y764, N64) ──────
+    // The same question the pico witness asks, asked separately because the
+    // answer is about an ENCODER and these are a different encoder's bytes. The
+    // half to damage is zenohd's: damaging wz's own would ask whether wz's
+    // decoder objects to wz's encoder, which is the self-witness this harness
+    // exists to escape. zenohd LISTENS here (pico dialled in the sibling), so
+    // the foreign half is `FromListener` — the roles swap between the two
+    // witnesses and the constant has to swap with them.
+    let sweep = sweep_single_byte_damage(&segments, Side::FromListener, DIALER_PORT, LISTENER_PORT);
+    eprintln!("damage sweep over zenohd's half: {sweep:?}");
+    assert!(
+        sweep.swept > 0,
+        "the damage sweep visited no byte, so its verdict is about nothing"
+    );
+    assert!(
+        sweep.yielded_err > 0,
+        "NO single-byte damage to the bytes a real zenohd wrote reaches the \
+         `Err` arm: {sweep:?}. The parse assertion above rejects any frame that \
+         comes back Err, and this would say it is unfireable on this encoder's \
+         output — a finding about wz's decoder, not a reason to drop it"
     );
 }
 

@@ -69,12 +69,26 @@
 //!   that lands in a payload, and a payload's contents are not the transport
 //!   decoder's business.
 //!
-//! So the `Err`-rejecting assertion is NOT yet shown to be reachable — neither
-//! probe produced a single `Err` frame; damage either vanished a direction or
-//! changed nothing. It is kept because it is the statement this witness exists
-//! to make, and stated as unproven rather than described as if it had fired.
-//! The assertions that DID carry the falsification are the flow count and the
-//! both-halves count.
+//! So after R311y759 the `Err`-rejecting assertion was not shown to be
+//! reachable — neither probe produced a single `Err` frame; damage either
+//! vanished a direction or changed nothing. It was kept because it is the
+//! statement this witness exists to make, and carried as unproven (N64) rather
+//! than described as if it had fired.
+//!
+//! ## R311y764 — the sweep that answered it
+//!
+//! Two hand-picked offsets are not an answer to "is this arm reachable", so the
+//! damage is now SWEPT: every byte of the foreign half is flipped in turn and
+//! the outcome classified (`wire_tap::sweep_single_byte_damage`, shared with the
+//! zenohd witness so the classification is one fact). On a representative run
+//! over pico's 110 bytes: 5 positions reach the `Err` arm, 3 vanish the
+//! direction, 102 change nothing the transport decoder objects to. y759's two
+//! probes missed a target that is roughly one byte in twenty — which is the
+//! argument for sweeping rather than guessing.
+//!
+//! What is asserted is EXISTENCE, never an offset: the counts move between runs
+//! (a `KeepAlive` or a `Close` changes the recording's length), and an offset
+//! pinned to one handshake would drift the first time pico's did.
 
 use std::process::Command;
 use std::time::Duration;
@@ -84,7 +98,7 @@ use wz_integration_tests::common::{
     graceful_terminate, read_captured, spawn_on_ephemeral_port, wait_for_substring,
     wz_ap_demo_binary, zenoh_pico_cli_binary,
 };
-use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Side};
+use wz_integration_tests::wire_tap::{sweep_single_byte_damage, synthesise_pcap, tap_proxy, Side};
 use wz_session_core::inbound::InboundFrame;
 use wz_session_core::passive::Direction;
 
@@ -274,4 +288,40 @@ fn the_analyzer_parses_every_message_a_real_zenoh_pico_session_puts_on_the_wire(
             );
         }
     }
+
+    // ── IS THE Err-REJECTING ASSERTION REACHABLE AT ALL? (R311y764, N64) ──
+    //
+    // R311y759 damaged this recording twice and neither probe produced a single
+    // `Err`: a byte flipped near the start desynchronised that direction into
+    // DISAPPEARING, and one flipped at the end landed in a payload and correctly
+    // changed nothing. So the assertion this whole witness exists to make was
+    // carried as UNPROVEN — a check nobody has seen fire may be a check that
+    // cannot fire, and then its green says nothing.
+    //
+    // Two hand-picked offsets are not an answer to that question, so the damage
+    // is SWEPT: every byte of the foreign half is flipped in turn, the capture
+    // re-synthesised and re-dissected, and each outcome classified. What is
+    // asserted is EXISTENCE — that some damage to bytes pico wrote reaches the
+    // `Err` arm — never an offset, because an offset would drift the first time
+    // pico's handshake changed length. The sweep runs on the same recording the
+    // assertions above just accepted, so it cannot be about different bytes.
+    // pico DIALLED here, so its half is the one to damage — damaging wz's own
+    // bytes would ask whether wz objects to wz.
+    let sweep = sweep_single_byte_damage(&segments, Side::FromDialer, DIALER_PORT, LISTENER_PORT);
+    eprintln!("damage sweep over pico's half: {sweep:?}");
+    // ANTI-VACUITY for the sweep itself: a sweep that visited no byte reports
+    // `yielded_err = 0` for the same reason a sweep of an unfireable assertion
+    // would, and those two must not read alike.
+    assert!(
+        sweep.swept > 0,
+        "the damage sweep visited no byte, so its verdict is about nothing"
+    );
+    assert!(
+        sweep.yielded_err > 0,
+        "NO single-byte damage to the bytes pico wrote reaches the `Err` arm: \
+         {sweep:?}. The headline assertion above rejects any frame that comes \
+         back Err, and this would say it is unfireable — which makes its green \
+         a statement about nothing. That is carry N64, and it would be a \
+         finding about wz's decoder, not a reason to drop the assertion"
+    );
 }

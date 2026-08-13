@@ -134,7 +134,14 @@ use alloc::vec::Vec;
 
 use wz_session_core::chain_loss::ChainLoss;
 use wz_session_core::parse_error::InboundParseError;
-use wz_session_core::passive::{
+// R311y764 — `pub`, because these are the vocabulary this crate's own public
+// fields are written in. `FlowDissection` exposes a `PassiveSession` and hands
+// out `PassiveFrame`s whose `direction` is a `Direction`, so until now every
+// consumer of those fields had to depend on `wz-session-core` directly to name
+// what it was already holding. A public API that returns types it does not
+// export makes its callers re-derive the dependency graph; this is the same
+// reasoning that re-exported `messages` above.
+pub use wz_session_core::passive::{
     Direction, FlowContext, PassiveFrame, PassiveSession, PassiveStall,
 };
 use wz_session_core::scouting_message::{parse_scouting, ScoutingFrame};
