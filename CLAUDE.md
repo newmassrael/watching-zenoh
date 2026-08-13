@@ -257,8 +257,12 @@ SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commerci
 SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 ```
 
-Applies to: `sources/**.scxml`, `crates/**/*.rs`,
-`runtime/**/*.{rs,c,h}`, `deploy/**.yaml`.
+Applies to: `sources/**.scxml`, `crates/**/*.rs`, `deploy/**.yaml`.
+
+(R311y794 removed `runtime/**/*.{rs,c,h}` from this list: there is no
+`runtime/` directory in this tree and there has not been one. The clause
+was a rule with no subject — the same class of residual the atom register
+carries, found here while mapping paths to lanes for pre-push gate 5.)
 
 **Generated files** (`out/**`, committed in-repo since R311y22) carry
 whatever header `sce-codegen` emits: SCE's MIT header where SCE emits

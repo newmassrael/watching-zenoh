@@ -717,8 +717,12 @@ jobs:
         # `always()` so a run that goes red elsewhere still reports its margin.
         # A run killed BY the timeout cannot reach this step at all — that is
         # the case this exists to prevent, not to diagnose.
+        # R311y794 — the 4th argument is the FLOOR. This job is post-split at
+        # ~62%, so 30 is slack; it is passed anyway because the number that
+        # would make it fire is a FUTURE split, and a job peeled down to
+        # nothing should be told to give its budget back.
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 30
 
   # ─────────────────────────────────────────────────────────────────
   # R311y385 — the VALIDATE + CODEGEN job. Layers A/A2/A3/A4 (Mnemosyne
@@ -2397,8 +2401,13 @@ jobs:
         # reports and never fails, because free space has no ceiling this
         # workflow can enforce. Time has one, and a cancel at that ceiling
         # grades nothing.
+        #
+        # R311y794 — the 4th argument is the FLOOR. The y793 split took this
+        # job to ~50%, so 30 is slack today; it is what will speak up if a
+        # later split takes it far enough down that 45 minutes stops being a
+        # ceiling anything can reach.
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90 30
 
   # ─────────────────────────────────────────────────────────────────
   # R311y793 — the ROUTING + ADMINSPACE job. Eight lanes peeled off
@@ -2481,8 +2490,14 @@ jobs:
         run: df -h /
 
       - name: Budget margin — this job may not approach its timeout in silence
+        # R311y794 — THE FLOOR MATTERS MOST HERE, and this is the job it was
+        # written for. y793 gave this job 45 minutes for its COLD first run
+        # against a warm estimate of 856s, and wrote down that nothing would
+        # ever make anyone lower it again. The floor is that thing: once the
+        # cache is warm and this lands near 30%, the step fails and says to give
+        # the budget back, in the same commit that reads it.
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90 30
 
   transport-modes:
     name: transport-MODE lanes (the §5.1 mode axis)

@@ -43,8 +43,24 @@
 # the two that matter look like boilerplate. Re-measure before assuming this
 # table still holds -- that is exactly how the `ci` job's "26m22s" rotted.
 #
+# CHECKED IN BOTH DIRECTIONS (R311y794). Too HIGH is the cancel this file was
+# written for. Too LOW is a budget nothing can approach, which is a gate that
+# cannot fire -- and a `timeout-minutes` that cannot fire is exactly the state
+# every job here was in before y791. This workspace already applies the
+# two-directional rule to its doc-link budget ("a crate whose count FALLS is
+# also a failure... a stale budget is a gate that has quietly stopped
+# measuring") and to the orphan ledger, which rejects a resolved-but-still-
+# ledgered entry. A time budget is the same kind of number.
+#
+# The floor is OPTIONAL because a job may be legitimately far under its budget
+# for a stated reason; passing one is the caller saying "this budget is a claim
+# I want held to". It exists because R311y793 gave the new routing-adminspace
+# job 45 minutes for its COLD first run and wrote down that nothing would ever
+# make anyone lower it again.
+#
 # USAGE
 #   job-budget-margin.sh <start-epoch-file> <budget-seconds> <alarm-percent>
+#                        [floor-percent]
 #
 # Exit 0 = inside the margin. Exit 1 = at or past the alarm fraction. Any
 # malformed input is exit 2 and is NOT treated as "inside the margin": a gate
@@ -52,14 +68,16 @@
 
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-    echo "job-budget-margin: usage: $0 <start-epoch-file> <budget-seconds> <alarm-percent>" >&2
+if [[ $# -lt 3 || $# -gt 4 ]]; then
+    echo "job-budget-margin: usage: $0 <start-epoch-file> <budget-seconds>" \
+        "<alarm-percent> [floor-percent]" >&2
     exit 2
 fi
 
 start_file="$1"
 budget_seconds="$2"
 alarm_pct="$3"
+floor_pct="${4:-}"
 
 if [[ ! -r "${start_file}" ]]; then
     echo "job-budget-margin: FAIL: start-epoch file '${start_file}' is unreadable." \
@@ -69,7 +87,7 @@ fi
 
 start_epoch="$(cat "${start_file}")"
 
-for value in "${start_epoch}" "${budget_seconds}" "${alarm_pct}"; do
+for value in "${start_epoch}" "${budget_seconds}" "${alarm_pct}" ${floor_pct:+"${floor_pct}"}; do
     if ! [[ "${value}" =~ ^[0-9]+$ ]]; then
         echo "job-budget-margin: FAIL: '${value}' is not a non-negative integer" >&2
         exit 2
@@ -99,7 +117,19 @@ elapsed=$(( now_epoch - start_epoch ))
 pct=$(( elapsed * 100 / budget_seconds ))
 
 echo "job-budget-margin: elapsed ${elapsed}s of ${budget_seconds}s budget (${pct}%)," \
-    "alarm at ${alarm_pct}%"
+    "alarm at ${alarm_pct}%${floor_pct:+, floor at ${floor_pct}%}"
+
+if [[ -n "${floor_pct}" && "${pct}" -lt "${floor_pct}" ]]; then
+    cat >&2 <<EOF
+::error::job used only ${pct}% of its ${budget_seconds}s budget (floor at ${floor_pct}%).
+Nothing failed. What this says is that the budget is too large to be a GATE: a
+timeout nothing can approach cannot fire, and a job whose ceiling cannot fire is
+the state every job in this workflow was in before R311y791. Lower
+timeout-minutes to something this job can actually run into, in the same commit
+that reads this -- the same rule the doc-link budget applies when a count FALLS.
+EOF
+    exit 1
+fi
 
 if [[ "${pct}" -ge "${alarm_pct}" ]]; then
     cat >&2 <<EOF

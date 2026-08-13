@@ -1979,8 +1979,24 @@ layer_c0b_job_budget_margin() {
         return 1
     fi
 
+    # R311y794 — THE FLOOR, the other direction. A budget nothing can approach is
+    # a ceiling that cannot fire, which is what every job here had before y791.
+    # 900s of 1800s = 50% must pass a floor of 30 and fail a floor of 60; the
+    # PAIR is the arm, because a floor that always fails would pass the second
+    # test alone and a floor that never fires would pass the first.
+    if ! WZ_JOB_BUDGET_NOW=1000900 bash "$script" "$stamp" 1800 90 30 >/dev/null; then
+        echo "  Layer C0b FAIL: 50% of budget was refused by a floor of 30%" >&2
+        return 1
+    fi
+    if WZ_JOB_BUDGET_NOW=1000900 bash "$script" "$stamp" 1800 90 60 >/dev/null 2>&1; then
+        echo "  Layer C0b FAIL: 50% of budget was ACCEPTED by a floor of 60% -- an" \
+            "oversized budget is a ceiling that cannot fire, and the floor is what" \
+            "says so" >&2
+        return 1
+    fi
+
     echo "  job-budget-margin gate: OK (passes 83%, refuses 94%, refuses a missing stamp" \
-        "and a zero budget)"
+        "and a zero budget; floor 30 passes 50% and floor 60 refuses it)"
     return 0
 }
 
@@ -2002,8 +2018,8 @@ layer_c0b_job_budget_margin() {
 # back alone. A widener that always returned the workspace would pass the
 # positive case and make the hook cost the full lane every time.
 layer_c0d_doclink_dependents() {
-    local script="scripts/lib/doclink-dependents.sh" out
-    out="$(bash "$script" wz-session-core)" || {
+    local script="scripts/lib/doclink_dependents.py" out
+    out="$(python3 "$script" wz-session-core)" || {
         echo "  Layer C0d FAIL: the expander exited non-zero on a real crate" >&2
         return 1
     }
@@ -2012,27 +2028,42 @@ layer_c0d_doclink_dependents() {
         echo "  Layer C0d FAIL: the input crate is missing from its own expansion" >&2
         return 1
     }
+    # QUALIFIED edge: wz-runtime-tokio writes `[wz_session_core::...]` outright.
     grep -qx "wz-runtime-tokio" <<<"$out" || {
         echo "  Layer C0d FAIL: wz-runtime-tokio is absent from wz-session-core's" \
             "expansion, but its sources carry [wz_session_core::...] doc links --" \
-            "the cross-crate half is not expanding" >&2
+            "the QUALIFIED half is not expanding" >&2
+        return 1
+    }
+    # R311y794 — UNQUALIFIED edge, and it is a SEPARATE arm because the two
+    # spellings are found by different code and y793 shipped only the first.
+    # wz-statechart-bridge reaches wz-session-core ONLY through `[Ident]` plus a
+    # `use wz_session_core::Ident`, so it is absent from the qualified answer and
+    # present in the right one. Measured: the union is 18 crates where the
+    # qualified spelling alone finds 14.
+    grep -qx "wz-statechart-bridge" <<<"$out" || {
+        echo "  Layer C0d FAIL: wz-statechart-bridge is absent from wz-session-core's" \
+            "expansion. It links in ONLY through an unqualified [Ident] resolved by a" \
+            "\`use wz_session_core::\` -- the spelling that carries more sites than the" \
+            "qualified one" >&2
         return 1
     }
 
-    out="$(bash "$script" wz-ap-demo)" || return 1
+    out="$(python3 "$script" wz-ap-demo)" || return 1
     if [[ "$out" != "wz-ap-demo" ]]; then
         echo "  Layer C0d FAIL: wz-ap-demo is a leaf nothing links INTO and must expand" \
             "to itself alone; got: $(tr '\n' ' ' <<<"$out")" >&2
         return 1
     fi
 
-    if bash "$script" >/dev/null 2>&1; then
+    if python3 "$script" >/dev/null 2>&1; then
         echo "  Layer C0d FAIL: an EMPTY crate set was accepted" >&2
         return 1
     fi
 
-    echo "  doclink-dependents gate: OK (wz-session-core pulls in wz-runtime-tokio," \
-        "wz-ap-demo expands to itself, an empty set is refused)"
+    echo "  doclink-dependents gate: OK (both link spellings expand -- qualified" \
+        "wz-runtime-tokio and unqualified wz-statechart-bridge; wz-ap-demo expands" \
+        "to itself; an empty set is refused)"
     return 0
 }
 
