@@ -2656,7 +2656,21 @@ layer_c1ax_cargo_test_routing_namespace() {
     # local pre-push runs changed crates rather than lanes. The lesson is the
     # one this file already carries elsewhere: when a count moves, grep every
     # `_runci_guarded_test` naming that FILTER, not just the lane you were in.
-    _runci_guarded_test "C1AX multicast_glue 18" 18 \
+    #
+    # R311y783: 18 -> 22, and the paragraph above did not prevent it. R311y782
+    # added four departure-Close cases to the same file, raised the same three
+    # C1q guards, and missed this same fourth one — the identical miss, one
+    # round after it was written down three lines from the guard it names. It
+    # redded on run 31678504853.
+    #
+    # So the prescription is restated as a MECHANICAL one rather than an
+    # exhortation, because the exhortation demonstrably does not survive
+    # contact: `grep -n 'lib multicast_glue' scripts/run-ci.sh` returns four
+    # lines, and a count change must touch every one of them. The general form
+    # is `grep -n '<the --lib or --test filter>' scripts/run-ci.sh`. Prose that
+    # says "remember to check" has now failed twice; a command that prints the
+    # call sites has not been tried.
+    _runci_guarded_test "C1AX multicast_glue 22" 22 \
         cargo test -p wz-runtime-tokio --features transport-multicast,routing-namespace --lib multicast_glue --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --all-targets --quiet -- -D warnings \
