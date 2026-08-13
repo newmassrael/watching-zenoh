@@ -1671,6 +1671,21 @@ PY
     # Enforcement MEASURED by re-introducing one of the eight verbatim, not by
     # observing that the script runs.
     python3 scripts/lib/expired_blocker_lint.py || return 1
+    # R311y779 (no register item) — the BINARY-FRESHNESS count. A fixture that
+    # spawns `wz-ap-demo` tests whatever build is on disk, and a stale one reads
+    # as "the feature does not work" rather than as stale -- its feature banner
+    # is identical either way. MEASURED, not hypothesised: R311y774 diagnosed
+    # exactly that red as a feature-closure defect that did not exist, and
+    # R311y776 retracted the round.
+    #
+    # A COUNT rather than a blanket requirement, because not every spawning
+    # fixture can be misled -- Layer E4's negative twin only checks that the demo
+    # REJECTS `--router`, and staleness says nothing about that. So the carried
+    # number is a standing statement of how much of the corpus can still be
+    # fooled, watched in BOTH directions like the C1bz doc budget: a new
+    # unchecked fixture raises it, fixing one lowers it, and either way the
+    # number has to move in the same commit. Enforcement measured both ways.
+    python3 scripts/lib/binary_freshness_lint.py || return 1
     # R311y750 (carry N40, carry N41) — the SELF-REPORT gate, the expired-blocker
     # lint's sibling one axis over: that one asks whether a stated blocker has
     # DISSOLVED, in three C-ABI crates; this one asks whether a comment declaring
