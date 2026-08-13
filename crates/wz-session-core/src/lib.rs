@@ -612,6 +612,19 @@ pub mod network_message;
 #[cfg(feature = "alloc")]
 pub mod driver_loop;
 
+/// R311y784 / R311y787 — the multicast departure observer surface
+/// (`MulticastPeerId` / `MulticastPeerLost` / `MulticastPeerLostReason`).
+/// Authored inside [`driver_loop`] and moved out of it: the types are
+/// allocation-free, but their PRODUCER is `multicast_dispatch`, which
+/// compiles on the no-alloc MCU profile where the alloc-gated `driver_loop`
+/// does not exist — so the observer surface is UNGATED and `driver_loop`
+/// re-exports it for the alloc-side consumers.
+///
+/// (`multicast_dispatch` is a code span, not an intra-doc link: it is
+/// `session-multicast`-gated and absent from the default-feature rustdoc run
+/// Layer C1bz measures.)
+pub mod multicast_peer_lost;
+
 /// Inbound transport-frame decode SSOT (`parse_inbound` + `InboundFrame`
 /// + `decode_ext_chain`) and the FSM-event projection
 /// (`inbound_to_fsm_event`). Hoisted from `wz-runtime-tokio::session_glue`

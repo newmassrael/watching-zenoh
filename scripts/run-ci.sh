@@ -5075,13 +5075,18 @@ layer_c1l_reassembly() {
 # pass on hundreds of unrelated session-core cases and would not move if the
 # multicast module cfg'd out), so the lane now ALSO runs its OWN subject
 # filtered, with the counts that make the composition visible -- `multicast`
-# selects 32 cases on bare session-multicast and 48 once reassembly + codec-push
-# + codec-join compose in. The 32 -> 48 step is the proof the second feature set
+# selects 36 cases on bare session-multicast and 52 once reassembly + codec-push
+# + codec-join compose in. The 36 -> 52 step is the proof the second feature set
 # is doing something.
+#
+# R311y784 moved both counts by 1 (the departure observer case) and R311y787 by
+# 3 more (the `multicast_peer_lost` value tests, which the `multicast` filter
+# selects by module path); the STEP is 16 across all three revisions, which is
+# the part of this guard that carries meaning.
 layer_c1p_multicast() {
-    _runci_guarded_test C1p 32 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
+    _runci_guarded_test C1p 36 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
         || return 1
-    _runci_guarded_test C1p 48 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    _runci_guarded_test C1p 52 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated

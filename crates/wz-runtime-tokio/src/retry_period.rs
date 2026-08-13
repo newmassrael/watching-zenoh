@@ -12,7 +12,10 @@
 //!   whose parity target is pico's `_z_client_reopen_task_fn` and therefore
 //!   defaults to a CONSTANT delay; and
 //! - the ROUTER peer auto-reconnect (`router-connect-reconcile`, in
-//!   [`crate::accept_loop`]), whose parity target is zenoh's
+//!   `crate::accept_loop` — a code span rather than an intra-doc link because
+//!   that module is `routing-accept`-gated and so does not exist in the
+//!   default-feature rustdoc run Layer C1bz measures), whose parity target is
+//!   zenoh's
 //!   `peer_connector_retry` and therefore defaults to zenoh's own
 //!   exponential-with-ceiling.
 //!

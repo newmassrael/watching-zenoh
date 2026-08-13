@@ -82,13 +82,16 @@
 use crate::driver_loop::{
     reassembled_frame_outcome, DriverLoopOutcome, IterationEvent, ReassemblyDropReason,
 };
-// R311y784 — the departure observer types. UNGATED here, unlike the reassembly
-// imports above: every eviction reports one, so a build without `reassembly`
-// still needs them.
-use crate::driver_loop::{MulticastPeerId, MulticastPeerLost, MulticastPeerLostReason};
 use crate::multicast_peer::{
     MulticastPeerActions, MulticastPeerEvent, MulticastPeerPolicy, MulticastPeerState,
 };
+// R311y784 / R311y787 — the departure observer types. UNGATED here, unlike the
+// reassembly imports above: every eviction reports one, so a build without
+// `reassembly` still needs them. Named through `multicast_peer_lost`, which is
+// where they live BECAUSE of this line: `driver_loop` is alloc-gated and this
+// module is not, so the original import through it was an E0432 on the
+// no-alloc MCU profile (run-ci Layer G.12).
+use crate::multicast_peer_lost::{MulticastPeerId, MulticastPeerLost, MulticastPeerLostReason};
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
 use crate::reassembly_dispatch::Fragment as ReassemblyFragment;
 #[cfg(feature = "reassembly")]

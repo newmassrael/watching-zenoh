@@ -170,7 +170,10 @@ pub struct WzConfig {
     /// `peer_connector_retry` and by the `closed_session` re-dial of a dropped
     /// configured peer.
     ///
-    /// UNGATED, unlike [`Self::max_links`] and [`Self::qos`], because upstream's is
+    /// UNGATED, unlike `Self::max_links` and `Self::qos` (code spans, not
+    /// intra-doc links: those two fields are feature-gated and therefore absent
+    /// from the default-feature rustdoc run Layer C1bz measures — naming a
+    /// cfg'd-out item is exactly what an unresolved link IS), because upstream's is
     /// too: `connect.retry` sits in the base config, not behind a feature, and both
     /// substrates that consume it (`router-connect-reconcile` peer auto-reconnect,
     /// `transport-multilink` per-link re-add) are separate features that would each
@@ -566,7 +569,9 @@ impl WzConfig {
     /// `connect.retry`), the builder twin of the `pub connect_retry` field. The
     /// router host chains it so the ONE `WzConfig` it hands to both the face loop
     /// and the admin GET carries the effective schedule — the same
-    /// no-desync-by-construction discipline as [`Self::with_max_links`].
+    /// no-desync-by-construction discipline as `Self::with_max_links` (a code
+    /// span for the same reason as the `connect_retry` field doc: that builder
+    /// is feature-gated and absent from the default-feature rustdoc run).
     pub fn with_connect_retry(mut self, connect_retry: RetryPolicy) -> Self {
         self.connect_retry = connect_retry;
         self
