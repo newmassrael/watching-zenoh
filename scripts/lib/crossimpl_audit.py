@@ -297,7 +297,19 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 #     router tier, where `answer_router_admin_query`'s own gate lives and where the
 #     suppressed legs -- linkstate DOT and route-successor -- exist only on a
 #     two-router federation. A different host, a different answerer, same atom.
-FOREIGN_ADJUDICATOR_LINKS = 824
+# R311y791 takes it to 825. `liveliness-history` gains a second adjudicating
+# test, and it leaves the SINGLE-ADJUDICATOR list this run printed it on:
+#   * `liveliness-history` <- wz_liveliness_history_replays_locally_to_a_late_
+#     second_subscriber_behind_zenohd -- the atom's existing witness is a
+#     subscriber declared BEFORE the session is driven, which zenohd serves off
+#     its answer to that subscriber's own CURRENT interest. This one declares a
+#     SECOND history subscriber after the first has seen the token, where zenohd
+#     answers with the id it already used for the resource (`make_token_id`
+#     reuses `local_tokens[res]`, hat/router/token.rs:978-990) and wz's
+#     first-declaration-wins guard drops the reply -- so only the R311y790
+#     declare-time local replay can serve it. Same atom, same router, a plane
+#     the first witness cannot reach.
+FOREIGN_ADJUDICATOR_LINKS = 825
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
