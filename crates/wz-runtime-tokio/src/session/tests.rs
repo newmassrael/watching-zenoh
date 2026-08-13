@@ -8180,6 +8180,95 @@ fn liveliness_sample_callback_runs_deferred_and_may_reenter_session() {
     );
 }
 
+/// R311y790 — the SESSION-level witness for the declare-time history replay.
+/// The registry-level tests pin that `register` fires the known tokens into
+/// the slot's sink; this pins that the samples reach the APPLICATION
+/// callback, which they only do by riding the same F-6 deferred-fire queue
+/// every live sample rides (the replay is staged under the observer lock, so
+/// a replay that staged and never drained would satisfy every registry
+/// assertion and still deliver nothing).
+///
+/// Shape: subscriber A is declared future-only and sees a token arrive live.
+/// Subscriber B is declared AFTERWARDS with history — and is given that same
+/// token, which is exactly what waiting for the peer's CURRENT reply would
+/// NOT give it behind a zenoh router: upstream suppresses re-declaring a
+/// token it has already declared to that face
+/// (`net/routing/hat/router/token.rs:127`).
+#[cfg(all(
+    feature = "liveliness-subscriber",
+    feature = "liveliness-token",
+    feature = "liveliness-history"
+))]
+#[test]
+fn a_later_history_subscriber_is_replayed_a_token_the_session_already_knows() {
+    use crate::declare::LivelinessSampleKind;
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    type SampleLog = Arc<Mutex<Vec<(LivelinessSampleKind, String, u64)>>>;
+
+    let first: SampleLog = Arc::new(Mutex::new(Vec::new()));
+    let first_cb = first.clone();
+    let _a = session
+        .declare_liveliness_subscriber(
+            "liveliness/**",
+            LivelinessSubscriberOptions::default(),
+            move |sample| {
+                first_cb.lock().unwrap().push((
+                    sample.kind,
+                    sample.keyexpr.to_string(),
+                    sample.token_id,
+                ));
+            },
+        )
+        .expect("liveliness-subscriber is on in this lane");
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .liveliness_subscribers
+        .dispatch_declare(&make_decl_token(9, "liveliness/x"), &HashMap::new());
+    session.drain_deferred_fires();
+    assert_eq!(
+        first.lock().unwrap().len(),
+        1,
+        "A saw the token arrive live -- the session now KNOWS it"
+    );
+
+    let second: SampleLog = Arc::new(Mutex::new(Vec::new()));
+    let second_cb = second.clone();
+    let _b = session
+        .declare_liveliness_subscriber(
+            "liveliness/**",
+            LivelinessSubscriberOptions::default().with_history(true),
+            move |sample| {
+                second_cb.lock().unwrap().push((
+                    sample.kind,
+                    sample.keyexpr.to_string(),
+                    sample.token_id,
+                ));
+            },
+        )
+        .expect("liveliness-subscriber is on in this lane");
+    session.drain_deferred_fires();
+
+    assert_eq!(
+        *second.lock().unwrap(),
+        vec![(LivelinessSampleKind::Put, "liveliness/x".to_string(), 9)],
+        "the history subscriber is replayed the token this session already \
+         knew, and it arrives through the deferred-fire queue rather than \
+         under the declare's own observer lock",
+    );
+    assert_eq!(
+        first.lock().unwrap().len(),
+        1,
+        "the replay is owed to the DECLARING subscriber only -- A was told \
+         about this token when it arrived live",
+    );
+}
+
 /// R311lg — a sample staged before `undeclare` but drained after it is
 /// suppressed (the kill-first ordering on the handle): the callback
 /// never observes a post-undeclare sample.

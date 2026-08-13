@@ -249,6 +249,20 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                 history_complete: false,
             })
             .map_err(|_| RegisterError::TableFull)?;
+        // R311y790 — a history subscriber is owed the tokens THIS session
+        // already knows before the peer's CURRENT reply adds any. Both
+        // upstreams do the replay inside their register function
+        // (zenoh-pico `_z_register_liveliness_subscriber` calls
+        // `_z_liveliness_subscription_trigger_history` between the register
+        // and the Interest emit, `src/net/liveliness.c:196-209`; zenoh runs
+        // it in `declare_liveliness_subscriber_inner` before
+        // `send_interest`, `zenoh/src/api/session.rs:1768-1815`), and so
+        // does this — folding it in is what makes both wz declare paths
+        // (literal and aliased) correct with one rule instead of two
+        // call-site copies that can drift.
+        if history {
+            self.replay_known_tokens(interest_id);
+        }
         Ok(true)
     }
 
@@ -495,6 +509,95 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         }
         #[cfg(not(feature = "alloc"))]
         {
+            0
+        }
+    }
+
+    /// R311y790 — replay the peer tokens this session ALREADY knows to the one
+    /// subscriber `interest_id` names, as `Put` samples. Returns how many were
+    /// replayed. Called by [`register`](Self::register) for a `history = true`
+    /// slot; both upstreams do exactly this at declare time — zenoh collects
+    /// `state.remote_tokens` intersecting the new subscriber's keyexpr and
+    /// calls its callback with an empty-payload `Put`
+    /// (`zenoh/src/api/session.rs:1768-1801`), and zenoh-pico's
+    /// `_z_liveliness_subscription_trigger_history` walks `zn->_remote_tokens`
+    /// and does the same (`vendor/zenoh-pico/src/net/liveliness.c:133-166`).
+    ///
+    /// The peer's CURRENT reply is NOT a substitute for this, which is why it
+    /// is not merely a latency optimisation: a zenoh router suppresses
+    /// re-declaring a token it has already declared to that face
+    /// (`net/routing/hat/router/token.rs:127`), so a SECOND history subscriber
+    /// on one wz session received an EMPTY history where both upstreams give
+    /// it the full set — silently, since the responder still terminates the
+    /// replay with its `Declare(DeclFinal)` and `history_complete` flips true.
+    ///
+    /// ONLY the named slot fires; this is deliberately not
+    /// [`fan_to_matching_slots`](Self::fan_to_matching_slots). The replay is
+    /// owed to the subscriber that just declared — every other matching slot
+    /// was already told about these tokens when they arrived live, and firing
+    /// them again would report the same token appearing twice to an
+    /// application that counts presence.
+    ///
+    /// The replay cannot double-fire against the peer's own CURRENT reply
+    /// either: an inbound `DeclToken` for an id already in `peer_token_table`
+    /// is dropped by the R311y769 first-declaration-wins guard in
+    /// [`dispatch_declare`](Self::dispatch_declare).
+    ///
+    /// Replay order is by token id. That is a TEST-determinism choice and not
+    /// a wire property — the same call the sibling
+    /// [`flush_peer_tokens_on_link_loss`](Self::flush_peer_tokens_on_link_loss)
+    /// records, and neither upstream's map order is defined.
+    ///
+    /// The BODY is `alloc`-gated, not the function (signature stability, the
+    /// same shape as the sibling flush): `peer_token_table` is the wire-side
+    /// resolution state and does not exist on the no-alloc control plane, so
+    /// `0` is the honest answer there — nothing is known to replay.
+    pub fn replay_known_tokens(&mut self, interest_id: u64) -> usize {
+        #[cfg(feature = "alloc")]
+        {
+            let Self {
+                slots,
+                peer_token_table,
+            } = self;
+            if peer_token_table.is_empty() {
+                return 0;
+            }
+            let slot = match slots.iter_mut().find(|s| s.interest_id == interest_id) {
+                Some(s) => s,
+                None => return 0,
+            };
+            let mut matched: alloc::vec::Vec<(u64, &str)> = alloc::vec::Vec::new();
+            {
+                // Same chunk view the live fan builds, hoisted out of the scan
+                // because one pattern is being matched against many keyexprs
+                // here rather than one keyexpr against many patterns. An
+                // over-long pattern is skipped rather than matched truncated,
+                // the same refusal `fan_to_matching_slots` makes.
+                let mut chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+                for c in slot.pattern.split('/') {
+                    if chunks.push(c).is_err() {
+                        return 0;
+                    }
+                }
+                for (token_id, keyexpr) in peer_token_table.iter() {
+                    if keyexpr_pattern_matches(&chunks, keyexpr) {
+                        matched.push((*token_id, keyexpr.as_str()));
+                    }
+                }
+            }
+            matched.sort_by_key(|(token_id, _)| *token_id);
+            for (token_id, keyexpr) in &matched {
+                slot.sink.on_sample(LivelinessSample {
+                    kind: LivelinessSampleKind::Put,
+                    keyexpr,
+                    token_id: *token_id,
+                });
+            }
+            matched.len()
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
+            let _ = interest_id;
             0
         }
     }
@@ -820,6 +923,146 @@ mod tests {
         assert_eq!(captured[0].1, "liveliness/dev42");
         assert_eq!(captured[0].2, 42);
         assert_eq!(reg.peer_token_count(), 1);
+    }
+
+    /// R311y790 — THE HEADLINE WITNESS. A history subscriber declared while
+    /// the session already knows remote tokens is replayed them as `Put`s at
+    /// declare time, as both upstreams do (zenoh `api/session.rs:1768-1801`,
+    /// pico `net/liveliness.c:133-166`).
+    ///
+    /// The SECOND subscriber is the shape that actually broke: a zenoh router
+    /// suppresses re-declaring a token it has already declared to that face
+    /// (`hat/router/token.rs:127`), so waiting for the peer's CURRENT reply
+    /// hands it an empty history while the first subscriber has the full set.
+    ///
+    /// THE DISCRIMINATOR is the untouched first subscriber. Replaying through
+    /// the shared `fan_to_matching_slots` would satisfy every count below
+    /// except that one — subscriber A would be told a second time about
+    /// tokens it was told about live.
+    #[test]
+    fn a_second_history_subscriber_is_replayed_the_tokens_already_known() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let first: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", false, make_subscriber(first.clone()))
+            .unwrap();
+        // Ids deliberately out of ascending order: the replay is id-ordered.
+        for (id, ke) in [
+            (7u64, "liveliness/a"),
+            (3, "liveliness/b"),
+            (9, "liveliness/c"),
+        ] {
+            reg.dispatch_declare(
+                &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(id, 0, Some(ke))),
+                &HashMap::new(),
+            );
+        }
+        assert_eq!(first.lock().unwrap().len(), 3, "live arrivals fired A");
+
+        let second: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(2, "liveliness/**", true, make_subscriber(second.clone()))
+            .unwrap();
+
+        let replayed = second.lock().unwrap().clone();
+        assert_eq!(
+            replayed,
+            vec![
+                (LivelinessSampleKind::Put, "liveliness/b".to_string(), 3),
+                (LivelinessSampleKind::Put, "liveliness/a".to_string(), 7),
+                (LivelinessSampleKind::Put, "liveliness/c".to_string(), 9),
+            ],
+            "a history subscriber is owed every already-known token as a Put, \
+             id-ordered",
+        );
+        assert_eq!(
+            first.lock().unwrap().len(),
+            3,
+            "the replay is owed to the DECLARING slot only -- subscriber A was \
+             already told about these tokens when they arrived live",
+        );
+    }
+
+    /// The `history` flag is what gates the replay, exactly as it gates the
+    /// CURRENT bit on the wire (pico `net/liveliness.c:196`, zenoh's
+    /// `if history { .. } else { vec![] }` at `api/session.rs:1768-1777`). A
+    /// future-only subscriber asked for no snapshot and must be given none.
+    #[test]
+    fn a_non_history_subscriber_is_replayed_nothing() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        reg.dispatch_declare(
+            &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(7, 0, Some("liveliness/a"))),
+            &HashMap::new(),
+        );
+
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+            .unwrap();
+
+        assert_eq!(
+            sink.lock().unwrap().len(),
+            0,
+            "future-only asked for no snapshot; replaying anyway would deliver \
+             a Put for a token that arrived before the subscriber existed",
+        );
+    }
+
+    /// The replay is keyexpr-matched by the DECLARING subscriber's own
+    /// pattern, the same intersection both upstreams filter on
+    /// (`key_expr.intersects(token)` / `_z_keyexpr_intersects`) — a known
+    /// token outside the pattern is not owed to it.
+    #[test]
+    fn the_replay_is_filtered_by_the_declaring_subscribers_pattern() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        for (id, ke) in [(7u64, "liveliness/a"), (8, "other/b")] {
+            reg.dispatch_declare(
+                &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(id, 0, Some(ke))),
+                &HashMap::new(),
+            );
+        }
+        assert_eq!(reg.peer_token_count(), 2);
+
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/*", true, make_subscriber(sink.clone()))
+            .unwrap();
+
+        let replayed = sink.lock().unwrap().clone();
+        assert_eq!(
+            replayed,
+            vec![(LivelinessSampleKind::Put, "liveliness/a".to_string(), 7)],
+            "only the tokens the subscriber's pattern matches are replayed",
+        );
+    }
+
+    /// R311y790 + R311y769 COMPOSE: after the local replay, the peer's own
+    /// CURRENT reply for the same token id fires nothing, because
+    /// `dispatch_declare` drops a `DeclToken` whose id the table already
+    /// holds (first-declaration-wins, zenoh's `Entry::Vacant` arm at
+    /// `api/session.rs:2633`). Without that guard the replay would DOUBLE the
+    /// history it exists to supply, which is why this pin lives beside it.
+    #[test]
+    fn the_replay_and_the_peers_current_reply_do_not_double_fire() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        reg.dispatch_declare(
+            &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(7, 0, Some("liveliness/a"))),
+            &HashMap::new(),
+        );
+
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", true, make_subscriber(sink.clone()))
+            .unwrap();
+        assert_eq!(sink.lock().unwrap().len(), 1, "replayed once at declare");
+
+        // The peer answers the CURRENT interest with the token it already
+        // declared before this subscriber existed.
+        reg.dispatch_declare(
+            &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(7, 0, Some("liveliness/a"))),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            sink.lock().unwrap().len(),
+            1,
+            "the peer's CURRENT reply for an already-known id must not fire a \
+             second Put on top of the replay",
+        );
     }
 
     /// R311y521 — link loss fires a Delete for EVERY remote token and empties
