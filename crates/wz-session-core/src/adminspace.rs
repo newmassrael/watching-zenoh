@@ -265,6 +265,29 @@ impl Default for AdminSpacePermissions {
     }
 }
 
+/// The outcome of an admin-query answer — whether the `read` gate served the GET
+/// or denied it.
+///
+/// This exists because the gate's DIAGNOSTIC and the gate's DECISION live in
+/// different layers here. zenoh logs inside the gate itself
+/// (`tracing::error!("Received GET on '{}' but adminspace.permissions.read=false
+/// in configuration")`, `net/runtime/adminspace.rs:458-461`) because its adminspace
+/// is a std, `tracing`-linked component. [`answer_admin_query`] is `no_std` +
+/// `alloc` and links no logger, so it REPORTS the deny to its caller and the host —
+/// which owns the log facade — emits the diagnostic. One gate, one decision, and
+/// the report is a value rather than a side effect, so a test can assert the deny
+/// without capturing log output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a DeniedRead outcome is the host's cue to emit the deny diagnostic"]
+pub enum AdminAnswerOutcome {
+    /// `read` was permitted: every intersecting handler ran (which may still be
+    /// none, when the GET keyexpr intersects no admin key).
+    Served,
+    /// `read = false`: nothing was replied. The querier receives only the
+    /// terminating Final (zenoh's bare `ResponseFinal`, `adminspace.rs:462-467`).
+    DeniedRead,
+}
+
 impl AdminLocalData {
     /// Serialize to the faithful zenoh `local_data` JSON object. zenoh builds
     /// it with the `json!` macro then `serde_json::to_vec`
@@ -547,8 +570,10 @@ pub struct AdminAnswerCtx<'a> {
 /// introspection (under `adminspace-introspection-handlers`), and the
 /// `plugins`/`status/plugins` legs (under `adminspace-plugins-handlers`).
 /// `read=false` answers NOTHING (the dispatch SSOT still emits the terminating
-/// Final — zenoh's bare ResponseFinal on deny, `:462-467`). The reply path is the
-/// same `reply_keyed_encoded` the Session queryable uses.
+/// Final — zenoh's bare ResponseFinal on deny, `:462-467`) and RETURNS
+/// [`AdminAnswerOutcome::DeniedRead`], which is the host's cue to emit the deny
+/// diagnostic zenoh logs inside its own gate. The reply path is the same
+/// `reply_keyed_encoded` the Session queryable uses.
 ///
 /// `plugins` is the node's compiled-in subsystem registry (surface A/B/C); it is
 /// consumed by [`AdminLocalData::plugins`] unconditionally (so the parameter is
@@ -562,9 +587,9 @@ pub fn answer_admin_query(
     declarations: &[AdminDeclaration],
     plugins: &[AdminPlugin],
     config_json: &str,
-) {
+) -> AdminAnswerOutcome {
     if !ctx.read {
-        return;
+        return AdminAnswerOutcome::DeniedRead;
     }
     // `declarations` is consumed ONLY by the `adminspace-introspection-handlers`
     // reply block below; keep the parameter unconditional (signature stability) and
@@ -688,6 +713,7 @@ pub fn answer_admin_query(
             }
         }
     }
+    AdminAnswerOutcome::Served
 }
 
 /// The ROUTER-tier admin `linkstate/routers` key `@/<zid>/<whatami>/linkstate/routers`
@@ -779,9 +805,9 @@ pub fn answer_router_admin_query(
     view: &dyn crate::query_sink::QueryView,
     out: &mut dyn crate::query_sink::ReplyOut,
     ctx: &AdminRouterCtx,
-) {
+) -> AdminAnswerOutcome {
     if !ctx.read {
-        return;
+        return AdminAnswerOutcome::DeniedRead;
     }
     // The reply legs are consumed ONLY under the feature; keep the signature
     // stable and consume the params here when the feature is off.
@@ -834,6 +860,7 @@ pub fn answer_router_admin_query(
             }
         }
     }
+    AdminAnswerOutcome::Served
 }
 
 /// R311y51 (§5.23 `adminspace-write`) — the typed intent a recognized admin
@@ -1614,7 +1641,7 @@ mod tests {
         // chunks, the query 4 — no intersect without a wildcard).
         let view = admin_view("@/a1b2/peer/config");
         let mut out = RecordingReply::default();
-        answer_admin_query(
+        let _ = answer_admin_query(
             &view,
             &mut out,
             &admin_ctx(true),
@@ -1636,7 +1663,7 @@ mod tests {
         // A GET on the bare root fires ONLY local_data (config is 4 chunks).
         let view = admin_view("@/a1b2/peer");
         let mut out = RecordingReply::default();
-        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &[], "{}");
+        let _ = answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &[], "{}");
         assert_eq!(out.replies.len(), 1, "only local_data fires");
         assert_eq!(out.replies[0].0, "@/a1b2/peer");
         // No plugins passed: `plugins` is `null` without the feature, `{}` with it.
@@ -1687,7 +1714,7 @@ mod tests {
             sub_decl("demo/**", &["a1b2"]),
             sub_decl("other/data", &["a1b2", "c3d4"]),
         ];
-        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &decls, &[], "{}");
+        let _ = answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &decls, &[], "{}");
         assert_eq!(out.replies.len(), 2, "one reply per declared subscriber");
         assert!(out
             .replies
@@ -1713,7 +1740,7 @@ mod tests {
             sub_decl("demo/**", &["a1b2"]),
             sub_decl("other/data", &["a1b2"]),
         ];
-        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &decls, &[], "{}");
+        let _ = answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &decls, &[], "{}");
         assert_eq!(out.replies.len(), 1, "only the intersecting subscriber");
         assert_eq!(out.replies[0].0, "@/a1b2/peer/subscriber/demo/**");
     }
@@ -1726,7 +1753,7 @@ mod tests {
         let view = admin_view("@/a1b2/peer/queryable/**");
         let mut out = RecordingReply::default();
         let decls = [qabl_decl("demo/q", &["a1b2"])];
-        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &decls, &[], "{}");
+        let _ = answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &decls, &[], "{}");
         assert_eq!(out.replies.len(), 1);
         assert_eq!(out.replies[0].0, "@/a1b2/peer/queryable/demo/q");
         assert_eq!(
@@ -1741,7 +1768,7 @@ mod tests {
         // read=false gates ALL replies (including introspection).
         let mut out = RecordingReply::default();
         let subs = [sub_decl("demo/**", &["a1b2"])];
-        answer_admin_query(
+        let _ = answer_admin_query(
             &admin_view("@/a1b2/peer/subscriber/**"),
             &mut out,
             &admin_ctx(false),
@@ -1755,7 +1782,7 @@ mod tests {
         // the queryable's entity key is `.../queryable/...`, disjoint from the GET.
         let mut out2 = RecordingReply::default();
         let qabls = [qabl_decl("demo/q", &["a1b2"])];
-        answer_admin_query(
+        let _ = answer_admin_query(
             &admin_view("@/a1b2/peer/subscriber/**"),
             &mut out2,
             &admin_ctx(true),
@@ -1775,7 +1802,10 @@ mod tests {
         // read=false: a deny answers NOTHING (the dispatch SSOT emits the Final).
         let view = admin_view("@/a1b2/peer/config");
         let mut out = RecordingReply::default();
-        answer_admin_query(&view, &mut out, &admin_ctx(false), &[], &[], &[], "{}");
+        let outcome = answer_admin_query(&view, &mut out, &admin_ctx(false), &[], &[], &[], "{}");
+        // The deny is REPORTED, not merely silent: the host logs off this value
+        // (zenoh logs inside its own gate, adminspace.rs:458-461).
+        assert_eq!(outcome, AdminAnswerOutcome::DeniedRead);
         assert!(out.replies.is_empty(), "read=false yields no replies");
     }
 
@@ -1832,7 +1862,7 @@ mod tests {
             let view = admin_view("@/a1b2/peer");
             let mut out = RecordingReply::default();
             let plugins = [rest_started(), storage_loaded()];
-            answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
+            let _ = answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
             assert_eq!(out.replies.len(), 1, "only local_data fires on a root GET");
             let body = String::from_utf8(out.replies[0].1.clone()).unwrap();
             // Only `rest` (Started); `storage_manager` (Loaded) is absent. Each value
@@ -1851,7 +1881,7 @@ mod tests {
             let view = admin_view("@/a1b2/peer/plugins/**");
             let mut out = RecordingReply::default();
             let plugins = [storage_loaded(), rest_started()];
-            answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
+            let _ = answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
             assert_eq!(out.replies.len(), 2, "one reply per declared plugin");
             assert!(out
                 .replies
@@ -1871,7 +1901,7 @@ mod tests {
             let view = admin_view("@/a1b2/peer/plugins/storage_manager");
             let mut out = RecordingReply::default();
             let plugins = [storage_loaded(), rest_started()];
-            answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
+            let _ = answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
             assert_eq!(out.replies.len(), 1, "only the intersecting plugin");
             assert_eq!(out.replies[0].0, "@/a1b2/peer/plugins/storage_manager");
         }
@@ -1884,7 +1914,7 @@ mod tests {
             let view = admin_view("@/a1b2/peer/status/plugins/**");
             let mut out = RecordingReply::default();
             let plugins = [storage_loaded(), rest_started()];
-            answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
+            let _ = answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
             assert_eq!(out.replies.len(), 1, "only the started rest __path__ leg");
             assert_eq!(out.replies[0].0, "@/a1b2/peer/status/plugins/rest/__path__");
             assert_eq!(out.replies[0].1, WZ_STATIC_PLUGIN_PATH.as_bytes());
@@ -1895,7 +1925,7 @@ mod tests {
             // read=false gates the plugins legs too (the dispatch SSOT emits Final).
             let mut out = RecordingReply::default();
             let plugins = [rest_started()];
-            answer_admin_query(
+            let _ = answer_admin_query(
                 &admin_view("@/a1b2/peer/plugins/**"),
                 &mut out,
                 &admin_ctx(false),
@@ -1916,7 +1946,7 @@ mod tests {
             // (distinct from the read-gate path — read=true, but nothing compiled).
             let view = admin_view("@/a1b2/peer/plugins/**");
             let mut out = RecordingReply::default();
-            answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &[], "{}");
+            let _ = answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &[], "{}");
             assert!(
                 out.replies.is_empty(),
                 "an empty plugin registry replies nothing to plugins/**"
@@ -1932,7 +1962,7 @@ mod tests {
             let view = admin_view("@/a1b2/peer/status/plugins/**");
             let mut out = RecordingReply::default();
             let plugins = [storage_loaded()];
-            answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
+            let _ = answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
             assert!(
                 out.replies.is_empty(),
                 "status/plugins/** replies nothing when no plugin is Started"
@@ -1990,7 +2020,7 @@ mod tests {
         // the zenoh-hex labels).
         let view = admin_view("@/a1b2/router/linkstate/**");
         let mut out = RecordingReply::default();
-        answer_router_admin_query(
+        let _ = answer_router_admin_query(
             &view,
             &mut out,
             &router_ctx(true, Some("graph { R }"), Some("graph { P }"), &[]),
@@ -2013,7 +2043,7 @@ mod tests {
         // peers key does not intersect a 5-chunk `.../linkstate/routers` GET).
         let view = admin_view("@/a1b2/router/linkstate/routers");
         let mut out = RecordingReply::default();
-        answer_router_admin_query(
+        let _ = answer_router_admin_query(
             &view,
             &mut out,
             &router_ctx(true, Some("graph { R }"), Some("graph { P }"), &[]),
@@ -2032,7 +2062,7 @@ mod tests {
         // A wildcard GET replies EVERY successor entry, body = the successor zid
         // as a JSON string `"<hex>"` (zenoh `json!(successor)` serialize_str).
         let mut out = RecordingReply::default();
-        answer_router_admin_query(
+        let _ = answer_router_admin_query(
             &admin_view("@/a1b2/router/route/successor/**"),
             &mut out,
             &router_ctx(true, None, None, &succ),
@@ -2048,7 +2078,7 @@ mod tests {
         // enumerate+intersect path subsumes zenoh's `route_successor(src,dst)`
         // perf shortcut (same observable result).
         let mut out2 = RecordingReply::default();
-        answer_router_admin_query(
+        let _ = answer_router_admin_query(
             &admin_view("@/a1b2/router/route/successor/src/201/dst/c3d4"),
             &mut out2,
             &router_ctx(true, None, None, &succ),
@@ -2071,16 +2101,19 @@ mod tests {
         // dispatch SSOT).
         let succ = vec![("201".to_string(), "c3d4".to_string(), "aaaa".to_string())];
         let mut out = RecordingReply::default();
-        answer_router_admin_query(
+        let outcome = answer_router_admin_query(
             &admin_view("@/a1b2/router/linkstate/**"),
             &mut out,
             &router_ctx(false, Some("graph { R }"), Some("graph { P }"), &succ),
         );
         assert!(out.replies.is_empty(), "read=false yields no replies");
+        assert_eq!(outcome, AdminAnswerOutcome::DeniedRead);
         // A `None` DOT leg is omitted even on a matching GET (the leg absent, not
-        // an empty body).
+        // an empty body). The outcome distinguishes this from the deny above:
+        // BOTH answer nothing, and only one of them is a permission denial the
+        // host must report.
         let mut out2 = RecordingReply::default();
-        answer_router_admin_query(
+        let outcome2 = answer_router_admin_query(
             &admin_view("@/a1b2/router/linkstate/**"),
             &mut out2,
             &router_ctx(true, None, None, &[]),
@@ -2089,5 +2122,6 @@ mod tests {
             out2.replies.is_empty(),
             "None routers_dot/peers_dot omit their legs"
         );
+        assert_eq!(outcome2, AdminAnswerOutcome::Served);
     }
 }

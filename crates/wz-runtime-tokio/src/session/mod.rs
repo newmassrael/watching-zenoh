@@ -3284,6 +3284,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// serves). [`Self::declare_adminspace`] delegates here with the permissive
     /// default. This method exists only under `adminspace-core` (its parameter
     /// type does), so it carries no `FeatureDisabled` arm.
+    ///
+    /// The permissions are FIXED for this queryable's life. zenoh's gate is live —
+    /// it re-reads `conf.adminspace.permissions()` from the runtime config on every
+    /// request (`net/runtime/adminspace.rs:456-457`), so a runtime config change
+    /// flips it — and the wz analogue of that is
+    /// [`Self::declare_adminspace_with_permissions_source`], which this method
+    /// delegates to with a CONSTANT source. Use this one when the permits are a
+    /// deploy-time decision; use the source form when something can change them.
     #[cfg(feature = "adminspace-core")]
     pub fn declare_adminspace_with_permissions(
         &self,
@@ -3294,22 +3302,48 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     where
         SessionLinkActions<R, T>: Send + Sync + 'static,
     {
+        // A constant source — the degenerate case of the live one, not a second
+        // implementation of the gate (`AdminSpacePermissions` is `Copy`).
+        self.declare_adminspace_with_permissions_source(version, locators, move || permissions)
+    }
+
+    /// §5.23 `adminspace-read` / `adminspace-write` — the LIVE-permit form of
+    /// [`Self::declare_adminspace_with_permissions`]: `permissions` is a source the
+    /// handler calls on EVERY admin GET, so a permit change takes effect on the very
+    /// next request.
+    ///
+    /// This is what makes wz's gate match zenoh's. Upstream does not capture a
+    /// permit at declare time at all — its admin `send_request` handler takes the
+    /// runtime config lock and re-reads `conf.adminspace.permissions().read` per
+    /// request (`net/runtime/adminspace.rs:456-457`), which is why a config change
+    /// (including one performed by upstream's OWN admin `config/**` PUT) flips the
+    /// gate live. A by-value permit cannot express that; a source can, and the
+    /// production source is a shared
+    /// [`WzConfig`](crate::config::WzConfig)'s
+    /// [`admin_permissions()`](crate::config::WzConfig::admin_permissions).
+    ///
+    /// The source is called ONCE per GET, before any reply, so a single GET is
+    /// answered under one consistent permit even if the value changes mid-dispatch.
+    /// On a deny the handler emits the diagnostic zenoh logs inside its own gate
+    /// (`adminspace.rs:458-461`) — reported here by
+    /// [`AdminAnswerOutcome`](wz_session_core::adminspace::AdminAnswerOutcome)
+    /// rather than logged by the `no_std` answerer.
+    #[cfg(feature = "adminspace-core")]
+    pub fn declare_adminspace_with_permissions_source(
+        &self,
+        version: impl Into<String>,
+        locators: Vec<String>,
+        permissions: impl Fn() -> wz_session_core::adminspace::AdminSpacePermissions + Send + 'static,
+    ) -> Result<Queryable<R, T>, QueryableError>
+    where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
         use wz_codecs::whatami::WhatAmI;
         use wz_session_core::adminspace::{
-            admin_queryable_key, answer_admin_query, AdminAnswerCtx, AdminSession,
+            admin_queryable_key, answer_admin_query, AdminAnswerCtx, AdminAnswerOutcome,
+            AdminSession,
         };
         use wz_session_core::zid_hex::zid_to_zenoh_hex;
-
-        // R311xy idiom — the read permission is a PER-CALL gate carried in the
-        // AdminAnswerCtx: with adminspace-read OFF `read` is `true` (the queryable
-        // always serves), so the signature stays feature-toggle-independent.
-        #[cfg(feature = "adminspace-read")]
-        let read = permissions.read;
-        #[cfg(not(feature = "adminspace-read"))]
-        let read = {
-            let _ = permissions;
-            true
-        };
 
         let zid_hex = zid_to_zenoh_hex(&self.actions().params.zid);
         let whatami = self.actions().params.whatami.to_str();
@@ -3322,6 +3356,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         let actions = self.actions().clone();
 
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+            // The LIVE permit read — the whole reason this handler takes a source.
+            // Resolved through the `admin_read_permit` cfg site (ONE place decides
+            // what "the gate compiled out" means), once per GET so the dispatch
+            // below runs under a single consistent verdict.
+            let read = crate::admin_read_permit(&permissions());
             // The connected peer is the session-centric `sessions[]` entry,
             // resolved LIVE per query off the captured bundle so a reconnect / peer
             // change is reflected (zenoh's `get_transports_unicast`,
@@ -3368,7 +3407,18 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // re-read the declaration registries — the introspection materialization
             // for this host is a NAMED follow-up). The forwarder-hosted demo admin
             // (`--config-queryable`) is the wired introspection host for §5.23.
-            answer_admin_query(view, out, &ctx, &sessions, &[], &plugins, &config_json);
+            if answer_admin_query(view, out, &ctx, &sessions, &[], &plugins, &config_json)
+                == AdminAnswerOutcome::DeniedRead
+            {
+                // zenoh's own deny diagnostic, at the same severity and naming the
+                // same cause (`net/runtime/adminspace.rs:458-461`). Without it the
+                // read gate was the one half of the pair that denied SILENTLY while
+                // the config-write host logged — an asymmetry with itself.
+                log::error!(
+                    "Received GET on '{}' but adminspace.permissions.read=false in configuration",
+                    view.keyexpr()
+                );
+            }
         };
 
         self.declare_queryable(queryable_key, QueryableOptions::default(), handler)

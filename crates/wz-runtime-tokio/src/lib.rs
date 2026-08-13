@@ -482,10 +482,12 @@ mod admin_write_permit_tests {
 /// zenoh `PermissionsConf` read default). A GET host feeds the resolved bool to
 /// [`adminspace::AdminAnswerCtx::read`], which [`adminspace::answer_admin_query`]
 /// consults at its top (`if !ctx.read { return }`) — "the gate is the value, not a
-/// cfg" once past this resolver, exactly as the write side does. This is a second
-/// `adminspace-read` cfg site (the first is `Session::declare_adminspace_with_permissions`),
-/// so a forwarder-hosted admin GET (the `--config-queryable` demo host) gates real
-/// library code rather than hardcoding `read: true`.
+/// cfg" once past this resolver, exactly as the write side does. Every admin GET
+/// host resolves its permit HERE: the forwarder-hosted `--config-queryable` demo
+/// host and, since the live-permit round, the Session queryable itself
+/// (`Session::declare_adminspace_with_permissions_source`, which used to inline its
+/// own copy of the `#[cfg]`). One cfg site, so "the gate compiled out means
+/// permissive" is decided in exactly one place.
 #[cfg(feature = "adminspace-core")]
 pub fn admin_read_permit(permissions: &adminspace::AdminSpacePermissions) -> bool {
     #[cfg(feature = "adminspace-read")]

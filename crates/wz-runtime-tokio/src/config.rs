@@ -71,6 +71,22 @@ pub struct WzConfig {
     /// [`Self::reconfigure_interceptors`] so the forwarder stays in sync.
     #[cfg(feature = "routing-peer")]
     interceptors: InterceptorConfig,
+    /// The LIVE adminspace permissions (zenoh `adminspace.permissions`, the
+    /// `PermissionsConf` read/write pair). The SECOND runtime-mutable typed slice
+    /// after [`Self::interceptors`], and it is here for the same reason: zenoh
+    /// re-reads `conf.adminspace.permissions()` from the LIVE config on EVERY admin
+    /// request — the GET gate at `net/runtime/adminspace.rs:456-457` and the
+    /// config-WRITE gate at `:394-396` both take the config lock inside the handler,
+    /// so a runtime config change (which upstream's own admin PUT can perform) flips
+    /// the gate for the very next request. A permit captured by value at host-setup
+    /// time cannot do that, which is why the two gates read this field per request
+    /// rather than a captured bool.
+    ///
+    /// Private, like `interceptors`: mutate via [`Self::set_admin_permissions`] so
+    /// the "one live config instance, read per request" invariant is structural.
+    /// Default = zenoh's `PermissionsConf::default` (read `true`, write `false`).
+    #[cfg(feature = "adminspace-core")]
+    admin_permissions: wz_session_core::adminspace::AdminSpacePermissions,
     /// R311y205 (transport-multilink) — the EMBEDDER-facing max number of physical
     /// links this node aggregates into ONE logical unicast session (zenoh
     /// `TransportManager` `unicast.max_links`). Default `1` = single-link,
@@ -150,7 +166,8 @@ pub struct WzConfig {
 
 impl Default for WzConfig {
     /// The base config — `whatami = Peer`, `batch_size = 0`, `lease_ms = 0`, no
-    /// interceptors, `max_links = 1`, `qos = false`. A hand-written impl (not
+    /// interceptors, admin permissions at zenoh's `PermissionsConf` default
+    /// (read `true`, write `false`), `max_links = 1`, `qos = false`. A hand-written impl (not
     /// derived) so the `transport-multilink` `max_links` defaults to `1` (the
     /// single-link degenerate path), not the `usize` `Default` of `0`; every other
     /// field keeps its type `Default` (`qos` = `false`, byte-identical to a pre-QoS
@@ -163,6 +180,8 @@ impl Default for WzConfig {
             lease_ms: 0,
             #[cfg(feature = "routing-peer")]
             interceptors: InterceptorConfig::default(),
+            #[cfg(feature = "adminspace-core")]
+            admin_permissions: wz_session_core::adminspace::AdminSpacePermissions::default(),
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
             #[cfg(feature = "transport-qos")]
@@ -543,6 +562,53 @@ impl WzConfig {
         #[cfg(not(feature = "config-mutate-runtime"))]
         let _ = sink;
     }
+
+    /// Builder-style initial adminspace permissions (consumed at setup) — the
+    /// admin twin of [`Self::with_interceptors`]. A host builds ONE `WzConfig`
+    /// carrying its startup permits and hands it to both the admin GET host and
+    /// the config-WRITE host, so there is one permit source, not two.
+    #[cfg(feature = "adminspace-core")]
+    pub fn with_admin_permissions(
+        mut self,
+        permissions: wz_session_core::adminspace::AdminSpacePermissions,
+    ) -> Self {
+        self.admin_permissions = permissions;
+        self
+    }
+
+    /// Read the LIVE adminspace permissions — the accessor an admin host calls
+    /// INSIDE its per-request handler, which is the whole point of the field.
+    /// Returns by value (the type is two `bool`s and `Copy`), so a handler holding
+    /// a shared cell borrows it for the read alone and never across a reply.
+    ///
+    /// Feed the result to [`admin_read_permit`](crate::admin_read_permit) /
+    /// [`admin_write_permit`](crate::admin_write_permit) — the cfg resolvers that
+    /// turn the value into the effective permit — rather than reading the fields
+    /// directly, so a build with the gate compiled out stays permissive at exactly
+    /// one place.
+    #[cfg(feature = "adminspace-core")]
+    pub fn admin_permissions(&self) -> wz_session_core::adminspace::AdminSpacePermissions {
+        self.admin_permissions
+    }
+
+    /// Runtime reconfigure of the live adminspace permissions — the admin-permit
+    /// twin of [`Self::reconfigure_interceptors`], and the mutation that makes the
+    /// gate genuinely live: the next admin request re-reads this value.
+    ///
+    /// Unlike the interceptor slice this needs NO sink and no
+    /// `config-mutate-runtime` arm. The distinction is real rather than an
+    /// omission: an interceptor change must be PUSHED into a forwarder that
+    /// compiled its chain, whereas the permits are PULLED by each gate on every
+    /// request (zenoh does the same — it takes the config lock inside the handler,
+    /// `net/runtime/adminspace.rs:394` and `:456`), so storing the new value IS
+    /// applying it. There is consequently no inert-mirror arm to opt out of.
+    #[cfg(feature = "adminspace-core")]
+    pub fn set_admin_permissions(
+        &mut self,
+        permissions: wz_session_core::adminspace::AdminSpacePermissions,
+    ) {
+        self.admin_permissions = permissions;
+    }
 }
 
 #[cfg(test)]
@@ -841,5 +907,62 @@ mod tests {
             json.contains(r#""acl_deny":["mesh/data"]"#),
             "acl_deny summary not rendered: {json}"
         );
+    }
+
+    /// The adminspace permits are a LIVE slice of the config, like the interceptors
+    /// — a `set` is visible to the very next read, and the read is what an admin
+    /// host does per request. This pins the config half of the live gate; the
+    /// behavioural half (a revoke denying the next GET on an already-declared
+    /// queryable) is `declare_adminspace_live_permit_source_flips_the_gate_at_runtime`.
+    ///
+    /// The assertions go through `admin_read_permit` / `admin_write_permit` rather
+    /// than the struct fields, because those resolvers are where "the gate compiled
+    /// out" is decided: with the gate off the permit is `true` regardless of the
+    /// stored value, and asserting the field would claim a denial the build does not
+    /// perform.
+    #[cfg(feature = "adminspace-core")]
+    #[test]
+    fn admin_permissions_are_a_live_config_slice() {
+        use wz_session_core::adminspace::AdminSpacePermissions;
+
+        // Default = zenoh's PermissionsConf (read true, write false).
+        let mut cfg = WzConfig::new();
+        assert_eq!(cfg.admin_permissions(), AdminSpacePermissions::default());
+
+        // Setup-time builder.
+        cfg = cfg.with_admin_permissions(AdminSpacePermissions {
+            read: false,
+            write: true,
+        });
+        assert!(!cfg.admin_permissions().read);
+        assert!(cfg.admin_permissions().write);
+
+        // Runtime mutation — the seam a config-write / operator control drives.
+        cfg.set_admin_permissions(AdminSpacePermissions {
+            read: true,
+            write: false,
+        });
+        assert!(cfg.admin_permissions().read);
+        assert!(!cfg.admin_permissions().write);
+
+        // Resolved through the cfg sites both gates use, in BOTH directions.
+        #[cfg(feature = "adminspace-read")]
+        {
+            assert!(crate::admin_read_permit(&cfg.admin_permissions()));
+            cfg.set_admin_permissions(AdminSpacePermissions {
+                read: false,
+                write: false,
+            });
+            assert!(!crate::admin_read_permit(&cfg.admin_permissions()));
+        }
+        #[cfg(feature = "adminspace-write")]
+        {
+            assert!(!crate::admin_write_permit(&cfg.admin_permissions()));
+            cfg.set_admin_permissions(AdminSpacePermissions {
+                read: false,
+                write: true,
+            });
+            assert!(crate::admin_write_permit(&cfg.admin_permissions()));
+        }
     }
 }

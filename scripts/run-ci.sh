@@ -3227,10 +3227,28 @@ layer_c1am_cargo_test_adminspace() {
         cargo test -p wz-runtime-tokio --features adminspace-core,query-get --lib admin_write_permit --quiet || return 1
     _runci_guarded_test "C1AM declare_adminspace 5" 5 \
         cargo test -p wz-runtime-tokio --features adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
-    _runci_guarded_test "C1AM declare_adminspace 6" 6 \
+    # 6 -> 7: the LIVE-permit witness
+    # (declare_adminspace_live_permit_source_flips_the_gate_at_runtime). It drives
+    # grant -> revoke -> re-grant against ONE already-declared queryable, which is
+    # the only shape that separates "the gate is re-read per GET" from "a new
+    # handler was built with a new constant" — the divergence the adminspace-read
+    # atom recorded (zenoh re-reads the live config inside its admin handler,
+    # net/runtime/adminspace.rs:456-457). Falsified by hoisting the permit read out
+    # of the closure: that arm alone reds, the other six stay green.
+    _runci_guarded_test "C1AM declare_adminspace 7" 7 \
         cargo test -p wz-runtime-tokio --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     _runci_guarded_test "C1AM admin_write_permit 1" 1 \
         cargo test -p wz-runtime-tokio --features adminspace-write,query-get --lib admin_write_permit --quiet || return 1
+    # The read-side resolver had NO guarded filter at all (only the write side did),
+    # so `admin_read_permit_tests` was running in no lane — a population-0 hole on
+    # the cfg site both admin GET hosts now resolve through. Pinned here.
+    _runci_guarded_test "C1AM admin_read_permit 1" 1 \
+        cargo test -p wz-runtime-tokio --features adminspace-read,query-get --lib admin_read_permit --quiet || return 1
+    # The config half of the live gate: the WzConfig admin-permission slice is
+    # readable per call and mutable at runtime, asserted through BOTH resolvers and
+    # in BOTH directions (a one-way assertion would pass on a latch).
+    _runci_guarded_test "C1AM admin_permissions 1" 1 \
+        cargo test -p wz-runtime-tokio --features adminspace-read,adminspace-write,query-get --lib admin_permissions --quiet || return 1
     _runci_guarded_test "C1AM adminspace 20" 20 \
         cargo test -p wz-session-core --features adminspace-introspection-handlers --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM adminspace 21" 21 \
@@ -3301,7 +3319,10 @@ layer_c1an_cargo_test_adminspace_nodefault() {
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace --quiet || return 1
     _runci_guarded_test "C1AN declare_adminspace 5" 5 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
-    _runci_guarded_test "C1AN declare_adminspace 6" 6 \
+    # 6 -> 7, the same live-permit witness C1AM pins — here on the slim build, so
+    # the source-taking declare and its per-GET resolve compose without the default
+    # feature set too.
+    _runci_guarded_test "C1AN declare_adminspace 7" 7 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --no-default-features --features adminspace-core --all-targets --quiet -- -D warnings \

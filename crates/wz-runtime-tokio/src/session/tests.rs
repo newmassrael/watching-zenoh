@@ -2708,6 +2708,83 @@ fn declare_adminspace_read_false_denies_get_with_final_only() {
     );
 }
 
+#[cfg(all(feature = "query-get", feature = "adminspace-read"))]
+#[test]
+fn declare_adminspace_live_permit_source_flips_the_gate_at_runtime() {
+    // §5.23 adminspace-read LIVE permit: the gate is re-read on EVERY GET, so a
+    // permit change takes effect on the next request against the SAME queryable.
+    //
+    // This is the divergence the atom recorded: wz resolved the permit once at
+    // declare time and captured it in the handler closure, where zenoh takes the
+    // runtime-config lock inside its admin `send_request` and re-reads
+    // `conf.adminspace.permissions().read` per request
+    // (`net/runtime/adminspace.rs:456-457`) — which is why a runtime config change,
+    // including one performed by upstream's own admin `config/**` PUT, flips
+    // upstream's gate and could not flip wz's.
+    //
+    // BOTH directions are driven on one queryable. A grant->deny-only assertion
+    // would pass against a handler that had simply been rebuilt with a new constant,
+    // and would say nothing about deny->grant; the three phases pin that the SOURCE
+    // is what decides, not the declare call.
+    use wz_session_core::adminspace::AdminSpacePermissions;
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let (session, _driver) = build_session();
+    let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+    let whatami = session.actions().params.whatami.to_str();
+    let root = format!("@/{zid_hex}/{whatami}");
+
+    // The live permit cell — the test's stand-in for the shared `WzConfig` a
+    // production host holds (`WzConfig::admin_permissions`).
+    let permits = Arc::new(Mutex::new(AdminSpacePermissions::default()));
+    let source = permits.clone();
+    let _admin = session
+        .declare_adminspace_with_permissions_source("0.9.9", Vec::new(), move || {
+            *source.lock().unwrap()
+        })
+        .expect("adminspace-core ON in this build");
+
+    // One GET, returning (replies, finals) — the same loopback probe three times.
+    let get = || {
+        let replies = Arc::new(AtomicUsize::new(0));
+        let finals = Arc::new(AtomicUsize::new(0));
+        let r = replies.clone();
+        let f = finals.clone();
+        session
+            .query(
+                &root,
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                move |_| {
+                    r.fetch_add(1, Ordering::SeqCst);
+                },
+                move |_| {
+                    f.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .expect("query-get ON in this build");
+        (
+            replies.load(Ordering::SeqCst),
+            finals.load(Ordering::SeqCst),
+        )
+    };
+
+    // Phase 1 — the default permit (zenoh `PermissionsConf` read=true) serves.
+    assert_eq!(get(), (1, 1), "default read=true serves the admin GET");
+
+    // Phase 2 — revoke at runtime. No re-declare: the SAME queryable, same handler.
+    permits.lock().unwrap().read = false;
+    assert_eq!(
+        get(),
+        (0, 1),
+        "a runtime revoke denies the very next GET (only the terminating Final)"
+    );
+
+    // Phase 3 — re-grant. The gate must open again; a latch that only ever closes
+    // would satisfy phases 1-2 and fail here.
+    permits.lock().unwrap().read = true;
+    assert_eq!(get(), (1, 1), "a runtime re-grant serves again");
+}
+
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
 #[test]
 fn query_locality_remote_alone_skips_local_queryable() {

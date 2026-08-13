@@ -2967,6 +2967,22 @@ async fn run_peer_until(
         Some(state) => cfg.with_qos_link(state),
         None => cfg,
     };
+    // §5.23 adminspace-read / -write — the startup permits land in the SAME shared
+    // config both admin hosts read, rather than being captured as two independent
+    // bools at two setup sites. That is what makes them LIVE: zenoh re-reads
+    // `conf.adminspace.permissions()` inside each admin handler
+    // (`net/runtime/adminspace.rs:394` write, `:456` read), so the gate follows a
+    // runtime config change; a captured bool cannot. `--no-admin-read` and
+    // `--config-write-permit` set the initial values here and nowhere else.
+    //
+    // NOT `#[cfg(feature = "adminspace-core")]`: wz-ap-demo declares no such feature
+    // of its own — `routing-peer` (which gates this whole function) pulls
+    // `wz/adminspace-core`, so that cfg would be permanently FALSE and this line
+    // would silently never run.
+    let cfg = cfg.with_admin_permissions(wz::runtime_tokio::adminspace::AdminSpacePermissions {
+        read: !no_admin_read,
+        write: config_write_permit,
+    });
     let wz_config = std::rc::Rc::new(std::cell::RefCell::new(cfg));
     {
         let cfg = wz_config.borrow();
@@ -3056,6 +3072,7 @@ async fn run_peer_until(
     if config_queryable {
         use wz::runtime_tokio::adminspace::{
             admin_config_key, admin_queryable_key, answer_admin_query, AdminAnswerCtx,
+            AdminAnswerOutcome,
         };
         use wz::runtime_tokio::query_sink::{QueryView, ReplyOut};
         use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
@@ -3080,16 +3097,20 @@ async fn run_peer_until(
         // config-write host's admin_write_permit): --no-admin-read ->
         // permissions.read=false -> under the adminspace-read cfg the handler answers
         // nothing (answer_admin_query returns on !ctx.read, only the Final unwinds);
-        // with the gate compiled out it stays permissive (value ignored). Computed
-        // ONCE and captured by the per-GET closure.
-        let admin_read = wz::runtime_tokio::admin_read_permit(
-            &wz::runtime_tokio::adminspace::AdminSpacePermissions {
-                read: !no_admin_read,
-                ..Default::default()
-            },
+        // with the gate compiled out it stays permissive (value ignored).
+        //
+        // Resolved PER GET off the shared config, not once at setup: that is the
+        // whole of zenoh's gate, which re-reads the live config inside the admin
+        // handler (`net/runtime/adminspace.rs:456-457`). The `to_admin_json` read on
+        // the next line already worked this way; the permit did not, which is why a
+        // runtime permission change could not reach it.
+        log::info!(
+            "wz-ap-demo peer: adminspace read permit = {}",
+            wz::runtime_tokio::admin_read_permit(&shared.borrow().admin_permissions())
         );
-        log::info!("wz-ap-demo peer: adminspace read permit = {admin_read}");
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+            let admin_read =
+                wz::runtime_tokio::admin_read_permit(&shared.borrow().admin_permissions());
             let config_json = shared.borrow().to_admin_json();
             let ctx = AdminAnswerCtx {
                 zid_hex: &zid_hex,
@@ -3109,7 +3130,7 @@ async fn run_peer_until(
             // the §5.23 host shipped as a documented deferral. Resolved per query
             // (never a retained side-table), like `introspection` above.
             let sessions = sessions_h.borrow();
-            answer_admin_query(
+            if answer_admin_query(
                 view,
                 out,
                 &ctx,
@@ -3117,7 +3138,16 @@ async fn run_peer_until(
                 &introspection_h.borrow(),
                 &plugins,
                 &config_json,
-            );
+            ) == AdminAnswerOutcome::DeniedRead
+            {
+                // zenoh's deny diagnostic (`adminspace.rs:458-461`). The write host
+                // below has always logged its deny; the read host denied silently,
+                // so an operator who revoked reads saw nothing in the log.
+                log::error!(
+                    "Received GET on '{}' but adminspace.permissions.read=false in configuration",
+                    view.keyexpr()
+                );
+            }
         };
         match forwarder.register_local_queryable(&queryable_key, true, Box::new(handler)) {
             Ok(_) => {
@@ -3141,7 +3171,7 @@ async fn run_peer_until(
         use wz::runtime_tokio::admin_write_permit;
         use wz::runtime_tokio::adminspace::{
             admin_config_key, admin_config_write_key, parse_admin_config_write, AdminConfigWrite,
-            AdminConfigWriteOutcome, AdminSpacePermissions,
+            AdminConfigWriteOutcome,
         };
         use wz::runtime_tokio::sink::SampleView;
         use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
@@ -3167,15 +3197,19 @@ async fn run_peer_until(
         // zenoh PermissionsConf write:false), with the gate compiled out it is `true`
         // (apply-all, the pre-y51 behavior). The resolved value then flows through the
         // feature-independent parse_admin_config_write SSOT.
-        let permissions = AdminSpacePermissions {
-            write: config_write_permit,
-            ..Default::default()
-        };
-        let write_permitted = admin_write_permit(&permissions);
+        // The permit source is the SHARED config (seeded from --config-write-permit
+        // where the instance is built), read per PUT — upstream takes the config lock
+        // inside `send_push` for exactly this reason (`adminspace.rs:394-396`).
+        let write_cfg = wz_config.clone();
+        log::info!(
+            "wz-ap-demo peer: adminspace write permit = {}",
+            admin_write_permit(&write_cfg.borrow().admin_permissions())
+        );
         let pending = pending_acl_deny.clone();
         let handler = move |sample: &dyn SampleView| {
             // Gate (permissions.write) + decode via the wz-session-core SSOT, the
             // write-side counterpart of answer_admin_query.
+            let write_permitted = admin_write_permit(&write_cfg.borrow().admin_permissions());
             match parse_admin_config_write(
                 &write_prefix,
                 sample.keyexpr(),
@@ -4148,7 +4182,7 @@ async fn run_router_hat_until(
     {
         use wz::runtime_tokio::adminspace::{
             admin_queryable_key, answer_admin_query, answer_router_admin_query, AdminAnswerCtx,
-            AdminRouterCtx,
+            AdminAnswerOutcome, AdminRouterCtx,
         };
         use wz::runtime_tokio::query_sink::{QueryView, ReplyOut};
         use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
@@ -4187,6 +4221,12 @@ async fn run_router_hat_until(
                 whatami: whatami_str,
                 version: &version,
                 locators: &locators,
+                // This run-mode has NO permit source: `--router-hat` parses no
+                // `--no-admin-read` and holds no shared WzConfig, so the gate is
+                // hardcoded permissive here where the `--config-queryable` peer host
+                // resolves it live. Naming it rather than leaving a bare literal: the
+                // missing piece is the flag + a config instance on this run-mode, not
+                // the gate itself (`answer_admin_query` honours `read` from any host).
                 read: true,
             };
             // R311y237 — the router node's compiled-in plugin registry.
@@ -4194,7 +4234,14 @@ async fn run_router_hat_until(
             let plugins = wz::runtime_tokio::compiled_plugins(&version);
             #[cfg(not(feature = "adminspace-plugins-handlers"))]
             let plugins: Vec<wz::runtime_tokio::adminspace::AdminPlugin> = Vec::new();
-            answer_admin_query(view, out, &ctx, &[], &[], &plugins, "{}");
+            if answer_admin_query(view, out, &ctx, &[], &[], &plugins, "{}")
+                == AdminAnswerOutcome::DeniedRead
+            {
+                log::error!(
+                    "Received GET on '{}' but adminspace.permissions.read=false in configuration",
+                    view.keyexpr()
+                );
+            }
             // The ROUTER-tier legs, rendered LIVE from the two nets per GET.
             let routers_dot = routers_view.dot();
             let peers_dot = peers_view.dot();
@@ -4205,9 +4252,15 @@ async fn run_router_hat_until(
                 routers_dot: Some(&routers_dot),
                 peers_dot: Some(&peers_dot),
                 successors: &successors,
+                // Same missing permit source as the root ctx above.
                 read: true,
             };
-            answer_router_admin_query(view, out, &rctx);
+            if answer_router_admin_query(view, out, &rctx) == AdminAnswerOutcome::DeniedRead {
+                log::error!(
+                    "Received GET on '{}' but adminspace.permissions.read=false in configuration",
+                    view.keyexpr()
+                );
+            }
         };
         forwarder.register_local_queryable(&queryable_key, true, Box::new(handler));
         log::info!(
@@ -4961,6 +5014,9 @@ pub(crate) async fn run_storage_host(
                     whatami: whatami_str,
                     version: &get_version,
                     locators: &get_locators,
+                    // As with the router-hat host: `--storage-host` parses no
+                    // read-permit flag and holds no shared WzConfig, so there is no
+                    // source to resolve. The gate is honoured, the source is missing.
                     read: true,
                 };
                 // The DYNAMIC registry: storage_manager is Started when a storage is
@@ -4972,7 +5028,15 @@ pub(crate) async fn run_storage_host(
                 // admin surface, and the only difference visible on the wire is
                 // the `path` field (a real `.so` vs `"__static__"`).
                 plugins.extend(get_plugin_records.iter().cloned());
-                answer_admin_query(view, out, &ctx, &[], &[], &plugins, &get_config);
+                if answer_admin_query(view, out, &ctx, &[], &[], &plugins, &get_config)
+                    == wz::runtime_tokio::adminspace::AdminAnswerOutcome::DeniedRead
+                {
+                    log::error!(
+                        "Received GET on '{}' but adminspace.permissions.read=false in \
+                         configuration",
+                        view.keyexpr()
+                    );
+                }
             },
         ) {
             Ok(q) => Some(q),
