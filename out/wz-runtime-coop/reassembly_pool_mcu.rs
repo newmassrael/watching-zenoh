@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: e812b8b9426089658c190b079d72f4505398532fde65fe2c41c3ec6148939d1b
-// template-hash: 56bec87d0124f368b72ecb45f170dc38a324027a2fa3663195c8aeaa13f5d24d
+// template-hash: 74ba562b33766da248288b5dadec1e79a0ebb46a66e38786f6a7a4b2ccd653e3
 // generated-at: 0
 // SCE-MAP: reassembly_pool_mcu.scxml:41 :: _forge_body
 
