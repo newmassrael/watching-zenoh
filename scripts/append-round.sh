@@ -37,6 +37,17 @@
 # UNCHANGED; this script adds a precondition and takes nothing away. A leading
 # `§` on an id is accepted and stripped for the lookup, because that is how the
 # CLI itself stores them.
+#
+# ## --check-only
+#
+# Resolves the ids and exits WITHOUT appending. That is what Layer C0i runs, in
+# both directions, and the flag exists for that reason: a refusal is the whole
+# value here, so it has to be something a lane can fail. R311y783 added it
+# because C0's store-reader gate refused this script for the right reason --
+# "a gate nothing runs cannot fail" -- and it was correct: R311y782 shipped the
+# check with no witness that it discriminates.
+#
+# The flag is stripped before the pass-through, so it is not handed to the CLI.
 
 set -euo pipefail
 
@@ -54,14 +65,18 @@ fi
 # the other.
 impact=""
 saw_impact=0
+check_only=0
 prev=""
+passthrough=()
 for arg in "$@"; do
     case "$prev" in
         --impact) impact="$arg"; saw_impact=1 ;;
     esac
     case "$arg" in
         --impact=*) impact="${arg#--impact=}"; saw_impact=1 ;;
+        --check-only) check_only=1; prev="$arg"; continue ;;
     esac
+    passthrough+=("$arg")
     prev="$arg"
 done
 
@@ -126,4 +141,9 @@ if [[ $missing -ne 0 ]]; then
     exit 1
 fi
 
-exec mnemosyne-cli append-changelog-entry "$@"
+if [[ $check_only -eq 1 ]]; then
+    echo "append-round: OK ${#impact_ids[@]} impact ref(s) resolve; --check-only, nothing appended"
+    exit 0
+fi
+
+exec mnemosyne-cli append-changelog-entry "${passthrough[@]}"

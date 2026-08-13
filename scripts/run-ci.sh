@@ -1857,6 +1857,72 @@ layer_c0mut_verdict_legs() {
     return 0
 }
 
+# ─── Layer C0i — the impact-ref gate discriminates BOTH ways ────────
+#
+# R311y783. `scripts/append-round.sh` resolves a round's `--impact` ids against
+# the section space BEFORE `append-changelog-entry` freezes the entry. Its whole
+# value is a REFUSAL, and R311y782 shipped it with nothing that could fail if
+# the refusal stopped working -- which is exactly what Layer C0's store-reader
+# gate said when it rejected the script ("a gate nothing runs cannot fail"). It
+# was right, and this lane is the answer rather than an exemption.
+#
+# Both directions, because either alone is vacuous: a script that always exits 1
+# passes the negative case, and one that always exits 0 passes the positive.
+#
+# The negative case uses the REAL defect, not a synthetic one -- `5.4-session`
+# is verbatim what Round 1811 cited, the spoken §-number where the store's id is
+# the full path. Pinning the actual historical input means a future rewrite that
+# "improves" the matcher into accepting short forms fails here.
+#
+# --check-only throughout: this lane must never mutate the store.
+layer_c0i_impact_ref_gate() {
+    # The gate READS THE STORE (`query --list-sections`), so it inherits the
+    # R311y743 shape: hosted CI runs most lanes on a job that deliberately does
+    # not install mnemosyne-cli. Armed like every other store-reading lane --
+    # a SKIP where the job DOES provision the tool is a provisioning regression
+    # wearing a green badge, so the arming flag turns absence into a FAIL.
+    if ! command -v mnemosyne-cli >/dev/null 2>&1; then
+        if [[ "${WZ_C0I_REQUIRE:-0}" == "1" || -n "${GITHUB_ACTIONS:-}" ]]; then
+            echo "  Layer C0i FAIL: mnemosyne-cli REQUIRED (WZ_C0I_REQUIRE=1 or" \
+                "GITHUB_ACTIONS) but not on PATH — the section space is unreadable" >&2
+            return 1
+        fi
+        echo "  Layer C0i SKIP (mnemosyne-cli not on PATH; the gate reads the section space)"
+        return 0
+    fi
+
+    local real
+    real="feature-inventory--composable-framework-atomic--preset-catalog"
+    real="$real/5-atomic-feature-catalog/5-4-session"
+
+    # POSITIVE — a real section id resolves and the gate gets out of the way.
+    if ! bash scripts/append-round.sh --check-only --impact "$real" >/dev/null; then
+        echo "  Layer C0i FAIL: a REAL section id was refused — the gate now" \
+            "blocks correct rounds, which is worse than not gating" >&2
+        return 1
+    fi
+
+    # NEGATIVE — Round 1811's actual mistake must still be caught.
+    if bash scripts/append-round.sh --check-only --impact "5.4-session" >/dev/null 2>&1; then
+        echo "  Layer C0i FAIL: '5.4-session' was ACCEPTED — that is the exact id" \
+            "Round 1811 cited, and accepting it re-opens a class that has leaked" \
+            "six times (193, y327, y503 x2, y579, 1811)" >&2
+        return 1
+    fi
+
+    # NEGATIVE — an absent --impact is its own refusal (workflow rule: empty
+    # impact_refs signal incomplete planning), and it is a SEPARATE arm because
+    # a matcher bug and an argument-parsing bug are different defects.
+    if bash scripts/append-round.sh --check-only --entry-id "Round 0" >/dev/null 2>&1; then
+        echo "  Layer C0i FAIL: an append with NO --impact was accepted" >&2
+        return 1
+    fi
+
+    echo "  impact-ref gate: OK (accepts a real section id, refuses Round 1811's" \
+        "own '5.4-session' and an absent --impact)"
+    return 0
+}
+
 # ─── Layer C1 — cargo test --workspace ──────────────────────────────
 layer_c1_cargo_test() {
     # Stage 4b — exclude wz-session-lwip: it forces wz-session-core/no_std
@@ -11837,6 +11903,7 @@ run_layer B layer_b_verify_codegen || overall=1
 run_layer B2 layer_b2_regen_diff || overall=1
 run_layer C0 layer_c0_test_discipline || overall=1
 run_layer C0mut layer_c0mut_verdict_legs || overall=1
+run_layer C0i layer_c0i_impact_ref_gate || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1

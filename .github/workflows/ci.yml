@@ -823,6 +823,22 @@ jobs:
           WZ_C0_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C0
 
+      - name: Layer C0i (armed) — the impact-ref gate discriminates both ways
+        # R311y783. `scripts/append-round.sh` refuses a round whose `--impact`
+        # ids name no section, BEFORE `append-changelog-entry` freezes the
+        # entry -- the only cheap moment there is, since a frozen entry costs
+        # an orphan_ledger row plus a whole re-citing round to correct.
+        #
+        # R311y782 shipped that check with nothing that could fail if it broke,
+        # and Layer C0's store-reader gate rejected it on exactly that ground:
+        # "a gate nothing runs cannot fail". This lane is the answer. It runs
+        # HERE because it reads the section space, and this is the job that
+        # installs mnemosyne-cli; armed for the same reason as WZ_C0_REQUIRE
+        # above. --check-only throughout, so it never mutates the store.
+        env:
+          WZ_C0I_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer C0i
+
       - name: Layer B — verify-codegen.sh per codec
         run: bash scripts/run-ci.sh --layer B
 

@@ -55,8 +55,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, spawn_on_ephemeral_port, wait_for_substring, wz_ap_demo_binary,
-    zenoh_pico_cli_binary, ChildGuard,
+    assert_demo_binary_newer_than_sources, read_captured, spawn_on_ephemeral_port,
+    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
 };
 
 fn spawn_router_hat(label: &str, args: &[&str]) -> (ChildGuard, std::fs::File, u16) {
@@ -94,6 +94,17 @@ fn admin_root(reader: &mut std::fs::File, label: &str) -> String {
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,adminspace-router-linkstate,adminspace-read + zenoh-pico z_get CLI); Layer E7g runs via --ignored"]
 fn wz_router_adminspace_read_deny_seen_by_pico_z_get() {
+    // R311y783 — this fixture is squarely in the class the freshness check
+    // exists for, and R311y781 landed it without one (hosted Layer C0 caught
+    // that: 110 -> 111). It asserts an ABSENCE against a binary spawned from
+    // whatever happens to be on disk. A demo predating R311y781 does not know
+    // `--no-admin-read` in router-hat mode; if it ignores the flag rather than
+    // rejecting it, the router answers the GET, the absence assertion fires,
+    // and the red reads as "the read gate does not work" -- which is exactly
+    // the R311y774 misdiagnosis this check was written for, on exactly this
+    // shape of test. Asserted once here rather than inside `spawn_router_hat`,
+    // which resolves the path twice.
+    assert_demo_binary_newer_than_sources(&wz_ap_demo_binary());
     let z_get = zenoh_pico_cli_binary("z_get");
 
     // ── R1: the router pico will query, with the READ gate DENIED ───
