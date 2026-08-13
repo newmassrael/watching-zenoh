@@ -334,6 +334,173 @@ mod tests {
         );
     }
 
+    /// Feed `forwarder` an already-built `Interest` from face `face` — the
+    /// kind-agnostic twin of [`send_interest`], so a test can drive the table
+    /// with a QUERYABLE or TOKEN interest the subscriber-only helper cannot
+    /// express.
+    fn send_built_interest(
+        forwarder: &RoutingForwarder,
+        face: u64,
+        interest: wz_codecs::interest::InterestOwned,
+    ) {
+        let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Interest(interest)],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        forwarder.forward(FaceId(face), IterationEvent::Poll(&outcome));
+    }
+
+    /// R311y773 THE DISCRIMINATOR. A CURRENT interest for a kind this table
+    /// cannot dump is TERMINATED, not ignored.
+    ///
+    /// Before this round `record_interest` returned on `!body.su()` before any
+    /// Final, and the requester is entitled to one: pico holds the pending
+    /// interest until a Final arrives, so silence is a HANG to its own timeout
+    /// rather than "no matches". zenoh sends the Final for a `mode.current()`
+    /// interest whatever option bits are set (`hat/client/interests.rs`).
+    ///
+    /// Driven with the round-R311y771 builder rather than a hand-rolled body:
+    /// that is the same message `Querier::declare_matching_listener` now puts on
+    /// the wire, so this test also pins that wz's own emit and wz's own router
+    /// meet.
+    #[test]
+    fn a_current_queryable_interest_is_terminated_rather_than_left_hanging() {
+        use wz_session_core::interest_build::build_interest_queryables;
+
+        let fwd = RoutingForwarder::new();
+        let (querier, querier_sink) = recording_actions();
+        let (bystander, _bystander_sink) = recording_actions();
+        fwd.register(FaceId(1), &querier);
+        fwd.register(FaceId(0), &bystander);
+
+        send_built_interest(
+            &fwd,
+            1,
+            build_interest_queryables(
+                /*interest_id=*/ 9,
+                /*current=*/ true,
+                /*future=*/ true,
+                /*mapping_id=*/ 0,
+                Some("demo/route"),
+            )
+            .expect("builder accepts a literal keyexpr"),
+        );
+
+        let replies = captured_declares(&querier_sink);
+        assert_eq!(
+            replies.len(),
+            1,
+            "a CURRENT queryable interest must be answered -- exactly the Final",
+        );
+        assert!(
+            is_decl_final(&replies[0]) && replies[0].interest_id == Some(9),
+            "the reply is a Final stamped with the soliciting interest_id",
+        );
+        assert!(
+            !replies.iter().any(is_decl_subscriber),
+            "this table holds no queryable registry, so the dump is EMPTY -- \
+             answering with a subscriber would be a lie about the plane",
+        );
+    }
+
+    /// ANTI-VACUITY. A FUTURE-only interest of the same kind is correctly
+    /// SILENT. Without this the test above is satisfied by a fix that Finals
+    /// every interest, which would terminate streams the peer means to keep
+    /// open — zenoh Finals only on `mode.current()`.
+    #[test]
+    fn a_future_only_queryable_interest_is_correctly_silent() {
+        use wz_session_core::interest_build::build_interest_queryables;
+
+        let fwd = RoutingForwarder::new();
+        let (querier, querier_sink) = recording_actions();
+        fwd.register(FaceId(1), &querier);
+
+        send_built_interest(
+            &fwd,
+            1,
+            build_interest_queryables(
+                9,
+                /*current=*/ false,
+                /*future=*/ true,
+                0,
+                Some("demo/route"),
+            )
+            .expect("builder accepts a literal keyexpr"),
+        );
+
+        assert_eq!(
+            captured_declares(&querier_sink).len(),
+            0,
+            "a FUTURE-only interest has nothing to terminate; a Final here would \
+             close a stream the peer means to keep open",
+        );
+    }
+
+    /// The TOKEN plane too, so the fix reads as "any kind" rather than "the
+    /// queryable kind as well as the subscriber one". `build_interest_liveliness_get`
+    /// is CURRENT-only (C=1, F=0), which additionally covers the mode that has
+    /// no future half at all.
+    #[test]
+    fn a_current_token_interest_is_terminated_on_the_same_rule() {
+        use wz_session_core::interest_build::build_interest_liveliness_get;
+
+        let fwd = RoutingForwarder::new();
+        let (peer, peer_sink) = recording_actions();
+        fwd.register(FaceId(1), &peer);
+
+        send_built_interest(
+            &fwd,
+            1,
+            build_interest_liveliness_get(4, 0, Some("demo/**"))
+                .expect("builder accepts a literal"),
+        );
+
+        let replies = captured_declares(&peer_sink);
+        assert_eq!(replies.len(), 1);
+        assert!(is_decl_final(&replies[0]) && replies[0].interest_id == Some(4));
+    }
+
+    /// A CURRENT SUBSCRIBER interest whose keyexpr cannot be resolved is
+    /// terminated as well. The alias names a mapping the face never declared, so
+    /// there is nothing to match against — but the requester is owed the same
+    /// Final, and this arm used to drop it silently for exactly the reason the
+    /// `!su()` arm did.
+    #[test]
+    fn a_current_interest_on_an_unresolvable_alias_is_still_terminated() {
+        let fwd = RoutingForwarder::new();
+        let (publisher, pub_sink) = recording_actions();
+        fwd.register(FaceId(1), &publisher);
+
+        // Alias id 77 was never declared by this face.
+        let mut interest = wz_session_core_test_support::interest_subscriber(
+            5, "ignored", /*current=*/ true, /*future=*/ false, /*aggregate=*/ false,
+        );
+        if let Some(body) = interest.body.as_mut() {
+            body.keyexpr = Some(wz_codecs::wireexpr::WireexprOwned {
+                body: wz_codecs::wireexpr::WireexprOwnedVariant::WireexprLocal(
+                    wz_codecs::wireexpr_local::WireexprLocalOwned {
+                        id: 77,
+                        suffix_len: None,
+                        suffix: None,
+                    },
+                ),
+            });
+        }
+        send_built_interest(&fwd, 1, interest);
+
+        let replies = captured_declares(&pub_sink);
+        assert_eq!(
+            replies.len(),
+            1,
+            "an unresolvable CURRENT interest is terminated, not dropped",
+        );
+        assert!(is_decl_final(&replies[0]) && replies[0].interest_id == Some(5));
+    }
+
     #[test]
     fn a_future_interest_pushes_a_later_declared_subscription() {
         // R311y373 — the pub-before-sub half: a publisher whose C+F interest found

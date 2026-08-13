@@ -508,25 +508,64 @@ mod imp {
             let Some(body) = interest.body.as_ref() else {
                 return;
             };
-            if !body.su() {
-                return;
-            }
             let interest_id = interest.interest_id;
-            let aggregate = body.ag();
-            // Resolve the interest keyexpr in the SOURCE face's alias context
-            // (literal id=0, or aliased id!=0 via a prior DeclareKeyexpr). A
-            // keyexpr-less interest has nothing to match against.
             let Some(src) = self.faces.get(&src_id) else {
                 return;
             };
+            let src_actions = src.actions.clone();
+
+            // R311y773 — A CURRENT INTEREST IS TERMINATED WHATEVER KIND IT NAMES.
+            // zenoh sends the `DeclareFinal` for a `mode.current()` interest
+            // regardless of which option bits are set (`hat/client/interests.rs`,
+            // the `if mode.current()` block after the per-kind dump), and the
+            // requester is entitled to it: pico's `_z_interest_process_declares`
+            // holds the pending interest until a Final arrives, so silence is not
+            // "no matches" but a HANG to the requester's own timeout.
+            //
+            // This table can only DUMP the subscriber plane -- it holds no
+            // queryable or token registry -- so a queryable / token CURRENT
+            // interest gets an EMPTY dump. That is a truthful "I have none",
+            // and it is exactly what the subscriber path already sends when
+            // nothing matches (the Final below is emitted with zero replies).
+            //
+            // Newly load-bearing as of R311y771: wz itself now emits QUERYABLES
+            // interests from `Querier::declare_matching_listener`, so a wz face
+            // peered with a wz RouteTable router would hang on its own message.
+            // The defect predates that and was reachable from pico and zenoh.
+            if !body.su() {
+                if interest.c() {
+                    let _ = src_actions.send_network_message(
+                        NetworkMessage::Declare(Box::new(build_declare_final_reply(interest_id))),
+                        true,
+                        true,
+                    );
+                }
+                // FUTURE-only: nothing to terminate and nothing this table can
+                // stream, so it is correctly silent -- zenoh Finals only on
+                // `mode.current()` too.
+                return;
+            }
+
+            let aggregate = body.ag();
+            // Resolve the interest keyexpr in the SOURCE face's alias context
+            // (literal id=0, or aliased id!=0 via a prior DeclareKeyexpr). A
+            // keyexpr-less interest has nothing to match against -- but a CURRENT
+            // one is still owed its Final for the same reason as above, so the
+            // unresolvable case terminates rather than dropping silently.
             let Some(interest_ke) = body
                 .keyexpr
                 .as_ref()
                 .and_then(|w| resolve_wireexpr(&w.body, &src.peer_aliases))
             else {
+                if interest.c() {
+                    let _ = src_actions.send_network_message(
+                        NetworkMessage::Declare(Box::new(build_declare_final_reply(interest_id))),
+                        true,
+                        true,
+                    );
+                }
                 return;
             };
-            let src_actions = src.actions.clone();
 
             if interest.c() {
                 // The CURRENT dump: the subscriptions already held on OTHER faces

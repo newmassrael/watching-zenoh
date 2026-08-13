@@ -3789,9 +3789,12 @@ layer_c1bm_cargo_test_pico_failfast() {
 layer_c1x_cargo_test_routing_routes() {
     # R311y766 (carry N39) — 24 -> 25 and 25 -> 26: `the_relay_emits_no_alias_of_its_own`,
     # the guard that binds the premise routing.rs's peer-only resolve rests on.
-    _runci_guarded_test "C1X routing_forward 25" 25 \
+    # R311y773: 25/26 -> 29/30. Four cases landed with the CURRENT-interest
+    # termination fix, none of them gated on transport-qos, so both counts move
+    # by the same +4 -- an unequal delta would mean a case is accidentally gated.
+    _runci_guarded_test "C1X routing_forward 29" 29 \
         cargo test -p wz-runtime-tokio --features routing-routes --lib routing_forward --quiet || return 1
-    _runci_guarded_test "C1X routing_forward 26" 26 \
+    _runci_guarded_test "C1X routing_forward 30" 30 \
         cargo test -p wz-runtime-tokio --features routing-routes,transport-qos --lib routing_forward --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-routes --quiet -- -D warnings \
