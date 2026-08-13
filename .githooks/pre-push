@@ -214,6 +214,38 @@ if [[ -n "$diff_base" ]]; then
     fi
 fi
 
+# ─── gate 2c — the PREVIOUS push's hosted verdict (R311y765) ────────
+# Gate 2b above mechanises ONE lane. This is the lane-agnostic half, and it is
+# the one carry N70 actually names: the feature-subset matrix, Layers F / G / Q
+# / Z / B2 and every other hosted-only lane are deliberately not mirrored here
+# (policy R311y386), so for them a human reading the run is the ONLY detector —
+# and R311y764 measured that detector failing three pushes in a row.
+#
+# It does not wait, ever. A run still in progress is reported and passed; the
+# verdict is read at the NEXT push, which is exactly where the standing
+# round-start rule would have read it. See scripts/lib/previous-run-gate.sh for
+# the classification (`cancelled` is neither red nor green) and for why the
+# escape is an acknowledgement rather than a refusal — the fix for a red must
+# always be pushable.
+#
+# Graded on the tip being REPLACED, not on what is being pushed: that commit is
+# the one hosted CI has had time to judge.
+# shellcheck disable=SC1091  # constant path, resolved at run time
+if ! source scripts/lib/previous-run-gate.sh; then
+    echo "pre-push: scripts/lib/previous-run-gate.sh missing or unreadable." >&2
+    exit 1
+fi
+prev_sha=""
+if [[ -n "$remote_sha" && "$remote_sha" != "$zero_sha" ]]; then
+    prev_sha="$remote_sha"
+elif git rev-parse --verify --quiet origin/main >/dev/null; then
+    prev_sha="$(git rev-parse origin/main)"
+fi
+if ! wz_previous_run_gate "$prev_sha" 'pre-push'; then
+    echo "pre-push: bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── housekeeping (NOT a gate) — toolchain-scoped target GC ─────────
 #
 # R311y445. Deliberately NOT a gate: it never fails the push, and an absent
