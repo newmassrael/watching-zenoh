@@ -51,8 +51,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, spawn_zenohd_on_ephemeral_tcp, wait_for_substring, wz_ap_demo_binary,
-    zenoh_pico_cli_binary, ChildGuard,
+    assert_demo_binary_newer_than_sources, read_captured, spawn_zenohd_on_ephemeral_tcp,
+    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
 };
 
 /// wz's publisher keyexpr — a literal, so the match against pico's wildcard is a
@@ -73,6 +73,12 @@ const MATCHING_TIMEOUT: Duration = Duration::from_secs(25);
 #[ignore = "binary-dep e2e (zenohd + wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored"]
 fn a_wz_matching_listener_behind_zenohd_learns_of_a_pico_subscriber() {
     let demo = wz_ap_demo_binary();
+    // R311y776 — this fixture's FIRST run redded against a demo binary that
+    // predated the emit it was written for, and the red was blamed on a
+    // feature-closure defect that did not exist. The freshness check is what
+    // makes a red here mean "the router withheld it" rather than "the binary is
+    // from before".
+    assert_demo_binary_newer_than_sources(&demo);
     let z_sub = zenoh_pico_cli_binary("z_sub");
 
     // R311y413 — the port is DISCOVERED from zenohd's own announcement; naming

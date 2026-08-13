@@ -240,6 +240,20 @@ pub mod common {
     /// `crates/target/<profile>/wz-ap-demo`; the test profile is
     /// usually debug, but release is checked as a fallback so a
     /// developer can run `cargo test --release` without surprises.
+    ///
+    /// R311y776 — "freshly-built" was a WISH until this round, and it cost a
+    /// wrong diagnosis. This helper returns whatever file exists, so a binary
+    /// built before the change under test is picked up silently and every
+    /// fixture that spawns it tests the OLD behaviour. That happened: a witness
+    /// written for R311y771's Interest emit redded against a demo predating it,
+    /// and the red was attributed to a feature-closure defect that did not
+    /// exist. Nothing in the harness could have said otherwise — the binary
+    /// prints its feature banner, which a stale build prints identically.
+    ///
+    /// [`assert_demo_binary_newer_than_sources`] is the check; it is deliberately
+    /// NOT folded in here, because this function is also used by fixtures that
+    /// only need the path (usage strings, argv rejection) and staleness cannot
+    /// mislead those.
     pub fn wz_ap_demo_binary() -> PathBuf {
         let crates_dir = project_root().join("crates");
         let candidates = [
@@ -254,6 +268,113 @@ pub mod common {
         panic!(
             "wz-ap-demo binary not found in {candidates:?}; run `cargo build -p wz-ap-demo` first"
         );
+    }
+
+    /// R311y776 — refuse a `wz-ap-demo` binary OLDER than the sources it is
+    /// supposed to embody.
+    ///
+    /// A behavioural fixture that spawns the demo is making a claim about the
+    /// CURRENT tree; a stale binary turns that into a claim about some past one,
+    /// and the failure mode is the worst kind — it looks like the feature under
+    /// test does not work, so the diagnosis goes hunting in the wrong place. The
+    /// remedy is cheap and local: compare mtimes.
+    ///
+    /// Deliberately mtime-based rather than a rebuild: a helper that shells out
+    /// to cargo inside a test would serialise every fixture behind a build lock
+    /// and hide compile errors inside test output. Reporting the staleness and
+    /// naming the fix is the harness's job; running the build is the lane's.
+    ///
+    /// The comparison walks `crates/*/src`, MINUS the crates a demo build cannot
+    /// possibly depend on: anything named `*-tests` or `*-test-support`, which
+    /// are dev-only. That exclusion is not tidiness — without it this check
+    /// false-alarms on its own file. Editing `wz-integration-tests/src/lib.rs`
+    /// correctly does NOT relink the demo, so the demo's mtime stays behind and
+    /// a naive walk calls it stale on every run; measured, on the first run of
+    /// this very function.
+    ///
+    /// The residual imprecision is stated rather than hidden: a change to a
+    /// non-test crate the demo does not link still false-alarms. That direction
+    /// is the safe one — it asks for a rebuild that costs seconds — whereas the
+    /// direction this exists to prevent (a stale binary read as a working one)
+    /// costs a wrong diagnosis. `out/` and `sources/` are excluded for a
+    /// different reason: codegen output is committed and regenerating it is
+    /// Layer B2's business, so a fresh checkout would otherwise report every
+    /// binary stale.
+    pub fn assert_demo_binary_newer_than_sources(demo: &std::path::Path) {
+        let built = match demo.metadata().and_then(|m| m.modified()) {
+            Ok(t) => t,
+            // A filesystem with no mtime is not a reason to fail a proof; say so
+            // rather than guessing, so a green here is never mistaken for a
+            // freshness check that ran.
+            Err(e) => {
+                eprintln!("wz-ap-demo freshness: mtime unavailable ({e}); check SKIPPED");
+                return;
+            }
+        };
+        let crates_dir = project_root().join("crates");
+        let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+        let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+            eprintln!("wz-ap-demo freshness: crates/ unreadable; check SKIPPED");
+            return;
+        };
+        for entry in entries.flatten() {
+            let crate_dir = entry.path();
+            // Dev-only crates cannot be a demo dependency, so a change in one
+            // says nothing about the binary's freshness. See the doc comment:
+            // without this, editing THIS file reports THIS binary stale.
+            let is_dev_only = crate_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("-tests") || n.ends_with("-test-support"));
+            if is_dev_only {
+                continue;
+            }
+            let src = crate_dir.join("src");
+            if !src.is_dir() {
+                continue;
+            }
+            newest_rust_file(&src, &mut newest);
+        }
+        if let Some((t, path)) = newest {
+            if t > built {
+                panic!(
+                    "wz-ap-demo is STALE: {} is newer than the binary at {}.\n\
+                     This fixture spawns that binary, so it would be testing an OLDER \
+                     tree than the one under test -- which reads as \"the feature does \
+                     not work\" and sends the diagnosis somewhere else entirely \
+                     (R311y774 paid exactly that).\n\
+                     Fix: cargo build -p wz-ap-demo",
+                    path.display(),
+                    demo.display(),
+                );
+            }
+        }
+    }
+
+    /// Depth-first walk recording the newest `.rs` under `dir`. Separate from
+    /// its caller so the recursion is not tangled with the per-crate loop.
+    fn newest_rust_file(
+        dir: &std::path::Path,
+        newest: &mut Option<(std::time::SystemTime, PathBuf)>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                newest_rust_file(&path, newest);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                if let Ok(t) = entry.metadata().and_then(|m| m.modified()) {
+                    // `is_none_or` is 1.82 and this workspace's MSRV is 1.81,
+                    // so the match is spelled out rather than borrowed from a
+                    // newer std (clippy's msrv lint caught it).
+                    if newest.as_ref().map_or(true, |(best, _)| t > *best) {
+                        *newest = Some((t, path));
+                    }
+                }
+            }
+        }
     }
 
     /// Locate the `wz-e2e-pubsub` binary — the minimal pubsub-only

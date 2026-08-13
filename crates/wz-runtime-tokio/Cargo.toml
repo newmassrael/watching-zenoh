@@ -1214,20 +1214,21 @@ session-reconnect = ["wz-session-core/session-reconnect"]
 # machinery; the Publisher/Querier declare_matching_listener methods are
 # signature-stable and reject typed with this off (R311g1).
 #
-# R311y774 — PULLS `declare-interest`, and that is a correctness dependency
-# rather than a convenience. A zenoh router forwards a subscriber declaration
-# to a face only when that face's own `remote_interests` carries a matching
-# `options.subscribers()` (`hat/router/pubsub.rs:120-125`), so behind a router
-# a matching listener with no Interest emit is INERT — it registers, nothing
-# arrives, and it never fires. MEASURED, not argued: the same
-# `wz_matching_status_through_zenohd_router` fixture times out at 25s on a
-# `preset-ap-client` demo (which shipped `session-matching` WITHOUT
-# `declare-interest`) and passes on `preset-ap-full`, with a real zenohd
-# deciding and pico's Puts flowing in both -- so the data plane was never the
-# difference. Declaring it here rather than adding the feature to each preset
-# keeps the dependency with the feature that needs it; a preset cannot now
-# ship the listener without the message that makes it work.
-session-matching = ["wz-session-core/session-matching", "declare-interest"]
+# R311y776 — DOES NOT pull `declare-interest`, and the reason is a RETRACTION.
+# R311y774 added that edge on a causal story that was wrong twice over, and
+# R311y776 falsified it directly: reverting the edge leaves BOTH zenohd witnesses
+# GREEN, so the edge was never what made them pass. The story rested on a
+# truncated `grep -A 30` that stopped at line 1481 of `crates/wz/Cargo.toml` and
+# so never reached `declare-interest` at 1486 — `preset-ap-client` has carried it
+# all along, and every preset that takes `session-matching` carries it.
+#
+# What IS true and is left as prose rather than an edge: a HAND-PICKED feature
+# set with `session-matching` and no `declare-interest` builds a listener that is
+# inert behind a router, because a zenoh router forwards a declaration only to a
+# face whose own `remote_interests` asked for one (`hat/router/pubsub.rs:120-125`).
+# No shipping preset is in that state and no measurement of one exists, so the
+# edge would buy a footprint cost on every profile for a build nobody makes.
+session-matching = ["wz-session-core/session-matching"]
 # R311cc — pubsub domain wire-up. 9 atomic features (Cargo.toml
 # authoring intent: "11 atomic, 9 active / 2 reserved"). After the
 # R311du SubscriberRegistry move + R311fv attachment SSOT, only TWO
