@@ -3784,9 +3784,11 @@ layer_c1bm_cargo_test_pico_failfast() {
 # switchboard twin of the router/linkstate transit band lanes (RouteTable::forward_push
 # now routes through send_network_message_qos on the received FramePayload.priority).
 layer_c1x_cargo_test_routing_routes() {
-    _runci_guarded_test "C1X routing_forward 24" 24 \
-        cargo test -p wz-runtime-tokio --features routing-routes --lib routing_forward --quiet || return 1
+    # R311y766 (carry N39) — 24 -> 25 and 25 -> 26: `the_relay_emits_no_alias_of_its_own`,
+    # the guard that binds the premise routing.rs's peer-only resolve rests on.
     _runci_guarded_test "C1X routing_forward 25" 25 \
+        cargo test -p wz-runtime-tokio --features routing-routes --lib routing_forward --quiet || return 1
+    _runci_guarded_test "C1X routing_forward 26" 26 \
         cargo test -p wz-runtime-tokio --features routing-routes,transport-qos --lib routing_forward --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-routes --quiet -- -D warnings \

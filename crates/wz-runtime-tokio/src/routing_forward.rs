@@ -670,6 +670,126 @@ mod tests {
         );
     }
 
+    /// The mapping id of the keyexpr an emitted record names, or `None` for a
+    /// record that carries no keyexpr.
+    ///
+    /// EXHAUSTIVE, and the catch-all arms PANIC rather than returning `None`.
+    /// A record kind this forwarder has never emitted before is a NEW emit
+    /// path, and a new emit path is precisely where an alias of the relay's own
+    /// could first appear — so the guard below must fail on it rather than
+    /// quietly skip it. Silence on an unrecognised shape is how a guard passes
+    /// over the thing it was written to catch.
+    fn emitted_keyexpr_id(record: &NetworkMessage) -> Option<u64> {
+        fn id_of(w: &wz_codecs::wireexpr::WireexprOwned) -> u64 {
+            match &w.body {
+                wz_codecs::wireexpr::WireexprOwnedVariant::WireexprLocal(a) => a.id,
+                wz_codecs::wireexpr::WireexprOwnedVariant::WireexprNonlocal(a) => a.id,
+            }
+        }
+        match record {
+            NetworkMessage::Push(p) => Some(id_of(&p.keyexpr)),
+            NetworkMessage::Declare(d) => match &d.body {
+                DeclareOwnedVariant::CodecZenohDeclSubscriber(s) => Some(id_of(&s.keyexpr)),
+                other => panic!(
+                    "the routing forwarder emitted a Declare arm this guard has \
+                     never seen ({other:?}). It is a NEW emit path -- check \
+                     whether it can carry an alias the relay declared, and see \
+                     `routing.rs`'s peer-only resolve if it can"
+                ),
+            },
+            other => panic!(
+                "the routing forwarder emitted a record kind this guard has \
+                 never seen ({other:?}); see the note on this function"
+            ),
+        }
+    }
+
+    /// R311y766 (carry N39) — THE PREMISE THE RELAY'S REFUSAL RESTS ON.
+    ///
+    /// `RouteTable` resolves every inbound keyexpr against the SOURCE FACE's
+    /// `peer_aliases` and nothing else (`routing.rs:670`); there is no own-id
+    /// space on the other side of the `M` bit, so an `M=0` alias — one naming
+    /// an id the RELAY declared — resolves against nothing and the message is
+    /// dropped. That is correct exactly while the relay declares no alias of
+    /// its own, and the day it does it becomes a silent drop of legitimate
+    /// traffic that looks identical to a peer naming an id it never declared.
+    /// N39 recorded that latency; this is what stops it being latent.
+    ///
+    /// THE CLAIM IS ABOUT EMITTED BYTES, not about the absence of a call site.
+    /// The frames the destination face actually received are decoded and every
+    /// keyexpr in them is required to be a literal (`id == 0`). A grep for
+    /// `send_declare_keyexpr` would keep passing on the day a forward path
+    /// started aliasing inline; this does not.
+    ///
+    /// THE DISCRIMINATOR IS THAT BOTH INBOUND HALVES ARE ALIASED, on DIFFERENT
+    /// ids: the consumer subscribed through its id 7, the producer published
+    /// through its id 9. A forwarder that passed its input through verbatim
+    /// would hand the consumer an id 9 it never declared, and would red here.
+    #[test]
+    fn the_relay_emits_no_alias_of_its_own() {
+        use wz_session_core::inbound::{parse_inbound, InboundFrame};
+        use wz_session_core::network_message::parse_frame_payload;
+
+        let fwd = RoutingForwarder::new();
+        let (consumer, consumer_sink) = recording_actions();
+        let (producer, _producer_sink) = recording_actions();
+        fwd.register(FaceId(0), &consumer);
+        fwd.register(FaceId(1), &producer);
+
+        declare_kexpr(&fwd, 0, 7, "home/temp");
+        let sub = declare_frame(declare_envelope_decl_subscriber(decl_subscriber(
+            1, 7, None,
+        )));
+        fwd.forward(FaceId(0), IterationEvent::Poll(&sub));
+
+        declare_kexpr(&fwd, 1, 9, "home/temp");
+        let push = build_push_aliased(9, None, b"payload").expect("aliased Put push");
+        fwd.forward(FaceId(1), IterationEvent::Poll(&push_frame(push, true)));
+
+        // ANTI-VACUITY: nothing forwarded means every assertion below holds
+        // over an empty set, which is the same green a relay that emitted only
+        // literals would produce.
+        assert_eq!(
+            fwd.forwarded(),
+            1,
+            "the aliased Put did not reach the aliased subscription, so this \
+             guard would be grading an empty emit set"
+        );
+        assert!(
+            consumer_sink.frame_count() > 0,
+            "the consumer face received no frame"
+        );
+
+        let mut inspected = 0usize;
+        for idx in 0..consumer_sink.frame_count() {
+            let bytes = consumer_sink.frame_bytes(idx);
+            let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(&bytes) else {
+                continue;
+            };
+            for record in parse_frame_payload(&payload).expect("the relay's own frame parses") {
+                let Some(id) = emitted_keyexpr_id(&record) else {
+                    continue;
+                };
+                inspected += 1;
+                assert_eq!(
+                    id, 0,
+                    "the relay emitted an ALIASED keyexpr (id {id}). Every \
+                     resolve site in routing.rs consults only the source face's \
+                     peer table, so a peer answering this alias with M=0 would \
+                     be dropped -- that is carry N39, and this is the day it \
+                     stopped being latent. Give the face an own-id space and \
+                     resolve through MappingSpaces, as every other plane has \
+                     since R311y739"
+                );
+            }
+        }
+        assert!(
+            inspected > 0,
+            "no keyexpr-carrying record was inspected, so the id assertion \
+             graded nothing"
+        );
+    }
+
     #[test]
     fn an_aliased_subscription_resolves_after_its_keyexpr_is_declared() {
         // R311qd: a peer that DeclareKeyexpr(id=7 -> "home/temp") then declares a

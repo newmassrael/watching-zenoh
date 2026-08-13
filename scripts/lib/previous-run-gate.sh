@@ -89,11 +89,15 @@ except ValueError:
 GREEN = {"success"}
 RED = {"failure", "timed_out", "startup_failure"}
 
-# AN EMPTY POPULATION IS NOT A PASS. `gh run list` answers `[]` for a commit
-# hosted CI never saw, and the first draft of this fell through every bucket
-# below and printed `was green` for it — measured against a sha that does not
-# exist. That is this workspace`s most-repeated defect shape, rebuilt inside the
-# gate whose whole job is to catch it, so the count is checked before the loop.
+# AN EMPTY POPULATION IS NOT A PASS. gh run list answers an empty array for a
+# commit hosted CI never saw, and the first draft of this fell through every
+# bucket below and printed "was green" for it -- measured against a sha that
+# does not exist. That is the most-repeated defect shape in this workspace,
+# rebuilt inside the gate whose whole job is to catch it, so the count is
+# checked before the loop. (No backticks and no apostrophes anywhere in this
+# python: it is a single-quoted -c argument, so shellcheck reads a backtick as
+# command substitution (SC2016) and an apostrophe as the closing quote
+# (SC1011), and Layer 0 refuses both.)
 if not runs:
     print("NORUN\tno hosted run exists for this commit")
     raise SystemExit(0)

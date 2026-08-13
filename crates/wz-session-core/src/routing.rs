@@ -664,6 +664,23 @@ mod imp {
             // Resolve the source keyexpr in the source face's alias context
             // (literal id=0 verbatim; aliased id!=0 via DeclareKeyexpr). An id
             // with no prior mapping yields None and is dropped.
+            //
+            // PEER TABLE ONLY, and that is a PREMISE rather than an oversight
+            // (carry N39, closed R311y766). R311y739 gave every other inbound
+            // plane the pair the `M` bit picks between — pubsub, reply,
+            // switchboard, liveliness all take `impl Into<MappingSpaces>` — and
+            // left this kernel peer-only. The consequence: an `M=0` alias, one
+            // naming an id the RELAY declared, resolves against nothing here and
+            // is dropped indistinguishably from a peer naming an id it never
+            // declared. Correct while the relay declares no alias of its own,
+            // wrong the day it does.
+            //
+            // So that premise is a test rather than a sentence:
+            // `routing_forward::tests::the_relay_emits_no_alias_of_its_own`
+            // decodes the bytes this forwarder puts on a destination face and
+            // requires every keyexpr in them to be literal. Falsified by making
+            // `reliteralize_push` forward verbatim, which reds it with `id 9`.
+            // The day a forward path emits an alias, that test names this site.
             let Some(src) = self.faces.get(&src_id) else {
                 return 0;
             };
