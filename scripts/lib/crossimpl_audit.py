@@ -267,7 +267,22 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 #   * `routing-router` <- zenohd_wire_dissection (y762) -- a router given
 #     something to route, so the bytes are ones only a router emits. It is
 #     `partial` on purpose: N68 records that the Frames were counted, not opened.
-FOREIGN_ADJUDICATOR_LINKS = 820
+# R311y774/y775 take it to 822, and BOTH links land on ONE atom that was already
+# `partial`: `declare-interest`. That is exactly the case this constant was split
+# out to make visible -- the atom's proven/partial bit did not move, so the two
+# rounds would otherwise have reported buying nothing, when what they bought is
+# the atom's FIRST foreign adjudication on either plane.
+#   * `declare-interest` <- wz_matching_status_through_zenohd_router (y774) --
+#     the SUBSCRIBERS interest, judged by a real zenohd deciding whether to
+#     forward a real pico subscriber's declaration to wz's face. Its first run
+#     was RED and found that `preset-ap-client` shipped the matching listener
+#     without `declare-interest`, so the listener was inert behind a router.
+#   * `declare-interest` <- wz_querier_matching_through_zenohd_router (y775) --
+#     the QUERYABLES half, a separate file because it swaps the wire bit, the
+#     registry, the feature gate, the router gate and the foreign process. The
+#     pair is what makes each specific: damaging the querier's emit reds only
+#     its own witness.
+FOREIGN_ADJUDICATOR_LINKS = 822
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
