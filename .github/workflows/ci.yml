@@ -1493,6 +1493,11 @@ jobs:
         # first run's report: the direction labels were swapped, zenohd sent
         # [Init, Open], and the three Frames were wz's own.
         #
+        # R311y762 added the leg where the router HAS something to route, and
+        # R311y764 (carry N68) opens the Frames it sends there: the lane now
+        # grades the record layer against a real router, not just the transport
+        # envelope. Idle leg `[]`, routing leg `["Push", "Push"]`.
+        #
         # Wired HERE because this job is what builds and guarantees zenohd; the
         # same `WZ_Z_REQUIRE` reasoning applies, and the lane's own prereq check
         # turns an absent binary into a FAIL under it.

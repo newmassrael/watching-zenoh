@@ -252,7 +252,22 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # for WHOSE opinion arrived: every prior witness of both atoms was pico, so this
 # is the first zenohd adjudication either one has, i.e. the half that moved is
 # `1-impl-only`, which is the half `links` was split out to make visible.
-FOREIGN_ADJUDICATOR_LINKS = 817
+# R311y764 takes it to 820, THREE links in one step, and the fact worth naming
+# is that it is one step rather than three. Each of R311y759 / y760 / y762 added
+# exactly one wire witness and none of them moved this constant, so hosted A4 has
+# been red on `1808ba7f`, `8f19661e` and `6f689628` -- three consecutive rounds
+# that each read the previous run, saw a red, and did not attribute it. Measured
+# rather than reconstructed: the audit re-run at `9eeb336a` (the last green)
+# reports 817, at `1808ba7f` 818, at `8f19661e` 819, and here 820.
+# WHOSE opinion the three bought:
+#   * `session-unicast-open` <- pico_wire_dissection (y759, Layer Ewire) -- the
+#     analyzer's first bytes from a foreign process rather than a fixture.
+#   * `session-unicast-open` <- zenohd_wire_dissection (y760, Layer Ewirez) --
+#     the same atom's first ROUTER adjudication; pico and zenohd are two impls.
+#   * `routing-router` <- zenohd_wire_dissection (y762) -- a router given
+#     something to route, so the bytes are ones only a router emits. It is
+#     `partial` on purpose: N68 records that the Frames were counted, not opened.
+FOREIGN_ADJUDICATOR_LINKS = 820
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

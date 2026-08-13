@@ -165,6 +165,55 @@ if ! mnemosyne-cli validate-workspace; then
     exit 1
 fi
 
+# ─── the diff range, hoisted (used by gate 2b and gate 3) ───────────
+# <remote_sha>..<local_sha>. A zero/absent remote_sha (a new ref or first push)
+# has no remote base — fall back to origin/main if it exists, else empty, and
+# each gate below decides what an unbounded range means for it.
+diff_base=""
+if [[ -n "$remote_sha" && "$remote_sha" != "$zero_sha" ]]; then
+    diff_base="$remote_sha"
+elif git rev-parse --verify --quiet origin/main >/dev/null; then
+    diff_base="origin/main"
+fi
+
+# ─── gate 2b — cross-impl proof audit, WHEN A CLAIM MOVED (R311y764) ─
+# The narrowest gate in this file, and it exists because of a measured
+# three-round failure rather than a hypothetical one.
+#
+# Layer A4 counts foreign adjudications and refuses a count that moved without
+# `FOREIGN_ADJUDICATOR_LINKS` moving with it, so that the diff carries the
+# claim. Each of R311y759 / y760 / y762 added exactly one wire witness and none
+# moved the constant, so hosted A4 went red on `1808ba7f`, `8f19661e` and
+# `6f689628`. THE GATE WORKED; nothing local ran it, and each of the three
+# rounds read the previous run, saw a red, and did not attribute it.
+#
+# Scoped to pushes that actually move a claim — a `wz-proves:` line in the diff,
+# or the audit's own sources — so the ordinary push pays nothing. Measured at
+# ~6s on this tree, which is the same order as gate 2. It is NOT a second A4:
+# hosted CI still runs the full layer on every push, and this catches only the
+# class that the last three rounds proved a human read will not.
+if [[ -n "$diff_base" ]]; then
+    a4_reason=""
+    if git diff -U0 "$diff_base..$local_sha" -- 'crates/' 2>/dev/null \
+        | grep -qE '^[-+].*wz-proves:'; then
+        a4_reason="a wz-proves claim changed"
+    elif ! git diff --quiet "$diff_base..$local_sha" -- \
+        'scripts/lib/crossimpl_audit.py' 'scripts/lib/crossimpl_corpus.py' \
+        'scripts/audit-crossimpl-proof.sh' 2>/dev/null; then
+        a4_reason="the cross-impl audit itself changed"
+    fi
+    if [[ -n "$a4_reason" ]]; then
+        echo "pre-push: cross-impl proof audit ($a4_reason) ..."
+        if ! bash scripts/audit-crossimpl-proof.sh; then
+            echo "" >&2
+            echo "pre-push: cross-impl proof audit FAILED — this is hosted Layer A4," >&2
+            echo "          run early because a claim moved in this push." >&2
+            echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+            exit 1
+        fi
+    fi
+fi
+
 # ─── housekeeping (NOT a gate) — toolchain-scoped target GC ─────────
 #
 # R311y445. Deliberately NOT a gate: it never fails the push, and an absent
@@ -191,17 +240,10 @@ if command -v cargo-sweep >/dev/null 2>&1; then
 fi
 
 # ─── gate 3 — changed-crate tests (default features, fast) ──────────
-# Diff range: <remote_sha>..<local_sha>. A zero/absent remote_sha (a new
-# ref or first push) has no remote base — fall back to origin/main if it
-# exists, else skip (nothing to diff against). Only crates/<name>/ changes
-# map to a test target; everything else is hosted-CI-only.
-diff_base=""
-if [[ -n "$remote_sha" && "$remote_sha" != "$zero_sha" ]]; then
-    diff_base="$remote_sha"
-elif git rev-parse --verify --quiet origin/main >/dev/null; then
-    diff_base="origin/main"
-fi
-
+# Diff range: `diff_base..<local_sha>`, computed above (gate 2b shares it). An
+# empty diff_base is a new ref with no remote base — nothing to diff against, so
+# skip. Only crates/<name>/ changes map to a test target; everything else is
+# hosted-CI-only.
 if [[ -z "$diff_base" ]]; then
     echo "pre-push: no diff base (new ref, no origin/main); skipping changed-crate tests."
     echo "          full validation runs on hosted CI."

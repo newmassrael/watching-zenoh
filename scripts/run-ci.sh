@@ -7396,6 +7396,12 @@ layer_ewire_pico_wire_dissection() {
 # router's. Its first failure was `session open failed: Terminal` -- the demo
 # carries a HARDCODED zid, so the second instance needs `--zid`.
 #
+# R311y764 (carry N68) opens those Frames. Counting containers said a router
+# spoke and nothing about what it said, so both legs now decode the record batch
+# inside every Frame on zenohd's half: the idle leg measures `[]` and the routing
+# leg `["Push", "Push"]`. That pair is the control at the record layer -- the
+# routing leg's Push is only evidence of routing because the idle leg is silent.
+#
 # SEPARATE LANE rather than a leg of Ewire because the prerequisite differs: this
 # needs `zenohd`, that needs the pico CLI, and folding them would make either
 # missing binary skip both.

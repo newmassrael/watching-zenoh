@@ -254,7 +254,7 @@ fn the_analyzer_parses_every_message_a_real_zenoh_pico_session_puts_on_the_wire(
     // the side and not merely the presence is what the zenohd correction taught:
     // a Frame on the wrong half would have read as success.
     assert!(
-        named(pico_side).iter().any(|n| *n == "Frame"),
+        named(pico_side).contains(&"Frame"),
         "the real z_put's sample did not arrive on pico's half: {:?}",
         named(pico_side)
     );

@@ -58,6 +58,22 @@
 //! label, and the assertion at the end of this test now pins it so the claim
 //! cannot rest on a printed line nobody re-reads.
 //!
+//! ## R311y764 — and what was INSIDE the router's Frames
+//!
+//! R311y762 gave the router something to route and measured `zenohd -> wz =
+//! [Init, Open, Frame, Frame]`. It counted those Frames; it never opened them,
+//! and carry N68 said so. A `Frame` is a container, so that census is identical
+//! whether the two carried the routed publication or two records this decoder
+//! cannot name — the transport layer was graded against a real router and the
+//! RECORD layer had never been graded against one at all.
+//!
+//! Both legs now decode the batch inside every Frame on zenohd's half, and the
+//! two readings are each other's control at that layer too:
+//!
+//! * idle leg — `[]`. A stock zenohd sends an idle face no records.
+//! * routing leg — `["Push", "Push"]`. The publisher's bytes never touched this
+//!   tap, so a Push here is the sample re-encoded by the router onto this face.
+//!
 //! ## Falsification
 //!
 //! Bypassing the tap (dialling zenohd directly) reds with `the tap never saw
@@ -65,6 +81,12 @@
 //! assumed — the session succeeds either way, and only the recording tells them
 //! apart. The shared harness's other probes (empty recording, damaged segment)
 //! were measured in the pico witness against the same code.
+//!
+//! For the record-layer half (R311y764): asking the routing leg for a `Declare`
+//! instead of a `Push` reds with `["Push", "Push"]` in the message, so the
+//! assertion reads what the batch actually holds rather than passing on any
+//! non-empty list. The idle leg's `[]` is the other half of that binding — a
+//! `records_on` that returned junk would red there.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -76,6 +98,7 @@ use wz_integration_tests::common::{
 };
 use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Recording, Side};
 use wz_session_core::inbound::InboundFrame;
+use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
 use wz_session_core::passive::Direction;
 
 /// The synthesised endpoint ports. They are NOT the real ones (the real dialer
@@ -100,6 +123,61 @@ fn frame_name(frame: &InboundFrame) -> &'static str {
         InboundFrame::Join { .. } => "Join",
         InboundFrame::Unknown { .. } => "Unknown",
     }
+}
+
+/// A short name for a decoded RECORD — the layer inside a `Frame`.
+///
+/// EXHAUSTIVE for the same reason as [`frame_name`], and with one arm that
+/// deliberately reads differently: `Unknown` renders its MID rather than a bare
+/// word, because a record wz cannot name is the single outcome here that is a
+/// finding about wz's decoder rather than a description of the router.
+fn record_name(record: &NetworkMessage) -> String {
+    match record {
+        NetworkMessage::Request(..) => "Request".to_string(),
+        NetworkMessage::Push(..) => "Push".to_string(),
+        NetworkMessage::ResponseFinal(..) => "ResponseFinal".to_string(),
+        NetworkMessage::Oam(..) => "Oam".to_string(),
+        NetworkMessage::Interest(..) => "Interest".to_string(),
+        NetworkMessage::Response(..) => "Response".to_string(),
+        NetworkMessage::Declare(..) => "Declare".to_string(),
+        NetworkMessage::Unknown { mid, .. } => format!("Unknown(mid={mid:#04x})"),
+    }
+}
+
+/// Decode the record batch inside every `Frame` a chosen half sent.
+///
+/// R311y764 (carry N68). Both witnesses in this file used to stop at the
+/// transport envelope: they counted `Frame` and asserted its presence, which
+/// establishes that a router spoke and nothing at all about WHAT it said. A
+/// `Frame` is a container, and `[Init, Open, Frame, Frame]` is the same census
+/// whether the two carried the routed publication or two records wz cannot
+/// decode.
+///
+/// Returns the record names in wire order plus the batches that FAILED to
+/// decode, kept separate on purpose: an empty name list and an empty failure
+/// list mean "the router sent no records", while a non-empty failure list is a
+/// defect report against `parse_frame_payload`. Collapsing them would let the
+/// second read as the first.
+fn records_on(flow: &wz_capture::FlowDissection, side: Direction) -> (Vec<String>, Vec<String>) {
+    let mut names = Vec::new();
+    let mut failures = Vec::new();
+    for frame in flow.frames.iter() {
+        if frame.direction != side {
+            continue;
+        }
+        let Ok(InboundFrame::Frame { payload, .. }) = &frame.frame else {
+            continue;
+        };
+        match parse_frame_payload(payload) {
+            Ok(records) => names.extend(records.iter().map(record_name)),
+            Err(e) => failures.push(format!(
+                "stream_offset {} ({} payload byte(s)): {e:?}",
+                frame.stream_offset,
+                payload.len()
+            )),
+        }
+    }
+    (names, failures)
 }
 
 /// Wait until BOTH directions have carried bytes, which is the earliest point a
@@ -311,9 +389,28 @@ fn the_analyzer_parses_every_message_a_real_zenohd_puts_on_the_wire() {
     // N66; it was there all along, under the other label. Asserting it here is
     // what stops the claim from depending on a printed line nobody re-reads.
     assert!(
-        named(wz_side).iter().any(|n| *n == "Frame"),
+        named(wz_side).contains(&"Frame"),
         "wz ran with --publish and no Frame was dissected on its half: {:?}",
         named(wz_side)
+    );
+
+    // ── THE RECORD-LAYER CONTROL (R311y764, carry N68) ────────────────────
+    // The second witness asserts that a routing zenohd's Frames carry a `Push`.
+    // That assertion is only worth something if THIS leg — same harness, same
+    // router build, one difference: nothing to route — produces no such record.
+    // Asserted rather than left implied: if a stock zenohd emitted records to
+    // an idle face, the second leg's Push would not be evidence of routing.
+    let (idle_records, idle_failures) = records_on(flow, zenohd_side);
+    eprintln!("zenohd -> wz (idle) RECORD set: {idle_records:?}");
+    assert!(
+        idle_failures.is_empty(),
+        "the idle router's Frames failed to decode: {idle_failures:?}"
+    );
+    assert!(
+        idle_records.is_empty(),
+        "an IDLE zenohd sent record(s) to a face that declares nothing: \
+         {idle_records:?}. The routing witness reads a `Push` here as proof of \
+         routing, and that reading depends on this half being silent"
     );
 }
 
@@ -340,7 +437,7 @@ fn the_analyzer_parses_every_message_a_real_zenohd_puts_on_the_wire() {
 /// this lane's prerequisites for a leg whose foreign half is zenohd's either way.
 /// The publisher here is scaffolding that gives the router work; the bytes under
 /// test are the router's, and they are equally foreign whoever caused them.
-// wz-proves: routing-router wz->zenohd->wz
+// wz-proves: routing-router zenohd->wz partial
 #[test]
 #[ignore = "binary-dep e2e (two wz-ap-demo + zenohd); Layer Ewirez runs via --ignored"]
 fn the_analyzer_parses_what_a_real_zenohd_sends_when_it_actually_routes() {
@@ -510,7 +607,56 @@ fn the_analyzer_parses_what_a_real_zenohd_sends_when_it_actually_routes() {
          measured, and this witness exists to leave it."
     );
     assert!(
-        zenohd_sent.iter().any(|n| *n == "Frame"),
+        zenohd_sent.contains(&"Frame"),
         "no Frame on zenohd's half: {zenohd_sent:?}"
+    );
+
+    // ── AND WHAT WAS INSIDE THEM (R311y764, carry N68) ────────────────────
+    // Up to here this witness has counted the router's containers. N68 was
+    // filed because that is all it did: `[Init, Open, Frame, Frame]` is the
+    // same census whether those Frames carried the routed publication or two
+    // records the decoder cannot name. The transport layer was proven against
+    // a real router; the record layer had never been graded against one at all.
+    let (records, record_failures) = records_on(flow, Direction::A);
+    eprintln!("zenohd -> wz (routing) RECORD set: {records:?}");
+
+    assert!(
+        record_failures.is_empty(),
+        "the analyzer parsed the router's Frames but FAILED to decode the \
+         record batch inside {} of them -- a finding about wz's \
+         parse_frame_payload, not about the fixture:\n  {}",
+        record_failures.len(),
+        record_failures.join("\n  ")
+    );
+    // ANTI-VACUITY: `record_failures` is empty for a router that sent no
+    // records at all, so the empty case has to be refused separately or the
+    // assertion above proves nothing.
+    assert!(
+        !records.is_empty(),
+        "zenohd's Frames carried NO records. A Frame with an empty batch is a \
+         valid transport envelope, so the parse assertions above would all pass \
+         on it -- which is exactly why this witness cannot stop at them"
+    );
+    // THE RECORD THAT MAKES A ROUTER A ROUTER. `Push` is the pub/sub data
+    // carrier: the publisher's own bytes never touched this tap, so a Push
+    // arriving on zenohd's half is the routed sample, re-encoded by the router
+    // onto this face. Any other record here (a Declare, an Interest) would be
+    // the router talking about the session rather than routing through it.
+    assert!(
+        records.iter().any(|r| r == "Push"),
+        "zenohd routed a sample to this face and the subscriber fired, but no \
+         Push was decoded out of its Frames: {records:?}"
+    );
+    // A record whose MID wz does not decode is the one outcome that would be a
+    // defect rather than a description, and `Unknown` is how the batch decoder
+    // reports it WITHOUT failing -- so it has to be refused by name.
+    let unknown: Vec<&String> = records
+        .iter()
+        .filter(|r| r.starts_with("Unknown"))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "a real zenohd sent record(s) this decoder has no envelope for: \
+         {unknown:?} (whole set: {records:?})"
     );
 }
