@@ -29,9 +29,26 @@ lines give an identifier -> crate map, and a doc-comment link naming one of thos
 identifiers is an edge to that crate. It is a per-FILE map because that is the
 scope rustdoc itself resolves in.
 
-WHAT IT STILL CANNOT SEE, stated rather than left to be rediscovered: a link
-through a glob import (`use wz_x::*`), through a local re-export chain, or to an
-identifier whose `use` is behind a `#[cfg]` this reader does not evaluate.
+R311y795 CLOSED THE THREE GAPS y794 WROTE DOWN, and measuring them first was
+the point -- y794's own lesson was that a gap nobody measured turned out to be
+the larger half. This time the three measured very differently:
+
+  * `#[cfg]`-gated `use` -- THE CLAIM WAS FALSE. 130 such sites over 6 crates,
+    and every one was already captured: the attribute sits on the line ABOVE and
+    the `use` line itself is what this reader matches. Removed rather than
+    "fixed", because a gap that does not exist is not closed by code.
+  * RE-EXPORT chains -- REAL. `[Foo]` in a crate that wrote `use wz_a::Foo`,
+    where wz_a itself wrote `pub use wz_x::Foo`, is an edge to wz_x and was read
+    as one to wz_a. 8 crates re-export 158 wz identifiers between them; the
+    edges actually missed are 3, all into wz-session-core (wz-capi-c,
+    wz-capi-core, wz-runtime-tokio-test-support). Resolved transitively below.
+  * GLOB imports -- REAL and tiny. `use wz_x::*` binds names this reader cannot
+    enumerate. 6 sites, 1 crate pair, 1 missed edge (wz-session-core ->
+    wz-session-core-test-support).
+
+WHAT IT STILL CANNOT SEE: a re-export written through a module path this reader
+does not follow (`pub use crate::inner::Thing` where `inner` re-exported it), and
+anything a macro generates. Neither is measured.
 
 USAGE
     doclink_dependents.py <crate-name>...
@@ -52,6 +69,13 @@ import sys
 LINK = re.compile(r"^\s*(?://[/!])\s*.*?\[`?([A-Za-z_][A-Za-z0-9_]*)`?\]")
 # `use wz_x::a::{B, C};` / `pub use wz_x::D;`
 USE = re.compile(r"^\s*(?:pub\s+)?use\s+(wz_[a-z0-9_]+)::([^;]+);")
+# R311y795 — the RE-EXPORT half: `pub use wz_x::Foo;` makes Foo reachable as the
+# re-exporting crate's own, so a downstream `use that_crate::Foo` + `[Foo]` is
+# really an edge to wz_x.
+PUB_USE = re.compile(r"^\s*pub\s+use\s+(wz_[a-z0-9_]+)::([^;]+);")
+# R311y795 — `use wz_x::*;` (or `use wz_x::a::*;`) binds names this reader cannot
+# enumerate, so the import itself is taken as the edge.
+GLOB_USE = re.compile(r"^\s*(?:pub\s+)?use\s+(wz_[a-z0-9_]+)::(?:[^;]*::)?\*\s*;")
 # The qualified link spelling, both backtick forms.
 QUAL = re.compile(r"\[`?(wz_[a-z0-9_]+)::")
 IDENT = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
@@ -64,33 +88,85 @@ def repo_root() -> pathlib.Path:
     return pathlib.Path(out.stdout.strip())
 
 
-def edges(crates_dir: pathlib.Path) -> dict:
-    """target crate name -> set of crate names whose docs link into it."""
-    graph: dict = {}
+def read_files(crates_dir: pathlib.Path):
+    """(source crate, lines) for every crate source file, target dirs excluded."""
     for path in crates_dir.rglob("*.rs"):
         parts = path.relative_to(crates_dir).parts
         if not parts or "target" in parts:
             continue
-        source = parts[0]
         try:
-            lines = path.read_text(errors="ignore").splitlines()
+            yield parts[0], path.read_text(errors="ignore").splitlines()
         except OSError:
             continue
 
+
+def reexports(crates_dir: pathlib.Path) -> dict:
+    """crate (module form) -> {ident: the wz crate it was re-exported FROM}."""
+    out: dict = {}
+    for source, lines in read_files(crates_dir):
+        module = source.replace("-", "_")
+        for line in lines:
+            m = PUB_USE.match(line)
+            if m:
+                for ident in IDENT.findall(m.group(2)):
+                    out.setdefault(module, {})[ident] = m.group(1)
+    return out
+
+
+def origin(module: str, ident: str, chain: dict) -> str:
+    """Walk `module::ident` back to the crate that first exported it.
+
+    Bounded by a visited set rather than a hop count: the re-export map is tiny
+    and a cycle is the only thing that could not terminate. One hop is what the
+    measurement found (3 missed edges, all into wz-session-core), but hop count
+    is not a property worth hard-coding -- a second re-export would be silently
+    missed by a fixed `1`.
+    """
+    seen = {module}
+    while True:
+        nxt = chain.get(module, {}).get(ident)
+        if nxt is None or nxt in seen:
+            return module
+        seen.add(nxt)
+        module = nxt
+
+
+def edges(crates_dir: pathlib.Path) -> dict:
+    """target crate name -> set of crate names whose docs link into it."""
+    graph: dict = {}
+    chain = reexports(crates_dir)
+
+    def add(target_module: str, source: str) -> None:
+        graph.setdefault(target_module.replace("_", "-"), set()).add(source)
+
+    for source, lines in read_files(crates_dir):
         imported = {}
+        globs = set()
         for line in lines:
             m = USE.match(line)
             if m:
                 for ident in IDENT.findall(m.group(2)):
                     imported[ident] = m.group(1)
+            g = GLOB_USE.match(line)
+            if g:
+                globs.add(g.group(1))
+
+        # A glob import is taken as an edge on its own: the names it binds
+        # cannot be enumerated here, so the file's docs may name any of them.
+        # An over-approximation whose whole cost today is one crate pair.
+        for target in globs:
+            add(target, source)
 
         for line in lines:
             for target in QUAL.findall(line):
-                graph.setdefault(target.replace("_", "-"), set()).add(source)
+                add(target, source)
             m = LINK.match(line)
             if m and m.group(1) in imported:
-                target = imported[m.group(1)].replace("_", "-")
-                graph.setdefault(target, set()).add(source)
+                direct = imported[m.group(1)]
+                add(direct, source)
+                # And the crate the item actually came from, if `direct` is
+                # only passing it through.
+                add(origin(direct, m.group(1), chain), source)
     return graph
 
 

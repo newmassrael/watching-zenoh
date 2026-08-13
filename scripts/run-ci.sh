@@ -2049,6 +2049,30 @@ layer_c0d_doclink_dependents() {
         return 1
     }
 
+    # R311y795 — RE-EXPORT hop. wz-capi-core doc-links an identifier it imported
+    # from a crate that had itself `pub use`d it out of wz-session-core, so the
+    # edge exists only if the walk follows the re-export back to its origin.
+    # Measured: 3 such edges, all into wz-session-core.
+    grep -qx "wz-capi-core" <<<"$out" || {
+        echo "  Layer C0d FAIL: wz-capi-core is absent from wz-session-core's expansion." \
+            "It links in through a RE-EXPORT -- \`use <mid>::Ident\` where <mid> wrote" \
+            "\`pub use wz_session_core::Ident\` -- so the walk is not following the hop" >&2
+        return 1
+    }
+
+    # R311y795 — GLOB import. wz-session-core writes \`use wz_session_core_test_support::*\`,
+    # which binds names this reader cannot enumerate, so the import ITSELF is the
+    # edge. Asserted from the other direction on purpose: it is the test-support
+    # crate that must pull wz-session-core in.
+    out="$(python3 "$script" wz-session-core-test-support)" || return 1
+    grep -qx "wz-session-core" <<<"$out" || {
+        echo "  Layer C0d FAIL: wz-session-core is absent from" \
+            "wz-session-core-test-support's expansion, though it glob-imports it --" \
+            "a \`use wz_x::*\` binds names no reader here can enumerate and must count" \
+            "as an edge on its own" >&2
+        return 1
+    }
+
     out="$(python3 "$script" wz-ap-demo)" || return 1
     if [[ "$out" != "wz-ap-demo" ]]; then
         echo "  Layer C0d FAIL: wz-ap-demo is a leaf nothing links INTO and must expand" \
@@ -2061,9 +2085,9 @@ layer_c0d_doclink_dependents() {
         return 1
     fi
 
-    echo "  doclink-dependents gate: OK (both link spellings expand -- qualified" \
-        "wz-runtime-tokio and unqualified wz-statechart-bridge; wz-ap-demo expands" \
-        "to itself; an empty set is refused)"
+    echo "  doclink-dependents gate: OK (four spellings expand -- qualified" \
+        "wz-runtime-tokio, unqualified wz-statechart-bridge, re-export wz-capi-core," \
+        "glob wz-session-core; wz-ap-demo expands to itself; an empty set is refused)"
     return 0
 }
 
