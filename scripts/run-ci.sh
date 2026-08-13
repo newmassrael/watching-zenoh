@@ -2564,7 +2564,14 @@ layer_c1ax_cargo_test_routing_namespace() {
         cargo test -p wz-runtime-tokio --features routing-namespace,session-reconnect --test namespace_reconnect_e2e --quiet || return 1
     _runci_guarded_test "C1AX session-multicast 25" 25 \
         cargo test -p wz-session-core --no-default-features --features routing-namespace,session-multicast,codec-join,codec-frame,codec-close,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,query-queryable,reassembly,pubsub-put --lib namespace --quiet || return 1
-    _runci_guarded_test "C1AX multicast_glue 15" 15 \
+    # R311y775: 15 -> 18. R311y772 added three graceful-stop cases to
+    # `multicast_glue` and raised the THREE guards in Layer C1q while missing
+    # this one — a SECOND lane running the same filter under a different union.
+    # It redded on hosted CI (run 31666905266) and nowhere locally, because the
+    # local pre-push runs changed crates rather than lanes. The lesson is the
+    # one this file already carries elsewhere: when a count moves, grep every
+    # `_runci_guarded_test` naming that FILTER, not just the lane you were in.
+    _runci_guarded_test "C1AX multicast_glue 18" 18 \
         cargo test -p wz-runtime-tokio --features transport-multicast,routing-namespace --lib multicast_glue --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --all-targets --quiet -- -D warnings \
@@ -9381,6 +9388,19 @@ layer_z_zenohd_interop() {
     # data plane was never the difference.
     _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_matching_status_through_zenohd_router -- --ignored --quiet --test-threads=1 \
+        || return 1
+    # R311y775 — the QUERYABLES half, and the reason it is a SECOND file rather
+    # than a second case in the one above: it swaps the foreign process (pico
+    # `z_queryable`), the wz surface (`Querier::declare_matching_listener`), the
+    # wire bit (`Q` 0x04 vs `S` 0x02), the registry, the feature gate, and the
+    # router gate (`hat/router/queries.rs:255-259`). Only the topology is shared.
+    #
+    # The pair is what makes each one specific: pointing the querier's emit at
+    # `build_interest_subscribers` reds THIS test at 25s and leaves the
+    # subscriber-plane witness green, so a real zenohd is distinguishing the two
+    # bits rather than answering any interest at all.
+    _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_querier_matching_through_zenohd_router -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked
     # against wz's cdylib, must report a REAL zenohd's zid under "Routers IDs".

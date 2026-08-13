@@ -76,8 +76,8 @@ use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use wz::runtime_tokio::session::{
     LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
-    MatchingListener, PublishOptions, Publisher, Queryable, QueryableOptions, SubscribeOptions,
-    Subscriber, TokioSession,
+    MatchingListener, PublishOptions, Publisher, Querier, QueryOptions, Queryable,
+    QueryableOptions, SubscribeOptions, Subscriber, TokioSession,
 };
 use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionInitParams, SessionLinkActions,
@@ -120,6 +120,12 @@ struct SessionHandles {
     /// alongside it because dropping it would take the listener's keyexpr with it.
     _publisher: Option<Publisher>,
     _matching_listener: Option<MatchingListener>,
+    /// R311y775 — `--querier-matching-log`'s querier + its matching listener,
+    /// held for the same RAII reason as the publisher pair above: the listener
+    /// must outlive whatever drives the far edge, and dropping the querier would
+    /// take the listener's keyexpr with it.
+    _querier: Option<Querier>,
+    _querier_matching_listener: Option<MatchingListener>,
     /// R311y442 — `--advanced-subscribe`'s [`AdvancedSubscriber`]. Held for the
     /// same RAII reason as the plain `_subscriber`: dropping it undeclares the
     /// live subscription, and with it the reorder state the history replies feed.
@@ -1021,6 +1027,48 @@ fn install_session_handles(
         None => (None, None),
     };
 
+    // R311y775 — `--querier-matching-log`, the QUERYABLE-plane twin of the block
+    // above. PRE-DRIVE for the identical reason, and a SEPARATE handle pair
+    // because it watches a different registry (`RemoteQueryableRegistry`) behind
+    // a different feature (`declare-queryable`).
+    //
+    // Its log lines are deliberately DISTINCT from the publisher's ("QUERIER
+    // MATCHING ..."), not a shared prefix: a fixture that greps `MATCHING STATUS`
+    // must not be satisfiable by the other plane's transition, or a run proving
+    // one would read as proving both.
+    let (querier, querier_matching_listener) =
+        match declare_spec.querier_matching_log_keyexpr.as_deref() {
+            Some(keyexpr) => {
+                let querier = session.declare_querier(keyexpr, QueryOptions::default());
+                let keyexpr_for_log = keyexpr.to_string();
+                match querier.declare_matching_listener(move |status| {
+                    log::info!(
+                    "wz-ap-demo: QUERIER MATCHING STATUS keyexpr='{keyexpr_for_log}' matching={}",
+                    status.matching,
+                );
+                }) {
+                    Ok(listener) => {
+                        log::info!(
+                            "wz-ap-demo: DECLARED QUERIER MATCHING LISTENER keyexpr='{keyexpr}' \
+                         (transition-only; a remote Decl/UndeclQueryable drives each edge)"
+                        );
+                        (Some(querier), Some(listener))
+                    }
+                    // The anti-vacuity arm, loud for the same reason as the publisher
+                    // side: a fixture must be able to tell "the feature is off" from
+                    // "the transition never happened".
+                    Err(e) => {
+                        log::warn!(
+                            "wz-ap-demo: QUERIER MATCHING LISTENER declare rejected for \
+                         keyexpr='{keyexpr}': {e:?}"
+                        );
+                        (Some(querier), None)
+                    }
+                }
+            }
+            None => (None, None),
+        };
+
     // R311y442 — `--advanced-subscribe`. Declared PRE-DRIVE for a reason the
     // plain subscriber does not have: the startup history GET goes out as part of
     // the declare, so declaring it after drive_session started would race the very
@@ -1143,6 +1191,8 @@ fn install_session_handles(
         _queryable: queryable,
         _publisher: publisher,
         _matching_listener: matching_listener,
+        _querier: querier,
+        _querier_matching_listener: querier_matching_listener,
         #[cfg(feature = "advanced")]
         _advanced_subscriber: advanced_subscriber.flatten(),
     }

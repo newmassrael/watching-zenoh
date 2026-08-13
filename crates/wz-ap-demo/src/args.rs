@@ -531,6 +531,27 @@ pub(crate) struct DeclareEmitSpec {
     /// token publisher + token subscriber simultaneously on a wz↔wz
     /// round-trip.
     pub(crate) liveliness_subscriber_keyexpr: Option<String>,
+    /// R311y775 — `--querier-matching-log <keyexpr>`: declare a
+    /// [`wz::runtime_tokio::session::Querier`] on `keyexpr` plus a
+    /// `Querier::declare_matching_listener`, and log every matching-status
+    /// TRANSITION it reports.
+    ///
+    /// The QUERYABLE-plane twin of `--matching-log`, and a SEPARATE knob rather
+    /// than a mode of it: the two watch different registries
+    /// (`RemoteSubscriberRegistry` vs `RemoteQueryableRegistry`), are gated on
+    /// different features (`declare-subscriber` vs `declare-queryable`), and are
+    /// driven by different foreign processes (a pico `z_sub` vs a pico
+    /// `z_queryable`). Folding them into one flag would make a run that proves
+    /// one look like a run that proves both.
+    ///
+    /// Valued rather than bare because it does NOT ride the publisher: a querier
+    /// carries its own keyexpr, so `--publish` is not a precondition here the way
+    /// it is for `--matching-log`.
+    ///
+    /// Deliberately NOT cfg-gated, for the same reason as `--matching-log`: the
+    /// `session-matching`-OFF build must reach the same path and surface the
+    /// typed reject, because that arm is the anti-vacuity twin.
+    pub(crate) querier_matching_log_keyexpr: Option<String>,
     /// R311ph — `--liveliness-subscribe-history`: declare the liveliness
     /// subscriber with `history = true` so the peer/router replays the CURRENT
     /// alive tokens on subscription (not just future declares). This makes an

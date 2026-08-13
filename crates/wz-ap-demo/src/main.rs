@@ -982,6 +982,12 @@ fn main() -> ExitCode {
     // subscriber with `history = true` (replay current alive tokens on
     // subscription), so an observer is order-independent of token declare time.
     let liveliness_subscribe_history = rest.iter().any(|a| a == "--liveliness-subscribe-history");
+    // R311y775 — `--querier-matching-log <keyexpr>` declares a Querier plus a
+    // `Querier::declare_matching_listener` on that keyexpr. The QUERYABLE-plane
+    // twin of `--matching-log`; valued rather than bare because a querier carries
+    // its own keyexpr and does not ride the publisher. Not cfg-gated, on the same
+    // terms as `--matching-log`: the OFF build must reach the typed reject.
+    let querier_matching_log_opt = parse_pair(rest, "--querier-matching-log");
     // R311y442 — `--advanced-subscribe <keyexpr>` declares an AdvancedSubscriber
     // whose STARTUP HISTORY GET asks every matching publisher's `@adv` cache for
     // the samples it published before this subscriber existed. `--history-max <N>`
@@ -1261,12 +1267,19 @@ fn main() -> ExitCode {
         // declares an event subscriber, a per-member queryable and a keep-alive
         // beacon, which is exactly the work a foreign group peer observes.
         && group_join_opt.is_none()
+        // R311y775 — `--querier-matching-log` is a standalone role: it declares a
+        // Querier plus a matching listener and emits the QUERYABLES Interest that
+        // makes the watch work behind a router. A demo carrying only this flag
+        // has real work to do, and leaving it out of this list is what made its
+        // first fixture run die here with "at least one of ..." rather than at
+        // the assertion it was written for.
+        && querier_matching_log_opt.is_none()
     {
         eprintln!(
             "wz-ap-demo: at least one of --key / --publish / --delete / --queryable / --query / \
              --declare-token / --liveliness-subscribe / --liveliness-get / \
              --advanced-subscribe / --advanced-publish / --group-join / \
-             --on-remote-* must be supplied",
+             --querier-matching-log / --on-remote-* must be supplied",
         );
         eprintln!();
         print_usage();
@@ -1696,6 +1709,7 @@ fn main() -> ExitCode {
         token_keyexpr: declare_token_opt,
         liveliness_subscriber_keyexpr: liveliness_subscribe_opt,
         liveliness_subscriber_history: liveliness_subscribe_history,
+        querier_matching_log_keyexpr: querier_matching_log_opt,
         advanced_subscriber_keyexpr: advanced_subscribe_opt,
         advanced_history_max,
         advanced_history_max_age,
