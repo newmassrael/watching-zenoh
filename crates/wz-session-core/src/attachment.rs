@@ -27,9 +27,39 @@ use sce_forge_runtime::codec::CodecError;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 
-/// Attachment ext id inside a PUSH body (Put / Del) — zenoh-pico
-/// `_z_push_body_decode_extensions` matches `0x03` at message.c 314-322.
+/// Attachment ext id inside a PUT push body — zenoh-pico
+/// `_z_push_body_decode_extensions` matches `0x03` at message.c 314-322, and
+/// zenoh 1.5.0 declares the same id on the Put body
+/// (`zenoh-protocol/src/zenoh/put.rs:78`, `zextzbuf!(0x3, false)`).
+///
+/// R311y769 renamed the concept from "PUSH body (Put / Del)" to PUT
+/// specifically, because the two arms do NOT share an id — see
+/// [`ATTACHMENT_EXT_ID_DEL`].
 pub const ATTACHMENT_EXT_ID_PUSH: u8 = 0x03;
+
+/// Attachment ext id inside a DEL push body — `0x02`, NOT the Put's `0x03`.
+///
+/// R311y769. THE TWO UPSTREAMS DISAGREE HERE and the disagreement is on the
+/// wire, so it cannot be papered over:
+///
+/// * zenoh 1.5.0 declares the Del body's attachment at id `0x2`
+///   (`zenoh-protocol/src/zenoh/del.rs:60`, `zextzbuf!(0x2, false)`) against
+///   the Put body's `0x3` (`put.rs:78`). Its `ReplyBody` IS a `PushBody`, so a
+///   Del REPLY carries one too.
+/// * zenoh-pico never EMITS an attachment on a Del at all — `has_attachment`
+///   is `pshb->_is_put && ..` (`src/protocol/codec/message.c:263`) — and its
+///   decoder is shared between the arms, recognising only `0x03`
+///   (`:313-322`).
+///
+/// So no single byte satisfies both, and wz emits **zenoh's**. That choice is
+/// SAFE against pico rather than a coin flip: `zextzbuf!(0x2, false)` is
+/// non-mandatory, and pico's `default` arm errors only when the `M` bit is set
+/// (`:325-327`), so a pico peer silently ignores the ext and lands on exactly
+/// the behaviour it has today — the attachment dropped. Emitting `0x03`
+/// instead would please pico and make zenoh read the ext as
+/// `ext_unknown`, which is the same loss pointed the other way, with the
+/// protocol SSOT on the losing side.
+pub const ATTACHMENT_EXT_ID_DEL: u8 = 0x02;
 
 /// Attachment ext id inside a Query — zenoh-pico `_z_query_encode_ext`
 /// emits `0x05` at message.c 446-448.

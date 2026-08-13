@@ -543,6 +543,10 @@ impl QueryReply {
                         // the inner arm to MsgDel — see
                         // session_glue.rs:3519-3523). Passing an empty
                         // slice here is the natural shape.
+                        //
+                        // R311y769: the payload is still the only thing the
+                        // Del arm drops. The attachment threaded below now
+                        // survives, under the Del body's own ext id.
                         ResponseReplyBuilder::new(rid, 0, Some(&keyexpr_literal), &[]).reply_del()
                     }
                 };
@@ -557,9 +561,10 @@ impl QueryReply {
                 if let Some(ts) = timestamp {
                     builder = builder.timestamp(&ts);
                 }
-                // Thread the inner-MsgPut body attachment ext (id 0x03),
-                // emitted iff `pubsub-attachment` is on (the builder gates
-                // it). `None` leaves the body ext chain empty / Z bit clear.
+                // Thread the inner body attachment ext, emitted iff
+                // `pubsub-attachment` is on (the builder gates it, and picks
+                // the arm's own ext id — Put 0x03, Del 0x02 since R311y769).
+                // `None` leaves the body ext chain empty / Z bit clear.
                 if let Some(att) = attachment {
                     builder = builder.attachment(&att);
                 }
@@ -947,15 +952,28 @@ impl<'a> QueryResponder<'a> {
 
     /// R311y562 — the Del-arm mirror of [`Self::send_reply_keyed_meta`].
     ///
-    /// `meta.encoding` / `meta.attachment` are dropped rather than staged, and
-    /// that is the WIRE's rule, not a shortcut: `_z_push_body_encode` gates
-    /// `has_attachment` on `_is_put` and reads the encoding only in the
-    /// `_is_put` branch (`vendor/zenoh-pico/src/protocol/codec/message.c:263,
-    /// 269-276`), so staging either onto a Del body would put a field into the
-    /// reply record that the codec then silently discards — a staged value that
-    /// cannot reach the wire is worse than an honest drop, because the next
-    /// reader of the record believes it was sent. See
-    /// [`ReplyOut::reply_keyed_del_meta`].
+    /// `meta.encoding` is dropped rather than staged, and that is the WIRE's
+    /// rule, not a shortcut: `_z_push_body_encode` reads the encoding only in
+    /// the `_is_put` branch
+    /// (`vendor/zenoh-pico/src/protocol/codec/message.c:269-276`), and zenoh's
+    /// `Del` declares no encoding field either, so staging one would put a
+    /// value into the reply record that the codec then silently discards — a
+    /// staged value that cannot reach the wire is worse than an honest drop,
+    /// because the next reader of the record believes it was sent.
+    ///
+    /// R311y769 — `meta.attachment` IS staged now, and it was the same argument
+    /// applied to a premise that turned out to be false. The `has_attachment =
+    /// _is_put && ..` gate quoted here (`message.c:263`) is pico's EMIT
+    /// behaviour; zenoh's `ReplyBody` is a `PushBody` whose `Del` declares
+    /// `ext_attachment` outright (`zenoh-protocol/src/zenoh/del.rs:47,60`), and
+    /// [`ResponseReplyBuilder`](crate::response_build::ResponseReplyBuilder)
+    /// now emits it under the Del arm's own ext id. The drop here was the LAST
+    /// link in a chain that was otherwise already complete: `wz-capi-c`'s
+    /// `z_query_reply_del_options_t.attachment` is taken and carried, its
+    /// `flush_one` hands it over in the `ReplyMeta`, and
+    /// `QueryReply::into_response` threads it into the builder for both arms —
+    /// so a C caller's attachment travelled the whole way and died on this one
+    /// hardcoded `None`.
     pub fn send_reply_keyed_del_meta(&mut self, keyexpr: &str, meta: ReplyMeta<'_>) {
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
@@ -964,7 +982,7 @@ impl<'a> QueryResponder<'a> {
             encoding: None,
             timestamp: meta.timestamp.cloned(),
             responder: self.responder.clone(),
-            attachment: None,
+            attachment: meta.attachment.map(<[u8]>::to_vec),
             source_info: meta.source_info.cloned(),
         });
     }
@@ -3116,6 +3134,77 @@ mod tests {
             via_chain, via_builder,
             "reply_del_sourced → QueryResponder → into_response must emit the \
              source_info ext on the MsgDel reply byte-for-byte",
+        );
+    }
+
+    /// R311y769 — a Del reply's ATTACHMENT survives the whole responder chain,
+    /// `ReplyMeta` -> staged `QueryReply` -> wire `ResponseOwned`.
+    ///
+    /// This is the seam a C caller reaches: `wz-capi-c`'s
+    /// `z_query_reply_del_options_t.attachment` is taken, carried through
+    /// `flush_one` into exactly this `ReplyMeta`, and everything downstream of
+    /// it already threaded the value — so the single hardcoded `attachment:
+    /// None` in `send_reply_keyed_del_meta` was where a C program's attachment
+    /// died, three layers below where it was accepted.
+    ///
+    /// DISCRIMINATING at BOTH ends: the staged record must hold the bytes (or
+    /// the drop is merely moved downstream), and the emitted wire must equal
+    /// what the builder produces directly for the same inputs (or the chain and
+    /// the builder have drifted into two encoders). The encoding stays dropped
+    /// in the same test, so this does not read as "the Del arm now keeps
+    /// everything".
+    #[cfg(feature = "pubsub-attachment")]
+    #[test]
+    fn a_del_reply_attachment_survives_the_responder_chain() {
+        use crate::query_sink::ReplyMeta;
+
+        let mut reg = QueryableRegistry::new();
+        reg.register("demo/**", move |_q, responder| {
+            responder.reply_keyed_del_meta(
+                "demo/data",
+                ReplyMeta::new().with_attachment(Some(&b"tombstone-meta"[..])),
+            );
+        });
+        let mut replies = Vec::new();
+        reg.dispatch_request(
+            &request_query(7, 0, Some("demo/**")),
+            &HashMap::new(),
+            &mut replies,
+        );
+        assert_eq!(replies.len(), 1);
+        let staged = replies.pop().unwrap();
+        match &staged {
+            QueryReply::Reply {
+                body,
+                attachment,
+                encoding,
+                ..
+            } => {
+                assert_eq!(*body, ReplyBody::Del, "precondition: a Del body");
+                assert_eq!(
+                    attachment.as_deref(),
+                    Some(&b"tombstone-meta"[..]),
+                    "the staged Del record holds the attachment",
+                );
+                assert!(
+                    encoding.is_none(),
+                    "and the ENCODING is still dropped on a Del — zenoh's Del \
+                     declares no encoding field, so that drop was never the \
+                     same claim as the attachment one",
+                );
+            }
+            _ => panic!("reply_keyed_del_meta must stage a QueryReply::Reply"),
+        }
+        let via_chain = staged.into_response().unwrap().wire();
+        let via_builder = ResponseReplyBuilder::new(7, 0, Some("demo/data"), &[])
+            .reply_del()
+            .attachment(b"tombstone-meta")
+            .build()
+            .unwrap()
+            .wire();
+        assert_eq!(
+            via_chain, via_builder,
+            "the responder chain and the builder must emit the same bytes",
         );
     }
 

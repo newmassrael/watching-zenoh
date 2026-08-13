@@ -2109,6 +2109,9 @@ fn query_loopback_propagates_del_body() {
     assert_eq!(
         got.body,
         InboundReplyBody::Del {
+            // R311y769 — the Del arm gained an attachment slot; this loopback
+            // reply sets none, so `None` is the assertion and not a placeholder.
+            attachment: None,
             source_info: None,
             timestamp: None,
         }

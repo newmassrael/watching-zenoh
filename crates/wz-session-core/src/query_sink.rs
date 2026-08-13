@@ -423,20 +423,29 @@ pub trait ReplyOut {
     /// Del-form reply under an explicit concrete `keyexpr` carrying the
     /// metadata a DEL body can actually hold.
     ///
-    /// [`ReplyMeta::encoding`] and [`ReplyMeta::attachment`] are ignored here,
-    /// and that is wire-faithful rather than a gap: `_z_push_body_encode`
-    /// computes `has_attachment` as `_is_put && ...` and reads the encoding
-    /// only inside the `_is_put` branch
-    /// (`vendor/zenoh-pico/src/protocol/codec/message.c:263,269-276`), so a Del
-    /// body emits neither ext even when the caller's
-    /// `z_query_reply_del_options_t` supplied one. Upstream pico accepts the
-    /// attachment on that struct and drops it the same way
-    /// (`src/api/api.c:2208-2212` hands it to `_z_send_reply`, which encodes a
-    /// Del body). The timestamp and source_info DO ride a Del
-    /// (`_Z_FLAG_Z_D_T`; `has_source_info` precedes the `_is_put` split).
+    /// [`ReplyMeta::encoding`] is ignored here, and that is wire-faithful
+    /// rather than a gap: `_z_push_body_encode` reads the encoding only inside
+    /// the `_is_put` branch
+    /// (`vendor/zenoh-pico/src/protocol/codec/message.c:269-276`) and zenoh's
+    /// `Del` declares no encoding field, so a Del body emits none even when the
+    /// caller's `z_query_reply_del_options_t` supplied one. The timestamp and
+    /// source_info DO ride a Del (`_Z_FLAG_Z_D_T`; `has_source_info` precedes
+    /// the `_is_put` split).
     ///
-    /// Default impl chains to [`Self::reply_keyed_del_sourced`] when a
-    /// timestamp is present and to [`Self::reply_keyed_del`] otherwise.
+    /// R311y769 — [`ReplyMeta::attachment`] is NO LONGER ignored by the
+    /// implementation this seam exists for. The prose here used to justify
+    /// dropping it with pico's `has_attachment = _is_put && ..`
+    /// (`message.c:263`), which is pico's EMIT rule and not the protocol:
+    /// zenoh's `Del` declares `ext_attachment` at its own ext id
+    /// (`zenoh-protocol/src/zenoh/del.rs:47,60`), and
+    /// [`QueryResponder::send_reply_keyed_del_meta`](crate::query::QueryResponder::send_reply_keyed_del_meta)
+    /// — the impl every production path routes through — now stages it.
+    ///
+    /// THE DEFAULT BELOW STILL DROPS IT, and cannot do otherwise: it chains to
+    /// [`Self::reply_keyed_del_sourced`] / [`Self::reply_keyed_del`], neither of
+    /// which has a parameter to carry an attachment. An impl that wants the
+    /// attachment must override this method rather than inherit the fallback —
+    /// which is what `QueryResponder` does.
     #[cfg(feature = "alloc")]
     fn reply_keyed_del_meta(&mut self, keyexpr: &str, meta: ReplyMeta<'_>) {
         match meta.timestamp {

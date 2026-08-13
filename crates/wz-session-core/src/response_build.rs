@@ -437,6 +437,37 @@ fn gated_reply_attachment(attachment: Option<&[u8]>) -> Result<Option<ExtEntryOw
     }
 }
 
+/// R311y769 — the DEL-arm twin of [`gated_reply_attachment`]. Same gate, same
+/// SSOT encoder, DIFFERENT ext id: a Del body's attachment is
+/// [`ATTACHMENT_EXT_ID_DEL`](crate::attachment::ATTACHMENT_EXT_ID_DEL) (`0x02`)
+/// where a Put's is `0x03`, because zenoh 1.5.0 declares them separately
+/// (`zenoh-protocol/src/zenoh/del.rs:60` vs `put.rs:78`). Reusing the Put id on
+/// the Del arm would put a byte on the wire that zenoh reads as `ext_unknown`,
+/// so the two ids cannot share one helper even though everything else about
+/// them is identical — see the constant's own doc for why pico disagrees and
+/// why that is safe.
+#[cfg(feature = "codec-response")]
+fn gated_reply_del_attachment(
+    attachment: Option<&[u8]>,
+) -> Result<Option<ExtEntryOwned>, CodecError> {
+    #[cfg(feature = "pubsub-attachment")]
+    {
+        attachment
+            .map(|a| {
+                crate::attachment::encode_attachment_ext(
+                    crate::attachment::ATTACHMENT_EXT_ID_DEL,
+                    a,
+                )
+            })
+            .transpose()
+    }
+    #[cfg(not(feature = "pubsub-attachment"))]
+    {
+        let _ = attachment;
+        Ok(None)
+    }
+}
+
 /// R311y74 — SSOT for the reply-side `reply-source-info` gate: build the
 /// single inner-body source_info ext (push-body ext id `0x01`) from a
 /// [`crate::sample::SourceInfo`] iff `reply-source-info` is on, else
@@ -547,12 +578,16 @@ pub struct ResponseReplyBuilder {
     // so it lives in `build`'s `Result`, not the infallible setter). What a
     // `History::All` storage stamps each version reply with.
     timestamp: Option<crate::sample::TimestampHint>,
-    // A8a: optional inner-MsgPut body attachment — the push-body attachment
-    // ext (id 0x03) + the `_Z_FLAG_Z_Z` (0x80) body-ext-chain header bit.
-    // Held as the raw side-band bytes and built into the ext at build()
-    // (fallible owned copy). PUT-only (zenoh-pico gates `has_attachment` on
-    // `_is_put`), so it is dropped on a `.reply_del()` builder. What the
-    // storage aligner carries its serialized `AlignmentReply` on.
+    // A8a: optional inner-body attachment — the push-body attachment ext +
+    // the `_Z_FLAG_Z_Z` (0x80) body-ext-chain header bit. Held as the raw
+    // side-band bytes and built into the ext at build() (fallible owned copy).
+    // What the storage aligner carries its serialized `AlignmentReply` on.
+    //
+    // R311y769: applies to BOTH arms now, under the arm's OWN ext id — Put
+    // `0x03`, Del `0x02` (zenoh `put.rs:78` vs `del.rs:60`). The prior
+    // PUT-only note read pico's emit gate (`has_attachment = _is_put && ..`)
+    // as the protocol; zenoh's `ReplyBody` is a `PushBody` whose `Del`
+    // declares `ext_attachment`, so a Del reply may carry one.
     attachment: Option<Vec<u8>>,
     // R311y74: optional inner-body source_info ext (push-body ext id 0x01)
     // — the (zid, eid, sn) triple a recovery reply carries so the advanced
@@ -561,8 +596,10 @@ pub struct ResponseReplyBuilder {
     // carries no source_info and storage / query replies stay byte-
     // unchanged. Applies to BOTH the Put and Del arms (it sits in the
     // shared push-body `_commons`, zenoh-pico `_z_push_body_encode`
-    // message.c:291-293, unlike attachment which is Put-only). Held as the
-    // wz-side `SourceInfo` and built into the ext at build() (fallible
+    // message.c:291-293). R311y769: attachment applies to both arms too now,
+    // under each arm's own ext id — the "unlike attachment, which is Put-only"
+    // clause that stood here was pico's emit gate, not the protocol. Held as
+    // the wz-side `SourceInfo` and built into the ext at build() (fallible
     // owned copy). The Reply-body twin of the Push path's source_info.
     source_info: Option<crate::sample::SourceInfo>,
     // R121j-3c: Response-ENVELOPE-level responder ext (ext_id 0x03 ZBUF).
@@ -626,17 +663,21 @@ impl ResponseReplyBuilder {
         self
     }
 
-    /// Set the inner-`MsgPut` body attachment (the push-body attachment ext,
-    /// id 0x03). Subsequent calls overwrite (last-wins). Emitted iff
-    /// `pubsub-attachment` is on (the wz Put-body attachment policy gate,
-    /// shared with the Push path); otherwise the body ext chain stays empty
-    /// and the `_Z_FLAG_Z_Z` bit clear. Put-only — a Reply Del body carries
-    /// no attachment (zenoh-pico `has_attachment = _is_put && ..`), so an
-    /// `.attachment()` on a `.reply_del()` builder is ignored at build().
-    /// No length cap: under `alloc` the ext-zbuf carrier is unbounded, so an
-    /// aligner-sized `AlignmentReply` rides intact. What
+    /// Set the inner body attachment (the push-body attachment ext).
+    /// Subsequent calls overwrite (last-wins). Emitted iff `pubsub-attachment`
+    /// is on (the wz body-attachment policy gate, shared with the Push path);
+    /// otherwise the body ext chain stays empty and the `_Z_FLAG_Z_Z` bit
+    /// clear. No length cap: under `alloc` the ext-zbuf carrier is unbounded,
+    /// so an aligner-sized `AlignmentReply` rides intact. What
     /// [`crate::query::QueryReply`] threads a storage aligner's serialized
     /// reply through.
+    ///
+    /// R311y769 — it now survives `.reply_del()` too, under the DEL arm's own
+    /// ext id `0x02` rather than the Put arm's `0x03`
+    /// ([`ATTACHMENT_EXT_ID_DEL`](crate::attachment::ATTACHMENT_EXT_ID_DEL)).
+    /// The prior "Put-only" note quoted pico's emit gate as if it were the
+    /// protocol; zenoh's `ReplyBody` is a `PushBody` whose `Del` declares
+    /// `ext_attachment` (`zenoh-protocol/src/zenoh/del.rs:47`).
     pub fn attachment(mut self, attachment: &[u8]) -> Self {
         self.attachment = Some(attachment.to_vec());
         self
@@ -648,10 +689,10 @@ impl ResponseReplyBuilder {
     /// advanced-recovery composition gate); otherwise the body ext chain
     /// carries no source_info and the reply is byte-unchanged. Applies to
     /// BOTH the Put and Del arms (source_info sits in the shared push-body
-    /// `_commons`, unlike attachment which is Put-only). When composed with
-    /// `.attachment()` on a Put body, source_info emits FIRST (ext 0x01)
-    /// then attachment (ext 0x03), matching zenoh-pico's
-    /// `_z_push_body_encode` emit order (message.c:291-298). What the
+    /// `_commons`). When composed with `.attachment()`, source_info emits
+    /// FIRST (ext 0x01) then the attachment, matching zenoh-pico's
+    /// `_z_push_body_encode` emit order (message.c:291-298) — on a Put the
+    /// attachment is ext `0x03`, on a Del (R311y769) ext `0x02`. What the
     /// advanced-recovery cache stamps each recovery reply with so the
     /// advanced subscriber can re-key/reorder the retransmitted samples.
     pub fn source_info(mut self, source_info: &crate::sample::SourceInfo) -> Self {
@@ -732,6 +773,9 @@ impl ResponseReplyBuilder {
         let reply_timestamp = gated_reply_timestamp(self.timestamp.as_ref())?;
         let reply_encoding = gated_reply_encoding(self.encoding.as_ref())?;
         let reply_attachment = gated_reply_attachment(self.attachment.as_deref())?;
+        // R311y769 — the same bytes under the Del arm's own ext id; only one of
+        // the two is ever consumed, since exactly one inner arm survives.
+        let reply_del_attachment = gated_reply_del_attachment(self.attachment.as_deref())?;
         let reply_source_info = gated_reply_source_info(self.source_info.as_ref())?;
         let mut response = if self.keyexpr_mapping_id == 0 {
             let suffix = self.keyexpr_suffix.as_deref().unwrap_or_else(|| {
@@ -797,15 +841,16 @@ impl ResponseReplyBuilder {
                     put.header |= 0x40; // _Z_FLAG_Z_P_E
                 }
             }
-            // Stamp the inner body's source_info (ext 0x01) + attachment
-            // (ext 0x03) as a combined body ext chain + the Z (0x80)
-            // body-ext-chain header bit. Emit order is source_info THEN
-            // attachment, matching zenoh-pico's `_z_push_body_encode`
-            // (message.c:291-298). source_info applies to BOTH the Put and
-            // Del arms (it lives in the shared push-body `_commons`);
-            // attachment is Put-only (zenoh-pico gates `has_attachment` on
-            // `_is_put`), so a `.attachment()` on a `.reply_del()` builder is
-            // dropped here. The per-entry Z chain-continuation bits are
+            // Stamp the inner body's source_info (ext 0x01) + attachment as a
+            // combined body ext chain + the Z (0x80) body-ext-chain header
+            // bit. Emit order is source_info THEN attachment, matching
+            // zenoh-pico's `_z_push_body_encode` (message.c:291-298). BOTH
+            // apply to BOTH arms as of R311y769 — source_info because it lives
+            // in the shared push-body `_commons`, attachment because zenoh's
+            // `Del` declares its own `ext_attachment`. The ATTACHMENT EXT ID
+            // is the one thing the arms do not share: Put `0x03`, Del `0x02`
+            // (zenoh `put.rs:78` vs `del.rs:60`), which is why two gated
+            // builders feed this match. The per-entry Z chain-continuation bits are
             // normalised by the `apply_chain_z_bits` SSOT (source_info gets
             // Z-continuation when an attachment follows; the last entry
             // terminates with Z clear), exactly as the Push path's
@@ -828,11 +873,29 @@ impl ResponseReplyBuilder {
                     }
                 }
                 ReplyOwnedVariant::CodecZenohMsgDel(del) => {
-                    // Del body: source_info only — no attachment slot
-                    // (`has_attachment = _is_put && ..`), so any attachment is
-                    // dropped on the del arm.
+                    // R311y769 — the Del arm carries BOTH now. The prose here
+                    // used to say a Del body has no attachment slot, citing
+                    // pico's `has_attachment = _is_put && ..`
+                    // (`message.c:263`). That is true of pico's EMIT and false
+                    // of the protocol: zenoh's `ReplyBody` is a `PushBody` and
+                    // its `Del` declares `ext_attachment` outright
+                    // (`zenoh-protocol/src/zenoh/del.rs:47,60`), so a Del reply
+                    // that drops the attachment loses data a zenoh querier
+                    // would have read.
+                    //
+                    // The id is the Del's OWN `0x02`, not the Put's `0x03` —
+                    // the one thing this arm cannot borrow from the Put arm
+                    // above. Emit order is source_info THEN attachment, the
+                    // same as the Put arm and the same as pico's
+                    // `_z_push_body_encode`.
+                    let mut exts: Vec<ExtEntryOwned> = Vec::new();
                     if let Some(si_ext) = reply_source_info {
-                        let mut exts = vec![si_ext];
+                        exts.push(si_ext);
+                    }
+                    if let Some(att_ext) = reply_del_attachment {
+                        exts.push(att_ext);
+                    }
+                    if !exts.is_empty() {
                         crate::ext_nodeid::apply_chain_z_bits(&mut exts);
                         del.extensions = Some(exts);
                         del.header |= 0x80; // _Z_FLAG_Z_Z
@@ -1987,6 +2050,84 @@ mod tests {
         );
     }
 
+    /// R311y769 — a `.reply_del()` reply CARRIES its attachment, and carries it
+    /// under the DEL arm's own ext id. Two claims, and the second is the one
+    /// that could silently go wrong: the ext header byte must be
+    /// `ENC_ZBUF(0x40) | 0x02`, never the Put arm's `| 0x03`
+    /// (zenoh `zenoh-protocol/src/zenoh/del.rs:60` vs `put.rs:78`).
+    ///
+    /// DISCRIMINATING: the same builder is driven twice, differing ONLY by
+    /// `.reply_del()`, and the two ext headers are asserted against each other.
+    /// Reusing `gated_reply_attachment` on the Del arm would emit `0x43` there
+    /// and fail exactly this assertion — a bug no length or round-trip check
+    /// would catch, since both ids encode to the same number of bytes.
+    #[cfg(all(feature = "codec-response", feature = "pubsub-attachment"))]
+    #[test]
+    fn a_del_reply_carries_its_attachment_under_the_del_ext_id() {
+        let put_wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+            .attachment(&[0xDE, 0xAD])
+            .build()
+            .unwrap()
+            .wire();
+        let del_wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+            .reply_del()
+            .attachment(&[0xDE, 0xAD])
+            .build()
+            .unwrap()
+            .wire();
+
+        // Layout: Response.header(1) + VLE(rid)(1) + VLE(mapping)(1) +
+        // Reply.header(1) + inner MID(1), then the body ext chain. The inner
+        // body carries no timestamp / encoding here, so the ext entry header
+        // is the very next byte on the Del arm.
+        assert_eq!(
+            del_wire[4] & 0x1f,
+            0x02,
+            "precondition: the inner arm IS a MsgDel: {del_wire:02x?}",
+        );
+        assert_eq!(
+            del_wire[4] & 0x80,
+            0x80,
+            "precondition: the body-ext-chain Z bit is set, so a chain follows",
+        );
+        assert_eq!(
+            del_wire[5], 0x42,
+            "the Del attachment ext header is ENC_ZBUF(0x40) | 0x02",
+        );
+        assert_ne!(
+            del_wire[5], 0x43,
+            "and it is NOT the Put arm's 0x03 — zenoh declares the two ids \
+             separately, so borrowing the Put id here would read as an \
+             unknown ext on a zenoh peer",
+        );
+        assert!(
+            put_wire.contains(&0x43),
+            "anti-vacuity: the PUT arm still emits ENC_ZBUF | 0x03, so 0x42 \
+             above is a real difference between the arms and not a change to \
+             the shared encoder",
+        );
+    }
+
+    /// The ANTI-VACUITY pair for the leg above: with NO attachment set, the Del
+    /// reply emits no body ext chain at all and the `Z` bit stays clear. Without
+    /// this, "the ext header is at offset 5" could be satisfied by a builder
+    /// that always emits something there.
+    #[cfg(all(feature = "codec-response", feature = "pubsub-attachment"))]
+    #[test]
+    fn a_del_reply_without_an_attachment_emits_no_body_ext_chain() {
+        let del_wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+            .reply_del()
+            .build()
+            .unwrap()
+            .wire();
+        assert_eq!(del_wire[4], 0x02, "precondition: inner arm is MsgDel");
+        assert_eq!(
+            del_wire.len(),
+            5,
+            "an attachment-less Del reply ends at its inner MID byte: {del_wire:02x?}",
+        );
+    }
+
     /// R121j-3d — reply_del() composes with consolidation. The
     /// Reply.header.C bit must still be set when MsgDel + consolidation
     /// are combined; the consolidation byte sits between Reply.header
@@ -2238,25 +2379,54 @@ mod tests {
         }
     }
 
-    /// A8a — attachment is PUT-only (zenoh-pico gates `has_attachment` on
-    /// `_is_put`): an `.attachment()` on a `.reply_del()` builder is dropped,
-    /// the Del body stays attachment-free, and nothing panics.
+    /// R311y769 REVERSES what this test asserted. It was
+    /// `response_reply_builder_attachment_dropped_on_del_arm`, and it pinned
+    /// the DROP: "a Del reply carries no attachment (Put-only)", citing pico's
+    /// `has_attachment = _is_put && ..` (`message.c:263`). That citation is
+    /// about pico's EMIT and was read as the protocol — zenoh's `ReplyBody` is
+    /// a `PushBody` whose `Del` declares `ext_attachment`
+    /// (`zenoh-protocol/src/zenoh/del.rs:47,60`), so the drop lost data a zenoh
+    /// querier would have read. The test is REPLACED rather than deleted: the
+    /// same builder shape now asserts the opposite outcome, so the reversal is
+    /// visible at the site instead of leaving a silent hole where a claim was.
+    ///
+    /// The `0x02` id is asserted through the decoder's own id constant here,
+    /// which is what makes this the ENCODER-side twin of the raw-byte check in
+    /// `a_del_reply_carries_its_attachment_under_the_del_ext_id`: that one pins
+    /// the literal wire byte, this one pins that the SSOT pair agrees with it.
     #[cfg(all(feature = "codec-response", feature = "pubsub-attachment"))]
     #[test]
-    fn response_reply_builder_attachment_dropped_on_del_arm() {
+    fn response_reply_builder_attachment_survives_the_del_arm() {
         let response = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
             .reply_del()
-            .attachment(b"ignored")
+            .attachment(b"kept")
             .build()
             .unwrap();
         if let ResponseOwnedVariant::CodecZenohReply(reply) = &response.body {
             match &reply.body {
                 ReplyOwnedVariant::CodecZenohMsgDel(del) => {
-                    assert!(
-                        del.extensions.is_none(),
-                        "a Del reply carries no attachment (Put-only)"
+                    let exts = del
+                        .extensions
+                        .as_ref()
+                        .expect("the Del body carries a body ext chain");
+                    assert_eq!(
+                        crate::attachment::decode_attachment_ext(
+                            exts,
+                            crate::attachment::ATTACHMENT_EXT_ID_DEL
+                        ),
+                        Some(&b"kept"[..]),
+                        "the Del attachment reads back under the DEL ext id",
                     );
-                    assert_eq!(del.header & 0x80, 0x00, "no Z bit on the Del body");
+                    assert_eq!(
+                        crate::attachment::decode_attachment_ext(
+                            exts,
+                            crate::attachment::ATTACHMENT_EXT_ID_PUSH
+                        ),
+                        None,
+                        "and NOT under the Put arm's id — the two are distinct \
+                         ids upstream, not aliases",
+                    );
+                    assert_eq!(del.header & 0x80, 0x80, "Z bit set: a chain follows");
                 }
                 _ => panic!("expected MsgDel after reply_del()"),
             }

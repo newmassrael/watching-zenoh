@@ -235,6 +235,16 @@ pub enum InboundReplyBody {
     /// too (zenoh-pico `_z_push_body_encode`), so a recovered Del sample
     /// re-keys identically.
     Del {
+        /// R311y769 — the inner-`MsgDel` body attachment the reply carried, or
+        /// `None` when it had none or `pubsub-attachment` is off (the decode is
+        /// gated, mirroring the emit seam). Read from ext id **`0x02`**, the
+        /// Del body's own id, NOT the Put arm's `0x03`
+        /// (zenoh `zenoh-protocol/src/zenoh/del.rs:60` vs `put.rs:78`).
+        ///
+        /// Before this the arm had no slot at all, so `attachment()` answered
+        /// `None` for every Del reply whatever the wire carried — the receive
+        /// half of the same gap the emit side had.
+        attachment: Option<Vec<u8>>,
         /// The source identity `(zid, eid, sn)` the Del reply carried on its
         /// inner-body source_info ext (id 0x01), or `None` when the reply had
         /// no source_info or `reply-source-info` is off.
@@ -318,8 +328,14 @@ impl ReplyView for InboundReply {
     }
     fn attachment(&self) -> Option<&[u8]> {
         match &self.body {
-            InboundReplyBody::Put { attachment, .. } => attachment.as_deref(),
-            _ => None,
+            // R311y769 — BOTH data arms. The `_ => None` this replaces was the
+            // reason a Del reply's attachment was unreachable even once the
+            // decode existed; only `Err` genuinely has no attachment slot
+            // (zenoh's `_z_err_encode` emits none).
+            InboundReplyBody::Put { attachment, .. } | InboundReplyBody::Del { attachment, .. } => {
+                attachment.as_deref()
+            }
+            InboundReplyBody::Err { .. } => None,
         }
     }
     fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
@@ -370,6 +386,7 @@ impl InboundReply {
                 timestamp: view.timestamp().cloned(),
             },
             ReplyKind::Del => InboundReplyBody::Del {
+                attachment: view.attachment().map(<[u8]>::to_vec),
                 source_info: view.source_info().cloned(),
                 timestamp: view.timestamp().cloned(),
             },
@@ -494,6 +511,35 @@ fn put_reply_attachment(put: &wz_codecs::msg_put::MsgPutOwned) -> Option<Vec<u8>
     #[cfg(not(feature = "pubsub-attachment"))]
     {
         let _ = put;
+        None
+    }
+}
+
+/// R311y769 — the DEL-arm twin of [`put_reply_attachment`], reading the Del
+/// body's OWN attachment ext id
+/// ([`ATTACHMENT_EXT_ID_DEL`](crate::attachment::ATTACHMENT_EXT_ID_DEL), `0x02`)
+/// rather than the Put's `0x03`. Same gate, same
+/// [`decode_attachment_ext`](crate::attachment::decode_attachment_ext) SSOT —
+/// only the id differs, and it is the one thing that cannot be shared: zenoh
+/// declares the two ids separately (`zenoh-protocol/src/zenoh/del.rs:60` vs
+/// `put.rs:78`), so a reader that looked for `0x03` here would answer `None`
+/// for every attachment a zenoh peer actually sent.
+#[cfg(all(
+    feature = "codec-response",
+    feature = "alloc",
+    any(feature = "pubsub-delete", feature = "query-reply")
+))]
+fn del_reply_attachment(del: &wz_codecs::msg_del::MsgDelOwned) -> Option<Vec<u8>> {
+    #[cfg(feature = "pubsub-attachment")]
+    {
+        del.extensions.as_ref().and_then(|exts| {
+            crate::attachment::decode_attachment_ext(exts, crate::attachment::ATTACHMENT_EXT_ID_DEL)
+                .map(<[u8]>::to_vec)
+        })
+    }
+    #[cfg(not(feature = "pubsub-attachment"))]
+    {
+        let _ = del;
         None
     }
 }
@@ -661,6 +707,12 @@ impl From<QueryReply> for InboundReply {
                     // source_info the Put arm carries (the staged QueryReply
                     // holds it regardless of body arm), gated reply-source-info.
                     ReplyBody::Del => InboundReplyBody::Del {
+                        // R311y769 — the loopback arm carries it too, under the
+                        // same gate as the Put arm. A loopback reply that
+                        // dropped what the wire path now delivers would make
+                        // the in-process queryable a different oracle from the
+                        // remote one.
+                        attachment: loopback_put_attachment(attachment),
                         source_info: loopback_put_source_info(source_info),
                         timestamp: loopback_reply_timestamp(timestamp),
                     },
@@ -922,6 +974,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
                 },
                 #[cfg(any(feature = "pubsub-delete", feature = "query-reply"))]
                 ReplyOwnedVariant::CodecZenohMsgDel(del) => InboundReplyBody::Del {
+                    attachment: del_reply_attachment(del),
                     source_info: reply_body_source_info(del.extensions.as_ref()),
                     timestamp: reply_body_timestamp(del.timestamp.as_ref()),
                 },
@@ -1801,6 +1854,113 @@ mod tests {
         assert_eq!(reply.put_encoding(), Some((13, None)));
     }
 
+    /// R311y769 — the DEL arm's emit -> receive closure, the twin of the Put
+    /// test above. A `.reply_del()` reply built with `.attachment()` decodes
+    /// back through `dispatch_response` and surfaces on both the
+    /// `InboundReplyBody::Del` slot and the `ReplyView::attachment()` accessor.
+    ///
+    /// It closes a LOOP, which is what makes it more than a mirror of the emit
+    /// test: emit writes ext id `0x02` and decode reads ext id `0x02`, so a
+    /// version of this change that moved only ONE of the two would still pass
+    /// its own side's assertions and fail here. The bytes in between are real
+    /// wire bytes — `dispatch_response` consumes the built `ResponseOwned`.
+    #[cfg(all(
+        feature = "codec-response",
+        feature = "pubsub-attachment",
+        feature = "query-reply"
+    ))]
+    #[test]
+    fn dispatch_response_surfaces_a_del_reply_attachment() {
+        use crate::reply_sink::ReplyView;
+        use crate::response_build::ResponseReplyBuilder;
+
+        let mut reg = ReplyRegistry::new();
+        let captured: Arc<Mutex<Vec<InboundReply>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_cb = captured.clone();
+        reg.register(
+            42,
+            1,
+            None,
+            move |reply| {
+                captured_cb
+                    .lock()
+                    .unwrap()
+                    .push(InboundReply::from_view(reply))
+            },
+            |_| {},
+        );
+
+        let resp = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"")
+            .reply_del()
+            .attachment(b"tombstone-meta")
+            .build()
+            .unwrap();
+        reg.dispatch_response(&resp, &HashMap::new());
+
+        let snapshot = captured.lock().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        let reply = &snapshot[0];
+        match &reply.body {
+            InboundReplyBody::Del {
+                attachment,
+                source_info: _,
+                timestamp: _,
+            } => {
+                assert_eq!(
+                    attachment.as_deref(),
+                    Some(&b"tombstone-meta"[..]),
+                    "the Del arm's attachment survives the wire round trip",
+                );
+            }
+            other => panic!("expected Del, got {other:?}"),
+        }
+        assert_eq!(
+            reply.attachment(),
+            Some(&b"tombstone-meta"[..]),
+            "and it is reachable through the ReplyView seam, not only the enum",
+        );
+    }
+
+    /// The ANTI-VACUITY twin: an attachment-less Del reply surfaces `None`, so
+    /// the test above measures the attachment rather than a slot that is always
+    /// populated.
+    #[cfg(all(
+        feature = "codec-response",
+        feature = "pubsub-attachment",
+        feature = "query-reply"
+    ))]
+    #[test]
+    fn a_del_reply_without_an_attachment_surfaces_none() {
+        use crate::reply_sink::ReplyView;
+        use crate::response_build::ResponseReplyBuilder;
+
+        let mut reg = ReplyRegistry::new();
+        let captured: Arc<Mutex<Vec<InboundReply>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_cb = captured.clone();
+        reg.register(
+            42,
+            1,
+            None,
+            move |reply| {
+                captured_cb
+                    .lock()
+                    .unwrap()
+                    .push(InboundReply::from_view(reply))
+            },
+            |_| {},
+        );
+
+        let resp = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"")
+            .reply_del()
+            .build()
+            .unwrap();
+        reg.dispatch_response(&resp, &HashMap::new());
+
+        let snapshot = captured.lock().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].attachment(), None);
+    }
+
     /// R311y78 — the source_info emit->receive closure: a reply built with the
     /// producer `ResponseReplyBuilder.source_info()` (R311y74) decodes back
     /// through `dispatch_response`, so the `InboundReply` surfaces the
@@ -2410,6 +2570,7 @@ mod tests {
             rid: 99,
             keyexpr_literal: "home/temp".to_string(),
             body: InboundReplyBody::Del {
+                attachment: None,
                 source_info: None,
                 timestamp: None,
             },
@@ -2619,6 +2780,7 @@ mod tests {
         assert_eq!(
             inbound.body,
             InboundReplyBody::Del {
+                attachment: None,
                 source_info: None,
                 timestamp: None,
             }
