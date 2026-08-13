@@ -376,13 +376,57 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                     Some(s) => s,
                     None => return,
                 };
+                // R311y769 — the FIRST declaration of an id wins, and a repeat
+                // is silent. zenoh wraps this whole arm in
+                // `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`
+                // (`zenoh/src/api/session.rs:2633`), so an OCCUPIED id neither
+                // re-inserts nor calls the subscriber back.
+                //
+                // Both halves matter and they are one decision, not two. Firing
+                // again would tell an application that counts presence that the
+                // same token appeared twice; re-inserting would rebind the id to
+                // the newer keyexpr, and the eventual `UndeclToken` — which
+                // carries only the id — would then name a keyexpr the token was
+                // never declared on. Skipping the arm entirely is what keeps the
+                // retraction truthful.
+                if self.peer_token_table.contains_key(&decl.id) {
+                    return;
+                }
                 self.peer_token_table.insert(decl.id, resolved.clone());
                 self.fan_to_matching_slots(LivelinessSampleKind::Put, &resolved, decl.id);
             }
             DeclareOwnedVariant::CodecZenohUndeclToken(undecl) => {
                 let resolved = match self.peer_token_table.remove(&undecl.id) {
                     Some(s) => s,
-                    None => return,
+                    // R311y769 — the id is unknown, so FALL BACK to the keyexpr
+                    // the retraction carries itself. zenoh reaches its
+                    // `else if m.ext_wire_expr.wire_expr != WireExpr::empty()`
+                    // branch here (`api/session.rs:2679-2708`) and delivers the
+                    // Delete all the same.
+                    //
+                    // This is what a SOURCED retraction always looks like: zenoh
+                    // identifies a sourced token by its KEYEXPR, not an id (the
+                    // id is 0 — see
+                    // [`build_undeclare_token_with_keyexpr`](crate::declare_build::build_undeclare_token_with_keyexpr)),
+                    // so the table can never hold it and dropping on a table miss
+                    // discarded every one of them.
+                    //
+                    // [`resolve_ext_keyexpr`](crate::declare_ext_keyexpr::resolve_ext_keyexpr)
+                    // rather than the literal-only `read_ext_keyexpr`, because
+                    // the ext may name an alias; and the PEER half of the pair
+                    // because upstream pins this resolution to the remote space
+                    // (`wireexpr_to_keyexpr(.., false)`) regardless of what the
+                    // ext's own mapping bit says. An ext that is absent or names
+                    // an alias the peer never declared resolves to `None`, and
+                    // then nothing fires — a Delete for a keyexpr nobody named
+                    // would be worse than the drop this replaces.
+                    None => match crate::declare_ext_keyexpr::resolve_ext_keyexpr(
+                        undecl.extensions.as_ref(),
+                        peer_keyexpr_table.peer(),
+                    ) {
+                        Some(s) => s,
+                        None => return,
+                    },
                 };
                 self.fan_to_matching_slots(LivelinessSampleKind::Delete, &resolved, undecl.id);
             }
@@ -885,6 +929,270 @@ mod tests {
             reg.peer_token_count(),
             0,
             "UndeclToken arrival removes the (id, keyexpr) entry",
+        );
+    }
+
+    /// R311y769 (`liveliness-subscriber`) — a REPEATED `DeclToken` naming an id
+    /// the peer already declared fires NOTHING. zenoh wraps the entire arm in
+    /// `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`
+    /// (`zenoh/src/api/session.rs:2633`), so an OCCUPIED id neither re-inserts
+    /// nor calls the subscriber back: an application counting presence is never
+    /// told the same token appeared twice.
+    ///
+    /// DISCRIMINATING ON THE KEYEXPR, not only the count. The second declare
+    /// names a DIFFERENT keyexpr, and the later Delete must still carry the
+    /// FIRST one — an implementation that suppressed the callback but still
+    /// overwrote the table would satisfy a count-only assertion and then name
+    /// the wrong keyexpr as dead. `Entry::Vacant` suppresses both.
+    #[test]
+    fn a_repeated_decl_token_for_a_known_id_fires_no_second_put() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+            .unwrap();
+
+        reg.dispatch_declare(
+            &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(7, 0, Some("liveliness/first"))),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            sink.lock().unwrap().len(),
+            1,
+            "precondition: the first declare fires"
+        );
+
+        reg.dispatch_declare(
+            &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(7, 0, Some("liveliness/second"))),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            sink.lock().unwrap().len(),
+            1,
+            "a DeclToken for an already-known id fires no second Put",
+        );
+        assert_eq!(
+            reg.peer_token_count(),
+            1,
+            "and it adds no second table entry",
+        );
+
+        reg.dispatch_declare(
+            &DeclareOwnedVariant::CodecZenohUndeclToken(undecl_token(7)),
+            &HashMap::new(),
+        );
+        let captured = sink.lock().unwrap().clone();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(
+            (captured[1].0, captured[1].1.as_str()),
+            (LivelinessSampleKind::Delete, "liveliness/first"),
+            "the occupied entry was NOT overwritten, so the Delete names the \
+             keyexpr the token was actually declared on",
+        );
+    }
+
+    /// The ANTI-VACUITY twin of the gate above: a DISTINCT id declared after the
+    /// first still fires. Without it, "no second Put" would be satisfied by a
+    /// registry that had stopped firing Puts altogether.
+    #[test]
+    fn a_second_distinct_token_id_still_fires_its_own_put() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+            .unwrap();
+
+        for (id, ke) in [(7u64, "liveliness/first"), (8, "liveliness/second")] {
+            reg.dispatch_declare(
+                &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(id, 0, Some(ke))),
+                &HashMap::new(),
+            );
+        }
+        let captured = sink.lock().unwrap().clone();
+        assert_eq!(captured.len(), 2, "two distinct ids are two Puts");
+        assert_eq!(captured[1].1, "liveliness/second");
+        assert_eq!(reg.peer_token_count(), 2);
+    }
+
+    /// R311y769 (`liveliness-subscriber`) — an `UndeclToken` for an id this
+    /// registry never saw falls back to the keyexpr its OWN `ext_wire_expr`
+    /// carries and still delivers the Delete. zenoh's `else if
+    /// m.ext_wire_expr.wire_expr != WireExpr::empty()` branch
+    /// (`zenoh/src/api/session.rs:2679-2708`) is the whole of this: a retraction
+    /// that names its keyexpr does not need the declaration to have been
+    /// observed, which is what a SOURCED token (`id == 0`, keyexpr IS the
+    /// identity) always looks like.
+    ///
+    /// The message is built by the PRODUCTION builder
+    /// [`build_undeclare_token_with_keyexpr`](crate::declare_build::build_undeclare_token_with_keyexpr),
+    /// not a hand-rolled fixture, so what the reader accepts is what wz emits.
+    #[test]
+    fn an_undecl_token_for_an_unknown_id_falls_back_to_its_ext_keyexpr() {
+        use crate::declare_build::build_undeclare_token_with_keyexpr;
+
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+            .unwrap();
+
+        let body = build_undeclare_token_with_keyexpr("liveliness/svc/api")
+            .expect("build sourced undeclare")
+            .body;
+        let DeclareOwnedVariant::CodecZenohUndeclToken(ref undecl) = body else {
+            unreachable!("the builder emits an UndeclToken")
+        };
+        assert_eq!(
+            undecl.id, 0,
+            "precondition: a sourced retraction carries no id, so the table \
+             lookup CANNOT be what resolves it",
+        );
+        assert_eq!(
+            reg.peer_token_count(),
+            0,
+            "precondition: no declaration was ever observed for it",
+        );
+
+        reg.dispatch_declare(&body, &HashMap::new());
+
+        let captured = sink.lock().unwrap().clone();
+        assert_eq!(
+            captured.len(),
+            1,
+            "the retraction is delivered, not dropped"
+        );
+        assert_eq!(
+            (captured[0].0, captured[0].1.as_str()),
+            (LivelinessSampleKind::Delete, "liveliness/svc/api"),
+            "the Delete names the keyexpr the ext_wire_expr carried",
+        );
+    }
+
+    /// The negative arm that keeps the fallback honest: an id-only `UndeclToken`
+    /// for an unknown id has NO ext to fall back to and still fires nothing.
+    /// zenoh's `else if` guards on a non-empty `ext_wire_expr` for exactly this
+    /// reason — without the guard the fallback would fabricate a Delete for a
+    /// keyexpr nobody named.
+    #[test]
+    fn an_undecl_token_for_an_unknown_id_with_no_ext_still_fires_nothing() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+            .unwrap();
+
+        reg.dispatch_declare(
+            &DeclareOwnedVariant::CodecZenohUndeclToken(undecl_token(99)),
+            &HashMap::new(),
+        );
+        assert!(
+            sink.lock().unwrap().is_empty(),
+            "an unknown id with no ext_wire_expr names nothing to retract",
+        );
+    }
+
+    /// The PRECEDENCE leg: when the id IS known, the REMEMBERED keyexpr wins and
+    /// the ext is not consulted. zenoh reaches the ext only in the `else` of the
+    /// successful `remote_tokens.remove` (`api/session.rs:2665-2679`), so a
+    /// retraction whose ext disagrees with the observed declaration retracts what
+    /// was actually declared.
+    #[test]
+    fn a_known_id_retracts_by_its_remembered_keyexpr_not_the_ext() {
+        use crate::declare_build::build_undeclare_token_with_keyexpr;
+
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+            .unwrap();
+
+        reg.dispatch_declare(
+            &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(
+                7,
+                0,
+                Some("liveliness/declared"),
+            )),
+            &HashMap::new(),
+        );
+        sink.lock().unwrap().clear();
+
+        let mut body = build_undeclare_token_with_keyexpr("liveliness/from-the-ext")
+            .expect("build sourced undeclare")
+            .body;
+        let DeclareOwnedVariant::CodecZenohUndeclToken(ref mut undecl) = body else {
+            unreachable!("the builder emits an UndeclToken")
+        };
+        undecl.id = 7;
+
+        reg.dispatch_declare(&body, &HashMap::new());
+
+        let captured = sink.lock().unwrap().clone();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            (captured[0].0, captured[0].1.as_str()),
+            (LivelinessSampleKind::Delete, "liveliness/declared"),
+            "the observed declaration wins; the ext is the FALLBACK, not an \
+             override",
+        );
+    }
+
+    /// The fallback resolves an ALIASED ext through the peer table, which is why
+    /// it funnels through
+    /// [`resolve_ext_keyexpr`](crate::declare_ext_keyexpr::resolve_ext_keyexpr)
+    /// (alias-capable) rather than the literal-only `read_ext_keyexpr`. zenoh's
+    /// fallback calls `wireexpr_to_keyexpr(.., false)`, whose `false` pins the
+    /// REMOTE space — the peer's declarations — so this passes the peer half of
+    /// the pair and nothing else.
+    ///
+    /// The second leg is the anti-vacuity one: the SAME message against an EMPTY
+    /// table fires nothing, so the first leg measures the table rather than the
+    /// suffix bytes.
+    #[test]
+    fn the_fallback_resolves_an_aliased_ext_through_the_peer_table() {
+        use crate::declare_ext_keyexpr::KEYEXPR_EXT_HEADER;
+        use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+        use wz_codecs::ext_zbuf::ExtZbufOwned;
+
+        // inner_header 0x03 (local + suffix), VLE id 0x07, suffix "dev".
+        let aliased = || ExtEntryOwned {
+            header: KEYEXPR_EXT_HEADER,
+            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: 5,
+                value: crate::codec_owned::owned_bytes(&[0x03, 0x07, b'd', b'e', b'v']).unwrap(),
+            }),
+        };
+        let msg = || {
+            let mut u = undecl_token(0);
+            u.header |= 0x80; // Z: the inner declaration carries an ext chain
+            u.extensions = Some(vec![aliased()]);
+            DeclareOwnedVariant::CodecZenohUndeclToken(u)
+        };
+
+        let mut peer = HashMap::new();
+        peer.insert(7u64, "liveliness/".to_string());
+
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+            .unwrap();
+        reg.dispatch_declare(&msg(), &peer);
+        let captured = sink.lock().unwrap().clone();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            (captured[0].0, captured[0].1.as_str()),
+            (LivelinessSampleKind::Delete, "liveliness/dev"),
+            "the aliased ext composes the peer's mapping with the suffix",
+        );
+
+        let mut bare = LivelinessSubscriberRegistry::new();
+        let unresolved: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        bare.register(
+            1,
+            "liveliness/**",
+            false,
+            make_subscriber(unresolved.clone()),
+        )
+        .unwrap();
+        bare.dispatch_declare(&msg(), &HashMap::new());
+        assert!(
+            unresolved.lock().unwrap().is_empty(),
+            "an alias the peer never declared resolves to nothing, so no Delete \
+             is fabricated",
         );
     }
 
