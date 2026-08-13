@@ -1923,6 +1923,67 @@ layer_c0i_impact_ref_gate() {
     return 0
 }
 
+# ─── Layer C0b — the job time-budget margin gate discriminates BOTH ways ───
+#
+# R311y791. `scripts/lib/job-budget-margin.sh` is what the `ci` job's last step
+# runs, and its entire value is a REFUSAL near the ceiling. The lane exists for
+# the reason Layer C0i exists: logic that only the workflow can execute cannot
+# be tested, so its two arms cannot be told apart, and a gate nothing runs
+# cannot fail.
+#
+# Both directions, because either alone is vacuous: a script that always exits 1
+# passes the negative case, and one that always exits 0 passes the positive.
+#
+# The clock is PLACED through `WZ_JOB_BUDGET_NOW` rather than waited for -- the
+# real ceiling is 30 minutes and no lane may cost that. The override is read
+# only when set, so a hosted run always reads the real clock.
+#
+# The numbers below are the MEASURED band, not round figures: across the 12
+# completed `ci` jobs ending at run 31732246052 the successful ones spanned
+# 23m39s-28m50s of the 30m budget (79%-96%), and run 31711867852 was cancelled
+# at 30m20s. 1500s = 83% must pass; 1700s = 94% must fail.
+layer_c0b_job_budget_margin() {
+    local script="scripts/lib/job-budget-margin.sh"
+    local stamp
+    stamp="$(mktemp)"
+    # shellcheck disable=SC2064
+    trap "rm -f '$stamp'" RETURN
+    echo 1000000 >"$stamp"
+
+    # POSITIVE — inside the margin, the gate gets out of the way.
+    if ! WZ_JOB_BUDGET_NOW=1001500 bash "$script" "$stamp" 1800 90 >/dev/null; then
+        echo "  Layer C0b FAIL: 1500s of a 1800s budget (83%) was REFUSED — the gate now" \
+            "reds runs that are comfortably inside their budget" >&2
+        return 1
+    fi
+
+    # NEGATIVE — the shape that actually happened must be caught.
+    if WZ_JOB_BUDGET_NOW=1001700 bash "$script" "$stamp" 1800 90 >/dev/null 2>&1; then
+        echo "  Layer C0b FAIL: 1700s of a 1800s budget (94%) was ACCEPTED — that is inside" \
+            "the band that produced the run 31711867852 cancel, and a cancel grades nothing" >&2
+        return 1
+    fi
+
+    # NEGATIVE — an unreadable stamp is NOT green. A gate that cannot read its
+    # input must not report green; this is the arm that fires if the stamp step
+    # is ever dropped from the job.
+    if bash "$script" "$stamp.absent" 1800 90 >/dev/null 2>&1; then
+        echo "  Layer C0b FAIL: a MISSING start stamp was accepted — the margin was unknown" \
+            "and the gate called it green" >&2
+        return 1
+    fi
+
+    # NEGATIVE — a malformed budget must refuse rather than divide by zero.
+    if bash "$script" "$stamp" 0 90 >/dev/null 2>&1; then
+        echo "  Layer C0b FAIL: a zero budget was accepted" >&2
+        return 1
+    fi
+
+    echo "  job-budget-margin gate: OK (passes 83%, refuses 94%, refuses a missing stamp" \
+        "and a zero budget)"
+    return 0
+}
+
 # ─── Layer C1 — cargo test --workspace ──────────────────────────────
 layer_c1_cargo_test() {
     # Stage 4b — exclude wz-session-lwip: it forces wz-session-core/no_std
@@ -11978,6 +12039,7 @@ run_layer B2 layer_b2_regen_diff || overall=1
 run_layer C0 layer_c0_test_discipline || overall=1
 run_layer C0mut layer_c0mut_verdict_legs || overall=1
 run_layer C0i layer_c0i_impact_ref_gate || overall=1
+run_layer C0b layer_c0b_job_budget_margin || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1

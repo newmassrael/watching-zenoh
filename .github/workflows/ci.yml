@@ -157,6 +157,14 @@ jobs:
       # The `df -h` bracket is not decoration. The failure above was
       # undiagnosable from the log precisely because nothing ever reported
       # free space; a future squeeze should be visible BEFORE it is fatal.
+      - name: Budget stamp — start this job's own clock
+        # R311y791 — the read end is the "Budget margin" step at the bottom of
+        # this job. FIRST step on purpose: the margin that matters is the one
+        # `timeout-minutes` measures, which starts when the job does, so a
+        # stamp taken after the prune or the checkout would under-report
+        # exactly the provisioning cost that has been growing.
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
       - name: Free runner disk space (headroom for the feature-matrix lanes)
         run: |
           echo "=== free space BEFORE prune ==="
@@ -399,22 +407,6 @@ jobs:
         # class at PR time rather than after Layer C1 panics with
         # "binary not found" downstream.
         run: bash scripts/run-ci.sh --layer C0
-
-      - name: Layer C0mut — every verdict leg is load-bearing
-        # R311y726 (N14) — severs each `VerdictReason` leg in turn and requires
-        # a test to redden. The sufficient condition Layer C0's static
-        # `verdict_reason_lint` cannot express: that gate proves a leg is
-        # NAMED by a test, this proves one DEPENDS on it.
-        #
-        # Placed here, before the workspace test run, because it is the cheaper
-        # of the two ways to learn the suite is broken: it compiles and runs
-        # only the crates that bind a leg, and a tree whose baseline is red
-        # fails this lane by design rather than measuring nothing.
-        #
-        # MEASURED locally at 2m16s over 23 legs (warm cache). It mutates
-        # `report.rs` in place and restores it byte for byte on every exit
-        # path; a hosted runner's checkout is discarded either way.
-        run: bash scripts/run-ci.sh --layer C0mut
 
       - name: Layer C1 — cargo test --workspace
         run: bash scripts/run-ci.sh --layer C1
@@ -697,6 +689,37 @@ jobs:
         # never SKIPs here.
         run: bash scripts/run-ci.sh --layer E6u
 
+      - name: Budget margin — this job may not approach its timeout in silence
+        # R311y791 — THE GATE THIS FILE HAS TWICE WISHED FOR AND TWICE NOT
+        # BUILT. y296 recorded that "both ceilings were being approached at
+        # once and nothing reported either" and fixed only the disk one; y351
+        # wrote "Nothing reported the margin — exactly what ci.yml:84-86
+        # predicted in y297 and left standing". y791 is when the time ceiling
+        # actually fired: run 31711867852 was CANCELLED at 30m20s, which grades
+        # nothing, so a ledger commit reached origin with no hosted verdict.
+        #
+        # WHY IT FAILS RATHER THAN WARNS. A warning is what the last two rounds
+        # already had, in prose, and neither was read until the ceiling hit. By
+        # the time this fires every lane above it has RUN and reported, so the
+        # red says "everything passed and the budget needs attention" — which
+        # is strictly more information than a cancel, and it arrives while
+        # there is still room to act. An annotation nobody is obliged to read
+        # is the failure mode, not the remedy.
+        #
+        # THE THRESHOLD is 90% of the budget, chosen from measurement rather
+        # than taste: across the 12 completed `ci` jobs ending at run
+        # 31732246052 the successful ones spanned 23m39s-28m50s against 30m —
+        # 79% to 96% — so 90% sits inside the band that was already producing
+        # cancels and above where the job lands after the y791 C0mut split
+        # (~62%). Both numbers live here, next to `timeout-minutes`, because
+        # they are one fact: move that and move these.
+        #
+        # `always()` so a run that goes red elsewhere still reports its margin.
+        # A run killed BY the timeout cannot reach this step at all — that is
+        # the case this exists to prevent, not to diagnose.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90
+
   # ─────────────────────────────────────────────────────────────────
   # R311y385 — the VALIDATE + CODEGEN job. Layers A/A2/A3/A4 (Mnemosyne
   # workspace validate + catalog/cross-impl truthfulness) and B/B2
@@ -839,11 +862,114 @@ jobs:
           WZ_C0I_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C0i
 
+      - name: Layer C0b — the job budget-margin gate discriminates both ways
+        # R311y791. The `ci` job's last step runs
+        # scripts/lib/job-budget-margin.sh, whose whole value is a refusal near
+        # the ceiling. This lane drives BOTH arms with a placed clock, for the
+        # reason C0i above exists: logic only the workflow can execute cannot be
+        # told apart from logic that always passes.
+        #
+        # It runs HERE rather than on `ci` for the obvious reason: a lane that
+        # exists because that job is at its time ceiling must not be charged to
+        # that job. It needs only bash, and costs ~0s.
+        run: bash scripts/run-ci.sh --layer C0b
+
       - name: Layer B — verify-codegen.sh per codec
         run: bash scripts/run-ci.sh --layer B
 
       - name: Layer B2 — regen-diff (committed out/** == regenerated)
         run: bash scripts/run-ci.sh --layer B2
+
+  # ─────────────────────────────────────────────────────────────────
+  # R311y791 — the VERDICT-LEG MUTATION job. Layer C0mut ran as step 11 of the
+  # `ci` job and was its single largest step: 509s of a 1634s job on run
+  # 31732246052, i.e. 31% of a job sitting at 91% of its 30-minute budget.
+  #
+  # WHAT FORCED THE SPLIT. Run 31711867852 (Round 1819, a LEDGER-ONLY commit)
+  # did not fail — the `ci` job hit `timeout-minutes: 30` at 30m20s and was
+  # CANCELLED, on step 34, with every other job in the run green. A cancel
+  # grades nothing, so that commit has no hosted verdict at all, and the local
+  # push gate cannot produce one: the whole point of the R311y386 fast-push
+  # policy is that the hosted run is the full gate.
+  #
+  # It was not a flake. Measured across the 12 completed `ci` jobs ending at
+  # that run, the successful ones span 23m39s-28m50s with a ~27m20s median —
+  # 91% of budget at the median, 96% at the observed max. At that margin runner
+  # variance alone decides the run, which is the same sentence the footprint
+  # job's rationale had to write in y351 and the same one ci.yml:145-147 wrote
+  # in y296 about this job's DISK ceiling. Only the disk half was ever acted on.
+  #
+  # WHY SPLIT RATHER THAN RAISE, and this is this file's own settled doctrine
+  # (footprint, ~line 900): a bigger number buys one atom's worth of time and
+  # re-arms the same failure, because the cost grows monotonically in atom
+  # count. Splitting changes the SLOPE. The y385 `validate-codegen` split
+  # recorded the `ci` job at 14m49s; it is 27m12s now, so the slope is measured,
+  # not predicted. Moving this lane returns the job to ~18m45s, ~62% of budget.
+  #
+  # WHAT IT NEEDS, and it is much less than `ci`: python3 (in the runner image),
+  # cargo, and a tree that builds. `verdict_leg_mutation.py` rewrites
+  # `crates/wz-capture/src/report.rs` in place and runs `cargo test -p <pkg>`
+  # for the packages that bind a leg — DERIVED from the bindings, not a fixed
+  # list. So no mnemosyne-cli, no sce-codegen, no zenoh-pico CLI, no zenohd.
+  # The prep below is otherwise kept identical to `ci`'s rather than trimmed
+  # further, on the footprint job's stated reason: an over-provisioned job costs
+  # ~2min in parallel, an under-provisioned one costs the fix-and-repush series.
+  #
+  # WHAT THE SPLIT COSTS, stated rather than hidden: the lane sat BEFORE the
+  # workspace test run deliberately, as the cheaper of the two ways to learn the
+  # suite is broken. In its own job that ordering is gone — a tree with a red
+  # baseline now pays for both jobs instead of failing early in one. That is
+  # runner minutes on an already-broken tree, not a lost gate, and the lane
+  # still fails by design on such a tree rather than measuring nothing.
+  verdict-legs:
+    name: verdict-leg mutation gate (Layer C0mut)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (with submodules)
+        # `submodules: recursive` is load-bearing: the packages this lane
+        # compiles resolve through vendor/sce path deps. No `fetch-depth: 0` —
+        # that is the `ci` job's, for its git-log-based ledger drift check;
+        # this lane reads no history.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        # Mirrors `ci`'s list exactly. Not trimmed to what a direct-dependency
+        # read suggests: the resolved tree pulls bindgen (libclang) and the
+        # vendor/sce crates.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            libclang-dev \
+            clang \
+            perl
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        # Its OWN key, for the reason footprint and interop carry one: parallel
+        # jobs must not race a single cache save. This lane's tree is the
+        # ordinary `crates/target`, so the build half is a real saving here
+        # (unlike footprint's, which builds into per-lane target dirs).
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates -> target
+          key: verdict-legs
+
+      - name: Layer C0mut — every verdict leg is load-bearing
+        # R311y726 (N14) — severs each `VerdictReason` leg in turn and requires
+        # a test to redden, plus the y727 `widen` operator for the opposite
+        # defect. The sufficient condition Layer C0's static
+        # `verdict_reason_lint` cannot express: that gate proves a leg is NAMED
+        # by a test, this proves one DEPENDS on it.
+        #
+        # It mutates `report.rs` in place and restores it byte for byte on
+        # every exit path; a hosted runner's checkout is discarded either way.
+        run: bash scripts/run-ci.sh --layer C0mut
 
   # ─────────────────────────────────────────────────────────────────
   # R311y351 — the CODEC-FOOTPRINT job. Layer F ran as the `ci` job's last
