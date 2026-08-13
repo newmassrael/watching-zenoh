@@ -4940,16 +4940,21 @@ layer_c1p_multicast() {
 # the TX->RX round-trip through a peer loop's reassembly).
 #
 # R311y414 — the three runs were BARE, and here the COUNT is the proof: the
-# same `multicast_glue` filter activates 12 tests on bare transport-multicast,
-# 16 with reassembly and 18 with transport-fragmentation, so the measured
+# same `multicast_glue` filter activates N tests on bare transport-multicast,
+# N+4 with reassembly and N+6 with transport-fragmentation, so the measured
 # counts pin that each composition step really switches its cases on. A bare
 # run would stay green if a gate stopped activating (or the filter matched 0).
+#
+# R311y772: 12/16/18 -> 15/19/21. The graceful `multicast.stop` landed with
+# three tests that are NOT gated on either composition feature, so all three
+# runs move by the same +3 -- and that is the check on this edit: a change that
+# moved only the bare count would mean the new cases are accidentally gated.
 layer_c1q_multicast_glue() {
-    _runci_guarded_test C1q 12 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 15 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 16 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 19 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 18 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 21 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
         || return 1
 }
 

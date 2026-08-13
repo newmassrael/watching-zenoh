@@ -78,11 +78,20 @@
 //!
 //! ## Stop
 //!
-//! The loop runs until the link is lost (`LinkEvent::Lost` ->
-//! [`MulticastOutcome::LinkLost`]) or the test iteration budget is reached.
-//! A graceful `multicast.stop` (the §3.1 Running -> Stopped event) needs a
-//! shutdown signal threaded into the `select!`; that is a deferred
-//! follow-up (Round C drives until link loss).
+//! Three ways out: the link is lost (`LinkEvent::Lost` ->
+//! [`MulticastOutcome::LinkLost`]), the test iteration budget is reached
+//! ([`MulticastOutcome::IterationLimit`]), or the caller asks for a graceful
+//! `multicast.stop` — the §3.1 Running -> Stopped event —
+//! ([`MulticastOutcome::Stopped`]).
+//!
+//! R311y772 built that third door. The FSM half already existed
+//! (`MulticastDispatcher::stop`, which clears the peer table); what was
+//! deferred was the signal, and this header carried the deferral as its own
+//! residual. It is a `tokio::sync::watch::Receiver<bool>` handed to
+//! [`drive_multicast_session_with_shutdown`] — the two older entry points
+//! delegate with no signal and behave exactly as before. Dropping every sender
+//! also stops the loop; see the `select!` arm for why that is the only
+//! non-spinning reading of a closed channel.
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -261,6 +270,54 @@ where
     .await
 }
 
+/// R311y772 — [`drive_multicast_session`] plus the GRACEFUL STOP signal: the
+/// §3.1 `multicast.stop` event (Running -> Stopped), which the loop had no way
+/// to receive until this round.
+///
+/// Any change on `shutdown` stops the loop — the value is not read, only the
+/// change. `watch` rather than `oneshot` for two reasons: one sender can stop
+/// SEVERAL group loops (a host driving more than one multicast face shares the
+/// handle), and `changed()` takes `&mut self` on a receiver the caller keeps,
+/// so a stopped loop can be restarted against the same channel without
+/// rebuilding it.
+///
+/// DROPPING EVERY SENDER ALSO STOPS THE LOOP. That is not a fallback but the
+/// only non-spinning reading: `changed()` errors immediately and forever once
+/// the last sender is gone, so a loop that ignored the error would busy-wait.
+/// It also makes the sender an RAII stop handle, which is what a caller who
+/// dropped it meant.
+///
+/// On stop the dispatcher's `stop()` runs before the return, so the peer table
+/// is cleared exactly as it is on the link-loss path — a `Stopped` outcome
+/// never leaves peers behind.
+pub async fn drive_multicast_session_with_shutdown<D, T, F, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    cfg: MulticastDriveConfig<'_>,
+    driver: &mut D,
+    clock: &T,
+    on_event: F,
+    outbound: &mut UnboundedReceiver<MulticastTxItem>,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+) -> MulticastOutcome
+where
+    D: LinkDriver,
+    T: TimeSource,
+    F: FnMut(IterationEvent<'_>),
+{
+    drive_multicast_session_inner(
+        dispatcher,
+        cfg,
+        driver,
+        clock,
+        on_event,
+        outbound,
+        |_members: &[Vec<u8>]| {},
+        |_subs: &[String]| {},
+        Some(shutdown),
+    )
+    .await
+}
+
 /// The membership-aware variant of [`drive_multicast_session`]: the identical
 /// drive loop, plus — after each iteration — a snapshot-diff of the dispatcher's
 /// on-group ROUTER member set. On a real change it calls `on_members`; the router
@@ -283,6 +340,46 @@ pub async fn drive_multicast_session_with_membership<D, T, F, G, H, const MAX_PE
     cfg: MulticastDriveConfig<'_>,
     driver: &mut D,
     clock: &T,
+    on_event: F,
+    outbound: &mut UnboundedReceiver<MulticastTxItem>,
+    on_members: G,
+    on_group_subs: H,
+) -> MulticastOutcome
+where
+    D: LinkDriver,
+    T: TimeSource,
+    F: FnMut(IterationEvent<'_>),
+    G: FnMut(&[Vec<u8>]),
+    H: FnMut(&[String]),
+{
+    // R311y772 — no shutdown signal: this entry point keeps its pre-round
+    // behaviour exactly (link loss or the iteration budget are the only exits).
+    // The graceful stop lives on `drive_multicast_session_with_shutdown`.
+    drive_multicast_session_inner(
+        dispatcher,
+        cfg,
+        driver,
+        clock,
+        on_event,
+        outbound,
+        on_members,
+        on_group_subs,
+        None,
+    )
+    .await
+}
+
+/// The one drive loop all three entry points above run. `shutdown` is the only
+/// thing that varies between them, and it is an `Option` rather than three
+/// copies of the body: a duplicated select loop is exactly the shape this
+/// module already collapsed once (the `_with_membership` split kept ONE body on
+/// purpose), and a second copy would drift at the first arm anyone touches.
+#[allow(clippy::too_many_arguments)]
+async fn drive_multicast_session_inner<D, T, F, G, H, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    cfg: MulticastDriveConfig<'_>,
+    driver: &mut D,
+    clock: &T,
     mut on_event: F,
     outbound: &mut UnboundedReceiver<MulticastTxItem>,
     #[cfg_attr(
@@ -300,6 +397,10 @@ pub async fn drive_multicast_session_with_membership<D, T, F, G, H, const MAX_PE
         allow(unused_mut, unused_variables)
     )]
     mut on_group_subs: H,
+    // `None` on the two historical entry points, so their behaviour is
+    // bit-for-bit what it was: the `select!` arm this feeds is a
+    // never-completing `pending()` when absent.
+    mut shutdown: Option<&mut tokio::sync::watch::Receiver<bool>>,
 ) -> MulticastOutcome
 where
     D: LinkDriver,
@@ -501,6 +602,39 @@ where
                 }
                 LinkEvent::Ready => {}
             },
+            // R311y772 — GRACEFUL STOP: the §3.1 Running -> Stopped event, which
+            // until this round had no way in. The FSM half was already built
+            // (`MulticastDispatcher::stop`, which clears the peer table via
+            // `release_multicast_link`); what was missing was purely a signal
+            // threaded into this `select!`, and the module header said so.
+            //
+            // `pending()` on the None arm rather than an `if` guard: a disarmed
+            // arm that never completes is what `select!` already does with a
+            // never-ready future, and it keeps the borrow of `shutdown` inside
+            // the arm instead of spreading a guard expression across the macro.
+            //
+            // A CLOSED CHANNEL STOPS THE LOOP, and that is deliberate rather than
+            // incidental: `changed()` errors only when every sender is dropped,
+            // which means nobody can ever signal again. Treating that as "keep
+            // running" would spin this arm hot forever (the error is returned
+            // immediately, every iteration); treating it as a stop makes dropping
+            // the handle an RAII shutdown, which is what a caller that dropped it
+            // meant.
+            _ = async {
+                match shutdown.as_mut() {
+                    Some(rx) => {
+                        let _ = rx.changed().await;
+                    }
+                    None => core::future::pending::<()>().await,
+                }
+            } => {
+                // Drive the transition rather than just returning: the peer table
+                // must be cleared on the way out, exactly as the link-loss arm
+                // above does through `notify_link_lost`. Returning the outcome
+                // without it would leave a Stopped session still holding peers.
+                dispatcher.stop();
+                return MulticastOutcome::Stopped;
+            }
             _ = clock.sleep(tick_ms) => {
                 // PeerSweep: evict peers past their lease. Swept every tick
                 // (>= the §3.1 lease/3 cadence; sweeping more often only
@@ -1084,6 +1218,161 @@ mod tests {
             SessionFsmMulticastState::Stopped
         );
         assert_eq!(dispatcher.active_peers(), 0);
+    }
+
+    // ── R311y772 — the graceful stop the module header carried as a residual ──
+
+    /// Admit a peer, THEN stop: the loop returns [`MulticastOutcome::Stopped`]
+    /// and the peer table is cleared, exactly as the link-loss path does.
+    ///
+    /// Two phases rather than one racing drive, deliberately: `select!` picks
+    /// among ready arms, so a test that armed the signal and the JOIN together
+    /// would prove whichever the scheduler happened to take. Phase one admits
+    /// the peer with no signal at all; phase two re-enters the SAME dispatcher
+    /// with the signal already fired, so the only thing that can end it is the
+    /// stop arm — and the peer it must clear is provably there when it starts.
+    #[tokio::test]
+    async fn a_shutdown_signal_stops_the_loop_and_clears_the_peer_table() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let mut driver = FakeDriver::with([(join0(&params(&peer_b)), src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let cfg = || MulticastDriveConfig {
+            params: &self_params,
+            tick_ms: 5,
+            max_iters: Some(5),
+        };
+
+        // Phase 1 — no signal: the pre-round entry point, pre-round behaviour.
+        let admitted = drive_multicast_session(
+            &mut dispatcher,
+            cfg(),
+            &mut driver,
+            &clock,
+            |_| {},
+            &mut idle_outbound(),
+        )
+        .await;
+        assert_eq!(admitted, MulticastOutcome::IterationLimit);
+        assert_eq!(
+            dispatcher.active_peers(),
+            1,
+            "the peer the stop must clear has to be there first",
+        );
+
+        // Phase 2 — signal already fired before the loop is entered.
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        tx.send(true).expect("receiver alive");
+        let stopped = drive_multicast_session_with_shutdown(
+            &mut dispatcher,
+            cfg(),
+            &mut driver,
+            &clock,
+            |_| {},
+            &mut idle_outbound(),
+            &mut rx,
+        )
+        .await;
+
+        assert_eq!(
+            stopped,
+            MulticastOutcome::Stopped,
+            "a fired shutdown signal must end the loop as Stopped, not by budget",
+        );
+        assert_eq!(
+            dispatcher.session_state(),
+            SessionFsmMulticastState::Stopped,
+        );
+        assert_eq!(
+            dispatcher.active_peers(),
+            0,
+            "stop() must run on the way out -- a Stopped session holding peers \
+             is the defect the link-loss arm already avoids",
+        );
+    }
+
+    /// ANTI-VACUITY. The identical fixture WITHOUT a signal runs to its budget
+    /// and keeps the peer. Without this the test above proves only that some
+    /// drive returned Stopped, which an unconditional `return` would also do.
+    #[tokio::test]
+    async fn the_same_fixture_without_a_signal_still_runs_to_its_budget() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let mut driver = FakeDriver::with([(join0(&params(&peer_b)), src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        // A channel exists but is NEVER fired, and is handed to the shutdown
+        // entry point -- so the difference from the test above is the SIGNAL
+        // and not the entry point.
+        let (_tx, mut rx) = tokio::sync::watch::channel(false);
+        let outcome = drive_multicast_session_with_shutdown(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(5),
+            },
+            &mut driver,
+            &clock,
+            |_| {},
+            &mut idle_outbound(),
+            &mut rx,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            MulticastOutcome::IterationLimit,
+            "an un-fired signal must not stop the loop",
+        );
+        assert_eq!(
+            dispatcher.active_peers(),
+            1,
+            "and must not clear the peer table",
+        );
+    }
+
+    /// Dropping every sender stops the loop. Pinned because the alternative
+    /// reading of a closed channel -- ignore the error and keep going -- is a
+    /// BUSY LOOP: `changed()` then returns immediately on every iteration
+    /// forever. A regression to that would still pass the two tests above and
+    /// would only show up as a pegged core.
+    #[tokio::test]
+    async fn dropping_every_sender_stops_the_loop() {
+        // No inbound traffic at all: the loop parks on the sweep tick, so the
+        // ONLY thing that can end it early is the stop arm.
+        let mut driver = FakeDriver {
+            inbound: VecDeque::new(),
+            sent: Vec::new(),
+            lost: false,
+        };
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        drop(tx);
+        let outcome = drive_multicast_session_with_shutdown(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(5),
+            },
+            &mut driver,
+            &clock,
+            |_| {},
+            &mut idle_outbound(),
+            &mut rx,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            MulticastOutcome::Stopped,
+            "a closed channel can never signal again, so the only non-spinning \
+             reading is a stop",
+        );
     }
 
     // ── A1b — data plane: Frame payload -> observer registries ──
