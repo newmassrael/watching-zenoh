@@ -12056,6 +12056,75 @@ mod tests {
         assert_eq!(sink_a.frame_count(), 1, "A received the data");
     }
 
+    /// R311y767 (carry N71) — the SINGLE-NET peer forwarder's half of the
+    /// premise, the twin of `router_forward`'s `the_router_emits_no_alias_of_its_own`.
+    ///
+    /// This file resolves every inbound keyexpr against `s.keyexpr_table` — the
+    /// SOURCE face's alias table — at roughly thirty sites, with no own-id space
+    /// on the other side of the `M` bit. The refusal that follows is correct
+    /// exactly while this forwarder declares no alias of its own, and that
+    /// premise is what is asserted here rather than assumed.
+    ///
+    /// THE TWO FORWARDERS SHARE THE CLASSIFICATION, not a copy of it
+    /// (`test_fixtures::assert_emits_no_alias_of_its_own`): "is this emitted
+    /// keyexpr an alias" is ONE fact, and two spellings of it would diverge at
+    /// the first plane one of them learned about — the `inventory_kinds` lesson
+    /// this workspace has already paid for.
+    #[test]
+    fn the_peer_forwarder_emits_no_alias_of_its_own() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // self S
+        let (face_a, _sink_a) = peer_face(zid(0x0A)); // source
+        let (face_b, sink_b) = peer_face(zid(0x0B)); // subscriber
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/k"); // B subscribes, literally
+        sink_b.reset();
+
+        // A declares an alias of ITS OWN and then publishes through it, so a
+        // forwarder that passed the wireexpr through would hand B an id only A
+        // ever declared.
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_declare_kexpr(11, "demo/k")
+                    .expect("build kexpr"),
+            )),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Push(Box::new(
+                wz_session_core::push_build::build_push_aliased(11, None, b"v")
+                    .expect("aliased push"),
+            )),
+        );
+
+        let source_aliases = fwd.faces.borrow()[&FaceId(0)].keyexpr_table.clone();
+        // ANTI-VACUITY ON THE FIXTURE: with an empty table the failure case
+        // `(None, Some(_))` is unreachable by construction, so a green would mean
+        // nothing.
+        assert_eq!(
+            source_aliases.len(),
+            1,
+            "the source face did not absorb the alias, so a pass-through could \
+             not be detected"
+        );
+        let inspected = crate::test_fixtures::assert_emits_no_alias_of_its_own(
+            &sink_b,
+            &source_aliases,
+            "the single-net peer forwarder",
+        );
+        assert_eq!(
+            inspected,
+            vec!["demo/k"],
+            "the routed Push is what this scenario drives through an alias, and \
+             it must be the record the guard inspected"
+        );
+    }
+
     #[test]
     fn publish_to_a_self_only_subscription_has_no_remote_target() {
         // A key only THIS node subscribes to yields no remote forward direction

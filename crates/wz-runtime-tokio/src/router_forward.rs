@@ -11031,6 +11031,142 @@ mod tests {
         );
     }
 
+    /// R311y767 (carry N71) — the linkstate ROUTER's half of the premise
+    /// R311y766 bound for the switchboard kernel.
+    ///
+    /// Every one of this file's ~30 resolve sites reads `s.keyexpr_table`, the
+    /// SOURCE face's alias table, and nothing else. So an `M=0` alias naming an
+    /// id the ROUTER declared resolves against nothing and is dropped, which is
+    /// correct exactly while the router declares no alias of its own.
+    ///
+    /// FOUR PLANES ARE DRIVEN THROUGH ALIASES ON ONE FACE — subscriber, token,
+    /// queryable and data — because a scenario that drove one would say nothing
+    /// about the other three, and "a new plane reaches one producer" is a defect
+    /// shape this workspace has recorded four times. Each alias is a DIFFERENT
+    /// id, so a pass-through on any one of them hands C an id it never declared.
+    ///
+    /// The alias table handed to the assertion is read off face A's own state
+    /// rather than rebuilt here: a table this test wrote could disagree with what
+    /// the router actually absorbed, and then the guard would grade a fiction.
+    ///
+    /// ## Falsification, and the wrong function it started on
+    ///
+    /// The first probe damaged `reliteralize_push` — the normalizer R311y766 used
+    /// to falsify the switchboard kernel's twin — and this test stayed GREEN.
+    /// That is not the router's normalizer: `reliteralize_push` serves the
+    /// multicast and CLIENT egress legs, while the mesh transit re-forward
+    /// normalizes through `compute_push_forward`'s `set_push_keyexpr_literal`.
+    /// A probe on the wrong function reads exactly like a guard that works.
+    /// Damaging the right one (`set_literal_keyexpr_fields` made a no-op) reds
+    /// with `emitted 1 keyexpr(s) that only the SOURCE face's alias table can
+    /// resolve: ["demo/data"]`.
+    ///
+    /// That probe binds the DATA plane specifically: the declare re-floods build
+    /// from an already-resolved literal on a different path, so they stayed
+    /// literal under it. The set assertion below is what covers them.
+    #[test]
+    fn the_router_emits_no_alias_of_its_own() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink_a) = face(zid(0xAA), WIRE_ROUTER); // source
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // tree child + subscriber
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        // C subscribes LITERALLY, so the aliased Push from A has somewhere to go.
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        sink_c.reset();
+
+        // A declares three aliases of its own, then uses each one.
+        for (id, keyexpr) in [(7u64, "demo/tok"), (8, "demo/q"), (9, "demo/data")] {
+            forward_one(
+                &fwd,
+                FaceId(0),
+                NetworkMessage::Declare(Box::new(
+                    wz_session_core::declare_build::build_declare_kexpr(id, keyexpr)
+                        .expect("build kexpr"),
+                )),
+            );
+        }
+        // THE TOKEN PLANE IS FEATURE-GATED, and this cfg is not decoration: the
+        // router's `CodecZenohDeclToken` arm lives behind `routing-token-tables`,
+        // so without it the declare is ingested by nothing and re-floods
+        // nowhere. The first draft drove it unconditionally and the pinned set
+        // below measured `["demo/data", "demo/data", "demo/q"]` — a plane the
+        // scenario claimed to cover and did not, which is exactly what pinning
+        // the SET rather than a floor exists to catch.
+        #[cfg(feature = "routing-token-tables")]
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_declare_token(0, 7, None)
+                    .expect("aliased token"),
+            )),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_declare_queryable(0, 8, None)
+                    .expect("aliased queryable"),
+            )),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                build_declare_subscriber(0, 9, None).expect("aliased sub"),
+            )),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Push(Box::new(
+                wz_session_core::push_build::build_push_aliased(9, None, b"payload")
+                    .expect("aliased push"),
+            )),
+        );
+
+        let source_aliases = fwd.faces.borrow()[&FaceId(0)].keyexpr_table.clone();
+        // ANTI-VACUITY on the FIXTURE, not just on the emit: an empty table means
+        // the three DeclKexprs never landed, and then `(None, Some(_))` — the
+        // failure case — is unreachable by construction.
+        assert_eq!(
+            source_aliases.len(),
+            3,
+            "the source face absorbed {} of the 3 aliases, so the guard below \
+             could not detect a pass-through of the missing one(s)",
+            source_aliases.len()
+        );
+        let inspected = crate::test_fixtures::assert_emits_no_alias_of_its_own(
+            &sink_c,
+            &source_aliases,
+            "the linkstate router",
+        );
+        // THE SET, not the count. `literals` being non-empty inside the helper is
+        // a floor, and a floor cannot tell a guard that reached every plane this
+        // scenario drives from one that reached the subscriber re-flood and
+        // shrugged at the rest. Pinning the set means a plane that stops emitting
+        // reds here instead of quietly shrinking what the assertion above covers
+        // — and it is what caught the token plane being compiled out.
+        //
+        // The expectation follows the SAME cfg as the drive, so neither feature
+        // resolution grades a plane it never ran.
+        let mut expected = vec!["demo/data", "demo/data", "demo/q"];
+        #[cfg(feature = "routing-token-tables")]
+        expected.push("demo/tok");
+        expected.sort();
+        assert_eq!(
+            inspected, expected,
+            "every plane this scenario drives through an alias must reach the \
+             guard: the subscriber re-flood and the routed Push (both \
+             demo/data), the queryable re-flood, and — under \
+             routing-token-tables — the token re-flood"
+        );
+    }
+
     #[test]
     fn transit_source_declare_keys_on_the_resolved_zid() {
         // A declare with a NON-zero node_id resolves via the inbound link's psid

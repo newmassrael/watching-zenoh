@@ -136,3 +136,107 @@ pub(crate) fn recording_actions_with_driver(
 ) -> Arc<SessionLinkActions> {
     new_session_actions(driver, fixture_session_init_params(), TokioTime::new())
 }
+
+/// R311y767 (carry N71) — refuse a forwarder that puts an ALIAS OF ITS OWN on a
+/// face, by reading the bytes that face actually received.
+///
+/// ## The premise this binds
+///
+/// Every forwarder in this tree resolves an inbound keyexpr against the SOURCE
+/// FACE's alias table alone, with no own-id space on the other side of the `M`
+/// bit. R311y739 gave the four INBOUND planes the pair (pubsub, reply,
+/// switchboard, liveliness all take `impl Into<MappingSpaces>`) and left the
+/// forwarders peer-only. The consequence is a silent one: an `M=0` alias, one
+/// naming an id the FORWARDER declared, resolves against nothing and is dropped
+/// indistinguishably from a peer naming an id it never declared. That is correct
+/// exactly while the forwarder declares no alias of its own — a premise, not an
+/// oversight, and R311y766 turned it into a test for the switchboard kernel.
+/// This is that test's shared form, so the two remaining forwarders do not each
+/// grow their own copy of the classification.
+///
+/// ## Why it reuses `resolve_governed_keyexpr` instead of matching records
+///
+/// A hand-written match over `NetworkMessage` would have to know that
+/// `DeclareSubscriber` / `Queryable` / `Token` carry the keyexpr INLINE while the
+/// three undeclares carry it in an optional `ext_wire_expr` extension — and it
+/// would silently miss an alias hiding in that extension the first time it got
+/// the split wrong. `resolve_governed_keyexpr` is already this tree's SSOT for
+/// exactly that question, documented as a one-place edit when a new governed kind
+/// appears, so a new kind reaches this guard for free.
+///
+/// ## The classification, which is the whole trick
+///
+/// Each emitted record is resolved TWICE — against an EMPTY table and against
+/// the source face's real one:
+///
+/// * `(Some, _)` — a literal. Resolvable with no table at all, so any peer
+///   decodes it. This is the case that must hold, and it is counted.
+/// * `(None, Some(k))` — AN ALIAS THE FORWARDER PASSED THROUGH. Unresolvable
+///   without a table, resolvable with the source's, so the destination is being
+///   handed an id only the SOURCE ever declared. The failure.
+/// * `(None, None)` — the record carries no governed keyexpr (`Oam`, a
+///   `ResponseFinal`, a Final `Interest`, an id-only undeclare). Ignored.
+///
+/// The `(None, Some)` split is why the source's table is a parameter rather than
+/// this asserting on `None`: `None` alone cannot tell an alias from a record that
+/// never had a keyexpr, and treating the second as a failure would red every
+/// linkstate `Oam`.
+///
+/// ## It RETURNS the literals it saw
+///
+/// `literals > 0` is only an anti-vacuity floor, and a floor cannot tell a guard
+/// that inspected all four of a scenario's planes from one that inspected a
+/// single plane and shrugged at the rest. The caller pins the SET, which is this
+/// workspace's standing rule for coverage claims — a count would keep passing
+/// while a plane quietly stopped emitting.
+#[cfg(feature = "routing-peer")]
+pub(crate) fn assert_emits_no_alias_of_its_own(
+    sink: &RecordingLinkDriver,
+    source_aliases: &hashbrown::HashMap<u64, String>,
+    what: &str,
+) -> Vec<String> {
+    use wz_session_core::inbound::{parse_inbound, InboundFrame};
+    use wz_session_core::network_message::parse_frame_payload;
+
+    let empty: hashbrown::HashMap<u64, String> = hashbrown::HashMap::new();
+    let mut literals: Vec<String> = Vec::new();
+    let mut passed_through: Vec<String> = Vec::new();
+    for idx in 0..sink.frame_count() {
+        let bytes = sink.frame_bytes(idx);
+        // The forwarder's OWN bytes, so a parse failure is a defect and not a
+        // shape this guard may skip past.
+        let parsed = parse_inbound(&bytes).expect("the forwarder's own frame parses");
+        let InboundFrame::Frame { payload, .. } = parsed else {
+            continue;
+        };
+        let records = parse_frame_payload(&payload).expect("the forwarder's own batch parses");
+        for record in records {
+            let as_literal = crate::linkstate_forward::resolve_governed_keyexpr(&record, &empty);
+            let via_source =
+                crate::linkstate_forward::resolve_governed_keyexpr(&record, source_aliases);
+            match (as_literal, via_source) {
+                (Some(k), _) => literals.push(k),
+                (None, Some(k)) => passed_through.push(k),
+                (None, None) => {}
+            }
+        }
+    }
+    assert!(
+        passed_through.is_empty(),
+        "{what} emitted {} keyexpr(s) that only the SOURCE face's alias table \
+         can resolve: {passed_through:?}. The destination never declared those \
+         ids. Every resolve site in this forwarder consults the source face's \
+         peer table alone, so a peer answering such an alias with M=0 would be \
+         dropped -- that is carry N39/N71, and this is the day it stopped being \
+         latent. Give the face an own-id space and resolve through \
+         MappingSpaces, as the four inbound planes have since R311y739",
+        passed_through.len()
+    );
+    assert!(
+        !literals.is_empty(),
+        "{what} emitted no keyexpr-carrying record at all, so the assertion \
+         above graded nothing"
+    );
+    literals.sort();
+    literals
+}

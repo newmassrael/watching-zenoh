@@ -2659,21 +2659,24 @@ layer_c1ax_cargo_test_routing_namespace() {
 #      twin of the peer transit lane (C1bb's routing-peer,transport-qos --lib
 #      linkstate). Without this arm the y224 threading would be unguarded in CI.
 layer_c1ay_cargo_test_router_hat() {
-    _runci_guarded_test "C1AY router_forward 136" 136 \
+    # R311y767 (carry N71) — every arm moves by ONE: the_router_emits_no_alias_of
+    # _its_own is NOT cfg-gated (only the token leg INSIDE it is), so unlike the
+    # y464 step below it lands in all six feature resolutions.
+    _runci_guarded_test "C1AY router_forward 137" 137 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 138" 138 \
-        cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY router_forward 139" 139 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
+    _runci_guarded_test "C1AY router_forward 140" 140 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
     # cfg(routing-token-tables), so ONLY this arm of the six moves. The other five
-    # feature sets compile them out, which is why they still read 136/138/139/142/136.
-    _runci_guarded_test "C1AY router_forward 173" 173 \
+    # feature sets compile them out, which is why they still read 137/139/140/143/137.
+    _runci_guarded_test "C1AY router_forward 174" 174 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 142" 142 \
+    _runci_guarded_test "C1AY router_forward 143" 143 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 136" 136 \
+    _runci_guarded_test "C1AY router_forward 137" 137 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
@@ -3860,7 +3863,10 @@ layer_c1y_cargo_test_routing_peer() {
     # in BOTH linkstate pins because the plane is ungated, so it compiles under bare
     # `routing-peer` as well as the access set below. Two pins for one plane is not
     # redundancy: this one proves the tests are not silently access-feature-gated.
-    _runci_guarded_test "C1y linkstate" 202 \
+    # R311y767 (carry N71) — 202 -> 203 / 200 -> 201 / 213 -> 214, one test in each
+    # arm: the_peer_forwarder_emits_no_alias_of_its_own, which is ungated and so
+    # lands in the bare arm too (measured, not assumed: the bare run reports 201).
+    _runci_guarded_test "C1y linkstate" 203 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet || return 1
     # R311y513 — the BARE routing peer, and the pin that would have caught the
     # defect this round fixed. Every arm above passes `--features routing-peer`
@@ -3873,7 +3879,7 @@ layer_c1y_cargo_test_routing_peer() {
     # compile that feature ALONE at least once, or it is measuring the default
     # set and reporting the feature's name. 200 not 202: two access-tier tests
     # need the access set, which bare routing-peer does not pull.
-    _runci_guarded_test "C1y linkstate bare" 200 \
+    _runci_guarded_test "C1y linkstate bare" 201 \
         cargo test -p wz-runtime-tokio --no-default-features --features routing-peer \
         --lib linkstate --quiet || return 1
     # R311y451 — 10 -> 16: the six low-pass fidelity tests (attachment in the
@@ -3923,7 +3929,7 @@ layer_c1y_cargo_test_routing_peer() {
     # ingest or the dump arm reds the client-leaf test, and disabling the mesh
     # ingest reds only the mesh-sourced one. So the pair cannot rot as a unit, and
     # a count that moves names which tier moved.
-    _runci_guarded_test "C1y linkstate+access" 213 \
+    _runci_guarded_test "C1y linkstate+access" 214 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
     _runci_guarded_test "C1y extauth" 10 \
         cargo test -p wz-session-core --features access-extauth-usrpwd --lib extauth --quiet || return 1
