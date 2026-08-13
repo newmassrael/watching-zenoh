@@ -82,6 +82,10 @@
 use crate::driver_loop::{
     reassembled_frame_outcome, DriverLoopOutcome, IterationEvent, ReassemblyDropReason,
 };
+// R311y784 — the departure observer types. UNGATED here, unlike the reassembly
+// imports above: every eviction reports one, so a build without `reassembly`
+// still needs them.
+use crate::driver_loop::{MulticastPeerId, MulticastPeerLost, MulticastPeerLostReason};
 use crate::multicast_peer::{
     MulticastPeerActions, MulticastPeerEvent, MulticastPeerPolicy, MulticastPeerState,
 };
@@ -512,6 +516,23 @@ impl PeerSlot {
             }
             None => false,
         }
+    }
+
+    /// R311y784 — this slot's occupant as a departure record, for the
+    /// §3.2 `emit_peer_lost` effect the SCXML has marked since R311jh.
+    ///
+    /// Must be called BEFORE [`Self::evict`], which clears `zid`. A free slot
+    /// (or one somehow holding no zid) reports an EMPTY peer id rather than
+    /// panicking: both callers reach this only through a liveness check, so an
+    /// empty id here would mean the peer table's own `src.is_some() iff
+    /// zid.is_some()` invariant had broken, and a departure event carrying an
+    /// empty zid is a legible symptom where a panic in a sweep is not.
+    fn departure(&self, reason: MulticastPeerLostReason) -> MulticastPeerLost {
+        let peer = match &self.zid {
+            Some((buf, len)) => MulticastPeerId::from_wire(&buf[..*len as usize]),
+            None => MulticastPeerId::from_wire(&[]),
+        };
+        MulticastPeerLost { peer, reason }
     }
 
     /// Drive `peer.lost` (-> Expired, `emit_peer_lost`) then `peer.recycle`
@@ -1222,8 +1243,27 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// the peer `peer.lost` (`emit_peer_lost`) + recycle and frees the slot.
     /// Returns `true` if a live peer was at `src`.
     pub fn close_by_src(&mut self, src: SocketAddr) -> bool {
+        self.close_by_src_with(src, |_| {})
+    }
+
+    /// R311y784 — [`close_by_src`](MulticastDispatcher::close_by_src) with a
+    /// departure observer, the announced-departure twin of
+    /// [`sweep_with`](MulticastDispatcher::sweep_with)'s inferred one.
+    ///
+    /// `on_lost` fires BEFORE the slot recycles, for the same reason the sweep
+    /// reads its departure first: `evict()` clears the zid, so afterwards
+    /// there is no peer left to name. It does not fire when no live peer is at
+    /// `src` — an unattributable Close (a stale datagram, a peer never
+    /// admitted) must not manufacture a departure event, which is why the
+    /// closure is inside the `Some` arm rather than at the return.
+    pub fn close_by_src_with(
+        &mut self,
+        src: SocketAddr,
+        on_lost: impl FnOnce(MulticastPeerLost),
+    ) -> bool {
         match self.find_by_src(src) {
             Some(idx) => {
+                on_lost(self.peers[idx].departure(MulticastPeerLostReason::Closed));
                 self.peers[idx].evict();
                 true
             }
@@ -1240,16 +1280,28 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// multicast/lease.c:124), capped by the local config bound. Returns
     /// the number of peers expired (§3.1 PeerSweep).
     pub fn sweep(&mut self, now_ms: u64) -> usize {
-        self.sweep_with(now_ms, |_| {})
+        self.sweep_with(now_ms, |_, _| {})
     }
 
     /// [`sweep`](MulticastDispatcher::sweep) with an eviction observer:
-    /// `on_evict` fires once per expired peer with its pool-slot index,
-    /// BEFORE the slot is recycled. The reassembly-running host aborts the
-    /// evicted peer's in-progress chains here (pico's per-entry dbufs die
-    /// with the peer entry; the wz chains are keyed by slot index, so they
-    /// must be aborted before the index can be re-issued to a new peer).
-    pub fn sweep_with(&mut self, now_ms: u64, mut on_evict: impl FnMut(usize)) -> usize {
+    /// `on_evict` fires once per expired peer with its pool-slot index and
+    /// its [`MulticastPeerLost`] departure, BEFORE the slot is recycled. The
+    /// reassembly-running host aborts the evicted peer's in-progress chains
+    /// here (pico's per-entry dbufs die with the peer entry; the wz chains
+    /// are keyed by slot index, so they must be aborted before the index can
+    /// be re-issued to a new peer).
+    ///
+    /// R311y784 added the second argument. The two carry different things on
+    /// purpose: the INDEX is this node's private slot key, valid only until
+    /// the slot recycles and meaningless to an application; the DEPARTURE is
+    /// the peer's wire identity, which is what an observer can act on and
+    /// what both upstreams hand up. A caller that wants only the chain abort
+    /// ignores it (`|idx, _|`).
+    pub fn sweep_with(
+        &mut self,
+        now_ms: u64,
+        mut on_evict: impl FnMut(usize, MulticastPeerLost),
+    ) -> usize {
         let cap = self.config.lease_ms;
         let mut expired = 0;
         for (idx, slot) in self.peers.iter_mut().enumerate() {
@@ -1260,7 +1312,12 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             if now_ms < slot.last_seen_ms.saturating_add(window) {
                 continue;
             }
-            on_evict(idx);
+            // R311y784 — the departure is read BEFORE `evict()`, which is the
+            // only ordering that works: evict clears `zid`, so reading it
+            // after would report an empty peer. Same reason `on_evict` already
+            // fires here rather than below.
+            let lost = slot.departure(MulticastPeerLostReason::LeaseExpired);
+            on_evict(idx, lost);
             slot.evict();
             expired += 1;
         }
@@ -2448,16 +2505,70 @@ mod tests {
     /// slot recycles — the hook the reassembly host aborts evicted peers'
     /// chains on (a recycled index must never continue a dead peer's
     /// chain).
+    ///
+    /// R311y784 added the second argument, and this test now pins BOTH, because
+    /// they answer different questions and only one of them is reportable to an
+    /// application: the index is a private slot key, the departure is the
+    /// peer's wire identity.
     #[test]
     fn sweep_with_reports_evicted_slot_indices() {
         let mut d = running_dispatcher::<4>(5_000);
         d.ingest_join(ZID_A, SRC_A, sn0(), 0); // slot 0, deadline 5_000
         d.ingest_join(ZID_B, SRC_B, sn0(), 4_000); // slot 1, deadline 9_000
         let mut evicted = std::vec::Vec::new();
-        assert_eq!(d.sweep_with(6_000, |idx| evicted.push(idx)), 1);
+        let mut departed = std::vec::Vec::new();
+        assert_eq!(
+            d.sweep_with(6_000, |idx, lost| {
+                evicted.push(idx);
+                departed.push(lost);
+            }),
+            1
+        );
         assert_eq!(evicted, [0], "only the lapsed peer's slot is reported");
         assert_eq!(d.peer_index_by_src(SRC_B), Some(1));
         assert_eq!(d.peer_index_by_src(SRC_A), None, "evicted slot is freed");
+        // The departure names A, not B, and calls it an INFERENCE. Asserted at
+        // this layer and not only at the drive loops because this is where the
+        // read-before-`evict()` ordering lives: reading after would report an
+        // empty zid, and the loops could not tell the difference.
+        assert_eq!(departed.len(), 1);
+        assert_eq!(departed[0].peer.as_slice(), ZID_A);
+        assert_eq!(
+            departed[0].reason,
+            MulticastPeerLostReason::LeaseExpired,
+            "a lapsed lease is silence, not an announcement",
+        );
+    }
+
+    /// R311y784 — the announced-departure twin: an explicit Close reports the
+    /// peer with the OTHER reason, and an unattributable Close reports nothing.
+    ///
+    /// The second half is the one worth having. A stale datagram from an
+    /// address that holds no peer must not manufacture a departure event; a
+    /// naive implementation that fired the observer next to the `bool` return
+    /// would invent one for every Close that missed.
+    #[test]
+    fn close_by_src_with_reports_only_an_attributable_departure() {
+        let mut d = running_dispatcher::<4>(5_000);
+        d.ingest_join(ZID_A, SRC_A, sn0(), 0);
+
+        let mut departed = std::vec::Vec::new();
+        assert!(d.close_by_src_with(SRC_A, |lost| departed.push(lost)));
+        assert_eq!(departed.len(), 1);
+        assert_eq!(departed[0].peer.as_slice(), ZID_A);
+        assert_eq!(
+            departed[0].reason,
+            MulticastPeerLostReason::Closed,
+            "the peer said so; that is not an inference",
+        );
+
+        // Same address, now free: a second Close is unattributable.
+        let mut again = std::vec::Vec::new();
+        assert!(!d.close_by_src_with(SRC_A, |lost| again.push(lost)));
+        assert!(
+            again.is_empty(),
+            "a Close from an address holding no peer must not invent a departure",
+        );
     }
 
     // ── ingest_multicast_fragment — the shared multicast fragment-RX

@@ -605,7 +605,13 @@ where
                             now,
                             &mut on_event,
                         ) {
-                            dispatcher.close_by_src(src);
+                            // R311y784 — the non-reassembly twin of the
+                            // `multicast_rx` Close arm: same announced
+                            // departure, same event, so an application sees
+                            // the identical stream whichever build it runs.
+                            dispatcher.close_by_src_with(src, |lost| {
+                                on_event(IterationEvent::MulticastPeerLost(lost));
+                            });
                         }
                     }
                 }
@@ -683,8 +689,17 @@ where
                 // a non-reassembly loop calls the bare sweep.
                 #[cfg(feature = "reassembly")]
                 sweep_multicast_reassembling(dispatcher, &mut reasm, now, &mut on_event);
+                // R311y784 — was a bare `sweep`, which discarded the departure.
+                // A non-reassembly build has no chains to abort, so the slot
+                // index is genuinely unused here (`|_, lost|`) -- but the peer
+                // that fell silent is exactly as reportable as in the
+                // reassembly build, and reporting it in only one of the two
+                // would make the observer stream depend on a feature that has
+                // nothing to do with membership.
                 #[cfg(not(feature = "reassembly"))]
-                dispatcher.sweep(now);
+                dispatcher.sweep_with(now, |_, lost| {
+                    on_event(IterationEvent::MulticastPeerLost(lost));
+                });
             }
         }
         // §5.21 router-multicast-faces (I3b) — relay the on-group ROUTER member
@@ -1407,6 +1422,200 @@ mod tests {
             MulticastOutcome::Stopped,
             "a closed channel can never signal again, so the only non-spinning \
              reading is a stop",
+        );
+    }
+
+    // ── R311y784 — the §3.2 `emit_peer_lost` effect, finally realised ──
+
+    /// Every departure the loop reported, in order. A `Vec` rather than a
+    /// count because WHO left and WHY are the content of the event; a test
+    /// that only counted them would pass with the wrong peer named.
+    fn departures(
+        events: &std::sync::Arc<
+            std::sync::Mutex<Vec<wz_session_core::driver_loop::MulticastPeerLost>>,
+        >,
+    ) -> Vec<wz_session_core::driver_loop::MulticastPeerLost> {
+        events.lock().expect("no panic in the observer").clone()
+    }
+
+    /// A collecting observer. Shared through `Arc<Mutex<..>>` because the
+    /// drive loop takes the closure by value and the assertions outlive it.
+    fn departure_sink() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<wz_session_core::driver_loop::MulticastPeerLost>>>,
+        impl FnMut(IterationEvent<'_>),
+    ) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        (seen, move |ev: IterationEvent<'_>| {
+            if let IterationEvent::MulticastPeerLost(lost) = ev {
+                sink.lock().expect("no panic in the observer").push(lost);
+            }
+        })
+    }
+
+    /// An inbound Close reports the departing peer BY ZID, as an ANNOUNCED
+    /// departure.
+    ///
+    /// The zid is the point. The Close carries none — it is attributed by
+    /// source address — so reporting the right peer means the dispatcher read
+    /// the identity out of the slot before recycling it. An event that fired
+    /// with an empty or wrong zid would tell an application nothing, and is
+    /// exactly what a naive "fire after evict()" ordering produces.
+    #[tokio::test]
+    async fn an_inbound_close_reports_the_departing_peer_by_zid() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let mut driver = FakeDriver::with([
+            (join0(&params(&peer_b)), src(2)),
+            (std::vec![wire_const::T_MID_CLOSE, 0x00], src(2)),
+        ]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+        let (seen, sink) = departure_sink();
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(8),
+            },
+            &mut driver,
+            &clock,
+            sink,
+            &mut idle_outbound(),
+        )
+        .await;
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        assert_eq!(dispatcher.active_peers(), 0, "the Close must evict");
+
+        let lost = departures(&seen);
+        assert_eq!(lost.len(), 1, "one departure, once; got {lost:?}");
+        assert_eq!(
+            lost[0].peer.as_slice(),
+            &peer_b,
+            "the event must name the peer that left, learned from its JOIN",
+        );
+        assert_eq!(
+            lost[0].reason,
+            wz_session_core::driver_loop::MulticastPeerLostReason::Closed,
+            "a peer that said it was leaving is not an inference from silence",
+        );
+    }
+
+    /// A lease expiry reports the same peer with the OTHER reason. Both arms
+    /// are pinned because collapsing them is the defect an application would
+    /// feel: it could not tell a clean shutdown from a dead link.
+    #[tokio::test]
+    async fn a_lease_expiry_reports_the_departing_peer_as_inferred() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        // Nothing but the JOIN: the peer goes silent immediately, so only the
+        // sweep can end it. A 1 ms config cap bounds the hold window whatever
+        // the JOIN advertised (`min(advertised, cap)`).
+        let mut driver = FakeDriver::with([(join0(&params(&peer_b)), src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(1));
+        let clock = TokioTime::new();
+        let (seen, sink) = departure_sink();
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(12),
+            },
+            &mut driver,
+            &clock,
+            sink,
+            &mut idle_outbound(),
+        )
+        .await;
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        assert_eq!(dispatcher.active_peers(), 0, "the lease must expire");
+
+        let lost = departures(&seen);
+        assert_eq!(lost.len(), 1, "one departure, once; got {lost:?}");
+        assert_eq!(lost[0].peer.as_slice(), &peer_b);
+        assert_eq!(
+            lost[0].reason,
+            wz_session_core::driver_loop::MulticastPeerLostReason::LeaseExpired,
+            "silence is an INFERENCE -- reporting it as Closed would claim the \
+             peer announced something it never sent",
+        );
+    }
+
+    /// ANTI-VACUITY. A peer that stays inside its lease is never reported
+    /// lost, while the same fixture DOES admit it -- so the discriminator is
+    /// the departure and not "the observer never ran".
+    #[tokio::test]
+    async fn a_live_peer_is_never_reported_lost() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let mut driver = FakeDriver::with([(join0(&params(&peer_b)), src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(60_000));
+        let clock = TokioTime::new();
+        let (seen, sink) = departure_sink();
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(12),
+            },
+            &mut driver,
+            &clock,
+            sink,
+            &mut idle_outbound(),
+        )
+        .await;
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        assert_eq!(
+            dispatcher.active_peers(),
+            1,
+            "the peer must still be there, or the empty departure list below \
+             proves nothing",
+        );
+        assert!(departures(&seen).is_empty(), "a live peer has not left");
+    }
+
+    /// With TWO peers on the group, a Close from one names THAT one. Without
+    /// this, every assertion above is satisfied by a dispatcher that reports
+    /// whichever peer it happens to find first.
+    #[tokio::test]
+    async fn only_the_peer_that_left_is_named() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let peer_c = [0x0A, 0x0B, 0x0C, 0x0D];
+        let mut driver = FakeDriver::with([
+            (join0(&params(&peer_b)), src(2)),
+            (join0(&params(&peer_c)), src(3)),
+            // Only C leaves.
+            (std::vec![wire_const::T_MID_CLOSE, 0x00], src(3)),
+        ]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(60_000));
+        let clock = TokioTime::new();
+        let (seen, sink) = departure_sink();
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(10),
+            },
+            &mut driver,
+            &clock,
+            sink,
+            &mut idle_outbound(),
+        )
+        .await;
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        assert_eq!(dispatcher.active_peers(), 1, "B must survive C's Close");
+
+        let lost = departures(&seen);
+        assert_eq!(lost.len(), 1, "only one peer left; got {lost:?}");
+        assert_eq!(
+            lost[0].peer.as_slice(),
+            &peer_c,
+            "the departure must name C, not whichever slot came first",
         );
     }
 

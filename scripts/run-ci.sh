@@ -2670,7 +2670,11 @@ layer_c1ax_cargo_test_routing_namespace() {
     # is `grep -n '<the --lib or --test filter>' scripts/run-ci.sh`. Prose that
     # says "remember to check" has now failed twice; a command that prints the
     # call sites has not been tried.
-    _runci_guarded_test "C1AX multicast_glue 22" 22 \
+    #
+    # R311y784: 22 -> 26. Four `emit_peer_lost` observer cases. This time the
+    # grep above was run BEFORE the edit and all four sites moved together, so
+    # the prescription's first outing worked.
+    _runci_guarded_test "C1AX multicast_glue 26" 26 \
         cargo test -p wz-runtime-tokio --features transport-multicast,routing-namespace --lib multicast_glue --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --all-targets --quiet -- -D warnings \
@@ -5085,12 +5089,18 @@ layer_c1p_multicast() {
 # all three move by the same +4. The emit itself rides `transport-multicast`,
 # which already forwards `codec-close` (wz-runtime-tokio/Cargo.toml), so there
 # is no composition step for it to hide behind.
+#
+# R311y784: 19/23/25 -> 23/27/29, and the SIBLING in Layer C1ax moved to 26 in
+# the same commit. Four `emit_peer_lost` observer cases, again ungated, so all
+# FOUR guards reading this filter move by the same +4 -- which is both the
+# not-accidentally-gated check and, this round, the check that the same-filter
+# miss of R311y782 was not repeated a third time.
 layer_c1q_multicast_glue() {
-    _runci_guarded_test C1q 19 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 23 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 23 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 27 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 25 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 29 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
         || return 1
 }
 

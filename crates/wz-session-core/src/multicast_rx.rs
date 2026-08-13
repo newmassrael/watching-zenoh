@@ -380,7 +380,13 @@ pub fn dispatch_multicast_inbound_reassembling<
                 if let Some(idx) = dispatcher.peer_index_by_src(src) {
                     abort_peer_chains(reasm, idx);
                 }
-                dispatcher.close_by_src(src);
+                // R311y784 — an ANNOUNCED departure. Distinguished from the
+                // sweep's inferred one at the observer, because a peer saying
+                // "I am leaving" and a peer that stopped answering are
+                // different facts about the network.
+                dispatcher.close_by_src_with(src, |lost| {
+                    on_event(IterationEvent::MulticastPeerLost(lost));
+                });
             }
         }
         // Every arm above is terminal for this unit: a Frame or a Fragment ate
@@ -415,7 +421,15 @@ pub fn sweep_multicast_reassembling<
     F: FnMut(IterationEvent<'_>),
 {
     crate::reassembly_dispatch::sweep_reporting(reasm, now_ms, on_event);
-    dispatcher.sweep_with(now_ms, |idx| abort_peer_chains(reasm, idx));
+    // R311y784 — the two arguments serve two different consumers and both are
+    // used here: the slot INDEX aborts this node's own chains (private
+    // bookkeeping), the DEPARTURE tells the application which peer went quiet.
+    // Before this round only the first existed, so a lease expiry reclaimed
+    // buffers silently and the app kept a dead peer forever.
+    dispatcher.sweep_with(now_ms, |idx, lost| {
+        abort_peer_chains(reasm, idx);
+        on_event(IterationEvent::MulticastPeerLost(lost));
+    });
 }
 
 #[cfg(all(test, feature = "session-multicast", feature = "codec-join"))]

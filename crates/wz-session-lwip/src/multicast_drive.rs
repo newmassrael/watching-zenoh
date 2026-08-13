@@ -473,7 +473,13 @@ where
             if let MulticastRxNext::Close =
                 dispatch_multicast_inbound(dispatcher, params, bytes, src, now, &mut on_event)
             {
-                dispatcher.close_by_src(src);
+                // R311y784 — the MCU twin of the AP loop's announced departure.
+                // Both loops fire the identical event so an application's
+                // membership view does not depend on which profile it runs on;
+                // that is the same argument the shared RX/TX SSOTs already make.
+                dispatcher.close_by_src_with(src, |lost| {
+                    on_event(IterationEvent::MulticastPeerLost(lost));
+                });
             }
             continue;
         }
@@ -487,7 +493,9 @@ where
             #[cfg(feature = "reassembly")]
             sweep_multicast_reassembling(dispatcher, &mut reasm, now, &mut on_event);
             #[cfg(not(feature = "reassembly"))]
-            dispatcher.sweep(now);
+            dispatcher.sweep_with(now, |_, lost| {
+                on_event(IterationEvent::MulticastPeerLost(lost));
+            });
             next_sweep_ms = now.saturating_add(tick_ms);
         }
     }
