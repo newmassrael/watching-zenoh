@@ -92,6 +92,19 @@
 //! delegate with no signal and behave exactly as before. Dropping every sender
 //! also stops the loop; see the `select!` arm for why that is the only
 //! non-spinning reading of a closed channel.
+//!
+//! R311y782 gave that door a WIRE half. Stopping used to be silent — wz
+//! decoded a peer's Close but never emitted one, so a departing wz member left
+//! a stale entry in every peer's table until its lease expired. The stop arm
+//! now multicasts
+//! [`encode_multicast_close`](wz_session_core::handshake_encode::encode_multicast_close)
+//! before driving the transition, which is where the reason byte and the
+//! S-flag choice (and the zenoh/pico disagreement behind them) are recorded.
+//! The link-loss door deliberately stays silent: there is no link left to
+//! announce on. The MCU loop
+//! (`wz_session_lwip::multicast_drive::run_multicast_session`) has no stop
+//! signal at all yet, so it has no departure point to announce from — that
+//! half is still open.
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -628,6 +641,28 @@ where
                     None => core::future::pending::<()>().await,
                 }
             } => {
+                // R311y782 — ANNOUNCE the departure before taking it. Until this
+                // round wz only ever DECODED a multicast Close (`multicast_rx`
+                // classifies the MID and the loop calls `close_by_src`); it never
+                // emitted one, so a wz member that stopped went silent and every
+                // group peer held it until its lease expired — a stale route for
+                // up to `lease_ms` where both upstreams free it at once.
+                //
+                // Sent BEFORE `stop()`, matching both upstreams' order: zenoh
+                // pushes the Close onto the link pipeline and only then runs
+                // `delete()` (`multicast/transport.rs:204-229`), pico sends then
+                // clears (`multicast/transport.c:164-171`). After `stop()` the
+                // §3.1 session is Stopped and the link is released, so a send
+                // there would be an emission from a torn-down transport.
+                //
+                // Best-effort like the JOIN beacon: UDP multicast has no
+                // acknowledgement, and a failed send has no recovery that a node
+                // already leaving could take — the peers fall back to the lease
+                // sweep, which is exactly the pre-round behaviour. So the result
+                // is dropped rather than turned into a different outcome.
+                let dgram = wz_session_core::handshake_encode::encode_multicast_close();
+                let frame = TxFrame { bytes: &dgram };
+                let _ = driver.send(&frame, Reliability::BestEffort).await;
                 // Drive the transition rather than just returning: the peer table
                 // must be cleared on the way out, exactly as the link-loss arm
                 // above does through `notify_link_lost`. Returning the outcome
@@ -1373,6 +1408,235 @@ mod tests {
             "a closed channel can never signal again, so the only non-spinning \
              reading is a stop",
         );
+    }
+
+    // ── R311y782 — the wire half of the graceful stop: announce the departure ──
+
+    /// Every datagram this loop multicast that is a `T_MID_CLOSE`. The MID is
+    /// the discriminator on purpose: the loop also beacons JOINs, so "the
+    /// driver sent something" is true on EVERY run and would make the test
+    /// below pass without an emit.
+    fn closes_sent(driver: &FakeDriver) -> Vec<&Vec<u8>> {
+        driver
+            .sent
+            .iter()
+            .filter(|dg| dg.first().map(|h| h & 0x1f) == Some(wire_const::T_MID_CLOSE))
+            .collect()
+    }
+
+    /// A graceful stop puts a Close on the GROUP, byte-exact.
+    ///
+    /// Asserted as whole bytes rather than "a Close went out" because the two
+    /// fields are the whole content of the decision: the reason byte
+    /// (GENERIC = 0) and the S flag, which zenoh CLEARS for a multicast close
+    /// and pico SETS — see `encode_multicast_close` for why wz follows zenoh.
+    /// A test that only counted Closes would let either upstream's shape pass
+    /// and would not notice the day someone flipped it to the other one.
+    #[tokio::test]
+    async fn a_graceful_stop_multicasts_a_close_to_the_group() {
+        let mut driver = FakeDriver {
+            inbound: VecDeque::new(),
+            sent: Vec::new(),
+            lost: false,
+        };
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        tx.send(true).expect("receiver alive");
+        let outcome = drive_multicast_session_with_shutdown(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(5),
+            },
+            &mut driver,
+            &clock,
+            |_| {},
+            &mut idle_outbound(),
+            &mut rx,
+        )
+        .await;
+        assert_eq!(outcome, MulticastOutcome::Stopped);
+
+        let closes = closes_sent(&driver);
+        assert_eq!(
+            closes.len(),
+            1,
+            "a departing member announces itself exactly once; sent = {:?}",
+            driver.sent,
+        );
+        assert_eq!(
+            closes[0].as_slice(),
+            // Header: T_MID_CLOSE with NO flags -- S clear (link-only, zenoh's
+            // multicast choice) and Z clear (no ext chain). Body: reason
+            // GENERIC.
+            &[wire_const::T_MID_CLOSE, 0x00],
+            "the departure Close must be reason GENERIC with the S flag CLEAR",
+        );
+        assert_eq!(
+            closes[0][0] & wire_const::FLAG_T_CLOSE_S,
+            0,
+            "S set would be pico's shape, which is dead code upstream",
+        );
+    }
+
+    /// ANTI-VACUITY. The identical fixture WITHOUT a signal sends no Close at
+    /// all -- while still sending JOIN beacons, so the discriminator is proven
+    /// to be the Close and not "the driver was used".
+    #[tokio::test]
+    async fn the_same_fixture_without_a_signal_announces_nothing() {
+        let mut driver = FakeDriver {
+            inbound: VecDeque::new(),
+            sent: Vec::new(),
+            lost: false,
+        };
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        let (_tx, mut rx) = tokio::sync::watch::channel(false);
+        let outcome = drive_multicast_session_with_shutdown(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(5),
+            },
+            &mut driver,
+            &clock,
+            |_| {},
+            &mut idle_outbound(),
+            &mut rx,
+        )
+        .await;
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+
+        assert!(
+            !driver.sent.is_empty(),
+            "the fixture must have EXERCISED the send path (JOIN beacons), or \
+             the empty Close set below proves nothing",
+        );
+        assert_eq!(
+            closes_sent(&driver).len(),
+            0,
+            "only a stop announces a departure; sent = {:?}",
+            driver.sent,
+        );
+    }
+
+    /// A LOST LINK stays silent, and that is a decision rather than an
+    /// oversight: there is no link left to announce on, and both upstreams
+    /// agree (zenoh emits the Close from `close()`, never from the link's own
+    /// teardown; pico's send-close path is unreachable entirely). Pinned so a
+    /// later round that moves the emit "somewhere all the exits share" has to
+    /// confront this case rather than silently start writing to a dead socket.
+    #[tokio::test]
+    async fn a_lost_link_announces_nothing() {
+        let mut driver = FakeDriver {
+            inbound: VecDeque::new(),
+            sent: Vec::new(),
+            lost: true,
+        };
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        let (_tx, mut rx) = tokio::sync::watch::channel(false);
+        let outcome = drive_multicast_session_with_shutdown(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(5),
+            },
+            &mut driver,
+            &clock,
+            |_| {},
+            &mut idle_outbound(),
+            &mut rx,
+        )
+        .await;
+        assert!(
+            matches!(outcome, MulticastOutcome::LinkLost(_)),
+            "fixture must exit through the link-loss door, not the stop door",
+        );
+        assert_eq!(
+            closes_sent(&driver).len(),
+            0,
+            "a dead link is not a departure announcement channel",
+        );
+    }
+
+    /// The emitted Close is one wz's OWN receiver accepts as a departure --
+    /// the round-trip the two byte assertions above cannot make on their own.
+    /// Without this, `encode_multicast_close` could emit a shape no wz peer
+    /// classifies as a Close and every test here would still pass.
+    #[test]
+    fn the_emitted_close_is_classified_as_a_close_by_wz_s_own_receiver() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        // The RX SSOT admits only into a RUNNING session; the drive loop does
+        // this pair at its top. Driven here explicitly because this test calls
+        // the dispatch SSOT directly rather than through the loop.
+        dispatcher.create();
+        dispatcher.notify_link_ready();
+        assert_eq!(
+            dispatcher.session_state(),
+            SessionFsmMulticastState::Running,
+        );
+
+        // Admit peer B by its JOIN, so there is a peer for the Close to end.
+        let next = dispatch_multicast_inbound_under_test(
+            &mut dispatcher,
+            &self_params,
+            &join0(&params(&peer_b)),
+            src(2),
+            0,
+        );
+        assert_eq!(
+            next,
+            wz_session_core::multicast_rx::MulticastRxNext::Done,
+            "the JOIN must admit",
+        );
+        assert_eq!(dispatcher.active_peers(), 1);
+
+        // Now feed it the very bytes the stop arm multicasts.
+        let dgram = wz_session_core::handshake_encode::encode_multicast_close();
+        let next =
+            dispatch_multicast_inbound_under_test(&mut dispatcher, &self_params, &dgram, src(2), 0);
+        assert_eq!(
+            next,
+            wz_session_core::multicast_rx::MulticastRxNext::Close,
+            "wz's own receiver must classify the departure datagram as a Close",
+        );
+        dispatcher.close_by_src(src(2));
+        assert_eq!(
+            dispatcher.active_peers(),
+            0,
+            "and acting on that classification must free the departing peer",
+        );
+    }
+
+    /// The bare classify, whichever RX SSOT this build compiles. The
+    /// reassembly-aware wrapper takes a caller-owned Router this test has no
+    /// use for (no fragments are involved), so the non-reassembly entry point
+    /// is called directly in both builds.
+    fn dispatch_multicast_inbound_under_test<const MAX_PEERS: usize>(
+        dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+        params: &MulticastParams,
+        bytes: &[u8],
+        src: SocketAddr,
+        now_ms: u64,
+    ) -> wz_session_core::multicast_rx::MulticastRxNext {
+        wz_session_core::multicast_rx::dispatch_multicast_inbound(
+            dispatcher,
+            params,
+            bytes,
+            src,
+            now_ms,
+            &mut |_| {},
+        )
     }
 
     // ── A1b — data plane: Frame payload -> observer registries ──

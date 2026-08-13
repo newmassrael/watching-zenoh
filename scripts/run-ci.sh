@@ -926,7 +926,11 @@ layer_0_preflight_lints() {
         # DISCOVERY FLOOR, same contract as fmt_dirs_min above: without it a
         # pathspec that stops matching degrades to "linted fewer files" and
         # still prints OK. Bump it in the same commit that adds a script.
-        local -r sc_files_min=18   # 15 scripts/**.sh + 3 .githooks @ R311y419
+        # R311y782 — raised 18 -> 33, the MEASURED count. It had stood at the
+        # R311y419 count while the tree grew to 33 files, so a pathspec that
+        # stopped matching could have dropped fifteen scripts and still cleared
+        # the floor. A floor is only a floor against the number it is set to.
+        local -r sc_files_min=33   # 30 *.sh (25 scripts/ + 5 scripts/lib/) + 3 .githooks
         if (( ${#sc_files[@]} < sc_files_min )); then
             echo "  Layer0 FAIL: shellcheck discovery found ${#sc_files[@]} file(s), expected >= ${sc_files_min}" >&2
             return 1
@@ -4995,12 +4999,18 @@ layer_c1p_multicast() {
 # three tests that are NOT gated on either composition feature, so all three
 # runs move by the same +3 -- and that is the check on this edit: a change that
 # moved only the bare count would mean the new cases are accidentally gated.
+#
+# R311y782: 15/19/21 -> 19/23/25. The WIRE half of that stop (the departure
+# Close the loop now multicasts) landed with four more ungated tests, so again
+# all three move by the same +4. The emit itself rides `transport-multicast`,
+# which already forwards `codec-close` (wz-runtime-tokio/Cargo.toml), so there
+# is no composition step for it to hide behind.
 layer_c1q_multicast_glue() {
-    _runci_guarded_test C1q 15 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 19 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 19 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 23 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 21 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 25 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
         || return 1
 }
 

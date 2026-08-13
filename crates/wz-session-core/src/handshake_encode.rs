@@ -228,6 +228,53 @@ pub fn encode_close(reason: u8, session: bool) -> Vec<u8> {
     wire
 }
 
+/// R311y782 — the wire bytes a multicast group member puts on the group when
+/// it LEAVES voluntarily. Reason GENERIC, S flag CLEAR (link-only).
+///
+/// Named here rather than left as two literals at each drive loop's stop arm
+/// because both arguments are protocol decisions whose upstreams DISAGREE, and
+/// a caller choosing them inline is a caller choosing them differently:
+///
+/// - zenoh sends `Close { reason: GENERIC, session: false }` — S=0 — from
+///   `TransportMulticastInner::close`
+///   (`io/zenoh-transport/src/multicast/transport.rs:204-229`; the reason comes
+///   from its only two callers, `multicast/mod.rs:108` and
+///   `multicast/manager.rs:185`, both `close::reason::GENERIC`).
+/// - zenoh-pico's multicast close-send passes `link_only = false`, which SETS
+///   the S flag (`_z_multicast_send_close`,
+///   `src/transport/multicast/transport.c:164-175` ->
+///   `_z_t_msg_make_close`, `src/protocol/definitions/transport.c:228-238`) —
+///   the OPPOSITE bit.
+///
+/// wz follows zenoh, and the tie-break is REACHABILITY rather than taste:
+/// pico's multicast close-send is dead code in the vendored tree. Its only
+/// callers are `_z_send_close` and `_z_transport_close`
+/// (`src/transport/transport.c:60-79`), and nothing in the library calls
+/// either — so zenoh is the only upstream that actually puts a multicast Close
+/// on the wire, and matching observed traffic beats matching an unreachable
+/// declaration.
+///
+/// The bit is unobservable to both upstreams' receivers in any case, which is
+/// why the divergence is survivable at all: zenoh's multicast RX destructures
+/// `Close { reason, .. }` and discards `session`
+/// (`io/zenoh-transport/src/multicast/rx.rs:310-313`), and pico's drops the
+/// peer on the MID alone (`src/transport/multicast/rx.c:513-536`). wz's own
+/// receiver reads neither field — [`crate::multicast_rx`] classifies on the
+/// MID and hands `close_by_src` back to the loop. Recorded rather than
+/// resolved by guesswork, so a later round that finds a receiver which DOES
+/// read the flag knows exactly which choice to revisit.
+///
+/// Contrast [`encode_close`]'s `session = true` unicast callers: there the
+/// whole logical session is torn down, and the S bit is the only thing
+/// separating that from dropping one link of an aggregated session.
+#[cfg(feature = "codec-close")]
+pub fn encode_multicast_close() -> Vec<u8> {
+    encode_close(
+        crate::close_reason::CloseReason::Generic as u8,
+        /*session=*/ false,
+    )
+}
+
 /// R311kx — wire bytes for a KeepAlive transport message: the bare
 /// 1-byte header (MID 0x04, no flags) over a zero-byte body — zenoh-pico
 /// `_z_keep_alive_encode` writes nothing and the header alone marks the

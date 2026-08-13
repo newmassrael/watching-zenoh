@@ -354,6 +354,33 @@ to = "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-fe
 reason = "R311y579a scope correction — Round 311y579 impact_refs typo. Intended atomic section: feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace (the §5.23 config-introspection atom is named for the adminspace family; there is no `-config` section). Round 311y579a re-cites the intended section."
 since = "Round 311y579a"
 
+# R311y782 impact_refs typo — the SIXTH, and the one that finally built the
+# gate y579a named. Same shape as all five before it: `§5.4-session` and
+# `§5.1-transport` were composed from the atom's subject (the §-number a
+# human says out loud) instead of copied out of `list_sections`, which is
+# the full path form. y579a's open item was "nothing checks an impact_ref
+# against the section space AT APPEND TIME" — and that is exactly the window
+# this fell through. validate-workspace DID catch it, but only after
+# `append-changelog-entry` had frozen the entry, so the correction can no
+# longer be an edit; it has to be a ledger row plus a re-citing round.
+# `scripts/append-round.sh` now closes that window by resolving every
+# --impact id BEFORE the append, and CLAUDE.md names it as the append path.
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 1811"
+to = "5.4-session"
+reason = "R311y782 scope correction — Round 1811 impact_refs typo. Intended atomic section: feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session (the §-number short form is how the section is SPOKEN; the store's id is the full path). Round 1812 re-cites the intended section and lands the append-time gate."
+since = "Round 1812"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 1811"
+to = "5.1-transport"
+reason = "R311y782 scope correction — Round 1811 impact_refs typo, the twin of the row above. Intended atomic section: feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport. Round 1812 re-cites the intended section and lands the append-time gate."
+since = "Round 1812"
+
 # ── R408 markdown-doc model retirement (2026-06-04) ──
 # R400 retired the ParsedDoc validator; store-prose §N citations that
 # previously resolved against parsed markdown headings now surface as

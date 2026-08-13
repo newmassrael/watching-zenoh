@@ -90,10 +90,23 @@ surface and may drift from the store. To read the SSOT, use
   (R408 retired `GENERATED.md` and `generate-docs`; there is no longer a
   render cascade to keep in sync — the store IS the artifact.)
 - **Changelog entries** (atomic-store audit ledger + the
-  `rfc-open-questions-log.md::Change log`) → append via the CLI:
-  `mnemosyne-cli append-changelog-entry --entry-id "Round N"
-  --decision <text> --changes-file <path> --verification-file <path>
-  --impact §A,§B --carry-file <path>`. (Historical note: an earlier MCP
+  `rfc-open-questions-log.md::Change log`) → append via
+  **`bash scripts/append-round.sh`**, which takes the CLI's own arguments
+  unchanged:
+  `scripts/append-round.sh --entry-id "Round N"
+  --decision-file <path> --changes-file <path> --verification-file <path>
+  --impact <id>[,<id>...] --carry-file <path>`.
+  **`--impact` takes STORE SECTION IDS, not the §-number you would say out
+  loud** — `feature-inventory--…/5-atomic-feature-catalog/5-4-session`, not
+  `§5.4-session`. Copy them out of `mnemosyne-cli query --list-sections`.
+  The wrapper exists solely to resolve those ids BEFORE the append: this
+  class has leaked six times (Round 193, y327, y503 ×2, y579, y782), and the
+  window is one call wide — `validate_workspace` catches a bad ref, but only
+  after the entry has FROZEN, at which point the fix is no longer a retype
+  but an `[[orphan_ledger]]` row plus a whole re-citing round. Calling
+  `mnemosyne-cli append-changelog-entry` directly still works and is what the
+  wrapper `exec`s; it just gives up the only cheap moment there is.
+  (Historical note: an earlier MCP
   build exposed an `append_changelog_entry_v2` tool that shelled to an
   `append-changelog-entry-v2` subcommand the CLI never shipped, failing
   `unknown command`. That tool name is RETIRED as of R423 (`c2dbdf14`):
