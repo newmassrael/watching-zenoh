@@ -532,7 +532,8 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// replay with its `Declare(DeclFinal)` and `history_complete` flips true.
     ///
     /// ONLY the named slot fires; this is deliberately not
-    /// [`fan_to_matching_slots`](Self::fan_to_matching_slots). The replay is
+    /// `fan_to_matching_slots` (a code span, not a link: that helper is
+    /// private and a doc link to it is a broken one). The replay is
     /// owed to the subscriber that just declared — every other matching slot
     /// was already told about these tokens when they arrived live, and firing
     /// them again would report the same token appearing twice to an
@@ -541,7 +542,8 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// The replay cannot double-fire against the peer's own CURRENT reply
     /// either: an inbound `DeclToken` for an id already in `peer_token_table`
     /// is dropped by the R311y769 first-declaration-wins guard in
-    /// [`dispatch_declare`](Self::dispatch_declare).
+    /// `dispatch_declare` (a code span, not a link: that method is gated on
+    /// `all(codec-declare, alloc)` and the link breaks in builds without it).
     ///
     /// Replay order is by token id. That is a TEST-determinism choice and not
     /// a wire property — the same call the sibling
