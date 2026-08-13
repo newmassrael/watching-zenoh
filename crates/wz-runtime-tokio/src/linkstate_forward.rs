@@ -10322,6 +10322,12 @@ mod tests {
         let mut expected = String::from(
             r#"{"acl_default":"allow","acl_deny":["demo/**"],"acl_rules":[{"flow":"ingress","key_exprs":["demo/**"],"messages":["put"],"permission":"deny","subject":"any"}],"batch_size":65535"#,
         );
+        // R311y786 — UNCONDITIONAL, so it is pushed with no cfg: the re-dial
+        // schedule is base config on both sides of the port (zenoh's
+        // `connect.retry` sits outside any feature), and it sorts between
+        // `batch_size` and `downsampling`.
+        expected
+            .push_str(r#","connect_retry":{"period_increase_factor":2.0,"period_init_ms":1000,"period_max_ms":4000}"#);
         #[cfg(all(feature = "routing-peer", feature = "access-downsampling"))]
         expected.push_str(r#","downsampling":[]"#);
         expected.push_str(r#","lease_ms":10000"#);

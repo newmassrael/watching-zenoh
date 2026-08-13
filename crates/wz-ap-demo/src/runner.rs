@@ -3337,6 +3337,12 @@ async fn run_peer_until(
                     cfg.qos.then(|| cfg.qos_link.unwrap_or_default())
                 },
             },
+            // R311y786 — the re-dial schedule, off the SAME shared WzConfig the
+            // admin GET renders, so the peer mesh mode reports the cadence it
+            // runs. A peer node parses no `--connect-retry` (the flag belongs to
+            // `--router-hat`, the run-mode that owns a connect list), so this is
+            // the `WzConfig` default: zenoh's 1s/4s/x2.
+            retry: wz_config.borrow().connect_retry,
         },
         params,
         TokioTime::new(),
@@ -3853,6 +3859,13 @@ pub(crate) struct RouterHatOpts {
     /// shipping wz ROUTER applied it; the permit now rides the same live
     /// `WzConfig::admin_permissions` slice the peer host reads, re-resolved per GET.
     pub no_admin_read: bool,
+    /// R311y786 — `--connect-retry <init_ms>,<max_ms>,<factor>`: the schedule this
+    /// router paces its outbound re-dials by (zenoh's `connect.retry`). Defaults to
+    /// [`RetryPolicy::ZENOH_DEFAULT`], so the SHIPPED router runs the growth without
+    /// any flag — the flag exists to make the non-default schedules reachable (and
+    /// to let an e2e drive the growth on a sub-second cadence), not to opt into a
+    /// behaviour nothing would otherwise exercise.
+    pub connect_retry: wz::runtime_tokio::retry_period::RetryPolicy,
 }
 
 #[cfg(feature = "router-hat-router")]
@@ -4250,12 +4263,14 @@ async fn run_router_hat_until(
         // `--no-admin-read`. A router that answered its adminspace unconditionally was
         // the last shipping wz node the gate could not reach.
         let admin_cfg = std::rc::Rc::new(std::cell::RefCell::new(
-            wz::runtime_tokio::config::WzConfig::from_init_params(&params).with_admin_permissions(
-                wz::runtime_tokio::adminspace::AdminSpacePermissions {
+            wz::runtime_tokio::config::WzConfig::from_init_params(&params)
+                .with_admin_permissions(wz::runtime_tokio::adminspace::AdminSpacePermissions {
                     read: !no_admin_read,
                     ..Default::default()
-                },
-            ),
+                })
+                // R311y786 — the SAME policy the face loop is handed, so the config
+                // GET reports the cadence actually in force rather than the default.
+                .with_connect_retry(opts.connect_retry),
         ));
         log::info!(
             "wz-ap-demo router-hat: adminspace read permit = {}",
@@ -4343,6 +4358,11 @@ async fn run_router_hat_until(
             // them, so the empty default is the honest value rather than a
             // silently-dropped one.
             qos_link: wz::runtime_tokio::accept_loop::FaceQosLink::default(),
+            // R311y786 — the re-dial schedule, from `--connect-retry` (default =
+            // zenoh's own 1s/4s/x2). This is the router's ONE source for it: the
+            // same value seeds the admin config below, so the cadence the loop runs
+            // and the cadence the config GET reports cannot disagree.
+            retry: opts.connect_retry,
         },
         params,
         TokioTime::new(),

@@ -46,6 +46,7 @@ use wz_runtime_tokio::accept_loop::{
 };
 use wz_runtime_tokio::config::LinkReliabilityPref;
 use wz_runtime_tokio::multilink::{join_link, JoinOutcome};
+use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session_glue::{drive_session_until_terminal, SessionLinkActions};
 use wz_runtime_tokio::session_open::{
@@ -251,6 +252,10 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
             mcast_group_subs: None,
             reconcile: None,
             qos_link: FaceQosLink::default(),
+            // R311y786 — pin the PRE-y786 cadence (fixed 1 s, no growth) so this
+            // suite keeps measuring the aggregation path it was written for rather
+            // than the new schedule; the growth has its own witnesses.
+            retry: RetryPolicy::constant(1000),
             max_links: 2,
             qos: false,
         },
@@ -463,6 +468,10 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
             mcast_group_subs: None,
             reconcile: None,
             qos_link: FaceQosLink::default(),
+            // R311y786 — pin the PRE-y786 cadence (fixed 1 s, no growth) so this
+            // suite keeps measuring the aggregation path it was written for rather
+            // than the new schedule; the growth has its own witnesses.
+            retry: RetryPolicy::constant(1000),
             max_links: 2,
             qos: false,
         },
@@ -492,6 +501,10 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
             mcast_group_subs: None,
             reconcile: None,
             qos_link: FaceQosLink::default(),
+            // R311y786 — pin the PRE-y786 cadence (fixed 1 s, no growth) so this
+            // suite keeps measuring the aggregation path it was written for rather
+            // than the new schedule; the growth has its own witnesses.
+            retry: RetryPolicy::constant(1000),
             max_links: 2,
             qos: false,
         },
@@ -590,6 +603,10 @@ async fn deploy_active_qos_priority_segregates_across_links() {
             mcast_group_subs: None,
             reconcile: None,
             qos_link: FaceQosLink::default(),
+            // R311y786 — pin the PRE-y786 cadence (fixed 1 s, no growth) so this
+            // suite keeps measuring the aggregation path it was written for rather
+            // than the new schedule; the growth has its own witnesses.
+            retry: RetryPolicy::constant(1000),
             max_links: 2,
             qos: true,
         },

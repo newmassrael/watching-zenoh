@@ -18,6 +18,8 @@
 //     state from `main` into `run_demo` without inflating the
 //     latter's argument list past clippy::too_many_arguments.
 
+#[cfg(feature = "router-hat-router")]
+use wz::runtime_tokio::retry_period::RetryPolicy;
 use wz::runtime_tokio::session_glue::{SessionInitParams, SigningKey, WhatAmI};
 
 /// R121f — session role select. `--listen` lands here as
@@ -241,6 +243,73 @@ pub(crate) fn parse_pair(args: &[String], flag: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// R311y786 — parse `--connect-retry <init_ms>,<max_ms>,<factor>` into the
+/// outbound re-dial schedule (zenoh's `connect.retry`:
+/// `period_init_ms` / `period_max_ms` / `period_increase_factor`). Absent =>
+/// `Ok(None)` and the caller keeps [`RetryPolicy::ZENOH_DEFAULT`], which is what
+/// stock zenoh resolves for a config that omits the section.
+///
+/// Returns `Result` rather than calling `std::process::exit` the way
+/// [`parse_qos_link`] does, for one reason: a parser that exits cannot be tested,
+/// and the accept/reject SET is the whole content of this function. The caller
+/// turns `Err` into the same exit code — a malformed value is REFUSED, never
+/// degraded to the default. A silently-defaulted schedule is the failure mode
+/// that looks healthy: the node runs, dials, reconnects, and paces itself by a
+/// cadence the operator did not ask for and no log line contradicts.
+///
+/// A factor BELOW 1.0 is rejected, though the schedule itself would merely
+/// collapse to zero (see [`RetryPeriod::next_ms`](wz::runtime_tokio::retry_period::RetryPeriod::next_ms)):
+/// a shrinking retry period is not a configuration anyone means, and at this
+/// layer — the one taking human input — the honest answer is a refusal rather
+/// than a busy-loop the operator has to diagnose from behaviour.
+/// Gated `router-hat-router` — like [`parse_qos_link`]'s `session-extqos` gate —
+/// because its only caller is the `--router-hat` arm, the run-mode that owns a
+/// connect list. Consequence for CI: a lane that does not name that feature
+/// selects ZERO of the tests below and still exits 0, so the C1ay step names it.
+#[cfg(feature = "router-hat-router")]
+pub(crate) fn parse_connect_retry(args: &[String]) -> Result<Option<RetryPolicy>, String> {
+    let Some(spec) = parse_pair(args, "--connect-retry") else {
+        return Ok(None);
+    };
+    let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
+    let [init, max, factor] = parts.as_slice() else {
+        return Err(format!(
+            "--connect-retry: `{spec}` is not a schedule; expected \
+             <init_ms>,<max_ms>,<factor> (e.g. 1000,4000,2)"
+        ));
+    };
+    let period_init_ms: u64 = init
+        .parse()
+        .map_err(|e| format!("--connect-retry: init `{init}` is not a millisecond count ({e})"))?;
+    let period_max_ms: u64 = max
+        .parse()
+        .map_err(|e| format!("--connect-retry: max `{max}` is not a millisecond count ({e})"))?;
+    let period_increase_factor: f64 = factor
+        .parse()
+        .map_err(|e| format!("--connect-retry: factor `{factor}` is not a number ({e})"))?;
+    if !period_increase_factor.is_finite() || period_increase_factor < 1.0 {
+        return Err(format!(
+            "--connect-retry: factor `{factor}` must be finite and >= 1.0 (1 = a \
+             constant delay, 2 = zenoh's default doubling)"
+        ));
+    }
+    // The ceiling is BELOW the opening wait: the very first retry would already
+    // exceed a bound the operator declared. zenoh's `> 0` guard would simply
+    // clamp on the second attempt and never report it, so the value is caught
+    // here — where there is still someone to tell.
+    if period_max_ms > 0 && period_max_ms < period_init_ms {
+        return Err(format!(
+            "--connect-retry: max {period_max_ms}ms is below init {period_init_ms}ms; \
+             use 0 for no ceiling"
+        ));
+    }
+    Ok(Some(RetryPolicy {
+        period_init_ms,
+        period_max_ms,
+        period_increase_factor,
+    }))
 }
 
 /// R311y506 (session-extqos) — parse `--qos-band START-END` and `--qos-rel 0|1`
@@ -922,4 +991,96 @@ pub(crate) struct LivelinessGetSpec {
     /// returns `LivelinessGetError::FeatureDisabled` when elided, so the OFF arm
     /// walks the identical path and logs no reply.
     pub(crate) after_ms: Option<u64>,
+}
+
+#[cfg(all(test, feature = "router-hat-router"))]
+mod connect_retry_tests {
+    use super::*;
+
+    fn argv(spec: &str) -> Vec<String> {
+        vec![
+            "--router-hat".to_string(),
+            "tcp/127.0.0.1:0".to_string(),
+            "--connect-retry".to_string(),
+            spec.to_string(),
+        ]
+    }
+
+    /// The flag is OPTIONAL and its absence is not an error — the caller keeps
+    /// zenoh's own default. Pinned so a future round cannot make the schedule
+    /// mandatory without noticing that every existing invocation omits it.
+    #[test]
+    fn an_absent_flag_yields_none_not_an_error() {
+        let args = vec!["--router-hat".to_string(), "tcp/127.0.0.1:0".to_string()];
+        assert_eq!(parse_connect_retry(&args), Ok(None));
+    }
+
+    /// The accepted spelling, and it must reach all THREE fields unswapped —
+    /// deliberately three distinct values, so a transposition cannot pass.
+    #[test]
+    fn a_triple_parses_into_all_three_fields() {
+        let policy = parse_connect_retry(&argv("40,320,3")).unwrap().unwrap();
+        assert_eq!(policy.period_init_ms, 40);
+        assert_eq!(policy.period_max_ms, 320);
+        assert_eq!(policy.period_increase_factor, 3.0);
+        // And the parsed policy actually schedules: 40 -> 120 -> 320 (clamped).
+        let mut period = policy.period();
+        assert_eq!(
+            (0..4).map(|_| period.next_ms()).collect::<Vec<_>>(),
+            vec![40, 120, 320, 320]
+        );
+    }
+
+    /// `factor 1` is the CONSTANT schedule — the pre-y786 behaviour, still
+    /// reachable, because a deploy that wants a flat cadence must be able to say
+    /// so rather than having it removed by the round that added growth.
+    #[test]
+    fn a_factor_of_one_is_accepted_as_the_constant_schedule() {
+        let policy = parse_connect_retry(&argv("250,0,1")).unwrap().unwrap();
+        assert!(!policy.grows());
+        let mut period = policy.period();
+        assert_eq!(
+            (0..3).map(|_| period.next_ms()).collect::<Vec<_>>(),
+            vec![250, 250, 250]
+        );
+    }
+
+    /// Every REJECTED spelling, as a set. A malformed schedule must not degrade
+    /// to the default: the node would run, dial, and reconnect on a cadence the
+    /// operator did not ask for, with nothing in the logs contradicting it.
+    #[test]
+    fn malformed_schedules_are_refused_not_defaulted() {
+        for spec in [
+            "",              // empty
+            "1000",          // one field
+            "1000,4000",     // two fields
+            "1000,4000,2,5", // four fields
+            "abc,4000,2",    // init not a number
+            "1000,xyz,2",    // max not a number
+            "1000,4000,x",   // factor not a number
+            "-1,4000,2",     // negative init (u64)
+            "1000,4000,0.5", // shrinking factor
+            "1000,4000,0",   // zero factor
+            "1000,4000,nan", // non-finite factor
+            "4000,1000,2",   // ceiling below the opening wait
+        ] {
+            let got = parse_connect_retry(&argv(spec));
+            assert!(got.is_err(), "`{spec}` must be refused, got {got:?}");
+        }
+    }
+
+    /// `max = 0` is zenoh's NO-CEILING sentinel, so it must survive the
+    /// below-init check that rejects `4000,1000,2` — the one case where a
+    /// smaller max is legal.
+    #[test]
+    fn a_zero_ceiling_is_not_read_as_below_init() {
+        let policy = parse_connect_retry(&argv("1000,0,2")).unwrap().unwrap();
+        assert_eq!(policy.period_max_ms, 0);
+        let mut period = policy.period();
+        assert_eq!(
+            (0..3).map(|_| period.next_ms()).collect::<Vec<_>>(),
+            vec![1000, 2000, 4000],
+            "0 must mean unbounded here too, not an immediate clamp"
+        );
+    }
 }

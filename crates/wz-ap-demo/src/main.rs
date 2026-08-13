@@ -561,6 +561,19 @@ fn main() -> ExitCode {
                 },
                 None => None,
             };
+            // R311y786 — `--connect-retry <init_ms>,<max_ms>,<factor>`. A malformed
+            // value ABORTS: the alternative is a node that paces its re-dials by a
+            // schedule the operator did not ask for, which nothing downstream
+            // contradicts (the shape `--qos-band` also refuses).
+            let connect_retry = match crate::args::parse_connect_retry(rest) {
+                Ok(parsed) => {
+                    parsed.unwrap_or(wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT)
+                }
+                Err(msg) => {
+                    eprintln!("wz-ap-demo: {msg}");
+                    return ExitCode::from(2);
+                }
+            };
             return run_router_hat_mode(
                 router_hat_listen,
                 dial_targets,
@@ -591,6 +604,7 @@ fn main() -> ExitCode {
                     // named and left open. Parsed identically (a bare presence flag) so
                     // one spelling means one thing across run-modes.
                     no_admin_read: rest.iter().any(|a| a == "--no-admin-read"),
+                    connect_retry,
                 },
             );
         }

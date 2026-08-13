@@ -582,6 +582,13 @@ pub mod query;
 /// subset, re-applied to the forwarder under `config-mutate-runtime`.
 pub mod config;
 
+/// R311y786 — the connection-retry SCHEDULE (zenoh's `ConnectionRetryPeriod`):
+/// one transcription of the grow-then-clamp arithmetic, shared by the client
+/// reconnect supervisor and the router peer auto-reconnect so the two cannot
+/// drift. The two substrates keep DIFFERENT defaults (pico's constant vs
+/// zenoh's exponential) because their parity sources differ.
+pub mod retry_period;
+
 /// R311y579 (G8) — the OTHER direction of the same seam: emit the stringly
 /// JSON5 config a STOCK zenoh node reads, and validate a topology before
 /// starting one. `WzConfig` is how wz is configured; this is how wz configures

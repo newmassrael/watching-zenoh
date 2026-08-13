@@ -2788,6 +2788,42 @@ layer_c1ay_cargo_test_router_hat() {
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY router_forward 137" 137 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
+    # R311y786 (§5.21 router-connect-reconcile) — the re-dial BACKOFF. Until y786
+    # the loop slept a `const RECONNECT_BACKOFF_MS = 1000`, so an unreachable
+    # configured peer was re-dialed at 1 Hz for as long as it stayed down; zenoh
+    # holds a ConnectionRetryPeriod that grows toward period_max_ms
+    # (orchestrator.rs:787-820). Three steps, because each answers a question the
+    # others cannot:
+    #   a. the SCHEDULE arithmetic (retry_period::tests) — grow-then-clamp, the
+    #      `> 0` no-ceiling sentinel, a degenerate factor, and that `Default` is
+    #      zenoh's schedule and NOT the derived all-zero hot loop. Runs in the
+    #      DEFAULT feature set (the module is ungated), so this step is also the
+    #      guard that a future feature edit cannot cfg it out silently.
+    #   b. the per-address STATE (accept_loop::tests) — pinned by NAME rather than
+    #      by a bare count, so a rename cannot be absorbed by an unrelated test
+    #      landing in the same filter.
+    #   c. the LOOP-level witness (router_redial_backoff_e2e): the production
+    #      peer_loop actually consults the policy. A correct RedialSchedule sitting
+    #      UNUSED passes (a) and (b) while the loop stays on a fixed cadence — the
+    #      falsify that proved it reds only this step (gaps [61,61,61,61]).
+    _runci_guarded_test "C1AY retry_period 8" 8 \
+        cargo test -p wz-runtime-tokio --lib retry_period --quiet || return 1
+    _runci_guarded_test "C1AY redial_schedule 5" 5 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat,router-connect-reconcile --lib --quiet -- \
+        the_redial_wait_grows_per_address two_addresses_do_not_share_a_wait \
+        forget_returns_an_address_to_the_initial_wait a_recovered_address_leaves_no_entry_behind \
+        a_constant_policy_reproduces_the_fixed_backoff || return 1
+    _runci_guarded_test "C1AY redial_backoff_e2e 3" 3 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat,router-connect-reconcile --test router_redial_backoff_e2e --quiet || return 1
+    # R311y786 — and the CLI surface that reaches it: `--connect-retry
+    # <init>,<max>,<factor>` must REFUSE a malformed schedule rather than degrade
+    # to the default. A silently-defaulted cadence is the failure mode nothing
+    # downstream contradicts: the node runs, dials and reconnects on a schedule the
+    # operator did not ask for. The parser returns Result (not process::exit) for
+    # exactly this reason — an exiting parser cannot be tested, and the
+    # accept/reject SET is its whole content.
+    _runci_guarded_test "C1AY connect_retry_args 5" 5 \
+        cargo test -p wz-ap-demo --features router-hat-router,router-connect-reconcile connect_retry_tests --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings \
@@ -2798,6 +2834,15 @@ layer_c1ay_cargo_test_router_hat() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-token-tables --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,router-connect-reconcile --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features router-connect-reconcile --quiet -- -D warnings \
+        `# R311y786 — the re-dial schedule compiles in the two NARROW combos that` \
+        `# have only ONE of the two re-dial substrates: RedialSchedule and its` \
+        `# RetryPeriod import are gated any(router-connect-reconcile,` \
+        `# transport-multilink), so a combo carrying just one must neither` \
+        `# dead-code the type nor lose the import. The falsify that removed the` \
+        `# growth call reddened exactly here (next_ms unused under -D warnings),` \
+        `# which is what makes these two arms load-bearing rather than decorative.` \
+        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features routing-peer,transport-link-tcp,router-connect-reconcile --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features routing-peer,transport-link-tcp,transport-multilink --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,adminspace-router-linkstate --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat,adminspace-router-linkstate --quiet -- -D warnings \
         && cargo build -p wz-ap-demo --features router-multicast-faces --quiet \

@@ -46,6 +46,7 @@
 
 #[cfg(feature = "routing-peer")]
 use crate::interceptor::{InterceptorConfig, InterceptorSink};
+use crate::retry_period::RetryPolicy;
 use wz_codecs::whatami::WhatAmI;
 use wz_session_core::session_init_params::SessionInitParams;
 
@@ -162,6 +163,30 @@ pub struct WzConfig {
     /// applies the same guard, so metadata on a non-QoS node is inert.
     #[cfg(feature = "session-extqos")]
     pub qos_link: Option<wz_session_core::extqos::QosLinkState>,
+    /// R311y786 — the connection-retry period for OUTBOUND dials this node
+    /// re-attempts: zenoh's `connect.retry` block (`period_init_ms` /
+    /// `period_max_ms` / `period_increase_factor`,
+    /// `zenoh-config/src/connection_retry.rs:31-37`), read by
+    /// `peer_connector_retry` and by the `closed_session` re-dial of a dropped
+    /// configured peer.
+    ///
+    /// UNGATED, unlike [`Self::max_links`] and [`Self::qos`], because upstream's is
+    /// too: `connect.retry` sits in the base config, not behind a feature, and both
+    /// substrates that consume it (`router-connect-reconcile` peer auto-reconnect,
+    /// `transport-multilink` per-link re-add) are separate features that would each
+    /// have to appear in the gate. Three numbers with no dependencies; a build with
+    /// neither substrate simply never reads them.
+    ///
+    /// Defaults to [`RetryPolicy::ZENOH_DEFAULT`] (1 s -> 2 s -> 4 s, capped) — the
+    /// values a stock zenoh resolves when a config omits the section. Until
+    /// R311y786 the re-dial was a hardcoded fixed 1 s with no ceiling and no
+    /// growth, so a configured peer that was simply switched off was re-dialed at
+    /// 1 Hz for as long as it stayed down. Note the CLIENT reconnect supervisor
+    /// keeps a CONSTANT default instead
+    /// ([`ReconnectPolicy`](crate::reconnect::ReconnectPolicy)): its parity source
+    /// is pico's reopen task, not zenoh's orchestrator. Same schedule, different
+    /// default, because they mirror different upstreams.
+    pub connect_retry: RetryPolicy,
 }
 
 impl Default for WzConfig {
@@ -188,6 +213,7 @@ impl Default for WzConfig {
             qos: false,
             #[cfg(feature = "session-extqos")]
             qos_link: None,
+            connect_retry: RetryPolicy::ZENOH_DEFAULT,
         }
     }
 }
@@ -283,7 +309,7 @@ impl WzConfig {
         // (key, value-json) pairs, present-only; sorted alphabetically below, so the
         // order they are assembled in does not matter.
         //
-        // R311y474 — the three UNCONDITIONAL fields seed the vector rather than
+        // R311y474 — the UNCONDITIONAL fields seed the vector rather than
         // being pushed after the cfg-gated ones. Same output (the sort follows), but
         // it is now the type that says which fields every build carries, and it
         // retires a REAL clippy::vec_init_then_push failure that Layer C1bb was
@@ -295,8 +321,29 @@ impl WzConfig {
         // of silencing the lint.
         let mut whatami = String::new();
         wz_session_core::json::escape_into(self.whatami.to_str(), &mut whatami);
+        // R311y786 — the re-dial cadence, GET-observable for the same reason
+        // `max_links` is (R311y473): an operator diagnosing "why is this peer only
+        // retried every 4 s" must be able to read the schedule off the wire rather
+        // than off a startup log line. Inner keys ALPHABETICAL, like acl_rules.
+        //
+        // A non-finite factor renders `null`: `{:?}` on a NaN yields the bare token
+        // `NaN`, which would make this whole document invalid JSON and take the
+        // config GET down with it. `null` is valid and honest — the value is not a
+        // number — and the schedule treats it as no growth either way.
+        let factor = self.connect_retry.period_increase_factor;
+        let connect_retry = format!(
+            "{{\"period_increase_factor\":{},\"period_init_ms\":{},\"period_max_ms\":{}}}",
+            if factor.is_finite() {
+                format!("{factor:?}")
+            } else {
+                "null".to_string()
+            },
+            self.connect_retry.period_init_ms,
+            self.connect_retry.period_max_ms,
+        );
         let mut fields: Vec<(&str, String)> = vec![
             ("batch_size", self.batch_size.to_string()),
+            ("connect_retry", connect_retry),
             ("lease_ms", self.lease_ms.to_string()),
             ("whatami", whatami),
         ];
@@ -515,6 +562,16 @@ impl WzConfig {
         self
     }
 
+    /// R311y786 — set the outbound connection-retry period (zenoh's
+    /// `connect.retry`), the builder twin of the `pub connect_retry` field. The
+    /// router host chains it so the ONE `WzConfig` it hands to both the face loop
+    /// and the admin GET carries the effective schedule — the same
+    /// no-desync-by-construction discipline as [`Self::with_max_links`].
+    pub fn with_connect_retry(mut self, connect_retry: RetryPolicy) -> Self {
+        self.connect_retry = connect_retry;
+        self
+    }
+
     /// R311y48 (§5.23 Phase 3b) — read the live interceptor config. The
     /// read accessor symmetric with the private `interceptors` field's write
     /// path ([`Self::reconfigure_interceptors`]): a partial config-write (e.g.
@@ -652,7 +709,7 @@ mod tests {
         // No access interceptor feature: just the 3 read-at-open keys.
         assert_eq!(
             router_config().to_admin_json(),
-            r#"{"batch_size":65535,"lease_ms":10000,"whatami":"router"}"#
+            r#"{"batch_size":65535,"connect_retry":{"period_increase_factor":2.0,"period_init_ms":1000,"period_max_ms":4000},"lease_ms":10000,"whatami":"router"}"#
         );
     }
 
@@ -670,7 +727,7 @@ mod tests {
         // batch_size). Empty policy -> empty deny + empty rules arrays.
         assert_eq!(
             router_config().to_admin_json(),
-            r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"lease_ms":10000,"whatami":"router"}"#
+            r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"connect_retry":{"period_increase_factor":2.0,"period_init_ms":1000,"period_max_ms":4000},"lease_ms":10000,"whatami":"router"}"#
         );
     }
 
@@ -697,7 +754,7 @@ mod tests {
         // downsampling sorts between batch_size and lease_ms.
         assert_eq!(
             router_config().to_admin_json(),
-            r#"{"batch_size":65535,"downsampling":[],"lease_ms":10000,"whatami":"router"}"#
+            r#"{"batch_size":65535,"connect_retry":{"period_increase_factor":2.0,"period_init_ms":1000,"period_max_ms":4000},"downsampling":[],"lease_ms":10000,"whatami":"router"}"#
         );
     }
 
@@ -714,7 +771,7 @@ mod tests {
         // low_pass sorts between lease_ms and whatami.
         assert_eq!(
             router_config().to_admin_json(),
-            r#"{"batch_size":65535,"lease_ms":10000,"low_pass":[],"whatami":"router"}"#
+            r#"{"batch_size":65535,"connect_retry":{"period_increase_factor":2.0,"period_init_ms":1000,"period_max_ms":4000},"lease_ms":10000,"low_pass":[],"whatami":"router"}"#
         );
     }
 
@@ -730,7 +787,7 @@ mod tests {
     fn to_admin_json_acl_and_downsampling_alphabetical() {
         assert_eq!(
             router_config().to_admin_json(),
-            r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"downsampling":[],"lease_ms":10000,"whatami":"router"}"#
+            r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"connect_retry":{"period_increase_factor":2.0,"period_init_ms":1000,"period_max_ms":4000},"downsampling":[],"lease_ms":10000,"whatami":"router"}"#
         );
     }
 
@@ -746,7 +803,7 @@ mod tests {
     fn to_admin_json_acl_and_quota_alphabetical() {
         assert_eq!(
             router_config().to_admin_json(),
-            r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"lease_ms":10000,"low_pass":[],"whatami":"router"}"#
+            r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"connect_retry":{"period_increase_factor":2.0,"period_init_ms":1000,"period_max_ms":4000},"lease_ms":10000,"low_pass":[],"whatami":"router"}"#
         );
     }
 
@@ -765,7 +822,7 @@ mod tests {
         // between lease_ms and whatami.
         assert_eq!(
             router_config().to_admin_json(),
-            r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"downsampling":[],"lease_ms":10000,"low_pass":[],"whatami":"router"}"#
+            r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"connect_retry":{"period_increase_factor":2.0,"period_init_ms":1000,"period_max_ms":4000},"downsampling":[],"lease_ms":10000,"low_pass":[],"whatami":"router"}"#
         );
     }
 
@@ -789,7 +846,7 @@ mod tests {
     fn to_admin_json_ap_full_shape_alphabetical() {
         assert_eq!(
             router_config().to_admin_json(),
-            r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"downsampling":[],"lease_ms":10000,"low_pass":[],"max_links":1,"qos":false,"whatami":"router"}"#
+            r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"connect_retry":{"period_increase_factor":2.0,"period_init_ms":1000,"period_max_ms":4000},"downsampling":[],"lease_ms":10000,"low_pass":[],"max_links":1,"qos":false,"whatami":"router"}"#
         );
     }
 

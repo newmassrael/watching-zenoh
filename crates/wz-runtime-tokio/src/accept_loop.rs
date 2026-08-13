@@ -82,6 +82,9 @@ use futures_util::StreamExt;
 use tokio::net::TcpStream;
 use wz_runtime_core::TimeSource;
 
+#[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
+use crate::retry_period::RetryPeriod;
+use crate::retry_period::RetryPolicy;
 use crate::runtime_impl::TokioTime;
 use crate::session_glue::{
     drive_session_until_terminal_with_extra_deadline, DriverOutcome, ExtraDeadline, IterationEvent,
@@ -871,15 +874,68 @@ async fn dial_face_multilink_after(
     dial_face_multilink(id, peer, pref, qos, band, params, clock, tick_interval_ms).await
 }
 
-/// The fixed backoff between a dropped/failed dial and its re-dial. Shared by
-/// two substrates: `router-connect-reconcile` peer auto-reconnect (a dropped
-/// DESIRED peer) and `transport-multilink` per-link auto-re-add (R311y212 — a
-/// dropped aggregated link re-JOINed onto the surviving session). zenoh uses a
-/// configurable `ConnectionRetryConf` exponential period (`orchestrator.rs:788`);
-/// wz takes the simple fixed 1 s of the client `ReconnectPolicy` default — the
-/// per-endpoint retry-config surface is a deferred concern, not this atom.
+/// R311y786 — the per-PEER-ADDRESS re-dial schedule: how long each dropped or
+/// failed outbound dial waits before its next attempt, and how that wait grows.
+///
+/// Until R311y786 this was a `const RECONNECT_BACKOFF_MS: u64 = 1000`, so a
+/// configured peer that was simply switched off was re-dialed at 1 Hz forever —
+/// where zenoh's `peer_connector_retry` holds a `ConnectionRetryPeriod` across
+/// the retries of one outage and grows it toward `period_max_ms`
+/// (`net/runtime/orchestrator.rs:787-820`). The growth arithmetic itself is
+/// [`RetryPeriod`], shared with the client reconnect supervisor.
+///
+/// Keyed by ADDRESS, not [`FaceId`], because the id is fresh on every re-dial —
+/// keying on it would rebuild the state each attempt and reproduce the fixed
+/// delay exactly. The address is what persists across an outage, and it is
+/// already the key both substrates track their dials by.
+///
+/// Shared by the loop's two re-dial substrates — `router-connect-reconcile`
+/// peer auto-reconnect and the `transport-multilink` per-link re-add — as the
+/// single constant was. They are mutually exclusive per address in a
+/// both-features build (the `ml_handled` gate hands each failed id to exactly
+/// one arm), so sharing one map is not two writers racing on one counter.
 #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
-const RECONNECT_BACKOFF_MS: u64 = 1000;
+struct RedialSchedule {
+    policy: RetryPolicy,
+    /// Only addresses with an outage IN PROGRESS. [`Self::forget`] removes an
+    /// address the moment a dial to it succeeds, so this map does not grow with
+    /// the mesh — it holds the peers currently down, not the peers ever seen.
+    periods: BTreeMap<SocketAddr, RetryPeriod>,
+}
+
+#[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
+impl RedialSchedule {
+    fn new(policy: RetryPolicy) -> Self {
+        Self {
+            policy,
+            periods: BTreeMap::new(),
+        }
+    }
+
+    /// The wait for the next re-dial of `addr`, growing its state for the one
+    /// after. A first-ever (or post-success) call returns `period_init_ms`, so
+    /// the FIRST re-dial of an outage is unchanged from the fixed-delay era —
+    /// which is why adopting the growth does not move any timing a test that
+    /// observes only the first re-dial depends on.
+    fn next_ms(&mut self, addr: SocketAddr) -> u64 {
+        let policy = self.policy;
+        self.periods
+            .entry(addr)
+            .or_insert_with(|| policy.period())
+            .next_ms()
+    }
+
+    /// Forget `addr`'s growth: the next outage starts at `period_init_ms` again.
+    ///
+    /// Called when a dial SUCCEEDS (zenoh's `period` is a local of
+    /// `peer_connector_retry` and dies with the successful connect) and when an
+    /// address stops being desired (a reconcile removal — otherwise a peer
+    /// re-added to the connect list an hour later would inherit the ceiling from
+    /// the outage that preceded its removal).
+    fn forget(&mut self, addr: SocketAddr) {
+        self.periods.remove(&addr);
+    }
+}
 
 /// Dial a peer after a fixed backoff — the delayed twin of [`dial_face`] used by the
 /// `router-connect-reconcile` peer auto-reconnect (the wz analogue of zenoh's
@@ -919,14 +975,17 @@ async fn dial_face_after(
 /// permanently-unreachable peer does not inflate it without bound. `announce`
 /// controls the log level: the FIRST re-dial after a drop (an operator-visible peer
 /// flap) logs at `info`; subsequent retries against a still-unreachable peer log at
-/// `debug`, so a down configured peer does not emit a 1 Hz `info` storm (the retry
-/// cadence is bounded by [`RECONNECT_BACKOFF_MS`]).
+/// `debug`, so a down configured peer does not emit an `info` storm (the retry
+/// cadence is bounded by [`RedialSchedule`], and since R311y786 it BACKS OFF —
+/// under the default policy a peer that stays down settles at one attempt per
+/// `period_max_ms` rather than the 1 Hz the fixed delay held forever).
 #[cfg(feature = "router-connect-reconcile")]
 #[allow(clippy::too_many_arguments)]
 fn schedule_redial(
     addr: SocketAddr,
     desired: &std::collections::HashSet<SocketAddr>,
     dialed_targets: &mut BTreeMap<FaceId, SocketAddr>,
+    redial: &mut RedialSchedule,
     opening: &mut FuturesUnordered<OpenFuture>,
     next_id: &mut u64,
     announce: bool,
@@ -940,6 +999,10 @@ fn schedule_redial(
     tick_interval_ms: u64,
 ) {
     if !desired.contains(&addr) {
+        // No longer desired: drop any growth state with it, so a peer re-added to
+        // the connect list later starts from `period_init_ms` rather than
+        // inheriting the ceiling of the outage that preceded its removal.
+        redial.forget(addr);
         return;
     }
     let id = FaceId(*next_id);
@@ -947,21 +1010,26 @@ fn schedule_redial(
     // Reserve the address under the new id before the backoff so a reconcile that
     // arrives during the wait does not also dial it (the drop->redial dedup gap).
     dialed_targets.insert(id, addr);
+    // R311y786 — consume THIS peer's next wait (and grow it for the attempt after).
+    // Read once and reused in both the log and the dial, so the line an operator
+    // sees is the delay actually applied, not a second call that would double the
+    // growth.
+    let backoff_ms = redial.next_ms(addr);
     if announce {
         log::info!(
-            "reconcile: re-dialing desired peer {addr} in {RECONNECT_BACKOFF_MS}ms (face {})",
+            "reconcile: re-dialing desired peer {addr} in {backoff_ms}ms (face {})",
             id.0
         );
     } else {
         log::debug!(
-            "reconcile: retrying re-dial of desired peer {addr} in {RECONNECT_BACKOFF_MS}ms (face {})",
+            "reconcile: retrying re-dial of desired peer {addr} in {backoff_ms}ms (face {})",
             id.0
         );
     }
     opening.push(Box::pin(dial_face_after(
         id,
         addr,
-        RECONNECT_BACKOFF_MS,
+        backoff_ms,
         params.clone(),
         qos_link,
         clock,
@@ -973,8 +1041,12 @@ fn schedule_redial(
 /// aggregated link this node DIALED (the multilink twin of [`schedule_redial`],
 /// its own substrate, NOT gated on `router-connect-reconcile`). Unlike the peer
 /// auto-reconnect there is no `desired` connect-list gate — every retained
-/// multilink dial endpoint is permanently wanted (a per-link retry policy is a
-/// deferred slice). Re-keys the retained endpoint to a fresh [`FaceId`] BEFORE
+/// multilink dial endpoint is permanently wanted. R311y786 — it draws its wait
+/// from the SAME [`RedialSchedule`] the peer auto-reconnect does, as it drew from
+/// the same constant before: a PER-LINK policy is still the deferred slice, so N
+/// links to one address share that address's schedule (which is also why keying
+/// it by address rather than by link is not a compromise here — the two arms are
+/// mutually exclusive per failed id). Re-keys the retained endpoint to a fresh [`FaceId`] BEFORE
 /// the backoff (so the re-add is tracked across the drop->redial gap and the Err
 /// arm can retry it), carrying the DEAD link's `pref` AND its QoS-priority `band`
 /// so the re-added link restores BOTH its traffic class and its priority band (a
@@ -994,6 +1066,7 @@ fn schedule_multilink_redial(
         FaceId,
         (SocketAddr, LinkReliabilityPref, (Priority, Priority)),
     >,
+    redial: &mut RedialSchedule,
     opening: &mut FuturesUnordered<OpenFuture>,
     next_id: &mut u64,
     announce: bool,
@@ -1006,21 +1079,22 @@ fn schedule_multilink_redial(
     // Re-key the retained endpoint to the fresh id BEFORE the backoff, so the
     // re-add is tracked (a failed re-dial's Err arm finds it and retries).
     ml_dial_endpoints.insert(id, (addr, pref, band));
+    let backoff_ms = redial.next_ms(addr);
     if announce {
         log::info!(
-            "multilink: re-adding dropped link to {addr} in {RECONNECT_BACKOFF_MS}ms (face {})",
+            "multilink: re-adding dropped link to {addr} in {backoff_ms}ms (face {})",
             id.0
         );
     } else {
         log::debug!(
-            "multilink: retrying re-add to {addr} in {RECONNECT_BACKOFF_MS}ms (face {})",
+            "multilink: retrying re-add to {addr} in {backoff_ms}ms (face {})",
             id.0
         );
     }
     opening.push(Box::pin(dial_face_multilink_after(
         id,
         addr,
-        RECONNECT_BACKOFF_MS,
+        backoff_ms,
         pref,
         qos,
         band,
@@ -1455,6 +1529,19 @@ pub struct FaceSources {
     /// without the feature — so the eight open call sites in this loop stay
     /// cfg-free (the `FaceSources.qos` threading discipline).
     pub qos_link: FaceQosLink,
+    /// R311y786 — the connection-retry period every re-dial this loop schedules is
+    /// paced by: zenoh's `connect.retry` (`period_init_ms` / `period_max_ms` /
+    /// `period_increase_factor`), sourced from
+    /// [`WzConfig.connect_retry`](crate::config::WzConfig). Applies to BOTH re-dial
+    /// substrates — `router-connect-reconcile` peer auto-reconnect and the
+    /// `transport-multilink` per-link re-add — which shared the fixed constant it
+    /// replaced.
+    ///
+    /// UNCONDITIONAL, like [`Self::qos_link`] and for the same reason: the
+    /// alternative is a `#[cfg(any(..))]` on the field, which every construction
+    /// site would then repeat and every new site would be a place to forget. A
+    /// build with neither re-dial substrate simply never reads it.
+    pub retry: RetryPolicy,
 }
 
 /// session-extqos (R311y506) — the per-loop QoS link metadata, threaded to every
@@ -1522,6 +1609,7 @@ where
         #[cfg(feature = "transport-multilink")]
         qos,
         qos_link,
+        retry,
     } = sources;
     tokio::pin!(shutdown);
 
@@ -1556,6 +1644,19 @@ where
     // asymmetry). Maintained only when the feature is compiled.
     #[cfg(feature = "router-connect-reconcile")]
     let mut desired: std::collections::HashSet<SocketAddr> = dial_targets.iter().copied().collect();
+    // R311y786 — the per-address re-dial waits, replacing the fixed
+    // `RECONNECT_BACKOFF_MS`. Loop-local (not per-face) because the growth must
+    // survive the FaceId churn of the retries it is pacing, and one instance for
+    // both re-dial substrates because they shared the constant it replaced.
+    #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
+    let mut redial = RedialSchedule::new(retry);
+    // The FIELD is unconditional (so no construction site carries a cfg) but a build
+    // with NEITHER re-dial substrate schedules nothing to pace, so the local is
+    // discarded here — the same shape `run_router_hat` uses for the admin permit it
+    // only reads under a feature. Keeps that combo warning-clean without putting an
+    // `#[allow]` on the destructure, which would also hide a real future unused.
+    #[cfg(not(any(feature = "router-connect-reconcile", feature = "transport-multilink")))]
+    let _ = retry;
     let mut next_id: u64 = 0;
     // R311y205 (transport-multilink) — the per-peer aggregation registry (active
     // only when `max_links > 1`). `ml_sessions` maps a peer zid to its logical
@@ -1700,6 +1801,32 @@ where
                 let (id, peer, result) = *opened;
                 match result {
                     Ok(opened) => {
+                        // R311y786 — this dial SUCCEEDED, so the outage it was
+                        // retrying is over: forget the address's grown wait, and the
+                        // NEXT outage starts at `period_init_ms` again. zenoh's
+                        // `period` is a local of `peer_connector_retry` and dies with
+                        // the successful connect (`orchestrator.rs:787-806`); this is
+                        // that lifetime, spelled out because wz's re-dial is a future
+                        // in a shared loop rather than a per-peer task with a stack.
+                        // Placed BEFORE the multilink JOIN branch below, which
+                        // `continue`s: a joined link is a successful dial too, and a
+                        // reset written after that branch would never run for one.
+                        // R311y786 — NO WITNESS: deleting both calls below reds
+                        // nothing in this crate's 912 tests (measured, y786). The
+                        // reconcile remove/re-add e2e binds `forget` and the loop's
+                        // call to it, but nothing yet observes THIS call site — a
+                        // build that forgot only on a reconcile removal, never on a
+                        // successful dial, would make a recovered-then-flapped peer
+                        // wait its old ceiling. Witnessing it needs a peer that
+                        // reaches Established and then drops.
+                        #[cfg(feature = "router-connect-reconcile")]
+                        if let Some(addr) = dialed_targets.get(&id) {
+                            redial.forget(*addr);
+                        }
+                        #[cfg(feature = "transport-multilink")]
+                        if let Some((addr, _, _)) = ml_dial_endpoints.get(&id) {
+                            redial.forget(*addr);
+                        }
                         // R311qi — capture the remote peer's zid (the routing
                         // identity) from the established session before `opened`
                         // is moved into the drive future.
@@ -1903,6 +2030,7 @@ where
                                     qos,
                                     band,
                                     &mut ml_dial_endpoints,
+                                    &mut redial,
                                     &mut opening,
                                     &mut next_id,
                                     false,
@@ -1930,6 +2058,7 @@ where
                                     addr,
                                     &desired,
                                     &mut dialed_targets,
+                                    &mut redial,
                                     &mut opening,
                                     &mut next_id,
                                     false,
@@ -2012,6 +2141,7 @@ where
                                 qos,
                                 band,
                                 &mut ml_dial_endpoints,
+                                &mut redial,
                                 &mut opening,
                                 &mut next_id,
                                 true,
@@ -2057,6 +2187,7 @@ where
                         addr,
                         &desired,
                         &mut dialed_targets,
+                        &mut redial,
                         &mut opening,
                         &mut next_id,
                         true,
@@ -2425,6 +2556,10 @@ where
             // accept-only: no declared QoS band (the empty default is also the
             // whole value without `session-extqos`).
             qos_link: FaceQosLink::default(),
+            // accept-only: the loop schedules no outbound dial at all, so no
+            // re-dial either. Carried because the field is unconditional; never
+            // read on this path.
+            retry: RetryPolicy::ZENOH_DEFAULT,
         },
         params,
         clock,
@@ -2493,6 +2628,117 @@ mod tests {
     use crate::link_pipeline::bind_tcp;
     use crate::session_open::{initiate_and_open_session, DEFAULT_OPEN_TICK_MS};
     use wz_runtime_tokio_test_support::fixture_session_init_params;
+
+    // ── R311y786 per-address re-dial schedule ──────────────────────────────
+
+    #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
+    fn addr(port: u16) -> SocketAddr {
+        use std::net::{IpAddr, Ipv4Addr};
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+    }
+
+    /// The wait GROWS across the retries of one outage, per address. This is the
+    /// defect R311y786 paid off: the fixed `RECONNECT_BACKOFF_MS` returned 1000
+    /// forever, so a configured peer that was switched off was re-dialed at 1 Hz
+    /// for as long as it stayed down.
+    #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
+    #[test]
+    fn the_redial_wait_grows_per_address() {
+        let mut s = RedialSchedule::new(RetryPolicy {
+            period_init_ms: 100,
+            period_max_ms: 400,
+            period_increase_factor: 2.0,
+        });
+        let a = addr(7001);
+        assert_eq!(
+            (0..5).map(|_| s.next_ms(a)).collect::<Vec<_>>(),
+            vec![100, 200, 400, 400, 400],
+            "one address's retries must climb to the ceiling and stay there"
+        );
+    }
+
+    /// Two peers down at once keep INDEPENDENT schedules. Sharing one counter
+    /// would make a second peer's first re-dial inherit the first peer's grown
+    /// wait — a peer that just dropped would wait the ceiling immediately.
+    #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
+    #[test]
+    fn two_addresses_do_not_share_a_wait() {
+        let mut s = RedialSchedule::new(RetryPolicy {
+            period_init_ms: 100,
+            period_max_ms: 0,
+            period_increase_factor: 2.0,
+        });
+        let (a, b) = (addr(7001), addr(7002));
+        assert_eq!(s.next_ms(a), 100);
+        assert_eq!(s.next_ms(a), 200);
+        assert_eq!(
+            s.next_ms(b),
+            100,
+            "a different peer's FIRST re-dial must be period_init_ms"
+        );
+        assert_eq!(
+            s.next_ms(a),
+            400,
+            "and the first peer's own growth continues"
+        );
+    }
+
+    /// [`RedialSchedule::forget`] resets the growth, which is what the loop calls
+    /// on a SUCCESSFUL dial (and on an address that stops being desired). Without
+    /// it a peer that flapped hours ago would start its next outage at the
+    /// ceiling — the state would be per-process rather than per-outage, which is
+    /// not the lifetime zenoh's `peer_connector_retry` local has.
+    #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
+    #[test]
+    fn forget_returns_an_address_to_the_initial_wait() {
+        let mut s = RedialSchedule::new(RetryPolicy {
+            period_init_ms: 100,
+            period_max_ms: 0,
+            period_increase_factor: 2.0,
+        });
+        let a = addr(7001);
+        assert_eq!(s.next_ms(a), 100);
+        assert_eq!(s.next_ms(a), 200);
+        s.forget(a);
+        assert_eq!(
+            s.next_ms(a),
+            100,
+            "a recovered peer's NEXT outage starts from period_init_ms"
+        );
+        // And forgetting an address with no state is a no-op, not a panic — the
+        // loop calls it for every successful dial, including first-time ones.
+        s.forget(addr(7099));
+    }
+
+    /// The schedule holds only peers with an outage IN PROGRESS: `forget` removes
+    /// the entry rather than resetting it in place, so a long-lived mesh does not
+    /// accumulate one entry per address ever dialed.
+    #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
+    #[test]
+    fn a_recovered_address_leaves_no_entry_behind() {
+        let mut s = RedialSchedule::new(RetryPolicy::ZENOH_DEFAULT);
+        let a = addr(7001);
+        s.next_ms(a);
+        assert_eq!(s.periods.len(), 1);
+        s.forget(a);
+        assert!(
+            s.periods.is_empty(),
+            "a recovered peer must not stay in the map"
+        );
+    }
+
+    /// A `constant` policy keeps the pre-y786 cadence exactly — the escape hatch
+    /// the existing multilink suites and any flat-cadence deploy rely on.
+    #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
+    #[test]
+    fn a_constant_policy_reproduces_the_fixed_backoff() {
+        let mut s = RedialSchedule::new(RetryPolicy::constant(1000));
+        let a = addr(7001);
+        assert_eq!(
+            (0..4).map(|_| s.next_ms(a)).collect::<Vec<_>>(),
+            vec![1000, 1000, 1000, 1000]
+        );
+    }
 
     // ── R311y219 per-face priority-band + reliability-axis policy ──────────
 
@@ -3799,6 +4045,9 @@ mod tests {
                 mcast_group_subs: None,
                 reconcile: None,
                 qos_link: FaceQosLink::default(),
+                // R311y786 — the PRE-y786 cadence (fixed 1 s), so these suites keep
+                // measuring what they were written for; the growth has its own.
+                retry: RetryPolicy::constant(1000),
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
                 #[cfg(feature = "transport-multilink")]
@@ -3888,6 +4137,9 @@ mod tests {
                 mcast_group_subs: None,
                 reconcile: None,
                 qos_link: FaceQosLink::default(),
+                // R311y786 — the PRE-y786 cadence (fixed 1 s), so these suites keep
+                // measuring what they were written for; the growth has its own.
+                retry: RetryPolicy::constant(1000),
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
                 #[cfg(feature = "transport-multilink")]
@@ -3976,6 +4228,9 @@ mod tests {
                 mcast_group_subs: None,
                 reconcile: None,
                 qos_link: FaceQosLink::default(),
+                // R311y786 — the PRE-y786 cadence (fixed 1 s), so these suites keep
+                // measuring what they were written for; the growth has its own.
+                retry: RetryPolicy::constant(1000),
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
                 #[cfg(feature = "transport-multilink")]
