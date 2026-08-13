@@ -1984,6 +1984,58 @@ layer_c0b_job_budget_margin() {
     return 0
 }
 
+# ─── Layer C0d — the doc-link dependent expansion discriminates BOTH ways ──
+#
+# R311y793. `scripts/lib/doclink-dependents.sh` is what widens pre-push gate 4
+# from "the crates this push changed" to "and the crates whose docs link into
+# them". Its whole value is the ADDITION, so a version that returned its input
+# unchanged would look identical to a working one from the hook's side -- the
+# same objection C0i and C0b answer for their own scripts.
+#
+# The POSITIVE case uses a real, measured edge rather than a synthetic one:
+# wz-runtime-tokio's sources carry `[wz_session_core::...]` links, so changing
+# wz-session-core must pull wz-runtime-tokio in. Pinning a real relationship
+# means a future "optimisation" that drops cross-crate expansion fails here.
+#
+# The NEGATIVE case is the other half and is what keeps the expansion from being
+# "return everything": wz-ap-demo is a leaf nothing links INTO, so it must come
+# back alone. A widener that always returned the workspace would pass the
+# positive case and make the hook cost the full lane every time.
+layer_c0d_doclink_dependents() {
+    local script="scripts/lib/doclink-dependents.sh" out
+    out="$(bash "$script" wz-session-core)" || {
+        echo "  Layer C0d FAIL: the expander exited non-zero on a real crate" >&2
+        return 1
+    }
+
+    grep -qx "wz-session-core" <<<"$out" || {
+        echo "  Layer C0d FAIL: the input crate is missing from its own expansion" >&2
+        return 1
+    }
+    grep -qx "wz-runtime-tokio" <<<"$out" || {
+        echo "  Layer C0d FAIL: wz-runtime-tokio is absent from wz-session-core's" \
+            "expansion, but its sources carry [wz_session_core::...] doc links --" \
+            "the cross-crate half is not expanding" >&2
+        return 1
+    }
+
+    out="$(bash "$script" wz-ap-demo)" || return 1
+    if [[ "$out" != "wz-ap-demo" ]]; then
+        echo "  Layer C0d FAIL: wz-ap-demo is a leaf nothing links INTO and must expand" \
+            "to itself alone; got: $(tr '\n' ' ' <<<"$out")" >&2
+        return 1
+    fi
+
+    if bash "$script" >/dev/null 2>&1; then
+        echo "  Layer C0d FAIL: an EMPTY crate set was accepted" >&2
+        return 1
+    fi
+
+    echo "  doclink-dependents gate: OK (wz-session-core pulls in wz-runtime-tokio," \
+        "wz-ap-demo expands to itself, an empty set is refused)"
+    return 0
+}
+
 # ─── Layer C1 — cargo test --workspace ──────────────────────────────
 layer_c1_cargo_test() {
     # Stage 4b — exclude wz-session-lwip: it forces wz-session-core/no_std
@@ -12114,6 +12166,7 @@ run_layer C0 layer_c0_test_discipline || overall=1
 run_layer C0mut layer_c0mut_verdict_legs || overall=1
 run_layer C0i layer_c0i_impact_ref_gate || overall=1
 run_layer C0b layer_c0b_job_budget_margin || overall=1
+run_layer C0d layer_c0d_doclink_dependents || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1

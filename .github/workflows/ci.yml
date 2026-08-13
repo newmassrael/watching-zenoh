@@ -874,6 +874,13 @@ jobs:
         # that job. It needs only bash, and costs ~0s.
         run: bash scripts/run-ci.sh --layer C0b
 
+      - name: Layer C0d — the doc-link dependent expansion discriminates both ways
+        # R311y793. pre-push gate 4 widens its crate set through
+        # scripts/lib/doclink-dependents.sh; an expander that returned its input
+        # unchanged would be invisible from the hook's side. Same reason C0i and
+        # C0b are lanes. Needs only bash + grep.
+        run: bash scripts/run-ci.sh --layer C0d
+
       - name: Layer B — verify-codegen.sh per codec
         run: bash scripts/run-ci.sh --layer B
 
@@ -2099,8 +2106,9 @@ jobs:
       # quic-datagram}) are off-default and composed by no other hosted lane — Layer
       # C1's --workspace unifies features ON, never these routing-accept-gated
       # multi-peer accept subsets.
-      - name: Layer C1w — routing-accept multi-peer accept + quic/datagram mesh pins (R311y409)
-        run: bash scripts/run-ci.sh --layer C1w
+      # R311y793 — MOVED to the `routing-adminspace` job with the other routing
+      # lanes. Kept as a marker rather than deleted silently, because this
+      # comment block above it is the lane's own cost rationale.
 
       # Hosted R311y410 — C1al (unixpipe: locator + FIFO e2e + the mesh-JOIN accept
       # unit + the R311y410 BIND-time pin + 3 clippy gates) was defined in
@@ -2202,8 +2210,8 @@ jobs:
       # then selects ZERO tests and exits 0) reds. Cost: local median 45s / p90
       # 99s over 66 archived runs, ~194s / ~426s at this repo's measured 4.3x
       # hosted ratio, inside the 30-minute budget.
-      - name: Layer C1y — routing-peer + access-* + extauth (R311y424)
-        run: bash scripts/run-ci.sh --layer C1y
+      # R311y793 — MOVED to the `routing-adminspace` job. Same reason as C1w
+      # above; the comment block is its measured cost record.
 
       # R311y425 — eleven more local-only lanes, and the reason they are HERE
       # rather than on a fourth runner is a MEASUREMENT this job produced one
@@ -2301,18 +2309,11 @@ jobs:
       # interop genre, not pure-cargo lanes, so they belong with the jobs that
       # provision foreign binaries rather than here. They remain the last two
       # sole-runner lanes.
-      - name: Layer C1x — routing-routes forward tables (R311y427)
-        run: bash scripts/run-ci.sh --layer C1x
-      - name: Layer C1ax — routing-namespace (R311y427)
-        run: bash scripts/run-ci.sh --layer C1ax
-      - name: Layer C1ay — router-hat forward tables (R311y427)
-        run: bash scripts/run-ci.sh --layer C1ay
-      - name: Layer C1am — adminspace handlers (R311y427)
-        run: bash scripts/run-ci.sh --layer C1am
-      - name: Layer C1an — adminspace no-default-features (R311y427)
-        run: bash scripts/run-ci.sh --layer C1an
-      - name: Layer C1ao — config-mutate-runtime + admin json (R311y427)
-        run: bash scripts/run-ci.sh --layer C1ao
+      # R311y793 — C1x / C1ax / C1ay / C1am / C1an / C1ao MOVED to the
+      # `routing-adminspace` job, together with C1w and C1y. See that job for
+      # the measurement; the short version is that this job was at 86% of its
+      # budget and the R311y426 comment above already decided these belonged on
+      # their own runner "for a TIME reason that is measured".
 
       # R311y581 — SEVEN lanes were registered in scripts/run-ci.sh and absent
       # from this workflow's `--layer` set, so each ran ONLY in a local full
@@ -2396,6 +2397,90 @@ jobs:
         # reports and never fails, because free space has no ceiling this
         # workflow can enforce. Time has one, and a cancel at that ceiling
         # grades nothing.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90
+
+  # ─────────────────────────────────────────────────────────────────
+  # R311y793 — the ROUTING + ADMINSPACE job. Eight lanes peeled off
+  # `feature-gates`, which R311y792 measured at 86% of its 45-minute budget
+  # (2039-2328s over 10 successful runs, median 2208s) — the same band the `ci`
+  # job was in when run 31711867852 was CANCELLED rather than graded.
+  #
+  # WHY THESE EIGHT, and it is not "the heaviest": the feature-gates job has no
+  # hot step at all (its largest, C1ay, is 227s of 2216s = 10%), so peeling by
+  # size would produce a job with no name. These eight are a THEME, and the
+  # theme was already chosen — the R311y426 comment still standing in that job
+  # says ROUTING (C1x, C1ax, C1ay) and ADMINSPACE (C1am, C1an, C1ao) "need
+  # their own runner, and now for a TIME reason that is measured rather than
+  # the disk one R311y424 disproved". They were added there anyway. This is
+  # that decision, executed. C1w (routing-accept) and C1y (routing-peer) join
+  # them because they are the same subsystem by any reading.
+  #
+  # THE ARITHMETIC, from per-step timings on run 31732246052: C1w 103 + C1y 189
+  # + C1x 38 + C1ax 75 + C1ay 227 + C1am 150 + C1an 38 + C1ao 36 = 856s. That
+  # takes feature-gates from 2216s to ~1360s, i.e. 86% -> ~50% of its budget,
+  # and it is a SPLIT rather than the raise its budget already took once
+  # (30 -> 45 at y425).
+  #
+  # BUDGET 45, not 30, and the reason is the cache: this job's key is new, so
+  # its FIRST run builds every one of these off-default feature sets cold, and
+  # each is a distinct set of `crates/target` artifacts. 856s is the warm
+  # number. The margin step below is what will report where it actually lands
+  # rather than leaving the guess standing — which is the whole point of having
+  # built it.
+  routing-adminspace:
+    name: routing + adminspace lanes (the subsystem feature-gates could not hold)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Budget stamp — start this job's own clock
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Checkout (with submodules)
+        # `recursive`: these lanes compile wz-session-core, which resolves
+        # sce_forge_runtime out of vendor/sce.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake libclang-dev clang perl
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        # Its OWN key: parallel jobs must not race one cache save, the same
+        # reason footprint, interop and verdict-legs each carry one.
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates -> target
+          key: routing-adminspace
+
+      - name: Layer C1w — routing-accept multi-peer accept + quic/datagram mesh pins
+        run: bash scripts/run-ci.sh --layer C1w
+      - name: Layer C1y — routing-peer + access-* + extauth
+        run: bash scripts/run-ci.sh --layer C1y
+      - name: Layer C1x — routing-routes forward tables
+        run: bash scripts/run-ci.sh --layer C1x
+      - name: Layer C1ax — routing-namespace
+        run: bash scripts/run-ci.sh --layer C1ax
+      - name: Layer C1ay — router-hat forward tables
+        run: bash scripts/run-ci.sh --layer C1ay
+      - name: Layer C1am — adminspace handlers
+        run: bash scripts/run-ci.sh --layer C1am
+      - name: Layer C1an — adminspace no-default-features
+        run: bash scripts/run-ci.sh --layer C1an
+      - name: Layer C1ao — config-mutate-runtime + admin json
+        run: bash scripts/run-ci.sh --layer C1ao
+
+      - name: Disk headroom after the lanes (measurement, not a gate)
+        if: always()
+        run: df -h /
+
+      - name: Budget margin — this job may not approach its timeout in silence
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90
 

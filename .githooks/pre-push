@@ -8,10 +8,13 @@
 #   2. mnemosyne-cli validate-workspace   — the SSOT integrity gate (seconds).
 #   3. cargo test -p <crate>              — for ONLY the crates this push
 #                                           changes (default features).
-#   4. Layer C1bz over those same crates  — R311y792; the doc-link budget.
-#                                           A doc comment is the one thing a
-#                                           `cargo test` cannot fail on, and
-#                                           the class cost two rounds.
+#   4. Layer C1bz over those crates AND    — R311y792/y793; the doc-link
+#      the crates whose docs link into       budget. A doc comment is the one
+#      them                                  thing `cargo test` cannot fail on,
+#                                            and the class cost two rounds.
+#   5. Layer 0 when the push touches       — R311y793; rustfmt + actionlint +
+#      .github/workflows, scripts/ or        shellcheck. Those paths had no
+#      .githooks/                            local gate at all.
 # The FULL validation surface — the feature-subset matrix, clippy, codegen
 # (Layers B/B2), footprint (F), cross-compile (G), QEMU (Q), interop (Z),
 # every non-default feature combo — is the HOSTED CI's job. It runs on every
@@ -286,6 +289,40 @@ if [[ -z "$diff_base" ]]; then
     exit 0
 fi
 
+# ─── gate 5 — the lanes that own the paths OUTSIDE crates/ (R311y793) ──
+#
+# The rule this hook had only in prose: a round owes the lanes that own the
+# FILES it touched. Gates 3 and 4 know `crates/` and nothing else, so a push
+# consisting entirely of workflow, script and hook edits — which is what
+# R311y791 and R311y792 both were — reached origin with NO local gate at all.
+# Every check it could have failed (rustfmt, actionlint over ci.yml, shellcheck
+# over scripts/ and .githooks/) lives in Layer 0, which is ~40s.
+#
+# Placed BEFORE gate 3 on purpose: gates 3 and 4 exit early when a push touches
+# no crate, and that early exit is exactly the shape of push this gate exists
+# for.
+#
+# The mapping is DELIBERATELY SHORT and names only what is cheap. `sources/**`
+# and `out/**` are owned by Layers B/B2 (codegen + regen-diff), which need a
+# built sce-codegen and are minutes, not seconds; they stay hosted-only and this
+# comment is where that decision is recorded rather than left to be rediscovered.
+path_lanes=""
+if git diff --name-only "$diff_base..$local_sha" 2>/dev/null |
+    grep -qE '^(\.github/workflows/|scripts/|\.githooks/)'; then
+    path_lanes="0"
+fi
+
+if [[ -n "$path_lanes" ]]; then
+    echo "pre-push: this push touches workflow / script / hook files — running Layer $path_lanes"
+    echo "          (rustfmt + actionlint + shellcheck; the only local gate those paths have)."
+    if ! bash scripts/run-ci.sh --layer "$path_lanes"; then
+        echo "" >&2
+        echo "pre-push: Layer $path_lanes failed — fix before push." >&2
+        echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+        exit 1
+    fi
+fi
+
 # R311y420 — a while-read loop rather than `mapfile`. mapfile is a bash 4.0
 # builtin, and stock macOS ships bash 3.2, so this hook could not run there at
 # all; scripts/lib/schema-pin-gate.sh already avoids it for the same reason.
@@ -366,11 +403,24 @@ echo "pre-push: changed-crate tests passed."
 # moved. That is the same reason gate 2 shells out to `mnemosyne-cli` instead of
 # reading the store.
 #
-# Deliberately NOT covered, and hosted CI still is: a crate this push did not
-# touch whose links broke because a name it links TO moved. The subset is the
-# cheap 90%, not the gate.
-echo "pre-push: checking changed-crate doc links (Layer C1bz, subset): ${pkgs[*]}"
-if ! WZ_C1BZ_ONLY="${pkgs[*]}" bash scripts/run-ci.sh --layer C1bz; then
+# R311y793 — the set is EXPANDED to the crates whose docs link INTO a changed
+# one, which is the half y792 left open and named. A public item renamed in
+# wz-session-core breaks `[wz_session_core::Foo]` wherever it is written, and
+# those files live in crates this push never touched — so measuring only the
+# changed crate measures the one that is still fine. Measured: 98 files carry a
+# cross-crate link and `wz_session_core::` alone is 149 sites over fifteen
+# crates, so this is the common case rather than a corner.
+doc_pkgs=()
+while IFS= read -r _p; do
+    [[ -n "$_p" ]] && doc_pkgs+=("$_p")
+done < <(bash scripts/lib/doclink-dependents.sh "${pkgs[@]}")
+if [[ ${#doc_pkgs[@]} -eq 0 ]]; then
+    echo "pre-push: doc-link expansion produced NO crate — refusing to report clean." >&2
+    exit 1
+fi
+
+echo "pre-push: checking doc links (Layer C1bz, subset): ${doc_pkgs[*]}"
+if ! WZ_C1BZ_ONLY="${doc_pkgs[*]}" bash scripts/run-ci.sh --layer C1bz; then
     echo "" >&2
     echo "pre-push: changed-crate doc links failed — fix before push." >&2
     echo "          A count ABOVE budget is a link this push added: fix the link," >&2
