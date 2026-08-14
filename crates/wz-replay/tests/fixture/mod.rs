@@ -230,6 +230,7 @@ fn declare_kexpr(id: u64, base: &'static str) -> Vec<u8> {
                     | wz_session_core::wire_const::FLAG_D_N,
                 id,
                 keyexpr: keyexpr(base),
+                extensions: None,
             },
         ),
         ..Default::default()

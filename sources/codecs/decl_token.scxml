@@ -34,6 +34,18 @@
     <sce:variant-dispatch flag="header.M"/>
     <sce:flag-bind input="N" source="header.N"/>
   </sce:import>
+  <!-- R311y804: the Z-gated body ext chain, the same addition the sibling
+       decl_subscriber takes and for the same reason — an unconsumed chain
+       desynchronises the rest of the DECLARE batch, not just this record.
+       Upstream consumes it: zenoh reads `token::flag::Z` and `skip_all`s
+       (zenoh-codec/src/network/declare.rs:826-829), pico calls
+       `_z_msg_ext_skip_non_mandatories(zbf, 0x12)` (declarations.c:301-309).
+       Note the two upstreams differ in POLICY, not in consumption — pico's
+       skip refuses an unknown MANDATORY ext (the M bit) where zenoh's
+       `extension::skip` accepts it; wz carries the entries opaquely, so the
+       policy question belongs to whoever reads them, not to the codec.
+       Default state keeps Z=0 and the byte-identical wire. -->
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x06"/>
@@ -43,5 +55,9 @@
     </sce:flags>
     <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
     <sce:embed id="keyexpr" type="codec_zenoh_wireexpr" sce:byte="2"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="3"
+                   max-depth="8" on-overflow="reject"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
   </datamodel>
 </scxml>

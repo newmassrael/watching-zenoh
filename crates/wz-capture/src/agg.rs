@@ -1743,6 +1743,7 @@ pub(crate) mod tests {
                         | wz_session_core::wire_const::FLAG_D_N,
                     id,
                     keyexpr: sender_space(0, Some(suffix)),
+                    extensions: None,
                 },
             ),
             ..Default::default()
@@ -1757,6 +1758,7 @@ pub(crate) mod tests {
                 wz_codecs::undecl_kexpr::UndeclKexpr {
                     header: wz_session_core::wire_const::D_MID_UNDECL_KEXPR,
                     id,
+                    extensions: None,
                 },
             ),
             ..Default::default()
@@ -2865,6 +2867,7 @@ pub(crate) mod tests {
                     id: 2,
                     // id 1's literal, plus a suffix.
                     keyexpr: sender_space(1, Some("/child")),
+                    extensions: None,
                 },
             ),
             ..Default::default()

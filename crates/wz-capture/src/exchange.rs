@@ -925,6 +925,7 @@ pub(crate) mod tests {
                         | wz_session_core::wire_const::FLAG_D_N,
                     id,
                     keyexpr: sender_space(0, Some(suffix)),
+                    extensions: None,
                 },
             ),
             ..Default::default()

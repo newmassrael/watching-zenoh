@@ -34,11 +34,26 @@
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="undecl_kexpr">
+  <!-- R311y804: the Z-gated body ext chain. This is the ONE undeclare body
+       that lacked it — undecl_subscriber / undecl_queryable / undecl_token all
+       carry the identical chain because their SOURCED form rides it (the
+       `ext_wire_expr` upstream writes when the retraction names a keyexpr
+       instead of an id), and UndeclareKeyExpr has no such ext so nobody added
+       one. It still has the Z bit on the wire and upstream still consumes it:
+       zenoh `extension::skip_all` (zenoh-codec declare.rs:377-381), pico
+       `_z_msg_ext_skip_non_mandatories(zbf, 0x10)` (declarations.c:192-200).
+       An unconsumed chain here desynchronises the remainder of the DECLARE
+       batch, so the absence was the same defect as the four siblings'. -->
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x01"/>
       <sce:flag name="Z"   bit="7"/>
     </sce:flags>
     <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   max-depth="8" on-overflow="reject"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
   </datamodel>
 </scxml>

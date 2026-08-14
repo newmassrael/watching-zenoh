@@ -2735,6 +2735,9 @@ mod tests {
                     header: wz_codecs::decl_kexpr::DeclKexpr::default().header | 0x20,
                     id: 42,
                     keyexpr,
+                    // R311y804: the body's own Z-gated chain, absent here for the
+                    // reason the header comment above already gives.
+                    extensions: None,
                 },
             ),
         };

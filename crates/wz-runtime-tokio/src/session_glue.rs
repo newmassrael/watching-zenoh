@@ -3201,7 +3201,9 @@ mod reconnect_tx_tests {
             interest_id: Some(14),
             extensions: None,
             body: wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclFinal(
-                wz_codecs::decl_final::DeclFinal::default(),
+                wz_codecs::decl_final::DeclFinal::default()
+                    .try_into_owned()
+                    .expect("DeclFinal::default owns no borrowed data"),
             ),
         };
         let outcome = DriverLoopOutcome::FramePayload {

@@ -41,17 +41,17 @@ use super::undecl_token::UndeclToken;
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeclareVariant<'a> {
     CodecZenohDeclKexpr(DeclKexpr<'a>),
-    CodecZenohUndeclKexpr(UndeclKexpr),
+    CodecZenohUndeclKexpr(UndeclKexpr<'a>),
     CodecZenohDeclSubscriber(DeclSubscriber<'a>),
     CodecZenohUndeclSubscriber(UndeclSubscriber<'a>),
     CodecZenohDeclQueryable(DeclQueryable<'a>),
     CodecZenohUndeclQueryable(UndeclQueryable<'a>),
     CodecZenohDeclToken(DeclToken<'a>),
     CodecZenohUndeclToken(UndeclToken<'a>),
-    CodecZenohDeclFinal(DeclFinal),
+    CodecZenohDeclFinal(DeclFinal<'a>),
     Default {
         tag: u8,
-        body: DeclFinal,
+        body: DeclFinal<'a>,
     },
 }
 
@@ -336,7 +336,9 @@ impl<'a> Declare<'a> {
 // Naming it once is also what lets each field's declared capacity infer,
 // so no call site repeats a `sce:max-size` / `sce:max-count` constant.
 use super::ext_entry::ExtEntryOwned;
+use super::decl_final::DeclFinalOwned;
 use super::decl_kexpr::DeclKexprOwned;
+use super::undecl_kexpr::UndeclKexprOwned;
 use super::decl_subscriber::DeclSubscriberOwned;
 use super::decl_queryable::DeclQueryableOwned;
 use super::decl_token::DeclTokenOwned;
@@ -387,17 +389,17 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclareOwned<S> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeclareOwnedVariant<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
     CodecZenohDeclKexpr(DeclKexprOwned<S>),
-    CodecZenohUndeclKexpr(UndeclKexpr),
+    CodecZenohUndeclKexpr(UndeclKexprOwned<S>),
     CodecZenohDeclSubscriber(DeclSubscriberOwned<S>),
     CodecZenohUndeclSubscriber(UndeclSubscriberOwned<S>),
     CodecZenohDeclQueryable(DeclQueryableOwned<S>),
     CodecZenohUndeclQueryable(UndeclQueryableOwned<S>),
     CodecZenohDeclToken(DeclTokenOwned<S>),
     CodecZenohUndeclToken(UndeclTokenOwned<S>),
-    CodecZenohDeclFinal(DeclFinal),
+    CodecZenohDeclFinal(DeclFinalOwned<S>),
     Default {
         tag: u8,
-        body: DeclFinal,
+        body: DeclFinalOwned<S>,
     },
 }
 
@@ -410,15 +412,15 @@ impl<'a> DeclareVariant<'a> {
     pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<DeclareOwnedVariant<S>, CodecError> {
         Ok(match self {
             DeclareVariant::CodecZenohDeclKexpr(_b) => DeclareOwnedVariant::CodecZenohDeclKexpr(_b.try_into_owned_in::<S>()?),
-            DeclareVariant::CodecZenohUndeclKexpr(_b) => DeclareOwnedVariant::CodecZenohUndeclKexpr(_b),
+            DeclareVariant::CodecZenohUndeclKexpr(_b) => DeclareOwnedVariant::CodecZenohUndeclKexpr(_b.try_into_owned_in::<S>()?),
             DeclareVariant::CodecZenohDeclSubscriber(_b) => DeclareOwnedVariant::CodecZenohDeclSubscriber(_b.try_into_owned_in::<S>()?),
             DeclareVariant::CodecZenohUndeclSubscriber(_b) => DeclareOwnedVariant::CodecZenohUndeclSubscriber(_b.try_into_owned_in::<S>()?),
             DeclareVariant::CodecZenohDeclQueryable(_b) => DeclareOwnedVariant::CodecZenohDeclQueryable(_b.try_into_owned_in::<S>()?),
             DeclareVariant::CodecZenohUndeclQueryable(_b) => DeclareOwnedVariant::CodecZenohUndeclQueryable(_b.try_into_owned_in::<S>()?),
             DeclareVariant::CodecZenohDeclToken(_b) => DeclareOwnedVariant::CodecZenohDeclToken(_b.try_into_owned_in::<S>()?),
             DeclareVariant::CodecZenohUndeclToken(_b) => DeclareOwnedVariant::CodecZenohUndeclToken(_b.try_into_owned_in::<S>()?),
-            DeclareVariant::CodecZenohDeclFinal(_b) => DeclareOwnedVariant::CodecZenohDeclFinal(_b),
-            DeclareVariant::Default { tag, body } => DeclareOwnedVariant::Default { tag, body },
+            DeclareVariant::CodecZenohDeclFinal(_b) => DeclareOwnedVariant::CodecZenohDeclFinal(_b.try_into_owned_in::<S>()?),
+            DeclareVariant::Default { tag, body } => DeclareOwnedVariant::Default { tag, body: body.try_into_owned_in::<S>()? },
         })
     }
 
@@ -436,16 +438,16 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclareOwnedVariant<S> {
     /// its own.
     pub fn try_as_borrowed(&self) -> Result<DeclareVariant<'_>, CodecError> {
         Ok(match self {
-            DeclareOwnedVariant::CodecZenohDeclKexpr(_b) => DeclareVariant::CodecZenohDeclKexpr(_b.as_borrowed()),
-            DeclareOwnedVariant::CodecZenohUndeclKexpr(_b) => DeclareVariant::CodecZenohUndeclKexpr(_b.clone()),
-            DeclareOwnedVariant::CodecZenohDeclSubscriber(_b) => DeclareVariant::CodecZenohDeclSubscriber(_b.as_borrowed()),
+            DeclareOwnedVariant::CodecZenohDeclKexpr(_b) => DeclareVariant::CodecZenohDeclKexpr(_b.try_as_borrowed()?),
+            DeclareOwnedVariant::CodecZenohUndeclKexpr(_b) => DeclareVariant::CodecZenohUndeclKexpr(_b.try_as_borrowed()?),
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(_b) => DeclareVariant::CodecZenohDeclSubscriber(_b.try_as_borrowed()?),
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(_b) => DeclareVariant::CodecZenohUndeclSubscriber(_b.try_as_borrowed()?),
             DeclareOwnedVariant::CodecZenohDeclQueryable(_b) => DeclareVariant::CodecZenohDeclQueryable(_b.try_as_borrowed()?),
             DeclareOwnedVariant::CodecZenohUndeclQueryable(_b) => DeclareVariant::CodecZenohUndeclQueryable(_b.try_as_borrowed()?),
-            DeclareOwnedVariant::CodecZenohDeclToken(_b) => DeclareVariant::CodecZenohDeclToken(_b.as_borrowed()),
+            DeclareOwnedVariant::CodecZenohDeclToken(_b) => DeclareVariant::CodecZenohDeclToken(_b.try_as_borrowed()?),
             DeclareOwnedVariant::CodecZenohUndeclToken(_b) => DeclareVariant::CodecZenohUndeclToken(_b.try_as_borrowed()?),
-            DeclareOwnedVariant::CodecZenohDeclFinal(_b) => DeclareVariant::CodecZenohDeclFinal(_b.clone()),
-            DeclareOwnedVariant::Default { tag, body } => DeclareVariant::Default { tag: *tag, body: body.clone() },
+            DeclareOwnedVariant::CodecZenohDeclFinal(_b) => DeclareVariant::CodecZenohDeclFinal(_b.try_as_borrowed()?),
+            DeclareOwnedVariant::Default { tag, body } => DeclareVariant::Default { tag: *tag, body: body.try_as_borrowed()? },
         })
     }
 }

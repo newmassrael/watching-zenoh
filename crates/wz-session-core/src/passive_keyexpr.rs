@@ -252,6 +252,7 @@ mod tests {
                 header: 0,
                 id,
                 keyexpr: expr,
+                extensions: None,
             },
         ))
     }
@@ -358,7 +359,11 @@ mod tests {
         t.observe_declare(Direction::A, &declare_kexpr(5, local(0, Some("demo/x"))));
         assert_eq!(t.len(Direction::A), 1);
         let undecl = declaring(DeclareOwnedVariant::CodecZenohUndeclKexpr(
-            wz_codecs::undecl_kexpr::UndeclKexpr { header: 0, id: 5 },
+            wz_codecs::undecl_kexpr::UndeclKexprOwned {
+                header: 0,
+                id: 5,
+                extensions: None,
+            },
         ));
         t.observe_declare(Direction::A, &undecl);
         assert!(t.is_empty(Direction::A));

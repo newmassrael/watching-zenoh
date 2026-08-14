@@ -35,13 +35,13 @@ use crate::ext_nodeid::MESSAGE_FLAG_Z;
 /// peer reads as a truncated message rather than as a missing field.
 const DECLARE_ENVELOPE_HEADER: u8 = wire_const::N_MID_DECLARE | MESSAGE_FLAG_Z;
 
-use wz_codecs::decl_final::DeclFinal;
+use wz_codecs::decl_final::DeclFinalOwned;
 use wz_codecs::decl_kexpr::DeclKexprOwned;
 use wz_codecs::decl_queryable::DeclQueryableOwned;
 use wz_codecs::decl_subscriber::DeclSubscriberOwned;
 use wz_codecs::decl_token::DeclTokenOwned;
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
-use wz_codecs::undecl_kexpr::UndeclKexpr;
+use wz_codecs::undecl_kexpr::UndeclKexprOwned;
 use wz_codecs::undecl_queryable::UndeclQueryableOwned;
 use wz_codecs::undecl_subscriber::UndeclSubscriberOwned;
 use wz_codecs::undecl_token::UndeclTokenOwned;
@@ -122,6 +122,9 @@ pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> Result<DeclareOwned
                     suffix: Some(crate::codec_owned::owned_string(suffix)?),
                 }),
             },
+            // R311y804: Z=0 — neither upstream writes a body ext here, so the
+            // emitted bytes are unchanged. The chain is for the INBOUND side.
+            extensions: None,
         }),
     })
 }
@@ -200,6 +203,10 @@ pub fn build_declare_subscriber(
                     suffix: suffix_string,
                 }),
             },
+            // R311y804: Z=0 — pico passes `has_extensions = false` into
+            // `_z_decl_commons_encode` for this body (declarations.c:81-85), so
+            // the emitted bytes are unchanged. The chain is for the INBOUND side.
+            extensions: None,
         }),
     })
 }
@@ -377,6 +384,9 @@ pub fn build_declare_token(
                     suffix: suffix_string,
                 }),
             },
+            // R311y804: Z=0 — same `has_extensions = false` shape as the
+            // subscriber twin (pico declarations.c:123-127). Inbound-only chain.
+            extensions: None,
         }),
     })
 }
@@ -486,6 +496,8 @@ pub fn build_declare_subscriber_nonlocal(
                     suffix: suffix_string,
                 }),
             },
+            // R311y804: Z=0, as on the Local-arm twin. Inbound-only chain.
+            extensions: None,
         }),
     })
 }
@@ -575,6 +587,8 @@ pub fn build_declare_token_nonlocal(
                     suffix: suffix_string,
                 }),
             },
+            // R311y804: Z=0, as on the Local-arm twin. Inbound-only chain.
+            extensions: None,
         }),
     })
 }
@@ -591,20 +605,32 @@ pub fn build_declare_token_nonlocal(
 ///   VLE(mapping_id)
 /// ```
 ///
-/// UndeclKexpr has no wireexpr body and no Z-ext surface (unlike the
-/// other three Undecl_* variants below): the retraction is purely
-/// id-based because the peer already has the (id -> keyexpr) entry
-/// from a prior `Declare(DeclKexpr)`. The Z bit is bit-7 of the
-/// header and is left clear by every conformant zenoh-pico
-/// emit — wz mirrors that contract.
+/// UndeclKexpr has no wireexpr body and NO EXT THIS BUILDER EMITS (unlike
+/// the other three Undecl_* variants below, whose sourced form carries an
+/// `ext_keyexpr`): the retraction is purely id-based because the peer
+/// already has the (id -> keyexpr) entry from a prior
+/// `Declare(DeclKexpr)`. The Z bit is bit-7 of the header and is left clear
+/// by every conformant zenoh-pico emit — wz mirrors that contract.
+///
+/// R311y804 corrects the half of that sentence which said this body has no
+/// Z-EXT SURFACE at all. The DECODE surface exists in both upstreams —
+/// zenoh `extension::skip_all` (zenoh-codec network/declare.rs:377-381),
+/// pico `_z_msg_ext_skip_non_mandatories(zbf, 0x10)`
+/// (declarations.c:192-200) — and wz now carries it too. What stays true
+/// is the emit contract above: wz writes Z=0 here.
 pub fn build_undeclare_kexpr(mapping_id: u64) -> DeclareOwned {
     DeclareOwned {
         header: DECLARE_ENVELOPE_HEADER,
         interest_id: None,
         extensions: Some(declare_envelope_extensions()),
-        body: DeclareOwnedVariant::CodecZenohUndeclKexpr(UndeclKexpr {
+        body: DeclareOwnedVariant::CodecZenohUndeclKexpr(UndeclKexprOwned {
             header: wire_const::D_MID_UNDECL_KEXPR,
             id: mapping_id,
+            // R311y804: Z=0. This body has no ext of its own in either upstream
+            // (unlike the sourced UndeclareSubscriber / -Queryable / -Token,
+            // which carry `ext_keyexpr`); the chain exists so an INBOUND one is
+            // consumed rather than left to desynchronise the batch.
+            extensions: None,
         }),
     }
 }
@@ -799,8 +825,12 @@ pub fn build_declare_final() -> DeclareOwned {
         header: DECLARE_ENVELOPE_HEADER,
         interest_id: None,
         extensions: Some(declare_envelope_extensions()),
-        body: DeclareOwnedVariant::CodecZenohDeclFinal(DeclFinal {
+        body: DeclareOwnedVariant::CodecZenohDeclFinal(DeclFinalOwned {
             header: wire_const::D_MID_FINAL,
+            // R311y804: Z=0, so the emitted Final stays the bare one-byte body
+            // both upstreams write (pico `_z_decl_final_encode`,
+            // declarations.c:131-135).
+            extensions: None,
         }),
     }
 }

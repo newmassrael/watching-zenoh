@@ -46,6 +46,24 @@
     <sce:variant-dispatch flag="header.M"/>
     <sce:flag-bind input="N" source="header.N"/>
   </sce:import>
+  <!-- R311y804: the Z-gated body ext chain. The header has carried a Z bit
+       since R106 and NOTHING consumed it, so a peer that set it left its
+       extension bytes in the cursor — and a DECLARE batch is a run of
+       self-delimiting records with no per-record length prefix
+       (wz-session-core network_message.rs `parse_frame_payload`), so the
+       leftover desynchronises every record AFTER this one rather than
+       failing this one. Both upstreams consume it unconditionally: zenoh
+       loops `extension::skip` (zenoh-codec/src/network/declare.rs:452-457)
+       and pico iterates `_z_decl_subscriber_decode_extensions`
+       (src/protocol/codec/declarations.c:259-267). Neither 1.5.0 WRITER
+       sets the bit on this body (pico passes `has_extensions=false` into
+       `_z_decl_commons_encode` at declarations.c:81-85; zenoh's writer has
+       no ext to write), so this is the forward-compatibility half of the
+       contract — the half both upstreams implement and wz did not.
+       Opaque carry, exactly as decl_queryable's identical chain: the codec
+       holds entries, the routing layer interprets them. Default state keeps
+       Z=0 and the byte-identical `[0x42, 0x00, 0x00]` wire. -->
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x02"/>
@@ -55,5 +73,9 @@
     </sce:flags>
     <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
     <sce:embed id="keyexpr" type="codec_zenoh_wireexpr" sce:byte="2"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="3"
+                   max-depth="8" on-overflow="reject"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
   </datamodel>
 </scxml>

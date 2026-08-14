@@ -1703,6 +1703,7 @@ mod tests {
                 header: 0,
                 id: 3,
                 keyexpr: literal_wireexpr("other/x").unwrap(),
+                extensions: None,
             }),
         }));
         let undecl_sub = NetworkMessage::Declare(Box::new(DeclareOwned {
@@ -1814,6 +1815,7 @@ mod tests {
                         header: 0,
                         id: 3,
                         keyexpr: literal_wireexpr("other/x").unwrap(),
+                        extensions: None,
                     },
                 ),
             }))],
@@ -1882,6 +1884,7 @@ mod tests {
                             header: 0,
                             id,
                             keyexpr: crate::wireexpr_build::literal_wireexpr(keyexpr).unwrap(),
+                            extensions: None,
                         },
                     ),
                 },
@@ -3147,6 +3150,7 @@ mod tests {
                 header: 0,
                 id,
                 keyexpr: crate::wireexpr_build::literal_wireexpr(ke).unwrap(),
+                extensions: None,
             }),
         }))
     }
@@ -3179,6 +3183,7 @@ mod tests {
                 header: 0,
                 id,
                 keyexpr,
+                extensions: None,
             }),
         }))
     }

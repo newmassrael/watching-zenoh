@@ -6640,6 +6640,7 @@ mod datagram_tests {
                         | wz_session_core::wire_const::FLAG_D_N,
                     id: 1,
                     keyexpr: literal("census/declare"),
+                    extensions: None,
                 },
             ),
             ..Default::default()

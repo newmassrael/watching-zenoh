@@ -729,3 +729,200 @@ mod best_effort_batch_tests {
         assert!(best.is_complete());
     }
 }
+
+// ── R311y804 — the Z-flagged DECLARATION-BODY ext chain, and why every
+//    assertion below is about the SECOND record.
+//
+//    Each declaration body carries a `Z` bit at header bit 7 meaning "an
+//    extension chain follows", and both upstreams consume it unconditionally:
+//    zenoh loops `extension::skip` / `skip_all` per body
+//    (zenoh-codec/src/network/declare.rs — :319 DeclareKeyExpr, :377
+//    UndeclareKeyExpr, :452 DeclareSubscriber, :826 DeclareToken, :255 Final),
+//    and pico calls `_z_msg_ext_skip_non_mandatories` / `_z_msg_ext_decode_iter`
+//    at the same five sites (src/protocol/codec/declarations.c:181-191,
+//    :192-200, :259-267, :301-309, :314-321). wz consumed it on the four bodies
+//    that carry an ext of their OWN (the queryable info, the sourced
+//    `ext_keyexpr`) and on none of these five.
+//
+//    A test that only asserts the Z-flagged record itself decodes proves
+//    NOTHING — the old decoder returned `Ok` too, having simply stopped early.
+//    What the unconsumed bytes cost is the REST OF THE BATCH: a batch is a run
+//    of self-delimiting records with no per-record length prefix (see
+//    `BatchHalt`'s header above), so record N+1 is found only by having fully
+//    decoded record N. Each test therefore puts a second, ordinary
+//    `Declare(UndeclKexpr id = 42)` after the Z-flagged one and asserts THAT
+//    survives. Before this round every one of them read the ext header byte
+//    `0x21` as a network MID (`0x21 & 0x1F == 0x01`, which is no N_MID),
+//    absorbed the remainder as `Unknown`, and lost the second record.
+//
+//    The fixtures are hand-assembled bytes on purpose: wz's own builders write
+//    Z=0 on all five bodies, as do both upstreams' 1.5.0 writers, so an
+//    encode-then-decode round trip could not reach the arm under test. These
+//    bytes are what a peer with one extension more than this revision knows
+//    about puts on the wire. ──
+#[cfg(all(test, feature = "codec-frame", feature = "codec-declare"))]
+mod declare_body_ext_chain_tests {
+    use super::*;
+
+    /// A terminal ZINT extension: id 1, `enc = ZINT` (`0b01 << 5`), no `M`, no
+    /// `Z` — so the chain ends here — carrying VLE(42).
+    const TERMINAL_ZINT_EXT: [u8; 2] = [0x21, 0x2A];
+
+    /// The mapping id of the record every test appends AFTER the Z-flagged one.
+    const SENTINEL_ID: u64 = 42;
+
+    /// That record: a plain `Declare(UndeclKexpr)`, two bytes of body, no flags,
+    /// nothing shared with the record before it — so decoding it back out with
+    /// the right id is not something a desynchronised cursor produces.
+    fn sentinel_record() -> Vec<u8> {
+        alloc::vec![wire_const::N_MID_DECLARE, 0x01, SENTINEL_ID as u8]
+    }
+
+    /// `[Declare(<z_flagged_body>), Declare(UndeclKexpr 42)]`.
+    fn batch_after(z_flagged_body: &[u8]) -> Vec<u8> {
+        let mut wire = alloc::vec![wire_const::N_MID_DECLARE];
+        wire.extend_from_slice(z_flagged_body);
+        wire.extend_from_slice(&sentinel_record());
+        wire
+    }
+
+    /// The shared assertion: two records came back, and the SECOND is the
+    /// sentinel with its id intact.
+    fn assert_sentinel_survived(wire: &[u8], what: &str) -> Vec<NetworkMessage> {
+        let msgs = parse_frame_payload(wire)
+            .unwrap_or_else(|e| panic!("{what}: the batch must parse, got {e:?}"));
+        assert_eq!(
+            msgs.len(),
+            2,
+            "{what}: the Z-flagged body swallowed the record after it"
+        );
+        match &msgs[1] {
+            NetworkMessage::Declare(d) => match &d.body {
+                wz_codecs::declare::DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
+                    assert_eq!(
+                        u.id, SENTINEL_ID,
+                        "{what}: the second record decoded at the wrong offset"
+                    );
+                }
+                other => panic!("{what}: expected the sentinel UndeclKexpr, got {other:?}"),
+            },
+            other => panic!("{what}: expected a Declare, got {other:?}"),
+        }
+        msgs
+    }
+
+    /// DeclSubscriber, and the one fixture with a MULTI-entry chain: the first
+    /// entry sets its own `Z` (0x80) so the loop must run twice. A decoder that
+    /// consumed exactly one entry fails here while passing every single-entry
+    /// sibling below.
+    #[test]
+    fn a_z_flagged_decl_subscriber_does_not_swallow_the_next_record() {
+        let body = alloc::vec![
+            0x02 | 0x80, // DeclSubscriber MID 0x02 | Z
+            0x07,        // subscriber id
+            0x00,        // wireexpr mapping id (N=0, so no suffix)
+            0xA1,        // ext id 1, ZINT, Z set -> one more follows
+            0x2A,        // VLE(42)
+            0x22,        // ext id 2, ZINT, terminal
+            0x07,        // VLE(7)
+        ];
+        let msgs = assert_sentinel_survived(&batch_after(&body), "decl_subscriber");
+        match &msgs[0] {
+            NetworkMessage::Declare(d) => match &d.body {
+                wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(s) => {
+                    assert_eq!(
+                        s.extensions.as_ref().map_or(0, |e| e.len()),
+                        2,
+                        "both chain entries must be held, not skipped"
+                    );
+                }
+                other => panic!("expected a DeclSubscriber, got {other:?}"),
+            },
+            other => panic!("expected a Declare, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_z_flagged_decl_token_does_not_swallow_the_next_record() {
+        let mut body = alloc::vec![
+            0x06 | 0x80, // DeclToken MID 0x06 | Z
+            0x09,        // token id
+            0x00,        // wireexpr mapping id (N=0)
+        ];
+        body.extend_from_slice(&TERMINAL_ZINT_EXT);
+        assert_sentinel_survived(&batch_after(&body), "decl_token");
+    }
+
+    /// DeclKexpr is the sharper of the two bodies that did not model bit 7 at
+    /// all — the flag was absent from `decl_kexpr.scxml`, so there was no `z()`
+    /// accessor to have ignored.
+    #[test]
+    fn a_z_flagged_decl_kexpr_does_not_swallow_the_next_record() {
+        let mut body = alloc::vec![
+            0x00 | 0x80, // DeclKexpr MID 0x00 | Z (N=0)
+            0x03,        // mapping id
+            0x00,        // wireexpr mapping id
+        ];
+        body.extend_from_slice(&TERMINAL_ZINT_EXT);
+        assert_sentinel_survived(&batch_after(&body), "decl_kexpr");
+    }
+
+    /// UndeclKexpr had the `Z` flag declared with no chain behind it, which is
+    /// the shape that reads as deliberate and is not: its three Undecl_*
+    /// siblings all consume a chain because their SOURCED form rides one, and
+    /// this body has no ext of its own to have prompted the same work.
+    #[test]
+    fn a_z_flagged_undecl_kexpr_does_not_swallow_the_next_record() {
+        let mut body = alloc::vec![
+            0x01 | 0x80, // UndeclKexpr MID 0x01 | Z
+            0x05,        // mapping id
+        ];
+        body.extend_from_slice(&TERMINAL_ZINT_EXT);
+        assert_sentinel_survived(&batch_after(&body), "undecl_kexpr");
+    }
+
+    #[test]
+    fn a_z_flagged_decl_final_does_not_swallow_the_next_record() {
+        let mut body = alloc::vec![0x1A | 0x80]; // DeclFinal MID 0x1A | Z
+        body.extend_from_slice(&TERMINAL_ZINT_EXT);
+        assert_sentinel_survived(&batch_after(&body), "decl_final");
+    }
+
+    /// An UNKNOWN declaration MID with a chain, decoded through the `DeclFinal`
+    /// catch-all arm. wz ABSORBS an unknown declaration where both upstreams
+    /// reject the whole message, so wz is the implementation for which
+    /// consuming the chain changes an outcome rather than tidying one.
+    #[test]
+    fn an_unknown_declaration_kind_with_a_chain_does_not_swallow_the_next_record() {
+        // MID 0x0B is in no `declare::id::*` upstream and no wz arm.
+        let mut body = alloc::vec![0x0B | 0x80];
+        body.extend_from_slice(&TERMINAL_ZINT_EXT);
+        assert_sentinel_survived(&batch_after(&body), "unknown declaration kind");
+    }
+
+    /// wz HOLDS the chain where both upstreams DISCARD it (zenoh's `skip`,
+    /// pico's `skip_non_mandatories`), so a decoded body re-encodes to the bytes
+    /// it came from. That is a superset of upstream behaviour, and it separates
+    /// "the chain is consumed" from "the chain is modelled" — a skip-only
+    /// decoder passes every test above and fails this one.
+    #[test]
+    fn a_decoded_z_flagged_body_re_encodes_to_the_bytes_it_came_from() {
+        use sce_forge_runtime::codec::SceCursor;
+        let wire = alloc::vec![
+            wire_const::N_MID_DECLARE,
+            0x02 | 0x80, // DeclSubscriber | Z
+            0x07,
+            0x00,
+            0x21,
+            0x2A,
+        ];
+        let mut cursor = SceCursor::new(&wire);
+        let decoded = wz_codecs::declare::Declare::decode(&mut cursor).expect("decode");
+        assert_eq!(
+            cursor.remaining(),
+            0,
+            "the decode left the extension bytes on the cursor"
+        );
+        assert_eq!(decoded.encode_to_vec(), wire);
+    }
+}

@@ -660,6 +660,7 @@ mod tests {
                         header: 0,
                         id,
                         keyexpr: literal(ke),
+                        extensions: None,
                     },
                 ),
             }))
@@ -709,6 +710,7 @@ mod tests {
                         header: 0,
                         id,
                         keyexpr: literal(ke),
+                        extensions: None,
                     },
                 ),
             }))
@@ -874,6 +876,7 @@ mod tests {
                 header: 0,
                 id: 9,
                 keyexpr: literal("foo"),
+                extensions: None,
             },
         ));
         apply_egress(&n, &mut k).unwrap();
@@ -884,6 +887,7 @@ mod tests {
                 header: 0,
                 id: 1,
                 keyexpr: literal("bar"),
+                extensions: None,
             },
         ));
         apply_egress(&n, &mut s).unwrap();
@@ -894,6 +898,7 @@ mod tests {
                 header: 0,
                 id: 2,
                 keyexpr: aliased_sender(7, Some("baz")),
+                extensions: None,
             },
         ));
         apply_egress(&n, &mut a).unwrap();
@@ -961,9 +966,10 @@ mod tests {
                 header: 0,
                 interest_id: None,
                 extensions: None,
-                body: DV::CodecZenohUndeclKexpr(wz_codecs::undecl_kexpr::UndeclKexpr {
+                body: DV::CodecZenohUndeclKexpr(wz_codecs::undecl_kexpr::UndeclKexprOwned {
                     header: 0,
                     id,
+                    extensions: None,
                 }),
             }))
         };
@@ -1012,6 +1018,7 @@ mod tests {
                 header: 0,
                 id: 2,
                 keyexpr: literal("other/t"),
+                extensions: None,
             },
         ))));
         assert!(ing.blocked_tokens.contains(&2));

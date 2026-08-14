@@ -15,8 +15,15 @@ extern crate alloc;
 use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
+// RFC §synth-5-B B2/B3: bounded inline list storage for repeat / tlv-chain
+// fields — heap-free `heapless::Vec<T, N>` (re-exported by the runtime),
+// the Rust mirror of the C11 `T elems[MAX]; len` representation. Always
+// available (no `alloc` gate) so list-bearing codecs compile on the
+// pure no_std no-alloc MCU tier.
+use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
 use super::wireexpr::Wireexpr;
+use super::ext_entry::ExtEntry;
 
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
 // §6 codec). The kind-agnostic conformance harness only references a
@@ -28,6 +35,7 @@ pub struct DeclKexpr<'a> {
     pub header: u8,
     pub id: u64,
     pub keyexpr: Wireexpr<'a>,
+    pub extensions: Option<HeaplessVec<ExtEntry<'a>, 8>>,
 }
 
 #[allow(dead_code)]
@@ -65,10 +73,34 @@ impl<'a> DeclKexpr<'a> {
         };
         let id = cursor.read_vle_u64()?;
         let keyexpr = Wireexpr::decode(cursor, (header >> 5) & 0x1, 0x1u8)?;
+        let extensions = if (header & 0x80u8) != 0 {
+            let mut _vec: HeaplessVec<ExtEntry<'a>, 8> = HeaplessVec::new();
+            let mut _more = false;
+            for _ in 0..8u32 {
+                if cursor.remaining() == 0 { break; }
+                let _entry = ExtEntry::decode(cursor)?;
+                _more = _entry.z();
+                // Bounded by max-depth on both sides — loop count and `_vec`
+                // capacity are the same literal — so this push cannot fail. An
+                // over-long chain is refused by the guard after the loop.
+                _vec.push(_entry).map_err(|_| CodecError::TooManyElements)?;
+                if !_more { break; }
+            }
+            if _more && cursor.remaining() == 0 {
+                return Err(CodecError::NeedMoreBytes);
+            }
+            if _more {
+                return Err(CodecError::TlvChainOverflow);
+            }
+            Some(_vec)
+        } else {
+            None
+        };
         Ok(Self {
             header,
             id,
             keyexpr,
+            extensions,
         })
     }
 
@@ -98,11 +130,23 @@ impl<'a> DeclKexpr<'a> {
         }
     }
 
+    pub fn z(&self) -> bool {
+        (self.header & 0x80) != 0
+    }
+
+    pub fn set_z(&mut self, v: bool) {
+        if v {
+            self.header |= 0x80;
+        } else {
+            self.header &= !0x80;
+        }
+    }
+
     /// Worst-case encoded byte count for this codec — the upper bound
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 266;
+    pub const MAX_ENCODED_BYTES: usize = 602;
 
     /// Encode `self` into the caller-owned sink. Returns
     /// `CodecError::BufferOverflow` from a bounded sink when the
@@ -121,6 +165,11 @@ impl<'a> DeclKexpr<'a> {
         w.write_u8(self.header)?;
         w.write_vle_u64(self.id)?;
         self.keyexpr.encode(w, (self.header >> 5) & 0x1)?;
+        if let Some(_list) = &self.extensions {
+            for _e in _list {
+                _e.encode(w)?;
+            }
+        }
         Ok(())
     }
 
@@ -165,7 +214,7 @@ impl<'a> DeclKexpr<'a> {
 //
 // `try_into_owned` is the fallible direction (one `?` per profile: on the
 // growable profile the copy cannot fail, on the inline profile it enforces
-// each declared bound); `as_borrowed` re-borrows any profile back
+// each declared bound); `try_as_borrowed` re-borrows any profile back
 // into the single borrowed view that owns `encode`; `transcode_in` moves a
 // value between profiles as a checked projection rather than a re-decode.
 //
@@ -177,6 +226,7 @@ impl<'a> DeclKexpr<'a> {
 // Naming it once is also what lets each field's declared capacity infer,
 // so no call site repeats a `sce:max-size` / `sce:max-count` constant.
 use super::wireexpr::WireexprOwned;
+use super::ext_entry::ExtEntryOwned;
 // Same pub-API policy as the borrowed view above: the owned mirror and its
 // projections are cross-crate surface, and which of them a given in-repo
 // fixture happens to call says nothing about their value.
@@ -186,6 +236,7 @@ pub struct DeclKexprOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_fo
     pub header: u8,
     pub id: u64,
     pub keyexpr: WireexprOwned<S>,
+    pub extensions: Option<S::List<ExtEntryOwned<S>, 16>>,
 }
 
 #[allow(dead_code)]
@@ -202,6 +253,10 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclKexprOwned<S> {
 
     pub fn n(&self) -> bool {
         (self.header & 0x20) != 0
+    }
+
+    pub fn z(&self) -> bool {
+        (self.header & 0x80) != 0
     }
 }
 
@@ -223,6 +278,7 @@ impl<'a> DeclKexpr<'a> {
             header: self.header,
             id: self.id,
             keyexpr: self.keyexpr.try_into_owned_in::<S>()?,
+            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
         })
     }
 
@@ -238,14 +294,19 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclKexprOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
-    /// reaches it via `as_borrowed` then `encode` / `encode_to_vec`.
+    /// reaches it via `try_as_borrowed` then `encode` / `encode_to_vec`.
     /// Each field is projected by reference — a cheap re-borrow, not a copy.
-    pub fn as_borrowed(&self) -> DeclKexpr<'_> {
-        DeclKexpr {
+    /// Fallible: a bounded `<sce:repeat>` / `<sce:tlv-chain>` list holding
+    /// more than its declared `N` raises `CodecError::TooManyElements` — the
+    /// same bound decode enforces. Only a growable profile can hold such a
+    /// list; on the inline profile the source is already within bounds.
+    pub fn try_as_borrowed(&self) -> Result<DeclKexpr<'_>, CodecError> {
+        Ok(DeclKexpr {
             header: self.header,
             id: self.id,
             keyexpr: self.keyexpr.as_borrowed(),
-        }
+            extensions: self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::try_project_bounded(_l, |_e| Ok(_e.as_borrowed()))).transpose()?,
+        })
     }
 
     /// Move this value to a different storage profile — growable to inline
@@ -257,6 +318,6 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclKexprOwned<S> {
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
     pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<DeclKexprOwned<D>, CodecError> {
-        self.as_borrowed().try_into_owned_in::<D>()
+        self.try_as_borrowed()?.try_into_owned_in::<D>()
     }
 }

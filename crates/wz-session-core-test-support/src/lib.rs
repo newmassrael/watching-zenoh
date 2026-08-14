@@ -45,7 +45,7 @@ use wz_codecs::decl_token::{DeclToken, DeclTokenOwned};
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::interest::{Interest, InterestOwned};
 use wz_codecs::interest_body::InterestBody;
-use wz_codecs::undecl_kexpr::UndeclKexpr;
+use wz_codecs::undecl_kexpr::{UndeclKexpr, UndeclKexprOwned};
 use wz_codecs::undecl_queryable::{UndeclQueryable, UndeclQueryableOwned};
 use wz_codecs::undecl_subscriber::{UndeclSubscriber, UndeclSubscriberOwned};
 use wz_codecs::undecl_token::{UndeclToken, UndeclTokenOwned};
@@ -146,11 +146,13 @@ pub fn decl_subscriber_nonlocal(
     .unwrap()
 }
 
-pub fn undecl_kexpr(id: u64) -> UndeclKexpr {
+pub fn undecl_kexpr(id: u64) -> UndeclKexprOwned {
     UndeclKexpr {
         id,
         ..UndeclKexpr::default()
     }
+    .try_into_owned()
+    .expect("undecl_kexpr owns no borrowed data")
 }
 
 pub fn undecl_subscriber(id: u64) -> UndeclSubscriberOwned {
@@ -275,7 +277,7 @@ pub fn declare_envelope_decl_kexpr(d: DeclKexprOwned) -> DeclareOwned {
     }
 }
 
-pub fn declare_envelope_undecl_kexpr(u: UndeclKexpr) -> DeclareOwned {
+pub fn declare_envelope_undecl_kexpr(u: UndeclKexprOwned) -> DeclareOwned {
     DeclareOwned {
         header: 0,
         interest_id: None,
@@ -363,6 +365,10 @@ pub fn declare_envelope_decl_final_with_interest(interest_id: u64) -> DeclareOwn
         header: 0,
         interest_id: Some(interest_id),
         extensions: None,
-        body: DeclareOwnedVariant::CodecZenohDeclFinal(DeclFinal::default()),
+        body: DeclareOwnedVariant::CodecZenohDeclFinal(
+            DeclFinal::default()
+                .try_into_owned()
+                .expect("DeclFinal::default owns no borrowed data"),
+        ),
     }
 }

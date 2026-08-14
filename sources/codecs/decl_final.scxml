@@ -28,9 +28,39 @@
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="decl_final">
+  <!-- R311y804: the Z bit and its ext chain. Like decl_kexpr, this body did
+       not model bit 7 at all, so `DeclFinal::decode` read exactly one byte and
+       a Z-flagged Final left its whole chain in the cursor. The bit is part of
+       the declared format — `|Z|X|X| D_FINAL |` with `~ [final_exts] ~ if Z==1`
+       (zenoh-protocol network/declare.rs:156-170) — and both upstreams consume
+       it: zenoh `extension::skip_all(reader, "Final")`
+       (zenoh-codec/src/network/declare.rs:255-259), pico
+       `_z_msg_ext_skip_non_mandatories(zbf, 0x13)` (declarations.c:314-321).
+       Neither 1.5.0 writer sets it (pico's `_z_decl_final_encode` emits the
+       bare MID, declarations.c:131-135; zenoh's writer likewise), so this is
+       the forward-compatibility half.
+
+       SECOND CONSEQUENCE, named rather than discovered later: DeclFinal is also
+       `declare.scxml`'s catch-all body, so an UNKNOWN declaration MID decodes
+       through this codec (`DeclareVariant::Default { tag, body }`). It now
+       consumes that unknown body's ext chain too, which is what keeps the rest
+       of the batch parseable instead of resyncing on an extension byte. wz
+       ABSORBS an unknown declaration where both upstreams reject the whole
+       message, so wz is the implementation for which consuming the chain
+       actually changes an outcome.
+
+       Declaring the flag with no `value=` leaves the default header at 0x1A,
+       so `DeclFinal::default()` still round-trips the 1-byte wire and
+       `Declare::default()` is unchanged. -->
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x1A"/>
+      <sce:flag name="Z"   bit="7"/>
     </sce:flags>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="1"
+                   max-depth="8" on-overflow="reject"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
   </datamodel>
 </scxml>

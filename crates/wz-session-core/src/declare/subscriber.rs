@@ -1013,8 +1013,11 @@ mod tests {
         // — it lives in the SubscriberRegistry's path (DeclKexpr /
         // UndeclKexpr) or the future RemoteQueryableRegistry path
         // (DeclQueryable).
-        let body =
-            DeclareOwnedVariant::CodecZenohDeclFinal(wz_codecs::decl_final::DeclFinal::default());
+        let body = DeclareOwnedVariant::CodecZenohDeclFinal(
+            wz_codecs::decl_final::DeclFinal::default()
+                .try_into_owned()
+                .expect("DeclFinal::default owns no borrowed data"),
+        );
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(
             fired.load(Ordering::SeqCst),

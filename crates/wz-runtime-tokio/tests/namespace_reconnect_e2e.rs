@@ -107,6 +107,7 @@ fn reset_for_reopen_clears_namespace_correlation_keeps_prefix() {
                 header: 0,
                 id,
                 keyexpr: literal_wireexpr(ke).unwrap(),
+                extensions: None,
             }),
         }))],
     };

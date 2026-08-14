@@ -43,12 +43,30 @@
   <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr">
     <sce:flag-bind input="N" source="header.N"/>
   </sce:import>
+  <!-- R311y804: the Z bit itself was NEVER DECLARED on this body — unlike its
+       decl_subscriber / decl_token / decl_queryable siblings, which carried the
+       bit with nothing reading it, this codec did not model bit 7 at all. It is
+       part of the wire format: `|Z|X|N| D_KEXPR |` with `~ [decl_exts] ~ if
+       Z==1` (zenoh-protocol network/declare.rs:230-234, where bit 6 alone is
+       the reserved X the comment above discusses). Both upstreams consume the
+       chain — zenoh `extension::skip_all` (zenoh-codec declare.rs:319-323),
+       pico `_z_msg_ext_skip_non_mandatories(zbf, 0x15)`
+       (declarations.c:181-191) — and neither 1.5.0 writer sets it, so this is
+       the forward-compatibility half. Declaring the flag with no `value=`
+       leaves the default header at 0x00, so the default-state wire is
+       unchanged. -->
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x00"/>
       <sce:flag name="N"   bit="5"/>
+      <sce:flag name="Z"   bit="7"/>
     </sce:flags>
     <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
     <sce:embed id="keyexpr" type="codec_zenoh_wireexpr" sce:byte="2"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="3"
+                   max-depth="8" on-overflow="reject"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
   </datamodel>
 </scxml>

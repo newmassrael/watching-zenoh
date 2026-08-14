@@ -439,14 +439,19 @@ pub fn build_token_reply(token_id: u64, keyexpr: &str, interest_id: u64) -> Decl
                     suffix: Some(keyexpr),
                 }),
             },
+            // R311y804: Z=0 — the reply's bytes are unchanged; the body's ext
+            // chain exists so an INBOUND Z-flagged DeclToken is consumed.
+            extensions: None,
         }),
     }
 }
 
 /// R311ho — build the borrowed `Declare(DeclFinal)` that terminates the
 /// interest-response chain for `interest_id`. Single source shared by the
-/// AP (`into_owned`) and MCU (`SliceSink` encode) emit paths. `DeclFinal`
-/// borrows nothing, so the result is `'static`.
+/// AP (`into_owned`) and MCU (`SliceSink` encode) emit paths. The value
+/// borrows nothing — R311y804 gave `DeclFinal` a lifetime parameter for its
+/// inbound ext chain, but this builder leaves the chain absent, so the
+/// parameter is free and the result is still `'static`.
 pub fn build_final_reply(interest_id: u64) -> Declare<'static> {
     Declare {
         header: wire_const::N_MID_DECLARE | wire_const::FLAG_N_DECLARE_I,
@@ -454,6 +459,8 @@ pub fn build_final_reply(interest_id: u64) -> Declare<'static> {
         extensions: None,
         body: DeclareVariant::CodecZenohDeclFinal(DeclFinal {
             header: wire_const::D_MID_FINAL,
+            // R311y804: Z=0 — the bare one-byte Final both upstreams write.
+            extensions: None,
         }),
     }
 }
