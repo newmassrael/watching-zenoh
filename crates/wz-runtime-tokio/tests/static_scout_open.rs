@@ -17,6 +17,13 @@
 //!   - `open_session_static` skips an unreachable locator to the first
 //!     reachable one, and reports `NoReachableLocator` when none work.
 //!
+//! R311y807 — and the `listen=` half, which static mode had no seam for at
+//! all until `open_session_static_config` (the wz analog of pico reading
+//! `_z_locators_by_config`'s `peer_op`): a real wz<->wz session whose
+//! ACCEPTING half comes up from a `listen=` config alone and announces
+//! itself a peer; `listen=` and `connect=` together refused before any
+//! socket; and a blank `listen=` falling through to the dial arm.
+//!
 //! The active multicast scout -> open e2e is the Layer M follow-up.
 //!
 //! Note: the open loop is bounded only by `max_iters` (poll count), not wall
@@ -53,10 +60,16 @@ use wz_runtime_tokio::writer_queue::WriterHandle;
 // R311if — the static-mode open path is gated on `scouting-static`; the
 // mode-agnostic `open_session_at` tests stay in the default run.
 #[cfg(feature = "scouting-static")]
-use wz_runtime_tokio::session_open::open_session_static;
+use wz_runtime_tokio::session_open::{
+    open_session_static, open_session_static_config, AcceptConfig, OpenedSession,
+};
 #[cfg(feature = "transport-link-udp")]
 use wz_runtime_tokio::udp_pipeline::wire_udp_socket;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
+#[cfg(feature = "scouting-static")]
+use wz_session_core::scout_static::StaticConfigError;
+#[cfg(feature = "scouting-static")]
+use wz_session_core::WhatAmI;
 
 const ITER_CAP: usize = 64;
 
@@ -344,4 +357,209 @@ async fn open_session_static_all_unreachable_is_no_reachable() {
         matches!(err, OpenError::NoReachableLocator),
         "expected NoReachableLocator, got {err:?}"
     );
+}
+
+// ── the `listen=` half of the static deploy config (the wz analog of pico's
+//    `_z_locators_by_config` peer_op, vendor/zenoh-pico/src/net/session.c:87-118).
+//    Until now static mode could only DIAL: `open_session_static` took a
+//    connect list and nothing else, so a `listen=` deploy had no seam at all.
+
+/// Wall-clock bound for the two-half listen tests below.
+///
+/// Both pair an inline acceptor with an initiator inside one `join!`, and
+/// `join!` waits for BOTH: an initiator that errors out WITHOUT connecting
+/// leaves the acceptor parked in `accept()` with nothing left to wake it, so
+/// the test hangs instead of failing. That is not hypothetical — it is what
+/// the R311y807 damage probe measured, when disabling the blank-listen
+/// hygiene turned `static_blank_listen_still_dials_the_connect_list` from a
+/// failure into a run that never returned. A hang is a worse diagnostic than
+/// a failure at every layer that reads it, so these bound their own wait.
+#[cfg(feature = "scouting-static")]
+const LISTEN_PAIR_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// A loopback port that is free at the moment of the call — the repo's
+/// standing convention (`wz-capi-pico/tests/listener_multipeer.rs:88`), used
+/// because `accept_endpoint` binds INSIDE `open_session_static_config` and
+/// therefore cannot hand an ephemeral port back to the dialer. A port stolen
+/// between the probe and the bind surfaces as a loud bind error from the
+/// acceptor, not as a hang.
+#[cfg(feature = "scouting-static")]
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("probe bind")
+        .local_addr()
+        .expect("probe addr")
+        .port()
+}
+
+/// Dial a static connect list, retrying while the acceptor is still binding.
+///
+/// The Listen arm binds inside the call being tested, so there is no instant
+/// before `join!` at which the port is known to be listening and a single-shot
+/// dial races it. Retrying is safe here BECAUSE a retry cannot hide a real
+/// failure: the only attempts that fail are the ones refused before the bind
+/// lands, which consume none of the acceptor's single accept, and the first
+/// attempt that connects at all is between two real wz peers and so runs the
+/// handshake to its true verdict. A barrier that probed the port by connecting
+/// would instead eat that accept, which is why this waits by retrying the seam
+/// rather than by pinging the socket.
+#[cfg(feature = "scouting-static")]
+async fn dial_static_when_listening(
+    connect: &[String],
+    cfg: &DialConfig,
+) -> Result<OpenedSession, OpenError> {
+    let mut last = OpenError::NoReachableLocator;
+    for _ in 0..200 {
+        match open_session_static(
+            connect,
+            initiator_params(),
+            cfg,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        {
+            Ok(opened) => return Ok(opened),
+            Err(e) => {
+                last = e;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    }
+    Err(last)
+}
+
+#[cfg(feature = "scouting-static")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn static_listen_accepts_a_dialing_peer_and_announces_peer_mode() {
+    let port = free_port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+
+    let mut acceptor_params = fixture_session_init_params();
+    acceptor_params.zid = vec![0x02; 4]; // distinct zid from the initiator
+
+    // Deliberately CLIENT. pico's listen arm inserts `mode=peer` OVER whatever
+    // the config said (session.c:96, :110) precisely because its own default is
+    // Z_WHATAMI_CLIENT (session.c:122) and a client does not accept. A wiring
+    // that bound the socket but skipped that overwrite would still reach
+    // Established here — and would put `client` on the wire, which the
+    // `peer_whatami` assertion below is what catches.
+    acceptor_params.whatami = WhatAmI::Client;
+
+    let dial_cfg = DialConfig::default();
+    let accept_cfg = AcceptConfig::default();
+    let listen_endpoint = endpoint.clone();
+    let acceptor = open_session_static_config(
+        Some(&listen_endpoint),
+        &[],
+        acceptor_params,
+        &dial_cfg,
+        &accept_cfg,
+        TokioTime::new(),
+        Some(ITER_CAP),
+        DEFAULT_OPEN_TICK_MS,
+    );
+
+    let connect = vec![endpoint];
+    let dialer_cfg = DialConfig::default();
+    let dialer = dial_static_when_listening(&connect, &dialer_cfg);
+
+    let (accepted, dialed) =
+        tokio::time::timeout(LISTEN_PAIR_BUDGET, async { tokio::join!(acceptor, dialer) })
+            .await
+            .expect("the listen/dial pair did not settle within its budget");
+
+    let accepted = accepted.expect("static listen reached Established");
+    assert!(
+        accepted.actions.trace_snapshot().record_established_at >= 1,
+        "the listening half established"
+    );
+
+    let dialed = dialed.expect("the dialing peer reached the static listener");
+    assert!(
+        dialed.actions.trace_snapshot().record_established_at >= 1,
+        "the dialing half established"
+    );
+    assert_eq!(
+        dialed.peer_whatami(),
+        Some(WhatAmI::Peer),
+        "a `listen=` deploy must announce itself a peer (pico's mode=peer \
+         insert); the acceptor's params said Client and the listen arm is what \
+         overrides them"
+    );
+}
+
+#[cfg(feature = "scouting-static")]
+#[tokio::test]
+async fn static_listen_with_connect_is_refused_before_any_socket() {
+    // pico returns _Z_ERR_GENERIC for this pair without opening anything
+    // (session.c:107-108). Both endpoints below are unreachable on purpose:
+    // the call must fail on the CONFIG, so it must never reach them — a wiring
+    // that honoured one half and dropped the other would instead block or
+    // surface a Dial error.
+    let connect = vec!["tcp/127.0.0.1:9".to_string()];
+    let result = open_session_static_config(
+        Some("tcp/127.0.0.1:9"),
+        &connect,
+        initiator_params(),
+        &DialConfig::default(),
+        &AcceptConfig::default(),
+        TokioTime::new(),
+        Some(4),
+        DEFAULT_OPEN_TICK_MS,
+    )
+    .await;
+    let Err(err) = result else {
+        panic!("expected listen+connect to be refused, got Ok");
+    };
+    assert!(
+        matches!(
+            err,
+            OpenError::BadStaticConfig(StaticConfigError::ListenWithConnect)
+        ),
+        "expected BadStaticConfig(ListenWithConnect), got {err:?}"
+    );
+}
+
+#[cfg(feature = "scouting-static")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn static_blank_listen_still_dials_the_connect_list() {
+    // Config hygiene at the RUNTIME seam, not just in the pure resolution: a
+    // whitespace-only `listen=` is an absent one, so the role stays Open and
+    // the connect list is dialed. A resolution that treated the blank as
+    // present would bind it (or refuse the pair) and never reach this peer.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let acceptor = drive_acceptor_to_established(listener);
+
+    let connect = vec![format!("tcp/{addr}")];
+    let dial_cfg = DialConfig::default();
+    let accept_cfg = AcceptConfig::default();
+    let initiator = open_session_static_config(
+        Some("   "),
+        &connect,
+        initiator_params(),
+        &dial_cfg,
+        &accept_cfg,
+        TokioTime::new(),
+        Some(ITER_CAP),
+        DEFAULT_OPEN_TICK_MS,
+    );
+
+    let ((acc_est, _w), opened) = tokio::time::timeout(LISTEN_PAIR_BUDGET, async {
+        tokio::join!(acceptor, initiator)
+    })
+    .await
+    .expect("the blank-listen pair did not settle within its budget");
+    assert!(
+        opened
+            .expect("a blank listen dials the connect list")
+            .actions
+            .trace_snapshot()
+            .record_established_at
+            >= 1,
+        "the blank listen did not flip the role away from the dial arm"
+    );
+    assert!(acc_est >= 1, "acceptor established");
 }

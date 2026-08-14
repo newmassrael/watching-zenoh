@@ -43,7 +43,7 @@ use wz_session_core::locator::{
     parse_any_locator, AnyLocator, AnyLocatorError, LocatorParseError, Proto,
 };
 #[cfg(feature = "scouting-static")]
-use wz_session_core::scout_static::synth_static_locators;
+use wz_session_core::scout_static::{resolve_static_config, StaticRole};
 // R3b — the Z_EXT_AUTH dispatch installed by the auth-on open variants.
 #[cfg(feature = "session-extauth")]
 use wz_session_core::auth_dispatch::AuthDispatch;
@@ -3133,6 +3133,17 @@ pub enum OpenError {
     /// diagnostic (docs/scouting-fsm.md §2.4.3 reason #1). Only returned by
     /// [`open_session_static`].
     NoReachableLocator,
+    /// The static deploy config's `listen=` / `connect=` pair does not name a
+    /// transport half this build can bring up — today only "both at once",
+    /// which needs the `_z_new_peer` multi-peer path wz has no analog of.
+    /// Raised BEFORE any socket is touched, by
+    /// [`resolve_static_config`](wz_session_core::scout_static::resolve_static_config);
+    /// pico's own answer to the same pair under `Z_FEATURE_UNICAST_PEER == 0`
+    /// is `_Z_ERR_GENERIC` (`vendor/zenoh-pico/src/net/session.c:107-108`).
+    /// Distinct from [`Self::NoReachableLocator`], which means the config was
+    /// coherent and the peers were not there.
+    #[cfg(feature = "scouting-static")]
+    BadStaticConfig(wz_session_core::scout_static::StaticConfigError),
     /// R311py — the `--connect`-style string parsed to a valid locator that is
     /// NOT a reconnect target (a `serial/...` endpoint: no client reopen-task
     /// model, pico parity). Only returned by
@@ -4329,6 +4340,12 @@ pub async fn open_session_at(
 /// R311if — gated on `scouting-static` (the static-mode toggle); the
 /// mode-agnostic [`open_session_at`] above stays ungated since active
 /// scouting feeds it too.
+///
+/// This is the dial-only spelling of [`open_session_static_config`] — the
+/// `listen=`-unaware entry point, kept because it is what every existing
+/// caller and the `--connect`-shaped deploy needs. It delegates rather than
+/// duplicating the loop, so the two cannot disagree about what a static
+/// config means.
 #[cfg(feature = "scouting-static")]
 pub async fn open_session_static(
     connect: &[String],
@@ -4338,13 +4355,88 @@ pub async fn open_session_static(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    // R311ih — synth now yields the bounded seam (StaticLocators =
+    open_session_static_config(
+        None,
+        connect,
+        params,
+        cfg,
+        &AcceptConfig::default(),
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// Bring up the transport half a static deploy config asks for — the
+/// `listen=`-aware static-mode entry point, and the wz analog of pico's
+/// `_z_open` reading `_z_locators_by_config`'s `peer_op`
+/// (`vendor/zenoh-pico/src/net/session.c:87-118`, `:155-190`).
+///
+/// [`resolve_static_config`] decides which half from the `listen=` /
+/// `connect=` pair, BEFORE any socket is touched; this then brings that half
+/// up through the seam that already exists for it:
+///
+/// - [`StaticRole::Open`] — dial the connect list in deploy order, first
+///   Established wins, exactly [`open_session_static`]'s contract above.
+/// - [`StaticRole::Listen`] — [`accept_endpoint`] binds the one configured
+///   endpoint and accepts on it, then [`accept_and_open_session`] drives the
+///   Accepting half of the handshake. The node's `whatami` is forced to
+///   [`WhatAmI::Peer`](wz_codecs::whatami::WhatAmI) first, because pico's
+///   listen arm inserts `mode=peer` over whatever the config said
+///   (`session.c:96`, `:110`) — its default is `Z_WHATAMI_CLIENT`
+///   (`session.c:122`) and a client does not accept, so honouring the listen
+///   endpoint while leaving the role a client would announce a node that
+///   contradicts what it is doing.
+///
+/// An incoherent pair surfaces as [`OpenError::BadStaticConfig`]; an empty
+/// resolved locator list is the "configured locators are wrong / unreachable"
+/// diagnostic [`OpenError::NoReachableLocator`], which is where the empty
+/// config lands now that static mode has no scouting to fall through to.
+///
+/// `accept_cfg` is consumed only by the Listen arm (a `tls/...` or `quic/...`
+/// listen endpoint needs its server cert); the dial arm takes `cfg`. Both are
+/// present rather than one being chosen at the call site because the config
+/// — not the caller — decides which half runs.
+#[cfg(feature = "scouting-static")]
+#[allow(clippy::too_many_arguments)]
+pub async fn open_session_static_config(
+    listen: Option<&str>,
+    connect: &[String],
+    params: SessionInitParams,
+    cfg: &DialConfig,
+    accept_cfg: &AcceptConfig,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    // R311ih — the resolution yields the bounded seam (StaticLocators =
     // BoundedVec<BoundedString>); iterate via the slice Deref and pass each
     // locator as &str to the mode-agnostic open path.
-    let locators = synth_static_locators(connect);
+    let resolved = resolve_static_config(listen, connect).map_err(OpenError::BadStaticConfig)?;
+    let role = resolved.role;
+    let locators = resolved.locators;
     if locators.is_empty() {
         return Err(OpenError::NoReachableLocator);
     }
+
+    // The role decides the announced identity BEFORE either half runs, which
+    // is pico's own order: `_z_locators_by_config` inserts `mode=peer` while
+    // resolving, and `_z_open` reads the mode afterwards (session.c:110, :121).
+    let mut params = params;
+    if role.forces_peer_mode() {
+        params.whatami = wz_codecs::whatami::WhatAmI::Peer;
+    }
+
+    if role == StaticRole::Listen {
+        let endpoint = locators[0].as_str();
+        log::info!("wz session-open: static listen endpoint {endpoint:?} (mode=peer)");
+        let accepted = accept_endpoint(endpoint, accept_cfg)
+            .await
+            .map_err(OpenError::Dial)?;
+        return accept_and_open_session(accepted, params, clock, max_iters, tick_interval_ms).await;
+    }
+
     for locator in locators.iter() {
         match open_session_at(
             locator.as_str(),

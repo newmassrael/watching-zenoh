@@ -5193,10 +5193,14 @@ layer_c1i_cargo_test_scouting() {
 # synth module nor the wz-runtime-tokio `open_session_static` consumer. This
 # lane builds + runs both under `--features scouting-static`:
 #   - the synth unit tests (ScoutingMode parse, synth_static_locators
-#     trim/dedup/order) in wz-session-core;
+#     trim/dedup/order) in wz-session-core, plus the `listen=` resolution
+#     (resolve_static_config: the four arms of pico's
+#     `_z_locators_by_config`, vendor/zenoh-pico/src/net/session.c:87-118);
 #   - the static -> session-open seam in wz-runtime-tokio
-#     (static_scout_open.rs: skip-unreachable, empty, all-unreachable),
-#     which Layer C1 stopped running once the static tests gained the gate.
+#     (static_scout_open.rs: skip-unreachable, empty, all-unreachable, and
+#     the listen half — accept + peer-mode announce, listen+connect refused,
+#     blank listen still dials), which Layer C1 stopped running once the
+#     static tests gained the gate.
 # `--features X` adds to (does not replace) the default feature set, so the
 # transport-link-tcp/udp + transport-unicast the open path needs stay on.
 # R311ih: also build-gates the no-alloc backing (scout_static on the
@@ -5204,9 +5208,9 @@ layer_c1i_cargo_test_scouting() {
 # (wz-runtime-coop scouting-static = the facade -> runtime -> core funnel,
 # no-alloc + alloc). The thumb cross-compile of the same is Layer G.5.
 layer_c1k_cargo_test_scouting_static() {
-    _runci_guarded_test "C1k scout_static" 7 \
+    _runci_guarded_test "C1k scout_static" 15 \
         cargo test -p wz-session-core --features scouting-static --lib scout_static --quiet || return 1
-    _runci_guarded_test "C1k static_scout_open" 6 \
+    _runci_guarded_test "C1k static_scout_open" 9 \
         cargo test -p wz-runtime-tokio --features scouting-static --test static_scout_open --quiet || return 1
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features scouting-static --quiet \
