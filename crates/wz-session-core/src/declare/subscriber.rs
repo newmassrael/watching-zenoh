@@ -881,6 +881,85 @@ mod tests {
         assert_eq!(*log.lock().unwrap(), vec![true, false]);
     }
 
+    /// R311y800 — the SUBSCRIBER-plane twin of
+    /// `RemoteQueryableRegistry`'s `a_link_loss_drops_the_peers_declarations_
+    /// and_flips_the_watch`, and it is new because that twin did not exist.
+    ///
+    /// R311y799 built `flush_declarations_on_link_loss` on BOTH planes and
+    /// wrote "its two tests are registry-tier" — but both of those tests are
+    /// on the QUERYABLE registry. This plane had none, and the gap was
+    /// MEASURED rather than noticed: deleting the `reevaluate` call from this
+    /// file's flush leaves all 527 tests of `cargo test -p wz-session-core
+    /// --features session-matching,declare-subscriber,declare-queryable,
+    /// query-queryable,codec-declare` GREEN. Only the e2e gate reds.
+    ///
+    /// The `matching=false` fire is the discriminator, not the emptied table:
+    /// a flush that cleared the map without re-evaluating would leave every
+    /// listener believing it still matched, which is the exact failure the
+    /// surviving table produced.
+    #[cfg(feature = "session-matching")]
+    #[test]
+    fn a_link_loss_drops_the_peers_subscribers_and_flips_the_watch() {
+        use crate::declare::matching::BoxedMatchingSink;
+
+        let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+        let log_cb = log.clone();
+        let mut reg = RemoteSubscriberRegistry::new();
+        reg.declare_matching_listener(
+            "home/temp",
+            BoxedMatchingSink::new(move |m| log_cb.lock().unwrap().push(m)),
+        );
+
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(1, 0, Some("home/temp")));
+        reg.dispatch_declare(&body, &HashMap::new());
+        assert_eq!(*log.lock().unwrap(), vec![true], "the peer raised it");
+        assert_eq!(reg.declared_count(), 1);
+
+        assert_eq!(
+            reg.flush_declarations_on_link_loss(&|_| false),
+            1,
+            "the one declaration the dead link had made is dropped"
+        );
+        assert_eq!(reg.declared_count(), 0);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![true, false],
+            "and the watch follows it down — the emptied table alone would \
+             leave every listener believing it still matched"
+        );
+    }
+
+    /// The local half survives the link, so a watch a session-local
+    /// subscriber is holding must NOT be flipped by a remote link dying.
+    /// Same fixture as above, one predicate apart — the pair is what proves
+    /// the flush consults the local half rather than flipping everything.
+    #[cfg(feature = "session-matching")]
+    #[test]
+    fn a_link_loss_does_not_flip_a_watch_a_local_subscriber_holds() {
+        use crate::declare::matching::BoxedMatchingSink;
+
+        let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+        let log_cb = log.clone();
+        let mut reg = RemoteSubscriberRegistry::new();
+        reg.declare_matching_listener_seeded(
+            PublisherCriterion::any_locality("home/temp"),
+            /*local_matching=*/ true,
+            BoxedMatchingSink::new(move |m| log_cb.lock().unwrap().push(m)),
+        );
+        assert_eq!(*log.lock().unwrap(), vec![true]);
+
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(1, 0, Some("home/temp")));
+        reg.dispatch_declare(&body, &HashMap::new());
+        assert_eq!(reg.flush_declarations_on_link_loss(&|_| true), 1);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![true],
+            "the local subscriber still receives, so the link loss flips nothing"
+        );
+    }
+
     #[test]
     fn multiple_decl_callbacks_fire_in_registration_order() {
         let mut reg = RemoteSubscriberRegistry::new();

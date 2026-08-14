@@ -389,6 +389,158 @@ async fn a_dying_link_delivers_remote_liveliness_deletes_to_the_dialer() {
     );
 }
 
+/// R311y800 — THE DIAL-PATH DELIVERY GATE for the link-loss DECLARATION flush,
+/// the twin of [`a_dying_link_delivers_remote_liveliness_deletes_to_the_dialer`]
+/// one plane over.
+///
+/// R311y799 built `ApplicationLayerObserver::flush_declarations_on_link_loss`
+/// and shipped it with two REGISTRY-tier tests, then wrote down what those
+/// cannot reach: "the deferred-fire drain seam a registry test cannot see is
+/// exactly where this round's second defect lived". That defect was real —
+/// `drain_deferred_fires` was keyed on the LIVELINESS staged count alone, so a
+/// session with no remote tokens purged its tables and delivered none of the
+/// transitions — and it was found by reading, not by a lane. This is the
+/// missing lane.
+///
+/// THE SHAPE, and every part of it is load-bearing:
+///
+/// * A reconnect-supervised publisher holds a matching listener. The acceptor
+///   declares a SUBSCRIBER on the same keyexpr, so the listener flips `true`.
+/// * The acceptor then VANISHES. No `UndeclSubscriber` can arrive — the link
+///   that would carry one is what died — so the only thing that can tell the
+///   application is the supervisor's own flush.
+/// * THERE IS NO LIVELINESS SUBSCRIBER AND NO TOKEN ANYWHERE IN THIS TEST.
+///   That is the discriminator, not an omission: it forces `staged == 0` at the
+///   drain site, so the drain can only run on the DECLARATION count. Restore
+///   `if staged > 0` (R311y799's second defect) and this test reds while the
+///   liveliness gate above stays green.
+///
+/// The `true` leg is asserted first. Without it the `false` leg would pass on a
+/// run where the acceptor's declaration never reached the dialer at all — the
+/// silence-passes-everything shape a purge test is most exposed to.
+#[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dying_link_flips_the_dialers_matching_listener_to_false() {
+    use std::sync::Mutex as StdMutex;
+    use wz_runtime_tokio::observer::ApplicationLayerObserver;
+    use wz_runtime_tokio::session::{PublishOptions, TokioSession};
+    use wz_runtime_tokio::sync::Mutex as WzMutex;
+
+    const KEYEXPR: &str = "wz/decl/dialgate";
+
+    let (listener, locator) = ip_loopback().await;
+    let mut params = fixture_session_init_params();
+    params.zid = vec![0x09; 4];
+
+    let policy = ReconnectPolicy {
+        retry_delay_ms: 50,
+        max_attempts: Some(100),
+        ..ReconnectPolicy::default()
+    };
+
+    let (client, server) = tokio::join!(
+        async {
+            open_session_with_reconnect(
+                locator,
+                params,
+                DialConfig::default(),
+                TokioTime::new(),
+                policy,
+                Some(ITER_CAP),
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .expect("client reaches Established")
+        },
+        async {
+            let (stream, _peer) = listener.accept().await.expect("accept");
+            accept_and_open_session(
+                DialedLink::Tcp(stream),
+                fixture_session_init_params(),
+                TokioTime::new(),
+                Some(ITER_CAP),
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .expect("acceptor reaches Established")
+        },
+    );
+    let mut client = client;
+
+    let verdicts: Arc<StdMutex<Vec<bool>>> = Arc::new(StdMutex::new(Vec::new()));
+    let sink = verdicts.clone();
+    let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
+    let session = TokioSession::new(
+        client.actions().clone(),
+        observer,
+        Arc::new(TokioTime::new()),
+    );
+    let publisher = session.declare_publisher(KEYEXPR, PublishOptions::put());
+    let _listener = publisher
+        .declare_matching_listener(move |s| sink.lock().unwrap().push(s.matching))
+        .expect("session-matching is on in this lane");
+    assert!(
+        verdicts.lock().unwrap().is_empty(),
+        "registration on a session with no matching subscriber is silent, so \
+         the `true` below can only come from the acceptor's declaration"
+    );
+    // The supervisor's flush hook. Named for the plane it was built for
+    // (R311y521); it carries both planes since R311y799.
+    client.set_liveliness_flush(session.clone());
+
+    // The acceptor declares a matching subscriber; the client drives until the
+    // listener has been told `true`.
+    server
+        .actions
+        .send_declare_subscriber(31, 0, Some(KEYEXPR))
+        .expect("acceptor declares a matching subscriber");
+    let dispatch_session = session.clone();
+    let mut dispatch = |e: IterationEvent<'_>| dispatch_session.dispatch_iteration_event(e);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_killer = stop.clone();
+    let verdicts_for_killer = verdicts.clone();
+
+    let timeouts = timeouts_for_gate();
+    let (drive_outcome, _) = tokio::join!(
+        client.drive(&timeouts, &stop, Some(ITER_CAP), &mut dispatch),
+        async {
+            // Wait for the `true`, then VANISH. Raising `stop` first makes the
+            // supervisor return Stopped at its next loop boundary instead of
+            // reconnecting, so the flush is the last thing it does.
+            for _ in 0..400 {
+                if verdicts_for_killer.lock().unwrap().iter().any(|m| *m) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            stop_for_killer.store(true, Ordering::Release);
+            drop(server);
+        },
+    );
+
+    let seen = verdicts.lock().unwrap().clone();
+    assert_eq!(
+        seen.first().copied(),
+        Some(true),
+        "the acceptor's subscriber never raised the dialer's matching listener, \
+         so the `false` leg below would be testing nothing. seen: {seen:?} \
+         (outcome {drive_outcome:?})"
+    );
+    assert_eq!(
+        seen.last().copied(),
+        Some(false),
+        "the peer holding the only subscriber for {KEYEXPR} vanished and the \
+         publisher was never told: the listener is still reading `true`. No \
+         UndeclSubscriber can arrive either -- the link that would carry one is \
+         what died. This fails if the supervisor skips the declaration flush, if \
+         the flush drops the table without re-evaluating the watches, or if it \
+         stages the transition and nothing drains the deferred-fire queue \
+         (R311y799's second defect, which keyed that drain on the liveliness \
+         count alone -- and there is no token in this test). seen: {seen:?} \
+         (outcome {drive_outcome:?})"
+    );
+}
+
 /// The timeouts every gate in this file shares.
 fn timeouts_for_gate() -> SessionTimeouts {
     SessionTimeouts::spec_defaults()
