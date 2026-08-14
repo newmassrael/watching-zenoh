@@ -136,11 +136,22 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
         // consulted the remote registry only, so a publisher whose only
         // subscriber sat on its own session reported `false` while its
         // own `put` delivered to it.
+        //
+        // R311y797 — the remote half now asks through the criterion
+        // consult rather than open-coding the locality gate beside it, so
+        // the poll and the WATCH provably share one predicate: the watch
+        // stores the same `PublisherCriterion` and re-evaluates through the
+        // same fn. The open-coded form was correct here and wrong in the
+        // watch, which is precisely the failure two copies produce.
         #[cfg(feature = "declare-subscriber")]
         let matching = R::with_mutex_mut(&self.session.observer, |obs| {
             let locality = self.options.allowed_destination;
-            (locality.allows_remote() && obs.remote_subscribers.has_matching(&self.keyexpr))
-                || (locality.allows_local() && obs.subscribers.has_local_matching(&self.keyexpr))
+            obs.remote_subscribers.has_matching_for(
+                &wz_session_core::declare::subscriber::PublisherCriterion::new(
+                    &self.keyexpr,
+                    locality,
+                ),
+            ) || (locality.allows_local() && obs.subscribers.has_local_matching(&self.keyexpr))
         });
         #[cfg(not(feature = "declare-subscriber"))]
         let matching = false;
@@ -224,8 +235,17 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
                 // poll gates it.
                 let local = self.options.allowed_destination.allows_local()
                     && obs.subscribers.has_local_matching(&self.keyexpr);
-                obs.remote_subscribers
-                    .declare_matching_listener_seeded(&self.keyexpr, local, sink)
+                // R311y797 — the watch now STORES the locality it was
+                // seeded under, so every later re-evaluation applies the
+                // same gate the seed and the poll do.
+                obs.remote_subscribers.declare_matching_listener_seeded(
+                    wz_session_core::declare::subscriber::PublisherCriterion::new(
+                        &self.keyexpr,
+                        self.options.allowed_destination,
+                    ),
+                    local,
+                    sink,
+                )
             });
             // R311y771 — ASK THE PEER FOR THE DECLARATIONS THIS WATCH IS FED
             // BY. Without it the watch is registered against a registry a

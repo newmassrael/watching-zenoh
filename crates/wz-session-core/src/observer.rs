@@ -468,11 +468,32 @@ impl ApplicationLayerObserver {
         {
             let subscribers = &self.subscribers;
             self.remote_subscribers
-                .dispatch_iteration_event_with_local(event, peer_table, &|k| {
-                    subscribers.has_local_matching(k)
+                .dispatch_iteration_event_with_local(event, peer_table, &|c| {
+                    // R311y797 — the publisher's own locality gates the
+                    // local half here too, exactly as it does in the poll;
+                    // before this round the watch answered as if it were
+                    // `Any`.
+                    c.locality.allows_local() && subscribers.has_local_matching(&c.keyexpr)
                 });
         }
-        #[cfg(feature = "declare-queryable")]
+        // R311y797 — the queryable-plane twin of the fan just above: the
+        // remote-queryable dispatch carries the SESSION-LOCAL half of a
+        // querier's matching verdict, read from the sibling `queryables`
+        // field under a disjoint borrow. Without it an inbound remote
+        // undeclare flips a watch that a local queryable is holding true.
+        // The local half needs `query-queryable` (the table it reads); a
+        // build without it structurally has no local queryables, so the
+        // constant `false` is the honest answer rather than a stub.
+        #[cfg(all(feature = "declare-queryable", feature = "query-queryable"))]
+        {
+            let queryables = &self.queryables;
+            self.remote_queryables
+                .dispatch_iteration_event_with_local(event, peer_table, &|c| {
+                    c.locality.allows_local()
+                        && queryables.has_local_matching(&c.keyexpr, c.complete_required)
+                });
+        }
+        #[cfg(all(feature = "declare-queryable", not(feature = "query-queryable")))]
         self.remote_queryables
             .dispatch_iteration_event(event, peer_table);
         #[cfg(feature = "liveliness-token")]

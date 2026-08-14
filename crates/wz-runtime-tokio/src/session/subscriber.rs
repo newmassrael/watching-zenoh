@@ -253,9 +253,9 @@ impl<R: SessionRuntime> Subscriber<R> {
             #[cfg(all(feature = "declare-subscriber", feature = "session-matching"))]
             {
                 let subscribers = &observer.subscribers;
-                observer
-                    .remote_subscribers
-                    .reevaluate_matching(&|k| subscribers.has_local_matching(k));
+                observer.remote_subscribers.reevaluate_matching(&|c| {
+                    c.locality.allows_local() && subscribers.has_local_matching(&c.keyexpr)
+                });
             }
             removed
         })

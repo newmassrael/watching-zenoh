@@ -91,11 +91,11 @@ impl MatchingSink for BoxedMatchingSink {
     }
 }
 
-/// One registered watch: the watched keyexpr, the last delivered verdict,
-/// and the sink to fire on a flip.
-struct MatchingWatch<C: MatchingSink> {
+/// One registered watch: the watched CRITERION, the last delivered
+/// verdict, and the sink to fire on a flip.
+struct MatchingWatch<C: MatchingSink, K> {
     id: u64,
-    keyexpr: String,
+    criterion: K,
     last: bool,
     sink: C,
 }
@@ -103,18 +103,30 @@ struct MatchingWatch<C: MatchingSink> {
 /// Flip-fire watch list — the registry-side state behind
 /// `declare_matching_listener`. IDs are list-local monotonic (the
 /// registry's listener-handle currency, not a wire id).
-pub struct MatchingWatchList<C: MatchingSink> {
-    watches: Vec<MatchingWatch<C>>,
+///
+/// R311y797 — `K` is the WATCHED CRITERION, i.e. everything the verdict
+/// predicate needs from the watcher. It defaults to `String` (the bare
+/// keyexpr) because that is the whole of a publisher's criterion, and the
+/// subscriber-side registry keeps that instantiation unchanged. A querier
+/// needs more — its `AllComplete` target changes which peer queryables can
+/// answer it at all — so the queryable-side registry instantiates
+/// `K = `[`QuerierCriterion`](crate::declare::queryable::QuerierCriterion).
+/// This is pico's own shape: the write-filter ctx stores `key` AND
+/// `is_complete` side by side and both are read on every re-evaluation
+/// (`vendor/zenoh-pico/include/zenoh-pico/net/filtering.h:56-66`), so the
+/// watch key is a criterion rather than a keyexpr in upstream too.
+pub struct MatchingWatchList<C: MatchingSink, K = String> {
+    watches: Vec<MatchingWatch<C, K>>,
     next_id: u64,
 }
 
-impl<C: MatchingSink> Default for MatchingWatchList<C> {
+impl<C: MatchingSink, K> Default for MatchingWatchList<C, K> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<C: MatchingSink> MatchingWatchList<C> {
+impl<C: MatchingSink, K> MatchingWatchList<C, K> {
     /// Empty watch list.
     pub const fn new() -> Self {
         Self {
@@ -161,7 +173,7 @@ impl<C: MatchingSink> MatchingWatchList<C> {
     /// tier installs a DEFERRED sink that merely stages, so a user callback
     /// registered through `Publisher::declare_matching_listener` runs outside
     /// the lock and is unconstrained.
-    pub fn register(&mut self, keyexpr: String, initial: bool, sink: C) -> u64 {
+    pub fn register(&mut self, criterion: K, initial: bool, sink: C) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         let mut sink = sink;
@@ -170,7 +182,7 @@ impl<C: MatchingSink> MatchingWatchList<C> {
         }
         self.watches.push(MatchingWatch {
             id,
-            keyexpr,
+            criterion,
             last: initial,
             sink,
         });
@@ -198,10 +210,10 @@ impl<C: MatchingSink> MatchingWatchList<C> {
     /// registry's membership consult) and fire each sink whose verdict
     /// FLIPPED, recording the new verdict. Returns the count fired —
     /// a same-verdict sweep fires nothing (pico transition-only).
-    pub fn reevaluate(&mut self, has_matching: impl Fn(&str) -> bool) -> usize {
+    pub fn reevaluate(&mut self, has_matching: impl Fn(&K) -> bool) -> usize {
         let mut fired = 0;
         for watch in self.watches.iter_mut() {
-            let now = has_matching(&watch.keyexpr);
+            let now = has_matching(&watch.criterion);
             if now != watch.last {
                 watch.last = now;
                 watch.sink.on_matching_changed(now);
@@ -229,7 +241,7 @@ mod tests {
     #[test]
     fn watch_fires_on_flip_only() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut list = MatchingWatchList::new();
+        let mut list: MatchingWatchList<BoxedMatchingSink> = MatchingWatchList::new();
         let id = list.register("home/temp".into(), false, recording_sink(&log));
         assert_eq!(list.len(), 1);
 
@@ -263,7 +275,7 @@ mod tests {
     #[test]
     fn registering_an_already_matching_watch_fires_true_once() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut list = MatchingWatchList::new();
+        let mut list: MatchingWatchList<BoxedMatchingSink> = MatchingWatchList::new();
         list.register("home/temp".into(), true, recording_sink(&log));
         assert_eq!(
             *log.lock().unwrap(),
@@ -286,7 +298,7 @@ mod tests {
     #[test]
     fn registering_a_non_matching_watch_stays_silent() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut list = MatchingWatchList::new();
+        let mut list: MatchingWatchList<BoxedMatchingSink> = MatchingWatchList::new();
         list.register("home/temp".into(), false, recording_sink(&log));
         assert!(log.lock().unwrap().is_empty());
     }
@@ -297,7 +309,7 @@ mod tests {
     fn watches_evaluate_independently() {
         let log_a = Arc::new(Mutex::new(Vec::new()));
         let log_b = Arc::new(Mutex::new(Vec::new()));
-        let mut list = MatchingWatchList::new();
+        let mut list: MatchingWatchList<BoxedMatchingSink> = MatchingWatchList::new();
         list.register("home/a".into(), false, recording_sink(&log_a));
         list.register("home/b".into(), false, recording_sink(&log_b));
 

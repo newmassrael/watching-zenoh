@@ -48,6 +48,66 @@ use crate::registry_error::RegisterError;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
 
+/// R311y797 — everything a publisher's matching verdict depends on, as
+/// one value: the keyexpr it publishes on and the locality it is willing
+/// to reach. The watch key of the subscriber-side
+/// `MatchingWatchList` (a code span, not a link: that type lives behind
+/// `session-matching` and this one does not) and the argument of
+/// [`RemoteSubscriberRegistry::has_matching_for`]; the pub-side sibling of
+/// [`QuerierCriterion`](crate::declare::queryable::QuerierCriterion),
+/// which additionally carries the query target.
+///
+/// WHAT THIS CLOSED, found by direct read while building the querier
+/// twin: R311y788 gave the POLL both halves and gated each on the
+/// publisher's `allowed_destination`, but the WATCH kept only a keyexpr,
+/// so every re-evaluation answered as if the locality were `Any`. A
+/// `Locality::SessionLocal` publisher polled `false` on a purely remote
+/// subscriber and was told `true` by its own listener a moment later, and
+/// a `Locality::Remote` publisher had the mirror-image disagreement. pico
+/// has no such gap because the locality lives in the same write-filter
+/// ctx as the keyexpr and is re-read on every notification —
+/// `registration_ctx->allow_local` at
+/// `vendor/zenoh-pico/src/net/filtering.c:386`, and
+/// `_z_write_filter_peer_allowed` (`:66`) on the remote side.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublisherCriterion {
+    /// The publisher's keyexpr (a pattern; both sides may be wildcards).
+    pub keyexpr: String,
+    /// The publisher's `allowed_destination`: which halves of the verdict
+    /// it admits at all.
+    pub locality: crate::locality::Locality,
+}
+
+#[cfg(feature = "alloc")]
+impl PublisherCriterion {
+    /// Build from the publisher's own two knobs.
+    pub fn new(keyexpr: &str, locality: crate::locality::Locality) -> Self {
+        Self {
+            keyexpr: String::from(keyexpr),
+            locality,
+        }
+    }
+
+    /// The plain criterion a locality-blind caller means: any origin
+    /// counts. The shape [`RemoteSubscriberRegistry::has_matching`] keeps
+    /// for its existing callers.
+    pub fn any_locality(keyexpr: &str) -> Self {
+        Self::new(keyexpr, crate::locality::Locality::Any)
+    }
+}
+
+/// R311y797 — the REMOTE half of a publisher's verdict: does any
+/// currently-declared peer subscriber intersect `criterion.keyexpr`, AND
+/// does the publisher admit a remote destination at all? A free fn for
+/// the same reason [`declared_intersects`] is one — the watch-list sweep
+/// consults the membership table while the watch list itself is mutably
+/// borrowed.
+#[cfg(feature = "alloc")]
+fn declared_reaches(declared: &HashMap<u64, String>, criterion: &PublisherCriterion) -> bool {
+    criterion.locality.allows_remote() && declared_intersects(declared, &criterion.keyexpr)
+}
+
 /// Application-layer registry tracking the peer's outbound
 /// `DeclSubscriber` / `UndeclSubscriber` records. `!Sync` by
 /// construction; cross-task sharing goes through `Arc<Mutex<…>>`.
@@ -92,7 +152,7 @@ pub struct RemoteSubscriberRegistry<D: DeclSink, U: UndeclSink> {
     /// mutation, firing each watch's sink on a verdict flip. The
     /// listener form of the polling `has_matching` consult.
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
-    matching_watches: MatchingWatchList<BoxedMatchingSink>,
+    matching_watches: MatchingWatchList<BoxedMatchingSink, PublisherCriterion>,
 }
 
 impl<D: DeclSink, U: UndeclSink> Default for RemoteSubscriberRegistry<D, U> {
@@ -205,6 +265,15 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
         declared_intersects(&self.declared, publish_keyexpr)
     }
 
+    /// R311y797 — the criterion-aware consult: the REMOTE half of a
+    /// publisher's matching verdict, gated by that publisher's own
+    /// locality. [`Self::has_matching`] is the locality-blind membership
+    /// question and stays exactly that for its other callers.
+    #[cfg(feature = "alloc")]
+    pub fn has_matching_for(&self, criterion: &PublisherCriterion) -> bool {
+        declared_reaches(&self.declared, criterion)
+    }
+
     /// R311kh — register a matching-listener watch over `keyexpr` (pico
     /// `Z_FEATURE_MATCHING`): the sink fires on every VERDICT FLIP of
     /// [`Self::has_matching`]`(keyexpr)` caused by an inbound
@@ -215,7 +284,11 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// [`Self::undeclare_matching_listener`].
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     pub fn declare_matching_listener(&mut self, keyexpr: &str, sink: BoxedMatchingSink) -> u64 {
-        self.declare_matching_listener_seeded(keyexpr, false, sink)
+        self.declare_matching_listener_seeded(
+            PublisherCriterion::any_locality(keyexpr),
+            false,
+            sink,
+        )
     }
 
     /// R311y788 — [`Self::declare_matching_listener`] with the
@@ -228,16 +301,20 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// instant the listener was created — a publisher whose only match is
     /// a subscriber on its own session would poll `true` and then be told
     /// `true` again by a spurious registration fire.
+    ///
+    /// R311y797 — the seed takes the publisher's whole
+    /// [`PublisherCriterion`], not a bare keyexpr, because the LOCALITY is
+    /// part of the verdict too and the watch has to keep applying it. See
+    /// that type for the divergence this closed.
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     pub fn declare_matching_listener_seeded(
         &mut self,
-        keyexpr: &str,
+        criterion: PublisherCriterion,
         local_matching: bool,
         sink: BoxedMatchingSink,
     ) -> u64 {
-        let initial = self.has_matching(keyexpr) || local_matching;
-        self.matching_watches
-            .register(String::from(keyexpr), initial, sink)
+        let initial = self.has_matching_for(&criterion) || local_matching;
+        self.matching_watches.register(criterion, initial, sink)
     }
 
     /// R311y788 — re-evaluate every matching watch after a change this
@@ -250,9 +327,12 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// declaration already arrives through
     /// [`Self::dispatch_declare_with_local`], which re-evaluates.
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
-    pub fn reevaluate_matching(&mut self, local_matching: &dyn Fn(&str) -> bool) -> usize {
+    pub fn reevaluate_matching(
+        &mut self,
+        local_matching: &dyn Fn(&PublisherCriterion) -> bool,
+    ) -> usize {
         self.matching_watches
-            .reevaluate(|k| declared_intersects(&self.declared, k) || local_matching(k))
+            .reevaluate(|c| declared_reaches(&self.declared, c) || local_matching(c))
     }
 
     /// R311kh — remove a matching-listener watch. Returns whether one
@@ -334,7 +414,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
         &mut self,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        local_matching: &dyn Fn(&str) -> bool,
+        local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         let _ = &local_matching;
@@ -362,7 +442,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
                 // through the free-fn consult.
                 #[cfg(feature = "session-matching")]
                 self.matching_watches
-                    .reevaluate(|k| declared_intersects(&self.declared, k) || local_matching(k));
+                    .reevaluate(|c| declared_reaches(&self.declared, c) || local_matching(c));
             }
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl) => {
                 // R290 — drop the membership entry first so a
@@ -374,7 +454,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
                 // R311kh — see the DeclSubscriber arm.
                 #[cfg(feature = "session-matching")]
                 self.matching_watches
-                    .reevaluate(|k| declared_intersects(&self.declared, k) || local_matching(k));
+                    .reevaluate(|c| declared_reaches(&self.declared, c) || local_matching(c));
             }
             // Other sub-variants do not reach this registry.
             _ => {}
@@ -403,7 +483,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
         &mut self,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        local_matching: &dyn Fn(&str) -> bool,
+        local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         for message in messages {
@@ -437,7 +517,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
         &mut self,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        local_matching: &dyn Fn(&str) -> bool,
+        local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {

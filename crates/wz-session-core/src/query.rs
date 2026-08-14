@@ -1352,6 +1352,83 @@ impl<C: QuerySink> QueryableRegistry<C> {
         self.queryables.is_empty()
     }
 
+    /// R311y797 — the SESSION-LOCAL half of a querier's matching status:
+    /// `true` iff at least one queryable registered on THIS session would
+    /// be reached by a local query on `query_keyexpr` under the querier's
+    /// target. The queryable-plane twin of
+    /// [`crate::pubsub::SubscriberRegistry::has_local_matching`] (R311y788),
+    /// and the fact `Querier::get_matching_status` was missing: the poll
+    /// consulted the REMOTE registry alone while this session's own
+    /// `query` already dispatched into this table.
+    ///
+    /// The filters are pico's, in pico's order
+    /// (`vendor/zenoh-pico/src/net/filtering.c:146-152`):
+    ///
+    /// 1. the queryable's own `allowed_origin` must permit a LOCAL origin
+    ///    — a `Locality::Remote` queryable is not a target for its own
+    ///    session's querier, and would not be fired by the private
+    ///    `Queryable::matches` on the loopback leg either;
+    /// 2. then EITHER the `AllComplete` arm — the queryable declared
+    ///    itself `complete` AND its pattern INCLUDES the querier's keyexpr
+    ///    — OR, for every other target, plain pattern INTERSECTION.
+    ///
+    /// zenoh computes the same two arms
+    /// (`matching_status_local`, `zenoh/src/api/session.rs:1887-1894`) but
+    /// omits filter 1, reading only the keyexpr; `P=` for the
+    /// `session-matching` atom is pico, and pico's stricter answer is also
+    /// the one that agrees with this registry's own dispatch rule — so a
+    /// `true` here predicts a real delivery rather than a table entry.
+    ///
+    /// NOTE the deliberate asymmetry with the DISPATCH filter, which is
+    /// upstream's and not wz's: dispatch admits an `AllComplete` query on
+    /// `complete && INTERSECTS` (`Queryable::matches`, zenoh
+    /// `session.rs:2430`) where matching status demands
+    /// `complete && INCLUDES`. Inclusion is strictly stronger, so the
+    /// verdict stays sound in the direction that matters — every pair this
+    /// reports `true` for the dispatch would also fire.
+    #[cfg(feature = "alloc")]
+    pub fn has_local_matching(&self, query_keyexpr: &str, require_complete: bool) -> bool {
+        let mut query_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+        for c in query_keyexpr.split('/') {
+            // A keyexpr deeper than the declared bound cannot be
+            // represented, so it matches nothing — the same conservative
+            // answer the sibling registries give an over-deep target.
+            if query_chunks.push(c).is_err() {
+                return false;
+            }
+        }
+        self.queryables.iter().any(|queryable| {
+            if !queryable.allowed_origin.allows_local() {
+                return false;
+            }
+            if require_complete && !queryable.complete {
+                return false;
+            }
+            let mut pattern_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+            for c in queryable.pattern.split('/') {
+                if pattern_chunks.push(c).is_err() {
+                    return false;
+                }
+            }
+            if require_complete {
+                #[cfg(feature = "keyexpr-includes")]
+                {
+                    crate::keyexpr_match::keyexpr_includes_patterns(&pattern_chunks, &query_chunks)
+                }
+                // Unreachable in any build that can ask: `session-matching`
+                // forwards `keyexpr-includes`, and only a matching poll
+                // passes `require_complete`. See the sibling note in
+                // `declare::queryable::declared_answers`.
+                #[cfg(not(feature = "keyexpr-includes"))]
+                {
+                    false
+                }
+            } else {
+                crate::keyexpr_match::keyexpr_intersect_patterns(&pattern_chunks, &query_chunks)
+            }
+        })
+    }
+
     /// R311gb (Track 2) — no-heap fire entry: match `view`'s keyexpr
     /// against every queryable and hand each matching sink the borrowed
     /// [`QueryView`] + the caller-supplied [`ReplyOut`], applying the
@@ -4412,6 +4489,138 @@ mod request_decode_isolation_tests {
             present.load(Ordering::SeqCst),
             0,
             "wire source-info must NOT reach QueryView when query-source-info is off"
+        );
+    }
+}
+
+// ── R311y797 — QueryableRegistry::has_local_matching ──────────────────
+//
+// A module of its own rather than a section of the main `mod tests`, and
+// the gate is the reason: that module's gate is the FULL query union
+// (query-attachment + query-selector-parameters + query-reply-err), which
+// is Layer C1e's row. `has_local_matching` needs none of those — it needs
+// the registry and a keyexpr matcher — so hosting these there would
+// silently confine them to one lane and leave every other
+// `query-queryable` build measuring nothing. Same reasoning the
+// receive-side decode-isolation module above already applies in the other
+// direction.
+#[cfg(all(test, feature = "query-queryable", feature = "alloc"))]
+mod local_matching_tests {
+    use super::*;
+    use crate::locality::Locality;
+
+    /// The session-local half sees a queryable declared on THIS session.
+    /// This is the fact `Querier::get_matching_status` was missing: the
+    /// poll consulted the peer registry alone while `Session::query`
+    /// already dispatched into this table on the loopback leg.
+    #[test]
+    fn has_local_matching_sees_a_session_local_queryable() {
+        let mut reg = QueryableRegistry::new();
+        reg.register("home/temp", |_q, _r| {});
+        assert!(
+            reg.has_local_matching("home/temp", /*require_complete=*/ false),
+            "a queryable on this session answers this session's querier",
+        );
+        assert!(
+            !reg.has_local_matching("garden/temp", false),
+            "a non-intersecting keyexpr is not a match",
+        );
+    }
+
+    /// A `Locality::Remote` queryable is NOT a local match — it declines
+    /// the loopback origin, so `Queryable::matches` would not fire it
+    /// either and a `true` here would predict a delivery that never
+    /// happens. pico applies the same filter before counting
+    /// (`_z_locality_allows_local(queryable->_allowed_origin)`,
+    /// `vendor/zenoh-pico/src/net/filtering.c:146`); zenoh reads only the
+    /// keyexpr, and this atom's `P=` is pico.
+    #[test]
+    fn has_local_matching_ignores_a_remote_only_queryable() {
+        let mut reg = QueryableRegistry::new();
+        reg.register_with_locality("home/temp", Locality::Remote, |_q, _r| {});
+        assert!(
+            !reg.has_local_matching("home/temp", false),
+            "a Remote-only queryable declines the loopback origin",
+        );
+
+        let mut any = QueryableRegistry::new();
+        any.register_with_locality("home/temp", Locality::Any, |_q, _r| {});
+        assert!(
+            any.has_local_matching("home/temp", false),
+            "the same declaration at Locality::Any DOES match — so the \
+             refusal above is the origin filter and not a broken matcher",
+        );
+    }
+
+    /// Both sides may be wildcards, so the ordinary arm is a two-pattern
+    /// INTERSECTION and not a pattern-vs-literal match: `home/*/temp` and
+    /// `home/kitchen/**` share `home/kitchen/temp`.
+    #[test]
+    fn has_local_matching_is_a_two_pattern_intersection() {
+        let mut reg = QueryableRegistry::new();
+        reg.register("home/*/temp", |_q, _r| {});
+        assert!(reg.has_local_matching("home/kitchen/**", false));
+        assert!(
+            !reg.has_local_matching("garden/kitchen/temp", false),
+            "a disjoint first chunk shares no literal key",
+        );
+    }
+
+    /// Under `AllComplete` an INCOMPLETE local queryable is not a match.
+    /// The `require_complete = false` arm over the same registry is the
+    /// discriminator, so this cannot pass by the keyexprs failing.
+    #[test]
+    fn has_local_matching_under_all_complete_refuses_an_incomplete_queryable() {
+        let mut reg = QueryableRegistry::new();
+        // The convenience wrapper defaults `complete = false`, matching
+        // zenoh's builder default.
+        reg.register("home/temp", |_q, _r| {});
+        assert!(reg.has_local_matching("home/temp", false));
+        assert!(
+            !reg.has_local_matching("home/temp", /*require_complete=*/ true),
+            "an AllComplete querier needs a COMPLETE responder",
+        );
+    }
+
+    /// Under `AllComplete` the keyexpr test is INCLUSION: the responder
+    /// must cover the querier's whole keyexpr alone. `home/*/temp`
+    /// intersects `home/**` without including it, so a registry that used
+    /// intersection here would answer `true`.
+    #[cfg(feature = "keyexpr-includes")]
+    #[test]
+    fn has_local_matching_under_all_complete_demands_inclusion() {
+        let mut narrow = QueryableRegistry::new();
+        narrow
+            .register_sink(
+                "home/*/temp",
+                Locality::Any,
+                /*complete=*/ true,
+                crate::query_sink::BoxedQuerySink::new(
+                    |_q: &dyn QueryView, _r: &mut dyn ReplyOut| {},
+                ),
+            )
+            .expect("register on the alloc backing never exceeds capacity");
+        assert!(
+            narrow.has_local_matching("home/**", false),
+            "the two patterns intersect at `home/a/temp`",
+        );
+        assert!(
+            !narrow.has_local_matching("home/**", true),
+            "`home/*/temp` does not INCLUDE `home/**`",
+        );
+
+        let mut wide = QueryableRegistry::new();
+        wide.register_sink(
+            "home/**",
+            Locality::Any,
+            /*complete=*/ true,
+            crate::query_sink::BoxedQuerySink::new(|_q: &dyn QueryView, _r: &mut dyn ReplyOut| {}),
+        )
+        .expect("register on the alloc backing never exceeds capacity");
+        assert!(
+            wide.has_local_matching("home/kitchen/temp", true),
+            "`home/**` includes `home/kitchen/temp`, so the complete arm \
+             is not simply refusing everything",
         );
     }
 }

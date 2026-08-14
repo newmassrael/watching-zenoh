@@ -1459,9 +1459,9 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             #[cfg(all(feature = "declare-subscriber", feature = "session-matching"))]
             {
                 let subscribers = &observer.subscribers;
-                observer
-                    .remote_subscribers
-                    .reevaluate_matching(&|k| subscribers.has_local_matching(k));
+                observer.remote_subscribers.reevaluate_matching(&|c| {
+                    c.locality.allows_local() && subscribers.has_local_matching(&c.keyexpr)
+                });
             }
             id
         });
@@ -3196,7 +3196,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 // `options.complete`) now agree by construction. The closure
                 // convenience wrappers default `complete = false`, so a
                 // complete queryable must take this path.
-                observer
+                let id = observer
                     .queryables
                     .register_sink(
                         &keyexpr_string,
@@ -3204,7 +3204,25 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         options.complete,
                         crate::query_sink::BoxedQuerySink::new(sink),
                     )
-                    .expect("register on the alloc backing never exceeds declared capacity")
+                    .expect("register on the alloc backing never exceeds declared capacity");
+                // R311y797 — a LOCAL declaration can flip a querier's
+                // matching status just as an inbound remote one can, and
+                // pico reports both
+                // (`_z_write_filter_notify_queryable` ->
+                // `_z_write_filter_ctx_add_local_match`,
+                // `vendor/zenoh-pico/src/net/filtering.c:87-92`,`:427-429`).
+                // The queryable-plane twin of the R311y788 subscriber site;
+                // the remote registry owns the watches, so it is driven here
+                // with the local half read from the sibling field.
+                #[cfg(all(feature = "declare-queryable", feature = "session-matching"))]
+                {
+                    let queryables = &observer.queryables;
+                    observer.remote_queryables.reevaluate_matching(&|c| {
+                        c.locality.allows_local()
+                            && queryables.has_local_matching(&c.keyexpr, c.complete_required)
+                    });
+                }
+                id
             });
             // R311ow — announce the queryable to the router iff the locality
             // allows remote (pico `_z_register_queryable`, primitives.c:348),
@@ -3217,7 +3235,22 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 Err(e) => {
                     cell.kill();
                     R::with_mutex_mut(&self.observer, |observer| {
-                        observer.queryables.unregister(id)
+                        let removed = observer.queryables.unregister(id);
+                        // R311y797 — the rollback must undo the watch
+                        // re-evaluation the register above fired, or a
+                        // REJECTED declare leaves every querier watching
+                        // this keyexpr believing it matched. Same call as
+                        // the undeclare site, for the same reason.
+                        #[cfg(all(feature = "declare-queryable", feature = "session-matching"))]
+                        {
+                            let queryables = &observer.queryables;
+                            observer.remote_queryables.reevaluate_matching(&|c| {
+                                c.locality.allows_local()
+                                    && queryables
+                                        .has_local_matching(&c.keyexpr, c.complete_required)
+                            });
+                        }
+                        removed
                     });
                     return Err(e);
                 }

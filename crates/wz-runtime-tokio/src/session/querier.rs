@@ -1038,18 +1038,90 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
     /// from the surface. R310 previously gated the entire signature
     /// on `declare-queryable`, which broke the zenoh-cpp parity
     /// (consumers had to themselves cfg-gate every call site).
+    ///
+    /// R311y797 — THE VERDICT NOW HAS TWO HALVES AND READS THE TARGET,
+    /// the queryable-plane completion of what R311y788 did for the
+    /// publisher.
+    ///
+    /// * SESSION-LOCAL half — a queryable declared on THIS session is a
+    ///   real answerer: `Session::query` dispatches into that table on the
+    ///   loopback leg whenever the locality allows it, and until this
+    ///   round the poll consulted the REMOTE registry alone, so a querier
+    ///   whose only queryable sat on its own session reported `false`
+    ///   while its own `get` was answered. pico counts both halves
+    ///   (`local_targets` beside `targets`,
+    ///   `vendor/zenoh-pico/src/net/filtering.c:71`,`:141-155`).
+    /// * TARGET — `AllComplete` asks for responders that can answer the
+    ///   WHOLE keyexpr alone, so both halves switch predicate under it
+    ///   (`complete` AND inclusion, rather than plain intersection). That
+    ///   is zenoh's `MatchingStatusType::Queryables(target ==
+    ///   AllComplete)` (`zenoh/src/api/querier.rs:225`) and pico's
+    ///   `ctx->is_complete` (`vendor/zenoh-pico/src/api/api.c:1843-1844`).
+    ///   The target is read through
+    ///   [`QueryOptions::effective_target`](super::QueryOptions), never
+    ///   the raw `pub` field, so a build without `query-target` cannot be
+    ///   pushed into an AllComplete verdict it could not emit.
+    ///
+    /// Each half is additionally gated by this querier's own
+    /// `allowed_destination` — the knob prior rounds recorded here as
+    /// typed but unread (pico's `allow_local` / `allow_remote`,
+    /// `filtering.c:261-262`). The remote half needs
+    /// `declare-queryable`, the local half `query-queryable`; a build
+    /// missing one contributes a structural `false` for that half rather
+    /// than a stub, because in such a build the corresponding table
+    /// cannot hold anything.
     pub fn get_matching_status(&self) -> MatchingStatus {
         // R311dd — observer access via R::with_mutex_mut closure form.
         // Replaces the AP-only `.lock()` + PoisonError::into_inner
         // recovery pattern; per-profile poison-recovery semantics now
         // live inside the Runtime impl.
-        #[cfg(feature = "declare-queryable")]
-        let matching = R::with_mutex_mut(&self.session.observer, |obs| {
-            obs.remote_queryables.has_matching(&self.keyexpr)
-        });
-        #[cfg(not(feature = "declare-queryable"))]
+        #[cfg(any(feature = "declare-queryable", feature = "query-queryable"))]
+        let matching = {
+            let locality = self.options.allowed_destination;
+            let complete_required = self.complete_required();
+            R::with_mutex_mut(&self.session.observer, |obs| {
+                #[cfg(feature = "declare-queryable")]
+                let remote = obs.remote_queryables.has_matching_for(
+                    &wz_session_core::declare::queryable::QuerierCriterion::new(
+                        &self.keyexpr,
+                        locality,
+                        complete_required,
+                    ),
+                );
+                #[cfg(not(feature = "declare-queryable"))]
+                let remote = false;
+                #[cfg(feature = "query-queryable")]
+                let local = locality.allows_local()
+                    && obs
+                        .queryables
+                        .has_local_matching(&self.keyexpr, complete_required);
+                #[cfg(not(feature = "query-queryable"))]
+                let local = false;
+                remote || local
+            })
+        };
+        #[cfg(not(any(feature = "declare-queryable", feature = "query-queryable")))]
         let matching = false;
         MatchingStatus { matching }
+    }
+
+    /// R311y797 — whether this querier's target demands COMPLETE
+    /// responders, i.e. zenoh's `Queryables(self.target ==
+    /// QueryTarget::AllComplete)` discriminant
+    /// (`zenoh/src/api/querier.rs:225`).
+    ///
+    /// Reads [`QueryOptions::effective_target`](super::QueryOptions)
+    /// rather than the raw `pub target` field, for the reason that
+    /// accessor exists: with `query-target` OFF the field is still
+    /// writable and would otherwise select a matching semantic in a build
+    /// that cannot put a target on the wire — the poll would answer about
+    /// a query the peer will never be asked.
+    ///
+    /// A shared helper because the poll, the aliased poll and the watch
+    /// registration must all answer it the same way; three copies of one
+    /// comparison is exactly how the poll and the watch drift apart.
+    fn complete_required(&self) -> bool {
+        self.options.effective_target() == Some(QueryTarget::AllComplete)
     }
 
     /// R311kh — callback counterpart of [`Self::get_matching_status`]
@@ -1093,9 +1165,30 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
                     cell.invoke(move |cb| cb(MatchingStatus { matching: m }));
                 }));
             });
+            // R311y797 — seed with the SAME verdict the poll reports, and
+            // store the SAME criterion the poll computes, so registration
+            // and `get_matching_status` cannot disagree at the instant the
+            // listener is created and cannot drift afterwards: the watch
+            // keeps re-evaluating under this querier's own target.
+            let complete_required = self.complete_required();
+            let locality = self.options.allowed_destination;
             let id = R::with_mutex_mut(&self.session.observer, |obs| {
-                obs.remote_queryables
-                    .declare_matching_listener(&self.keyexpr, sink)
+                #[cfg(feature = "query-queryable")]
+                let local = locality.allows_local()
+                    && obs
+                        .queryables
+                        .has_local_matching(&self.keyexpr, complete_required);
+                #[cfg(not(feature = "query-queryable"))]
+                let local = false;
+                obs.remote_queryables.declare_matching_listener_seeded(
+                    wz_session_core::declare::queryable::QuerierCriterion::new(
+                        &self.keyexpr,
+                        locality,
+                        complete_required,
+                    ),
+                    local,
+                    sink,
+                )
             });
             // R311y771 — the QUERYABLE-plane twin of the emit in
             // `Publisher::declare_matching_listener`; read its comment for
@@ -1319,11 +1412,40 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
             }
         };
         // R311dd — observer access via R::with_mutex_mut closure form.
-        #[cfg(feature = "declare-queryable")]
-        let matching = R::with_mutex_mut(&self.session.observer, |obs| {
-            obs.remote_queryables.has_matching(&_effective_keyexpr)
-        });
-        #[cfg(not(feature = "declare-queryable"))]
+        // R311y797 — the literal twin's rule verbatim, over the composed
+        // effective keyexpr: both halves, each gated by this querier's own
+        // `allowed_destination`, under the criterion its target selects.
+        // See `Querier::get_matching_status` for every upstream citation;
+        // the two must not diverge, which is why the target question is
+        // asked through the shared `complete_required` helper rather than
+        // re-derived here.
+        #[cfg(any(feature = "declare-queryable", feature = "query-queryable"))]
+        let matching = {
+            let locality = self.options.allowed_destination;
+            let complete_required =
+                self.options.effective_target() == Some(QueryTarget::AllComplete);
+            R::with_mutex_mut(&self.session.observer, |obs| {
+                #[cfg(feature = "declare-queryable")]
+                let remote = obs.remote_queryables.has_matching_for(
+                    &wz_session_core::declare::queryable::QuerierCriterion::new(
+                        &_effective_keyexpr,
+                        locality,
+                        complete_required,
+                    ),
+                );
+                #[cfg(not(feature = "declare-queryable"))]
+                let remote = false;
+                #[cfg(feature = "query-queryable")]
+                let local = locality.allows_local()
+                    && obs
+                        .queryables
+                        .has_local_matching(&_effective_keyexpr, complete_required);
+                #[cfg(not(feature = "query-queryable"))]
+                let local = false;
+                remote || local
+            })
+        };
+        #[cfg(not(any(feature = "declare-queryable", feature = "query-queryable")))]
         let matching = false;
         Ok(MatchingStatus { matching })
     }

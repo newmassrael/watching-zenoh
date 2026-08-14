@@ -780,7 +780,17 @@ session-reconnect = ["alloc"]
 # membership mutation (the listener form of the polling
 # `get_matching_status`). Pulls `alloc` for the watch keyexpr Strings —
 # the membership table it consults is the registries' alloc-gated half.
-session-matching = ["alloc"]
+# R311y797 — also pulls `keyexpr-includes`, and that is a semantic
+# requirement rather than a convenience: a querier targeting AllComplete
+# matches a queryable only when the queryable's keyexpr INCLUDES the
+# querier's (zenoh api/session.rs:1891-1894, pico net/filtering.c:148),
+# and inclusion is a different predicate from intersection, not a
+# stricter reading of it. Without the forward the AllComplete arm has no
+# matcher to call and could only answer conservatively, which is a wrong
+# answer rather than a missing one. Costs nothing on the MCU side:
+# preset-cortex-m4-default already carries `keyexpr-includes` and does
+# NOT carry `session-matching`.
+session-matching = ["alloc", "keyexpr-includes"]
 
 # R311lh — consumer-enable arm for the `deferred_fire` module gate. The
 # Session tier (wz-runtime-tokio, host-only, always alloc + Arc) turns

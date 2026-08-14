@@ -5068,6 +5068,212 @@ fn publisher_get_matching_status_false_with_non_matching_peer_keyexpr() {
     );
 }
 
+// ── R311y797 — the SESSION-LOCAL half and the TARGET on the QUERIER
+// plane. Until this round `Querier::get_matching_status` consulted the
+// remote registry only and never read the target, so a querier whose only
+// queryable sat on its own session reported false while its own `get` was
+// answered by it, and an AllComplete querier was told `true` by responders
+// that could not answer it alone.
+
+#[cfg(feature = "query-queryable")]
+#[test]
+fn querier_get_matching_status_true_for_a_session_local_queryable() {
+    let (session, _driver) = build_session();
+    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    assert_eq!(
+        querier.get_matching_status(),
+        MatchingStatus { matching: false },
+        "nothing declared anywhere yet"
+    );
+    let _q = session
+        .declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {})
+        .expect("query-queryable is on in this lane");
+    assert_eq!(
+        querier.get_matching_status(),
+        MatchingStatus { matching: true },
+        "a queryable on THIS session answers this querier — no peer involved"
+    );
+}
+
+#[cfg(feature = "query-queryable")]
+#[test]
+fn querier_get_matching_status_false_again_after_the_local_queryable_drops() {
+    let (session, _driver) = build_session();
+    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    {
+        let _q = session
+            .declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {})
+            .expect("query-queryable is on in this lane");
+        assert_eq!(
+            querier.get_matching_status(),
+            MatchingStatus { matching: true }
+        );
+    }
+    assert_eq!(
+        querier.get_matching_status(),
+        MatchingStatus { matching: false },
+        "the queryable's RAII drop unregisters it and the verdict follows"
+    );
+}
+
+#[cfg(feature = "query-queryable")]
+#[test]
+fn querier_get_matching_status_ignores_local_when_destination_is_remote() {
+    // The DISCRIMINATOR for reading the querier's own locality: same local
+    // queryable, same keyexpr, and a querier that has declared it will
+    // never be answered locally.
+    use wz_session_core::locality::Locality;
+    let (session, _driver) = build_session();
+    let querier = session.declare_querier(
+        "home/temp",
+        QueryOptions::get().with_allowed_destination(Locality::Remote),
+    );
+    let _q = session
+        .declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {})
+        .expect("query-queryable is on in this lane");
+    assert_eq!(
+        querier.get_matching_status(),
+        MatchingStatus { matching: false },
+        "a Remote-destination querier does not count its own session's queryable"
+    );
+}
+
+#[cfg(feature = "query-queryable")]
+#[test]
+fn querier_get_matching_status_ignores_a_remote_only_local_queryable() {
+    // The other side of the same gate: the QUERYABLE refuses local
+    // origins, so it is not reached by its own session's querier even
+    // though the keyexprs are identical.
+    use wz_session_core::locality::Locality;
+    let (session, _driver) = build_session();
+    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let _q = session
+        .declare_queryable(
+            "home/temp",
+            QueryableOptions::default().with_allowed_origin(Locality::Remote),
+            |_q, _r| {},
+        )
+        .expect("query-queryable is on in this lane");
+    assert_eq!(
+        querier.get_matching_status(),
+        MatchingStatus { matching: false },
+        "a Remote-origin queryable is not reached by a loopback query, so it does not match"
+    );
+}
+
+/// A `Locality::SessionLocal` querier is not answered by a PEER, so a
+/// peer's DeclQueryable must not flip its verdict. The `Locality::Any`
+/// twin over the identical fixture is the discriminator.
+#[cfg(feature = "declare-queryable")]
+#[test]
+fn querier_get_matching_status_ignores_a_peer_when_destination_is_session_local() {
+    use hashbrown::HashMap;
+    use wz_session_core::locality::Locality;
+    let (session, _driver) = build_session();
+    let local_only = session.declare_querier(
+        "home/temp",
+        QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+    );
+    let anywhere = session.declare_querier("home/temp", QueryOptions::get());
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .remote_queryables
+        .dispatch_declare(&make_decl_queryable(90, "home/temp"), &HashMap::new());
+    assert_eq!(
+        anywhere.get_matching_status(),
+        MatchingStatus { matching: true },
+        "the peer declaration DID land — the fixture is live"
+    );
+    assert_eq!(
+        local_only.get_matching_status(),
+        MatchingStatus { matching: false },
+        "a SessionLocal querier never reaches a peer, so no peer \
+         declaration can make it match"
+    );
+}
+
+/// `AllComplete` restricts the LOCAL half to queryables that declared
+/// themselves complete. Both arms register the same keyexpr and the same
+/// target, differing only in `QueryableOptions::complete`, so a poll that
+/// ignored the flag would report them identically.
+#[cfg(all(feature = "query-queryable", feature = "query-target"))]
+#[test]
+fn querier_get_matching_status_under_all_complete_needs_a_complete_local_queryable() {
+    use wz_session_core::query_mode::QueryTarget;
+    let (session, _driver) = build_session();
+    let querier = session.declare_querier(
+        "home/temp",
+        QueryOptions::get().with_target(QueryTarget::AllComplete),
+    );
+    let incomplete = session
+        .declare_queryable(
+            "home/temp",
+            QueryableOptions::default().with_complete(false),
+            |_q, _r| {},
+        )
+        .expect("query-queryable is on in this lane");
+    assert_eq!(
+        querier.get_matching_status(),
+        MatchingStatus { matching: false },
+        "an AllComplete querier is not answered by an INCOMPLETE queryable"
+    );
+    drop(incomplete);
+
+    let _complete = session
+        .declare_queryable(
+            "home/temp",
+            QueryableOptions::default().with_complete(true),
+            |_q, _r| {},
+        )
+        .expect("query-queryable is on in this lane");
+    assert_eq!(
+        querier.get_matching_status(),
+        MatchingStatus { matching: true },
+        "the same declaration marked COMPLETE does answer it"
+    );
+}
+
+/// `AllComplete` also switches the keyexpr test from intersection to
+/// INCLUSION. `home/*/temp` intersects `home/**` without including it, so
+/// only the target distinguishes the two queriers here — same registry,
+/// same complete queryable.
+#[cfg(all(
+    feature = "query-queryable",
+    feature = "query-target",
+    feature = "keyexpr-includes"
+))]
+#[test]
+fn querier_get_matching_status_under_all_complete_demands_inclusion() {
+    use wz_session_core::query_mode::QueryTarget;
+    let (session, _driver) = build_session();
+    let _q = session
+        .declare_queryable(
+            "home/*/temp",
+            QueryableOptions::default().with_complete(true),
+            |_q, _r| {},
+        )
+        .expect("query-queryable is on in this lane");
+
+    let best_matching = session.declare_querier("home/**", QueryOptions::get());
+    let all_complete = session.declare_querier(
+        "home/**",
+        QueryOptions::get().with_target(QueryTarget::AllComplete),
+    );
+    assert_eq!(
+        best_matching.get_matching_status(),
+        MatchingStatus { matching: true },
+        "the two patterns intersect at `home/a/temp`"
+    );
+    assert_eq!(
+        all_complete.get_matching_status(),
+        MatchingStatus { matching: false },
+        "`home/*/temp` does not INCLUDE `home/**`, so it cannot answer \
+         the whole question alone"
+    );
+}
+
 #[test]
 fn publisher_aliased_get_matching_status_returns_err_on_unknown_mapping() {
     let (session, _driver) = build_session();
@@ -7199,6 +7405,299 @@ fn querier_matching_listener_fires_on_remote_queryable_transitions() {
     session.drain_deferred_fires();
     assert_eq!(*log.lock().unwrap(), vec![true, false]);
 
+    assert!(listener.undeclare());
+}
+
+// ── R311y797 — the WATCH must answer what the POLL answers ────────────
+//
+// These live at the session tier deliberately, and R311y788's own damage
+// probe is the reason: a registry-only test cannot see the delivery seam
+// (removing the deferred-fire drain left all four registry unit tests
+// green and reddened only the session-tier one).
+
+/// A LOCAL queryable declared after the listener flips the watch. Before
+/// this round the querier's watch stood on the remote registry alone, so
+/// declaring a queryable on the same session fired nothing at all.
+#[cfg(all(feature = "session-matching", feature = "query-queryable"))]
+#[test]
+fn querier_matching_listener_fires_when_a_local_queryable_is_declared() {
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let listener = querier
+        .declare_matching_listener(move |s| log_cb.lock().unwrap().push(s.matching))
+        .expect("session-matching is on in this lane");
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "registration on a session with NO queryable anywhere is silent"
+    );
+
+    let queryable = session
+        .declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {})
+        .expect("query-queryable is on in this lane");
+    session.drain_deferred_fires();
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![true],
+        "a queryable on THIS session flips the watch, exactly as it flips \
+         the poll"
+    );
+
+    drop(queryable);
+    session.drain_deferred_fires();
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![true, false],
+        "and its undeclare flips it back"
+    );
+    assert!(listener.undeclare());
+}
+
+/// Registration SEEDS from both halves, so a listener created while a
+/// local queryable already answers fires `true` immediately — the same
+/// verdict the poll reports at that instant. A seed that read only the
+/// remote registry would stay silent here and then disagree with the poll
+/// for the life of the listener.
+#[cfg(all(feature = "session-matching", feature = "query-queryable"))]
+#[test]
+fn querier_matching_listener_registration_seeds_from_the_local_half_too() {
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    let _q = session
+        .declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {})
+        .expect("query-queryable is on in this lane");
+    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    assert_eq!(
+        querier.get_matching_status(),
+        MatchingStatus { matching: true },
+        "precondition: the poll already says true"
+    );
+
+    let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let listener = querier
+        .declare_matching_listener(move |s| log_cb.lock().unwrap().push(s.matching))
+        .expect("session-matching is on in this lane");
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![true],
+        "an already-matching registration must DELIVER `true`, and the \
+         local queryable is the only thing making it match"
+    );
+    assert!(listener.undeclare());
+}
+
+/// The watch keeps applying the querier's TARGET, not just its keyexpr.
+/// Registered by an `AllComplete` querier, it stays silent while only an
+/// INCOMPLETE local queryable exists and fires when a complete one
+/// arrives — the flip a keyexpr-only watch key would have delivered on
+/// the first declaration.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "query-queryable",
+    feature = "query-target"
+))]
+#[test]
+fn querier_matching_listener_keeps_applying_the_all_complete_target() {
+    use std::sync::{Arc, Mutex};
+    use wz_session_core::query_mode::QueryTarget;
+
+    let (session, _driver) = build_session();
+    let querier = session.declare_querier(
+        "home/temp",
+        QueryOptions::get().with_target(QueryTarget::AllComplete),
+    );
+    let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let listener = querier
+        .declare_matching_listener(move |s| log_cb.lock().unwrap().push(s.matching))
+        .expect("session-matching is on in this lane");
+
+    let incomplete = session
+        .declare_queryable(
+            "home/temp",
+            QueryableOptions::default().with_complete(false),
+            |_q, _r| {},
+        )
+        .expect("query-queryable is on in this lane");
+    session.drain_deferred_fires();
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "an incomplete queryable does not satisfy an AllComplete watch"
+    );
+    drop(incomplete);
+    session.drain_deferred_fires();
+
+    let _complete = session
+        .declare_queryable(
+            "home/temp",
+            QueryableOptions::default().with_complete(true),
+            |_q, _r| {},
+        )
+        .expect("query-queryable is on in this lane");
+    session.drain_deferred_fires();
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![true],
+        "the complete queryable flips it exactly once"
+    );
+    assert!(listener.undeclare());
+}
+
+/// The SESSION-LOCAL half reaches the watch on the PRODUCTION INBOUND
+/// path, not only at registration and on local declares. A peer's
+/// UndeclQueryable arriving through the observer fan must not flip a
+/// watch that a session-local queryable is holding `true`.
+///
+/// Driven through `Session::dispatch_iteration_event` deliberately: the
+/// registry's own `dispatch_declare` passes a `false` local half by
+/// contract, so a test that used it would prove nothing about the fan —
+/// and the fan is the only thing that runs in production.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "query-queryable",
+    feature = "declare-queryable"
+))]
+#[test]
+fn an_inbound_peer_undeclare_does_not_flip_a_watch_a_local_queryable_holds() {
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    let _local = session
+        .declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {})
+        .expect("query-queryable is on in this lane");
+    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let listener = querier
+        .declare_matching_listener(move |s| log_cb.lock().unwrap().push(s.matching))
+        .expect("session-matching is on in this lane");
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![true],
+        "the local queryable already answers, so registration fires true"
+    );
+
+    let fan = |body: wz_codecs::declare::DeclareOwnedVariant| {
+        let declare = wz_codecs::declare::DeclareOwned {
+            header: 0,
+            interest_id: None,
+            extensions: None,
+            body,
+        };
+        let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![wz_session_core::network_message::NetworkMessage::Declare(
+                Box::new(declare),
+            )],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    };
+
+    fan(make_decl_queryable(50, "home/temp"));
+    fan(make_undecl_queryable(50));
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![true],
+        "the peer came and went, but the LOCAL queryable still answers — \
+         a fan that dropped the local half would have fired `false` here"
+    );
+
+    drop(_local);
+    session.drain_deferred_fires();
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![true, false],
+        "only when the local half goes too does the verdict flip"
+    );
+    assert!(listener.undeclare());
+}
+
+/// R311y797 — the PUBLISHER-plane defect this round found while building
+/// the querier twin: R311y788 gated the poll on the publisher's
+/// `allowed_destination` but the WATCH stored only a keyexpr, so every
+/// re-evaluation answered as if the locality were `Any`.
+///
+/// A `Locality::SessionLocal` publisher polls `false` on a purely remote
+/// subscriber; its listener must agree. The disagreement is what this
+/// pins, so the assertion is on BOTH surfaces at the same instant.
+#[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
+#[test]
+fn a_session_local_publishers_watch_agrees_with_its_poll_about_a_peer() {
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+    use wz_session_core::locality::Locality;
+
+    let (session, _driver) = build_session();
+    let pubr = session.declare_publisher(
+        "home/temp",
+        PublishOptions::put().with_locality(Locality::SessionLocal),
+    );
+    let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let listener = pubr
+        .declare_matching_listener(move |s| log_cb.lock().unwrap().push(s.matching))
+        .expect("session-matching is on in this lane");
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .remote_subscribers
+        .dispatch_declare(&make_decl_subscriber(97, "home/temp"), &HashMap::new());
+    session.drain_deferred_fires();
+
+    assert_eq!(
+        pubr.get_matching_status(),
+        MatchingStatus { matching: false },
+        "a SessionLocal publisher never reaches a peer, so the poll is false"
+    );
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "and the WATCH must say the same thing — before this round it \
+         fired `true` here while the poll said false"
+    );
+    assert!(listener.undeclare());
+}
+
+/// The anti-vacuity twin of the test above: the identical fixture with a
+/// `Locality::Any` publisher DOES fire, so the silence there is the
+/// locality gate and not a broken dispatch.
+#[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
+#[test]
+fn an_any_locality_publishers_watch_still_fires_on_the_same_peer() {
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    let pubr = session.declare_publisher("home/temp", PublishOptions::put());
+    let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let listener = pubr
+        .declare_matching_listener(move |s| log_cb.lock().unwrap().push(s.matching))
+        .expect("session-matching is on in this lane");
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .remote_subscribers
+        .dispatch_declare(&make_decl_subscriber(98, "home/temp"), &HashMap::new());
+    session.drain_deferred_fires();
+
+    assert_eq!(
+        pubr.get_matching_status(),
+        MatchingStatus { matching: true }
+    );
+    assert_eq!(*log.lock().unwrap(), vec![true]);
     assert!(listener.undeclare());
 }
 
