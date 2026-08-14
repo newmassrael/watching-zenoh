@@ -656,9 +656,9 @@ pub(crate) struct DeclareEmitSpec {
     pub(crate) querier_matching_log_keyexpr: Option<String>,
     /// R311y798 — `--querier-matching-all-complete`: declare a SECOND querier
     /// on the very same `--querier-matching-log` keyexpr, differing in exactly
-    /// one thing — its target is
-    /// [`QueryTarget::AllComplete`](wz_session_core::query_mode::QueryTarget) —
-    /// and log its transitions under a DISTINCT prefix.
+    /// one thing — its target is `QueryTarget::AllComplete` (a code span: this
+    /// crate does not depend on wz-session-core directly, so the path is not a
+    /// link it can resolve) — and log its transitions under a DISTINCT prefix.
     ///
     /// A bare companion of `--querier-matching-log` rather than a keyexpr of
     /// its own, and that is the whole point: the two queriers must be
