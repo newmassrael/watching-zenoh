@@ -2402,7 +2402,15 @@ layer_c1u_cargo_test_tls() {
         || return 1
     _runci_guarded_test C1u 3 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet \
         || return 1
-    _runci_guarded_test C1u 6 cargo test -p wz-runtime-tokio --features transport-link-tls --test session_reconnect_e2e --quiet \
+    #
+    # R311y801 — 6 -> 7, the THIRD instance of the same missed update, and this
+    # time the two lanes moved together in one commit. R1834 added
+    # `a_dying_link_flips_the_dialers_matching_listener_to_false` to that binary
+    # and updated neither guard; pre-push runs `cargo test -p wz-runtime-tokio`
+    # but no count guard, so the skew reaches origin by construction. The delta
+    # being +1 HERE and +1 in C1v is the measurement that the new test is not
+    # trapped behind either link feature: both sets compile and run it.
+    _runci_guarded_test C1u 7 cargo test -p wz-runtime-tokio --features transport-link-tls --test session_reconnect_e2e --quiet \
         || return 1
     _runci_guarded_test C1u 6 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_pem_mtls_e2e --quiet \
         || return 1
@@ -2457,7 +2465,8 @@ layer_c1v_cargo_test_ws() {
         || return 1
     _runci_guarded_test C1v 3 cargo test -p wz-runtime-tokio --features transport-link-ws --test ws_e2e --quiet \
         || return 1
-    _runci_guarded_test C1v 6 cargo test -p wz-runtime-tokio --features transport-link-ws --test session_reconnect_e2e --quiet \
+    # R311y801 — 6 -> 7 with C1u, same commit, same reason (see C1u's note).
+    _runci_guarded_test C1v 7 cargo test -p wz-runtime-tokio --features transport-link-ws --test session_reconnect_e2e --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
@@ -2693,7 +2702,15 @@ layer_c1bb_cargo_test_qos() {
     # population rather than about this lane's subject alone. That is the
     # accepted cost of an exact pin, and the remedy is to move it deliberately
     # rather than to loosen the filter.
-    _runci_guarded_test C1bb 22 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
+    #
+    # R311y801 — 22 -> 25, the SAME shape R311y630c records and for the same
+    # reason: `declare_ext_qos::interest_tests`'s three ungated cases match the
+    # substring, though the module is the DECLARE-plane `ext_qos` and has
+    # nothing to do with transport-qos. Found by measuring this guard before
+    # pushing rather than by a red run — and the measurement caught more than a
+    # count, because the same command refused to COMPILE first (`ext_nodeid`
+    # was gated on its callers, and the new Interest arm has none of them).
+    _runci_guarded_test C1bb 25 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --all-targets --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --quiet -- -D warnings \
@@ -6427,6 +6444,17 @@ layer_c1bz_docs_resolve() {
     # watched in BOTH directions deliberately -- a deletion that lowers the
     # count has to say so, which is what turned an unnoticed doc edit into a
     # named debt instead of a silent drift.
+    #
+    # R311y801: wz-session-core 274 -> 273, and the route there is the point.
+    # The new `declare_ext_qos` module added NINE findings of its own (links to
+    # `declare_build` / `declare_routing_context` / `set_declare_qos`, all
+    # `codec-declare`-gated and so absent from the default-feature rustdoc); each
+    # was rewritten as a code span rather than budgeted, per the standing rule.
+    # The count then read 277 rather than 274, because widening `ext_nodeid`'s
+    # gate to `alloc` made that module's OWN pre-existing links visible in the
+    # default config for the first time. Those were code-spanned too, which is
+    # what lands the count one BELOW the old budget — a removal this line has to
+    # declare, exactly as the gate's downward arm demands.
     budget="
         wz-ap-demo:13
         wz-capi-c:56
@@ -6437,7 +6465,7 @@ layer_c1bz_docs_resolve() {
         wz-routing-graph:6
         wz-runtime-coop:19
         wz-runtime-tokio:190
-        wz-session-core:274
+        wz-session-core:273
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
     "

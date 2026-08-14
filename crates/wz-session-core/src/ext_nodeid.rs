@@ -7,8 +7,8 @@
 //! `Z`-bit invariant any owned extension chain re-encodes under.
 //!
 //! Consolidates what were three byte-identical copies of this logic
-//! (`push_build`'s chain-Z helper, [`push_routing_context`](crate::push_routing_context),
-//! [`declare_routing_context`](crate::declare_routing_context)). The carrier
+//! (`push_build`'s chain-Z helper, `push_routing_context`,
+//! `declare_routing_context`). The carrier
 //! modules keep ONLY the one-line message-header `Z` sync, because that header
 //! field is the one thing that genuinely differs per message type (the Push
 //! header `Z` vs the Declare header `Z` live at the same bit but on different
@@ -53,7 +53,7 @@ pub use crate::ext_header::ext_id;
 
 /// Sync a message header's `Z` bit to whether its extension chain is now
 /// present — the SSOT for the per-message source setters
-/// ([`set_source`](crate::push_routing_context::set_push_source) and the
+/// (`push_routing_context::set_push_source` and the
 /// Declare / Request / hop-limit twins), which all did the identical
 /// `header |= MESSAGE_FLAG_Z` (chain present) / `header &= !MESSAGE_FLAG_Z`
 /// (chain empty) after an ext-chain edit. The ONE field that differs per
@@ -86,7 +86,7 @@ pub fn apply_chain_z_bits(entries: &mut [ExtEntryOwned]) {
 
 /// Read a `Z64`-bodied extension's value by `id` from a chain — the generic
 /// chain read the per-id routing-context readers share ([`read_source`] for the
-/// `ext_nodeid`, [`push_routing_context`](crate::push_routing_context)'s
+/// `ext_nodeid`, `push_routing_context`'s
 /// hop-limit). `None` when no entry with `id` is present (or its body is not a
 /// `Z64` zint). The id-keyed scan + body-variant match lives here ONCE so each
 /// per-id reader is a one-line projection.

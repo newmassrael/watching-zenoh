@@ -87,13 +87,23 @@ pub fn build_interest_liveliness_subscriber(
     // A liveliness subscriber always sets FUTURE (the subscription stays
     // live for subsequent peer declarations); CURRENT mirrors the
     // `history` replay request.
-    build_liveliness_token_interest(
+    let mut interest = build_liveliness_token_interest(
         interest_id,
         /*current=*/ history,
         /*future=*/ true,
         keyexpr_mapping_id,
         keyexpr_suffix,
-    )
+    )?;
+    // R311y801 — the `ext_qos` upstream stamps on THIS Interest and on no other
+    // api-level one (`api/session.rs:1812`; the subscribers / queryables /
+    // liveliness-get / Final interests are all left at DEFAULT and so write
+    // nothing). Applied HERE rather than in the shared
+    // `build_liveliness_token_interest` precisely because the GET arm shares
+    // that body and must NOT carry it — the two builders differ in the C/F bits
+    // and now in this, and folding it down would have made wz uniform where
+    // upstream is not.
+    crate::declare_ext_qos::set_interest_qos(&mut interest, crate::declare_ext_qos::QOS_DECLARE);
+    Ok(interest)
 }
 
 /// Build a one-shot liveliness GET (snapshot) `Interest`: CURRENT set,
@@ -429,6 +439,16 @@ mod tests {
     use alloc::vec;
     use wz_codecs_test_support::TestWire;
 
+    /// R311y801 — the two bytes a liveliness-subscriber Interest now ends with:
+    /// the `ext_qos` entry header (`id 0x01 | ENC_Z64`, terminal) and
+    /// `QoSType::DECLARE` (Control | nodrop). Named once so the four vectors
+    /// below say WHAT they gained rather than repeating a pair of magic bytes,
+    /// and so a change to either value has to move this line.
+    const QOS_EXT_TAIL: [u8; 2] = [
+        crate::declare_ext_qos::QOS_EXT_HEADER,
+        crate::declare_ext_qos::QOS_DECLARE.raw,
+    ];
+
     /// R279 — `build_interest_liveliness_subscriber` produces an
     /// `Interest` envelope with the inner `InterestBody` carrier
     /// emitting `flags = KEYEXPRS | TOKENS | RESTRICTED | FUTURE
@@ -457,15 +477,21 @@ mod tests {
             Some("liveliness/dev"),
         )
         .unwrap();
+        // R311y801 — all four vectors gained the outer `Z` bit and a TRAILING
+        // two-byte `ext_qos` entry. Trailing, not leading: the Interest codec
+        // writes its extensions AFTER the id / options / wire_expr
+        // (`zenoh-codec/src/network/interest.rs:65-88`), the mirror image of
+        // the Declare, where they precede the body.
         let future_only_wire = future_only.wire();
         let mut future_only_expected = vec![
-            0x59u8, // outer: MID | F
+            0xD9u8, // outer: MID | F | Z
             0x07,   // VLE(interest_id=7)
             0x79,   // body: KE | TO | R | N | M
             0x00,   // wireexpr.id VLE(0) literal sentinel
             0x0E,   // suffix_len VLE(14)
         ];
         future_only_expected.extend_from_slice(b"liveliness/dev");
+        future_only_expected.extend_from_slice(&QOS_EXT_TAIL);
         assert_eq!(
             future_only_wire, future_only_expected,
             "future-only literal Interest wire bytes must match zenoh-pico reference",
@@ -485,13 +511,14 @@ mod tests {
         .unwrap();
         let current_future_wire = current_future.wire();
         let mut current_future_expected = vec![
-            0x79u8, // outer: MID | C | F
+            0xF9u8, // outer: MID | C | F | Z
             0x03,   // VLE(interest_id=3)
             0x79,   // body: KE | TO | R | N | M
             0x00,   // wireexpr.id VLE(0)
             0x01,   // suffix_len VLE(1)
         ];
         current_future_expected.extend_from_slice(b"a");
+        current_future_expected.extend_from_slice(&QOS_EXT_TAIL);
         assert_eq!(
             current_future_wire, current_future_expected,
             "current+future literal Interest wire bytes must match zenoh-pico reference",
@@ -509,7 +536,7 @@ mod tests {
         let alias_wire = alias.wire();
         assert_eq!(
             alias_wire,
-            vec![0x59u8, 0x05, 0x59, 0x0B],
+            vec![0xD9u8, 0x05, 0x59, 0x0B, QOS_EXT_TAIL[0], QOS_EXT_TAIL[1]],
             "alias Interest wire bytes must match zenoh-pico reference",
         );
 
@@ -524,8 +551,9 @@ mod tests {
         )
         .unwrap();
         let composite_wire = composite.wire();
-        let mut composite_expected = vec![0x59u8, 0x05, 0x79, 0x0B, 0x05];
+        let mut composite_expected = vec![0xD9u8, 0x05, 0x79, 0x0B, 0x05];
         composite_expected.extend_from_slice(b"/tail");
+        composite_expected.extend_from_slice(&QOS_EXT_TAIL);
         assert_eq!(
             composite_wire, composite_expected,
             "composite alias Interest wire bytes must match zenoh-pico reference",
@@ -692,9 +720,22 @@ mod tests {
             "the two forms must differ in the KIND bits and nothing else -- a \
              difference anywhere else means the shared header SSOT drifted",
         );
+        // R311y801 — compared MODULO the ext-chain `Z` bit, which the outer
+        // header now also carries: the liveliness-token form stamps `ext_qos`
+        // (upstream `api/session.rs:1812`) and the subscribers form does not
+        // (`:1376`), so the raw bytes legitimately differ there. The claim this
+        // line makes is about the MODE bits, and it is narrowed to say so
+        // rather than widened to accept the difference.
         assert_eq!(
-            subs.header, tokens.header,
+            subs.header & !crate::ext_nodeid::MESSAGE_FLAG_Z,
+            tokens.header & !crate::ext_nodeid::MESSAGE_FLAG_Z,
             "the outer C/F header is a mode, not a kind, and must be identical",
+        );
+        assert_eq!(
+            (subs.header ^ tokens.header) & crate::ext_nodeid::MESSAGE_FLAG_Z,
+            crate::ext_nodeid::MESSAGE_FLAG_Z,
+            "and the Z bit is exactly where they DO differ -- the token form \
+             carries ext_qos, the subscribers form does not",
         );
     }
 

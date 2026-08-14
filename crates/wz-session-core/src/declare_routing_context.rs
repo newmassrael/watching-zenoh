@@ -86,10 +86,11 @@ mod tests {
     #[test]
     fn absent_ext_reads_as_self_originated_zero() {
         let d = declare_sub();
-        assert!(
-            d.extensions.is_none(),
-            "builder emits no Declare-level exts"
-        );
+        // R311y801 — the builder now emits ONE Declare-level ext, the `ext_qos`
+        // zenoh stamps on every Declare. What this test gates is unchanged: no
+        // ext_nodeid means self-originated, and the reader must not be confused
+        // by a chain that exists but holds someone else's extension.
+        assert_eq!(d.extensions.as_ref().map(|e| e.len()), Some(1));
         assert_eq!(read_declare_source(&d), 0);
     }
 
@@ -105,9 +106,9 @@ mod tests {
         let mut d = declare_sub();
         set_declare_source(&mut d, 7);
         let exts = d.extensions.as_ref().expect("ext present after set");
-        assert_eq!(exts.len(), 1, "only the nodeid ext");
-        // 0x03 (id) | 0x10 (M) | 0x20 (Z64), Z clear (sole / last entry).
-        assert_eq!(exts[0].header, 0x33);
+        assert_eq!(exts.len(), 2, "the builder's ext_qos, then the nodeid");
+        // 0x03 (id) | 0x10 (M) | 0x20 (Z64), Z clear (last entry).
+        assert_eq!(exts[1].header, 0x33);
         // Declare-level Z bit set because a chain is now present.
         assert_eq!(d.header & MESSAGE_FLAG_Z, MESSAGE_FLAG_Z);
     }
@@ -118,8 +119,19 @@ mod tests {
         set_declare_source(&mut d, 7);
         set_declare_source(&mut d, 0);
         assert_eq!(read_declare_source(&d), 0);
-        assert!(d.extensions.is_none(), "the sole ext is dropped to None");
-        assert_eq!(d.header & MESSAGE_FLAG_Z, 0, "Declare Z bit cleared");
+        // R311y801 — the nodeid entry is dropped, the builder's ext_qos stays,
+        // so the chain (and the header Z bit) survive. Removing one ext must
+        // not silently take the rest of the chain with it.
+        assert_eq!(d.extensions.as_ref().map(|e| e.len()), Some(1));
+        assert_eq!(
+            crate::declare_ext_qos::read_declare_qos(&d),
+            crate::declare_ext_qos::QOS_DECLARE,
+        );
+        assert_eq!(
+            d.header & MESSAGE_FLAG_Z,
+            MESSAGE_FLAG_Z,
+            "Declare Z bit still set — a chain remains"
+        );
     }
 
     #[test]
@@ -129,7 +141,7 @@ mod tests {
         set_declare_source(&mut d, 9);
         assert_eq!(read_declare_source(&d), 9);
         let exts = d.extensions.as_ref().expect("ext present");
-        assert_eq!(exts.len(), 1, "replaced, not duplicated");
+        assert_eq!(exts.len(), 2, "replaced, not duplicated (ext_qos + nodeid)");
     }
 
     #[test]
@@ -215,6 +227,12 @@ mod tests {
         set_declare_source(&mut d, 7);
         let mut expected = vec![
             0x9E, // Declare header: N_MID_DECLARE 0x1E | Z 0x80 (ext chain present)
+            // R311y801 — the builder's ext_qos leads the chain, which is also
+            // zenoh's write order (qos, tstamp, nodeid — zenoh-codec
+            // declare.rs:118-129), so this vector gained two bytes rather than
+            // changing shape.
+            0xA1, // ext_qos header: id 0x01 | ENC_Z64 0x20 | Z 0x80 (more follows)
+            0x08, // QoSType::DECLARE -> Priority::Control | nodrop -> VLE(8)
             0x33, // ext_nodeid header: id 0x3 | M 0x10 | ENC_Z64 0x20 (terminal, Z clear)
             0x07, // node_id 7 -> VLE(7)
             0x62, // DeclSubscriber header: MID 0x02 | N 0x20 | M 0x40 (derived)

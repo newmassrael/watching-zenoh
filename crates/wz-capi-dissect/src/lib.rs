@@ -5,7 +5,7 @@
 //!
 //! ## The design choice, and why it is this one
 //!
-//! A [REDACTED]/C++ consumer can drive wz as a zenoh NODE today (`wz-capi-c`) and
+//! A C/C++ consumer can drive wz as a zenoh NODE today (`wz-capi-c`) and
 //! could not call the decode core at all. Closing that had two candidate
 //! shapes, and they are not equally durable:
 //!
@@ -21,8 +21,9 @@
 //! that hand back JSON. Adding a walker adds NODES, not symbols; a consumer
 //! built against today's header keeps working and simply sees fields it does
 //! not recognise, which is the same forward-compatibility contract zenoh's
-//! own unknown-extension policy takes. [REDACTED] parses it with `QJsonDocument`,
-//! which is in the framework already.
+//! own unknown-extension policy takes. A consumer parses it with whatever JSON
+//! reader its own framework already ships, so the dependency is theirs and not
+//! this crate's.
 //!
 //! This crate is the second shape. The deciding fact is that
 //! [`wz_session_core::dissect::to_json`] already exists and takes NO serde

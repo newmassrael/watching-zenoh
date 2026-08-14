@@ -690,22 +690,18 @@ pub mod wireexpr_build;
 /// plus the per-entry chain `Z`-bit normalisation. `push_routing_context` /
 /// `declare_routing_context` / `request_routing_context` / `push_build`
 /// delegate here instead of each re-implementing the chain edits (R311ru
-/// consolidation of the prior triplication). Gated on `alloc` + whichever
-/// carrier codec is present.
-#[cfg(all(
-    feature = "alloc",
-    any(
-        feature = "codec-push",
-        feature = "codec-declare",
-        feature = "codec-request",
-        // R311y74 — the codec-response reply path needs the chain-`Z`-bit
-        // SSOT too: a recovery reply that composes source_info (0x01) +
-        // attachment (0x03) on its inner push-body must normalise the
-        // per-entry continuation bits via `apply_chain_z_bits`
-        // (response_build.rs), exactly as the Push body does.
-        feature = "codec-response"
-    )
-))]
+/// consolidation of the prior triplication).
+///
+/// R311y801 — gated on `alloc` ALONE. It used to additionally require one of
+/// `codec-push` / `codec-declare` / `codec-request` / `codec-response`, which
+/// named its callers rather than its needs: every type this module touches
+/// (`ExtEntryOwned`, `ExtZint`, [`ext_header`]) is ungated. The narrower gate
+/// became wrong when `interest_build` — which carries NO codec gate, mirroring
+/// the ungated `frame_encode::encode_frame_with_interest` — started stamping
+/// the `ext_qos` chain, so an `alloc`-only build reached a chain edit that did
+/// not exist. Widening costs nothing: the items are `pub`, so no configuration
+/// gains a dead-code finding.
+#[cfg(feature = "alloc")]
 pub mod ext_nodeid;
 
 /// QueryableInfo (`complete` / `distance`) extension on a DeclareQueryable
@@ -759,6 +755,19 @@ pub mod declare_routing_context;
 /// `codec-declare` gated and owned `Vec` output (alloc-gated).
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 pub mod declare_ext_keyexpr;
+
+/// Declare `ext_qos` extension (R311y801): `QOS_DECLARE` /
+/// `read_declare_qos` / `set_declare_qos` over the `zextz64!(0x1, false)` QoS
+/// extension zenoh stamps on the Declare ENVELOPE — `Priority::Control` plus
+/// `CongestionControl::Block`, the class that keeps a declaration out of the
+/// drop-on-congestion band. Every `declare_build` envelope carries it; the
+/// module owns the value, the header byte and the omit-on-DEFAULT rule.
+/// `alloc`-gated only — the Interest arm rides the SAME extension (upstream's
+/// Interest codec compares against `declare::ext::QoSType`), and
+/// `wz_codecs::interest` carries no codec feature gate; the `DeclareOwned`-typed
+/// items inside are `codec-declare`-gated individually.
+#[cfg(feature = "alloc")]
+pub mod declare_ext_qos;
 
 /// Outbound INTEREST network-message builders
 /// (`build_interest_liveliness_subscriber` / `_get` / `build_interest_final`)
