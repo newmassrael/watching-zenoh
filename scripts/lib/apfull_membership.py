@@ -181,11 +181,22 @@ def _predicate_alt_abi(atom, entry):
 
 
 def _predicate_out_of_scope(atom, entry):
-    return entry["reason"].lstrip().upper().startswith("OUT-OF-SCOPE")
+    return inventory_kinds.reason_head_tag(entry["reason"]) == "OUT-OF-SCOPE"
 
 
 def _predicate_unbuilt(atom, entry):
-    return "UNBUILT" in entry["reason"].upper()
+    """The inventory reason's TAG is UNBUILT — its head token, not a word in it.
+
+    R311y800 — this was `"UNBUILT" in entry["reason"].upper()` and redded the
+    hosted run on a RETRACTION: R311y799 wrote "as mis-mechanised rather than
+    merely unbuilt" into `session-matching`'s reason and the gate read the
+    sentence as a tag, declaring a built member inert. Both directions of that
+    are damage — a member wrongly called inert stops the push, and a reason that
+    happened to spell the word would have been able to make a REAL inert member
+    look declared. The two other head-tag consumers never had it; see
+    `inventory_kinds.reason_head_tag`, which is now the one definition.
+    """
+    return inventory_kinds.reason_head_tag(entry["reason"]) == "UNBUILT"
 
 
 PREDICATES = {
@@ -250,7 +261,35 @@ def inventory():
     }
 
 
+def classify_reason(argv):
+    """`--classify-reason <category> <atom> <reason>` — exit 0 iff the predicate holds.
+
+    R311y800. The exclusion / inert machinery is only as good as the five
+    predicates under it, and NOTHING drove them: the tables are usually small or
+    empty, so a predicate that answered `True` to everything and one that
+    answered correctly produced the same run output. That is how a substring
+    search sat in the `unbuilt` slot until a retraction happened to spell the
+    word.
+
+    This is the seam Layer C0e drives, deliberately from OUTSIDE and through the
+    real `PREDICATES` table rather than a self-test the gate defines about
+    itself, which is the shape C0b and C0d already use for their scripts.
+    """
+    if len(argv) != 3:
+        print("usage: --classify-reason <category> <atom> <reason>", file=sys.stderr)
+        return 2
+    category, atom, reason = argv
+    predicate, expected = PREDICATES.get(category, (None, None))
+    if predicate is None:
+        print(f"unknown category `{category}`", file=sys.stderr)
+        return 2
+    return 0 if predicate(atom, {"status": "reserved", "reason": reason}) else 1
+
+
 def main():
+    if "--classify-reason" in sys.argv:
+        i = sys.argv.index("--classify-reason")
+        return classify_reason(sys.argv[i + 1:])
     report_only = "--report" in sys.argv
     atoms = inventory()
     wz_features = cargo_features(WZ_MANIFEST)

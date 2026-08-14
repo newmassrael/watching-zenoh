@@ -547,8 +547,12 @@ def assert_host_gated_ci_targets() -> list[str]:
 
 
 def impl_tag(reason: str | None) -> str | None:
-    head = (reason or "").split(":")[0].split("(")[0].strip().upper()
-    return head if head else None
+    # R311y800 — delegated to `inventory_kinds`, the one definition. This spelling
+    # and `audit-catalog-status.sh`'s were identical and both correct; the FOURTH
+    # copy (Layer A5's `unbuilt` predicate) was a substring search and redded a
+    # hosted run on a reason that merely discussed the tag. Measured no-op here:
+    # the two forms agree on all 219 atoms.
+    return inventory_kinds.reason_head_tag(reason)
 
 
 def main() -> int:

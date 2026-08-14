@@ -282,9 +282,13 @@ IMPL_TAGS = {
 TAGS_REMAINING = ("UNBUILT", "PARTIAL", "UNVERIFIED")
 
 def _head(atom):
-    """The reason's first token, whether or not it is a legal tag."""
-    r = reason.get(atom) or ""
-    return r.split(":")[0].split("(")[0].strip().upper()
+    """The reason's first token, whether or not it is a legal tag.
+
+    R311y800 — delegated to `inventory_kinds`, the one definition. The fourth
+    consumer (Layer A5's `unbuilt` predicate) had spelled this as a substring
+    search and redded a hosted run on a reason that merely discussed the tag.
+    """
+    return inventory_kinds.reason_head_tag(reason.get(atom)) or ""
 
 def impl_tag(atom):
     """First token of the reason, if it is a closed-set tag."""

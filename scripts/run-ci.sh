@@ -2103,6 +2103,114 @@ layer_c0d_doclink_dependents() {
     return 0
 }
 
+# ─── Layer C0e — the inventory TAG reader tells a tag from a word ───────────
+#
+# R311y800. Layer A5's exclusion table and its INERT_MEMBERS mirror both rest on
+# five predicates, and until this round NOTHING drove them. Both tables are
+# small (INERT_MEMBERS is EMPTY, which its own comment argues is when the gate
+# is strictest), so a predicate that answered `True` to everything and one that
+# answered correctly produced byte-identical run output.
+#
+# What that hid: the `unbuilt` predicate was `"UNBUILT" in reason.upper()`, a
+# substring search over a reason that runs to thousands of words. R311y799 wrote
+# the sentence "as mis-mechanised rather than merely unbuilt" into
+# `session-matching`'s reason -- RETRACTING a residual -- and A5 read the
+# retraction as a tag, called a built member inert, and redded run 31762809988.
+# Nothing about the atom had moved.
+#
+# Both directions are damage and both are probed below. A tag read as prose
+# stops a push on a lie; a word read as a tag would let a REAL inert member look
+# declared, which is the failure the INERT_MEMBERS table exists to catch.
+#
+# Driven from OUTSIDE through `--classify-reason`, which dispatches the real
+# PREDICATES table -- the same objection C0b and C0d answer for their scripts:
+# a self-test the gate defines about itself cannot be told from one it silently
+# stopped running.
+layer_c0e_inventory_tag_reader() {
+    local script="scripts/lib/apfull_membership.py"
+
+    # POSITIVE — the tag as the store actually spelled it when it had live
+    # users. Read directly off the store at 5a67b235^, not recalled:
+    # runtime-tokio-uring carried "UNBUILT: F=io_uring fixed-buf adapter; ...".
+    if ! python3 "$script" --classify-reason unbuilt runtime-tokio-uring \
+        "UNBUILT: F=io_uring fixed-buf adapter; P=ARCHITECTURE 9.5 row 3" >/dev/null 2>&1; then
+        echo "  Layer C0e FAIL: a reason whose HEAD TAG is UNBUILT was not read as unbuilt." \
+            "That is the tag's only real spelling, so INERT_MEMBERS can no longer expire" >&2
+        return 1
+    fi
+
+    # NEGATIVE — the shape that actually happened, verbatim from R311y799's
+    # retraction. This is the arm that fires if the substring search returns.
+    if python3 "$script" --classify-reason unbuilt session-matching \
+        "PARTIAL: F=matching status. THE NO-PER-PEER-KEYING CLAUSE IS RETRACTED, and as
+mis-mechanised rather than merely unbuilt: the observer resolves every declaration
+through a SINGLE unkeyed mapping_id-to-keyexpr peer alias space." >/dev/null 2>&1; then
+        echo "  Layer C0e FAIL: a PARTIAL reason that merely DISCUSSES the word unbuilt was" \
+            "read as tagged UNBUILT. That is run 31762809988 -- a built member declared" \
+            "inert by its own retraction. The tag is the head token, not a word in the body" >&2
+        return 1
+    fi
+
+    # NEGATIVE — the same trap on the sibling predicate. `api-compat-c`'s real
+    # UNBUILT-era reason went on to say "genuinely unbuilt work", so a reason
+    # naming a tag it does not carry is the NORM here, not a contrived case.
+    if python3 "$script" --classify-reason out-of-scope storage-backend-rocksdb \
+        "PARTIAL: the out-of-scope label is REMOVED by user decision 2026-07-13" >/dev/null 2>&1; then
+        echo "  Layer C0e FAIL: a PARTIAL reason mentioning out-of-scope was read as tagged" \
+            "OUT-OF-SCOPE -- an atom could then be excluded from preset-ap-full by prose" >&2
+        return 1
+    fi
+    if ! python3 "$script" --classify-reason out-of-scope storage-backend-rocksdb \
+        "OUT-OF-SCOPE third-party system adapter" >/dev/null 2>&1; then
+        echo "  Layer C0e FAIL: a reason whose HEAD TAG is OUT-OF-SCOPE was refused, so the" \
+            "exclusion table's two ratified entries can no longer be justified" >&2
+        return 1
+    fi
+
+    # NEGATIVE — an EMPTY reason is not a tag. `session-matching`'s reason was
+    # JSON null for ~347 rounds (crossimpl_audit.py:567 still guards it), and a
+    # reader that answers a tag to an empty string grades an atom on nothing.
+    if python3 "$script" --classify-reason unbuilt some-atom "" >/dev/null 2>&1; then
+        echo "  Layer C0e FAIL: an EMPTY reason was read as tagged UNBUILT" >&2
+        return 1
+    fi
+
+    # POSITIVE — the ATOM-NAME predicates still discriminate. They are the other
+    # three fifths of the table and nothing drove them either.
+    if ! python3 "$script" --classify-reason alt-platform platform-zephyr "" >/dev/null 2>&1; then
+        echo "  Layer C0e FAIL: platform-zephyr is not read as an alt-platform" >&2
+        return 1
+    fi
+    if python3 "$script" --classify-reason alt-platform platform-linux "" >/dev/null 2>&1; then
+        echo "  Layer C0e FAIL: platform-linux was read as an alt-platform -- the preset's" \
+            "OWN platform could then be excluded from it" >&2
+        return 1
+    fi
+    if python3 "$script" --classify-reason alt-runtime runtime-tokio "" >/dev/null 2>&1; then
+        echo "  Layer C0e FAIL: runtime-tokio was read as an alt-runtime" >&2
+        return 1
+    fi
+    if python3 "$script" --classify-reason alt-abi api-compat-pico "" >/dev/null 2>&1; then
+        echo "  Layer C0e FAIL: api-compat-pico was read as an alt-abi -- the ABI this" \
+            "preset carries could then be excluded from it" >&2
+        return 1
+    fi
+
+    # An unknown category must be a hard error, not a silent False. A typo in
+    # EXCLUSIONS is caught by main()'s own check; this pins that the probe seam
+    # cannot report OK for a category that does not exist.
+    python3 "$script" --classify-reason no-such-category x "" >/dev/null 2>&1
+    if [[ $? -ne 2 ]]; then
+        echo "  Layer C0e FAIL: an unknown category did not exit 2" >&2
+        return 1
+    fi
+
+    echo "  inventory tag reader: OK (UNBUILT head accepted, R311y799's retraction refused;" \
+        "OUT-OF-SCOPE head accepted, the same word in prose refused; empty refused;" \
+        "alt-platform/runtime/abi each refuse the preset's own member)"
+    return 0
+}
+
 # ─── Layer C1 — cargo test --workspace ──────────────────────────────
 layer_c1_cargo_test() {
     # Stage 4b — exclude wz-session-lwip: it forces wz-session-core/no_std
@@ -12243,6 +12351,7 @@ run_layer C0mut layer_c0mut_verdict_legs || overall=1
 run_layer C0i layer_c0i_impact_ref_gate || overall=1
 run_layer C0b layer_c0b_job_budget_margin || overall=1
 run_layer C0d layer_c0d_doclink_dependents || overall=1
+run_layer C0e layer_c0e_inventory_tag_reader || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1

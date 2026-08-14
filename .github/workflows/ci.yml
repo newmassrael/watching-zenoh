@@ -891,6 +891,16 @@ jobs:
         # C0b are lanes. Needs only bash + grep.
         run: bash scripts/run-ci.sh --layer C0d
 
+      - name: Layer C0e — the inventory tag reader tells a tag from a word
+        # R311y800. Layer A5 above rests on five predicates that nothing drove,
+        # and one of them was a substring search: R311y799 wrote the word
+        # "unbuilt" into a RETRACTION inside session-matching's inventory reason
+        # and A5 declared a built member inert, redding run 31762809988 on this
+        # very job. Same reason C0i / C0b / C0d are lanes — a predicate over an
+        # empty table cannot be told from one that always answers True. Needs
+        # only python3, and costs ~0s.
+        run: bash scripts/run-ci.sh --layer C0e
+
       - name: Layer B — verify-codegen.sh per codec
         run: bash scripts/run-ci.sh --layer B
 

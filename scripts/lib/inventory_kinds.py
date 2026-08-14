@@ -46,10 +46,41 @@ is R311y315 again with a bigger denominator.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 
 PRESET_PREFIX = "preset-"
 DEBT_PREFIX = "debt-"
+
+# The TAG slot of an inventory `reason` is its HEAD token and nothing else.
+#
+# R311y800 — this is here because the fourth consumer got it wrong in the one way
+# the other three did not. `apfull_membership.py`'s `unbuilt` predicate was
+# `"UNBUILT" in reason.upper()` — a substring search over a reason that runs to
+# thousands of words — while `crossimpl_audit.py` and `audit-catalog-status.sh`
+# both already read the head. R311y799 wrote the sentence "as mis-mechanised
+# rather than merely unbuilt" into `session-matching`'s reason, retracting a
+# residual, and Layer A5 read that retraction as a tag: it declared a member the
+# preset counts as covered to be UNBUILT and redded the hosted run
+# (31762809988). Nothing about the atom had changed; the gate read prose.
+#
+# The head IS the tag by the store's own convention, established here by direct
+# read of the store as it stood at 5a67b235^, when the tag had live users:
+#
+#     api-compat-c        "UNBUILT: (R311y256: the out-of-scope label is ...)"
+#     runtime-tokio-uring "UNBUILT: F=io_uring fixed-buf adapter; P=..."
+#
+# and `api-compat-c`'s own body went on to say "genuinely unbuilt work that
+# belongs on the schedule" — so the distinction between a tag and a word was
+# already load-bearing in the very entries the tag was invented for.
+#
+# The word-boundary form rather than the `split(":")[0].split("(")[0]` spelling
+# the two working consumers carry: MEASURED across all 301 entries, the two
+# disagree on 0 of the 219 atoms, and differ only on `debt-` heads ("CLOSED
+# R311Y725" -> "CLOSED") and `preset-` heads, which no tag consumer reads. So
+# adopting it is a no-op for every consumer today and is the form that survives
+# a reason whose head is followed by prose instead of a delimiter.
+_HEAD_TAG_RE = re.compile(r"\s*([A-Za-z][A-Za-z0-9-]*)")
 
 
 def load_entries() -> list[dict]:
@@ -66,6 +97,19 @@ def load_entries() -> list[dict]:
 
 def entry_id(entry: dict) -> str | None:
     return entry.get("id") or entry.get("inventory_id")
+
+
+def reason_head_tag(reason: str | None) -> str | None:
+    """The tag an inventory `reason` carries: its HEAD token, upper-cased.
+
+    `None` for an empty or untagged reason. A tag is a slot, not a word that
+    occurs somewhere — a reason is free prose after the head and routinely
+    discusses the very tags it does not carry. Every consumer that wants to know
+    "what does the inventory call this atom" asks HERE; see `_HEAD_TAG_RE` for
+    the round that paid for the fourth spelling of the question.
+    """
+    m = _HEAD_TAG_RE.match(reason or "")
+    return m.group(1).upper() if m else None
 
 
 def is_preset(eid: str) -> bool:
