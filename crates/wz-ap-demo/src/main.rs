@@ -1018,6 +1018,18 @@ fn main() -> ExitCode {
     // its own keyexpr and does not ride the publisher. Not cfg-gated, on the same
     // terms as `--matching-log`: the OFF build must reach the typed reject.
     let querier_matching_log_opt = parse_pair(rest, "--querier-matching-log");
+    // R311y798 — `--querier-matching-all-complete`, a bare companion that adds
+    // an AllComplete-targeted TWIN querier on the very same keyexpr. Bare, so
+    // the two cannot differ in the keyexpr; see the field doc for why that
+    // matters to the fixture.
+    let querier_matching_all_complete = rest.iter().any(|a| a == "--querier-matching-all-complete");
+    if querier_matching_all_complete && querier_matching_log_opt.is_none() {
+        eprintln!(
+            "wz-ap-demo: --querier-matching-all-complete decorates \
+             --querier-matching-log; pass --querier-matching-log <keyexpr>"
+        );
+        return ExitCode::from(2);
+    }
     // R311y442 — `--advanced-subscribe <keyexpr>` declares an AdvancedSubscriber
     // whose STARTUP HISTORY GET asks every matching publisher's `@adv` cache for
     // the samples it published before this subscriber existed. `--history-max <N>`
@@ -1484,17 +1496,31 @@ fn main() -> ExitCode {
     // each needs `--queryable`; `--queryable` needs one of them) all fired above,
     // at the demo's pair-check site. So every reachable combination here is
     // well-formed and the `_` arm is genuinely "no queryable requested".
+    // R311y798 — `--queryable-complete`, a bare flag decorating `--queryable`.
+    let queryable_complete = rest.iter().any(|a| a == "--queryable-complete");
     let queryable_spec: Option<QueryableSpec> = match (queryable_opt, reply_opt, reply_err_opt) {
         (Some(keyexpr), Some(text), None) => Some(QueryableSpec {
             keyexpr,
             reply: QueryableReply::Ok(text),
+            complete: queryable_complete,
         }),
         (Some(keyexpr), None, Some(text)) => Some(QueryableSpec {
             keyexpr,
             reply: QueryableReply::Err(text),
+            complete: queryable_complete,
         }),
         _ => None,
     };
+    // A knob that silently does nothing is how a proof goes vacuous — the rule
+    // `--matching-log` states just above. `--queryable-complete` decorates a
+    // queryable, so name the mistake rather than dropping the flag.
+    if queryable_complete && queryable_spec.is_none() {
+        eprintln!(
+            "wz-ap-demo: --queryable-complete decorates --queryable; pass \
+             --queryable <keyexpr> with --reply <text> or --reply-err <text>"
+        );
+        return ExitCode::from(2);
+    }
     // R311y481 — `--query-params` / `--query-attachment` decorate `--query`, so a
     // run that passes one without it would emit nothing at all. Reject rather
     // than ignore, for the reason the `--reply` guard above states.
@@ -1638,8 +1664,13 @@ fn main() -> ExitCode {
             log::info!("declare-id = {n} (R121g DECLARE-aliased mode)");
         }
     }
-    if let Some(QueryableSpec { keyexpr, reply }) = &queryable_spec {
-        log::info!("queryable = {keyexpr}");
+    if let Some(QueryableSpec {
+        keyexpr,
+        reply,
+        complete,
+    }) = &queryable_spec
+    {
+        log::info!("queryable = {keyexpr} (complete = {complete})");
         match reply {
             QueryableReply::Ok(text) => log::info!("reply     = {text}"),
             QueryableReply::Err(text) => {
@@ -1741,6 +1772,7 @@ fn main() -> ExitCode {
         liveliness_subscriber_history: liveliness_subscribe_history,
         liveliness_subscriber_on_sample: liveliness_subscribe_on_sample,
         querier_matching_log_keyexpr: querier_matching_log_opt,
+        querier_matching_all_complete,
         advanced_subscriber_keyexpr: advanced_subscribe_opt,
         advanced_history_max,
         advanced_history_max_age,

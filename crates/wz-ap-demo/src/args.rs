@@ -654,6 +654,32 @@ pub(crate) struct DeclareEmitSpec {
     /// `session-matching`-OFF build must reach the same path and surface the
     /// typed reject, because that arm is the anti-vacuity twin.
     pub(crate) querier_matching_log_keyexpr: Option<String>,
+    /// R311y798 — `--querier-matching-all-complete`: declare a SECOND querier
+    /// on the very same `--querier-matching-log` keyexpr, differing in exactly
+    /// one thing — its target is
+    /// [`QueryTarget::AllComplete`](wz_session_core::query_mode::QueryTarget) —
+    /// and log its transitions under a DISTINCT prefix.
+    ///
+    /// A bare companion of `--querier-matching-log` rather than a keyexpr of
+    /// its own, and that is the whole point: the two queriers must be
+    /// incapable of differing in anything but the target, because the claim
+    /// this flag exists to witness is "the SAME foreign declaration is
+    /// accepted by one and refused by the other". Giving it its own keyexpr
+    /// would let a fixture pass on a keyexpr mismatch.
+    ///
+    /// The log prefix is `QUERIER ALLCOMPLETE MATCHING STATUS`, which contains
+    /// neither `QUERIER MATCHING STATUS` nor is contained by it — so neither
+    /// plane's grep can be satisfied by the other's line. That non-containment
+    /// is checked by eye here because it is the property the fixture rests on:
+    /// `--matching-log`'s own prefix is a substring of the querier's, and only
+    /// the keyexpr in the pattern keeps those two apart.
+    ///
+    /// Deliberately NOT cfg-gated, same terms as its companion: a
+    /// `query-target`-OFF build must reach the same path, where
+    /// `effective_target` returns `None` and the AllComplete querier degrades
+    /// into an ordinary one. A fixture that sees both prefixes report the same
+    /// verdict has found exactly that build.
+    pub(crate) querier_matching_all_complete: bool,
     /// R311ph — `--liveliness-subscribe-history`: declare the liveliness
     /// subscriber with `history = true` so the peer/router replays the CURRENT
     /// alive tokens on subscription (not just future declares). This makes an
@@ -905,6 +931,21 @@ pub(crate) struct QueryableSpec {
     pub(crate) keyexpr: String,
     /// How this queryable answers a matching inbound Query.
     pub(crate) reply: QueryableReply,
+    /// R311y798 — `--queryable-complete`: declare this queryable COMPLETE, i.e.
+    /// able to answer its whole keyexpr alone. Two consequences, and the flag
+    /// exists for the second:
+    ///
+    /// 1. on the WIRE it sets the `QueryableInfo` ext's `C` bit, which is what
+    ///    a peer reads to decide whether an `AllComplete` query may reach it;
+    /// 2. LOCALLY it is the operand of the completeness conjunct in both the
+    ///    dispatch filter and the matching-status verdict, so it is the only
+    ///    thing that lets a session-local queryable satisfy an `AllComplete`
+    ///    querier on the same session.
+    ///
+    /// Default `false`, which is zenoh's builder default and pico's
+    /// `_Z_QUERYABLE_COMPLETE_DEFAULT` — so a run without the flag emits the
+    /// same bytes it always did (pico omits the ext entirely at that value).
+    pub(crate) complete: bool,
 }
 
 /// R311y481 — the queryable's answer form: an OK Put-form reply (`--reply`) or

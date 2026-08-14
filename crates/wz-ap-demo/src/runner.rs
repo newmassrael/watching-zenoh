@@ -80,8 +80,8 @@ use wz::runtime_tokio::session::{
     QueryableOptions, SubscribeOptions, Subscriber, TokioSession,
 };
 use wz::runtime_tokio::session_glue::{
-    drive_session_until_terminal, IterationEvent, SessionInitParams, SessionLinkActions,
-    SessionTimeouts,
+    drive_session_until_terminal, IterationEvent, QueryTarget, SessionInitParams,
+    SessionLinkActions, SessionTimeouts,
 };
 use wz::runtime_tokio::session_open::{
     accept_and_open_session_with_offer, accept_endpoint, dial_endpoint,
@@ -135,6 +135,13 @@ struct SessionHandles {
     /// take the listener's keyexpr with it.
     _querier: Option<Querier>,
     _querier_matching_listener: Option<MatchingListener>,
+    /// R311y798 — `--querier-matching-all-complete`'s AllComplete TWIN of the
+    /// pair above, on the same keyexpr and held for the same RAII reason. A
+    /// separate pair rather than a mode of the one above because both must be
+    /// live AT THE SAME TIME: the whole point is to watch one declaration
+    /// through two targets simultaneously.
+    _querier_all_complete: Option<Querier>,
+    _querier_all_complete_matching_listener: Option<MatchingListener>,
     /// R311y442 — `--advanced-subscribe`'s [`AdvancedSubscriber`]. Held for the
     /// same RAII reason as the plain `_subscriber`: dropping it undeclares the
     /// live subscription, and with it the reorder state the history replies feed.
@@ -1027,6 +1034,7 @@ fn install_session_handles(
         let QueryableSpec {
             keyexpr: pattern,
             reply: reply_mode,
+            complete: declared_complete,
         } = spec;
         let pattern_for_callback = pattern.clone();
         let pattern_for_log = pattern.clone();
@@ -1042,9 +1050,16 @@ fn install_session_handles(
         // R311gb-3b — declare_queryable hands the handler the seam contracts
         // (&dyn QueryView, &mut dyn ReplyOut); rid + keyexpr are read from the
         // query (QueryView is their SSOT) rather than the reply sink.
+        // R311y798 — `--queryable-complete` rides the SAME declaration that
+        // stamps the wire `QueryableInfo` ext, so the local dispatch table and
+        // the bytes a peer reads cannot disagree about this queryable's
+        // completeness. Default `false` matches zenoh's builder and pico's
+        // `_Z_QUERYABLE_COMPLETE_DEFAULT`, at which value pico omits the ext
+        // entirely — so a run without the flag puts the same bytes on the wire
+        // it always did.
         let declared = session.declare_queryable(
             pattern,
-            QueryableOptions::default(),
+            QueryableOptions::default().with_complete(declared_complete),
             move |query, responder| {
                 // R311y481 — the answer arm. `reply_err` is signature-stable but
                 // its emit is gated `query-reply-err` (`query.rs`'s ReplyOut impl
@@ -1176,6 +1191,62 @@ fn install_session_handles(
             None => (None, None),
         };
 
+    // R311y798 — `--querier-matching-all-complete`, the AllComplete TWIN of the
+    // block above. Same keyexpr, same session, same instant; the ONLY thing that
+    // differs is `QueryTarget::AllComplete` on the options, which switches the
+    // matching predicate from "some peer queryable INTERSECTS" to "some COMPLETE
+    // queryable INCLUDES" (zenoh `api/querier.rs:225` picks the same
+    // discriminant; pico `api.c:1843-1844` the same bool).
+    //
+    // Declared alongside rather than instead, because the fixture needs both
+    // verdicts about ONE declaration at ONE moment. Two demo processes could not
+    // give that: they would see two different declarations.
+    //
+    // The prefix is `QUERIER ALLCOMPLETE MATCHING STATUS`, which neither
+    // contains nor is contained by the plain querier's `QUERIER MATCHING STATUS`
+    // — so a grep for either cannot be satisfied by the other, which is the
+    // separation the whole fixture rests on.
+    let (querier_all_complete, querier_all_complete_listener) = match declare_spec
+        .querier_matching_log_keyexpr
+        .as_deref()
+        .filter(|_| declare_spec.querier_matching_all_complete)
+    {
+        Some(keyexpr) => {
+            let querier = session.declare_querier(
+                keyexpr,
+                QueryOptions::default().with_target(QueryTarget::AllComplete),
+            );
+            let keyexpr_for_log = keyexpr.to_string();
+            match querier.declare_matching_listener(move |status| {
+                log::info!(
+                    "wz-ap-demo: QUERIER ALLCOMPLETE MATCHING STATUS keyexpr='{keyexpr_for_log}' \
+                     matching={}",
+                    status.matching,
+                );
+            }) {
+                Ok(listener) => {
+                    log::info!(
+                        "wz-ap-demo: DECLARED QUERIER ALLCOMPLETE MATCHING LISTENER \
+                         keyexpr='{keyexpr}' (target=AllComplete; only a COMPLETE queryable \
+                         whose keyexpr INCLUDES this one can raise it)"
+                    );
+                    (Some(querier), Some(listener))
+                }
+                // The anti-vacuity arm, loud for the same reason as its two
+                // siblings: a fixture must be able to tell "the feature is off"
+                // from "the transition never happened".
+                Err(e) => {
+                    log::warn!(
+                        "wz-ap-demo: QUERIER ALLCOMPLETE MATCHING LISTENER declare rejected for \
+                         keyexpr='{keyexpr}': {e:?}"
+                    );
+                    (Some(querier), None)
+                }
+            }
+        }
+        None => (None, None),
+    };
+
     // R311y442 — `--advanced-subscribe`. Declared PRE-DRIVE for a reason the
     // plain subscriber does not have: the startup history GET goes out as part of
     // the declare, so declaring it after drive_session started would race the very
@@ -1301,6 +1372,8 @@ fn install_session_handles(
         _matching_listener: matching_listener,
         _querier: querier,
         _querier_matching_listener: querier_matching_listener,
+        _querier_all_complete: querier_all_complete,
+        _querier_all_complete_matching_listener: querier_all_complete_listener,
         #[cfg(feature = "advanced")]
         _advanced_subscriber: advanced_subscriber.flatten(),
     }

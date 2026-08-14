@@ -144,6 +144,9 @@ pub(crate) fn print_usage() {
     eprintln!("    --queryable <keyexpr>    register a queryable for the given pattern;");
     eprintln!("                             each inbound Request(Query) whose keyexpr matches");
     eprintln!("                             fires a callback that emits one Reply via --reply");
+    eprintln!("    --queryable-complete     declare that queryable COMPLETE (QueryableInfo C");
+    eprintln!("                             bit on the wire; the operand an AllComplete query");
+    eprintln!("                             filters on). Default false, as zenoh and pico do");
     eprintln!("    --reply <text>           OK Put-form reply payload for the queryable");
     eprintln!("                             (--queryable requires this or --reply-err)");
     eprintln!("    --reply-err <text>       answer with an ERR-form Reply carrying <text>");
@@ -239,6 +242,22 @@ pub(crate) fn print_usage() {
     eprintln!("                             liveliness-equivalent for the queryable side");
     eprintln!("    --on-remote-liveliness-log");
     eprintln!("                             liveliness-equivalent for the DeclToken side");
+    // R311y798 — the three matching knobs were undocumented here. `--matching-log`
+    // (R311y347) and `--querier-matching-log` (R311y775) both shipped without a
+    // usage line; adding the AllComplete companion without them would leave a
+    // flag whose only documentation is the fixture that uses it.
+    eprintln!("    --matching-log           install a Publisher matching listener on the");
+    eprintln!("                             --publish keyexpr and log every TRANSITION");
+    eprintln!("                             ('MATCHING STATUS ... matching=<bool>')");
+    eprintln!("    --querier-matching-log <keyexpr>");
+    eprintln!("                             the QUERYABLE-plane twin: a Querier on <keyexpr>");
+    eprintln!("                             plus its matching listener, logging");
+    eprintln!("                             'QUERIER MATCHING STATUS ...'");
+    eprintln!("    --querier-matching-all-complete");
+    eprintln!("                             add a SECOND querier on the SAME keyexpr whose");
+    eprintln!("                             target is AllComplete, logging under");
+    eprintln!("                             'QUERIER ALLCOMPLETE MATCHING STATUS ...'. Only a");
+    eprintln!("                             COMPLETE queryable INCLUDING that keyexpr raises it");
     eprintln!("    --on-query-reply-log     install a ReplyRegistry callback that logs");
     eprintln!("                             'REPLY RECEIVED' on each inbound");
     eprintln!("                             Response(Reply|Err) for the --query rid");

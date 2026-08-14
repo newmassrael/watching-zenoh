@@ -309,7 +309,24 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 #     first-declaration-wins guard drops the reply -- so only the R311y790
 #     declare-time local replay can serve it. Same atom, same router, a plane
 #     the first witness cannot reach.
-FOREIGN_ADJUDICATOR_LINKS = 825
+# R311y798 takes it to 828. `session-matching` gains THREE adjudicating tests,
+# all in wz_querier_all_complete_vs_pico_queryable.rs, for the AllComplete axis
+# R311y797 built and could not witness:
+#   * a_pico_incomplete_queryable_is_refused_by_an_all_complete_wz_querier --
+#     the REMOTE arm. pico's stock `z_queryable` declares `complete = false`,
+#     at which value pico OMITS the QueryableInfo ext entirely
+#     (codec/declarations.c:107-112), so this binds wz's reading of an ABSENT
+#     ext against a real encoder rather than against wz's own fixture.
+#   * an_incomplete_session_local_queryable_does_not_satisfy_the_all_complete_
+#     querier -- the LOCAL arm, one argv token (`--queryable-complete`) away
+#     from the leg below. Its session opener is a `z_sub` and not a
+#     `z_queryable` deliberately: a falsify probe showed that with pico's own
+#     queryable in scope the leg reddened for the REMOTE arm's defect too, so
+#     it proved "something refuses" rather than "the local half refuses".
+#   * a_complete_session_local_queryable_does_satisfy_the_all_complete_querier
+#     -- the anti-vacuity twin of the other two. An AllComplete watch that were
+#     simply inert would satisfy both silences; this one makes it speak.
+FOREIGN_ADJUDICATOR_LINKS = 828
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

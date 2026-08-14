@@ -7896,7 +7896,16 @@ layer_e_ap_demo_round_trip() {
     # z_liveliness and z_sub_liveliness on the same grounds -- they were already
     # in the build script's TARGETS but never guarded, so a tree that had them
     # and a tree that did not were indistinguishable to this lane.
-    if [[ ! -x target/zenoh-pico-cli/z_put || ! -x target/zenoh-pico-cli/z_sub || ! -x target/zenoh-pico-cli/z_sub_attachment || ! -x target/zenoh-pico-cli/z_pub_attachment || ! -x target/zenoh-pico-cli/z_pong || ! -x target/zenoh-pico-cli/z_liveliness || ! -x target/zenoh-pico-cli/z_sub_liveliness ]]; then
+    # R311y798 — z_queryable joins the guarded set, on the grounds this list has
+    # been extended twice already (R311y478 z_pong, R311y479 z_liveliness /
+    # z_sub_liveliness): this lane's `--ignored` sweep auto-includes every
+    # binary-dep test, and three of them drive z_queryable
+    # (wz_query_{source_info,value}_to_pico_zqueryable, and now
+    # wz_querier_all_complete_vs_pico_queryable). It was already needed and
+    # already unguarded, so a tree that had it and a tree that did not were
+    # indistinguishable to this lane — the exact gap the two prior extensions
+    # closed for their own binaries.
+    if [[ ! -x target/zenoh-pico-cli/z_put || ! -x target/zenoh-pico-cli/z_sub || ! -x target/zenoh-pico-cli/z_sub_attachment || ! -x target/zenoh-pico-cli/z_pub_attachment || ! -x target/zenoh-pico-cli/z_pong || ! -x target/zenoh-pico-cli/z_liveliness || ! -x target/zenoh-pico-cli/z_sub_liveliness || ! -x target/zenoh-pico-cli/z_queryable ]]; then
         _pico_cli_unavailable "Layer E" || return 1
         return 0
     fi
