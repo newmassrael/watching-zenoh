@@ -121,6 +121,26 @@ pub fn qos_ext(qos: QosLevel) -> ExtEntryOwned {
 /// the `ext_qos` carrying [`QOS_DECLARE`]. The single place the "what does a
 /// freshly built Declare carry" question is answered, so a new builder cannot
 /// forget it by copying a stale literal.
+///
+/// R311y802 — `#[inline(never)]` is load-bearing, and it is a FOOTPRINT
+/// decision rather than a style one. R311y801 shipped this function inlinable
+/// and Layer F redded on the codec-close lane, whose elision collapsed from
+/// +1776B to -192B; bisecting to this one file restored it, and the attribute
+/// fixes it while keeping the feature.
+///
+/// The MECHANISM is not the obvious one and was measured rather than assumed.
+/// Inlining fifteen copies of a one-element `Vec` is not what cost the bytes:
+/// with the attribute the BASELINE binary shrinks only 152B (2711088 ->
+/// 2710936). What it costs is CONFIGURATION-DEPENDENCE — the `minus-codec-close`
+/// build shrinks 2184B (2711296 -> 2709112), because in that feature set (which
+/// also drops `transport-multicast` and the `domain-*` umbrellas) LLVM chose to
+/// inline at all fifteen sites and in the baseline it did not. A codec's
+/// measured elision is a DIFFERENCE between two builds, so a function whose
+/// inlining decision flips between them is charged to whichever feature the
+/// lane is measuring. Out-of-line, the decision cannot flip: codec-close's
+/// elision reads +1824B, against +1792B for a tree with this whole envelope
+/// change reverted.
+#[inline(never)]
 pub fn declare_envelope_extensions() -> Vec<ExtEntryOwned> {
     alloc::vec![qos_ext(QOS_DECLARE)]
 }
