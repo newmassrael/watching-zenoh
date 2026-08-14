@@ -125,55 +125,60 @@ pub fn declare_envelope_extensions() -> Vec<ExtEntryOwned> {
     alloc::vec![qos_ext(QOS_DECLARE)]
 }
 
-/// Read an `Interest`'s `ext_qos`. Same convention as the Declare twin:
-/// `QosLevel::DEFAULT` when absent, which is what five of upstream's six
-/// api-level Interests mean on the wire.
-pub fn read_interest_qos(interest: &InterestOwned) -> QosLevel {
-    ext_nodeid::read_z64_ext(interest.extensions.as_ref(), QOS_EXT_ID)
+/// Read the `ext_qos` out of a message's extension chain. `QosLevel::DEFAULT`
+/// when absent — zenoh's omit-on-DEFAULT convention read back the way its
+/// decoder does (the field simply keeps its default), which is also what every
+/// Declare from a pico peer means.
+///
+/// Carrier-agnostic because the chain is: the two public readers below differ
+/// only in which struct's field they hand over.
+fn read_qos_chain(exts: Option<&Vec<ExtEntryOwned>>) -> QosLevel {
+    ext_nodeid::read_z64_ext(exts, QOS_EXT_ID)
         .map(|v| QosLevel::from_raw(v as u8))
         .unwrap_or(QosLevel::DEFAULT)
 }
 
-/// Set an `Interest`'s `ext_qos` (`QosLevel::DEFAULT` removes it). Syncs the
-/// Interest-level header `Z` bit — the same bit position as the Declare's, on a
-/// different struct, which is the one thing the two arms cannot share.
-pub fn set_interest_qos(interest: &mut InterestOwned, qos: QosLevel) {
+/// Set the `ext_qos` in a message's extension chain and sync that message's
+/// header `Z` bit. `QosLevel::DEFAULT` REMOVES the entry — zenoh's
+/// omit-on-DEFAULT encode gate expressed as a chain edit, so a round-trip
+/// through the wire and back is idempotent.
+///
+/// The header byte is passed in rather than the message, because WHICH header
+/// carries the bit is the only thing the Declare and Interest arms do not
+/// share; everything above it does, which is why it is one function.
+fn set_qos_chain(exts: &mut Option<Vec<ExtEntryOwned>>, header: &mut u8, qos: QosLevel) {
     let value = if qos == QosLevel::DEFAULT {
         None
     } else {
         Some(qos.raw as u64)
     };
-    let present =
-        ext_nodeid::set_z64_ext(&mut interest.extensions, QOS_EXT_ID, QOS_EXT_HEADER, value);
-    ext_nodeid::sync_header_z(&mut interest.header, present);
+    let present = ext_nodeid::set_z64_ext(exts, QOS_EXT_ID, QOS_EXT_HEADER, value);
+    ext_nodeid::sync_header_z(header, present);
 }
 
-/// Read the Declare's `ext_qos`. Returns `QosLevel::DEFAULT` when absent —
-/// zenoh's omit-on-DEFAULT convention read back the way its decoder does (the
-/// field simply keeps its default), which is also what a Declare from a pico
-/// peer always means.
+/// Read an `Interest`'s `ext_qos`. Absent means `QosLevel::DEFAULT`, which is
+/// what five of upstream's six api-level Interests mean on the wire.
+pub fn read_interest_qos(interest: &InterestOwned) -> QosLevel {
+    read_qos_chain(interest.extensions.as_ref())
+}
+
+/// Set an `Interest`'s `ext_qos` (`QosLevel::DEFAULT` removes it).
+pub fn set_interest_qos(interest: &mut InterestOwned, qos: QosLevel) {
+    set_qos_chain(&mut interest.extensions, &mut interest.header, qos);
+}
+
+/// Read a Declare's `ext_qos`. Absent means `QosLevel::DEFAULT` — the state
+/// every Declare wz emitted before R311y801, and every Declare a pico peer
+/// emits at all.
 #[cfg(feature = "codec-declare")]
 pub fn read_declare_qos(declare: &DeclareOwned) -> QosLevel {
-    ext_nodeid::read_z64_ext(declare.extensions.as_ref(), QOS_EXT_ID)
-        .map(|v| QosLevel::from_raw(v as u8))
-        .unwrap_or(QosLevel::DEFAULT)
+    read_qos_chain(declare.extensions.as_ref())
 }
 
-/// Set the Declare's `ext_qos` (`QosLevel::DEFAULT` REMOVES it — zenoh's
-/// omit-on-DEFAULT encode gate expressed as a chain edit, so a round-trip
-/// through the wire and back is idempotent). Syncs the Declare-level header `Z`
-/// bit to the resulting chain, the one field that differs from the Push /
-/// Request twins.
+/// Set a Declare's `ext_qos` (`QosLevel::DEFAULT` REMOVES it).
 #[cfg(feature = "codec-declare")]
 pub fn set_declare_qos(declare: &mut DeclareOwned, qos: QosLevel) {
-    let value = if qos == QosLevel::DEFAULT {
-        None
-    } else {
-        Some(qos.raw as u64)
-    };
-    let present =
-        ext_nodeid::set_z64_ext(&mut declare.extensions, QOS_EXT_ID, QOS_EXT_HEADER, value);
-    ext_nodeid::sync_header_z(&mut declare.header, present);
+    set_qos_chain(&mut declare.extensions, &mut declare.header, qos);
 }
 
 /// The Interest arm's own tests — separate from the Declare module below
