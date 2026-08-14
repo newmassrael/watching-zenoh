@@ -5199,8 +5199,10 @@ layer_c1i_cargo_test_scouting() {
 #   - the static -> session-open seam in wz-runtime-tokio
 #     (static_scout_open.rs: skip-unreachable, empty, all-unreachable, and
 #     the listen half — accept + peer-mode announce, listen+connect refused,
-#     blank listen still dials), which Layer C1 stopped running once the
-#     static tests gained the gate.
+#     blank listen still dials; and R311y808's connect RETRY — the two zeros
+#     that disable it, a peer reached only because the dial was re-attempted,
+#     the paired no-retry negative, and the connect-timeout bound), which
+#     Layer C1 stopped running once the static tests gained the gate.
 # `--features X` adds to (does not replace) the default feature set, so the
 # transport-link-tcp/udp + transport-unicast the open path needs stay on.
 # R311ih: also build-gates the no-alloc backing (scout_static on the
@@ -5210,7 +5212,7 @@ layer_c1i_cargo_test_scouting() {
 layer_c1k_cargo_test_scouting_static() {
     _runci_guarded_test "C1k scout_static" 15 \
         cargo test -p wz-session-core --features scouting-static --lib scout_static --quiet || return 1
-    _runci_guarded_test "C1k static_scout_open" 9 \
+    _runci_guarded_test "C1k static_scout_open" 15 \
         cargo test -p wz-runtime-tokio --features scouting-static --test static_scout_open --quiet || return 1
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features scouting-static --quiet \

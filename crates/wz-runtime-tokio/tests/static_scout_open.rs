@@ -24,6 +24,13 @@
 //! itself a peer; `listen=` and `connect=` together refused before any
 //! socket; and a blank `listen=` falling through to the dial arm.
 //!
+//! R311y808 — and the dial arm's RETRY (zenoh's `connect.retry` +
+//! `connect.timeout_ms`, `connect_peers_single_link`): the two independent
+//! zeros that disable it, a peer reached ONLY because the dial was
+//! re-attempted, the paired no-retry negative on the same fixture that makes
+//! that a measurement, and the connect-timeout bound that ends a retry which
+//! upstream otherwise pins to one locator forever.
+//!
 //! The active multicast scout -> open e2e is the Layer M follow-up.
 //!
 //! Note: the open loop is bounded only by `max_iters` (poll count), not wall
@@ -60,8 +67,11 @@ use wz_runtime_tokio::writer_queue::WriterHandle;
 // R311if — the static-mode open path is gated on `scouting-static`; the
 // mode-agnostic `open_session_at` tests stay in the default run.
 #[cfg(feature = "scouting-static")]
+use wz_runtime_tokio::retry_period::RetryPolicy;
+#[cfg(feature = "scouting-static")]
 use wz_runtime_tokio::session_open::{
     open_session_static, open_session_static_config, AcceptConfig, OpenedSession,
+    StaticConnectRetry, StaticDeploy,
 };
 #[cfg(feature = "transport-link-udp")]
 use wz_runtime_tokio::udp_pipeline::wire_udp_socket;
@@ -451,8 +461,7 @@ async fn static_listen_accepts_a_dialing_peer_and_announces_peer_mode() {
     let accept_cfg = AcceptConfig::default();
     let listen_endpoint = endpoint.clone();
     let acceptor = open_session_static_config(
-        Some(&listen_endpoint),
-        &[],
+        StaticDeploy::connect(&[]).with_listen(&listen_endpoint),
         acceptor_params,
         &dial_cfg,
         &accept_cfg,
@@ -500,8 +509,7 @@ async fn static_listen_with_connect_is_refused_before_any_socket() {
     // surface a Dial error.
     let connect = vec!["tcp/127.0.0.1:9".to_string()];
     let result = open_session_static_config(
-        Some("tcp/127.0.0.1:9"),
-        &connect,
+        StaticDeploy::connect(&connect).with_listen("tcp/127.0.0.1:9"),
         initiator_params(),
         &DialConfig::default(),
         &AcceptConfig::default(),
@@ -537,8 +545,7 @@ async fn static_blank_listen_still_dials_the_connect_list() {
     let dial_cfg = DialConfig::default();
     let accept_cfg = AcceptConfig::default();
     let initiator = open_session_static_config(
-        Some("   "),
-        &connect,
+        StaticDeploy::connect(&connect).with_listen("   "),
         initiator_params(),
         &dial_cfg,
         &accept_cfg,
@@ -562,4 +569,214 @@ async fn static_blank_listen_still_dials_the_connect_list() {
         "the blank listen did not flip the role away from the dial arm"
     );
     assert!(acc_est >= 1, "acceptor established");
+}
+
+// ── R311y808 — the dial arm's RETRY, zenoh's `connect.retry` +
+//    `connect.timeout_ms` (`connect_peers_single_link`,
+//    zenoh/src/net/runtime/orchestrator.rs:345-370). The schedule itself is
+//    `RetryPolicy`, already pinned by its own unit tests; what these pin is the
+//    ARM SELECTION and that a retried dial actually reaches a peer the first
+//    attempt could not.
+
+/// A retry that is on: zenoh's shipped `connect.retry` with the infinite
+/// `timeout_ms: -1` a router or peer defaults to, but shortened so a test that
+/// waits for one retry waits 60ms rather than 1s.
+#[cfg(feature = "scouting-static")]
+fn brisk_retry(timeout_ms: Option<u64>) -> StaticConnectRetry {
+    StaticConnectRetry {
+        policy: RetryPolicy {
+            period_init_ms: 30,
+            period_max_ms: 120,
+            period_increase_factor: 2.0,
+        },
+        timeout_ms,
+    }
+}
+
+#[cfg(feature = "scouting-static")]
+#[test]
+fn a_zero_period_init_disables_the_retry() {
+    // Upstream's first zero: `retry_config.timeout()` IS `period_init_ms` read
+    // as a duration, and `is_zero()` takes the no-retry arm
+    // (orchestrator.rs:356). Without this rule the schedule is a hot loop — a
+    // `0` wait multiplied by any factor stays `0`.
+    let retry = StaticConnectRetry {
+        policy: RetryPolicy::constant(0),
+        timeout_ms: None,
+    };
+    assert!(!retry.retries());
+}
+
+#[cfg(feature = "scouting-static")]
+#[test]
+fn a_zero_connect_timeout_disables_the_retry() {
+    // Upstream's SECOND zero, independent of the first: `timeout_ms: 0` is how
+    // a stock zenoh CLIENT is configured (`{ router: -1, peer: -1, client: 0 }`,
+    // DEFAULT_CONFIG.json5:41), and it disables the retry even though the
+    // `connect.retry` block is fully populated.
+    let retry = StaticConnectRetry {
+        policy: RetryPolicy::ZENOH_DEFAULT,
+        timeout_ms: Some(0),
+    };
+    assert!(!retry.retries());
+}
+
+#[cfg(feature = "scouting-static")]
+#[test]
+fn the_zenoh_peer_default_retries() {
+    // The populated schedule with upstream's `-1` timeout — the router/peer
+    // default, and the arm wz did not have before R311y808.
+    let retry = StaticConnectRetry {
+        policy: RetryPolicy::ZENOH_DEFAULT,
+        timeout_ms: None,
+    };
+    assert!(retry.retries());
+}
+
+#[cfg(feature = "scouting-static")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn static_dial_retry_reaches_a_peer_that_was_not_listening_yet() {
+    // THE witness for this arm: the peer does not exist when the dial starts.
+    // A single-attempt walk cannot reach it (the paired negative below measures
+    // exactly that on the same fixture), so an Established here is the retry.
+    let port = free_port();
+    let connect = vec![format!("tcp/127.0.0.1:{port}")];
+
+    let late_acceptor = async move {
+        // Long enough that the first dial attempt is already refused.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let listener = TcpListener::bind(("127.0.0.1", port))
+            .await
+            .expect("late bind");
+        drive_acceptor_to_established(listener).await
+    };
+
+    let dial_cfg = DialConfig::default();
+    let accept_cfg = AcceptConfig::default();
+    let initiator = open_session_static_config(
+        StaticDeploy::connect(&connect).with_retry(brisk_retry(None)),
+        initiator_params(),
+        &dial_cfg,
+        &accept_cfg,
+        TokioTime::new(),
+        Some(ITER_CAP),
+        DEFAULT_OPEN_TICK_MS,
+    );
+
+    let ((acc_est, _w), opened) = tokio::time::timeout(LISTEN_PAIR_BUDGET, async {
+        tokio::join!(late_acceptor, initiator)
+    })
+    .await
+    .expect("the retrying dial did not settle within its budget");
+
+    assert!(
+        opened
+            .expect("the retry reached the late peer")
+            .actions
+            .trace_snapshot()
+            .record_established_at
+            >= 1,
+        "the retried dial established against a peer that appeared later"
+    );
+    assert!(acc_est >= 1, "the late acceptor established");
+}
+
+#[cfg(feature = "scouting-static")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn static_dial_without_retry_gives_up_before_the_peer_appears() {
+    // The SAME fixture as above with the retry omitted. Its failure is what
+    // makes the test above a measurement of the retry rather than of the
+    // acceptor: one attempt, refused, and the walk ends with the list
+    // exhausted.
+    let port = free_port();
+    let connect = vec![format!("tcp/127.0.0.1:{port}")];
+
+    let late_acceptor = async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // Bound the wait: nothing will ever connect, and the point of this
+        // half is only that the port is not open when the dial runs.
+        let listener = TcpListener::bind(("127.0.0.1", port))
+            .await
+            .expect("late bind");
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(300), listener.accept()).await;
+    };
+
+    let dial_cfg = DialConfig::default();
+    let accept_cfg = AcceptConfig::default();
+    let initiator = open_session_static_config(
+        StaticDeploy::connect(&connect),
+        initiator_params(),
+        &dial_cfg,
+        &accept_cfg,
+        TokioTime::new(),
+        Some(ITER_CAP),
+        DEFAULT_OPEN_TICK_MS,
+    );
+
+    let (_late, opened) = tokio::time::timeout(LISTEN_PAIR_BUDGET, async {
+        tokio::join!(late_acceptor, initiator)
+    })
+    .await
+    .expect("the no-retry dial did not settle within its budget");
+
+    let Err(err) = opened else {
+        panic!("expected the un-retried dial to give up, got Ok");
+    };
+    assert!(
+        matches!(err, OpenError::NoReachableLocator),
+        "expected NoReachableLocator, got {err:?}"
+    );
+}
+
+#[cfg(feature = "scouting-static")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn static_dial_retry_is_bounded_by_the_connect_timeout() {
+    // The retry arm PINS its locator, exactly as `peer_connector_retry` does,
+    // so `timeout_ms` is the only thing that ends it. Without the bound this
+    // call never returns; with it the call is the one that reports, not a
+    // harness timeout. Nothing ever listens on the probed port.
+    let (_dead_guard, dead) = refused_locator();
+    let connect = vec![format!("tcp/{dead}")];
+
+    let started = std::time::Instant::now();
+    // Bounded by the test as well as by the call, and deliberately: this arm's
+    // whole hazard is a retry that never ends, so a build that dropped
+    // `timeout_ms` must FAIL here rather than hang the suite (the R311y807
+    // lesson, applied before a probe had to find it a second time).
+    let result = tokio::time::timeout(
+        LISTEN_PAIR_BUDGET,
+        open_session_static_config(
+            StaticDeploy::connect(&connect).with_retry(brisk_retry(Some(200))),
+            initiator_params(),
+            &DialConfig::default(),
+            &AcceptConfig::default(),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        ),
+    )
+    .await
+    .expect("the bounded retry never returned — `timeout_ms` did not end it");
+    let elapsed = started.elapsed();
+
+    let Err(err) = result else {
+        panic!("expected a bounded retry to give up, got Ok");
+    };
+    assert!(
+        matches!(err, OpenError::NoReachableLocator),
+        "expected NoReachableLocator, got {err:?}"
+    );
+    // It must have RETRIED (so longer than one refused attempt) and it must
+    // have STOPPED (so nowhere near the harness budget). Both halves matter:
+    // the lower bound fails a build that never slept, the upper one fails a
+    // build that ignored `timeout_ms`.
+    assert!(
+        elapsed >= std::time::Duration::from_millis(30),
+        "gave up without waiting even the first retry period: {elapsed:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "the connect timeout did not end the retry: {elapsed:?}"
+    );
 }

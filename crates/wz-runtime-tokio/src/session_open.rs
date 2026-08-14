@@ -44,6 +44,10 @@ use wz_session_core::locator::{
 };
 #[cfg(feature = "scouting-static")]
 use wz_session_core::scout_static::{resolve_static_config, StaticRole};
+// R311y808 — the static dial arm's retry reuses the crate's ONE transcription of
+// zenoh's `ConnectionRetryConf` rather than growing a second schedule.
+#[cfg(feature = "scouting-static")]
+use crate::retry_period::RetryPolicy;
 // R3b — the Z_EXT_AUTH dispatch installed by the auth-on open variants.
 #[cfg(feature = "session-extauth")]
 use wz_session_core::auth_dispatch::AuthDispatch;
@@ -4356,8 +4360,7 @@ pub async fn open_session_static(
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     open_session_static_config(
-        None,
-        connect,
+        StaticDeploy::connect(connect),
         params,
         cfg,
         &AcceptConfig::default(),
@@ -4366,6 +4369,93 @@ pub async fn open_session_static(
         tick_interval_ms,
     )
     .await
+}
+
+/// zenoh's `connect.retry` block plus its `connect.timeout_ms`, as the ONE
+/// value that decides whether a failed static dial is re-attempted
+/// (`DEFAULT_CONFIG.json5:37-68`).
+///
+/// The schedule itself is not re-implemented here: [`RetryPolicy`] is the
+/// crate's single transcription of `ConnectionRetryConf`, already shared by the
+/// client reconnect supervisor and the router peer auto-reconnect, so a fix to
+/// the growth arithmetic cannot land on those two and miss this one.
+///
+/// # Upstream disables the retry through EITHER of two zeros
+///
+/// `connect_peers_single_link` takes its no-retry arm when
+/// `retry_config.timeout().is_zero() || get_global_connect_timeout().is_zero()`
+/// (`zenoh/src/net/runtime/orchestrator.rs:356`), and `timeout()` is just
+/// `period_init_ms` re-read as a duration. So `period_init_ms = 0` and
+/// `timeout_ms = 0` each independently mean "one attempt, then move on" — and
+/// `timeout_ms: { client: 0 }` is exactly how a stock zenoh CLIENT is
+/// configured, against `{ router: -1, peer: -1 }`. [`Self::retries`] is that
+/// disjunction, named once, because the alternative is a hot re-dial loop: a
+/// `period_init_ms` of `0` multiplied by any factor stays `0`.
+#[cfg(feature = "scouting-static")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StaticConnectRetry {
+    /// The growth schedule — zenoh's `connect.retry`. [`RetryPolicy::ZENOH_DEFAULT`]
+    /// is what a config omitting the section resolves to (1s -> 2s -> 4s).
+    pub policy: RetryPolicy,
+    /// zenoh's `connect.timeout_ms`, bounding the WHOLE dial rather than one
+    /// attempt: `None` is upstream's `-1` (infinite — the router and peer
+    /// default), `Some(0)` is upstream's `0` (no retry — the client default),
+    /// and `Some(ms)` is a positive bound.
+    pub timeout_ms: Option<u64>,
+}
+
+#[cfg(feature = "scouting-static")]
+impl StaticConnectRetry {
+    /// Whether this actually re-attempts a failed dial — upstream's two-zero
+    /// disjunction, spelled once. See the type docs.
+    pub fn retries(&self) -> bool {
+        self.policy.period_init_ms > 0 && self.timeout_ms != Some(0)
+    }
+}
+
+/// The `connect` / `listen` block of a static deploy, as one value — the wz
+/// shape of zenoh's `connect: {}` config section (`DEFAULT_CONFIG.json5:37-68`)
+/// and of the `connect=` / `listen=` keys pico's `_z_locators_by_config` reads.
+///
+/// Carried as a struct rather than as three parameters because that is what it
+/// IS upstream: one config block whose members are read together. The practical
+/// consequence is that the next knob from that block lands here instead of on
+/// [`open_session_static_config`]'s signature.
+#[cfg(feature = "scouting-static")]
+pub struct StaticDeploy<'a> {
+    /// `deploy.listen` — present means bind and accept, and forces the node's
+    /// `whatami` to `Peer`. See [`resolve_static_config`].
+    pub listen: Option<&'a str>,
+    /// `deploy.connect[]` — the locators to dial, in deploy order.
+    pub connect: &'a [String],
+    /// `connect.retry` + `connect.timeout_ms`. `None` is one attempt per
+    /// locator then fall through to the next, which is upstream's own
+    /// no-retry arm and what every caller had before R311y808.
+    pub retry: Option<StaticConnectRetry>,
+}
+
+#[cfg(feature = "scouting-static")]
+impl<'a> StaticDeploy<'a> {
+    /// A dial-only deploy: `connect[]`, no `listen=`, no retry.
+    pub fn connect(connect: &'a [String]) -> Self {
+        Self {
+            listen: None,
+            connect,
+            retry: None,
+        }
+    }
+
+    /// Set `deploy.listen`. Chainable onto [`Self::connect`].
+    pub fn with_listen(mut self, listen: &'a str) -> Self {
+        self.listen = Some(listen);
+        self
+    }
+
+    /// Set `connect.retry` + `connect.timeout_ms`. Chainable.
+    pub fn with_retry(mut self, retry: StaticConnectRetry) -> Self {
+        self.retry = Some(retry);
+        self
+    }
 }
 
 /// Bring up the transport half a static deploy config asks for — the
@@ -4398,11 +4488,33 @@ pub async fn open_session_static(
 /// listen endpoint needs its server cert); the dial arm takes `cfg`. Both are
 /// present rather than one being chosen at the call site because the config
 /// — not the caller — decides which half runs.
+///
+/// # The dial arm's retry (R311y808)
+///
+/// [`StaticDeploy::retry`] selects between the two arms zenoh's
+/// `connect_peers_single_link` has (`orchestrator.rs:345-370`), and wz had only
+/// the first of:
+///
+/// - `None`, or a policy whose [`retries`](StaticConnectRetry::retries) is
+///   false — ONE attempt per locator, falling through to the next on failure.
+///   This is upstream's `retry_config.timeout().is_zero()` arm and the shape a
+///   stock zenoh CLIENT is configured into (`timeout_ms: { client: 0 }`).
+/// - a policy that retries — the current locator is re-attempted on its own
+///   growing schedule and the walk does NOT advance past it. That pin is
+///   upstream's, not an accident of this port: `peer_connector_retry` loops
+///   until the endpoint connects and then returns `Ok`, so the later endpoints
+///   are unreachable while it waits. `timeout_ms` is the only thing that ends
+///   it, exactly as upstream's outer `tokio::time::timeout` is
+///   (`orchestrator.rs:318-335`), and a `None` timeout is upstream's `-1` —
+///   infinite, the router and peer default.
+///
+/// The wait itself comes from [`RetryPolicy`] /
+/// [`RetryPeriod`](crate::retry_period::RetryPeriod), the crate's one
+/// transcription of `ConnectionRetryConf`, so this arm cannot drift from the
+/// client reconnect supervisor or the router auto-reconnect.
 #[cfg(feature = "scouting-static")]
-#[allow(clippy::too_many_arguments)]
 pub async fn open_session_static_config(
-    listen: Option<&str>,
-    connect: &[String],
+    deploy: StaticDeploy<'_>,
     params: SessionInitParams,
     cfg: &DialConfig,
     accept_cfg: &AcceptConfig,
@@ -4413,6 +4525,11 @@ pub async fn open_session_static_config(
     // R311ih — the resolution yields the bounded seam (StaticLocators =
     // BoundedVec<BoundedString>); iterate via the slice Deref and pass each
     // locator as &str to the mode-agnostic open path.
+    let StaticDeploy {
+        listen,
+        connect,
+        retry,
+    } = deploy;
     let resolved = resolve_static_config(listen, connect).map_err(OpenError::BadStaticConfig)?;
     let role = resolved.role;
     let locators = resolved.locators;
@@ -4437,26 +4554,61 @@ pub async fn open_session_static_config(
         return accept_and_open_session(accepted, params, clock, max_iters, tick_interval_ms).await;
     }
 
-    for locator in locators.iter() {
-        match open_session_at(
-            locator.as_str(),
-            params.clone(),
-            cfg,
-            clock,
-            max_iters,
-            tick_interval_ms,
-        )
-        .await
-        {
-            Ok(opened) => return Ok(opened),
-            Err(e) => {
-                log::warn!(
-                    "wz session-open: static locator {locator:?} failed: {e:?}; trying next"
+    let dial = async {
+        for locator in locators.iter() {
+            // Fresh growth state per locator, matching `peer_connector_retry`
+            // building its `period` on entry (orchestrator.rs:787-788).
+            let mut period = retry.map(|r| r.policy.period());
+            loop {
+                match open_session_at(
+                    locator.as_str(),
+                    params.clone(),
+                    cfg,
+                    clock,
+                    max_iters,
+                    tick_interval_ms,
+                )
+                .await
+                {
+                    Ok(opened) => return Ok(opened),
+                    Err(e) => {
+                        log::warn!("wz session-open: static locator {locator:?} failed: {e:?}");
+                    }
+                }
+                // Upstream's no-retry arm: one attempt, then the next locator.
+                let Some(period) = period
+                    .as_mut()
+                    .filter(|_| retry.is_some_and(|r| r.retries()))
+                else {
+                    log::warn!(
+                        "wz session-open: static locator {locator:?} not retried; trying next"
+                    );
+                    break;
+                };
+                // Upstream's retry arm PINS this locator — `peer_connector_retry`
+                // loops until it connects, so the walk never advances while it
+                // waits. Only `timeout_ms` ends this, and it does so from the
+                // outer bound below rather than from a second deadline here.
+                let wait_ms = period.next_ms();
+                log::info!(
+                    "wz session-open: static locator {locator:?} unreachable; retry in {wait_ms}ms"
                 );
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
             }
         }
+        Err(OpenError::NoReachableLocator)
+    };
+
+    // zenoh wraps the WHOLE walk, not one attempt (orchestrator.rs:318-335), and
+    // skips the wrap entirely when the timeout is zero — which is why a zero is
+    // never turned into an instantly-elapsed bound here. `None` is upstream's
+    // `-1`: no wrap, wait forever.
+    match retry.and_then(|r| r.timeout_ms).filter(|ms| *ms > 0) {
+        Some(ms) => tokio::time::timeout(std::time::Duration::from_millis(ms), dial)
+            .await
+            .unwrap_or(Err(OpenError::NoReachableLocator)),
+        None => dial.await,
     }
-    Err(OpenError::NoReachableLocator)
 }
 
 #[cfg(test)]
