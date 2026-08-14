@@ -558,6 +558,25 @@ pub struct AdminAnswerCtx<'a> {
     /// so the answerer stays feature-toggle-independent (the gate is the value,
     /// not a cfg).
     pub read: bool,
+    /// R311y810 (`transport-stats`) — this node's live counter snapshot, or
+    /// `None` when it has none to report.
+    ///
+    /// The metrics leg appends its OpenMetrics rendering after the `zenoh_build`
+    /// gauge, which is where zenoh appends
+    /// `manager().get_stats().report().openmetrics_text()` under its own `stats`
+    /// feature (`net/runtime/adminspace.rs:722-730`). Carried on the CONTEXT
+    /// rather than read inside the answerer because the answerer is
+    /// session-independent by contract: a Session passes its own report, while a
+    /// mesh host has no equivalent to upstream's transport-MANAGER aggregate and
+    /// passes `None` — a residual named at the call site, not hidden by one.
+    ///
+    /// UNGATED, and deliberately: a `#[cfg]` here would be a cfg-gated pub
+    /// struct field, so every one of the five construction sites would need a
+    /// matching `#[cfg]` — including `wz-ap-demo`, which has no `transport-stats`
+    /// feature of its own and would therefore break the moment feature
+    /// unification turned the flag on in `wz-session-core`. The field costs one
+    /// `Option` in a build that never fills it.
+    pub stats: Option<crate::stats::TransportStatsReport>,
 }
 
 /// R311y45 (§5.23 Phase 2b) — the Session-INDEPENDENT admin-query answerer: the
@@ -625,9 +644,19 @@ pub fn answer_admin_query(
         let metrics_key = admin_metrics_key(ctx.zid_hex, ctx.whatami);
         let metrics_chunks: Vec<&str> = metrics_key.split('/').collect();
         if crate::keyexpr_match::keyexpr_intersects_target(ke, &metrics_chunks) {
+            let mut body = metrics_text(ctx.version);
+            // R311y810 — the transport-stats composition, appended AFTER the
+            // build-info gauge exactly as upstream appends its own stats block
+            // (adminspace.rs:722-730). A node without counters (or a build
+            // without the feature) emits the build-info block alone, which is
+            // byte-identical to what this leg served before. No `#[cfg]`: the
+            // gate is the VALUE being `None`, the same shape `ctx.read` uses.
+            if let Some(stats) = ctx.stats {
+                body.push_str(&stats.openmetrics_text());
+            }
             out.reply_keyed_encoded(
                 &metrics_key,
-                metrics_text(ctx.version).as_bytes(),
+                body.as_bytes(),
                 Some(&crate::sample::EncodingHint::TEXT_PLAIN),
             );
         }
@@ -1582,6 +1611,64 @@ mod tests {
         assert!(metrics_text("v\"x").contains(r#"version="v\"x""#));
     }
 
+    /// R311y810 — the metrics leg APPENDS the counter block after the build-info
+    /// gauge, which is where upstream appends its own
+    /// (`net/runtime/adminspace.rs:722-730`). Pinned on the ANSWERER, not on the
+    /// renderer: the renderer's own shape is pinned in `stats.rs`, and what this
+    /// adds is that the composition happens at all and in that order.
+    #[cfg(feature = "adminspace-metrics")]
+    #[test]
+    fn metrics_reply_appends_the_transport_stats_block() {
+        let mut out = RecordingReply::default();
+        let view = admin_view("@/a1b2/peer/metrics");
+        let stats = crate::stats::TransportStatsReport {
+            tx_bytes: 140,
+            tx_msgs: 2,
+            rx_bytes: 12,
+            rx_msgs: 1,
+        };
+        let _ = answer_admin_query(
+            &view,
+            &mut out,
+            &admin_ctx_with_stats(stats),
+            &[],
+            &[],
+            &[],
+            "{}",
+        );
+        let body = out
+            .replies
+            .iter()
+            .find(|(k, _)| k == "@/a1b2/peer/metrics")
+            .map(|(_, p)| String::from_utf8_lossy(p).into_owned())
+            .expect("the metrics leg replied");
+        assert_eq!(
+            body,
+            metrics_text("0.1.0") + &stats.openmetrics_text(),
+            "the counter block must follow the build-info gauge, in that order"
+        );
+    }
+
+    /// The same leg with NO report serves the build-info block ALONE — byte-
+    /// identical to what it served before R311y810. This is the paired negative:
+    /// without it, a composition that always appended (or that appended an empty
+    /// block) would pass the test above and silently change every node that has
+    /// no counters to report.
+    #[cfg(feature = "adminspace-metrics")]
+    #[test]
+    fn metrics_reply_without_a_report_is_unchanged() {
+        let mut out = RecordingReply::default();
+        let view = admin_view("@/a1b2/peer/metrics");
+        let _ = answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &[], "{}");
+        let body = out
+            .replies
+            .iter()
+            .find(|(k, _)| k == "@/a1b2/peer/metrics")
+            .map(|(_, p)| String::from_utf8_lossy(p).into_owned())
+            .expect("the metrics leg replied");
+        assert_eq!(body, metrics_text("0.1.0"));
+    }
+
     // R311y45 — a recording ReplyOut for the answer_admin_query unit tests:
     // captures each emitted (keyexpr, payload).
     #[derive(Default)]
@@ -1619,6 +1706,18 @@ mod tests {
             version: "0.1.0",
             locators: &[],
             read,
+            stats: None,
+        }
+    }
+
+    /// R311y810 — the same context carrying a counter snapshot, for the tests
+    /// that pin the metrics composition. Separate from [`admin_ctx`] so every
+    /// OTHER admin test keeps asserting the no-stats body unchanged.
+    #[cfg(feature = "adminspace-metrics")]
+    fn admin_ctx_with_stats<'a>(stats: crate::stats::TransportStatsReport) -> AdminAnswerCtx<'a> {
+        AdminAnswerCtx {
+            stats: Some(stats),
+            ..admin_ctx(true)
         }
     }
 

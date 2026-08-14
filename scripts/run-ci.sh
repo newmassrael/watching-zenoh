@@ -3438,9 +3438,22 @@ layer_c1aj_cargo_test_quic_datagram() {
 # R311y414 — both test steps were BARE; anchored count guards with the MEASURED
 # counts (2 counter unit / 1 e2e) now pin them.
 layer_c1ak_cargo_test_transport_stats() {
-    _runci_guarded_test C1ak 2 cargo test -p wz-session-core --features transport-stats --lib stats --quiet \
+    _runci_guarded_test C1ak 4 cargo test -p wz-session-core --features transport-stats --lib stats --quiet \
         || return 1
     _runci_guarded_test C1ak 1 cargo test -p wz-runtime-tokio --features transport-stats --test transport_stats_e2e --quiet \
+        || return 1
+    # R311y810 — the OpenMetrics renderer with the counting half OFF. The report
+    # type and its rendering are unconditional (only the atomics are gated), and
+    # this is what holds that apart: a build that never counts must still be able
+    # to name and render a report, because a consumer carries one in a struct
+    # field in every feature combination.
+    _runci_guarded_test C1ak 2 cargo test -p wz-session-core --no-default-features --features alloc --lib stats --quiet \
+        || return 1
+    # R311y810 — adminspace-metrics AND transport-stats together: the combination
+    # a deployment actually runs, which no lane composed before. The metrics leg's
+    # own count is pinned by C1AM; this pins that turning the counters ON does not
+    # change it, since the composition is driven by the VALUE, not by the cfg.
+    _runci_guarded_test C1ak 20 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-stats --quiet -- -D warnings \
@@ -3660,7 +3673,7 @@ layer_c1ba_cargo_clippy_transport_multilink() {
 # two self-sufficiency fixes that the slim build surfaced (the session/mod.rs
 # unused-ResponseSink import + the test-module dead-code re-gating).
 layer_c1am_cargo_test_adminspace() {
-    _runci_guarded_test "C1AM adminspace 18" 18 \
+    _runci_guarded_test "C1AM adminspace 20" 20 \
         cargo test -p wz-session-core --features adminspace-metrics --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM zid_hex 3" 3 \
         cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet || return 1

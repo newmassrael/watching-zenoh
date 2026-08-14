@@ -3324,6 +3324,12 @@ async fn run_peer_until(
                 version: &version,
                 locators: &locators,
                 read: admin_read,
+                // R311y810 — a MESH host has no counterpart to upstream's
+                // transport-MANAGER aggregate: wz's counters are per-session and
+                // this node holds N faces, so there is no single report to serve.
+                // `None` states that rather than serving one face's numbers as if
+                // they were the node's.
+                stats: None,
             };
             // R311y237 — the node's compiled-in plugin registry (wz-native subsystem
             // set; e.g. storage_manager under `storage-backend`). Empty without the
@@ -4487,6 +4493,8 @@ async fn run_router_hat_until(
                 version: &version,
                 locators: &locators,
                 read: admin_read,
+                // R311y810 — the mesh-host `None`; see the peer host above.
+                stats: None,
             };
             // R311y237 — the router node's compiled-in plugin registry.
             #[cfg(feature = "adminspace-plugins-handlers")]
@@ -5282,6 +5290,8 @@ pub(crate) async fn run_storage_host(
                     // read-permit flag and holds no shared WzConfig, so there is no
                     // source to resolve. The gate is honoured, the source is missing.
                     read: true,
+                    // R311y810 — the mesh-host `None`; see the peer host above.
+                    stats: None,
                 };
                 // The DYNAMIC registry: storage_manager is Started when a storage is
                 // live (!manager.is_empty(), reflected into storage_started), Loaded

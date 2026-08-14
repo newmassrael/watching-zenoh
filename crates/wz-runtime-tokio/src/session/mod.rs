@@ -3435,12 +3435,24 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // The match+reply SSOT (root local_data / metrics / config + the read
             // gate) — the SAME answerer the §5.23 routing-peer forwarder host calls
             // (R311y45), so both emit byte-identical admin replies.
+            // R311y810 — THIS session's live counters, which is exactly the scope
+            // `transport-stats` documents (per-session). Read here per query
+            // rather than snapshotted at open, so a scrape reflects the traffic up
+            // to the moment it was served. The cfg is on the VALUE, not on the
+            // struct field: gating the field would force a matching `#[cfg]` on
+            // every construction site, including crates that carry no such
+            // feature of their own.
+            #[cfg(feature = "transport-stats")]
+            let stats = Some(actions.stats_report());
+            #[cfg(not(feature = "transport-stats"))]
+            let stats = None;
             let ctx = AdminAnswerCtx {
                 zid_hex: &zid_hex,
                 whatami,
                 version: &version,
                 locators: &locators,
                 read,
+                stats,
             };
             // R311y237 — the node's compiled-in plugin registry (the wz-native
             // subsystem set this binary carries; `Loaded` state). Empty vec without

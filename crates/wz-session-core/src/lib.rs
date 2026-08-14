@@ -984,7 +984,16 @@ pub mod compression;
 /// instrumentation counting wire bytes + messages at the `send_wire` (TX) /
 /// `dispatch_link_event` (RX) seams, with a public snapshot accessor. Off by
 /// default; the adminspace consumer stays P4.
-#[cfg(feature = "transport-stats")]
+/// R311y810 — the MODULE is unconditional; only the counting half
+/// (`stats::TransportStats`, the atomics and the `inc_*` seams) is gated.
+/// `stats::TransportStatsReport` is a four-integer snapshot with no
+/// feature-dependent behaviour, and a consumer that carries one in a struct
+/// field must be able to name the type in EVERY feature combination — the same
+/// reason `locator::AnyLocator`'s `Serial` / `Unixsock` variants are
+/// unconditional while their backends are gated. Gating the type instead is how
+/// a cfg-gated pub struct field appears, which is the C1bf hazard class.
+/// (Code spans, not links: the counting half is gated and this doc is read in
+/// the default-feature rustdoc Layer C1bz measures.)
 pub mod stats;
 
 /// SSOT for the Z_EXT_COMPRESSION establishment ext (`session-extcompression`) —
