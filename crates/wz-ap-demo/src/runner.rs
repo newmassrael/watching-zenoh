@@ -2525,6 +2525,42 @@ async fn run_router_until(
     Ok(())
 }
 
+/// Resolve every configured `--connect` dial target for a mesh host, in order.
+///
+/// R311y809 — ONE resolution for both mesh hosts, through the SHARED classifier.
+/// The peer and the router-hat each carried a near-identical loop that parsed
+/// its targets with `str::parse::<SocketAddr>()`, which read a grammar no other
+/// wz entry point uses: it REJECTED `tcp/HOST:PORT` — zenoh's own spelling, and
+/// exactly what `--listen` on the same node accepts — while taking the
+/// scheme-less `HOST:PORT`, and it could not resolve a DNS name at all. It also
+/// reported a `tls/...` target as a malformed string, when a `tls/...` locator
+/// is perfectly well formed and the same loop's ACCEPT side does carry it.
+///
+/// [`resolve_mesh_dial_target`](wz::runtime_tokio::session_open::resolve_mesh_dial_target)
+/// is where all three now separate; this only prefixes the failure with the role
+/// so an operator reading stderr knows which host refused. Fail-fast per target
+/// (the prior discipline): a malformed or undialable entry stops startup rather
+/// than silently dropping a mesh link.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+async fn resolve_dial_targets(
+    role: &str,
+    dial_targets: &[String],
+) -> io::Result<Vec<std::net::SocketAddr>> {
+    let mut dials = Vec::with_capacity(dial_targets.len());
+    for target in dial_targets {
+        let addr = wz::runtime_tokio::session_open::resolve_mesh_dial_target(target)
+            .await
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("wz-ap-demo {role}: --connect dial target {e}"),
+                )
+            })?;
+        dials.push(addr);
+    }
+    Ok(dials)
+}
+
 /// R311qg — peer-MESH mode: bind once, DIAL each configured peer, and accept
 /// inbound — holding both directions' faces (the `routing-peer` foundation,
 /// hold-only). The dial+accept generalisation of [`run_router`]: where a router
@@ -2843,18 +2879,7 @@ async fn run_peer_until(
     // DIAL side is TCP-only; the LISTEN side is transport-general (unixpipe-capable as
     // of R311y397, above). A malformed target fails fast rather than silently dropping
     // a mesh link.
-    let mut dials = Vec::with_capacity(dial_targets.len());
-    for target in dial_targets {
-        match target.parse::<std::net::SocketAddr>() {
-            Ok(addr) => dials.push(addr),
-            Err(e) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("wz-ap-demo peer: invalid --connect dial target {target:?}: {e}"),
-                ));
-            }
-        }
-    }
+    let dials = resolve_dial_targets("peer", dial_targets).await?;
 
     log::info!(
         "wz-ap-demo peer: listening on {local_display}; dialing {} configured peer(s), \
@@ -4179,18 +4204,7 @@ async fn run_router_hat_until(
     // Parse the outbound dial targets (empty for a listen-only router; non-empty
     // for router-to-router federation, ACTIVATION-4). A malformed target fails
     // fast rather than silently dropping a mesh link — the run_peer discipline.
-    let mut dials = Vec::with_capacity(dial_targets.len());
-    for target in dial_targets {
-        match target.parse::<std::net::SocketAddr>() {
-            Ok(addr) => dials.push(addr),
-            Err(e) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("wz-ap-demo router-hat: invalid --connect dial target {target:?}: {e}"),
-                ));
-            }
-        }
-    }
+    let dials = resolve_dial_targets("router-hat", dial_targets).await?;
 
     // The runtime connect-list reconcile affordance (`router-connect-reconcile`):
     // `--connect-after <ms>:<addr>[,<addr>...]` schedules a runtime ADD of the
@@ -5598,6 +5612,71 @@ mod caller_failfast_tests {
 
         // The acceptor's teardown unlinks the base request node; best-effort here.
         let _ = std::fs::remove_file(format!("{base}_uplink"));
+    }
+}
+
+/// R311y809 — the mesh `--connect` target resolution BOTH mesh hosts call.
+///
+/// These sit on `resolve_dial_targets` rather than on `run_peer_until` /
+/// `run_router_hat_until` deliberately: those two take a `PeerOpts` /
+/// `RouterHatOpts` whose fields are themselves `#[cfg]`-gated, so constructing
+/// one in a test would bind the assertion to a feature combination and break on
+/// every future field. The helper IS the whole of what the two sites do with a
+/// target — each site is now one `?` line — so pinning it pins the wiring.
+#[cfg(all(test, any(feature = "routing-peer", feature = "router-hat-router")))]
+mod mesh_dial_target_tests {
+    use super::resolve_dial_targets;
+
+    /// THE defect: `tcp/HOST:PORT` was rejected while the bare `HOST:PORT`
+    /// worked, on a node whose `--listen` accepts the schemed form. Both
+    /// spellings must now reach the same address through the one classifier.
+    ///
+    /// RED reproduction: restore `target.parse::<std::net::SocketAddr>()` in
+    /// `resolve_dial_targets` -> the schemed entry returns InvalidInput and this
+    /// `expect` panics.
+    #[tokio::test]
+    async fn both_tcp_spellings_are_admitted() {
+        let targets = vec![
+            "127.0.0.1:7447".to_string(),
+            "tcp/127.0.0.1:7447".to_string(),
+        ];
+        let dials = resolve_dial_targets("peer", &targets)
+            .await
+            .expect("both spellings resolve");
+        assert_eq!(dials.len(), 2);
+        assert_eq!(dials[0], dials[1], "one classifier, one address");
+    }
+
+    /// A scheme the mesh dial side cannot carry is REPORTED as that, naming the
+    /// scheme — not disguised as a malformed string. The role prefix is part of
+    /// the contract too: an operator reading stderr must know which host refused.
+    #[tokio::test]
+    async fn an_undialable_scheme_is_named_not_called_malformed() {
+        let targets = vec!["tls/127.0.0.1:7447".to_string()];
+        let err = resolve_dial_targets("router-hat", &targets)
+            .await
+            .expect_err("a tls dial target is refused");
+        let msg = err.to_string();
+        assert!(msg.contains("router-hat"), "role must be named: {msg}");
+        assert!(msg.contains("tls"), "the scheme must be named: {msg}");
+        assert!(
+            msg.contains("tcp-only"),
+            "the LIMIT must be stated, not just the rejection: {msg}"
+        );
+    }
+
+    /// The widening must not swallow real garbage, and it must still fail FAST:
+    /// one bad entry stops startup rather than silently dropping a mesh link.
+    #[tokio::test]
+    async fn a_malformed_target_still_stops_startup() {
+        let targets = vec!["127.0.0.1:7447".to_string(), "not-an-endpoint".to_string()];
+        let err = resolve_dial_targets("peer", &targets)
+            .await
+            .expect_err("a malformed target is refused");
+        assert!(
+            err.to_string().contains("not a dialable endpoint"),
+            "expected the malformed arm, got {err}"
+        );
     }
 }
 

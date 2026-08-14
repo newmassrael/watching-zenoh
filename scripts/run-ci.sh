@@ -4214,6 +4214,14 @@ layer_c1bl_cargo_test_router_failfast() {
         && cargo clippy -p wz-ap-demo --all-targets --features routing-peer,quic --quiet -- -D warnings \
         && cargo test -p wz-ap-demo --features router-hat-router,quic run_router_hat_admits_a_quic_listen_with_cert_at_bind --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
         && cargo clippy -p wz-ap-demo --all-targets --features router-hat-router,quic --quiet -- -D warnings)
+    # R311y809 — the mesh `--connect` target resolution, on BOTH hosts. Same lane
+    # because it is the same claim as the four above: what this binary ADMITS at
+    # startup. Run under each mesh feature ALONE, not only together, because the
+    # helper is `cfg(any(..))` and a build with one of the two must still compile
+    # and still resolve; a single combined run would not distinguish them.
+    (cd crates \
+        && cargo test -p wz-ap-demo --features routing-peer mesh_dial_target --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed' \
+        && cargo test -p wz-ap-demo --features router-hat-router mesh_dial_target --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed')
 }
 
 # ─── Layer C1bm — pico admits a multi-client unixpipe listen (R311y392) ─────
