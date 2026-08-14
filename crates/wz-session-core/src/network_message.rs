@@ -857,6 +857,15 @@ mod declare_body_ext_chain_tests {
     /// all — the flag was absent from `decl_kexpr.scxml`, so there was no `z()`
     /// accessor to have ignored.
     #[test]
+    // R311y806 — the `<MID> | 0x80` spelling is what makes this group of hand-
+    // assembled fixtures readable: each names its declaration MID and then sets
+    // bit 7. DeclKexpr's MID is 0x00, so clippy reads the OR as an identity and
+    // asks for a bare `0x80` — which would leave this the one fixture in the
+    // group that does not say which body it is. The lint is right about the
+    // arithmetic and wrong about the intent, so it is silenced HERE rather than
+    // the byte being collapsed. R311y804 shipped this and the `--all-features`
+    // clippy lane (C1bf) reddened on it hosted.
+    #[allow(clippy::identity_op)]
     fn a_z_flagged_decl_kexpr_does_not_swallow_the_next_record() {
         let mut body = alloc::vec![
             0x00 | 0x80, // DeclKexpr MID 0x00 | Z (N=0)
