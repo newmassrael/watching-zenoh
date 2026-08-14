@@ -326,7 +326,23 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 #   * a_complete_session_local_queryable_does_satisfy_the_all_complete_querier
 #     -- the anti-vacuity twin of the other two. An AllComplete watch that were
 #     simply inert would satisfy both silences; this one makes it speak.
-FOREIGN_ADJUDICATOR_LINKS = 828
+# R311y799 takes it to 830. `session-matching` gains the ACCEPT half of the same
+# axis, in wz_querier_all_complete_vs_zenohd_storage.rs, and the adjudicator is a
+# DIFFERENT implementation from y798's on purpose:
+#   * a_zenohd_storage_declared_complete_satisfies_an_all_complete_wz_querier --
+#     the only leg in this corpus where a FOREIGN encoder SETS the completeness
+#     bit. zenoh-pico structurally cannot: its stock z_queryable example takes no
+#     completeness option, so a pico `complete = true` would need a patched
+#     oracle. zenoh-full's storage-manager declares its storage's queryable with
+#     `.complete(self.configuration.complete)` (service.rs:154) from a plain
+#     config key, so a stock zenohd sets it from the command line.
+#   * a_zenohd_storage_declared_incomplete_does_not_satisfy_it -- its twin, one
+#     config key apart, without which the leg above would be satisfied by a wz
+#     that ignored the bit entirely. It also carries the ordinary querier's rise
+#     as the control that zenohd forwarded the declaration at all.
+# Together they also MEASURE what y798 left open: whether the routed path
+# preserves the declarer's bit, which it does with one storage behind the router.
+FOREIGN_ADJUDICATOR_LINKS = 830
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

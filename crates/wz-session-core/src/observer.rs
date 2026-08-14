@@ -545,6 +545,67 @@ impl ApplicationLayerObserver {
         }
     }
 
+    /// R311y799 — the DECLARATION plane's twin of
+    /// [`Self::flush_liveliness_on_link_loss`]: the peer's link died, so
+    /// every subscriber and queryable it had declared is gone. Drops both
+    /// membership tables and re-evaluates the matching watches against what
+    /// remains — which on a session with no local declarations is nothing,
+    /// so a publisher or querier that was matching flips back to `false`.
+    /// Returns the total number of declarations dropped.
+    ///
+    /// WITHOUT THIS the tables outlive the link. The observer survives a
+    /// reconnect by design (it is built over the shared
+    /// `SessionLinkActions`, and `ReconnectingSession` replaces only the
+    /// link), so a peer's declarations stayed in `declared` across the loss,
+    /// kept every matching verdict `true`, and were never overwritten
+    /// because the peer re-declares with FRESH ids after the re-handshake.
+    /// R311y521 built exactly this for the token plane and the declaration
+    /// plane was left behind; pico purges both from one sweep
+    /// (`vendor/zenoh-pico/src/net/filtering.c:217-220`).
+    ///
+    /// Each plane's local half is passed in from its sibling field under a
+    /// disjoint borrow, the same shape the inbound fan uses — a watch held
+    /// `true` by a LOCAL subscriber or queryable must not be flipped by a
+    /// remote link dying.
+    pub fn flush_declarations_on_link_loss(&mut self) -> usize {
+        #[allow(unused_mut)]
+        let mut dropped = 0usize;
+        #[cfg(all(feature = "declare-subscriber", feature = "codec-declare"))]
+        {
+            let subscribers = &self.subscribers;
+            dropped += self
+                .remote_subscribers
+                .flush_declarations_on_link_loss(&|c| {
+                    c.locality.allows_local() && subscribers.has_local_matching(&c.keyexpr)
+                });
+        }
+        #[cfg(all(
+            feature = "declare-queryable",
+            feature = "query-queryable",
+            feature = "codec-declare"
+        ))]
+        {
+            let queryables = &self.queryables;
+            dropped += self
+                .remote_queryables
+                .flush_declarations_on_link_loss(&|c| {
+                    c.locality.allows_local()
+                        && queryables.has_local_matching(&c.keyexpr, c.complete_required)
+                });
+        }
+        #[cfg(all(
+            feature = "declare-queryable",
+            not(feature = "query-queryable"),
+            feature = "codec-declare"
+        ))]
+        {
+            dropped += self
+                .remote_queryables
+                .flush_declarations_on_link_loss(&|_| false);
+        }
+        dropped
+    }
+
     /// R311gi gc-2c — fan an [`IterationEvent`] into the statechart
     /// switchboard, injecting the mapped SCXML domain event through
     /// `injector` for each inbound `FramePayload` Push whose resolved

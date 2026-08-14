@@ -381,6 +381,29 @@ impl ReconnectingSession {
                     // it whether or not this supervisor is about to stop, so a
                     // caller that stops during a loss must still be told.
                     if let Some(session) = &self.liveliness_session {
+                        // R311y799 — the DECLARATION plane goes with the link
+                        // too, and until this round it did not. The observer
+                        // survives a reconnect by design, so a peer's
+                        // subscribers and queryables stayed in `declared`,
+                        // held every matching verdict `true`, and were never
+                        // overwritten because the peer re-declares with fresh
+                        // ids after the re-handshake. pico purges both planes
+                        // from one connection-dropped sweep
+                        // (`net/filtering.c:217-220`). Flushed BEFORE the
+                        // liveliness one so the single `drain_deferred_fires`
+                        // below delivers both planes' staged fires.
+                        let declarations = match session.observer().lock() {
+                            Ok(mut o) => o.flush_declarations_on_link_loss(),
+                            Err(poisoned) => {
+                                poisoned.into_inner().flush_declarations_on_link_loss()
+                            }
+                        };
+                        if declarations > 0 {
+                            log::info!(
+                                "wz reconnect: link lost; dropped {declarations} remote \
+                                 declaration(s) and re-evaluated matching"
+                            );
+                        }
                         let staged = match session.observer().lock() {
                             Ok(mut o) => o.flush_liveliness_on_link_loss(),
                             // A panicking sink poisons the mutex; recover
@@ -388,14 +411,23 @@ impl ReconnectingSession {
                             // every other shutdown path in this crate.
                             Err(poisoned) => poisoned.into_inner().flush_liveliness_on_link_loss(),
                         };
-                        if staged > 0 {
-                            // R311y522 — the flush only STAGES on the
-                            // deferred-fire queue; the drive loop is what
-                            // normally drains it, and it has just returned.
-                            // Without this the Deletes reach the
-                            // application late (only if some other periodic
-                            // sweeper happens to exist) or never.
+                        // R311y522 — a flush only STAGES on the deferred-fire
+                        // queue; the drive loop is what normally drains it,
+                        // and it has just returned. Without this the Deletes
+                        // reach the application late (only if some other
+                        // periodic sweeper happens to exist) or never.
+                        //
+                        // R311y799 — the drain is now conditioned on EITHER
+                        // plane, not on the liveliness count alone. The
+                        // declaration flush stages matching-listener fires
+                        // through the same queue, so keying the drain on
+                        // `staged` would have swallowed every one of them on a
+                        // session with no remote tokens — which is most
+                        // sessions.
+                        if staged > 0 || declarations > 0 {
                             session.drain_deferred_fires();
+                        }
+                        if staged > 0 {
                             log::info!(
                                 "wz reconnect: link lost; delivered {staged} remote \
                                  liveliness token(s) as Delete"

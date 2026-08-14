@@ -465,6 +465,27 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
             .reevaluate(|c| declared_answers(&self.declared, c) || local_matching(c))
     }
 
+    /// R311y799 — the queryable-plane twin of
+    /// [`RemoteSubscriberRegistry::flush_declarations_on_link_loss`](crate::declare::subscriber::RemoteSubscriberRegistry::flush_declarations_on_link_loss);
+    /// read that one for pico's arm, for why a purge needs no `peer` key on
+    /// a single-peer observer, and for why the decl-listener surface stays
+    /// silent. pico makes no distinction between the two planes here — its
+    /// connection-dropped sweep drops SUBSCRIBER and QUERYABLE targets
+    /// alike, because both live in the same target list.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn flush_declarations_on_link_loss(
+        &mut self,
+        local_matching: &dyn Fn(&QuerierCriterion) -> bool,
+    ) -> usize {
+        let _ = &local_matching;
+        let dropped = self.declared.len();
+        self.declared.clear();
+        #[cfg(feature = "session-matching")]
+        self.matching_watches
+            .reevaluate(|c| declared_answers(&self.declared, c) || local_matching(c));
+        dropped
+    }
+
     /// R311kh — remove a matching-listener watch. Returns whether one
     /// was removed.
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
@@ -1236,6 +1257,82 @@ mod tests {
         );
 
         assert!(reg.undeclare_matching_listener(id));
+    }
+
+    /// R311y799 — a dead link takes its peer's declarations with it, and the
+    /// matching watch must follow. Until this round the membership outlived
+    /// the link: the observer survives a reconnect, so the entries stayed,
+    /// held the verdict `true`, and were never overwritten because the peer
+    /// re-declares with FRESH ids after the re-handshake.
+    ///
+    /// The `matching=false` fire is the discriminator, not the emptied
+    /// table: a flush that cleared the map without re-evaluating would leave
+    /// every listener believing it still matched, which is the exact failure
+    /// the surviving table produced.
+    #[cfg(feature = "session-matching")]
+    #[test]
+    fn a_link_loss_drops_the_peers_declarations_and_flips_the_watch() {
+        let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+        let log_for_sink = log.clone();
+        let mut reg = RemoteQueryableRegistry::new();
+        reg.declare_matching_listener_seeded(
+            QuerierCriterion::intersecting("home/temp"),
+            /*local_matching=*/ false,
+            crate::declare::matching::BoxedMatchingSink::new(move |m| {
+                log_for_sink.lock().unwrap().push(m)
+            }),
+        );
+
+        reg.dispatch_declare(
+            &decl_queryable_complete(1, "home/temp", false),
+            &HashMap::new(),
+        );
+        assert_eq!(*log.lock().unwrap(), vec![true], "the peer raised it");
+        assert_eq!(reg.declared_count(), 1);
+
+        assert_eq!(
+            reg.flush_declarations_on_link_loss(&|_| false),
+            1,
+            "the one declaration the dead link had made is dropped"
+        );
+        assert_eq!(reg.declared_count(), 0);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![true, false],
+            "and the watch follows it down — the emptied table alone would \
+             leave every listener believing it still matched"
+        );
+    }
+
+    /// The local half survives the link, so a watch a session-local
+    /// queryable is holding must NOT be flipped by a remote link dying.
+    /// Same fixture as above, one predicate apart.
+    #[cfg(feature = "session-matching")]
+    #[test]
+    fn a_link_loss_does_not_flip_a_watch_a_local_queryable_holds() {
+        let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+        let log_for_sink = log.clone();
+        let mut reg = RemoteQueryableRegistry::new();
+        reg.declare_matching_listener_seeded(
+            QuerierCriterion::intersecting("home/temp"),
+            /*local_matching=*/ true,
+            crate::declare::matching::BoxedMatchingSink::new(move |m| {
+                log_for_sink.lock().unwrap().push(m)
+            }),
+        );
+        assert_eq!(*log.lock().unwrap(), vec![true]);
+
+        reg.dispatch_declare_with_local(
+            &decl_queryable_complete(1, "home/temp", false),
+            &HashMap::new(),
+            &|_| true,
+        );
+        assert_eq!(reg.flush_declarations_on_link_loss(&|_| true), 1);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![true],
+            "the local queryable still answers, so the link loss flips nothing"
+        );
     }
 
     /// The SESSION-LOCAL half reaches the watch on the INBOUND path, not

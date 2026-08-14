@@ -335,6 +335,48 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
             .reevaluate(|c| declared_reaches(&self.declared, c) || local_matching(c))
     }
 
+    /// R311y799 — the peer's link died: drop every declaration it had made
+    /// and re-evaluate the matching watches. Returns the number of
+    /// declarations dropped.
+    ///
+    /// pico's own arm, and the reason this is a purge rather than a
+    /// per-declaration undeclare: `_Z_INTEREST_MSG_TYPE_CONNECTION_DROPPED`
+    /// drops ALL of that peer's write-filter targets in one sweep and then
+    /// runs `_z_write_filter_ctx_update_state`
+    /// (`vendor/zenoh-pico/src/net/filtering.c:217-220`), which is what
+    /// flips a matching listener back to `false`.
+    ///
+    /// WHY "ALL" IS THE SAME AS "THIS PEER'S" HERE, and why wz needs no
+    /// `peer` key to do it: this registry lives on an
+    /// [`ApplicationLayerObserver`](crate::observer) whose peer alias table
+    /// (`SubscriberRegistry`'s `peer_keyexpr_table`) is a single unkeyed
+    /// `{mapping_id -> keyexpr}` map. Two peers' id spaces would collide in
+    /// it, so the observer is single-peer BY CONSTRUCTION and every entry
+    /// in `declared` belongs to the one link that just died. pico keys its
+    /// targets by peer because its write-filter ctx spans a session that
+    /// really can hold several transport peers.
+    ///
+    /// The decl-listener surface (`on_subscriber_undeclared`) is
+    /// deliberately NOT fired: pico's connection-dropped arm touches the
+    /// filter targets and nothing else, so firing it would be a wz
+    /// superset rather than parity. The liveliness plane's link-loss flush
+    /// (R311y521) DOES deliver to the application, and that asymmetry is
+    /// upstream's too — `_z_liveliness_subscription_undeclare_all` calls
+    /// the subscriber callbacks where the write filter does not.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn flush_declarations_on_link_loss(
+        &mut self,
+        local_matching: &dyn Fn(&PublisherCriterion) -> bool,
+    ) -> usize {
+        let _ = &local_matching;
+        let dropped = self.declared.len();
+        self.declared.clear();
+        #[cfg(feature = "session-matching")]
+        self.matching_watches
+            .reevaluate(|c| declared_reaches(&self.declared, c) || local_matching(c));
+        dropped
+    }
+
     /// R311kh — remove a matching-listener watch. Returns whether one
     /// was removed (pico `_z_matching_listener_undeclare`).
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
