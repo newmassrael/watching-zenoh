@@ -101,10 +101,11 @@ use tokio_serial::SerialStream;
 use wz_integration_tests::common::{zenoh_pico_cli_binary, ChildGuard};
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::serial_pipeline::accept_serial;
 use wz_runtime_tokio::session::{SubscribeOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
-use wz_runtime_tokio::session_open::{accept_and_open_session, DialedLink, DEFAULT_OPEN_TICK_MS};
+use wz_runtime_tokio::session_open::{
+    accept_and_open_session, accept_endpoint, AcceptConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
+};
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::{parse_any_locator, AnyLocator, SerialTarget};
@@ -243,29 +244,44 @@ async fn serial_interop_over_metadata_span(metadata: &str) {
             .expect("spawn zenoh-pico z_pub"),
     );
 
-    // ── The wz end of the wire, opened FROM THE PARSE (not from the path
-    //    string), so a mis-split would open the wrong device here. This is
-    //    also the serial-LINK handshake, which sits below the zenoh
-    //    transport and has no TCP analogue: pico sends INIT, wz answers
-    //    INIT|ACK.
-    let wz_serial = tokio::time::timeout(Duration::from_secs(20), accept_serial(&endpoint))
-        .await
-        .expect("the pico serial initiator reaches wz within 20s")
-        .expect("wz opens its serial endpoint and answers INIT|ACK");
+    // ── The wz end of the wire, opened FROM THE LISTEN STRING. R311y805 —
+    //    this was `accept_serial(&endpoint)` until the accept SEAM existed:
+    //    `bind_locator`'s `AnyLocator::Serial` arm was a typed `Unsupported`,
+    //    so the only way to a wz serial acceptor was to call the primitive
+    //    with an endpoint the test had parsed for itself. It now goes through
+    //    `accept_endpoint` — bind, accept, deferred Responder handshake — which
+    //    is the entry point the demo's Acceptor role uses, so what this foreign
+    //    witness adjudicates is the SHIPPED path rather than a primitive
+    //    underneath it. The parse assertions above stay: they name the split,
+    //    and `accept_endpoint` re-does it internally from the same string, so a
+    //    mis-split still opens the wrong device here.
+    //
+    //    The serial-LINK handshake (pico sends INIT, wz answers INIT|ACK) sits
+    //    below the zenoh transport and has no TCP analogue. It is why pico must
+    //    already be running: the seam's accept returns as soon as the tty is
+    //    open, but the handshake it defers still blocks until an INIT arrives.
+    let accept_cfg = AcceptConfig::default();
+    let wz_link = tokio::time::timeout(
+        Duration::from_secs(20),
+        accept_endpoint(&wz_locator, &accept_cfg),
+    )
+    .await
+    .expect("the pico serial initiator reaches wz within 20s")
+    .expect("wz binds its serial listen string, opens the tty and answers INIT|ACK");
+    assert!(
+        matches!(wz_link, DialedLink::Serial { .. }),
+        "a `serial/...` listen string must accept into the serial link variant"
+    );
 
     // ── Zenoh transport open over the handshaked serial link — the same
-    //    accept path the TCP pico legs use; only the framing differs.
+    //    accept path the TCP pico legs use; only the framing differs. The
+    //    endpoint the link carries (R311y474: a tty's address is not readable
+    //    off the stream, and the adminspace `{src,dst}` view needs it) is now
+    //    threaded by the seam itself, from the same parse asserted above.
     let mut opened = tokio::time::timeout(
         Duration::from_secs(20),
         accept_and_open_session(
-            // R311y475 — the variant carries the dialled endpoint since R311y474 (a
-            // tty's address is not readable off the stream, and the adminspace
-            // `{src,dst}` view needs it). This site has the REAL one in hand: it is
-            // the endpoint `accept_serial` just opened.
-            DialedLink::Serial {
-                stream: wz_serial,
-                endpoint: endpoint.clone(),
-            },
+            wz_link,
             fixture_session_init_params(),
             TokioTime::new(),
             Some(ITER_CAP),

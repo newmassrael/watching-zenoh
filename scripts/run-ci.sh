@@ -2314,6 +2314,13 @@ layer_c1c_cargo_test_codec_declare() {
 # a minimal build with no reassembly subsystem. A matching frag-ON clippy
 # gate lints the otherwise cfg'd-out fragmentation test.
 #
+# R311y805 — the serial_pty_e2e counts move 1 -> 5 (frag-off) and 2 -> 6
+# (frag-on), both +4, because the ACCEPT SEAM slice landed: a `serial/...`
+# listen string now binds (`bind_locator`'s `AnyLocator::Serial` arm was a
+# typed `Unsupported` until this round, so `accept_serial` had no production
+# caller). The delta being the SAME on both invocations is the check that no
+# new case hid behind `transport-fragmentation`.
+#
 # R311y413 — HOSTED on ci.yml's feature-gates job (completes the link-kind
 # e2e family: all 10 transport-link-* kinds now gate hosted). The three
 # targeted runtime steps (serial_pipeline lib; serial_pty_e2e frag-off /
@@ -2328,8 +2335,8 @@ layer_c1t_cargo_test_serial() {
         && cargo test -p wz-session-core --features transport-link-serial --quiet \
         && cargo test -p wz-session-core --no-default-features --features transport-link-serial --quiet \
         && cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed' \
-        && cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
-        && cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 5 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 6 passed' \
         && cargo test -p wz-runtime-tokio --features transport-link-serial --test link_endpoints_pairing --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial,transport-fragmentation --quiet -- -D warnings)
@@ -6459,6 +6466,21 @@ layer_c1bz_docs_resolve() {
     # default config for the first time. Those were code-spanned too, which is
     # what lands the count one BELOW the old budget — a removal this line has to
     # declare, exactly as the gate's downward arm demands.
+    # R311y805: wz-runtime-tokio 190 -> 189, and the route there is worth the
+    # line. The removal is ONE link: `accept_locator`'s doc said the serial
+    # acceptor was "unwired until their responder caller lands" and linked
+    # `[accept_serial](crate::serial_pipeline::accept_serial)`, a
+    # `transport-link-serial`-gated target and so unresolved in the default
+    # rustdoc. Wiring the acceptor retired the sentence and the link with it.
+    #
+    # The first measurement said 187, and chasing the missing two found a REAL
+    # DEFECT rather than a budget question: the new `SerialListener` had been
+    # placed between `BoundListener`'s doc comment and its `pub enum`, so the
+    # enum's documentation silently re-attached to a `#[cfg]`-gated struct and
+    # vanished from the default build (taking its two `accept_bound`
+    # private-link findings with it). This gate aims at doc LINKS and caught a
+    # doc-OWNERSHIP bug, which is the second time in this arc a gate found
+    # something other than what it was pointed at.
     budget="
         wz-ap-demo:13
         wz-capi-c:56
@@ -6468,7 +6490,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:6
         wz-routing-graph:6
         wz-runtime-coop:19
-        wz-runtime-tokio:190
+        wz-runtime-tokio:189
         wz-session-core:273
         wz-switchboard-codegen:8
         zenoh-pico-sys:3

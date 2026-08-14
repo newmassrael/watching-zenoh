@@ -99,9 +99,13 @@ use tokio::net::UdpSocket;
 // also carries tcp, so the SERIAL pieces are guarded only by the
 // transport-link-serial feature here.
 #[cfg(feature = "transport-link-serial")]
-use crate::serial_pipeline::{dial_serial, wire_serial_stream, SerialReadDriver};
+use crate::serial_pipeline::{
+    dial_serial, drive_serial_handshake, open_serial_device, wire_serial_stream, SerialReadDriver,
+};
 #[cfg(feature = "transport-link-serial")]
 use tokio_serial::SerialStream;
+#[cfg(feature = "transport-link-serial")]
+use wz_session_core::serial_link::SerialRole;
 
 // R311oa — the TLS arm, like serial, rides this tcp+unicast-gated module as
 // an additive transport (transport-link-tls forwards transport-link-tcp, so
@@ -825,6 +829,66 @@ pub enum BoundListener {
     /// scope.
     #[cfg(feature = "transport-link-quic-datagram")]
     QuicDatagram(Endpoint),
+    /// A bound `serial/...` endpoint (R311y805) — the LAST scheme whose acceptor
+    /// was an unwired extension point, and the only one that binds NOTHING: a tty
+    /// has no listen queue, so [`SerialListener`] holds the endpoint and
+    /// [`Self::accept_raw`] opens the device. The one variant whose accept is a
+    /// LOCAL open rather than a peer arrival, which is why it is also the only
+    /// one that can be exhausted (see [`SerialListener`] on the one-shot arming).
+    ///
+    /// Its post-accept SERVER handshake is the serial-LINK handshake
+    /// (`drive_serial_handshake(.., SerialRole::Responder)`: await `INIT`, reply
+    /// `INIT|ACK`) — peer-controlled and unbounded, so it DEFERS to
+    /// [`AcceptedLink::handshake`] exactly like the tls/quic crypto, keeping the
+    /// accept path itself unblocked. That handshake runs BEFORE the zenoh
+    /// transport, which no other scheme does (serial_protocol.c:255-280).
+    ///
+    /// NOT mesh-capable ([`Self::supports_mesh_multi_peer`] is `false` here, the
+    /// first `false` in the enum since R311y404): one tty = one peer. The mesh
+    /// callers consult that at bind and fail fast, so a `--router --listen
+    /// serial/...` reports "single-connection, not multi-peer" instead of
+    /// accepting a face the loop would then drop; the one-shot [`accept_endpoint`]
+    /// path — the demo's Acceptor role and pico's `z_open(listen=serial/)` — is
+    /// what serves a serial listen.
+    #[cfg(feature = "transport-link-serial")]
+    Serial(SerialListener),
+}
+
+/// The "listener" state of a bound `serial/...` endpoint (R311y805) — a tty is
+/// not a socket, so there is nothing to bind: this holds the parsed
+/// [`SerialEndpoint`] plus the one-shot arming flag, and the DEVICE is opened
+/// per-accept in [`BoundListener::accept_raw`]. That is upstream's shape, not an
+/// approximation of it: zenoh's `new_listener` creates NO port either — it
+/// records the endpoint and lets its accept task open the device
+/// (`zenoh-link-serial/src/unicast.rs:321-373`, whose `receive` opens the
+/// `ZSerial` and only then `accept()`s, `:436-453`).
+///
+/// A tty is POINT-TO-POINT: one device carries exactly one link. Upstream models
+/// that with an `is_connected` gate its accept task spins on before re-opening
+/// (`unicast.rs:430-433`), i.e. at most one live link at a time. wz's accept seam
+/// carries no link-liveness feedback, so the honest model here is ONE accept per
+/// bind: `armed` is cleared by the first [`BoundListener::accept_raw`] and every
+/// later accept PARKS (`pending`) rather than re-opening the device. Parking, not
+/// `Err`: an `Err` re-arms the accept loop's `Step::Accepted(Err)` throttle, which
+/// is the R311y382 "F2 perpetual-throttle" spin the udp demux exists to kill. And
+/// re-opening would be worse than either — a second fd on a LIVE tty splits the
+/// read stream between two drivers.
+#[cfg(feature = "transport-link-serial")]
+pub struct SerialListener {
+    /// The endpoint parsed out of the `serial/...` locator — the device the
+    /// accept opens, and the address [`BoundListener::local_addr_display`] logs.
+    endpoint: SerialEndpoint,
+    /// Cleared by the first accept; see the type doc for why a second accept
+    /// parks instead of re-opening the device.
+    armed: bool,
+}
+
+#[cfg(feature = "transport-link-serial")]
+impl SerialListener {
+    /// The endpoint this listener was bound from — the device an accept opens.
+    pub fn endpoint(&self) -> &SerialEndpoint {
+        &self.endpoint
+    }
 }
 
 /// The peer of a link accepted by [`BoundListener::accept_raw`] — an IP
@@ -905,6 +969,8 @@ impl BoundListener {
             BoundListener::Quic(_) => "quic",
             #[cfg(feature = "transport-link-quic-datagram")]
             BoundListener::QuicDatagram(_) => "quic-datagram",
+            #[cfg(feature = "transport-link-serial")]
+            BoundListener::Serial(_) => "serial",
         }
     }
 
@@ -970,6 +1036,8 @@ impl BoundListener {
             BoundListener::Quic(_) => InterceptorLink::Quic,
             #[cfg(feature = "transport-link-quic-datagram")]
             BoundListener::QuicDatagram(_) => InterceptorLink::QuicDatagram,
+            #[cfg(feature = "transport-link-serial")]
+            BoundListener::Serial(_) => InterceptorLink::Serial,
         }
     }
 
@@ -983,8 +1051,11 @@ impl BoundListener {
     /// than let the loop reject-throttle each accept forever (0 faces held). Since
     /// R311y392 the stream + same-host families are all `true`, and R311y404 flips
     /// `Quic` `false -> true` (its deferred-handshake split moves the crypto off the
-    /// accept path, so a quic endpoint holds N per-peer faces like the rest) — every
-    /// variant is now mesh-capable. A SHIPPED quic listen DOES hit this predicate: the
+    /// accept path, so a quic endpoint holds N per-peer faces like the rest). R311y805
+    /// ends that run: `Serial` is `false`, the first since R311y404 — one tty
+    /// carries one peer, so there is no N to hold, and upstream agrees (its serial
+    /// listener gates re-accept on the previous link having dropped,
+    /// `zenoh-link-serial/src/unicast.rs:430-433`). A SHIPPED quic listen DOES hit this predicate: the
     /// `--router` (R311y405) + `--peer`/`--router-hat` (R311y406) CLI paths and pico all
     /// thread a cert (`--quic-cert` -> `AcceptConfig.quic`), so `bind_locator` binds
     /// rather than cert-absence-rejecting; only a cert-LESS bind is rejected first. This
@@ -1022,6 +1093,18 @@ impl BoundListener {
             // Mesh-capable for the SAME reason as `Quic` (deferred crypto handshake).
             #[cfg(feature = "transport-link-quic-datagram")]
             BoundListener::QuicDatagram(_) => true,
+            // R311y805 — `false`, and not for a deferral reason: a tty is
+            // POINT-TO-POINT, so one bound serial endpoint can only ever produce
+            // ONE peer. Upstream's serial listener is the same shape (it re-opens
+            // only after the previous link dropped, `unicast.rs:430-433`), so this
+            // is parity, not a wz shortfall. The consequence is the one this
+            // predicate exists for: a mesh caller (`run_router` / `drive_listen`)
+            // fail-fasts the `--listen serial/...` at BIND with "single-connection,
+            // not multi-peer" rather than accepting the link and letting the loop's
+            // runtime backstop drop it. The one-shot `accept_endpoint` path serves a
+            // serial listen, which is the path the demo's Acceptor role uses.
+            #[cfg(feature = "transport-link-serial")]
+            BoundListener::Serial(_) => false,
         }
     }
 
@@ -1091,6 +1174,14 @@ impl BoundListener {
             BoundListener::Quic(ep) => ep.local_addr()?.to_string(),
             #[cfg(feature = "transport-link-quic-datagram")]
             BoundListener::QuicDatagram(ep) => ep.local_addr()?.to_string(),
+            // A serial endpoint's address is the DEVICE (or the pin pair),
+            // rendered with the `#baudrate=` tail that makes it parse back --
+            // `locator_address_with_config` is the same renderer the per-link
+            // adminspace `{src,dst}` pair uses (R311y474), so the "listening on"
+            // line is a string a peer can actually dial. Infallible: unlike a
+            // socket's, this address is known at bind and no syscall reads it.
+            #[cfg(feature = "transport-link-serial")]
+            BoundListener::Serial(l) => l.endpoint.locator_address_with_config(),
         })
     }
 
@@ -1148,6 +1239,15 @@ impl BoundListener {
             BoundListener::Quic(ep) => ep.local_addr(),
             #[cfg(feature = "transport-link-quic-datagram")]
             BoundListener::QuicDatagram(ep) => ep.local_addr(),
+            // A tty has no IP address at all (not even a same-host path the way
+            // unixsock does); its address is a device node. Same typed error as the
+            // other non-IP families -- a zid-from-port caller never binds serial.
+            #[cfg(feature = "transport-link-serial")]
+            BoundListener::Serial(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "a serial listener has no IP SocketAddr (it addresses by tty device); \
+                 use local_addr_display",
+            )),
         }
     }
 
@@ -1306,6 +1406,35 @@ impl BoundListener {
                     AcceptedPeer::Ip(peer),
                 )
             }
+            // R311y805 — the serial accept: the CHEAP half is a local tty open
+            // (`open_serial_device`), and the peer-controlled serial-LINK handshake
+            // (await `INIT`, reply `INIT|ACK`) DEFERS to `AcceptedLink::handshake`,
+            // the same split tls/quic use for their crypto. A tty open is the one
+            // accept in this enum that completes without any peer having arrived,
+            // which is precisely why the handshake half must not run here: it is
+            // the part that waits.
+            //
+            // ONE accept per bind (see `SerialListener`): the second and later
+            // accepts PARK rather than re-open a device whose link is still live.
+            // `pending` and not `Err`, for the R311y382 F2 reason -- an `Err` re-arms
+            // the loop's throttle and spins. Reached only by a direct-API caller
+            // today: the mesh loop rejects a serial listen at bind (not mesh-capable),
+            // and the one-shot `accept_bound` consumes the listener after one accept.
+            #[cfg(feature = "transport-link-serial")]
+            BoundListener::Serial(l) => {
+                if !l.armed {
+                    std::future::pending::<()>().await;
+                }
+                l.armed = false;
+                let stream = open_serial_device(&l.endpoint)?;
+                (
+                    AcceptedLink::Serial {
+                        stream,
+                        endpoint: l.endpoint.clone(),
+                    },
+                    AcceptedPeer::NonIp("serial"),
+                )
+            }
         })
     }
 
@@ -1324,6 +1453,7 @@ impl BoundListener {
                 feature = "transport-link-unixsock",
                 feature = "transport-link-udp",
                 feature = "transport-link-quic",
+                feature = "transport-link-serial",
                 all(feature = "transport-link-vsock", target_os = "linux"),
                 all(feature = "transport-link-unixpipe", target_os = "linux")
             ))]
@@ -1418,6 +1548,24 @@ pub enum AcceptedLink {
         incoming: Box<Incoming>,
         endpoint: Endpoint,
     },
+    /// An OPEN tty awaiting its DEFERRED serial-LINK handshake (R311y805) — the
+    /// `SerialStream` [`BoundListener::accept_raw`] opened WITHOUT waiting for the
+    /// peer, plus the [`SerialEndpoint`] it was opened from (a `SerialStream`
+    /// exposes no device name, and the downstream `wire_serial_stream` needs it for
+    /// the adminspace `{src,dst}` pair). [`Self::handshake`] drives
+    /// `SerialRole::Responder` — await `INIT`, reply `INIT|ACK` — into
+    /// [`DialedLink::Serial`].
+    ///
+    /// The deferral is not a mirror of tls/quic's for its own sake: this handshake
+    /// is UNBOUNDED (it retries on `RESET` the way `_z_connect_serial` does,
+    /// serial_protocol.c:255-280), so running it in the accept path would block on
+    /// a peer that may never come. It also runs BEFORE the zenoh transport, which
+    /// no other scheme's does.
+    #[cfg(feature = "transport-link-serial")]
+    Serial {
+        stream: SerialStream,
+        endpoint: SerialEndpoint,
+    },
 }
 
 impl AcceptedLink {
@@ -1476,6 +1624,23 @@ impl AcceptedLink {
             AcceptedLink::QuicDatagram { incoming, endpoint } => DialedLink::QuicDatagram(
                 Box::new(complete_quic_datagram_accept(*incoming, endpoint).await?),
             ),
+            // R311y805 — the DEFERRED serial-LINK handshake, the Responder half of
+            // the exchange `dial_serial` drives as Initiator: await `INIT`, reply
+            // `INIT|ACK`, and leave the stream positioned exactly at the first
+            // post-handshake byte so the zenoh transport bytes reach the split read
+            // half intact. Composing it here with the accept's tty open reproduces
+            // `serial_pipeline::accept_serial` exactly -- that one-call form stays
+            // for callers holding their own endpoint; this seam needs the halves
+            // apart. Yields the SAME `DialedLink::Serial` the dial side produces, so
+            // `wire_dialed_link` is shared.
+            #[cfg(feature = "transport-link-serial")]
+            AcceptedLink::Serial {
+                mut stream,
+                endpoint,
+            } => {
+                drive_serial_handshake(&mut stream, SerialRole::Responder).await?;
+                DialedLink::Serial { stream, endpoint }
+            }
         })
     }
 
@@ -1532,6 +1697,14 @@ impl AcceptedLink {
             // Mesh-capable for the SAME reason as `Quic` (deferred crypto handshake).
             #[cfg(feature = "transport-link-quic-datagram")]
             AcceptedLink::QuicDatagram { .. } => true,
+            // R311y805 — `false`, matching its `BoundListener` twin: a tty is
+            // point-to-point, so this acceptor yields exactly ONE peer and there is
+            // no N for the loop to hold. This is the FIRST subject the loop's
+            // reject arm has had since R311y404 emptied it -- though the bind-time
+            // twin fail-fasts a mesh `--listen serial/...` first, so the reject
+            // arm is reached only by a caller that skipped the bind-time check.
+            #[cfg(feature = "transport-link-serial")]
+            AcceptedLink::Serial { .. } => false,
         }
     }
 
@@ -1567,6 +1740,12 @@ impl AcceptedLink {
             // it earns the same completion-witness note (datagram-tagged).
             #[cfg(feature = "transport-link-quic-datagram")]
             AcceptedLink::QuicDatagram { .. } => "; quic-datagram server handshake",
+            // R311y805 — serial defers a handshake too, but a LINK-level one (the
+            // `INIT` / `INIT|ACK` exchange that precedes the zenoh transport), so
+            // the note says which layer it completed rather than borrowing the
+            // crypto wording.
+            #[cfg(feature = "transport-link-serial")]
+            AcceptedLink::Serial { .. } => "; serial link handshake",
         }
     }
 }
@@ -2061,22 +2240,23 @@ pub async fn dial_endpoint(connect: &str, cfg: &DialConfig) -> io::Result<Dialed
 ///
 /// R311qa — delegates to [`bind_locator`] (the bind half, the SSOT the
 /// multi-peer [`accept_loop`](crate::accept_loop) shares) then [`accept_bound`]
-/// (accept ONE), rather than inlining the bind. The non-tcp `Unsupported`
-/// surfaced here originates in `bind_locator`'s scheme match. The NON-tcp
-/// handling is where the symmetry with [`dial_locator`] deliberately STOPS:
-/// dial_locator pairs
-/// each non-tcp scheme with a `#[cfg(feature)]` wired arm + a `#[cfg(not)]`
-/// Unsupported arm, whereas accept_locator returns a single feature-blind
-/// `Unsupported` for ws/tls/udp REGARDLESS of feature. Wiring a real accept
-/// arm is not a one-arm change: an `accept_ws` is `bind_tcp` + `accept_tcp` +
-/// `accept_ws(stream)` — a handshake over an already-accepted stream, two
-/// primitives — unlike dial's single-call `dial_ws(addr)`. The `accept_ws` /
-/// `accept_tls` primitives exist; they wire in when a verified cross-impl
-/// acceptor caller lands (R63; R311pq: no cross-impl WS/TLS dialer to verify a
-/// wz acceptor against). `Udp`'s acceptor would be a `bind` + first-`recv_from`
-/// peer-learn (not a `TcpListener::accept`); `Serial`'s is a tty open
-/// ([`accept_serial`](crate::serial_pipeline::accept_serial)) — both unwired
-/// until their responder caller lands.
+/// (accept ONE), rather than inlining the bind. The `Unsupported` still
+/// surfaced here originates in `bind_locator`'s scheme match.
+///
+/// R311y805 — the asymmetry this doc used to describe is GONE, and the record of
+/// it is kept because it was the reason the gap survived so long. It read: "the
+/// NON-tcp handling is where the symmetry with `dial_locator` deliberately STOPS
+/// ... accept_locator returns a single feature-blind `Unsupported` for ws/tls/udp
+/// REGARDLESS of feature", and it argued that wiring an acceptor "is not a one-arm
+/// change". Stage by stage every scheme was wired anyway — ws (R311y374), tls
+/// (R311y375), unixsock/vsock/unixpipe (R311y378-380, y392), udp (R311y381-382),
+/// quic (R311y401), quic-datagram (R311y408), and serial LAST (R311y805) — so
+/// today accept_locator matches dial_locator arm for arm: every scheme has a
+/// `#[cfg(feature)]` wired arm plus a `#[cfg(not)]` typed-`Unsupported` twin, and
+/// the only feature-BLIND rejection left is a tls/quic bind with no server cert
+/// (opt-in material, not an unwired seam). What remains asymmetric is not the
+/// dispatch but the SHAPE of each accept: tls/quic/serial defer a peer-controlled
+/// handshake to [`AcceptedLink::handshake`], which dial runs inline.
 pub async fn accept_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result<DialedLink> {
     // R311y375 — bind + accept dispatch uniformly on the scheme: `bind_locator`
     // produces the scheme's `BoundListener` (consuming `cfg`'s server cert where a
@@ -2091,9 +2271,16 @@ pub async fn accept_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Resu
 /// [`accept_loop`](crate::accept_loop) can hold the listener and loop accepts
 /// over it (R311qa), while the one-shot [`accept_locator`] binds-then-accepts a
 /// single peer. Returns a [`BoundListener`] keyed by scheme (the accept-side
-/// mirror of `dial_locator`'s [`DialedLink`]): `tcp` / `ws` bind a `TcpListener`
-/// (ws upgrades per-accept), and the remaining schemes return a feature-blind
-/// typed `Unsupported` extension point until their [`BoundListener`] arm lands.
+/// mirror of `dial_locator`'s [`DialedLink`]): `tcp` / `ws` / `tls` bind a
+/// `TcpListener` (ws upgrades and tls handshakes per-accept), `udp` / `quic` /
+/// `quic-datagram` bind a datagram socket or QUIC endpoint, `unixsock` / `vsock` /
+/// `unixpipe` bind their same-host listener, and `serial` binds NOTHING (a tty has
+/// no listen queue — `SerialListener` records the endpoint and the accept opens
+/// the device). R311y805 wired the last of them, so no scheme is an unwired
+/// extension point any more; what remains is per-scheme material, not dispatch — a
+/// `tls` / `quic` listen without a server cert in [`AcceptConfig`] is a typed
+/// `Unsupported`, and every scheme has a `#[cfg(not(feature))]` twin for a build
+/// without its backend.
 pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result<BoundListener> {
     fn unsupported(detail: &str) -> io::Error {
         io::Error::new(
@@ -2331,8 +2518,25 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                 "tls acceptor requires the transport-link-tls feature",
             )),
         },
-        AnyLocator::Serial(_) => Err(unsupported(
-            "serial accept is a tty open (accept_serial), not a listen bind; unwired",
+        // R311y805 — the LAST unwired acceptor scheme. A serial "bind" opens
+        // nothing: `SerialListener` records the endpoint and `accept_raw` opens the
+        // device, which is zenoh's own shape (`new_listener` creates no port
+        // either; its accept task does, `unicast.rs:321-373`). The comment this
+        // replaced ("a tty open, not a listen bind") was a true observation used as
+        // a reason not to wire it -- but the seam does not require a listen queue,
+        // only a `BoundListener` that can accept, and every non-socket sibling
+        // (unixpipe's FIFO rendezvous, the udp demux) had already established that.
+        // `AnyLocator::Serial` is an ALWAYS-present variant (the locator GRAMMAR is
+        // ungated in wz-session-core, only the tty BACKEND is gated), so the arm
+        // exists in both feature configs, exactly as the dial arm does.
+        #[cfg(feature = "transport-link-serial")]
+        AnyLocator::Serial(endpoint) => Ok(BoundListener::Serial(SerialListener {
+            endpoint,
+            armed: true,
+        })),
+        #[cfg(not(feature = "transport-link-serial"))]
+        AnyLocator::Serial(_ep) => Err(unsupported(
+            "serial acceptor requires the transport-link-serial feature",
         )),
         // R311y378 (accept-symmetry Stage 4) — a unixsock acceptor binds a
         // `UnixListener` (`bind_unixsock`) into `BoundListener::Unixsock`, the

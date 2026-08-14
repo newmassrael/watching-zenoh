@@ -88,7 +88,14 @@ const SERIAL_CONNECT_THROTTLE: Duration = Duration::from_millis(250);
 /// are openable by the host tty backend; a [`SerialTarget::Pins`] target is
 /// an MCU UART HAL endpoint with no host device node, so it surfaces a
 /// typed `Unsupported` rather than a misleading "no such file".
-fn open_serial_device(endpoint: &SerialEndpoint) -> io::Result<SerialStream> {
+///
+/// Public since R311y805 because the ACCEPT seam needs the two halves of
+/// [`accept_serial`] separately: `BoundListener::Serial::accept_raw` runs
+/// this (cheap, local, unblocked) and DEFERS the peer-controlled
+/// [`drive_serial_handshake`] to `AcceptedLink::handshake`, exactly as the
+/// tls/quic acceptors defer their crypto off the accept path. A caller that
+/// wants both halves in one call still uses [`accept_serial`].
+pub fn open_serial_device(endpoint: &SerialEndpoint) -> io::Result<SerialStream> {
     let path = match &endpoint.target {
         SerialTarget::Device(path) => path,
         SerialTarget::Pins { .. } => {
