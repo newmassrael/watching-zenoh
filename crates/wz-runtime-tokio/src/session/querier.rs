@@ -525,6 +525,45 @@ impl QueryOptions {
         }
     }
 
+    /// R311y797 — whether a querier carrying these options demands
+    /// COMPLETE responders, i.e. zenoh's
+    /// `MatchingStatusType::Queryables(target == QueryTarget::AllComplete)`
+    /// discriminant (`zenoh/src/api/querier.rs:225`). The single place the
+    /// matching plane asks that question: the literal poll, the aliased
+    /// poll and the watch registration all route here, and three copies of
+    /// one comparison is exactly how a poll and its watch drift apart.
+    ///
+    /// It reads `effective_target` rather than the raw `pub target` field,
+    /// for the reason that accessor exists: with `query-target` OFF the
+    /// field is still writable and would otherwise select a matching
+    /// semantic in a build that cannot put a target on the wire — the poll
+    /// would answer about a query the peer will never be asked.
+    ///
+    /// UNGATED, unlike its two neighbours, and that is deliberate: the
+    /// ALIASED matching poll compiles without `query-get` (the aliased
+    /// handle does), so a `query-get`-gated helper is one this caller
+    /// cannot reach. Without `query-get` there is no query to target at
+    /// all, so `false` is the structural answer rather than a fallback.
+    /// R311y797 measured that the hard way — the pre-push doc-link gate,
+    /// reaching wz-replay and wz-runtime-tokio-test-support because they
+    /// link INTO this crate, is what surfaced the E0599.
+    ///
+    /// The gate is its CONSUMERS' own: both matching polls elide when
+    /// neither queryable registry is compiled in, and under `-D warnings`
+    /// a helper with no caller is an error. Gating it rather than
+    /// `allow(dead_code)`-ing it keeps the elision honest.
+    #[cfg(any(feature = "declare-queryable", feature = "query-queryable"))]
+    pub(super) fn matching_needs_complete(&self) -> bool {
+        #[cfg(feature = "query-get")]
+        {
+            self.effective_target() == Some(QueryTarget::AllComplete)
+        }
+        #[cfg(not(feature = "query-get"))]
+        {
+            false
+        }
+    }
+
     /// See [`Self::effective_target`]. `None` elides Q_C → peer decodes
     /// `Z_CONSOLIDATION_MODE_AUTO`.
     #[cfg(feature = "query-get")]
@@ -1110,18 +1149,13 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
     /// QueryTarget::AllComplete)` discriminant
     /// (`zenoh/src/api/querier.rs:225`).
     ///
-    /// Reads [`QueryOptions::effective_target`](super::QueryOptions)
-    /// rather than the raw `pub target` field, for the reason that
-    /// accessor exists: with `query-target` OFF the field is still
-    /// writable and would otherwise select a matching semantic in a build
-    /// that cannot put a target on the wire — the poll would answer about
-    /// a query the peer will never be asked.
-    ///
-    /// A shared helper because the poll, the aliased poll and the watch
-    /// registration must all answer it the same way; three copies of one
-    /// comparison is exactly how the poll and the watch drift apart.
+    /// A one-line forward to `QueryOptions::matching_needs_complete`,
+    /// which is where the rule and its citations live; the aliased poll
+    /// calls that same accessor directly. Same consumer-derived gate as
+    /// that accessor carries.
+    #[cfg(any(feature = "declare-queryable", feature = "query-queryable"))]
     fn complete_required(&self) -> bool {
-        self.options.effective_target() == Some(QueryTarget::AllComplete)
+        self.options.matching_needs_complete()
     }
 
     /// R311kh — callback counterpart of [`Self::get_matching_status`]
@@ -1422,8 +1456,7 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
         #[cfg(any(feature = "declare-queryable", feature = "query-queryable"))]
         let matching = {
             let locality = self.options.allowed_destination;
-            let complete_required =
-                self.options.effective_target() == Some(QueryTarget::AllComplete);
+            let complete_required = self.options.matching_needs_complete();
             R::with_mutex_mut(&self.session.observer, |obs| {
                 #[cfg(feature = "declare-queryable")]
                 let remote = obs.remote_queryables.has_matching_for(
