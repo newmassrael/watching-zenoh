@@ -342,7 +342,25 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 #     as the control that zenohd forwarded the declaration at all.
 # Together they also MEASURE what y798 left open: whether the routed path
 # preserves the declarer's bit, which it does with one storage behind the router.
-FOREIGN_ADJUDICATOR_LINKS = 830
+# R311y803 takes it to 833, in wz_router_routes_liveliness_pico_interop.rs. The
+# atom under grade is the LIVELINESS plane of the `routing-routes` STAR router,
+# which recorded no token at all until this round, and the three links are two
+# atoms across two legs:
+#   * wz_router_carries_a_pico_token_and_retracts_it_when_the_holder_dies --
+#     TWO links (`liveliness-subscriber` + `routing-routes`), because the fixture
+#     grades both halves of one clause: pico A's token reaching pico B through
+#     the router, and the retraction wz SYNTHESISES when it watches A die. The
+#     driver of the second half is a SIGKILL rather than a SIGINT: on SIGINT
+#     `z_liveliness` retracts its own token, so the graceful shape would witness
+#     the PEER's withdrawal, an arm the rise already covers.
+#   * wz_router_replays_a_pre_existing_pico_token_to_a_history_subscriber -- one
+#     link, the CURRENT dump, with the ordering reversed so the token predates
+#     the subscriber's session. Its `-h`-off twin declares `none`: it binds the
+#     replay to the CURRENT bit and claims no atom of its own.
+# The substrate is the point. `wz_router_hat_liveliness_history_pico_interop.rs`
+# grades the same observable on `--router-hat`, whose token plane is a different
+# atom (`routing-token-tables`) and was already built; the star router's was not.
+FOREIGN_ADJUDICATOR_LINKS = 833
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

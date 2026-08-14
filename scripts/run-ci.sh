@@ -4273,9 +4273,13 @@ layer_c1x_cargo_test_routing_routes() {
     # R311y773: 25/26 -> 29/30. Four cases landed with the CURRENT-interest
     # termination fix, none of them gated on transport-qos, so both counts move
     # by the same +4 -- an unequal delta would mean a case is accidentally gated.
-    _runci_guarded_test "C1X routing_forward 29" 29 \
+    # R311y803: 29/30 -> 37/38. Eight cases landed with the LIVELINESS plane
+    # (advertise, interest gate, CURRENT dump, retraction by advertised id, the
+    # face-departure retraction, the second-holder guard, and both sourced
+    # forms), again none of them gated on transport-qos, so again +8 on both.
+    _runci_guarded_test "C1X routing_forward 37" 37 \
         cargo test -p wz-runtime-tokio --features routing-routes --lib routing_forward --quiet || return 1
-    _runci_guarded_test "C1X routing_forward 30" 30 \
+    _runci_guarded_test "C1X routing_forward 38" 38 \
         cargo test -p wz-runtime-tokio --features routing-routes,transport-qos --lib routing_forward --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-routes --quiet -- -D warnings \
@@ -10624,6 +10628,18 @@ layer_e3_router_multi_peer() {
         || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_terminates_a_pico_liveliness_get -- --ignored --quiet) || return 1
+    # R311y803 — the LIVELINESS PLANE on the same star router, and it reuses the
+    # binary built just above rather than asking for a third one: the feature set
+    # is identical, only the fixture is new. The sibling above deliberately holds
+    # NO token (its claim is about the terminator); these three hold one and
+    # grade what the router does with it -- FUTURE advertisement, the CURRENT
+    # dump, and the retraction wz SYNTHESISES when it watches the holder die.
+    #
+    # Serial: every arm binds an ephemeral port and drives three processes whose
+    # ordering is the proof, so a parallel run would interleave their banners.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_routes_liveliness_pico_interop -- --ignored --test-threads=1 --quiet) \
+        || return 1
 }
 
 # ─── Layer E4 — routing-router catalog-truthfulness reject gate (R311qa) ─

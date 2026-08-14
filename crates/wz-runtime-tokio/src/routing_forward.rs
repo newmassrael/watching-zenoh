@@ -64,6 +64,15 @@ impl RoutingForwarder {
         self.table.borrow().subscription_count()
     }
 
+    /// Total liveliness tokens currently recorded across all held faces
+    /// ([`RouteTable::token_count`]) — the token twin of
+    /// [`subscription_count`](Self::subscription_count), so a test can assert
+    /// the table's own state (recorded, retracted, gone with a departed face)
+    /// independently of the declarations it emitted onto other faces.
+    pub fn token_count(&self) -> usize {
+        self.table.borrow().token_count()
+    }
+
     /// Number of currently-valid cached routes
     /// ([`RouteTable::cached_route_count`]) — a route-cache state witness: a
     /// route appears after a Put on a fresh keyexpr, and the count drops to 0
@@ -464,6 +473,474 @@ mod tests {
         assert!(is_decl_final(&replies[0]) && replies[0].interest_id == Some(4));
     }
 
+    // ─── R311y803: the liveliness plane ──────────────────────────────────
+    //
+    // A `RouteTable` dispatches `Declare`, `Push` and `Interest` and no other
+    // message kind, and the whole token plane is expressed in the first and the
+    // third: the `DeclareToken` IS the delivery, the `UndeclareToken` IS the
+    // retraction, the TOKENS `Interest` is the ask. So unlike the queryable
+    // plane above, routing tokens advertises nothing unreachable.
+
+    /// Feed `forwarder` a literal-keyexpr `DeclareToken` for `(token_id,
+    /// keyexpr)` on face `face` — the shape a peer holding a liveliness token
+    /// puts on the wire.
+    fn declare_token(forwarder: &RoutingForwarder, face: u64, token_id: u64, keyexpr: &str) {
+        let outcome = declare_frame(wz_session_core_test_support::declare_envelope_decl_token(
+            wz_session_core_test_support::decl_token(token_id, 0, Some(keyexpr)),
+        ));
+        forwarder.forward(FaceId(face), IterationEvent::Poll(&outcome));
+    }
+
+    /// Feed `forwarder` an id-only `UndeclareToken` on face `face` — the
+    /// ordinary retraction a holder sends for a token it declared by id.
+    fn undeclare_token(forwarder: &RoutingForwarder, face: u64, token_id: u64) {
+        let outcome = declare_frame(wz_session_core_test_support::declare_envelope_undecl_token(
+            wz_session_core_test_support::undecl_token(token_id),
+        ));
+        forwarder.forward(FaceId(face), IterationEvent::Poll(&outcome));
+    }
+
+    /// Feed `forwarder` a TOKENS `Interest` from the PRODUCTION builder — the
+    /// exact message a liveliness subscriber emits. `history` is the CURRENT
+    /// bit: a pico `z_liveliness_declare_subscriber` sends `CURRENT|FUTURE`
+    /// with history and `FUTURE` alone without it
+    /// (`vendor/zenoh-pico/src/net/liveliness.c:202`).
+    fn send_token_interest(
+        forwarder: &RoutingForwarder,
+        face: u64,
+        interest_id: u64,
+        keyexpr: &str,
+        history: bool,
+    ) {
+        use wz_session_core::interest_build::build_interest_liveliness_subscriber;
+        send_built_interest(
+            forwarder,
+            face,
+            build_interest_liveliness_subscriber(interest_id, history, 0, Some(keyexpr))
+                .expect("builder accepts a literal keyexpr"),
+        );
+    }
+
+    fn is_decl_token(d: &DeclareOwned) -> bool {
+        matches!(d.body, DeclareOwnedVariant::CodecZenohDeclToken(_))
+    }
+
+    fn is_undecl_token(d: &DeclareOwned) -> bool {
+        matches!(d.body, DeclareOwnedVariant::CodecZenohUndeclToken(_))
+    }
+
+    fn decl_token_id(d: &DeclareOwned) -> u64 {
+        match &d.body {
+            DeclareOwnedVariant::CodecZenohDeclToken(t) => t.id,
+            other => panic!("expected a DeclToken, got {other:?}"),
+        }
+    }
+
+    fn undecl_token_id(d: &DeclareOwned) -> u64 {
+        match &d.body {
+            DeclareOwnedVariant::CodecZenohUndeclToken(u) => u.id,
+            other => panic!("expected an UndeclToken, got {other:?}"),
+        }
+    }
+
+    /// The literal keyexpr a `DeclToken` carries.
+    fn decl_token_keyexpr(d: &DeclareOwned) -> String {
+        match &d.body {
+            DeclareOwnedVariant::CodecZenohDeclToken(t) => match &t.keyexpr.body {
+                wz_codecs::wireexpr::WireexprOwnedVariant::WireexprLocal(w) => {
+                    String::from(w.suffix.as_deref().unwrap_or_default())
+                }
+                other => panic!("expected a literal wireexpr, got {other:?}"),
+            },
+            other => panic!("expected a DeclToken, got {other:?}"),
+        }
+    }
+
+    /// The keyexpr a SOURCED `UndeclToken` carries in its `ext_wire_expr`
+    /// (`None` for the ordinary id-only form).
+    fn undecl_token_ext_keyexpr(d: &DeclareOwned) -> Option<String> {
+        match &d.body {
+            DeclareOwnedVariant::CodecZenohUndeclToken(u) => {
+                wz_session_core::declare_ext_keyexpr::read_ext_keyexpr(u.extensions.as_ref())
+                    .map(String::from)
+            }
+            other => panic!("expected an UndeclToken, got {other:?}"),
+        }
+    }
+
+    /// THE HEADLINE. A liveliness token declared on one face reaches a face
+    /// that asked for tokens — which before this round it did not, at all:
+    /// `record_declare` matched only the keyexpr and subscriber arms and a
+    /// `DeclToken` fell through to `_ => false`, so a liveliness subscriber
+    /// behind a wz `--router` read an empty world however many holders were
+    /// connected to the same router.
+    ///
+    /// The advertised id is NON-ZERO and that is load-bearing rather than
+    /// cosmetic: the receiver keys its token table by the declared id
+    /// (`liveliness_subscriber.rs`'s `peer_token_table`), so an advertisement
+    /// carrying 0 could never be retracted by the ordinary id-only
+    /// `UndeclareToken` — which is exactly what the retraction tests below
+    /// require. zenoh allocates the same way (`make_token_id`'s future branch).
+    #[test]
+    fn a_token_declared_on_one_face_reaches_a_face_that_asked_for_tokens() {
+        let fwd = RoutingForwarder::new();
+        let (holder, _holder_sink) = recording_actions();
+        let (observer, observer_sink) = recording_actions();
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &observer);
+
+        // The observer subscribes FIRST, with no history: nothing to dump.
+        send_token_interest(&fwd, 1, 4, "group/**", /*history=*/ false);
+        assert_eq!(
+            captured_declares(&observer_sink).len(),
+            0,
+            "a FUTURE-only interest has nothing to terminate and nothing to dump",
+        );
+
+        declare_token(&fwd, 0, 77, "group/member/a");
+
+        assert_eq!(fwd.token_count(), 1, "the table recorded the held token");
+        let seen = captured_declares(&observer_sink);
+        assert_eq!(
+            seen.len(),
+            1,
+            "the token declared on the holder's face must reach the observer -- \
+             a DeclareToken IS the delivery on this plane, so a table that \
+             records it without advertising it carries liveliness nowhere",
+        );
+        assert!(is_decl_token(&seen[0]), "the advertisement is a DeclToken");
+        assert_eq!(decl_token_keyexpr(&seen[0]), "group/member/a");
+        assert_ne!(
+            decl_token_id(&seen[0]),
+            0,
+            "the advertisement must carry a NON-ZERO id: the receiver keys its \
+             token table by it and the retraction names it back",
+        );
+        assert_eq!(
+            seen[0].interest_id, None,
+            "an unsolicited advertisement carries no interest id -- upstream's \
+             shape (propagate_simple_token_to leaves it None), and the one every \
+             receiver accepts",
+        );
+    }
+
+    /// ANTI-VACUITY for the interest GATE. A face that never asked for tokens
+    /// is told nothing. Without this, the test above is satisfied by a table
+    /// that broadcasts every token to every face — which is zenoh's CLIENT hat
+    /// rule, not its router one (`hat/router/token.rs` collects
+    /// `remote_interests` filtered by `options.tokens() && i.matches(res)`), and
+    /// would put a message on a face with no liveliness subscriber to read it.
+    #[test]
+    fn a_face_that_never_asked_for_tokens_is_told_nothing() {
+        let fwd = RoutingForwarder::new();
+        let (holder, _holder_sink) = recording_actions();
+        let (bystander, bystander_sink) = recording_actions();
+        let (observer, observer_sink) = recording_actions();
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &bystander);
+        fwd.register(FaceId(2), &observer);
+
+        // The bystander asks for SUBSCRIBERS on the same keyexpr -- a matching
+        // keyexpr but the wrong KIND, so the gate is on the kind bit and not
+        // merely on having registered something.
+        send_interest(&fwd, 1, 8, "group/**", true, true, false);
+        send_token_interest(&fwd, 2, 4, "group/**", false);
+        declare_token(&fwd, 0, 77, "group/member/a");
+
+        assert!(
+            !captured_declares(&bystander_sink).iter().any(is_decl_token),
+            "a face whose interest names SUBSCRIBERS must not be told about a \
+             token: it has no liveliness subscriber to fire",
+        );
+        assert!(
+            captured_declares(&observer_sink).iter().any(is_decl_token),
+            "the face that DID ask for tokens still hears it, so the assertion \
+             above is not grading a table that advertises to nobody",
+        );
+    }
+
+    /// The CURRENT half: a token already held is DUMPED to an interest that
+    /// asks for history, ahead of the Final. The sibling
+    /// `a_current_token_interest_is_terminated_on_the_same_rule` pins the empty
+    /// case (Final alone), so together they separate "this table has none" from
+    /// "this table does not look".
+    #[test]
+    fn a_current_token_interest_dumps_the_tokens_already_held() {
+        let fwd = RoutingForwarder::new();
+        let (holder, _holder_sink) = recording_actions();
+        let (observer, observer_sink) = recording_actions();
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &observer);
+
+        // The token exists BEFORE anyone asks -- the ordering the FUTURE half
+        // cannot cover.
+        declare_token(&fwd, 0, 77, "group/member/a");
+        assert_eq!(
+            captured_declares(&observer_sink).len(),
+            0,
+            "nobody has asked yet, so nothing is advertised",
+        );
+
+        send_token_interest(&fwd, 1, 4, "group/**", /*history=*/ true);
+
+        let replies = captured_declares(&observer_sink);
+        assert_eq!(replies.len(), 2, "the dump, then the Final");
+        assert!(is_decl_token(&replies[0]));
+        assert_eq!(decl_token_keyexpr(&replies[0]), "group/member/a");
+        assert_eq!(
+            replies[0].interest_id,
+            Some(4),
+            "a CURRENT-dump reply is stamped with the soliciting interest_id",
+        );
+        assert_ne!(
+            decl_token_id(&replies[0]),
+            0,
+            "this interest is CURRENT+FUTURE, so the dump allocates a real id \
+             (zenoh's make_token_id returns 0 only when !mode.future()) -- \
+             without it the token could never be retracted by id",
+        );
+        assert!(
+            is_decl_final(&replies[1]) && replies[1].interest_id == Some(4),
+            "ONE Final closes the interest, after the dump",
+        );
+    }
+
+    /// The retraction the HOLDER sends, carried to the observer under the id the
+    /// advertisement used. A retraction under any other id would name a token
+    /// the receiver's table does not hold, and its liveliness subscriber would
+    /// fall through to the sourced-keyexpr path or drop it.
+    #[test]
+    fn an_undeclared_token_is_retracted_by_the_id_it_was_advertised_under() {
+        let fwd = RoutingForwarder::new();
+        let (holder, _holder_sink) = recording_actions();
+        let (observer, observer_sink) = recording_actions();
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &observer);
+
+        send_token_interest(&fwd, 1, 4, "group/**", false);
+        declare_token(&fwd, 0, 77, "group/member/a");
+        let advertised = captured_declares(&observer_sink);
+        assert_eq!(advertised.len(), 1);
+        let advertised_id = decl_token_id(&advertised[0]);
+
+        // The holder's OWN id is 77; the advertised id is the table's. They must
+        // not be conflated, and the retraction must use the second.
+        undeclare_token(&fwd, 0, 77);
+
+        assert_eq!(
+            fwd.token_count(),
+            0,
+            "the table dropped the retracted token"
+        );
+        let after = captured_declares(&observer_sink);
+        assert_eq!(after.len(), 2, "the retraction reached the observer");
+        assert!(is_undecl_token(&after[1]));
+        assert_eq!(
+            undecl_token_id(&after[1]),
+            advertised_id,
+            "the retraction names the id the ADVERTISEMENT carried, which is \
+             what `local_tokens` remembers it for",
+        );
+        assert_eq!(
+            undecl_token_ext_keyexpr(&after[1]),
+            None,
+            "an advertised token retracts by id alone -- the sourced form is for \
+             a face that was never told",
+        );
+    }
+
+    /// THE ROUTER-GENERATED RETRACTION. A holder that LEAVES takes its tokens
+    /// with it, and the observer is told — the arm R311y802 closed on the
+    /// subscriber and queryable planes and recorded as absent on this one.
+    ///
+    /// It is a different arm from the test above and not a duplicate of it: no
+    /// peer sends anything here. A liveliness token's whole meaning is that its
+    /// holder is alive, so a face that vanishes without a retraction leaves
+    /// every observer believing a dead peer is still there and NO later message
+    /// corrects it. zenoh synthesises it in `close_face`, draining
+    /// `remote_tokens` into `undeclare_simple_token`
+    /// (`hat/router/mod.rs:541-544`).
+    #[test]
+    fn a_departing_face_takes_its_tokens_with_it() {
+        let fwd = RoutingForwarder::new();
+        let (holder, _holder_sink) = recording_actions();
+        let (observer, observer_sink) = recording_actions();
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &observer);
+
+        send_token_interest(&fwd, 1, 4, "group/**", false);
+        declare_token(&fwd, 0, 77, "group/member/a");
+        let advertised_id = decl_token_id(&captured_declares(&observer_sink)[0]);
+
+        // The holder's link drops: the accept loop deregisters the face. Nothing
+        // arrives on the wire from it -- this retraction has no sender but the
+        // router.
+        fwd.deregister(FaceId(0));
+
+        assert_eq!(
+            fwd.token_count(),
+            0,
+            "a departed face's tokens leave the table with it",
+        );
+        let after = captured_declares(&observer_sink);
+        assert_eq!(
+            after.len(),
+            2,
+            "the observer must be told the holder is gone -- silence here is a \
+             liveliness token that stays alive forever",
+        );
+        assert!(is_undecl_token(&after[1]));
+        assert_eq!(
+            undecl_token_id(&after[1]),
+            advertised_id,
+            "the synthesised retraction names the advertised id, exactly as the \
+             holder's own would have",
+        );
+    }
+
+    /// A SECOND HOLDER KEEPS IT ALIVE. Two peers holding the same liveliness
+    /// keyexpr are ONE fact to an observer, so one of them leaving retracts
+    /// nothing. Upstream guards the same condition — `undeclare_simple_token`
+    /// propagates the forget only when `simple_tokens(res)` is empty.
+    ///
+    /// This is the discriminator for the dedup half as well: the observer is
+    /// told ONCE for two holders, because a second advertisement under a second
+    /// id would leave it still believing after only one retraction.
+    #[test]
+    fn a_second_holder_keeps_the_token_alive_when_the_first_leaves() {
+        let fwd = RoutingForwarder::new();
+        let (first, _first_sink) = recording_actions();
+        let (second, _second_sink) = recording_actions();
+        let (observer, observer_sink) = recording_actions();
+        fwd.register(FaceId(0), &first);
+        fwd.register(FaceId(1), &second);
+        fwd.register(FaceId(2), &observer);
+
+        send_token_interest(&fwd, 2, 4, "group/**", false);
+        declare_token(&fwd, 0, 77, "group/member/a");
+        declare_token(&fwd, 1, 88, "group/member/a");
+
+        assert_eq!(fwd.token_count(), 2, "both holders are recorded");
+        assert_eq!(
+            captured_declares(&observer_sink).len(),
+            1,
+            "the observer is told ONCE: the same keyexpr held twice is one \
+             liveliness fact, and a second id would survive the first retraction",
+        );
+
+        fwd.deregister(FaceId(0));
+
+        assert_eq!(fwd.token_count(), 1, "the survivor's token is still held");
+        assert_eq!(
+            captured_declares(&observer_sink).len(),
+            1,
+            "nothing is retracted while a holder remains -- the peer IS still \
+             alive and a Delete here would be a lie",
+        );
+
+        fwd.deregister(FaceId(1));
+
+        let after = captured_declares(&observer_sink);
+        assert_eq!(after.len(), 2, "the LAST holder leaving does retract it");
+        assert!(is_undecl_token(&after[1]));
+    }
+
+    /// The SOURCED retraction, and the shape that reaches it. A FUTURE-only
+    /// (no-history) liveliness subscriber registers its interest and is never
+    /// sent a declaration for a token that predates it, so when that token dies
+    /// there is no advertised id to name — upstream sends a one-shot
+    /// `UndeclareToken` carrying the keyexpr in `ext_wire_expr` instead
+    /// (`hat/router/token.rs:438-457`), and so does this.
+    ///
+    /// The driver is a real shape rather than a constructed one: pico's
+    /// `z_liveliness_declare_subscriber` sends exactly `FUTURE` alone when
+    /// history is off (`net/liveliness.c:202`).
+    #[test]
+    fn a_token_older_than_a_future_only_interest_retracts_by_its_keyexpr() {
+        let fwd = RoutingForwarder::new();
+        let (holder, _holder_sink) = recording_actions();
+        let (observer, observer_sink) = recording_actions();
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &observer);
+
+        // The token exists BEFORE the interest, and the interest asks for no
+        // history -- so nothing is ever advertised to this face.
+        declare_token(&fwd, 0, 77, "group/member/a");
+        send_token_interest(&fwd, 1, 4, "group/**", /*history=*/ false);
+        assert_eq!(
+            captured_declares(&observer_sink).len(),
+            0,
+            "no history was asked for, so the pre-existing token is not dumped",
+        );
+
+        undeclare_token(&fwd, 0, 77);
+
+        let after = captured_declares(&observer_sink);
+        assert_eq!(after.len(), 1, "the retraction still reaches the observer");
+        assert!(is_undecl_token(&after[0]));
+        assert_eq!(
+            undecl_token_id(&after[0]),
+            0,
+            "a sourced retraction uses no id -- the keyexpr is the identity",
+        );
+        assert_eq!(
+            undecl_token_ext_keyexpr(&after[0]).as_deref(),
+            Some("group/member/a"),
+            "so the keyexpr must ride in the ext, or the receiver has nothing to \
+             resolve the Delete against",
+        );
+    }
+
+    /// The INBOUND sourced form — the RECEIVE side of the very shape this table
+    /// EMITS two tests above. A sourced retraction names its token by KEYEXPR
+    /// with `id == 0` (`build_undeclare_token_with_keyexpr`), so a table that
+    /// only ever looked the id up would discard every one of them: that is the
+    /// defect R311y769 paid off on the endpoint registry, and `record_declare`
+    /// has the same seam. Same two-step in the same order — id first, then the
+    /// `ext_wire_expr` — through the shared `resolve_ext_keyexpr` SSOT.
+    ///
+    /// The token is deliberately NOT declared to this table first. That is what
+    /// makes the ext the only thing that can name it, and it is also the honest
+    /// shape: upstream declines to act on a sourced retraction while the face
+    /// still holds the same resource under an id of its own
+    /// (`undeclare_simple_token`'s `!remote_tokens.values().any(..)` guard),
+    /// which this table's own "still held by someone" guard reproduces.
+    #[test]
+    fn a_sourced_undeclare_is_resolved_through_its_ext_keyexpr() {
+        use wz_session_core::declare_build::build_undeclare_token_with_keyexpr;
+
+        let fwd = RoutingForwarder::new();
+        let (upstream, _upstream_sink) = recording_actions();
+        let (observer, observer_sink) = recording_actions();
+        fwd.register(FaceId(0), &upstream);
+        fwd.register(FaceId(1), &observer);
+
+        send_token_interest(&fwd, 1, 4, "group/**", /*history=*/ false);
+
+        // The PRODUCTION builder, so this drives the same bytes this file's own
+        // forget path puts on the wire rather than a hand-rolled fixture.
+        let sourced = build_undeclare_token_with_keyexpr("group/member/a")
+            .expect("the literal keyexpr fits the owned carrier");
+        let outcome = declare_frame(sourced);
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+
+        let after = captured_declares(&observer_sink);
+        assert_eq!(
+            after.len(),
+            1,
+            "the retraction must be carried on -- id 0 names nothing, so \
+             dropping on the table miss would discard every sourced retraction \
+             there is",
+        );
+        assert!(is_undecl_token(&after[0]));
+        assert_eq!(
+            undecl_token_ext_keyexpr(&after[0]).as_deref(),
+            Some("group/member/a"),
+            "and it names the keyexpr the inbound ext resolved to, which is the \
+             only place that string could have come from",
+        );
+    }
+
     /// A CURRENT SUBSCRIBER interest whose keyexpr cannot be resolved is
     /// terminated as well. The alias names a mapping the face never declared, so
     /// there is nothing to match against — but the requester is owed the same
@@ -857,6 +1334,15 @@ mod tests {
             NetworkMessage::Push(p) => Some(id_of(&p.keyexpr)),
             NetworkMessage::Declare(d) => match &d.body {
                 DeclareOwnedVariant::CodecZenohDeclSubscriber(s) => Some(id_of(&s.keyexpr)),
+                // R311y803 — the liveliness emits, answering this guard's own
+                // instruction rather than being waved past it. A `DeclToken`
+                // carries a body wireexpr and so is graded exactly like the
+                // subscriber arm; an `UndeclToken` carries none (the sourced
+                // form puts its keyexpr in an `ext_wire_expr`, built by the
+                // `declare_ext_keyexpr` SSOT from an already-resolved literal),
+                // so there is no id to grade and `None` skips it.
+                DeclareOwnedVariant::CodecZenohDeclToken(t) => Some(id_of(&t.keyexpr)),
+                DeclareOwnedVariant::CodecZenohUndeclToken(_) => None,
                 other => panic!(
                     "the routing forwarder emitted a Declare arm this guard has \
                      never seen ({other:?}). It is a NEW emit path -- check \

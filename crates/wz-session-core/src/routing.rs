@@ -80,6 +80,26 @@
 //! expr-id with no prior `DeclareKeyexpr` resolves to `None` and is dropped with
 //! a debug trace.
 //!
+//! ## The liveliness plane (R311y803)
+//!
+//! Tokens route here too, and the reason is a property of the MESSAGE KINDS
+//! this table dispatches rather than a scope decision:
+//! [`observe`](RouteTable::observe) handles `Declare`, `Push` and `Interest`,
+//! and the whole liveliness plane is expressed in the first and the third — a
+//! `DeclareToken` IS the delivery to a liveliness subscriber, a
+//! `Declare(UndeclareToken)` IS the retraction, and a TOKENS `Interest` is how
+//! a subscriber asks for the current set. Nothing on that plane needs a
+//! `Request` or a `Response`. So a token declared on one face reaches every
+//! other face whose registered TOKENS interest matches it
+//! ([`propagate_token_declaration`](RouteTable::propagate_token_declaration)),
+//! it is retracted when its holder withdraws it or its face LEAVES
+//! ([`propagate_token_forget`](RouteTable::propagate_token_forget) —
+//! zenoh's `close_face` drain, `hat/router/mod.rs:541-544`), and a CURRENT
+//! TOKENS interest is answered with the tokens already held
+//! ([`dump_current_tokens`](RouteTable::dump_current_tokens)). Before this the
+//! table recorded none of it: a liveliness subscriber behind a wz `--router`
+//! read an empty world, and a peer that dropped left its tokens alive forever.
+//!
 //! ## NON-goals (this atom)
 //!
 //! Multi-hop declaration propagation (a router forwarding a peer's
@@ -87,8 +107,10 @@
 //! interest optimisation, not required for a single-hop star: a producer
 //! sends its Put unconditionally and the router routes it), zid-keyed mesh
 //! de-duplication (the `src != dst` skip suffices for the star topology; a
-//! mesh needs source-zid suppression), and Queryable / liveliness routing
-//! (Push only).
+//! mesh needs source-zid suppression), and QUERYABLE routing — that one is
+//! not symmetry left undone but the same message-kind argument running the
+//! other way: a queryable advertised from here would invite a `Request` this
+//! table has no arm for, so the empty dump it answers with is truthful.
 //! Self-echo cannot occur: a face never receives its own Put back (`src_id`
 //! is skipped).
 
@@ -111,7 +133,9 @@ mod imp {
     use crate::declare::declared_intersects;
     use crate::declare_build::{
         build_declare_final_reply, build_declare_subscriber_reply,
-        build_declare_subscriber_reply_with_id,
+        build_declare_subscriber_reply_with_id, build_declare_token, build_declare_token_reply,
+        build_declare_token_reply_with_id, build_undeclare_token,
+        build_undeclare_token_with_keyexpr,
     };
     use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
     use crate::link::SessionRuntime;
@@ -156,6 +180,30 @@ mod imp {
         /// a face that declared no subscriber interest (a plain wz/zenoh
         /// publisher that puts without a write filter, e.g. `z_put`).
         future_subs: Vec<FutureSubInterest>,
+        /// Liveliness TOKENS this face has declared: the resolved keyexpr keyed
+        /// by the wire token id, so an `UndeclareToken` — which carries only the
+        /// id — removes exactly the matching one. The token twin of
+        /// [`subs`](Self::subs), and the same stored form a receiving endpoint's
+        /// own
+        /// [`LivelinessSubscriberRegistry`](crate::declare::liveliness_subscriber)
+        /// keeps in its `peer_token_table`.
+        tokens: HashMap<u64, String>,
+        /// Tokens this table has ADVERTISED TO this face: the advertised keyexpr
+        /// -> the id that advertisement carried. zenoh's
+        /// `face_hat.local_tokens` (`hat/router/token.rs`), and it is
+        /// load-bearing for one reason — the retraction must name the SAME id
+        /// the declaration did, because the receiver keys its token table by
+        /// that id and an id-only `UndeclareToken` is the ordinary retraction
+        /// shape. It doubles as the already-advertised guard (zenoh's
+        /// `!face_hat!(dst_face).local_tokens.contains_key(res)`), so two faces
+        /// holding the same keyexpr advertise once.
+        local_tokens: HashMap<String, u64>,
+        /// TOKENS-kind interests this face registered — the liveliness twin of
+        /// [`future_subs`](Self::future_subs). zenoh's `remote_interests`
+        /// filtered by `options.tokens()`; propagation to a face is GATED on one
+        /// of these matching (`hat/router/token.rs::propagate_simple_token_to`),
+        /// which is why a face that never asks for tokens hears none.
+        token_interests: Vec<TokenInterest>,
     }
 
     /// One FUTURE subscriber interest a face registered — the state
@@ -181,6 +229,40 @@ mod imp {
         pushed: HashMap<String, u64>,
     }
 
+    /// One TOKENS-kind `Interest` a face registered — the liveliness-plane twin
+    /// of [`FutureSubInterest`], and the gate every advertisement to that face
+    /// passes (zenoh keeps the same thing as a `RemoteInterest` filtered by
+    /// `options.tokens()`).
+    ///
+    /// Unlike its subscriber twin this carries no `pushed` id map: an advertised
+    /// token's id is allocated per DESTINATION FACE rather than per interest
+    /// (zenoh's `face_hat.next_id` into `local_tokens`), because the retraction
+    /// that must reuse it — `propagate_forget_simple_token` — reaches the face
+    /// with a resource in hand and no interest, so the id has to be findable
+    /// from the face alone. It lives in [`FaceRoute::local_tokens`].
+    struct TokenInterest {
+        /// The soliciting interest id. Held for DEDUP of a repeated identical
+        /// interest only: the unsolicited advertisement this gates carries
+        /// `interest_id: None`, which is zenoh's shape
+        /// (`propagate_simple_token_to` leaves it `None`) and the one every
+        /// receiver accepts — zenoh-pico matches an inbound declaration against
+        /// EVERY interest bearing the kind bit when the id is absent or zero
+        /// (`session/interest.c:270`), and wz's own liveliness subscriber never
+        /// consults it at all (`liveliness_subscriber.rs::dispatch_declare` fans
+        /// to every keyexpr-matching slot). Stamping a concrete id would NARROW
+        /// the advertisement to one interest for no gain.
+        interest_id: u64,
+        /// The resolved (literal) interest keyexpr, matched against each
+        /// declared token's keyexpr to decide whether to advertise.
+        keyexpr: String,
+        /// Whether the interest is AGGREGATE: the advertisement then carries the
+        /// interest's OWN keyexpr rather than the token's, because the peer
+        /// associates an aggregate interest's replies by `_z_keyexpr_equals`
+        /// (`session/interest.c:274-276`) — the same rule
+        /// [`FutureSubInterest::aggregate`] follows on the subscriber plane.
+        aggregate: bool,
+    }
+
     impl<R: SessionRuntime, T: TimeSource> FaceRoute<R, T> {
         fn new(actions: Arc<SessionLinkActions<R, T>>) -> Self {
             Self {
@@ -188,6 +270,9 @@ mod imp {
                 subs: HashMap::new(),
                 peer_aliases: HashMap::new(),
                 future_subs: Vec::new(),
+                tokens: HashMap::new(),
+                local_tokens: HashMap::new(),
+                token_interests: Vec::new(),
             }
         }
 
@@ -287,6 +372,15 @@ mod imp {
         /// redundant re-push reuses it. `Cell` because the push path runs off the
         /// `&mut` observe borrow but the id state is logically interior.
         next_future_sub_id: Cell<u64>,
+        /// Monotonic allocator for the id an advertised `DeclareToken` carries —
+        /// zenoh's per-face `face_hat.next_id` (`hat/router/token.rs`), kept
+        /// table-wide here because a table-wide counter satisfies the only
+        /// property the id needs: uniqueness WITHIN the destination face, which
+        /// a globally-unique id has for free. Starts at 1 because 0 is reserved
+        /// for the CURRENT-only dump (zenoh's `make_token_id` returns 0 when
+        /// `!mode.future()`), so a non-zero id always means "this advertisement
+        /// is retractable by id".
+        next_local_token_id: Cell<u64>,
     }
 
     impl<R: SessionRuntime, T: TimeSource> Default for RouteTable<R, T> {
@@ -307,6 +401,7 @@ mod imp {
                 }),
                 route_computations: Cell::new(0),
                 next_future_sub_id: Cell::new(1),
+                next_local_token_id: Cell::new(1),
             }
         }
 
@@ -325,12 +420,39 @@ mod imp {
         /// Remove a face that left (peer Close / link loss): it can no longer
         /// be a destination, and its subscriptions are dropped with it. Called
         /// from the accept loop's `FaceDown` handling.
+        ///
+        /// The liveliness tokens it held are RETRACTED to the faces that were
+        /// told about them, because a token's whole meaning is that its holder
+        /// is alive: a face that vanishes without a retraction leaves every
+        /// observer believing a dead peer is still there, and no later message
+        /// corrects it. zenoh does this in `close_face`, draining
+        /// `hat_face.remote_tokens` into `undeclare_simple_token`
+        /// (`hat/router/mod.rs:541-544`, `hat/client/mod.rs:209-212`) — the
+        /// retraction the ROUTER synthesises, as opposed to the one a departing
+        /// peer sends for itself.
         pub fn remove_face(&mut self, id: u64) {
             // A removed face may have carried subscriptions that fed cached
             // routes (and its id must never resurface in one), so its departure
             // invalidates the cache.
-            if self.faces.remove(&id).is_some() {
-                self.invalidate_routes();
+            let Some(face) = self.faces.remove(&id) else {
+                return;
+            };
+            self.invalidate_routes();
+            // Deduplicated: one face may hold several token ids on the SAME
+            // keyexpr, and each retraction is per-keyexpr.
+            let mut retracted: Vec<String> = Vec::new();
+            for keyexpr in face.tokens.into_values() {
+                if retracted.contains(&keyexpr) {
+                    continue;
+                }
+                retracted.push(keyexpr);
+            }
+            for keyexpr in &retracted {
+                // `id` is already out of `self.faces`, so the src-face guard
+                // inside the forget cannot fire on it; pass `None` for the same
+                // reason zenoh's close_face path does (it has no source face to
+                // exclude — `src_face.map_or(true, ..)`, token.rs:428).
+                self.propagate_token_forget(None, keyexpr);
             }
         }
 
@@ -340,6 +462,15 @@ mod imp {
         /// recorded), distinct from the observable forward count.
         pub fn subscription_count(&self) -> usize {
             self.faces.values().map(|f| f.subs.len()).sum()
+        }
+
+        /// Total liveliness tokens recorded across all faces — the token twin of
+        /// [`subscription_count`](Self::subscription_count), so a test can
+        /// assert the table's own state (a token recorded, a token retracted, a
+        /// departed face's tokens gone) independently of the declarations it
+        /// emitted onto other faces.
+        pub fn token_count(&self) -> usize {
+            self.faces.values().map(|f| f.tokens.len()).sum()
         }
 
         /// Number of currently-valid cached routes — the cache-state witness a
@@ -432,6 +563,11 @@ mod imp {
             // OTHER faces) can consult it. `Some` only on a DeclareSubscriber that
             // recorded a route (so `subscriptions_changed` is implied by it).
             let mut new_sub_keyexpr = None;
+            // The liveliness-plane counterparts, carried out of the `face`
+            // borrow for the same reason: advertising / retracting re-borrows
+            // the OTHER faces.
+            let mut new_token_keyexpr = None;
+            let mut forgotten_token_keyexpr = None;
             let subscriptions_changed = match &declare.body {
                 // R311qd — record the peer's expr-id -> literal-keyexpr mapping
                 // so a later aliased subscription / Put resolves through it.
@@ -475,6 +611,51 @@ mod imp {
                 DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl) => {
                     face.subs.remove(&undecl.id).is_some()
                 }
+                // The LIVELINESS plane. Recorded and advertised on the same
+                // rules as a subscription, but it feeds no route cache: a token
+                // is not a destination for anything, so `subscriptions_changed`
+                // stays false and the Push cache is left alone.
+                DeclareOwnedVariant::CodecZenohDeclToken(decl) => {
+                    match resolve_wireexpr(&decl.keyexpr.body, &face.peer_aliases) {
+                        Some(keyexpr) => {
+                            // FIRST DECLARATION OF AN ID WINS, matching the
+                            // endpoint registry this table feeds
+                            // (`liveliness_subscriber.rs` skips an occupied id,
+                            // zenoh's `Entry::Vacant`). Re-binding the id would
+                            // make the later id-only retraction name a keyexpr
+                            // the token was never declared on.
+                            if !face.tokens.contains_key(&decl.id) {
+                                face.tokens.insert(decl.id, keyexpr.clone());
+                                new_token_keyexpr = Some(keyexpr);
+                            }
+                        }
+                        None => {
+                            log::debug!(
+                                "RouteTable: face {src_id} declared token id={} on an \
+                                 expr-id with no prior DeclareKeyexpr mapping; not recorded",
+                                decl.id
+                            );
+                        }
+                    }
+                    false
+                }
+                DeclareOwnedVariant::CodecZenohUndeclToken(undecl) => {
+                    // Id first, then the SOURCED form. zenoh identifies a
+                    // sourced token by its KEYEXPR carried in `ext_wire_expr`
+                    // with `id == 0` (`build_undeclare_token_with_keyexpr` emits
+                    // exactly that shape), so a table miss is not "unknown
+                    // token" — it is the ordinary shape of every sourced
+                    // retraction, and dropping on it discards all of them. The
+                    // same two-step, in the same order, as the endpoint
+                    // registry's (`liveliness_subscriber.rs`, R311y769).
+                    forgotten_token_keyexpr = face.tokens.remove(&undecl.id).or_else(|| {
+                        crate::declare_ext_keyexpr::resolve_ext_keyexpr(
+                            undecl.extensions.as_ref(),
+                            &face.peer_aliases,
+                        )
+                    });
+                    false
+                }
                 _ => false,
             };
             // `face`'s borrow of `self.faces` ends with the match; bump the epoch
@@ -487,6 +668,16 @@ mod imp {
             // now told about it, releasing its write filter.
             if let Some(keyexpr) = new_sub_keyexpr {
                 self.push_future_subscriber(src_id, &keyexpr);
+            }
+            // The liveliness plane's own fan-out. Unlike the subscriber one this
+            // is not an optimisation that a later Put would paper over: a
+            // `DeclareToken` IS the delivery, so a table that records it without
+            // advertising it carries liveliness nowhere.
+            if let Some(keyexpr) = new_token_keyexpr {
+                self.propagate_token_declaration(src_id, &keyexpr);
+            }
+            if let Some(keyexpr) = forgotten_token_keyexpr {
+                self.propagate_token_forget(Some(src_id), &keyexpr);
             }
         }
 
@@ -501,9 +692,16 @@ mod imp {
         /// echoed on each reply and on the terminating Final so the peer routes
         /// them to this interest. FUTURE registers the interest so a later
         /// matching subscription is pushed (see
-        /// [`push_future_subscriber`](Self::push_future_subscriber)). Queryable /
-        /// token interests are the query / liveliness planes and are not routed
-        /// here.
+        /// [`push_future_subscriber`](Self::push_future_subscriber)).
+        ///
+        /// The TOKENS kind is answered on exactly the same two rules
+        /// ([`propagate_token_declaration`](Self::propagate_token_declaration) is
+        /// the FUTURE half), because the liveliness plane rides the same two
+        /// message kinds this table already dispatches — `Declare` and
+        /// `Interest` — and needs no other. QUERYABLES does not, and that is not
+        /// symmetry left undone: a queryable is an invitation to send a
+        /// `Request`, which this table has no arm for, so advertising one would
+        /// advertise something no query could reach.
         fn record_interest(&mut self, src_id: u64, interest: &InterestOwned) {
             let Some(body) = interest.body.as_ref() else {
                 return;
@@ -522,17 +720,21 @@ mod imp {
             // holds the pending interest until a Final arrives, so silence is not
             // "no matches" but a HANG to the requester's own timeout.
             //
-            // This table can only DUMP the subscriber plane -- it holds no
-            // queryable or token registry -- so a queryable / token CURRENT
-            // interest gets an EMPTY dump. That is a truthful "I have none",
-            // and it is exactly what the subscriber path already sends when
-            // nothing matches (the Final below is emitted with zero replies).
+            // This table can DUMP the subscriber and token planes and no other,
+            // so a QUERYABLES-only CURRENT interest gets an EMPTY dump. That is
+            // a truthful "I have none" (`routing.rs` dispatches no `Request`, so
+            // a queryable advertised from here would name a service no query
+            // could reach), and it is exactly what the subscriber path already
+            // sends when nothing matches (the Final below is emitted with zero
+            // replies).
             //
             // Newly load-bearing as of R311y771: wz itself now emits QUERYABLES
             // interests from `Querier::declare_matching_listener`, so a wz face
             // peered with a wz RouteTable router would hang on its own message.
             // The defect predates that and was reachable from pico and zenoh.
-            if !body.su() {
+            let wants_subscribers = body.su();
+            let wants_tokens = body.to();
+            if !wants_subscribers && !wants_tokens {
                 if interest.c() {
                     let _ = src_actions.send_network_message(
                         NetworkMessage::Declare(Box::new(build_declare_final_reply(interest_id))),
@@ -547,6 +749,7 @@ mod imp {
             }
 
             let aggregate = body.ag();
+            let future = interest.f();
             // Resolve the interest keyexpr in the SOURCE face's alias context
             // (literal id=0, or aliased id!=0 via a prior DeclareKeyexpr). A
             // keyexpr-less interest has nothing to match against -- but a CURRENT
@@ -577,26 +780,28 @@ mod imp {
                 // sends one reply per matching subscription with the subscription's
                 // own keyexpr.
                 let mut replies: Vec<String> = Vec::new();
-                if aggregate {
-                    if self
-                        .faces
-                        .iter()
-                        .any(|(id, f)| *id != src_id && f.matches(&interest_ke))
-                    {
-                        replies.push(interest_ke.clone());
-                    }
-                } else {
-                    let target_chunks: Vec<&str> = interest_ke.split('/').collect();
-                    for (id, f) in self.faces.iter() {
-                        if *id == src_id {
-                            continue;
+                if wants_subscribers {
+                    if aggregate {
+                        if self
+                            .faces
+                            .iter()
+                            .any(|(id, f)| *id != src_id && f.matches(&interest_ke))
+                        {
+                            replies.push(interest_ke.clone());
                         }
-                        for sub_ke in f.subs.values() {
-                            if crate::keyexpr_match::keyexpr_intersects_target(
-                                sub_ke,
-                                &target_chunks,
-                            ) {
-                                replies.push(sub_ke.clone());
+                    } else {
+                        let target_chunks: Vec<&str> = interest_ke.split('/').collect();
+                        for (id, f) in self.faces.iter() {
+                            if *id == src_id {
+                                continue;
+                            }
+                            for sub_ke in f.subs.values() {
+                                if crate::keyexpr_match::keyexpr_intersects_target(
+                                    sub_ke,
+                                    &target_chunks,
+                                ) {
+                                    replies.push(sub_ke.clone());
+                                }
                             }
                         }
                     }
@@ -610,9 +815,15 @@ mod imp {
                         );
                     }
                 }
+                if wants_tokens {
+                    self.dump_current_tokens(src_id, interest_id, &interest_ke, aggregate, future);
+                }
                 // Close the CURRENT dump with a Final stamped with interest_id —
                 // sent even with zero replies (no matching subscriber -> the
                 // publisher's filter correctly stays ACTIVE and it does not put).
+                // ONE Final closes the whole interest however many kinds it
+                // named, as upstream's single post-dump `if mode.current()`
+                // block does (`hat/client/interests.rs`).
                 let _ = src_actions.send_network_message(
                     NetworkMessage::Declare(Box::new(build_declare_final_reply(interest_id))),
                     true,
@@ -620,23 +831,264 @@ mod imp {
                 );
             }
 
-            if interest.f() {
+            if future {
                 if let Some(src) = self.faces.get_mut(&src_id) {
                     // Dedup an identical re-declared interest so future entries do
                     // not stack.
-                    if !src
-                        .future_subs
-                        .iter()
-                        .any(|fi| fi.interest_id == interest_id && fi.keyexpr == interest_ke)
+                    if wants_subscribers
+                        && !src
+                            .future_subs
+                            .iter()
+                            .any(|fi| fi.interest_id == interest_id && fi.keyexpr == interest_ke)
                     {
                         src.future_subs.push(FutureSubInterest {
                             interest_id,
-                            keyexpr: interest_ke,
+                            keyexpr: interest_ke.clone(),
                             aggregate,
                             pushed: HashMap::new(),
                         });
                     }
+                    if wants_tokens
+                        && !src
+                            .token_interests
+                            .iter()
+                            .any(|ti| ti.interest_id == interest_id && ti.keyexpr == interest_ke)
+                    {
+                        src.token_interests.push(TokenInterest {
+                            interest_id,
+                            keyexpr: interest_ke,
+                            aggregate,
+                        });
+                    }
                 }
+            }
+        }
+
+        /// The CURRENT half of a TOKENS interest: the liveliness tokens already
+        /// held on OTHER faces that match `interest_ke`, each sent back as a
+        /// `Declare(DeclToken)` stamped with the soliciting `interest_id`
+        /// (zenoh's `declare_token_interest`, `hat/router/token.rs:992`).
+        ///
+        /// `future` decides the ADVERTISED ID, and it is not cosmetic. Upstream's
+        /// `make_token_id` (`token.rs:977-990`) returns 0 for a CURRENT-only
+        /// interest and otherwise allocates-and-REMEMBERS a per-face id. The
+        /// remembering is what makes the eventual retraction expressible as the
+        /// ordinary id-only `UndeclareToken`: a receiver keys its token table by
+        /// the declared id, so an advertisement that carried 0 could only ever be
+        /// retracted by the sourced keyexpr form. A CURRENT-only interest has no
+        /// future to retract into, which is why 0 is right there and wrong here.
+        fn dump_current_tokens(
+            &mut self,
+            src_id: u64,
+            interest_id: u64,
+            interest_ke: &str,
+            aggregate: bool,
+            future: bool,
+        ) {
+            let Some(src) = self.faces.get(&src_id) else {
+                return;
+            };
+            let src_actions = src.actions.clone();
+            let target_chunks: Vec<&str> = interest_ke.split('/').collect();
+            // AGGREGATE answers with ONE reply carrying the interest's OWN
+            // keyexpr iff anything matches — the peer associates an aggregate
+            // interest's replies by `_z_keyexpr_equals`, so a concrete token
+            // keyexpr would silently fail to match. Same rule as the subscriber
+            // dump above. Deduplicated either way: two faces holding the same
+            // keyexpr are ONE liveliness fact, and a receiver that keys tokens
+            // by id would otherwise hold two ids for it and stay "alive" after
+            // one retraction.
+            let mut replies: Vec<String> = Vec::new();
+            for (id, f) in self.faces.iter() {
+                if *id == src_id {
+                    continue;
+                }
+                for token_ke in f.tokens.values() {
+                    if !crate::keyexpr_match::keyexpr_intersects_target(token_ke, &target_chunks) {
+                        continue;
+                    }
+                    let reply_ke = if aggregate {
+                        interest_ke
+                    } else {
+                        token_ke.as_str()
+                    };
+                    if !replies.iter().any(|k| k == reply_ke) {
+                        replies.push(String::from(reply_ke));
+                    }
+                }
+            }
+            for reply_ke in &replies {
+                let token_id = if future {
+                    self.advertised_token_id(src_id, reply_ke)
+                } else {
+                    0
+                };
+                let built = if token_id == 0 {
+                    build_declare_token_reply(interest_id, reply_ke)
+                } else {
+                    build_declare_token_reply_with_id(interest_id, token_id, reply_ke)
+                };
+                if let Ok(decl) = built {
+                    let _ = src_actions.send_network_message(
+                        NetworkMessage::Declare(Box::new(decl)),
+                        true,
+                        true,
+                    );
+                }
+            }
+        }
+
+        /// The id under which `keyexpr` is advertised to face `face_id`,
+        /// allocating and remembering one on first use — zenoh's `make_token_id`
+        /// future branch over `face_hat.local_tokens`. Reusing the remembered id
+        /// is what keeps a repeated advertisement idempotent on the receiver
+        /// (which keys its token table by id) and what lets the retraction be
+        /// id-only. Returns 0 for an unknown face, which the callers treat as
+        /// "nothing to send".
+        fn advertised_token_id(&mut self, face_id: u64, keyexpr: &str) -> u64 {
+            let next = self.next_local_token_id.get();
+            let Some(face) = self.faces.get_mut(&face_id) else {
+                return 0;
+            };
+            if let Some(id) = face.local_tokens.get(keyexpr) {
+                return *id;
+            }
+            face.local_tokens.insert(String::from(keyexpr), next);
+            self.next_local_token_id.set(next.saturating_add(1));
+            next
+        }
+
+        /// Advertise a newly-declared token on `keyexpr` (held by face
+        /// `src_id`) to every OTHER face whose registered TOKENS interest
+        /// matches it — the FUTURE half, and the liveliness twin of
+        /// [`push_future_subscriber`](Self::push_future_subscriber).
+        ///
+        /// Interest-GATED, which is zenoh's router rule
+        /// (`propagate_simple_token_to` collects `remote_interests` filtered by
+        /// `options.tokens() && i.matches(res)`) and not its client rule, which
+        /// propagates to every face. The router rule is the right one here for
+        /// the reason it is upstream: a face that never asked has no liveliness
+        /// subscriber to fire, so an advertisement to it is a message with no
+        /// reader.
+        ///
+        /// Already-advertised keyexprs are SKIPPED via
+        /// [`local_tokens`](FaceRoute::local_tokens) (zenoh's
+        /// `!local_tokens.contains_key(res)`): two peers holding the same
+        /// liveliness keyexpr are one fact to an observer, and a second
+        /// advertisement under a second id would leave that observer still
+        /// believing after only one of them retracts.
+        fn propagate_token_declaration(&mut self, src_id: u64, keyexpr: &str) {
+            let target_chunks: Vec<&str> = keyexpr.split('/').collect();
+            // (destination face, the keyexpr to advertise) — collected first so
+            // the id allocation below can take `&mut self`.
+            let mut targets: Vec<(u64, String)> = Vec::new();
+            for (fid, face) in self.faces.iter() {
+                if *fid == src_id {
+                    continue;
+                }
+                for ti in face.token_interests.iter() {
+                    if !crate::keyexpr_match::keyexpr_intersects_target(&ti.keyexpr, &target_chunks)
+                    {
+                        continue;
+                    }
+                    let advertised = if ti.aggregate {
+                        ti.keyexpr.clone()
+                    } else {
+                        String::from(keyexpr)
+                    };
+                    if face.local_tokens.contains_key(&advertised) {
+                        continue;
+                    }
+                    if !targets.iter().any(|(f, k)| *f == *fid && *k == advertised) {
+                        targets.push((*fid, advertised));
+                    }
+                }
+            }
+            let mut sends: Vec<(Arc<SessionLinkActions<R, T>>, DeclareOwned)> = Vec::new();
+            for (fid, advertised) in &targets {
+                let token_id = self.advertised_token_id(*fid, advertised);
+                if token_id == 0 {
+                    continue;
+                }
+                let Some(face) = self.faces.get(fid) else {
+                    continue;
+                };
+                // `interest_id: None` — the unsolicited advertisement carries no
+                // interest id, which is upstream's shape and the one every
+                // receiver accepts (see [`TokenInterest::interest_id`]).
+                if let Ok(decl) = build_declare_token(token_id, 0, Some(advertised.as_str())) {
+                    sends.push((face.actions.clone(), decl));
+                }
+            }
+            for (actions, decl) in sends {
+                let _ = actions.send_network_message(
+                    NetworkMessage::Declare(Box::new(decl)),
+                    true,
+                    true,
+                );
+            }
+        }
+
+        /// Retract a token on `keyexpr` from every face that was told about it —
+        /// zenoh's `propagate_forget_simple_token` (`hat/router/token.rs:400`).
+        /// `src_id` is the face the retraction ARRIVED on (`None` when this table
+        /// synthesised it, i.e. from [`remove_face`](Self::remove_face)).
+        ///
+        /// Nothing is emitted while ANY face still holds a token on the same
+        /// keyexpr: a liveliness fact is alive as long as one holder is, and
+        /// upstream guards the same condition through `simple_tokens(res)`
+        /// being empty (`token.rs:239-242`). Two forms go out, and which one
+        /// depends on whether this table ever advertised the keyexpr to that
+        /// face — the id-only retraction when it did (the id is the one
+        /// [`local_tokens`](FaceRoute::local_tokens) remembered), and the SOURCED
+        /// form (id 0 plus the keyexpr in an `ext_wire_expr`) when it did not.
+        /// The second arm is not redundant: a face whose interest was registered
+        /// AFTER the CURRENT dump never received a declaration to retract by id,
+        /// and upstream sends it the same one-shot sourced form.
+        fn propagate_token_forget(&mut self, src_id: Option<u64>, keyexpr: &str) {
+            if self
+                .faces
+                .values()
+                .any(|f| f.tokens.values().any(|k| k == keyexpr))
+            {
+                return;
+            }
+            let target_chunks: Vec<&str> = keyexpr.split('/').collect();
+            let mut sends: Vec<(Arc<SessionLinkActions<R, T>>, DeclareOwned)> = Vec::new();
+            for (fid, face) in self.faces.iter_mut() {
+                if let Some(id) = face.local_tokens.remove(keyexpr) {
+                    sends.push((face.actions.clone(), build_undeclare_token(id)));
+                    continue;
+                }
+                // The face was never told, so there is no id to name. Only a
+                // NON-aggregate interest gets the sourced form: an aggregate
+                // interest's holder associates replies by keyexpr equality and
+                // was told about the INTEREST's keyexpr, never this one — which
+                // is why upstream excludes it here too (`!i.options.aggregate()`,
+                // token.rs:436).
+                if src_id == Some(*fid) {
+                    continue;
+                }
+                let interested = face.token_interests.iter().any(|ti| {
+                    !ti.aggregate
+                        && crate::keyexpr_match::keyexpr_intersects_target(
+                            &ti.keyexpr,
+                            &target_chunks,
+                        )
+                });
+                if !interested {
+                    continue;
+                }
+                if let Ok(decl) = build_undeclare_token_with_keyexpr(keyexpr) {
+                    sends.push((face.actions.clone(), decl));
+                }
+            }
+            for (actions, decl) in sends {
+                let _ = actions.send_network_message(
+                    NetworkMessage::Declare(Box::new(decl)),
+                    true,
+                    true,
+                );
             }
         }
 
