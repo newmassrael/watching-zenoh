@@ -567,6 +567,16 @@ jobs:
         # subset-specific unused-import / dead-code into a hard error.
         run: bash scripts/run-ci.sh --layer C1h
 
+      - name: Layer C1ca — the derived Open-body initial_sn
+        # R311y816 — zenoh derives an OpenSyn / OpenAck `initial_sn` from the
+        # (own zid, peer zid) pair (`compute_sn`); wz announced a literal 0.
+        # Count-guarded on both halves: the wz-session-core derivation is
+        # `codec-open-body`-gated and no other test lane names that feature,
+        # and the wz-runtime-tokio encode-seam tests otherwise ride only
+        # Layer C1's unfiltered workspace run, where a cfg that stopped
+        # matching would just make a summary number smaller.
+        run: bash scripts/run-ci.sh --layer C1ca
+
       - name: Layer C1i — scouting-active glue unit tests
         # R311ep — scouting-active is off by default, so Layer C1's
         # `cargo test --workspace` never builds the scouting glue. This

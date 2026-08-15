@@ -668,6 +668,15 @@ pub mod frame_encode;
 ))]
 pub mod handshake_encode;
 
+/// R311y816 — the Open-body `initial_sn` derivation (zenoh `compute_sn`),
+/// the ring origin an OpenSyn / OpenAck announces and the TX counter is
+/// seeded from. Gated on `codec-open-body` alone: it is the Open body's own
+/// field, it needs no allocator, and the `sha3` dependency rides the same
+/// feature so a profile without the Open body (the multicast-only MCU
+/// artifact the Layer Q footprint gate measures) links no Keccak.
+#[cfg(feature = "codec-open-body")]
+pub mod initial_sn;
+
 /// Outbound pub/sub `Push` network-message builders (`build_push_*` +
 /// the `_with_meta` family) hoisted from
 /// `wz-runtime-tokio::session_glue` so both runtime profiles share one

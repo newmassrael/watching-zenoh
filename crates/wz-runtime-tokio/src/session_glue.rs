@@ -2671,6 +2671,203 @@ mod negotiated_mtu_tests {
 /// the production `handle_inbound` path (peer.c:212-214 parity), and a
 /// `RxSnRejected` outcome clears the channel's in-progress chain through
 /// `report_outcome_reassembling` (rx.c dbuf-clear parity).
+/// R311y816 — the Open body's `initial_sn` is DERIVED at the encode seam
+/// (zenoh `compute_sn` at `establishment/open.rs:440` / `accept.rs:646`),
+/// not carried from `SessionInitParams`. These pin the WIRING that
+/// `wz_session_core::initial_sn`'s own unit tests cannot see: that the
+/// announced origin is the derived one rather than the literal `0` every wz
+/// host constructs with, that both handshake roles derive it, and that the
+/// TX conduits are seeded from the SAME value so the first Frame wz emits is
+/// the SN it just told the peer to expect.
+#[cfg(all(test, feature = "codec-open-body", feature = "codec-init-body"))]
+mod derived_initial_sn_tests {
+    use wz_runtime_tokio_test_support::fixture_session_init_params;
+    use wz_session_core::ext_chain_role::ExtChainRole;
+    use wz_session_core::inbound::{parse_inbound, InboundFrame};
+    use wz_session_core::initial_sn::derive_initial_sn;
+    use wz_session_wire_fixtures::{
+        craft_initack_wire_with_caps, craft_initsyn_wire, FIXTURE_LISTENER_ZID, FIXTURE_PEER_ZID,
+    };
+
+    /// The packed `sn_res` the crafted peer advertises: `seq_num_res = 2`
+    /// (the 28-bit ring `mask_from_res(2)`), `req_id_res = 2` — the shipped
+    /// demo / capi advertisement, so the ring under test is the one
+    /// production negotiates rather than the fixture's degenerate 7-bit one.
+    const SN_RES_SEQ2_REQ2: u8 = 0x0A;
+
+    fn params_with_res2() -> wz_session_core::session_init_params::SessionInitParams {
+        let mut params = fixture_session_init_params();
+        params.seq_num_res = 2;
+        params
+    }
+
+    /// The `initial_sn` an encoded Open frame carries, read back through the
+    /// production decoder rather than by byte offset (the body is
+    /// `lease` + `initial_sn` VLE and the lease compaction moves the offset).
+    fn announced_initial_sn(wire: &[u8]) -> u64 {
+        match parse_inbound(wire).expect("encoded Open re-parses") {
+            InboundFrame::Open { body, .. } => body.initial_sn,
+            other => panic!("expected Open, got {other:?}"),
+        }
+    }
+
+    /// THE DEFECT, on the INITIATOR: before this every OpenSyn wz emitted
+    /// announced the literal `0` its `SessionInitParams` was built with.
+    #[test]
+    fn opensyn_announces_the_derived_origin_not_zero() {
+        let (actions, _driver) =
+            crate::test_fixtures::recording_actions_with_params(params_with_res2());
+        actions
+            .handle_inbound(&craft_initack_wire_with_caps(&[], SN_RES_SEQ2_REQ2, 1024))
+            .expect("parse InitAck");
+
+        let wire = actions
+            .encode_open_with_role(false, None, ExtChainRole::OpenSyn)
+            .expect("encode OpenSyn");
+        let announced = announced_initial_sn(&wire);
+
+        assert_eq!(
+            announced,
+            derive_initial_sn(
+                &[0x01; 4],
+                &FIXTURE_LISTENER_ZID,
+                wz_session_core::sn::mask_from_res(2)
+            ),
+            "OpenSyn must announce compute_sn(own, peer, negotiated mask)"
+        );
+        assert_ne!(announced, 0, "the pre-R311y816 constant origin");
+    }
+
+    /// The ACCEPTOR twin — zenoh derives at BOTH Open seams, and a fix wired
+    /// only into the initiator would leave every wz acceptor on the constant.
+    /// The peer here is the InitSyn's zid, which is a DIFFERENT fixture
+    /// constant, so this cannot pass by accidentally reusing the arm above.
+    #[test]
+    fn openack_announces_the_derived_origin_not_zero() {
+        let (actions, _driver) =
+            crate::test_fixtures::recording_actions_with_params(params_with_res2());
+        actions
+            .handle_inbound(&craft_initsyn_wire())
+            .expect("parse InitSyn");
+
+        let wire = actions
+            .encode_open_with_role(true, None, ExtChainRole::OpenAck)
+            .expect("encode OpenAck");
+        let announced = announced_initial_sn(&wire);
+
+        assert_eq!(
+            announced,
+            derive_initial_sn(
+                &[0x01; 4],
+                &FIXTURE_PEER_ZID,
+                // The crafted InitSyn advertises sn_res 0, so the negotiated
+                // ring is min(2, 0) = 0 — the mask this arm must use, and a
+                // seam that masked with its OWN advertisement would fail here.
+                wz_session_core::sn::mask_from_res(0)
+            ),
+            "OpenAck must announce compute_sn(own, peer, negotiated mask)"
+        );
+        assert_ne!(announced, 0, "the pre-R311y816 constant origin");
+    }
+
+    /// The announced origin and the first minted Frame SN are ONE fact. A
+    /// derivation that reached the wire without re-seeding the conduits
+    /// would announce one origin and then emit a Frame at `0`, which the
+    /// peer's freshly seeded RX gate reads as far-stale and drops.
+    #[cfg(feature = "codec-frame")]
+    #[test]
+    fn the_announced_origin_is_the_first_minted_frame_sn() {
+        let (actions, _driver) =
+            crate::test_fixtures::recording_actions_with_params(params_with_res2());
+        actions
+            .handle_inbound(&craft_initack_wire_with_caps(&[], SN_RES_SEQ2_REQ2, 1024))
+            .expect("parse InitAck");
+
+        let wire = actions
+            .encode_open_with_role(false, None, ExtChainRole::OpenSyn)
+            .expect("encode OpenSyn");
+        let announced = announced_initial_sn(&wire);
+
+        let mask = actions.negotiated_sn_mask();
+        assert_eq!(
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, mask),
+            announced,
+            "the first reliable Frame must carry the announced origin"
+        );
+        assert_eq!(
+            actions.next_outbound_frame_sn(wz_session_core::qos::Priority::DEFAULT, false, mask),
+            announced,
+            "the best-effort conduit was seeded from the same origin"
+        );
+    }
+
+    /// The property the constant destroyed: one node's sessions to two
+    /// different peers no longer start from the same ring position. This is
+    /// the arm that a derivation ignoring the PEER zid would fail while
+    /// every assertion above still passed.
+    #[test]
+    fn two_peers_get_two_origins() {
+        let announce_to = |peer_zid: &[u8]| {
+            let (actions, _driver) =
+                crate::test_fixtures::recording_actions_with_params(params_with_res2());
+            let mut wire = craft_initack_wire_with_caps(&[], SN_RES_SEQ2_REQ2, 1024);
+            // Overwrite the crafted InitAck's 4-byte zid in place (offset 3:
+            // header, version, cbyte, then the zid).
+            wire[3..7].copy_from_slice(peer_zid);
+            actions.handle_inbound(&wire).expect("parse InitAck");
+            announced_initial_sn(
+                &actions
+                    .encode_open_with_role(false, None, ExtChainRole::OpenSyn)
+                    .expect("encode OpenSyn"),
+            )
+        };
+        assert_ne!(
+            announce_to(&[0xA0, 0xA1, 0xA2, 0xA3]),
+            announce_to(&[0xA0, 0xA1, 0xA2, 0xA4]),
+            "the origin must be a function of the peer, not of this node alone"
+        );
+    }
+
+    /// A redial re-derives the SAME origin with nothing persisted between
+    /// attempts — zenoh's stated reason for hashing rather than drawing
+    /// entropy ("in case of multilink it's important that the same
+    /// initial_sn is used for every connection attempt"). Two INDEPENDENT
+    /// action bundles stand in for the two attempts; a random draw would
+    /// fail here and a per-attempt counter would too.
+    #[test]
+    fn a_second_attempt_at_the_same_peer_derives_the_same_origin() {
+        let attempt = || {
+            let (actions, _driver) =
+                crate::test_fixtures::recording_actions_with_params(params_with_res2());
+            actions
+                .handle_inbound(&craft_initack_wire_with_caps(&[], SN_RES_SEQ2_REQ2, 1024))
+                .expect("parse InitAck");
+            announced_initial_sn(
+                &actions
+                    .encode_open_with_role(false, None, ExtChainRole::OpenSyn)
+                    .expect("encode OpenSyn"),
+            )
+        };
+        assert_eq!(attempt(), attempt());
+    }
+
+    /// Before any INIT lands there is no peer zid to hash, and the seam says
+    /// so instead of hashing an empty slice: the construction-time
+    /// `params.initial_sn` still encodes. Pins that the substitution is
+    /// scoped to a NEGOTIATED session — the arm every test that drives
+    /// `encode_open_with_role` without a handshake rides.
+    #[test]
+    fn without_a_peer_zid_the_constructed_origin_still_encodes() {
+        let mut params = params_with_res2();
+        params.initial_sn = 41;
+        let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
+        let wire = actions
+            .encode_open_with_role(false, None, ExtChainRole::OpenSyn)
+            .expect("encode OpenSyn");
+        assert_eq!(announced_initial_sn(&wire), 41);
+    }
+}
+
 #[cfg(all(test, feature = "codec-open-body", feature = "codec-frame"))]
 mod rx_sn_gate_tests {
     use wz_runtime_tokio_test_support::fixture_session_init_params;

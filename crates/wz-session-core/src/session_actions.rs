@@ -2009,9 +2009,64 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         cookie_override: Option<&[u8]>,
         role: ExtChainRole,
     ) -> Result<Vec<u8>, CodecError> {
+        // R311y816 — the ring origin is DERIVED here, not carried from
+        // construction. `params.initial_sn` is a literal `0` at every host
+        // (`wz-ap-demo/src/args.rs`, `wz-capi-core/src/drive.rs`,
+        // `wz-replay/src/live.rs`, `wz-mcu-session-acceptor/src/lib.rs`), so
+        // before this every wz session announced the same origin; both
+        // upstreams announce a per-session one. This is zenoh's Open seam
+        // exactly — `compute_sn(mine, other, resolution)` runs while BUILDING
+        // the OpenSyn (`establishment/open.rs:440`) and the OpenAck
+        // (`accept.rs:646`), never at transport construction, because the
+        // peer zid and the negotiated FrameSN resolution are both INIT
+        // results.
+        //
+        // Resolved OUTSIDE the ext-chain closure for the R311di-pre-f5
+        // reason `encode_init_with_role` records above it: this reads
+        // `remote_peer_zid` and (through `negotiated_sn_mask`)
+        // `inbound_peer_init_caps`, and a nested `R::with_mutex_mut` would
+        // deadlock the non-reentrant lwIP `critical_section`.
+        let params_owned = self.open_params();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            encode_open(&self.params, is_ack, cookie_override, chain)
+            let params = params_owned.as_ref().unwrap_or(&self.params);
+            encode_open(params, is_ack, cookie_override, chain)
         })
+    }
+
+    /// R311y816 — the Open-body params with the DERIVED `initial_sn`
+    /// substituted, or `None` when the peer zid is not yet known (no INIT
+    /// exchange has landed, which no production Open emit can be past).
+    ///
+    /// Re-seeding the TX conduits is part of the SAME call rather than a
+    /// second step a caller could forget: the announced origin and the first
+    /// minted Frame SN are one fact, and
+    /// [`next_outbound_frame_sn`](Self::next_outbound_frame_sn)'s contract is
+    /// that its first value equals what the Open body carried. Doing it here
+    /// keeps that true for a value the constructor could not have known.
+    ///
+    /// The re-seed REWINDS the conduits to the origin, and that is a
+    /// handshake-scoped operation, stated plainly rather than papered over:
+    /// an Open frame carries no SN itself and is emitted exactly once per
+    /// session incarnation, ahead of every data frame (the unicast FSM fires
+    /// `send_open_syn` / `send_open_ack` on one transition each; a reopen
+    /// runs `reset_for_reopen` and a fresh handshake). Calling this against
+    /// a session that has already minted data SNs would rewind them, so it
+    /// stays private to the encode seam.
+    ///
+    /// What IS idempotent is the VALUE: [`crate::initial_sn::derive_initial_sn`]
+    /// is a pure function of `(own zid, peer zid, mask)`, so a redial to the
+    /// same peer re-derives the same origin with nothing persisted between
+    /// attempts — the multilink property zenoh's `compute_sn` comment names
+    /// as the reason for hashing rather than drawing entropy.
+    #[cfg(feature = "codec-open-body")]
+    fn open_params(&self) -> Option<SessionInitParams> {
+        let peer_zid = self.peer_zid()?;
+        let mask = self.negotiated_sn_mask();
+        let initial_sn = crate::initial_sn::derive_initial_sn(&self.params.zid, &peer_zid, mask);
+        self.outbound_frame_sn.reset(initial_sn);
+        let mut params = self.params.clone();
+        params.initial_sn = initial_sn;
+        Some(params)
     }
 
     fn ext_chain_slot(&self, role: ExtChainRole) -> &R::Mutex<Vec<ExtEntryOwned>> {

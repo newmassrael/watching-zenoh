@@ -5232,6 +5232,39 @@ layer_c1h_arbitrary_subset_matrix() {
 # on a vacuous green (`--lib scout_static` without the feature). The number is
 # the count, not a floor, because this suite is small enough that every
 # addition should be a deliberate line in a diff.
+# ─── Layer C1ca — the DERIVED Open-body initial_sn (R311y816) ──────
+#
+# zenoh's `compute_sn` derives an OpenSyn / OpenAck `initial_sn` from the
+# (own zid, peer zid) pair masked to the negotiated FrameSN ring
+# (`establishment/mod.rs:104-118`, called at `open.rs:440` and
+# `accept.rs:646`); before R311y816 every wz host announced the literal `0`
+# its `SessionInitParams` was constructed with. Two halves, two crates:
+# `wz_session_core::initial_sn` is the derivation and
+# `session_glue::derived_initial_sn_tests` is the encode-seam wiring.
+#
+# COUNT-GUARDED because a guarded-lane sweep over all 203
+# `_runci_guarded_test` invocations found ZERO that select either module --
+# the session-core half is `#[cfg(feature = "codec-open-body")]` and no test
+# lane names that feature (C1h's subset 15 is a CLIPPY arm, which does not
+# compile tests), while the runtime-tokio half rides default features into
+# Layer C1's unfiltered `--workspace` run, where a module that stopped being
+# compiled would only make a summary number smaller. That is the R311y807 /
+# R311y814 class: a filter that selects zero tests still exits 0. Exact
+# counts, not floors -- both suites are small enough that an addition should
+# be a deliberate line in a diff.
+#
+# The session-core arm is deliberately `--no-default-features --features
+# codec-open-body`, the BARE subset: it proves the derivation carries its own
+# `sha3` dependency through that one feature, so a build that can emit an Open
+# frame can always derive its origin.
+layer_c1ca_cargo_test_derived_initial_sn() {
+    _runci_guarded_test C1ca 8 \
+        cargo test -p wz-session-core --no-default-features --features codec-open-body \
+        --lib initial_sn --quiet || return 1
+    _runci_guarded_test C1ca 6 \
+        cargo test -p wz-runtime-tokio --lib derived_initial_sn --quiet || return 1
+}
+
 layer_c1i_cargo_test_scouting() {
     _runci_guarded_test C1i 12 \
         cargo test -p wz-runtime-tokio --features scouting-active --lib scouting_glue --quiet
@@ -12582,6 +12615,7 @@ run_layer C1f layer_c1f_cargo_test_reply || overall=1
 run_layer C1g layer_c1g_cargo_test_observer || overall=1
 run_layer C1own layer_c1own_own_space_witnesses || overall=1
 run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
+run_layer C1ca layer_c1ca_cargo_test_derived_initial_sn || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1
 run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1
 run_layer C1l layer_c1l_reassembly || overall=1

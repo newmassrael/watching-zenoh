@@ -335,7 +335,14 @@ codec-linkstate = ["wz-codecs/codec-linkstate"]
 # here so the 3-stage chain (tokio codec-X -> session-core codec-X ->
 # wz-codecs codec-X) keeps a single ground-truth gate per body codec.
 codec-init-body = ["wz-codecs/codec-init-body"]
-codec-open-body = ["wz-codecs/codec-open-body"]
+# R311y816 — `dep:sha3` rides HERE, not on a feature of its own: the Open
+# body's `initial_sn` is derived with zenoh's `compute_sn` Shake128 (see
+# `src/initial_sn.rs`), so the hash is a hard requirement of anything that
+# can emit an Open frame and is absent from every profile that cannot. The
+# alternative (an own feature) would make a build that emits Open bodies
+# WITHOUT a derivation representable, and a session that falls back to the
+# literal 0 origin is indistinguishable from the defect this closes.
+codec-open-body = ["wz-codecs/codec-open-body", "dep:sha3"]
 codec-keep-alive = ["wz-codecs/codec-keep-alive"]
 codec-close = ["wz-codecs/codec-close"]
 # R311kt — codec-join forwards the wz-codecs JOIN body codec. Gates the
@@ -1024,11 +1031,15 @@ log = "0.4"
 # `alloc` feature supplies the `Zeroizing<Vec<u8>>` key wrapper.
 hmac = { version = "0.12", default-features = false }
 sha2 = { version = "0.10", default-features = false }
-# R3 (R311wx) — SHA3-256 for the §5.16 usrpwd auth method ONLY. zenoh's
+# R3 (R311wx) — SHA3-256 for the §5.16 usrpwd auth method. zenoh's
 # `zenoh_crypto::hmac::sign` is `Hmac::<Sha3_256>` (commons/zenoh-crypto/src/
 # hmac.rs:19), so usrpwd interop with zenohd requires SHA3 (the cookie path's
-# sha2 is a different hash). Optional + AP-only (pulled by access-extauth-usrpwd,
-# itself implying session-extauth); default-features = false keeps it no_std.
+# sha2 is a different hash). Optional; default-features = false keeps it no_std.
+# R311y816 — TWO consumers now, and the second is NOT AP-only: `codec-open-body`
+# pulls the same crate for `Shake128`, the XOF zenoh's `compute_sn` derives an
+# Open body's `initial_sn` with (src/initial_sn.rs). The MCU unicast acceptor
+# reaches that path, so the no_std flags above are load-bearing rather than
+# defensive. The former "usrpwd ONLY / AP-only" clause is retired here.
 sha3 = { version = "0.10", default-features = false, optional = true }
 # transport-compression — the per-batch lz4 codec, the SAME crate zenoh uses
 # (io/zenoh-transport lz4_flex 0.11), so a compression-negotiated wz<->zenohd
