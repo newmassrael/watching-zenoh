@@ -170,9 +170,31 @@ measure() {
     tail -3 /tmp/measure-build-$$.log
     rm -f /tmp/measure-build-$$.log
     local bin="$subdir/release/$BIN_NAME"
-    strip --strip-all "$bin"
+    # R311y822 — capture the DEFINED-SYMBOL SET, and strip a COPY rather than
+    # the linked artifact. Both halves were found by running this:
+    #
+    #   * the release profile sets no `strip`, so the linked binary already
+    #     carries a symbol table. Reading it costs nothing; re-linking an
+    #     unstripped build would have cost a whole second pass per lane.
+    #   * `strip --strip-all "$bin"` used to edit cargo's OWN output. cargo
+    #     hardlinks `release/$BIN_NAME` to `release/deps/<bin>-<hash>`, so the
+    #     strip poisoned the cached artifact, and a re-run that skipped the
+    #     relink then had NO symbols left to read. Measured: after one shard
+    #     run, `.baseline.syms` and `.minus-codec-close.syms` came back with 0
+    #     lines while every freshly-relinked lane had ~6300. A witness gate
+    #     reading that empty set would have judged "the symbol is absent" and
+    #     reported green, which is the R311y435 absence-reads-as-success shape.
+    #     Stripping a copy leaves the artifact cargo linked untouched.
+    #
+    # Demangled (`-C`) so the witness map below can be written in the Rust path
+    # a reader can find with grep, rather than in a v0 mangling that changes
+    # with the crate disambiguator.
+    local stripped="$subdir/release/$BIN_NAME.stripped"
+    nm -C --defined-only "$bin" > "$TARGET_DIR_BASE/.${label}.syms" 2>/dev/null || :
+    cp -f "$bin" "$stripped"
+    strip --strip-all "$stripped"
     local size
-    size=$(stat -c%s "$bin")
+    size=$(stat -c%s "$stripped")
     printf "  %-32s %10s bytes (%s)\n" \
         "$label:" "$size" "$(numfmt --to=iec --suffix=B "$size")"
     echo "$size" > "$TARGET_DIR_BASE/.${label}.size"
@@ -393,7 +415,37 @@ declare -A CODEC_DELTA_FLOOR=(
     [codec-keep-alive]=64      # measured 96 (R311y580, was 208 -> floor 128)
     [codec-init-body]=12000    # measured 14608
     [codec-open-body]=8000     # measured 10192
-    [codec-close]=500          # measured 600 (R311y437, was 1944 -> floor 1500)
+    # R311y822 — RE-PINNED 500 -> -1024, and the catalog-truthfulness claim for
+    # this codec MOVES to CODEC_ELISION_WITNESS below rather than being dropped.
+    # This is the second deliberate re-pin the block above prescribes, and it is
+    # the first one whose cause is the MEASUREMENT rather than the code.
+    #
+    # R311y820 red this lane at -40B hosted / -72B local, one round after it
+    # read +1792B. The per-symbol diff of the two unstripped builds says the
+    # codec is elided exactly as the catalog promises:
+    #
+    #       -86  wz_session_core::handshake_encode::encode_close  (86 -> 0)
+    #      -746  SessionFsmUnicastPolicy<SessionActionsBinding<..>>
+    #      -153  wz_session_core::inbound::parse_inbound_consuming
+    #       -77  core::ptr::drop_glue::<wz_session_core::inbound::InboundFrame>
+    #       -73  core::ptr::drop_glue::<wz_ap_demo::teardown::TokenDropped>
+    #       -72  <wz_session_core::inbound::InboundFrame>::ext_admission
+    #     +1547  wz_ap_demo::runner::run_demo::{closure#0}
+    #
+    # The last row is the whole story, and it is not a re-pull. `run_demo`'s
+    # async body is ONE 70KB symbol; R311y820 grew it (demo_session_init_params
+    # became fallible, so five call sites gained an error branch), which moved
+    # the inline boundary. In the minus-codec-close build the optimizer now
+    # pulls ~1.5KB of formerly out-of-line code INTO that closure and swamps
+    # the ~1.2KB the codec really removes. A whole-binary delta is a difference
+    # of two 2.7MB binaries whose INLINING differs, and on this axis that
+    # difference is an order of magnitude larger than the thing being measured.
+    #
+    # -1024 is chosen to sit below the observed swing rather than just below
+    # today's reading, because a floor re-pinned to -128 would red again the
+    # next time an unrelated edit moves that closure — and this lane is no
+    # longer where the codec's truthfulness is judged.
+    [codec-close]=-1024        # measured -72 (R311y822, was 600 -> floor 500)
     [codec-push]=8000          # measured 10072 (R311y435 revived this lane from SKIP)
     [codec-declare]=0          # lane SKIPs on this binary; floor unused until it is measurable
     [codec-request]=55000      # measured 66456
@@ -402,6 +454,42 @@ declare -A CODEC_DELTA_FLOOR=(
     [codec-scout]=-256         # measured -144: wz-codecs level only; negative is inline noise
     [codec-hello]=-256         # measured -144: same
 )
+
+# R311y822 — the ELISION WITNESS. A byte delta is a PROXY for the claim the
+# catalog actually makes ("turning codec-X off removes codec-X's code"); this
+# checks the claim itself, by name, and nothing the optimizer does to unrelated
+# call sites can move it.
+#
+# Why it exists: see the [codec-close] re-pin above. When a codec's real
+# contribution is smaller than the inline-boundary swing of the measurement
+# binary, the proxy stops resolving it — and a floor loose enough not to red
+# spuriously is a floor too loose to catch a re-pull. A codec in this position
+# keeps a byte floor as a coarse backstop and gets its truthfulness judged HERE
+# instead. This is the same move R311y436 made when it replaced one global
+# threshold with per-codec floors: keep every lane judged, do not let a lane
+# the number cannot serve fall back to "exempt".
+#
+# The witness is a symbol the codec OWNS — its encode entrypoint — which the
+# demo reaches on the baseline profile. It FAILS CLOSED in both directions:
+#
+#   * absent from the BASELINE -> FAIL. Either the symbol was renamed (fix the
+#     map) or the codec is no longer reachable from this binary at all, in
+#     which case this lane judges nothing and must say so rather than pass.
+#     This arm is also what makes an unreadable symbol table fatal: no `nm` on
+#     PATH, or a stripped artifact, yields an empty set, and an empty set fails
+#     the baseline check FIRST. A gate that cannot read its input must not
+#     report green (the same rule Layer C0 applies to python3).
+#   * still present in the MINUS build -> FAIL. That is the re-pull, which is
+#     the defect this whole layer exists to catch.
+#
+# NOT a population allowlist: a codec with no entry here is judged by its floor
+# exactly as before, so this can only ever add reject power. A codec whose
+# floor is re-pinned INTO the noise band, though, must arrive with a witness in
+# the same commit — that is what keeps the re-pin from being a silencing.
+declare -A CODEC_ELISION_WITNESS=(
+    [codec-close]="wz_session_core::handshake_encode::encode_close"
+)
+
 SKIP_THRESHOLD=${WZ_FOOTPRINT_NO_THRESHOLD:-0}
 if [[ "$SKIP_THRESHOLD" -ne 1 ]]; then
     fail=0
@@ -452,6 +540,37 @@ if [[ "$SKIP_THRESHOLD" -ne 1 ]]; then
             echo "    before/after numbers in the ledger entry -- never by" >&2
             echo "    lowering this constant on its own." >&2
             fail=1
+        fi
+        # R311y822 — the by-name half. Runs for every codec that pins a witness,
+        # INDEPENDENTLY of whether the byte floor above passed: the two answer
+        # different questions and a codec can clear one while failing the other.
+        witness="${CODEC_ELISION_WITNESS[$codec]-}"
+        if [[ -n "$witness" ]]; then
+            base_syms="$TARGET_DIR_BASE/.baseline.syms"
+            minus_syms="$TARGET_DIR_BASE/.minus-$codec.syms"
+            if ! grep -qF -- "$witness" "$base_syms" 2>/dev/null; then
+                echo "  WITNESS MISSING $codec ($witness not in the baseline)" >&2
+                echo "    The baseline binary does not define this codec's own" >&2
+                echo "    symbol, so the minus lane cannot show it disappearing" >&2
+                echo "    and this lane judges nothing. Either the symbol was" >&2
+                echo "    renamed (fix CODEC_ELISION_WITNESS), the codec stopped" >&2
+                echo "    being reachable from $BIN_NAME, or the symbol table" >&2
+                echo "    could not be read at all -- no nm on PATH, or a tree" >&2
+                echo "    whose lane dirs were stripped in place by the" >&2
+                echo "    pre-R311y822 script, which cargo will not relink." >&2
+                echo "    For the last one: rm -rf $TARGET_DIR_BASE" >&2
+                fail=1
+            elif grep -qF -- "$witness" "$minus_syms" 2>/dev/null; then
+                echo "  WITNESS RE-PULL $codec ($witness survives the exclusion)" >&2
+                echo "    A consumer still reaches this codec's code with the" >&2
+                echo "    feature excluded -- the catalog-truthfulness defect," >&2
+                echo "    measured by name rather than by byte delta. Declare" >&2
+                echo "    the missing implies edge, or gate the code to match" >&2
+                echo "    its callers; never drop the witness." >&2
+                fail=1
+            else
+                printf "  witness OK %-24s %s elided\n" "$codec:" "$witness"
+            fi
         fi
     done
     if [[ $fail -ne 0 ]]; then
