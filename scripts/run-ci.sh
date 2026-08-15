@@ -11283,6 +11283,34 @@ layer_e6h_adminspace_config_hotreload() {
         --test wz_storage_host_config_hotreload_pico -- --ignored --quiet --test-threads=1) || return 1
 }
 
+# ─── Layer E6i — adminspace-read GET gate on the STORAGE-HOST tier (vs pico) ────
+#
+# R311y812. The third and last sibling of E6g (peer) and E7g (router-hat). The
+# `adminspace-read` residual named `--storage-host` as the one shipping run-mode
+# that still hardcoded `read: true`; this lane is its foreign witness. It needs its
+# OWN binary because `adminspace-config-hotreload` (the only feature compiling the
+# run-mode) does NOT imply `adminspace-read` — E6h's build is therefore the wrong
+# one for this test, and running it there would resolve the permit through the
+# constant-true elided site and pass while proving nothing.
+#
+# The `wz_storage_host_` fn prefix is already in the default Layer E sweep's
+# `--skip` list, so the catch-all never runs this against an arbitrary-feature
+# binary (where `--storage-host` is rejected exit-2 and the readiness barrier would
+# time out); it runs ONLY here.
+#
+# SKIPs on the FOREIGN binary only (the pico CLI a machine may legitimately lack),
+# never on a wz one — the R311y265 rule; WZ_PICO_REQUIRE escalates that SKIP to a FAIL.
+layer_e6i_storage_host_adminspace_read_deny() {
+    (cd crates && cargo build -p wz-ap-demo \
+        --features adminspace-config-hotreload,adminspace-read --quiet) || return 1
+    if [[ ! -x target/zenoh-pico-cli/z_get ]]; then
+        _pico_cli_unavailable "Layer E6i (pico storage-host adminspace read-deny z_get)" || return 1
+        return 0
+    fi
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_storage_host_adminspace_read_deny_to_pico_zget -- --ignored --quiet) || return 1
+}
+
 # ─── Layer E7 — router-hat: RouterForwarder driven E2E (P4 §5.21 ACTIVATION) ───
 #
 # The dual-mesh RouterForwarder (the zenoh hat/router port) composed over real
@@ -12564,6 +12592,7 @@ run_layer E6e layer_e6e_adminspace_plugins || overall=1
 run_layer E6f layer_e6f_adminspace_metrics || overall=1
 run_layer E6g layer_e6g_adminspace_read || overall=1
 run_layer E6h layer_e6h_adminspace_config_hotreload || overall=1
+run_layer E6i layer_e6i_storage_host_adminspace_read_deny || overall=1
 run_layer E7 layer_e7_router_hat || overall=1
 run_layer E7b layer_e7b_router_connect_reconcile || overall=1
 run_layer E7c layer_e7c_router_adminspace_linkstate || overall=1

@@ -360,7 +360,7 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # The substrate is the point. `wz_router_hat_liveliness_history_pico_interop.rs`
 # grades the same observable on `--router-hat`, whose token plane is a different
 # atom (`routing-token-tables`) and was already built; the star router's was not.
-FOREIGN_ADJUDICATOR_LINKS = 833
+FOREIGN_ADJUDICATOR_LINKS = 834
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

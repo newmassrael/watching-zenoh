@@ -4933,6 +4933,43 @@ fn storage_host_volume_id(dir: Option<&str>) -> &'static str {
     }
 }
 
+/// R311y812 — read the LIVE adminspace permissions off the storage host's shared
+/// config, the per-GET resolve [`run_storage_host`]'s admin handler makes.
+///
+/// ONE place decides what a POISONED lock means, and the answer is DENY. A handler
+/// that panicked while holding this lock leaves the permit state unknown, and an
+/// admin gate whose input is unknown must not answer — the alternative, `unwrap`,
+/// panics a second time inside a queryable callback and denies nothing on the way.
+/// This is a wz-side concern with no upstream counterpart: zenoh reads its config
+/// through a lock that does not poison.
+#[cfg(feature = "adminspace-config-hotreload")]
+fn admin_permissions_of(
+    cfg: &std::sync::Arc<std::sync::Mutex<wz::runtime_tokio::config::WzConfig>>,
+) -> wz::runtime_tokio::adminspace::AdminSpacePermissions {
+    match cfg.lock() {
+        Ok(c) => c.admin_permissions(),
+        Err(_) => wz::runtime_tokio::adminspace::AdminSpacePermissions {
+            read: false,
+            write: false,
+        },
+    }
+}
+
+/// R311y812 — render the storage host's `config` admin leg off that same live
+/// instance, so the permit and the reported config come from one moment.
+///
+/// A poisoned lock yields the empty object rather than a panic, for the reason
+/// [`admin_permissions_of`] gives: the host reports nothing it cannot read.
+#[cfg(feature = "adminspace-config-hotreload")]
+fn admin_config_json_of(
+    cfg: &std::sync::Arc<std::sync::Mutex<wz::runtime_tokio::config::WzConfig>>,
+) -> String {
+    match cfg.lock() {
+        Ok(c) => c.to_admin_json(),
+        Err(_) => "{}".to_string(),
+    }
+}
+
 /// R311y277 (§5.23 `adminspace-config-hotreload` ACTIVATION) — the storage-HOSTING
 /// run-mode (`--storage-host <listen>`): the config-diff-driven storage lifecycle
 /// driven END-TO-END over the wire by a stock zenoh-pico client. A pico `z_put`
@@ -4995,6 +5032,26 @@ fn storage_host_volume_id(dir: Option<&str>) -> &'static str {
 /// `--storage-host-dir` puts hosted storages on a durable `FilesystemVolume`
 /// whose mirror is rebuilt on open, so a restarted host serves what the previous
 /// one stored; without it they ride the volatile `mem` volume and do not.
+///
+/// ## The adminspace READ permit (R311y812)
+///
+/// `--no-admin-read` denies this host's admin GET gate, closing the last
+/// `adminspace-read` residual: R311y780 gave the peer hosts a live permit source
+/// and R311y781 gave the router-hat one, leaving `--storage-host` the only
+/// shipping run-mode that hardcoded `read: true`. The residual named the choice —
+/// route this host through `Session::declare_adminspace_with_permissions_source`,
+/// or give the run-mode its own flag plus config — and this is the second. The
+/// first would have to widen the library declare to accept a DYNAMIC plugin
+/// registry, because this host's answer is `compiled_plugins_dyn(&version,
+/// storage_started)` plus the dlopen'd records; that is a library change made for
+/// one caller, where `--no-admin-read` is already one spelling meaning one thing
+/// across `--peer` and `--router-hat`.
+///
+/// The live-config invariant is the same as those two hosts; only the SHARING
+/// SHAPE differs. They hold an `Rc<RefCell<WzConfig>>` because their handler goes
+/// through the non-`Send` `register_local_queryable`; this host's
+/// [`Session::declare_queryable`] callback is `Send + 'static` (see above), so the
+/// same one-instance-read-per-request invariant needs an `Arc<Mutex<_>>`.
 #[cfg(feature = "adminspace-config-hotreload")]
 pub(crate) async fn run_storage_host(
     listen: &str,
@@ -5002,6 +5059,7 @@ pub(crate) async fn run_storage_host(
     plugin_paths: &[String],
     dynamic_volume: Option<&crate::args::DynamicVolumeArgs>,
     storage_gc: crate::args::StorageGcArgs,
+    no_admin_read: bool,
 ) -> io::Result<()> {
     use std::sync::atomic::Ordering::Relaxed;
 
@@ -5103,10 +5161,31 @@ pub(crate) async fn run_storage_host(
         p.push('/');
         p
     };
-    // The read-at-open config mirror the admin `config` leg answers from — built once
-    // from the handshake params (the witness reads only the plugins leg, but the
-    // answerer serves the whole admin surface, so it needs a config body).
-    let config_json = WzConfig::from_init_params(&params).to_admin_json();
+    // R311y812 — the config the admin `config` leg answers from is now HELD, not
+    // rendered and dropped: it is this host's live permit source, the third and last
+    // shipping run-mode to get one (peer R311y780, router-hat R311y781). The GET
+    // handler re-reads `admin_permissions()` off this one instance per request,
+    // which is the whole of zenoh's gate — it takes the config lock INSIDE the
+    // handler (`net/runtime/adminspace.rs:456-457`), so a runtime permission change
+    // reaches the very next request where a captured bool never could.
+    //
+    // `write: true` states this host's actual behaviour rather than the
+    // `PermissionsConf` default: its config-WRITE subscriber below permits writes
+    // unconditionally (it consults no `admin_write_permit`). Recording the truth
+    // here means a later round that wires the write gate finds the right seed
+    // instead of a `false` that never governed anything.
+    let admin_cfg = std::sync::Arc::new(std::sync::Mutex::new(
+        WzConfig::from_init_params(&params).with_admin_permissions(
+            wz::runtime_tokio::adminspace::AdminSpacePermissions {
+                read: !no_admin_read,
+                write: true,
+            },
+        ),
+    ));
+    log::info!(
+        "wz-ap-demo storage-host: adminspace read permit = {}",
+        wz::runtime_tokio::admin_read_permit(&admin_permissions_of(&admin_cfg))
+    );
     let version = env!("CARGO_PKG_VERSION").to_string();
     let locators = vec![format!("tcp/{local}")];
 
@@ -5267,8 +5346,7 @@ pub(crate) async fn run_storage_host(
         // ── admin GET queryable (Send+'static: captures storage_started + Strings) ──
         // Mirrors run_peer's --config-queryable handler (runner.rs answer path) but
         // swaps compiled_plugins -> compiled_plugins_dyn(&version, storage_started) so
-        // the plugins leg reports Started iff a storage is live. read:true (constraint:
-        // AdminAnswerCtx.read must be set; this host is permissive-read).
+        // the plugins leg reports Started iff a storage is live.
         let get_started = storage_started.clone();
         let get_zid = zid_hex.clone();
         let get_version = version.clone();
@@ -5276,20 +5354,31 @@ pub(crate) async fn run_storage_host(
         // so it owns its copy of the records rather than borrowing the outer Vec.
         let get_plugin_records = plugin_records.clone();
         let get_locators = locators.clone();
-        let get_config = config_json.clone();
+        // R311y812 — the shared LIVE config, not a rendered snapshot. `Arc` rather
+        // than the peer/router-hat `Rc` for the reason this function's doc gives:
+        // the callback is `Send + 'static`.
+        let get_cfg = admin_cfg.clone();
         let _admin_queryable: Option<Queryable> = match session.declare_queryable(
             queryable_key.clone(),
             QueryableOptions::default(),
             move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                // R311y812 — resolved PER GET off the shared config through the
+                // library `admin_read_permit` cfg site, exactly as the peer and
+                // router-hat hosts do. ONE read feeds the ctx below; with
+                // `adminspace-read` compiled out the site returns a constant true and
+                // the value here is ignored.
+                let permissions = admin_permissions_of(&get_cfg);
+                let admin_read = wz::runtime_tokio::admin_read_permit(&permissions);
+                // The `config` leg is rendered from the SAME live instance per GET
+                // (the peer host already did this), so the two things this handler
+                // reports about the config cannot come from different moments.
+                let config_json = admin_config_json_of(&get_cfg);
                 let ctx = AdminAnswerCtx {
                     zid_hex: &get_zid,
                     whatami: whatami_str,
                     version: &get_version,
                     locators: &get_locators,
-                    // As with the router-hat host: `--storage-host` parses no
-                    // read-permit flag and holds no shared WzConfig, so there is no
-                    // source to resolve. The gate is honoured, the source is missing.
-                    read: true,
+                    read: admin_read,
                     // R311y810 — the mesh-host `None`; see the peer host above.
                     stats: None,
                 };
@@ -5302,7 +5391,7 @@ pub(crate) async fn run_storage_host(
                 // admin surface, and the only difference visible on the wire is
                 // the `path` field (a real `.so` vs `"__static__"`).
                 plugins.extend(get_plugin_records.iter().cloned());
-                if answer_admin_query(view, out, &ctx, &[], &[], &plugins, &get_config)
+                if answer_admin_query(view, out, &ctx, &[], &[], &plugins, &config_json)
                     == wz::runtime_tokio::adminspace::AdminAnswerOutcome::DeniedRead
                 {
                     log::error!(

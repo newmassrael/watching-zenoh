@@ -676,6 +676,10 @@ fn main() -> ExitCode {
                 parse_repeated(rest, "--plugin"),
                 dynamic_volume,
                 storage_gc,
+                // R311y812 (§5.23 adminspace-read) — the SAME bare presence flag
+                // `--peer` and `--router-hat` parse, so one spelling means one thing
+                // across every run-mode that hosts an adminspace.
+                rest.iter().any(|a| a == "--no-admin-read"),
             )
         };
         #[cfg(not(feature = "adminspace-config-hotreload"))]
@@ -2034,6 +2038,7 @@ fn run_storage_host_mode(
     plugins: Vec<String>,
     dynamic_volume: Option<crate::args::DynamicVolumeArgs>,
     storage_gc: crate::args::StorageGcArgs,
+    no_admin_read: bool,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -2049,6 +2054,7 @@ fn run_storage_host_mode(
         &plugins,
         dynamic_volume.as_ref(),
         storage_gc,
+        no_admin_read,
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
