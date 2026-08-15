@@ -732,6 +732,18 @@ pub mod sync;
 /// §5.P "leaf crates first" guidance.
 pub mod runtime_impl;
 
+/// Subsystem runtime partitioning — five isolated tokio runtimes (`app`,
+/// `acc`, `tx`, `rx`, `net`), each with its own worker and blocking-thread
+/// counts, mirroring zenoh 1.5.0's `zenoh-runtime`.
+/// [`runtime_impl::TokioRuntime`] spawns onto whichever runtime is ambient, so
+/// a saturated receive path also starves the transmit path;
+/// [`runtime_pool::PartitionedRuntime`] is the same
+/// [`wz_runtime_core::Runtime`] trait bound to one named subsystem instead.
+/// [`runtime_pool::WzRuntime::block_in_place`] carries the sync-over-async
+/// bridge's fail-fast guards. Tuning goes through
+/// [`runtime_pool::RUNTIME_ENV`].
+pub mod runtime_pool;
+
 /// R311il — the engine-free unicast session FSM (the
 /// `SessionFsmUnicastState` / `SessionFsmUnicastEvent` enums, the
 /// `SessionFsmUnicastActions` host trait, and `SessionFsmUnicastPolicy<A>`)

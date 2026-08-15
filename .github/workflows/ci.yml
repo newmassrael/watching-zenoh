@@ -588,6 +588,16 @@ jobs:
         # would just make a summary number smaller.
         run: bash scripts/run-ci.sh --layer C1cb
 
+      - name: Layer C1cg — subsystem runtime partitioning
+        # R311y825 — zenoh isolates five runtimes (app/acc/tx/rx/net) with
+        # independently tunable worker and blocking-thread counts; wz spawned
+        # onto whichever runtime was ambient, so a saturated RX path starved
+        # TX. The whole `runtime_partition` target is count-guarded because no
+        # other lane selects it. Two of the fourteen are the PRE-fix
+        # measurement, kept green as the discriminator against a "partition"
+        # that hands every subsystem the same runtime.
+        run: bash scripts/run-ci.sh --layer C1cg
+
       - name: Layer C1cf — every crate builds with default features off
         # R311y821 — nothing local built a SHRUNKEN feature combination of a
         # changed crate, so a cfg-gated import behind an ungated signature was

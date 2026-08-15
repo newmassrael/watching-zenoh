@@ -246,6 +246,15 @@ pub struct TokioJoinHandle<T> {
 }
 
 impl<T> TokioJoinHandle<T> {
+    /// Wrap a tokio handle. The sibling
+    /// [`PartitionedRuntime`](crate::runtime_pool::PartitionedRuntime) spawns
+    /// through a named runtime's `Handle` rather than through `tokio::spawn`,
+    /// and returns the same wz-facing handle type; the wrapper's field stays
+    /// private so that is the only way in.
+    pub(crate) fn from_tokio(inner: tokio::task::JoinHandle<T>) -> Self {
+        Self { inner }
+    }
+
     /// R257 — abort the spawned task. Cooperative cancellation:
     /// the task receives a cancellation signal at its next yield
     /// point (every `.await` is a yield point under tokio). After

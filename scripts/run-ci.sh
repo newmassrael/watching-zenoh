@@ -5322,6 +5322,31 @@ layer_c1cb_cargo_test_init_ack_admission() {
         cargo test -p wz-runtime-tokio --test session_fsm_driver_loop --quiet || return 1
 }
 
+# ─── Layer C1cg — subsystem runtime partitioning (R311y825) ──
+#
+# zenoh isolates five runtimes -- Application, Acceptor, TX, RX, Net -- each
+# with its own worker and blocking-thread counts
+# (commons/zenoh-runtime/src/lib.rs:48-72, 103-127). wz spawned onto whichever
+# runtime was ambient, so a receive path that saturated its workers also
+# starved the transmit path, and an operator had no dial to separate them.
+#
+# COUNT-GUARDED because a sweep over every `_runci_guarded_test` in this
+# script reports ZERO that select `--test runtime_partition`: the target would
+# otherwise ride only Layer C1's unfiltered `--workspace` run, where a test
+# that stopped being compiled just makes a summary number smaller (the
+# R311y807 / R311y814 / R311y816 class -- a run selecting zero tests still
+# exits 0). This is the same reason C1cb guards a whole target.
+#
+# The guard is the WHOLE target at the default feature set. Two of the
+# fourteen are the PRE-fix measurement kept green on purpose -- one shared
+# runtime starving TX is what the partition exists to avoid, and it is the
+# discriminator against a pool that quietly hands every subsystem the same
+# runtime -- so a diff that drops them must be deliberate.
+layer_c1cg_cargo_test_runtime_partition() {
+    _runci_guarded_test C1cg 14 \
+        cargo test -p wz-runtime-tokio --test runtime_partition --quiet || return 1
+}
+
 # ─── Layer C1cf — every crate builds with its DEFAULT FEATURES OFF ──
 #
 # Named C1cf, not C1cc: C1cc..C1ce are the §5.27 api-compat-c cluster, and
@@ -12720,6 +12745,7 @@ run_layer C1own layer_c1own_own_space_witnesses || overall=1
 run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
 run_layer C1ca layer_c1ca_cargo_test_derived_initial_sn || overall=1
 run_layer C1cb layer_c1cb_cargo_test_init_ack_admission || overall=1
+run_layer C1cg layer_c1cg_cargo_test_runtime_partition || overall=1
 run_layer C1cf layer_c1cf_reduced_features || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1
 run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1
