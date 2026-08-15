@@ -240,6 +240,14 @@ pub mod locality;
 /// no_std + no_alloc clean (pure enum + helper); unconditional.
 pub mod reliability;
 
+/// R311y819 — the §2.5 RNG plugin-tier PORT: the shape a profile's entropy
+/// source has, so the per-handshake cookie / challenge nonces are drawn at
+/// construction on the MCU profile too and not left as deploy constants.
+/// Round 11 put RNG in the plugin tier for implementation multiplicity, so the
+/// no_std core declares the seam rather than naming a source. Pure no_std +
+/// no_alloc (one trait, one payload-free error); unconditional.
+pub mod entropy;
+
 /// A1a — modular sequence-number arithmetic (zenoh-pico
 /// `transport/utils.c` mirror): the `seq_num_res` ring masks + the
 /// half-window `precedes` ordering every RX SN gate shares. First

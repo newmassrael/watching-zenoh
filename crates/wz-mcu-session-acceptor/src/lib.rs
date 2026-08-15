@@ -76,7 +76,6 @@ pub use wz_session_core::driver_loop::ReassemblyDropReason;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
 use wz_session_core::link::BoxedLinkDriver;
-use wz_session_core::session_actions::SessionLinkActions;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
@@ -119,6 +118,42 @@ const MAX_ITERS: usize = 64;
 /// be installed at all (the slot's default denies). A deploy draws it per
 /// handshake from the §5.I intrinsics RNG.
 const FIXTURE_COOKIE_NONCE: u64 = 0x5A5A_5A5A_5A5A_5A5A;
+
+/// R311y819 — this e2e's [`EntropySource`], and the reason the fixed value
+/// above is now a FIXTURE rather than a deploy pattern.
+///
+/// Before this round the constant was handed straight to
+/// `refresh_cookie_nonce`, which meant the only MCU shape in the tree
+/// DEMONSTRATED installing a constant — and a board copying the demo inherited
+/// one cookie per zid for its whole service life. The constant now reaches the
+/// slot through the same port a real board plugs its TRNG into
+/// ([`wz_runtime_coop::session_runtime::new_session_actions`]), so what a
+/// deploy copies is the seam, and what it replaces is this type.
+///
+/// It deliberately does NOT satisfy the port's stated contract — the bytes are
+/// predictable — which is what the name says out loud. It is admissible here
+/// for the same reason `acceptor_params` fixes the signing key: this e2e
+/// asserts that the peer's echo of the REAL minted cookie passes the guard,
+/// a property that holds for any nonce value and needs a deterministic one to
+/// be reproducible on a frozen-clock board.
+struct FixtureEntropy;
+
+impl wz_session_core::entropy::EntropySource for FixtureEntropy {
+    fn try_fill_bytes(
+        &mut self,
+        buf: &mut [u8],
+    ) -> Result<(), wz_session_core::entropy::EntropyUnavailable> {
+        // Little-endian over the fixture constant, repeating — so a draw of 8
+        // bytes reproduces FIXTURE_COOKIE_NONCE exactly through the trait's
+        // fixed byte order, and the e2e's expectations are unchanged from the
+        // pre-port shape.
+        let src = FIXTURE_COOKIE_NONCE.to_le_bytes();
+        for (i, slot) in buf.iter_mut().enumerate() {
+            *slot = src[i % src.len()];
+        }
+        Ok(())
+    }
+}
 
 /// What the reactive peer sends after the handshake reaches `Established`, to
 /// exercise the acceptor's data plane.
@@ -318,21 +353,17 @@ pub fn run_acceptor_e2e<C: ClockSource, H: FnMut()>(
     // returns the non-injective `R::ActionsHandle<T>` (this profile's `Rc` —
     // the no-alloc M0 handle), so the `Rc<dyn _>` driver arg cannot back-infer
     // `R`. The `Rc` (not `Arc`) is exactly what lets this stack reach ARMv6-M.
-    let actions = SessionLinkActions::<CoopRuntime<C>, CoopTime<C>>::new_generic(
+    // R311y819 — through the MCU CONSTRUCTION SEAM, which draws the cookie
+    // nonce from the supplied [`EntropySource`], the way the AP's
+    // `new_session_actions` draws from `getrandom`. The former shape here was
+    // `new_generic` + a bare `refresh_cookie_nonce(FIXTURE_COOKIE_NONCE)`,
+    // which is what left the MCU profile with no production draw path at all.
+    let actions = wz::runtime_coop::session_runtime::new_session_actions(
         driver_sink,
         acceptor_params(),
         clock.clone(),
+        &mut FixtureEntropy,
     );
-    // R311y813 — the cookie nonce binds the acceptor's anti-amplification
-    // cookie to ONE handshake, and its default is fail-closed, so an acceptor
-    // that installs none admits no OpenSyn. A FIXED value here for the same
-    // reason `acceptor_params` fixes the signing key: this is the e2e fixture,
-    // and the verdict is that the peer's echo of the REAL minted cookie passes
-    // the guard — which it must do for any nonce. A deploy sources this from
-    // the §5.I intrinsics tier (`sce_intrinsics_runtime::rng`), the MCU
-    // counterpart of the AP `nonce_from_os_entropy` draw that
-    // `new_session_actions` performs at construction.
-    actions.refresh_cookie_nonce(FIXTURE_COOKIE_NONCE);
     let timeouts = SessionTimeouts::spec_defaults();
 
     // Open the handshake: the initiator's first move. The reactive peer

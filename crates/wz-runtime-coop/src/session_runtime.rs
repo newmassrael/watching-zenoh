@@ -165,6 +165,64 @@ pub fn install_own_mapping_space<C, T, S>(
     registry.set_own_mapping_space(actions.clone());
 }
 
+/// R311y819 — the MCU profile's SESSION-BUNDLE CONSTRUCTION SEAM, the exact
+/// counterpart of the AP's `wz_runtime_tokio::session_glue::new_session_actions`.
+///
+/// ## What it closes
+///
+/// R311y813 bound the acceptor's anti-amplification cookie to ONE handshake by
+/// folding a per-bundle nonce into the cookie MAC, and drew that nonce at the
+/// AP CONSTRUCTION seam rather than at each of the seven accept entry points —
+/// its own argument being that a caller cannot forget what construction does.
+/// The MCU profile had no such seam: it called
+/// [`SessionLinkActions::new_generic`] directly, which leaves the slot at its
+/// fail-closed `None`, and the one in-tree MCU deploy therefore installed a
+/// CONSTANT. A board built from that shape answers every handshake of its
+/// service life with one cookie per zid — the defect R311y813 closed on the AP
+/// side, alive on the profile whose e2e is a fixture. This seam gives the MCU
+/// the same "drawn at construction" property, so a board integrator supplies a
+/// TYPE (an [`EntropySource`]) instead of remembering a call.
+///
+/// ## Why the source is a parameter
+///
+/// §2.5 (`intrinsics-runtime--symbol-surface/2-5-rng`, ratified Round 11) puts
+/// RNG in the PLUGIN tier precisely because of implementation multiplicity —
+/// HW TRNG, ADC + Yarrow, `getrandom`, `arc4random`. There is no source this
+/// crate could name that is right for every board, so it takes one.
+///
+/// ## Fail-closed, and how you see it
+///
+/// An entropy failure leaves the slot at `None`, which is NOT "no cookie
+/// binding" but "admit no OpenSyn": the acceptor mints no HMAC cookie and every
+/// inbound OpenSyn is refused. That is deliberate — a fallback to an
+/// unbound cookie would be indistinguishable from a working binding. The AP
+/// seam reports the failure through `log::error!`; a no_std board has no such
+/// channel, so the observable here is
+/// [`SessionLinkActions::cookie_nonce`] returning `None`, and the bundle is
+/// still returned because an INITIATOR-role bundle never reads the slot and
+/// must not be denied a session over it.
+#[cfg(feature = "session-unicast")]
+pub fn new_session_actions<C, E>(
+    driver: Rc<dyn BoxedLinkDriver>,
+    params: wz_session_core::session_init_params::SessionInitParams,
+    clock: CoopTime<C>,
+    entropy: &mut E,
+) -> Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>
+where
+    C: ClockSource,
+    E: wz_session_core::entropy::EntropySource + ?Sized,
+{
+    let actions =
+        SessionLinkActions::<CoopRuntime<C>, CoopTime<C>>::new_generic(driver, params, clock);
+    // The draw, and the whole point of the seam. `Err` is dropped rather than
+    // surfaced: the slot's own `None` is the report (see the fail-closed note
+    // above), and there is no no_std channel to log through.
+    if let Ok(nonce) = entropy.try_next_u64() {
+        actions.refresh_cookie_nonce(nonce);
+    }
+    actions
+}
+
 /// LinkSink fixity. Mirrors the AP-side
 /// `tokio_session_runtime_link_sink_bounds_compile` regression assert,
 /// but pins the *opposite* auto-trait shape: the MCU sink is `Clone`
@@ -179,4 +237,131 @@ pub fn install_own_mapping_space<C, T, S>(
 fn _lwip_session_runtime_link_sink_is_clone<C: ClockSource>() {
     fn _assert_clone<T: Clone>() {}
     _assert_clone::<<CoopRuntime<C> as SessionRuntime>::LinkSink>();
+}
+
+#[cfg(all(test, feature = "session-unicast"))]
+mod cookie_nonce_draw_tests {
+    use super::*;
+    use alloc::vec;
+    use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
+    use wz_session_core::reliability::Reliability;
+    use wz_session_core::session_init_params::SessionInitParams;
+    use wz_session_core::signing_key::SigningKey;
+
+    /// The seam needs a link sink, and nothing about the draw touches it.
+    struct NullDriver;
+
+    impl BoxedLinkDriver for NullDriver {
+        fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {}
+        fn open_blocking(&self) {}
+        fn close_blocking(&self) {}
+    }
+
+    /// A frozen clock, so the bundle composes without a board.
+    #[derive(Clone, Copy)]
+    struct StoppedClock;
+
+    impl ClockSource for StoppedClock {
+        fn now_us(&self) -> u64 {
+            0
+        }
+    }
+
+    /// A board-shaped source: distinct bytes on every call, which is the
+    /// property a real TRNG has and the fixture constant does not.
+    struct Counting(u8);
+
+    impl EntropySource for Counting {
+        fn try_fill_bytes(&mut self, buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+            for slot in buf.iter_mut() {
+                *slot = self.0;
+                self.0 = self.0.wrapping_add(1);
+            }
+            Ok(())
+        }
+    }
+
+    /// A board whose TRNG is not ready — the fail-closed half.
+    struct Dry;
+
+    impl EntropySource for Dry {
+        fn try_fill_bytes(&mut self, _buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+            Err(EntropyUnavailable)
+        }
+    }
+
+    fn params() -> SessionInitParams {
+        SessionInitParams {
+            version: 0x05,
+            whatami: wz_session_core::WhatAmI::Peer,
+            zid: vec![0x0A, 0x0B, 0x0C, 0x0D],
+            seq_num_res: 2,
+            req_id_res: 2,
+            batch_size: 1024,
+            lease_ms: 10_000,
+            initial_sn: 0,
+            cookie: vec![0u8; 16],
+            cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect(">=32-byte key"),
+        }
+    }
+
+    fn build<E: EntropySource>(
+        entropy: &mut E,
+    ) -> Rc<SessionLinkActions<CoopRuntime<StoppedClock>, CoopTime<StoppedClock>>> {
+        let runtime = CoopRuntime::new(StoppedClock);
+        let clock = CoopTime::new(&runtime);
+        let driver: Rc<dyn BoxedLinkDriver> = Rc::new(NullDriver);
+        new_session_actions(driver, params(), clock, entropy)
+    }
+
+    #[test]
+    fn the_mcu_seam_installs_a_cookie_nonce_at_construction() {
+        // The headline. Before R311y819 the MCU profile called `new_generic`
+        // directly, which leaves the slot at `None`, and every deploy had to
+        // remember to install one itself.
+        let mut src = Counting(0);
+        let actions = build(&mut src);
+        assert!(
+            actions.cookie_nonce().is_some(),
+            "the construction seam must draw the nonce, so a deploy cannot forget it",
+        );
+    }
+
+    #[test]
+    fn two_bundles_take_two_nonces() {
+        // The replay property, and the one a constant defeats: a board built
+        // from the pre-R311y819 MCU shape answered every handshake of its
+        // service life with one cookie per zid.
+        let mut src = Counting(0);
+        let (a, b) = (build(&mut src), build(&mut src));
+        assert_ne!(
+            a.cookie_nonce(),
+            b.cookie_nonce(),
+            "two bundles off one source must not share a cookie nonce",
+        );
+    }
+
+    #[test]
+    fn the_drawn_nonce_is_the_sources_own_value() {
+        // Binds the seam to the port's fixed byte order rather than to
+        // "some value": a seam that hashed or truncated the draw would pass
+        // both assertions above.
+        let mut probe = Counting(0);
+        let expected = probe.try_next_u64().unwrap();
+        let mut src = Counting(0);
+        assert_eq!(build(&mut src).cookie_nonce(), Some(expected));
+    }
+
+    #[test]
+    fn a_dry_source_leaves_the_slot_fail_closed() {
+        // Not "no binding" but "admit no OpenSyn". A fallback to a constant
+        // here would be indistinguishable from a working binding, which is
+        // exactly the state this round found the MCU profile in.
+        let mut src = Dry;
+        assert_eq!(
+            build(&mut src).cookie_nonce(),
+            None,
+            "an entropy failure must leave the acceptor refusing, never guessing",
+        );
+    }
 }

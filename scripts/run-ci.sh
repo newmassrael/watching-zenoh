@@ -5760,8 +5760,25 @@ layer_c1n_mcu_session_acceptor() {
     _runci_guarded_test "C1n reassembly whole-frame" 1 \
         cargo test -p wz-mcu-session-acceptor --features reassembly \
         --test host_acceptor_e2e --quiet || return 1
+    # R311y819 — the LIBRARY under the e2e above: the MCU session-bundle
+    # construction seam that draws the anti-amplification cookie nonce, and the
+    # §2.5 entropy port it draws through. Both legs live HERE because this is
+    # the lane that owns the MCU session profile, and because neither crate had
+    # anywhere else to be watched: a mechanical sweep of all 224
+    # `_runci_guarded_test` invocations found `wz-runtime-coop` in ZERO of them
+    # (its only run-ci appearance is an unguarded `--features reassembly` leg in
+    # C1l, which does not arm `session-unicast` and therefore compiles these
+    # tests out), and every one of the 50 guarded `wz-session-core` lanes
+    # carries a module filter that excludes `entropy::`.
+    _runci_guarded_test "C1n coop cookie-nonce draw" 4 \
+        cargo test -p wz-runtime-coop --features session-unicast \
+        --lib cookie_nonce_draw_tests:: --quiet || return 1
+    _runci_guarded_test "C1n entropy port" 3 \
+        cargo test -p wz-session-core --lib entropy:: --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-mcu-session-acceptor --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-coop --features session-unicast \
+            --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-mcu-session-acceptor --features reassembly \
             --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-mcu-session-acceptor --features buffer-pool-session-rx-slim \
