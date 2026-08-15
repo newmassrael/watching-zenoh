@@ -664,6 +664,34 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        self.dispatch_messages_unclaimed(messages, peer_keyexpr_table, &|_| false);
+    }
+
+    /// [`Self::dispatch_messages`], skipping any `Declare` whose outer
+    /// `interest_id` a caller CLAIMS.
+    ///
+    /// A liveliness GET's replies are interest_id-tagged and match this
+    /// registry's keyexpr patterns just as an unsolicited declaration does, so
+    /// without this filter a snapshot fires every matching subscription: the
+    /// application is told a token "came alive" at the instant of its own
+    /// unrelated query, and the token enters the peer table as if it had been
+    /// announced. zenoh routes such a declare to the query and `return`s
+    /// before both (`zenoh/src/api/session.rs:2609-2632`).
+    ///
+    /// THE CLAIM IS PER-ID, NOT PER-SOLICITATION, and that distinction is the
+    /// whole of the rule: a HISTORY subscriber's own CURRENT replay is
+    /// interest_id-tagged too, and it must arrive. Only an id a pending GET
+    /// still owns is skipped.
+    ///
+    /// The two entry points share ONE body: `dispatch_messages` is this with a
+    /// closure that claims nothing.
+    #[cfg(feature = "alloc")]
+    pub fn dispatch_messages_unclaimed<'a>(
+        &mut self,
+        messages: &[NetworkMessage],
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        claimed: &dyn Fn(u64) -> bool,
+    ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // R311q — `peer_keyexpr_table` is only consumed inside the
         // cfg-gated `NetworkMessage::Declare` arm below; the
@@ -672,8 +700,13 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         // signature (signature-stability principle: dispatch_messages
         // keeps the same shape across builds so caller-side glue
         // need not feature-detect).
+        //
+        // `claimed` is in the same position and gets the same treatment
+        // rather than an `#[allow(unused_variables)]` on the parameter: a
+        // per-parameter allow would keep silencing the lint if a later
+        // change stopped reading it in the codec-declare build too.
         #[cfg(not(feature = "codec-declare"))]
-        let _ = peer_keyexpr_table;
+        let _ = (peer_keyexpr_table, claimed);
         for message in messages {
             match message {
                 // R311q — `NetworkMessage::Declare` is cfg-gated on
@@ -687,6 +720,14 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                 // the arm matches the wire reality.
                 #[cfg(feature = "codec-declare")]
                 NetworkMessage::Declare(decl) => {
+                    // The GET's claim: this declare answers a pending
+                    // liveliness snapshot, so it is not this registry's — not
+                    // its Put fan, and not its history-complete marker either
+                    // (a GET's DeclFinal terminates the GET, not a
+                    // subscriber's replay).
+                    if decl.interest_id.is_some_and(claimed) {
+                        continue;
+                    }
                     // R311y1 — `dispatch_declare` is the keyexpr-matched
                     // token FAN (DeclToken/UndeclToken -> Put/Delete, matched
                     // by the subscriber's keyexpr pattern). The DeclFinal
@@ -734,9 +775,21 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        self.dispatch_iteration_event_unclaimed(event, peer_keyexpr_table, &|_| false);
+    }
+
+    /// [`Self::dispatch_iteration_event`] with the claim filter of
+    /// [`Self::dispatch_messages_unclaimed`].
+    #[cfg(feature = "alloc")]
+    pub fn dispatch_iteration_event_unclaimed<'a>(
+        &mut self,
+        event: IterationEvent<'_>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        claimed: &dyn Fn(u64) -> bool,
+    ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages(messages, peer_keyexpr_table);
+            self.dispatch_messages_unclaimed(messages, peer_keyexpr_table, claimed);
         }
     }
 }

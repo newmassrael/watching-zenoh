@@ -369,7 +369,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # spawns ONE zenohd and therefore cannot grade the second — a single answer is
 # reported identically by a survey and by a first-answer lookup, measured by a
 # damage probe that leaves the one-router leg green and reds this one.
-FOREIGN_ADJUDICATOR_LINKS = 836
+# The solicited-declare routing round takes it to 838, in
+# wz_liveliness_get_zenohd_pico_interop.rs. ONE new leg,
+# `a_zenohd_answered_liveliness_get_does_not_fire_a_live_subscription`, TWO
+# links because the rule spans two planes: `liveliness-get` (the answer reaches
+# the requester) and `liveliness-subscriber` (and reaches nobody else). Its
+# claim is an ABSENCE, which is why the file's lane is count-guarded in the same
+# commit -- a de-selected absence assertion reports success by silence.
+FOREIGN_ADJUDICATOR_LINKS = 838
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

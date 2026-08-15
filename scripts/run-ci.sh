@@ -5023,9 +5023,19 @@ layer_c1f_cargo_test_reply() {
 # exercise (they only ever build the full union), so it is enumerated
 # here as the first explicit guard that the observer composes when a
 # consumer wires pub/sub + liveliness but no in-process queryable.
+# GUARDED WITH `+`, NOT A PINNED COUNT, and the shape is the point. This lane
+# runs a whole crate's suite rather than a filter, so an exact number would move
+# on every unrelated `wz-session-core` test and become a line people edit to make
+# a push go through -- the budget-line anti-pattern. `+` closes the one failure
+# this lane structurally cannot show on its own: the union below is the ONLY
+# guarded combination in this script that compiles the observer with BOTH
+# `liveliness-get` and `liveliness-subscriber` (the guarded-lane sweep counts 48
+# other `wz-session-core` lib lanes and none has the pair), so a future gate that
+# elided the whole module would be reported here as a silent success.
 layer_c1g_cargo_test_observer() {
+    _runci_guarded_test C1g + \
+        cargo test -p wz-session-core --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet || return 1
     (cd crates \
-        && cargo test -p wz-session-core --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet)
 }
 
@@ -10524,8 +10534,13 @@ layer_z_zenohd_interop() {
         _z_unavailable "zenoh-pico z_liveliness not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0
     fi
-    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_liveliness_get_zenohd_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+    # COUNT-GUARDED at 2: the file is a PAIR since the solicited-declare routing
+    # round, and the second leg's whole claim is an ABSENCE (a subscription that
+    # must NOT fire). An absence assertion that stops being selected reports
+    # success by silence, which is the one failure mode a bare `--test` target
+    # cannot show.
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_liveliness_get_zenohd_pico_interop -- --ignored --quiet --test-threads=1 || return 1
     # R311y354 — liveliness-history, same topology and same reason as the get above:
     # a history replay IS an Interest answer, and pico never answers one on unicast.
     # This file is a PAIR (history on / history off against an identical fixture) and

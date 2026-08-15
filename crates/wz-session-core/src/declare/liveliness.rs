@@ -172,9 +172,36 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        self.dispatch_messages_unclaimed(messages, peer_keyexpr_table, &|_| false);
+    }
+
+    /// [`Self::dispatch_messages`], skipping any `Declare` whose outer
+    /// `interest_id` a caller CLAIMS.
+    ///
+    /// The claim is upstream's early return, expressed as a filter. zenoh
+    /// answers a solicited `DeclareToken` into its pending liveliness query
+    /// and `return`s before it ever reaches the token observers
+    /// (`zenoh/src/api/session.rs:2609-2632`); wz's observer fans one message
+    /// into every registry in sequence, so the registry has to be told which
+    /// messages are not its business. `crate::declare::liveliness_get::
+    /// LivelinessGetRegistry::has_pending` is the only production claimant.
+    ///
+    /// The two entry points share ONE body: `dispatch_messages` is this with a
+    /// closure that claims nothing, so a build without `liveliness-get`
+    /// cannot drift from a build with it.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_messages_unclaimed<'a>(
+        &mut self,
+        messages: &[NetworkMessage],
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        claimed: &dyn Fn(u64) -> bool,
+    ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         for message in messages {
             if let NetworkMessage::Declare(decl) = message {
+                if decl.interest_id.is_some_and(claimed) {
+                    continue;
+                }
                 self.dispatch_declare(&decl.body, peer_keyexpr_table);
             }
         }
@@ -187,9 +214,21 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
+        self.dispatch_iteration_event_unclaimed(event, peer_keyexpr_table, &|_| false);
+    }
+
+    /// [`Self::dispatch_iteration_event`] with the claim filter of
+    /// [`Self::dispatch_messages_unclaimed`].
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_iteration_event_unclaimed<'a>(
+        &mut self,
+        event: IterationEvent<'_>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        claimed: &dyn Fn(u64) -> bool,
+    ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages(messages, peer_keyexpr_table);
+            self.dispatch_messages_unclaimed(messages, peer_keyexpr_table, claimed);
         }
     }
 }

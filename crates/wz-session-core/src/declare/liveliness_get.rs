@@ -224,6 +224,25 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
         self.pending.is_empty()
     }
 
+    /// Whether `interest_id` names a get this registry is still waiting on.
+    ///
+    /// THE ROUTING PREDICATE, and the reason it is public: zenoh decides who
+    /// owns an inbound solicited `Declare(DeclToken)` by asking exactly this
+    /// question of its `liveliness_queries` table, and answers the query and
+    /// nothing else when it is `true` (`zenoh/src/api/session.rs:2609-2632` —
+    /// the `return` is placed before the `remote_tokens` insert and before
+    /// `execute_subscriber_callbacks`). wz's observer fans one message into
+    /// every registry in sequence rather than running a chain of early
+    /// returns, so the same rule is expressed as a filter the liveliness
+    /// OBSERVER planes apply, reading this registry under a disjoint borrow.
+    ///
+    /// It is deliberately not `contains` or `is_pending`: what the caller
+    /// needs to know is whether a GET has a CLAIM on the declare, and an entry
+    /// that has already been finalized or swept no longer does.
+    pub fn has_pending(&self, interest_id: u64) -> bool {
+        self.pending.iter().any(|p| p.interest_id == interest_id)
+    }
+
     /// no-heap fire entry: deliver one alive-token reply to the pending
     /// get whose `interest_id` matches. The reply is synthesised as a
     /// [`ReplyKind::Put`] [`BorrowedReply`] whose `rid` is the

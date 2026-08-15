@@ -496,7 +496,26 @@ impl ApplicationLayerObserver {
         #[cfg(all(feature = "declare-queryable", not(feature = "query-queryable")))]
         self.remote_queryables
             .dispatch_iteration_event(event, peer_table);
-        #[cfg(feature = "liveliness-token")]
+        // A `Declare(DeclToken)` whose outer `interest_id` names a PENDING
+        // liveliness GET belongs to that GET and to no observer plane: zenoh
+        // answers the query and returns before the `remote_tokens` insert and
+        // before `execute_subscriber_callbacks`
+        // (`zenoh/src/api/session.rs:2609-2632`). wz fans one message into
+        // every registry in sequence rather than running early returns, so the
+        // rule rides in as a predicate over the sibling `liveliness_gets`
+        // field, taken under a disjoint borrow — the same shape R311y797 uses
+        // to hand the matching planes their local half.
+        //
+        // The predicate is per-ID, not per-solicitation. A history
+        // subscriber's own CURRENT replay is interest_id-tagged too and must
+        // still arrive; only an id a GET still owns is skipped.
+        #[cfg(all(feature = "liveliness-token", feature = "liveliness-get"))]
+        {
+            let gets = &self.liveliness_gets;
+            self.liveliness
+                .dispatch_iteration_event_unclaimed(event, peer_table, &|id| gets.has_pending(id));
+        }
+        #[cfg(all(feature = "liveliness-token", not(feature = "liveliness-get")))]
         self.liveliness.dispatch_iteration_event(event, peer_table);
         // R283 — declarer-side: stage an interest-response for each
         // inbound non-final liveliness Interest. Reads peer_table for the
@@ -510,7 +529,17 @@ impl ApplicationLayerObserver {
         #[cfg(all(feature = "liveliness-token", feature = "alloc"))]
         self.local_tokens
             .dispatch_iteration_event(event, peer_table, &mut self.pending_declares);
-        #[cfg(feature = "liveliness-subscriber")]
+        // Same claim, the other observer plane. This is the half with STATE:
+        // the registry's peer token table is wz's `remote_tokens`, so an
+        // unfiltered fan would also record a GET's answer as if the peer had
+        // announced it.
+        #[cfg(all(feature = "liveliness-subscriber", feature = "liveliness-get"))]
+        {
+            let gets = &self.liveliness_gets;
+            self.liveliness_subscribers
+                .dispatch_iteration_event_unclaimed(event, peer_table, &|id| gets.has_pending(id));
+        }
+        #[cfg(all(feature = "liveliness-subscriber", not(feature = "liveliness-get")))]
         self.liveliness_subscribers
             .dispatch_iteration_event(event, peer_table);
         // liveliness-get — fan inbound solicited Declare(DeclToken/DeclFinal)
@@ -947,7 +976,8 @@ mod tests {
     #[cfg(any(
         feature = "pubsub-put",
         feature = "declare-subscriber",
-        feature = "query-queryable"
+        feature = "query-queryable",
+        feature = "liveliness-get"
     ))]
     mod fixtures {
         use crate::driver_loop::DriverLoopOutcome;
@@ -1468,6 +1498,209 @@ mod tests {
             observer.pending_final_rids.clear();
             assert_eq!(observer.pending_reply_count(), 0);
             assert_eq!(observer.pending_final_count(), 0);
+        }
+    }
+
+    /// The SOLICITED-DECLARE routing rule: a `Declare(DeclToken)` whose outer
+    /// `interest_id` names a pending liveliness GET belongs to that GET and to
+    /// nothing else.
+    ///
+    /// zenoh states it as an early return — `if let Some(query) =
+    /// state.liveliness_queries.get(&interest_id) { query.callback.call(reply);
+    /// return; }` (`zenoh/src/api/session.rs:2609-2632`, the zenoh-1.5.0
+    /// `49c8a53` tree) — placed BEFORE the `remote_tokens` insert and before
+    /// `execute_subscriber_callbacks`. wz's observer fans one message into
+    /// every registry in sequence, so the rule has to be expressed as a filter
+    /// on the subscriber plane instead of as control flow.
+    ///
+    /// These three tests are one claim in three positions: the GET's reply is
+    /// the requester's alone, the SUBSCRIBER's own solicited replies still
+    /// arrive, and an unsolicited token still arrives. Only the middle one
+    /// distinguishes "route by whether a pending GET owns this id" from the
+    /// cruder "drop every solicited declare".
+    #[cfg(all(
+        feature = "liveliness-get",
+        feature = "liveliness-subscriber",
+        feature = "alloc"
+    ))]
+    mod solicited_declare_routing {
+        use super::fixtures::make_outcome;
+        use super::*;
+        use crate::declare::liveliness_sample::BoxedLivelinessSampleSink;
+        use crate::network_message::NetworkMessage;
+        use alloc::boxed::Box;
+        use alloc::vec;
+        use wz_session_core_test_support::{
+            decl_token_nonlocal, declare_envelope_decl_token,
+            declare_envelope_decl_token_with_interest,
+        };
+
+        /// The subscriber's interest id. Distinct from the GET's on purpose:
+        /// both planes mint from the same `alloc_next_interest_id` counter in
+        /// production, so a rule that keyed on anything but "is this id a
+        /// pending GET" would confuse them.
+        const SUB_INTEREST: u64 = 1;
+        /// The pending GET's interest id.
+        const GET_INTEREST: u64 = 9;
+
+        struct Fixture {
+            observer: ApplicationLayerObserver,
+            sub_fired: Arc<AtomicUsize>,
+            get_fired: Arc<AtomicUsize>,
+        }
+
+        /// One liveliness subscriber on `k/**` and one pending GET, so every
+        /// token below matches BOTH planes by keyexpr. The routing rule is the
+        /// only thing that can tell them apart.
+        fn fixture() -> Fixture {
+            let mut observer = ApplicationLayerObserver::new();
+            let sub_fired = Arc::new(AtomicUsize::new(0));
+            let s = sub_fired.clone();
+            observer
+                .liveliness_subscribers
+                .register(
+                    SUB_INTEREST,
+                    "k/**",
+                    false,
+                    BoxedLivelinessSampleSink::new(move |_sample| {
+                        s.fetch_add(1, Ordering::SeqCst);
+                    }),
+                )
+                .expect("register the liveliness subscriber");
+            let get_fired = Arc::new(AtomicUsize::new(0));
+            let g = get_fired.clone();
+            observer
+                .liveliness_gets
+                .register_get(
+                    GET_INTEREST,
+                    None,
+                    move |_reply| {
+                        g.fetch_add(1, Ordering::SeqCst);
+                    },
+                    |_id| {},
+                )
+                .expect("register the pending liveliness get");
+            Fixture {
+                observer,
+                sub_fired,
+                get_fired,
+            }
+        }
+
+        /// `id: 0` with a suffix is a literal keyexpr — no peer mapping needed,
+        /// so these tests measure the ROUTING and not a resolution accident.
+        fn token(id: u64, keyexpr: &str) -> wz_codecs::decl_token::DeclTokenOwned {
+            decl_token_nonlocal(id, 0, Some(keyexpr))
+        }
+
+        /// THE DEFECT. A GET's reply reaches the requester AND the liveliness
+        /// subscribers, so an application that runs a snapshot while holding a
+        /// subscription is told a token "came alive" at the instant of its own
+        /// unrelated query. zenoh returns before the subscriber callbacks.
+        #[test]
+        fn a_get_reply_is_the_requesters_alone() {
+            let mut f = fixture();
+            f.observer
+                .dispatch_event(IterationEvent::Poll(&make_outcome(vec![
+                    NetworkMessage::Declare(Box::new(declare_envelope_decl_token_with_interest(
+                        token(5, "k/a"),
+                        GET_INTEREST,
+                    ))),
+                ])));
+
+            assert_eq!(
+                f.get_fired.load(Ordering::SeqCst),
+                1,
+                "the snapshot's requester must receive its reply"
+            );
+            assert_eq!(
+                f.sub_fired.load(Ordering::SeqCst),
+                0,
+                "and the liveliness subscriber must NOT: this token was solicited \
+                 by a GET, not announced to the subscription"
+            );
+        }
+
+        /// The paired positive that keeps the rule from being "drop every
+        /// solicited declare": a history subscriber's OWN CURRENT replay is
+        /// also interest_id-tagged, and it must arrive.
+        #[test]
+        fn a_subscribers_own_solicited_replay_still_arrives() {
+            let mut f = fixture();
+            f.observer
+                .dispatch_event(IterationEvent::Poll(&make_outcome(vec![
+                    NetworkMessage::Declare(Box::new(declare_envelope_decl_token_with_interest(
+                        token(6, "k/b"),
+                        SUB_INTEREST,
+                    ))),
+                ])));
+
+            assert_eq!(
+                f.sub_fired.load(Ordering::SeqCst),
+                1,
+                "a solicited declare whose id is NOT a pending GET is the \
+                 subscriber's replay"
+            );
+            assert_eq!(
+                f.get_fired.load(Ordering::SeqCst),
+                0,
+                "and it is not an answer to the snapshot"
+            );
+        }
+
+        /// The SECOND observer plane. `ApplicationLayerObserver::liveliness` is
+        /// the un-filtered token observer — no keyexpr pattern, no table — and
+        /// it fires on every inbound `DeclToken` the fan hands it. It needs its
+        /// own witness rather than riding the subscriber tests: the two planes
+        /// are separate registries reached by separate calls, and a fix applied
+        /// to one is invisible to the other's tests.
+        #[cfg(feature = "liveliness-token")]
+        #[test]
+        fn a_get_reply_does_not_reach_the_generic_token_observer() {
+            use std::sync::Mutex;
+            let mut f = fixture();
+            let seen: Arc<Mutex<alloc::vec::Vec<alloc::string::String>>> =
+                Arc::new(Mutex::new(alloc::vec::Vec::new()));
+            let s = seen.clone();
+            f.observer.liveliness.on_token_declared(move |d| {
+                use alloc::string::ToString;
+                s.lock().unwrap().push(d.keyexpr().to_string());
+            });
+
+            f.observer
+                .dispatch_event(IterationEvent::Poll(&make_outcome(vec![
+                    // Claimed by the GET.
+                    NetworkMessage::Declare(Box::new(declare_envelope_decl_token_with_interest(
+                        token(5, "k/a"),
+                        GET_INTEREST,
+                    ))),
+                    // Unsolicited — the control, in the SAME batch, so a fan
+                    // that stopped dispatching altogether cannot pass.
+                    NetworkMessage::Declare(Box::new(declare_envelope_decl_token(token(7, "k/c")))),
+                ])));
+
+            use alloc::string::ToString;
+            assert_eq!(
+                *seen.lock().unwrap(),
+                vec!["k/c".to_string()],
+                "the GET's answer is not a declaration to observe; the \
+                 unsolicited one beside it still is"
+            );
+            assert_eq!(f.get_fired.load(Ordering::SeqCst), 1);
+        }
+
+        /// The unsolicited arm, unchanged: a peer declaring a token live with
+        /// no interest_id at all is the subscription's ordinary traffic.
+        #[test]
+        fn an_unsolicited_token_still_reaches_the_subscriber() {
+            let mut f = fixture();
+            f.observer
+                .dispatch_event(IterationEvent::Poll(&make_outcome(vec![
+                    NetworkMessage::Declare(Box::new(declare_envelope_decl_token(token(7, "k/c")))),
+                ])));
+
+            assert_eq!(f.sub_fired.load(Ordering::SeqCst), 1);
+            assert_eq!(f.get_fired.load(Ordering::SeqCst), 0);
         }
     }
 }

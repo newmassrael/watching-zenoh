@@ -202,3 +202,152 @@ fn wz_liveliness_get_decodes_a_pico_token_answered_by_zenohd() {
         );
     }
 }
+
+/// A SNAPSHOT IS NOT AN ANNOUNCEMENT: the same topology, with wz ALSO holding a
+/// liveliness subscription, and the get's answer must reach the requester
+/// WITHOUT firing that subscription.
+///
+/// zenoh routes a solicited `DeclareToken` to the pending liveliness query and
+/// `return`s before the `remote_tokens` insert and before
+/// `execute_subscriber_callbacks` (`zenoh/src/api/session.rs:2609-2632`, the
+/// 1.5.0 `49c8a53` tree). wz's observer fans one message into every registry in
+/// sequence, so until the round that added this it fired both.
+///
+/// WHY THIS LEG EXISTS RATHER THAN THE UNIT TESTS ALONE. The observer-tier
+/// tests construct the collision directly; what they cannot say is whether a
+/// REAL exchange produces it, and there was a specific reason to doubt it —
+/// wz's subscriber registry is first-declaration-wins (R311y769), so if the
+/// answer carried a token id the subscription already knew, the duplicate would
+/// have been swallowed and the defect would have been fixture-only. It is not:
+/// the subscription is FUTURE-only (`build_interest_liveliness_subscriber`
+/// passes `current = history`, and `--liveliness-subscribe-history` is absent
+/// here), so a token declared BEFORE wz connected is one this subscriber has
+/// never seen, and the get's answer is its first sighting.
+///
+/// THE ORDERING IS THE FIXTURE'S PRECONDITION AND IT IS GATED, not assumed:
+/// pico's banner is waited on before wz is spawned at all, so the token
+/// predates both the subscription and the get.
+///
+/// The GET reply is the positive control for the absence assertion. Without it
+/// "no sample line" would also pass on a run where nothing reached wz at all.
+///
+/// The name carries `zenohd` because libtest's `--skip` matches the FUNCTION
+/// name and Layer E's default sweep skips on that token; Layer C0 refused this
+/// leg without it, which is the gate doing exactly its job.
+// wz-proves: liveliness-get wz->zenohd
+// wz-proves: liveliness-subscriber wz->zenohd
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo + zenohd + zenoh-pico z_liveliness CLI); Layer Z runs via --ignored"]
+fn a_zenohd_answered_liveliness_get_does_not_fire_a_live_subscription() {
+    let demo = wz_ap_demo_binary();
+    let z_liveliness = zenoh_pico_cli_binary("z_liveliness");
+    let filter = "demo/**";
+    let pico_token = "demo/token/pico";
+
+    let (mut zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
+        tempfile::tempfile().expect("tempfile for readiness probe stderr")
+    });
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+
+    let pico_stdout = tempfile::tempfile().expect("tempfile for z_liveliness stdout");
+    let pico_stdout_writer = pico_stdout.try_clone().expect("dup z_liveliness handle");
+    let mut pico_stdout_reader = pico_stdout;
+    let mut pico_child = ChildGuard::wrap(
+        "z_liveliness token holder (zenoh-pico)",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_liveliness)
+            .args(["-k", pico_token, "-e", &endpoint, "-m", "client"])
+            .stdout(Stdio::from(pico_stdout_writer))
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn z_liveliness via stdbuf"),
+    );
+
+    let declared = wait_for_substring(
+        &mut pico_stdout_reader,
+        "Press CTRL-C to undeclare liveliness token",
+        Duration::from_secs(10),
+    );
+    if let Err(captured) = &declared {
+        let _ = pico_child.child_mut().kill();
+        let _ = zenohd.child_mut().kill();
+        panic!(
+            "z_liveliness never declared its token within 10s, so the token does not \
+             predate wz and this test's whole precondition is unmet.\n\
+             --- captured z_liveliness stdout ---\n{captured}"
+        );
+    }
+
+    // BOTH planes on one session, which is the collision. `--liveliness-subscribe`
+    // without `--liveliness-subscribe-history` is FUTURE-only, so this
+    // subscription has no legitimate claim on a token declared before it existed.
+    let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
+    let demo_stderr_writer = demo_stderr.try_clone().expect("dup demo stderr handle");
+    let mut demo_stderr_reader = demo_stderr;
+    let mut demo_child = ChildGuard::wrap(
+        "wz-ap-demo (--connect zenohd --liveliness-subscribe --liveliness-get)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--liveliness-subscribe")
+            .arg(filter)
+            .arg("--liveliness-get")
+            .arg(filter)
+            .arg("--liveliness-get-after-ms")
+            .arg(GET_HOLD_MS.to_string())
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(demo_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --liveliness-subscribe --liveliness-get"),
+    );
+
+    let expected = format!("LIVELINESS GET REPLY filter='{filter}' keyexpr='{pico_token}'");
+    let replied = wait_for_substring(&mut demo_stderr_reader, &expected, Duration::from_secs(20));
+    let finaled = wait_for_substring(
+        &mut demo_stderr_reader,
+        "LIVELINESS GET FINAL",
+        Duration::from_secs(10),
+    );
+
+    let demo_captured = read_captured(&mut demo_stderr_reader);
+    let pico_captured = read_captured(&mut pico_stdout_reader);
+    let _ = demo_child.child_mut().kill();
+    let _ = demo_child.child_mut().wait();
+    let _ = pico_child.child_mut().kill();
+    let _ = pico_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    if let Err(captured) = &replied {
+        panic!(
+            "wz's liveliness snapshot never decoded pico's token, so the absence \
+             assertion below would be vacuous.\n\
+             --- captured wz-ap-demo stderr ---\n{captured}\n\
+             --- captured z_liveliness stdout ---\n{pico_captured}"
+        );
+    }
+    if let Err(captured) = &finaled {
+        panic!(
+            "wz decoded the token reply but the get never finalled.\n\
+             --- captured wz-ap-demo stderr ---\n{captured}"
+        );
+    }
+
+    // THE CLAIM. The reply above proves the token reached wz; this proves it
+    // reached the REQUESTER ONLY. A sample line naming the same keyexpr is the
+    // subscription being fired by somebody else's answer.
+    let sample_lines: Vec<&str> = demo_captured
+        .lines()
+        .filter(|l| l.contains("LIVELINESS SAMPLE") && l.contains(pico_token))
+        .collect();
+    assert!(
+        sample_lines.is_empty(),
+        "the get's answer fired the live subscription: a FUTURE-only subscriber \
+         was told '{pico_token}' came alive, and the only thing that carried it \
+         was wz's own snapshot.\n--- offending lines ---\n{}\n\
+         --- full demo stderr ---\n{demo_captured}",
+        sample_lines.join("\n")
+    );
+}
