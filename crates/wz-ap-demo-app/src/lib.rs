@@ -108,7 +108,27 @@ pub fn register_bindings(board: &mut SwitchboardRegistry) {
 #[cfg(test)]
 mod tests {
     use super::temp_payload::TempPayload;
-    use super::{dispatch_switchboard, new_engine, SensorMonitorState};
+    use super::{
+        new_engine, Engine, SensorMonitorInjector, SensorMonitorPolicy, SensorMonitorState,
+    };
+
+    /// R311y824 — construct the value-capable port at the dispatch site, which
+    /// is the shape `SwitchboardRegistry::dispatch` uses and, since this round,
+    /// the shape the generated static dispatch takes too. It used to be handed
+    /// the `&mut Engine` directly; that was the per-profile divergence the
+    /// `wz_session_core::switchboard` module docs deny.
+    ///
+    /// Deliberately named for the generated function it wraps, so the case
+    /// bodies read as they did and the one thing that moved — who owns the
+    /// engine borrow at the ingress — is stated once, here.
+    fn dispatch_switchboard(
+        keyexpr: &str,
+        payload: &[u8],
+        engine: &mut Engine<SensorMonitorPolicy>,
+    ) -> usize {
+        let mut injector = SensorMonitorInjector::new(engine);
+        super::dispatch_switchboard(keyexpr, payload, &mut injector)
+    }
 
     // The temp_payload codec's wire form: a single big-endian u16 (centidegrees).
     // A real publisher encodes via this same codec, so the test runs a true

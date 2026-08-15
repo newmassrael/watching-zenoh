@@ -5,10 +5,10 @@
 // (Engine::raise_external_by_name); value rows decode the wire payload with
 // a forge codec and inject the typed _event.data via the generated
 // <Machine>Inject::raise_<event> seam. The per-event decode body is emitted
-// ONCE as an `inject_<event>` helper, shared by:
-//   - `dispatch_switchboard` -- the closed no-heap MCU static match;
-//   - `SensorMonitorInjector` -- the EventInjector the AP dynamic
-//     SwitchboardRegistry threads (one guard semantics across profiles).
+// ONCE as an `inject_<event>` helper, reached by BOTH profiles through
+// `SensorMonitorInjector::inject_value` -- the MCU static match and the
+// AP dynamic SwitchboardRegistry take the same EventInjector port, so
+// there is one ingress seam and one guard semantics, not two.
 // Regenerate by editing the source wz-switchboard.yaml and rebuilding.
 
 use sensor_monitor::SensorMonitorInject;
@@ -72,23 +72,31 @@ impl wz_session_core::switchboard::EventInjector for SensorMonitorInjector<'_> {
 /// for machine "sensor_monitor", injecting each matched domain event in
 /// declaration order. Returns the number of events injected. `payload`
 /// is the inbound sample's wire bytes (read only by value rows).
+///
+/// Takes the [`EventInjector`] port, exactly as the signal-only emit
+/// does: the two profiles differ in the `payload` parameter and in
+/// nothing else. Pass a `SensorMonitorInjector` (above) to reach
+/// the value rows; any signal-only injector takes the defaulted
+/// `inject_value` and simply declines them.
+///
+/// [`EventInjector`]: wz_session_core::switchboard::EventInjector
 pub fn dispatch_switchboard(
     target_keyexpr: &str,
     payload: &[u8],
-    engine: &mut ::sce_rust_runtime::Engine<sensor_monitor::SensorMonitorPolicy>,
+    injector: &mut dyn wz_session_core::switchboard::EventInjector,
 ) -> usize {
     let mut injected = 0usize;
 
     // demo/sensor/temp -> temp_update (value via temp_payload)
     if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&["demo", "sensor", "temp"], target_keyexpr)
-        && inject_temp_update(payload, engine)
+        && injector.inject_value("temp_update", payload)
     {
         injected += 1;
     }
 
     // demo/sensor/reset -> reset (signal)
     if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&["demo", "sensor", "reset"], target_keyexpr) {
-        engine.raise_external_by_name("reset", "");
+        injector.inject("reset", "");
         injected += 1;
     }
     injected

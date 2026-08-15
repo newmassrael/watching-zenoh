@@ -590,10 +590,15 @@ pub struct GenInput<'a> {
 ///  - **value** (codec present) — decodes the wire payload and injects a typed
 ///    `_event.data` via the machine's generated `<Machine>Inject` seam.
 ///
-/// A switchboard with at least one value row emits a dispatch over
-/// `&mut Engine<{Machine}Policy>` (the typed path needs the concrete engine);
-/// a signal-only switchboard keeps the `&mut dyn EventInjector` port (no SCE
-/// runtime dependency), byte-identical to the gc-3a shape.
+/// BOTH shapes dispatch over the `&mut dyn EventInjector` port; a value-bearing
+/// switchboard additionally takes the sample's `payload` bytes, and that one
+/// parameter is the whole difference between the two emits. R311y824 corrected
+/// this: the value shape used to take `&mut Engine<{Machine}Policy>` on the
+/// claim that "the typed path needs the concrete engine", which was never true
+/// — the emitted `{Machine}Injector` holds that borrow and resolves the value
+/// rows through `inject_value`. The old shape put the profile that runs on the
+/// real board on the far side of the seam that `wz_session_core::switchboard`
+/// says both profiles share.
 ///
 /// Validation per binding: machine pairing (whole-spec); event accepted as
 /// external input (W3C 3.12.1); for a value row additionally — event in
@@ -655,18 +660,14 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
         match &binding.codec {
             // ---- signal row ------------------------------------------------
             None => {
-                let inject = if has_value {
-                    // Value-bearing dispatch threads the concrete engine.
-                    format!(
-                        "engine.raise_external_by_name({}, \"\");",
-                        rust_string_literal(&binding.event)
-                    )
-                } else {
-                    format!(
-                        "injector.inject({}, \"\");",
-                        rust_string_literal(&binding.event)
-                    )
-                };
+                // R311y824 — ONE spelling for both profiles. This used to
+                // branch on `has_value` and emit `engine.raise_external_by_name`
+                // into the value-bearing dispatch, which is what made the MCU
+                // ingress bypass the port the module docs say both paths share.
+                let inject = format!(
+                    "injector.inject({}, \"\");",
+                    rust_string_literal(&binding.event)
+                );
                 arms.push_str(&format!(
                     "\n    // {canonical} -> {event} (signal)\n    \
                      if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[{chunks}], target_keyexpr) {{\n        \
@@ -731,21 +732,25 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
                 let helper = format!("inject_{snake}");
                 let codec_struct =
                     format!("{}::{}", codec.module_path, to_pascal_case(&codec.name));
-                // The static-match arm is now a call to the shared per-event
-                // helper (so the decode body lives in exactly one place — see
-                // `value_helpers` below). `&&` short-circuits: the helper (which
-                // decodes + injects) runs only on a keyexpr match, and the row
-                // counts only when the bytes decode.
+                // R311y824 — the arm calls the PORT's value shape, which
+                // resolves the event name to the same shared `inject_<event>`
+                // helper inside `{Machine}Injector::inject_value`. It used to
+                // call that helper directly with the concrete engine, which is
+                // the divergence this closes: the decode body stayed one SSOT
+                // either way, but only one profile actually went through the
+                // seam. `&&` short-circuits as before — the decode runs only on
+                // a keyexpr match, and the row counts only when the bytes
+                // decode, which is what `inject_value` returns.
                 arms.push_str(&format!(
                     "\n    // {canonical} -> {event} (value via {codec})\n    \
                      if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[{chunks}], target_keyexpr)\n        \
-                     && {helper}(payload, engine)\n    {{\n        \
+                     && injector.inject_value({event_lit}, payload)\n    {{\n        \
                      injected += 1;\n    }}\n",
                     canonical = canonical,
                     event = binding.event,
                     codec = codec.name,
                     chunks = chunks,
-                    helper = helper,
+                    event_lit = rust_string_literal(&binding.event),
                 ));
 
                 // Emit the helper + injector value arm once per unique event.
@@ -831,10 +836,10 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
              // (Engine::raise_external_by_name); value rows decode the wire payload with\n\
              // a forge codec and inject the typed _event.data via the generated\n\
              // <Machine>Inject::raise_<event> seam. The per-event decode body is emitted\n\
-             // ONCE as an `inject_<event>` helper, shared by:\n\
-             //   - `dispatch_switchboard` -- the closed no-heap MCU static match;\n\
-             //   - `{machine_pascal}Injector` -- the EventInjector the AP dynamic\n\
-             //     SwitchboardRegistry threads (one guard semantics across profiles).\n\
+             // ONCE as an `inject_<event>` helper, reached by BOTH profiles through\n\
+             // `{machine_pascal}Injector::inject_value` -- the MCU static match and the\n\
+             // AP dynamic SwitchboardRegistry take the same EventInjector port, so\n\
+             // there is one ingress seam and one guard semantics, not two.\n\
              // Regenerate by editing the source wz-switchboard.yaml and rebuilding.\n\
              \n\
              use {machine_module}::{machine_pascal}Inject;\n\
@@ -878,10 +883,18 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
              /// for machine {machine:?}, injecting each matched domain event in\n\
              /// declaration order. Returns the number of events injected. `payload`\n\
              /// is the inbound sample's wire bytes (read only by value rows).\n\
+             ///\n\
+             /// Takes the [`EventInjector`] port, exactly as the signal-only emit\n\
+             /// does: the two profiles differ in the `payload` parameter and in\n\
+             /// nothing else. Pass a `{machine_pascal}Injector` (above) to reach\n\
+             /// the value rows; any signal-only injector takes the defaulted\n\
+             /// `inject_value` and simply declines them.\n\
+             ///\n\
+             /// [`EventInjector`]: wz_session_core::switchboard::EventInjector\n\
              pub fn dispatch_switchboard(\n    \
              target_keyexpr: &str,\n    \
              payload: &[u8],\n    \
-             engine: &mut ::sce_rust_runtime::Engine<{machine_module}::{machine_pascal}Policy>,\n\
+             injector: &mut dyn wz_session_core::switchboard::EventInjector,\n\
              ) -> usize {{\n    \
              let mut injected = 0usize;\n\
              {arms}    \
@@ -1325,10 +1338,10 @@ pub fn dispatch_switchboard(
 // (Engine::raise_external_by_name); value rows decode the wire payload with
 // a forge codec and inject the typed _event.data via the generated
 // <Machine>Inject::raise_<event> seam. The per-event decode body is emitted
-// ONCE as an `inject_<event>` helper, shared by:
-//   - `dispatch_switchboard` -- the closed no-heap MCU static match;
-//   - `SensorMonitorInjector` -- the EventInjector the AP dynamic
-//     SwitchboardRegistry threads (one guard semantics across profiles).
+// ONCE as an `inject_<event>` helper, reached by BOTH profiles through
+// `SensorMonitorInjector::inject_value` -- the MCU static match and the
+// AP dynamic SwitchboardRegistry take the same EventInjector port, so
+// there is one ingress seam and one guard semantics, not two.
 // Regenerate by editing the source wz-switchboard.yaml and rebuilding.
 
 use sensor_monitor::SensorMonitorInject;
@@ -1392,29 +1405,166 @@ impl wz_session_core::switchboard::EventInjector for SensorMonitorInjector<'_> {
 /// for machine \"sensor_monitor\", injecting each matched domain event in
 /// declaration order. Returns the number of events injected. `payload`
 /// is the inbound sample's wire bytes (read only by value rows).
+///
+/// Takes the [`EventInjector`] port, exactly as the signal-only emit
+/// does: the two profiles differ in the `payload` parameter and in
+/// nothing else. Pass a `SensorMonitorInjector` (above) to reach
+/// the value rows; any signal-only injector takes the defaulted
+/// `inject_value` and simply declines them.
+///
+/// [`EventInjector`]: wz_session_core::switchboard::EventInjector
 pub fn dispatch_switchboard(
     target_keyexpr: &str,
     payload: &[u8],
-    engine: &mut ::sce_rust_runtime::Engine<sensor_monitor::SensorMonitorPolicy>,
+    injector: &mut dyn wz_session_core::switchboard::EventInjector,
 ) -> usize {
     let mut injected = 0usize;
 
     // home/*/temp -> temp_update (value via temp_payload)
     if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[\"home\", \"*\", \"temp\"], target_keyexpr)
-        && inject_temp_update(payload, engine)
+        && injector.inject_value(\"temp_update\", payload)
     {
         injected += 1;
     }
 
     // home/door -> door_opened (signal)
     if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[\"home\", \"door\"], target_keyexpr) {
-        engine.raise_external_by_name(\"door_opened\", \"\");
+        injector.inject(\"door_opened\", \"\");
         injected += 1;
     }
     injected
 }
 ";
+        // R311y824 REVERSED THIS GOLDEN IN PLACE rather than deleting it. It
+        // pinned a value-bearing dispatch over `&mut Engine<..Policy>` calling
+        // `inject_temp_update(payload, engine)` and `engine.raise_external_by_name`
+        // directly -- the MCU profile bypassing the very port
+        // `wz_session_core::switchboard` says both profiles share. The same
+        // fixture now pins the port form, so the reversal is visible here.
         assert_eq!(out, expected);
+    }
+
+    // ---- R311y824: the ingress PORT, on both profiles ----
+    //
+    // `wz_session_core::switchboard` states the contract three times: both the
+    // signal path and the value path "flow through the one EventInjector
+    // port"; the MCU static dispatch is "the SAME control-flow shape" as the
+    // AP one, "so AP and MCU share one ingress shape with no per-profile
+    // divergence"; and the catalog's section 5.20 repeats it. The generator
+    // emitted a value-bearing `dispatch_switchboard` over a concrete
+    // `&mut Engine<{Machine}Policy>` instead, so the profile that runs on the
+    // real board was the one that bypassed the seam.
+    //
+    // These read the SIGNATURE rather than the whole emit on purpose: the
+    // helper `inject_<event>` and `{Machine}Injector::new` legitimately take
+    // the concrete engine (they are the value seam's implementation), so a
+    // whole-file search for `Engine<` proves nothing about the ingress.
+
+    /// The parameter list of the emitted `dispatch_switchboard`, i.e. the text
+    /// between its `(` and its `) -> usize`.
+    fn dispatch_signature(out: &str) -> &str {
+        let start = out
+            .find("pub fn dispatch_switchboard(")
+            .expect("emit defines dispatch_switchboard");
+        let rest = &out[start..];
+        let end = rest.find(") -> usize").expect("dispatch returns usize");
+        &rest[..end]
+    }
+
+    /// A value-bearing spec + facts, shared by the port tests below.
+    fn mixed_value_emit() -> String {
+        let facts = parse_machine_facts(&facts_json_typed(
+            "sensor_monitor",
+            &["temp_update", "door_opened"],
+            &["temp_update"],
+        ))
+        .unwrap();
+        let schema =
+            parse_event_schema_facts(&schema_json("temp_update", &[("temperature", "float64")]))
+                .unwrap();
+        let codec = parse_codec_facts(
+            &codec_json(
+                "temp_payload",
+                &[("temperature", "float64"), ("seq", "uint32")],
+            ),
+            "temp_payload",
+        )
+        .unwrap();
+        let s = spec(
+            "sensor_monitor",
+            vec![
+                value_binding("home/*/temp", "temp_update", "temp_payload"),
+                binding("home/door", "door_opened"),
+            ],
+        );
+        generate(&GenInput {
+            spec: &s,
+            facts: &facts,
+            schemas: &[schema],
+            codecs: &[codec],
+            machine_module: "sensor_monitor",
+        })
+        .expect("generate")
+    }
+
+    #[test]
+    fn value_path_dispatch_takes_the_port_not_the_engine() {
+        let sig = mixed_value_emit();
+        let sig = dispatch_signature(&sig);
+        assert!(
+            sig.contains("injector: &mut dyn wz_session_core::switchboard::EventInjector"),
+            "the value-bearing dispatch must take the EventInjector port; got:\n{sig}"
+        );
+        assert!(
+            !sig.contains("::sce_rust_runtime::Engine<"),
+            "the ingress must not name the concrete engine -- that is the \
+             per-profile divergence the module docs deny; got:\n{sig}"
+        );
+    }
+
+    #[test]
+    fn both_profiles_emit_the_same_ingress_port() {
+        let value_emit = mixed_value_emit();
+        let facts = parse_machine_facts(&facts_json("sensor_monitor", &["door_opened"])).unwrap();
+        let signal_emit = gen_signal(
+            &spec("sensor_monitor", vec![binding("home/door", "door_opened")]),
+            &facts,
+        )
+        .expect("generate");
+
+        let port = "injector: &mut dyn wz_session_core::switchboard::EventInjector";
+        assert!(
+            dispatch_signature(&signal_emit).contains(port),
+            "the signal-only profile has always taken the port"
+        );
+        assert!(
+            dispatch_signature(&value_emit).contains(port),
+            "and the value profile must take the SAME one -- 'no per-profile \
+             divergence' is the module docs' words"
+        );
+    }
+
+    #[test]
+    fn only_the_value_profile_carries_the_payload() {
+        // The DISCRIMINATOR for the two above: they are also satisfied by
+        // making both emits byte-identical, which would drop the wire bytes
+        // the value rows decode. The two profiles differ in exactly one
+        // parameter, and this pins which one.
+        let value_emit = mixed_value_emit();
+        let facts = parse_machine_facts(&facts_json("sensor_monitor", &["door_opened"])).unwrap();
+        let signal_emit = gen_signal(
+            &spec("sensor_monitor", vec![binding("home/door", "door_opened")]),
+            &facts,
+        )
+        .expect("generate");
+        assert!(
+            dispatch_signature(&value_emit).contains("payload: &[u8]"),
+            "a value row decodes the sample's bytes, so the ingress carries them"
+        );
+        assert!(
+            !dispatch_signature(&signal_emit).contains("payload"),
+            "a signal-only switchboard has nothing to decode"
+        );
     }
 
     // ---- generate: value injector emission + helper dedup (SSOT) ----
@@ -1445,8 +1595,11 @@ pub fn dispatch_switchboard(
         assert!(out.contains("\"temp_update\" => inject_temp_update(payload, self.engine),"));
         // The shared decode helper is emitted (one body, both profiles).
         assert!(out.contains("fn inject_temp_update(\n"));
-        // The static arm calls the same helper (no inline decode duplicated).
-        assert!(out.contains("&& inject_temp_update(payload, engine)\n"));
+        // R311y824 — the static arm reaches that same helper THROUGH the port
+        // (it asserted `&& inject_temp_update(payload, engine)` before, the
+        // direct call that made the MCU profile bypass the seam). The decode
+        // body is still emitted once; only who reaches it changed.
+        assert!(out.contains("&& injector.inject_value(\"temp_update\", payload)\n"));
         assert!(!out.contains("SceCursor::new(payload);\n        if let Ok(decoded)"));
     }
 
@@ -1484,8 +1637,11 @@ pub fn dispatch_switchboard(
             1,
             "one injector arm"
         );
+        // R311y824 — the arm spelling is now the port call; the COUNT claim
+        // (one per keyexpr, against one deduped helper) is unchanged, which is
+        // the point: routing through the seam must not change the dedup.
         assert_eq!(
-            out.matches("&& inject_temp_update(payload, engine)\n")
+            out.matches("&& injector.inject_value(\"temp_update\", payload)\n")
                 .count(),
             2,
             "two static dispatch arms (one per keyexpr)"
@@ -1545,14 +1701,17 @@ pub fn dispatch_switchboard(
         assert!(out.contains("humidity_payload::HumidityPayload::decode"));
         assert!(out.contains("MTempUpdatePayload {"));
         assert!(out.contains("MHumidityUpdatePayload {"));
-        // Each keyexpr keeps its own static dispatch arm.
+        // Each keyexpr keeps its own static dispatch arm, and R311y824 made
+        // that arm a PORT call keyed by the event name -- so the per-event
+        // routing that used to live in the arm's chosen helper now lives in
+        // `inject_value`'s match, and the two must still agree one-to-one.
         assert_eq!(
-            out.matches("&& inject_temp_update(payload, engine)\n")
+            out.matches("&& injector.inject_value(\"temp_update\", payload)\n")
                 .count(),
             1
         );
         assert_eq!(
-            out.matches("&& inject_humidity_update(payload, engine)\n")
+            out.matches("&& injector.inject_value(\"humidity_update\", payload)\n")
                 .count(),
             1
         );

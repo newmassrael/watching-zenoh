@@ -156,10 +156,12 @@ mod temp_reading_codec {
     ));
 }
 
-// `use thermostat::ThermostatInject;` + `pub fn dispatch_switchboard(target,
-// payload, engine)`. Included at CRATE ROOT (not in a module) so its
-// `thermostat::` / `temp_reading_codec::` references resolve to the sibling
-// modules above (mirrors wz-switchboard-example/src/lib.rs).
+// `use thermostat::ThermostatInject;` + `pub struct ThermostatInjector` (the
+// value-capable EventInjector) + `pub fn dispatch_switchboard(target, payload,
+// injector)` — R311y824 made that third parameter the port rather than a
+// concrete `&mut Engine<ThermostatPolicy>`. Included at CRATE ROOT (not in a
+// module) so its `thermostat::` / `temp_reading_codec::` references resolve to
+// the sibling modules above (mirrors wz-switchboard-example/src/lib.rs).
 #[cfg(target_has_atomic = "32")]
 include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -488,11 +490,21 @@ fn main() -> ! {
             engine.get_current_state() == ThermostatState::Idle,
         );
 
+        // R311y824 — the generated value-capable EventInjector, constructed at
+        // the dispatch site exactly as the AP dynamic registry does. The MCU
+        // dispatch used to take `&mut Engine<ThermostatPolicy>` directly, which
+        // put the profile that runs on the real board on the far side of the
+        // one ingress port `wz_session_core::switchboard` says both profiles
+        // share. Threading it HERE is what makes this probe the witness: the
+        // link is still allocator-free, so the seam costs no heap.
+        let mut injector = ThermostatInjector::new(&mut engine);
+
         // 3500 centidegrees = 35.00 C, big-endian uint16 = [0x0D, 0xAC] —
         // above the 30.00 C (3000) native guard threshold. Hand-laid on the
         // stack (no allocator); a real publisher would encode the same bytes.
         let hot_wire = [0x0Du8, 0xACu8];
-        let injected = dispatch_switchboard("home/livingroom/temp", &hot_wire, &mut engine);
+        let injected = dispatch_switchboard("home/livingroom/temp", &hot_wire, &mut injector);
+        drop(injector);
         engine.step();
         require(
             "switchboard inject hot",
@@ -500,8 +512,11 @@ fn main() -> ! {
         );
 
         // The reset row is a SIGNAL binding (no codec): an empty _event.data
-        // injected via `raise_external_by_name` returns hot -> idle.
-        let reset_fired = dispatch_switchboard("home/livingroom/reset", &[], &mut engine);
+        // injected via `raise_external_by_name` returns hot -> idle. It reaches
+        // the engine through the SAME port as the value row above.
+        let mut injector = ThermostatInjector::new(&mut engine);
+        let reset_fired = dispatch_switchboard("home/livingroom/reset", &[], &mut injector);
+        drop(injector);
         engine.step();
         require(
             "switchboard reset",
@@ -513,7 +528,9 @@ fn main() -> ! {
         // decoded value actually reaches the guard rather than the transition
         // firing unconditionally. 2000 = 0x07D0 big-endian = [0x07, 0xD0].
         let cold_wire = [0x07u8, 0xD0u8];
-        let cold_fired = dispatch_switchboard("home/livingroom/temp", &cold_wire, &mut engine);
+        let mut injector = ThermostatInjector::new(&mut engine);
+        let cold_fired = dispatch_switchboard("home/livingroom/temp", &cold_wire, &mut injector);
+        drop(injector);
         engine.step();
         require(
             "switchboard inject cold",

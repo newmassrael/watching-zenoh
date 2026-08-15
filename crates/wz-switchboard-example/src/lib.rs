@@ -95,9 +95,11 @@ pub mod humidity_payload {
 }
 
 // The generated dispatch: `use sensor_monitor::SensorMonitorInject;` + a
-// crate-root `pub fn dispatch_switchboard(target, payload, engine)`. Included
-// at crate root so its `sensor_monitor::` / `temp_payload::` references
-// resolve to the sibling modules above.
+// crate-root `pub fn dispatch_switchboard(target, payload, injector)` +
+// `pub struct SensorMonitorInjector` — R311y824 made that third parameter the
+// EventInjector port rather than a concrete engine. Included at crate root so
+// its `sensor_monitor::` / `temp_payload::` references resolve to the sibling
+// modules above.
 include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../out/wz-switchboard-example",
@@ -106,11 +108,28 @@ include!(concat!(
 
 #[cfg(test)]
 mod tests {
-    use super::dispatch_switchboard;
     use super::humidity_payload::HumidityPayload;
     use super::sensor_monitor::{SensorMonitorPolicy, SensorMonitorState};
     use super::temp_payload::TempPayload;
+    use super::SensorMonitorInjector;
     use sce_rust_runtime::Engine;
+
+    /// R311y824 — construct the value-capable port at the dispatch site, which
+    /// is the shape `SwitchboardRegistry::dispatch` already used and, since
+    /// this round, the shape the generated static dispatch takes too. The
+    /// cases below used to hand it the `&mut Engine` directly.
+    ///
+    /// Deliberately named for the generated function it wraps, so the case
+    /// bodies read as they did and the one thing that moved — who owns the
+    /// engine borrow at the ingress — is stated once, here.
+    fn dispatch_switchboard(
+        keyexpr: &str,
+        payload: &[u8],
+        engine: &mut Engine<SensorMonitorPolicy>,
+    ) -> usize {
+        let mut injector = SensorMonitorInjector::new(engine);
+        super::dispatch_switchboard(keyexpr, payload, &mut injector)
+    }
 
     // The temp_payload codec's wire form: a big-endian u16 (centidegrees) +
     // a length-prefixed UTF-8 `sensor_id` + a length-prefixed `raw` blob. A
