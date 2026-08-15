@@ -3438,7 +3438,7 @@ layer_c1aj_cargo_test_quic_datagram() {
 # R311y414 — both test steps were BARE; anchored count guards with the MEASURED
 # counts (2 counter unit / 1 e2e) now pin them.
 layer_c1ak_cargo_test_transport_stats() {
-    _runci_guarded_test C1ak 4 cargo test -p wz-session-core --features transport-stats --lib stats --quiet \
+    _runci_guarded_test C1ak 5 cargo test -p wz-session-core --features transport-stats --lib stats --quiet \
         || return 1
     _runci_guarded_test C1ak 1 cargo test -p wz-runtime-tokio --features transport-stats --test transport_stats_e2e --quiet \
         || return 1
@@ -3447,7 +3447,17 @@ layer_c1ak_cargo_test_transport_stats() {
     # this is what holds that apart: a build that never counts must still be able
     # to name and render a report, because a consumer carries one in a struct
     # field in every feature combination.
-    _runci_guarded_test C1ak 2 cargo test -p wz-session-core --no-default-features --features alloc --lib stats --quiet \
+    _runci_guarded_test C1ak 3 cargo test -p wz-session-core --no-default-features --features alloc --lib stats --quiet \
+        || return 1
+    # R311y811 — the BARE arm: no `alloc`, no `transport-stats`. R311y810 un-gated
+    # this module precisely so its report type could be named in EVERY feature
+    # combination, and until now no lane composed the combination that claim is
+    # about. The cost of that gap was measured: every test in the module was
+    # gated, so the bare build compiled the module's tests to nothing, `use
+    # super::*` became unused, and the crate's `-D warnings` test build broke —
+    # surfacing on hosted CI inside Layer C1o (which compiles this binary only as
+    # a side effect of filtering `keyexpr_match`) rather than in a stats lane.
+    _runci_guarded_test C1ak 1 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
         || return 1
     # R311y810 — adminspace-metrics AND transport-stats together: the combination
     # a deployment actually runs, which no lane composed before. The metrics leg's

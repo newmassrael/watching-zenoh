@@ -205,6 +205,52 @@ fn push_counter(out: &mut alloc::string::String, name: &str, help: &str, value: 
 mod tests {
     use super::*;
 
+    /// R311y811 — the report type is NAMEABLE AND CONSTRUCTIBLE WITH NO FEATURES
+    /// AT ALL, which is the whole reason R311y810 un-gated this module: a
+    /// consumer holds one in an UNGATED struct field (`admin::AdminAnswerCtx`'s
+    /// `stats`), so a build with neither `alloc` nor `transport-stats` must still
+    /// be able to name the type, copy it, and compare it.
+    ///
+    /// This test is UNCONDITIONAL on purpose. Every other test in this module is
+    /// gated on one of the two features, so in the bare configuration the module
+    /// compiled to nothing at all — and a test module that compiles to nothing
+    /// does not merely fail to check anything, it makes `use super::*` an unused
+    /// import and turns the whole crate's `-D warnings` test build red. That is
+    /// exactly how R311y810 reached origin: the bare arm is compiled only by
+    /// Layer C1o (whose filter selects `keyexpr_match`), so the break surfaced
+    /// there rather than in a stats lane. The claim and the compile are now
+    /// pinned in the same place.
+    #[test]
+    fn the_report_type_is_nameable_and_usable_with_no_features() {
+        let r = TransportStatsReport {
+            tx_bytes: 140,
+            tx_msgs: 2,
+            rx_bytes: 12,
+            rx_msgs: 1,
+        };
+
+        // Field access without `alloc`: the four members are plain integers.
+        assert_eq!(
+            (r.tx_bytes, r.tx_msgs, r.rx_bytes, r.rx_msgs),
+            (140, 2, 12, 1)
+        );
+
+        // `Copy` + `PartialEq` + `Default` are the bounds a holder of an ungated
+        // field actually leans on (`AdminAnswerCtx` takes one by value).
+        let copied = r;
+        assert_eq!(copied, r);
+        assert_ne!(r, TransportStatsReport::default());
+        assert_eq!(
+            TransportStatsReport::default(),
+            TransportStatsReport {
+                tx_bytes: 0,
+                tx_msgs: 0,
+                rx_bytes: 0,
+                rx_msgs: 0,
+            }
+        );
+    }
+
     /// `inc_tx` / `inc_rx` accumulate bytes and bump the message count by one
     /// each; `report` snapshots them faithfully.
     ///
