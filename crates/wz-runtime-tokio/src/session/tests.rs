@@ -1561,6 +1561,278 @@ fn publish_loopback_propagates_all_metadata_in_one_chain() {
     assert_eq!(got.qos.unwrap().raw, 0x10);
 }
 
+// ── R311y818 — the PUBLISH-side auto-stamp (zenoh `Session::resolve_put`) ──
+//
+// zenoh resolves the effective timestamp ONCE, at the head of `resolve_put`,
+// before either branch runs:
+//
+//     let timestamp = timestamp.or_else(|| self.runtime.new_timestamp());
+//     // zenoh/src/api/session.rs:2129
+//
+// and `Runtime::new_timestamp` (`net/runtime/mod.rs:296-297`) is
+// `self.state.hlc.as_ref().map(|hlc| hlc.new_timestamp())` — so the whole
+// behaviour is ROLE-GATED through the node's `Option<Arc<HLC>>`. The one
+// resolved value then feeds BOTH the wire `PushBody::Put`/`Del` and the
+// session-local `DataInfo.timestamp` (`:2152`, `:2193`).
+
+/// A STAMPING node: the deterministic fixture params with `whatami = Router`,
+/// the one role zenoh's shipped `timestamping.enabled` map turns on
+/// (`DEFAULT_CONFIG.json5:206`, mirrored by
+/// [`TimestampingEnabled::default`](crate::node_clock::TimestampingEnabled::default)).
+///
+/// `build_session`'s fixture is a `Peer`, which is the NON-stamping half — it
+/// is used verbatim as this group's paired negative, so the role gate is
+/// witnessed rather than assumed. The zid is distinctive so a wire-byte
+/// assertion can tell the stamp's identity apart from the payload.
+#[cfg(all(
+    feature = "time-hlc",
+    feature = "pubsub-timestamp",
+    feature = "pubsub-allow-loop"
+))]
+fn build_router_session() -> (TokioSession, Arc<RecordingLinkDriver>) {
+    let mut params = fixture_session_init_params();
+    params.whatami = wz_codecs::whatami::WhatAmI::Router;
+    params.zid = vec![0xD1, 0xD2, 0xD3, 0xD4];
+    let (actions, driver) = recording_actions_with_params(params);
+    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let clock = Arc::new(TokioTime::new());
+    (TokioSession::new(actions, observer, clock), driver)
+}
+
+#[cfg(all(
+    feature = "time-hlc",
+    feature = "pubsub-timestamp",
+    feature = "pubsub-allow-loop"
+))]
+#[test]
+fn auto_stamp_fills_an_absent_timestamp_from_the_node_clock() {
+    // The headline: a publish that names no timestamp leaves a STAMPING node
+    // carrying one, minted off that node's own clock.
+    let (session, _driver) = build_router_session();
+    let captured = record_loopback_samples(&session, "home/temp");
+
+    session
+        .publish(
+            "home/temp",
+            b"22.5",
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        )
+        .unwrap();
+
+    let s = captured.lock().unwrap();
+    let ts = s[0].timestamp.as_ref().expect(
+        "a stamping node fills the absent timestamp itself — zenoh \
+         `timestamp.or_else(|| self.runtime.new_timestamp())`, api/session.rs:2129",
+    );
+    assert_eq!(
+        ts.zid,
+        vec![0xD1, 0xD2, 0xD3, 0xD4],
+        "the minted stamp carries THIS node's zid (the HLC's uhlc::ID IS the node zid)",
+    );
+}
+
+#[cfg(all(
+    feature = "time-hlc",
+    feature = "pubsub-timestamp",
+    feature = "pubsub-allow-loop"
+))]
+#[test]
+fn auto_stamp_keeps_the_callers_timestamp() {
+    // `or_else`, not `Some(..)`: a caller-supplied timestamp is authoritative.
+    // Without this the advanced publisher's own stamp — which it sets on every
+    // put so a recovery reply re-stamps the identical identity — would be
+    // overwritten on the way out.
+    let (session, _driver) = build_router_session();
+    let captured = record_loopback_samples(&session, "home/temp");
+
+    session
+        .publish(
+            "home/temp",
+            b"22.5",
+            PublishOptions::put()
+                .with_locality(Locality::SessionLocal)
+                .with_timestamp(TimestampHint {
+                    time: 0x0102_0304,
+                    zid: vec![0x11],
+                }),
+        )
+        .unwrap();
+
+    let s = captured.lock().unwrap();
+    let ts = s[0].timestamp.as_ref().unwrap();
+    assert_eq!(ts.time, 0x0102_0304, "the caller's time word survives");
+    assert_eq!(ts.zid, vec![0x11], "and so does the caller's identity");
+}
+
+#[cfg(all(
+    feature = "time-hlc",
+    feature = "pubsub-timestamp",
+    feature = "pubsub-allow-loop"
+))]
+#[test]
+fn auto_stamp_is_absent_on_a_non_stamping_role() {
+    // The ROLE GATE, and the reason this is a paired negative rather than a
+    // remark: zenoh's shipped map is `{ router: true, peer: false, client:
+    // false }`, so a peer that auto-stamped would diverge from upstream in the
+    // direction an over-eager implementation produces. `build_session`'s
+    // fixture is a `Peer`.
+    let (session, _driver) = build_session();
+    let captured = record_loopback_samples(&session, "home/temp");
+
+    session
+        .publish(
+            "home/temp",
+            b"22.5",
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        )
+        .unwrap();
+
+    let s = captured.lock().unwrap();
+    assert!(
+        s[0].timestamp.is_none(),
+        "a peer-role node holds no clock, so an un-timestamped publish stays bare \
+         (zenoh `Runtime::new_timestamp` returns None without an HLC)",
+    );
+}
+
+#[cfg(all(
+    feature = "time-hlc",
+    feature = "pubsub-timestamp",
+    feature = "pubsub-allow-loop"
+))]
+#[test]
+fn auto_stamp_successive_publishes_strictly_increase() {
+    // What makes this the HLC rather than a wall-clock read: two publishes
+    // inside one physical instant still order, via the logical counter in the
+    // low `uhlc::CSIZE` bits.
+    let (session, _driver) = build_router_session();
+    let captured = record_loopback_samples(&session, "home/temp");
+
+    let opts = || PublishOptions::put().with_locality(Locality::SessionLocal);
+    session.publish("home/temp", b"a", opts()).unwrap();
+    session.publish("home/temp", b"b", opts()).unwrap();
+
+    let s = captured.lock().unwrap();
+    let first = s[0].timestamp.as_ref().unwrap().time;
+    let second = s[1].timestamp.as_ref().unwrap().time;
+    assert!(
+        second > first,
+        "two publishes in one instant must still order: {second} !> {first}",
+    );
+}
+
+#[cfg(all(
+    feature = "time-hlc",
+    feature = "pubsub-timestamp",
+    feature = "pubsub-allow-loop",
+    feature = "codec-push"
+))]
+#[test]
+fn auto_stamp_reaches_both_legs_as_one_value() {
+    // ONE resolved value, both legs — zenoh binds `timestamp` once and hands
+    // the same binding to `PushBody::Put` and to `DataInfo`. Stamping each leg
+    // separately would mint two different times for one publish, which no
+    // observer could reconcile.
+    let (session, driver) = build_router_session();
+    let captured = record_loopback_samples(&session, "home/temp");
+
+    // `Locality::Any` — both legs fire off this single call.
+    session
+        .publish("home/temp", b"22.5", PublishOptions::put())
+        .unwrap();
+
+    let s = captured.lock().unwrap();
+    let ts = s[0].timestamp.clone().expect("loopback leg is stamped");
+
+    // Rebuild the Push the wire leg must have emitted, using the stamp the
+    // LOOPBACK leg reported. If the two legs minted separately, these bytes
+    // are not in the frame.
+    let meta = wz_session_core::metadata::PushMetadata {
+        timestamp: Some(ts),
+        ..Default::default()
+    };
+    let expected =
+        wz_session_core::push_build::build_push_literal_with_meta("home/temp", b"22.5", &meta)
+            .expect("fixture keyexpr and payload fit the bounded codec");
+    let expected_bytes = expected
+        .try_as_borrowed()
+        .expect("owned Push re-borrows")
+        .encode_to_vec();
+
+    let frame = driver.frame_bytes(0);
+    assert!(
+        frame
+            .windows(expected_bytes.len())
+            .any(|w| w == expected_bytes),
+        "the emitted frame must carry the SAME stamp the loopback leg reported",
+    );
+}
+
+#[cfg(all(
+    feature = "time-hlc",
+    feature = "pubsub-timestamp",
+    feature = "pubsub-allow-loop",
+    feature = "pubsub-delete"
+))]
+#[test]
+fn auto_stamp_covers_the_delete_arm() {
+    // zenoh binds the timestamp BEFORE the `match kind`, so both `PushBody::Put`
+    // and `PushBody::Del` receive it (`api/session.rs:2133` / `:2151`). A Del
+    // carries no payload, so its timestamp is the only ordering information a
+    // storage has to resolve it against a concurrent Put.
+    let (session, _driver) = build_router_session();
+    let captured = record_loopback_samples(&session, "home/temp");
+
+    session
+        .publish(
+            "home/temp",
+            &[],
+            PublishOptions::del().with_locality(Locality::SessionLocal),
+        )
+        .unwrap();
+
+    let s = captured.lock().unwrap();
+    assert_eq!(s[0].kind, SampleKind::Del);
+    assert!(
+        s[0].timestamp.is_some(),
+        "the Del arm is stamped by the same resolved value the Put arm gets",
+    );
+}
+
+#[cfg(all(
+    feature = "time-hlc",
+    feature = "pubsub-timestamp",
+    feature = "pubsub-allow-loop",
+    feature = "codec-declare",
+    feature = "codec-push",
+    feature = "declare-keyexpr"
+))]
+#[test]
+fn auto_stamp_covers_the_aliased_publish_body() {
+    // wz splits zenoh's single `resolve_put` into a LITERAL body and an
+    // ALIASED one (zenoh resolves the wire_expr inside the one function, so it
+    // has no such split). A seam installed on only the literal body would leave
+    // every `Publisher` declared through the keyexpr table publishing bare —
+    // which is the shape a `PublisherAliased` handle takes.
+    let (session, _driver) = build_router_session();
+    let captured = record_loopback_samples(&session, "home/temp");
+
+    session
+        .actions()
+        .send_declare_keyexpr(7, "home/temp")
+        .expect("hardcoded canonical literal keyexpr");
+    session
+        .publish_aliased_auto(7, None, b"22.5", PublishOptions::put())
+        .expect("declared mapping resolves cleanly");
+
+    let s = captured.lock().unwrap();
+    let ts = s[0]
+        .timestamp
+        .as_ref()
+        .expect("the aliased publish body resolves the timestamp too");
+    assert_eq!(ts.zid, vec![0xD1, 0xD2, 0xD3, 0xD4]);
+}
+
 // ── R234 publish_aliased_auto (outbound mapping table) ──
 
 #[cfg(all(

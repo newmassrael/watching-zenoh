@@ -3349,6 +3349,21 @@ layer_c1ah_cargo_test_time_hlc() {
     _runci_guarded_test "C1ah node_clock (advanced-cache leg)" 12 \
         cargo test -p wz-runtime-tokio --features time-hlc,ext-pubsub-advanced-cache \
         --lib node_clock:: --quiet || return 1
+    # R311y818 — the PUBLISH-side auto-stamp (zenoh `resolve_put`'s head,
+    # api/session.rs:2129). Its OWN leg, because a mechanical sweep of all 222
+    # `_runci_guarded_test` invocations found that of the 69 running
+    # `wz-runtime-tokio --lib`, exactly THREE carry `time-hlc` and all three
+    # filter to `timestamp_source::` / `node_clock::` — so no guarded lane
+    # selected these tests, and the two legs above cannot: the seam needs
+    # `pubsub-timestamp` (the gate that lets the field reach either leg) and
+    # `pubsub-allow-loop` (the leg the assertions read), neither of which
+    # `time-hlc` implies. Running it under the bare `time-hlc` features of the
+    # legs above would compile the module out and select ZERO tests, which
+    # still exits 0.
+    _runci_guarded_test "C1ah publish auto-stamp" 7 \
+        cargo test -p wz-runtime-tokio \
+        --features time-hlc,transport-unicast,codec-push,codec-declare,declare-keyexpr,pubsub-put,pubsub-delete,pubsub-allow-loop,pubsub-timestamp \
+        --lib session::tests::auto_stamp_ --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features time-hlc --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets \

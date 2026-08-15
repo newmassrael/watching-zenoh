@@ -832,13 +832,65 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// `pubsub-qos` — R311y314; said `pubsub-priority`, an alias, pre-y307). Factored out so both entry points share the remote +
     /// loopback leg logic and only the frame band differs; the remote leg hands
     /// `priority` to [`Self::send_network_message_qos`].
+    /// R311y818 — resolve the effective publish timestamp: the CALLER's if
+    /// there is one, otherwise this node's own clock. zenoh's counterpart is
+    /// the first statement of `resolve_put`:
+    ///
+    /// ```text
+    /// // zenoh/src/api/session.rs:2129
+    /// let timestamp = timestamp.or_else(|| self.runtime.new_timestamp());
+    /// ```
+    ///
+    /// Three properties of that line are load-bearing and each has a test:
+    ///
+    /// 1. **`or_else`, not `Some(..)`.** A caller-supplied timestamp wins. The
+    ///    advanced publisher sets one on every put precisely so a recovery
+    ///    reply can re-stamp the identical identity, and overwriting it here
+    ///    would break that.
+    /// 2. **Role-gated, through the clock's absence.** `Runtime::new_timestamp`
+    ///    (`net/runtime/mod.rs:296-297`) is
+    ///    `self.state.hlc.as_ref().map(|hlc| hlc.new_timestamp())`, so a node
+    ///    whose role does not timestamp publishes bare. wz inherits the whole
+    ///    gate from [`NodeHlc::stamp`](crate::node_clock::NodeHlc::stamp)
+    ///    returning `None` — off a router, and on every build without
+    ///    `time-hlc`.
+    /// 3. **Resolved ONCE, before either leg.** zenoh binds `timestamp` above
+    ///    the `destination` branches and hands the SAME binding to the wire
+    ///    `PushBody` (`:2133` / `:2151`) and to the session-local `DataInfo`
+    ///    (`:2193`). Stamping each leg separately would mint two different
+    ///    times for one publish.
+    ///
+    /// Called at the head of each of wz's publish bodies — the literal
+    /// [`Self::publish_prioritized`], the aliased [`Self::publish_aliased`],
+    /// and the SHM [`Self::publish_shm`]. zenoh needs one site because it
+    /// resolves the wire expression INSIDE `resolve_put`; wz splits those forms
+    /// into separate bodies, so the resolution is shared as this helper rather
+    /// than restated. Idempotent, which is what lets `publish_shm` call it and
+    /// then fall through to `publish`.
+    ///
+    /// `pubsub-timestamp`-gated: that feature is what makes the field reach
+    /// either leg (`gated_timestamp`), so without it minting would take the
+    /// clock's lock per publish to produce a value both consumers drop.
+    fn resolve_publish_timestamp(&self, opts: &mut PublishOptions) {
+        #[cfg(feature = "pubsub-timestamp")]
+        if opts.timestamp.is_none() {
+            opts.timestamp = self.node_hlc.stamp();
+        }
+        #[cfg(not(feature = "pubsub-timestamp"))]
+        let _ = opts;
+    }
+
     fn publish_prioritized(
         &self,
         keyexpr: &str,
         payload: &[u8],
-        opts: PublishOptions,
+        mut opts: PublishOptions,
         priority: wz_session_core::qos::Priority,
     ) -> Result<usize, PublishError> {
+        // R311y818 — zenoh's `resolve_put` head: fill an absent timestamp from
+        // this node's clock BEFORE either leg reads `opts`, so the wire Push
+        // and the loopback Sample carry one value rather than two.
+        self.resolve_publish_timestamp(&mut opts);
         // `priority` is consumed only by the `codec-push` remote leg below; a
         // build without it (loopback-only) never reads the band.
         #[cfg(not(feature = "codec-push"))]
@@ -1822,8 +1874,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self,
         keyexpr: &str,
         payload: &crate::shm_provider::ShmBackedPayload,
-        opts: PublishOptions,
+        mut opts: PublishOptions,
     ) -> Result<usize, PublishError> {
+        // R311y818 — the third publish body, and the same `resolve_put` head.
+        // Idempotent, so the not-negotiated fall-through to `Self::publish`
+        // below re-runs it as a no-op rather than double-stamping.
+        self.resolve_publish_timestamp(&mut opts);
         #[cfg(feature = "codec-push")]
         if self.actions().is_shm() && opts.allowed_destination.allows_remote() {
             use wz_session_core::send_wire_error::SendWireError;
@@ -2104,8 +2160,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         inline_suffix: Option<&str>,
         loopback_keyexpr: &str,
         payload: &[u8],
-        opts: PublishOptions,
+        mut opts: PublishOptions,
     ) -> Result<usize, PublishError> {
+        // R311y818 — the same `resolve_put` head the literal body runs. wz
+        // splits zenoh's one function into a literal and an aliased body; a
+        // seam on only the literal one would leave every `PublisherAliased`
+        // publishing bare.
+        self.resolve_publish_timestamp(&mut opts);
         // W3 — remote wire leg `codec-push`-gated (see Session::publish);
         // a codec-push-less build elides it and runs loopback only.
         #[cfg(feature = "codec-push")]
