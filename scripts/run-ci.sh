@@ -5318,6 +5318,29 @@ layer_c1cb_cargo_test_init_ack_admission() {
         cargo test -p wz-runtime-tokio --test session_fsm_driver_loop --quiet || return 1
 }
 
+# ─── Layer C1cf — every crate builds with its DEFAULT FEATURES OFF ──
+#
+# Named C1cf, not C1cc: C1cc..C1ce are the §5.27 api-compat-c cluster, and
+# Layer E's ABI-ownership note cites C1cc BY NAME for which oracle last built
+# `wz-capi-c`. The first draft of this lane took C1cc and the run printed the
+# label twice — a collision that would have made `--layer C1cc` ambiguous and
+# silently attached this sweep to that cluster's reputation.
+#
+# R311y821. The workspace sweep half of the reduced-feature gate; pre-push runs
+# the same script over the CHANGED crates only, which is the fast shape. See
+# scripts/lib/reduced-features-gate.sh for the class this closes (a cfg-gated
+# import behind an ungated signature, and a test module whose every member is
+# gated) and for why the population is a pinned SET with two named tiers rather
+# than "every crate must pass".
+#
+# It is a LANE, not just a pre-push arm, because pre-push only sees the crates a
+# push touches: a crate can be pushed clean and then broken by a CHANGE
+# ELSEWHERE — R311y809's defect was in the crate that LINKS to the one the diff
+# touched, which is exactly what a changed-crate filter cannot reach.
+layer_c1cf_reduced_features() {
+    bash scripts/lib/reduced-features-gate.sh || return 1
+}
+
 layer_c1i_cargo_test_scouting() {
     _runci_guarded_test C1i 12 \
         cargo test -p wz-runtime-tokio --features scouting-active --lib scouting_glue --quiet
@@ -12693,6 +12716,7 @@ run_layer C1own layer_c1own_own_space_witnesses || overall=1
 run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
 run_layer C1ca layer_c1ca_cargo_test_derived_initial_sn || overall=1
 run_layer C1cb layer_c1cb_cargo_test_init_ack_admission || overall=1
+run_layer C1cf layer_c1cf_reduced_features || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1
 run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1
 run_layer C1l layer_c1l_reassembly || overall=1

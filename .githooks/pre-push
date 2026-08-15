@@ -441,5 +441,32 @@ if ! WZ_C1BZ_ONLY="${doc_pkgs[*]}" bash scripts/run-ci.sh --layer C1bz; then
     exit 1
 fi
 
-echo "pre-push: changed-crate tests + doc links passed; full validation continues on hosted CI."
+# ─── gate 6 — changed-crate REDUCED FEATURE COMBINATION (R311y821) ──
+# The rule this encodes: a round that edits a crate owes the SHRUNKEN build of
+# it, not only the default one. `cargo clippy --all-features` cannot see a
+# cfg-gated import behind an ungated signature — the feature is on — and the
+# crate's own default-feature test run cannot either.
+#
+# The class fired TWICE. R311y809 was caught only because gate 4 above happened
+# to build a LINKING crate in a different combination, so detection existed as
+# another gate's side effect; R311y811 had no such accident and reached origin,
+# where a keyexpr lane (Layer C1o) turned out to be the only host lane that
+# compiles that crate's lib tests bare.
+#
+# It reuses the SAME `pkgs` set gate 3 tested, and the same script Layer C1cf
+# sweeps with — the tier lists live there, so a crate cannot be excluded here
+# and included on the hosted side. R311y821 MEASURED the cost the debt recorded
+# as unknown: 49 of 53 members are already clean bare, so this is seconds per
+# changed crate rather than the sweep's ~2min.
+echo "pre-push: reduced feature combination (Layer C1cf, subset): ${pkgs[*]}"
+if ! bash scripts/lib/reduced-features-gate.sh "${pkgs[@]}"; then
+    echo "" >&2
+    echo "pre-push: a changed crate does not build with its default features" >&2
+    echo "          off — fix the reduced combination, or place the crate in a" >&2
+    echo "          named tier in scripts/lib/reduced-features-gate.sh." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
+echo "pre-push: changed-crate tests + doc links + reduced features passed; full validation continues on hosted CI."
 exit 0

@@ -588,6 +588,15 @@ jobs:
         # would just make a summary number smaller.
         run: bash scripts/run-ci.sh --layer C1cb
 
+      - name: Layer C1cf — every crate builds with default features off
+        # R311y821 — nothing local built a SHRUNKEN feature combination of a
+        # changed crate, so a cfg-gated import behind an ungated signature was
+        # invisible to `--all-features` clippy BY CONSTRUCTION. The class fired
+        # twice (R311y809, R311y811) and the second reached origin. Measured
+        # cost: 49 of 53 members are already clean bare; the 4 that are not fail
+        # only in their TEST targets, and three of those are checked lib-only.
+        run: bash scripts/run-ci.sh --layer C1cf
+
       - name: Layer C1i — scouting-active glue unit tests
         # R311ep — scouting-active is off by default, so Layer C1's
         # `cargo test --workspace` never builds the scouting glue. This
