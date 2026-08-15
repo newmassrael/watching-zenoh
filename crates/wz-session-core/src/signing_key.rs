@@ -79,12 +79,62 @@ impl core::fmt::Display for SigningKeyTooShort {
 
 impl core::error::Error for SigningKeyTooShort {}
 
+/// The RFC §5.M minimum, and the length [`SigningKey::from_entropy`] draws.
+///
+/// Named rather than repeated as a literal because R311y820 gave the constant a
+/// SECOND reader: `new` validates against it and `from_entropy` sizes its draw
+/// by it, and a draw that were shorter than the validator's floor would build a
+/// key `new` would have refused.
+pub const SIGNING_KEY_BYTES: usize = 32;
+
 impl SigningKey {
+    /// R311y820 — draw a fresh key from the §2.5 plugin-tier entropy port
+    /// ([`crate::entropy::EntropySource`]).
+    ///
+    /// ## Why this exists, stated as the defect it removes
+    ///
+    /// `signing_key_from_os_entropy` has been available on the AP side since
+    /// R69 and had, at R311y820, exactly ZERO production callers — its only
+    /// callers were its own unit test. Every params builder in this tree
+    /// instead wrote a LITERAL: `vec![0xAB; 32]` in the AP demo, the C ABI
+    /// drive and the replay live path, `vec![7u8; 32]` on the MCU side. Those
+    /// literals are committed to a public repository, so the cookie MAC key of
+    /// every acceptor built from this tree was public knowledge, and the whole
+    /// secret of the anti-amplification cookie rested on the per-bundle nonce
+    /// R311y813 added — 64 bits on the AP profile, and on the MCU fixture
+    /// profile a second public literal.
+    ///
+    /// ## Why the PORT rather than `getrandom`
+    ///
+    /// `getrandom` has no bare-metal backend, which is why this crate's own
+    /// module header records the key draw as AP-only. R311y819 introduced the
+    /// port for the cookie nonce and deliberately made it BYTE-FILLING rather
+    /// than `u64`-minting so that this second secret could use it; this is that
+    /// use. One call reaches both profiles, and an MCU deploy supplies the same
+    /// `EntropySource` it already supplies for the nonce.
+    ///
+    /// ## Failure is not absorbed
+    ///
+    /// There is no fail-closed representation for a key — the field is not an
+    /// `Option`, and inventing a sentinel "key that cannot mint" would be a
+    /// value the HMAC would happily use. So the error propagates and the CALLER
+    /// declines to build a bundle, which is the honest shape: a host that
+    /// cannot obtain entropy at startup cannot serve an acceptor securely.
+    pub fn from_entropy<E: crate::entropy::EntropySource + ?Sized>(
+        source: &mut E,
+    ) -> Result<Self, crate::entropy::EntropyUnavailable> {
+        // Zeroizing FIRST, so a partially-filled buffer is wiped on the `?`
+        // rather than left on the heap for the allocator to hand out.
+        let mut bytes = Zeroizing::new(alloc::vec![0u8; SIGNING_KEY_BYTES]);
+        source.try_fill_bytes(&mut bytes)?;
+        Ok(Self { bytes })
+    }
+
     /// Construct a key from owned bytes. The input is moved into a
     /// `Zeroizing` wrapper; passing a shorter-than-32-byte slice
     /// returns the typed error without retaining the bytes.
     pub fn new(bytes: Vec<u8>) -> Result<Self, SigningKeyTooShort> {
-        if bytes.len() < 32 {
+        if bytes.len() < SIGNING_KEY_BYTES {
             // Zeroize the rejected input before returning — the
             // caller's Vec<u8> would otherwise persist on the
             // stack until they explicitly drop it.
@@ -450,5 +500,70 @@ mod tests {
             0x5c, 0x3a, 0x35, 0xe2,
         ];
         assert_eq!(mac, expected, "RFC 4231 TC7 byte mismatch");
+    }
+
+    // ── R311y820 — `SigningKey::from_entropy`, the §2.5 port draw ──
+
+    /// A source that hands out consecutive bytes, so a draw has a known
+    /// spelling and two draws differ.
+    struct Counting(u8);
+
+    impl crate::entropy::EntropySource for Counting {
+        fn try_fill_bytes(
+            &mut self,
+            buf: &mut [u8],
+        ) -> Result<(), crate::entropy::EntropyUnavailable> {
+            for slot in buf.iter_mut() {
+                *slot = self.0;
+                self.0 = self.0.wrapping_add(1);
+            }
+            Ok(())
+        }
+    }
+
+    /// A board whose TRNG is not ready.
+    struct Dry;
+
+    impl crate::entropy::EntropySource for Dry {
+        fn try_fill_bytes(
+            &mut self,
+            _buf: &mut [u8],
+        ) -> Result<(), crate::entropy::EntropyUnavailable> {
+            Err(crate::entropy::EntropyUnavailable)
+        }
+    }
+
+    #[test]
+    fn key_draw_uses_the_validators_own_floor() {
+        // The draw and `new`'s `>= 32` check read ONE constant. A draw sized
+        // below the floor would build a key `new` would have refused, which no
+        // other assertion here would notice.
+        let key = SigningKey::from_entropy(&mut Counting(0)).expect("counting source fills");
+        assert_eq!(key.len(), SIGNING_KEY_BYTES);
+        assert!(SigningKey::new(vec![0u8; SIGNING_KEY_BYTES]).is_ok());
+    }
+
+    #[test]
+    fn key_draw_two_draws_give_two_keys() {
+        // THE defect this round removed, stated as a property: every params
+        // builder in the tree wrote one literal, so every acceptor shared a
+        // key. A source that returned one value forever satisfies the
+        // signature; this is what it does not satisfy.
+        let mut src = Counting(0);
+        let a = SigningKey::from_entropy(&mut src).unwrap();
+        let b = SigningKey::from_entropy(&mut src).unwrap();
+        // The key bytes are private by design (that is the newtype's job), so
+        // the observable is the MAC each produces over one message.
+        let mac_a = compute_hmac_sha256_full(a.as_slice(), b"probe");
+        let mac_b = compute_hmac_sha256_full(b.as_slice(), b"probe");
+        assert_ne!(mac_a, mac_b, "two drawn keys must not MAC alike");
+    }
+
+    #[test]
+    fn key_draw_a_dry_source_yields_no_key_at_all() {
+        // Fail-closed with no sentinel: there is no "key that cannot mint", so
+        // the only honest answer is to hand the caller nothing and let it
+        // decline to build a bundle.
+        assert!(SigningKey::from_entropy(&mut Dry).is_err());
     }
 }

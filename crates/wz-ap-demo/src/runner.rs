@@ -1709,7 +1709,7 @@ pub(crate) async fn run_demo(
     // into the open helper, install_observer_callbacks, Session::new, the drive
     // loop, and sweep_task (TokioTime is Copy, so every copy is the same epoch).
     let session_clock = TokioTime::new();
-    let mut params = demo_session_init_params(role.node_kind());
+    let mut params = demo_session_init_params(role.node_kind())?;
     // `--zid <hex>` override: give this session node a DISTINCT identity so it can
     // coexist with another session node inside a router mesh (the mesh graph keys
     // on zid; the hardcoded demo zid would collide). No override -> the default.
@@ -2486,7 +2486,7 @@ async fn run_router_until(
          faces (routing-router foundation, no forwarding)"
     );
 
-    let params = demo_session_init_params(NodeKind::Router);
+    let params = demo_session_init_params(NodeKind::Router)?;
 
     // The forwarding seam: with `routing-routes` the router routes Puts between
     // faces ([`RoutingForwarder`]); without it the accept-and-hold foundation
@@ -2898,7 +2898,7 @@ async fn run_peer_until(
         }
     );
 
-    let mut params = demo_session_init_params(NodeKind::Peer);
+    let mut params = demo_session_init_params(NodeKind::Peer)?;
     // R311rc (c3d-4) — a DISTINCT zid per peer (the mesh routing graph keys on it,
     // so two peers MUST NOT share one; the demo's single hardcoded 0x01020304 would
     // collide — a node would ingest a remote link-state under its OWN zid).
@@ -4253,7 +4253,7 @@ async fn run_router_hat_until(
         dials.len()
     );
 
-    let mut params = demo_session_init_params(NodeKind::RouterHat);
+    let mut params = demo_session_init_params(NodeKind::RouterHat)?;
     params.zid = node_zid;
 
     // The dual-mesh router forwarder. Self is a WhatAmI::Router in BOTH meshes
@@ -5137,7 +5137,7 @@ pub(crate) async fn run_storage_host(
     use crate::args::NodeKind;
 
     let session_clock = TokioTime::new();
-    let params = demo_session_init_params(NodeKind::StorageHost);
+    let params = demo_session_init_params(NodeKind::StorageHost)?;
     // The pico witness scrapes ONE zid across all four sequential client sessions,
     // so the host zid must be STABLE across accept-loop iterations. The demo's fixed
     // Peer zid is that stable identity; there is exactly one storage host, so the

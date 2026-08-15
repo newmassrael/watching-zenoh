@@ -1814,6 +1814,14 @@ PY
     # the same text reds it too (R311y717's lesson -- a gate a comment can
     # satisfy is a gate that grades prose).
     python3 scripts/lib/verdict_assertion_lint.py || return 1
+    # R311y820 — the LITERAL COOKIE SIGNING KEY gate. Static because the
+    # invariant is "no SHIPPED path builds this key from a constant", which no
+    # test can observe about a path it does not run. It lives in C0 rather than
+    # Layer 0 because it grades source SEMANTICS, not style, and the class it
+    # watches leaked at FOUR production sites (the AP demo, the C ABI drive, the
+    # replay live path, the MCU acceptor) while the OS-entropy constructor that
+    # should have been called sat unused since R69.
+    bash scripts/lib/literal-key-gate.sh . || return 1
     return 0
 }
 
@@ -5775,6 +5783,12 @@ layer_c1n_mcu_session_acceptor() {
         --lib cookie_nonce_draw_tests:: --quiet || return 1
     _runci_guarded_test "C1n entropy port" 3 \
         cargo test -p wz-session-core --lib entropy:: --quiet || return 1
+    # R311y820 — the port's SECOND secret. Beside the leg above because it is
+    # the same seam reaching the cookie SIGNING key, and because the sweep found
+    # the same hole: of the 50 guarded `wz-session-core --lib` lanes, exactly one
+    # runs the module unfiltered and it is a `+` guard, so nothing pinned these.
+    _runci_guarded_test "C1n signing key draw" 3 \
+        cargo test -p wz-session-core --lib signing_key::tests::key_draw_ --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-mcu-session-acceptor --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-coop --features session-unicast \

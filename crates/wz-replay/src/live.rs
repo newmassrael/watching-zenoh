@@ -155,7 +155,9 @@ async fn play_into_session(
         clock: _,
     } = connect_and_open_session(
         locator,
-        session_init_params(),
+        session_init_params().map_err(|e| {
+            LiveError::Open(format!("no OS entropy for the cookie signing key: {e}"))
+        })?,
         &cfg,
         clock,
         None,
@@ -226,8 +228,11 @@ async fn play_into_session(
 /// The same shape every wz peer in this workspace announces. `WhatAmI::Peer`
 /// rather than Client because a replay is a data source that a router treats as
 /// an ordinary peer, which is what the captured publisher was.
-fn session_init_params() -> SessionInitParams {
-    SessionInitParams {
+/// R311y820 — FALLIBLE: the cookie signing key is drawn from OS entropy rather
+/// than written as `vec![0xAB; 32]`, a literal this repository publishes.
+fn session_init_params(
+) -> Result<SessionInitParams, wz::runtime_tokio::session_glue::EntropyUnavailable> {
+    Ok(SessionInitParams {
         version: 0x09,
         whatami: WhatAmI::Peer,
         zid: REPLAY_ZID.to_vec(),
@@ -237,7 +242,8 @@ fn session_init_params() -> SessionInitParams {
         lease_ms: 10_000,
         initial_sn: 0,
         cookie: Vec::new(),
-        cookie_signing_key: wz::runtime_tokio::session_glue::SigningKey::new(vec![0xAB; 32])
-            .expect("32 bytes satisfies the key length invariant"),
-    }
+        cookie_signing_key: wz::runtime_tokio::session_glue::SigningKey::from_entropy(
+            &mut wz::runtime_tokio::session_glue::OsEntropy,
+        )?,
+    })
 }

@@ -605,7 +605,13 @@ fn acceptor_params() -> SessionInitParams {
         lease_ms: 10_000,
         initial_sn: 0,
         cookie: vec![0u8; 16],
-        cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect(">=32-byte key"),
+        // R311y820 — through the SAME §2.5 port the cookie nonce uses, so this
+        // fixture demonstrates the production shape rather than the literal a
+        // board would otherwise copy. Deterministic because `FixtureEntropy`
+        // is, which is what keeps the frozen-clock e2e reproducible; a real
+        // board replaces that one type and this line is unchanged.
+        cookie_signing_key: SigningKey::from_entropy(&mut FixtureEntropy)
+            .expect("FixtureEntropy never fails"),
     }
 }
 

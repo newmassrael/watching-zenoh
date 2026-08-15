@@ -114,6 +114,12 @@ use crate::{LinkDriver, Reliability, TxFrame};
 pub use wz_session_core::signing_key::{
     generate_cookie_hmac_sha256, SigningKey, SigningKeyTooShort,
 };
+// R311y820 — the §2.5 port travels with the key it now draws. Re-exported here
+// rather than left to callers to reach through `wz_session_core` because every
+// consumer of `SigningKey::from_entropy` on this profile already names this
+// module for `SessionInitParams`, and a caller forced onto two crate paths for
+// one construction is how the AP demo ended up writing a literal instead.
+pub use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
 
 /// R69 / R311ei — construct a `SigningKey` from OS-backed cryptographic
 /// entropy. Pulls 32 bytes from `getrandom::getrandom` (Linux

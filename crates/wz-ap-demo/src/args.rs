@@ -20,7 +20,7 @@
 
 #[cfg(feature = "router-hat-router")]
 use wz::runtime_tokio::retry_period::RetryPolicy;
-use wz::runtime_tokio::session_glue::{SessionInitParams, SigningKey, WhatAmI};
+use wz::runtime_tokio::session_glue::{OsEntropy, SessionInitParams, SigningKey, WhatAmI};
 
 /// R121f — session role select. `--listen` lands here as
 /// `Acceptor`; `--connect` lands as `Initiator`. The two roles
@@ -513,7 +513,18 @@ pub(crate) const DEMO_ZID: [u8; 4] = [0x01, 0x02, 0x03, 0x04];
 /// feature message rather than a parse error.
 pub(crate) const DEFAULT_SCOUT_BUDGET_MS: u64 = 10_000;
 
-pub(crate) fn demo_session_init_params(kind: NodeKind) -> SessionInitParams {
+/// R311y820 — FALLIBLE, because the cookie signing key is now drawn from OS
+/// entropy rather than written as a literal, and there is no honest way to
+/// absorb an entropy failure into a key. A host that cannot obtain entropy at
+/// startup cannot serve an acceptor securely, so the caller declines to build
+/// the bundle rather than opening one whose cookie MAC anybody can forge.
+/// The error is `io::Error` rather than the port's own
+/// [`EntropyUnavailable`](wz::runtime_tokio::session_glue::EntropyUnavailable)
+/// because all five callers sit in `io::Result<()>` run-mode bodies; mapping
+/// once here beats five `map_err`s, and a binary that cannot reach the OS
+/// entropy pool is reporting an environment fault, which is what `io::Error`
+/// names.
+pub(crate) fn demo_session_init_params(kind: NodeKind) -> std::io::Result<SessionInitParams> {
     let whatami = match kind {
         NodeKind::Acceptor => WhatAmI::Peer, // R121b/c/d/e baseline
         // The router accepts via the same well-tested Client->Peer direction as
@@ -536,7 +547,7 @@ pub(crate) fn demo_session_init_params(kind: NodeKind) -> SessionInitParams {
         NodeKind::StorageHost => WhatAmI::Peer,
         NodeKind::Initiator => WhatAmI::Client, // R121f initiator path
     };
-    SessionInitParams {
+    Ok(SessionInitParams {
         version: DEMO_PROTO_VERSION,
         whatami,
         zid: DEMO_ZID.to_vec(),
@@ -546,13 +557,20 @@ pub(crate) fn demo_session_init_params(kind: NodeKind) -> SessionInitParams {
         lease_ms: 10_000,
         initial_sn: 0,
         cookie: Vec::new(),
-        // Demo signing key — 32 bytes of 0xAB. Production deployment
-        // MUST supply real per-process entropy via
-        // `SigningKey::new_random()` once deploy.yaml carries the
-        // cookie_signing_key source.
-        cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-            .expect("32-byte demo key satisfies >= 32 invariant"),
-    }
+        // R311y820 — DRAWN, not a literal. This site carried a 32-byte `0xAB`
+        // constant with a comment promising that a
+        // production deployment "MUST supply real per-process entropy via
+        // `SigningKey::new_random()`" — a method R311ei had already removed,
+        // so the note named a symbol that no longer existed and nothing ever
+        // supplied the entropy. The key of every acceptor this binary opened
+        // was therefore a literal in a public repository.
+        cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy).map_err(|e| {
+            std::io::Error::other(format!(
+                "no OS entropy for the cookie signing key ({e}); refusing to open a \
+                 session whose anti-amplification cookie anybody could forge"
+            ))
+        })?,
+    })
 }
 
 /// R311y345 — the publisher's `--publish` bundle. Was a bare

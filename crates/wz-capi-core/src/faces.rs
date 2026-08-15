@@ -792,7 +792,16 @@ impl SharedSession {
         self.zid
     }
 
-    pub fn new(clock: TokioTime, zid: Vec<u8>) -> Self {
+    /// R311y820 — FALLIBLE, because the params builder it shares with both
+    /// drive roles now draws the cookie signing key from OS entropy. The local
+    /// plane never handshakes, so this key never reaches a wire cookie — but it
+    /// takes the same path anyway rather than keeping a literal here with an
+    /// "it is inert" note, because that note is exactly the shape that let the
+    /// literal survive at four sites until R311y820 counted them.
+    pub fn new(
+        clock: TokioTime,
+        zid: Vec<u8>,
+    ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
         let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(InertLinkDriver);
         // `WhatAmI::Peer`: the plane never handshakes, so the role is inert on
         // the wire, and Peer is what a session that both publishes and answers
@@ -801,18 +810,18 @@ impl SharedSession {
         let mut zid_bytes = [0u8; 16];
         let n = zid.len().min(16);
         zid_bytes[..n].copy_from_slice(&zid[..n]);
-        let params = crate::drive::init_params(wz_runtime_tokio::session_glue::WhatAmI::Peer, zid);
+        let params = crate::drive::init_params(wz_runtime_tokio::session_glue::WhatAmI::Peer, zid)?;
         let actions = new_session_actions(driver, params, clock);
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
         let local = TokioSession::new(actions, observer, Arc::new(clock))
             .with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
-        Self {
+        Ok(Self {
             zid: zid_bytes,
             inner: StdMutex::new(Inner::default()),
             clock,
             local,
             local_wake: Arc::new(Notify::new()),
-        }
+        })
     }
 
     /// The local plane's session — what the ABI shims issue the LOCAL leg of a
@@ -2322,7 +2331,7 @@ mod matching_aggregate_tests {
     /// different claim that only the drain establishes.
     #[test]
     fn publish_all_delivers_locally_with_no_face() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid());
+        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
         let seen = Arc::new(StdMutex::new(Vec::<Vec<u8>>::new()));
         let sink_log = seen.clone();
         let sink: SubscriberSink = Arc::new(move || {
@@ -2371,7 +2380,7 @@ mod matching_aggregate_tests {
     /// not tell the difference (it declares `Any`).
     #[test]
     fn a_remote_origin_subscriber_is_not_widened_by_the_local_plane() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid());
+        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
         let hits = Arc::new(StdMutex::new(0usize));
         let sink_hits = hits.clone();
         let sink: SubscriberSink = Arc::new(move || {
@@ -2407,7 +2416,7 @@ mod matching_aggregate_tests {
     /// put delivers on the wire and to nobody in-process.
     #[test]
     fn publish_aliased_all_delivers_locally_with_no_face() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid());
+        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
         let seen = Arc::new(StdMutex::new(Vec::<Vec<u8>>::new()));
         let sink_log = seen.clone();
         let sink: SubscriberSink = Arc::new(move || {
@@ -2446,7 +2455,7 @@ mod matching_aggregate_tests {
     /// the faces had dropped.
     #[test]
     fn an_undeclared_alias_no_longer_delivers_locally() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid());
+        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
         let hits = Arc::new(StdMutex::new(0usize));
         let sink_hits = hits.clone();
         let sink: SubscriberSink = Arc::new(move || {
@@ -2482,7 +2491,7 @@ mod matching_aggregate_tests {
     /// to the C subscriber.
     #[test]
     fn a_delete_reaches_the_local_plane_as_a_del() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid());
+        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
         let kinds = Arc::new(StdMutex::new(Vec::<bool>::new()));
         let sink_kinds = kinds.clone();
         let sink: SubscriberSink = Arc::new(move || {

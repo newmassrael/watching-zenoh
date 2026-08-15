@@ -25,8 +25,8 @@ use tokio::sync::Notify;
 use wz_runtime_tokio::accept_loop::accept_loop;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
-    drive_session_until_terminal_with_extra_deadline, ExtraDeadline, IterationEvent,
-    SessionInitParams, SessionTimeouts, SigningKey, WhatAmI,
+    drive_session_until_terminal_with_extra_deadline, EntropyUnavailable, ExtraDeadline,
+    IterationEvent, OsEntropy, SessionInitParams, SessionTimeouts, SigningKey, WhatAmI,
 };
 use wz_runtime_tokio::session_open::{
     bind_endpoint_with_config, dial_endpoint, initiate_and_open_session, AcceptConfig, DialConfig,
@@ -161,8 +161,18 @@ fn fresh_zid() -> Option<[u8; ZID_LENGTH]> {
 
 /// Fixed session-init parameters (mirrors the wz-ap-demo defaults), with a
 /// per-session [`fresh_zid`].
-pub(crate) fn init_params(whatami: WhatAmI, zid: Vec<u8>) -> SessionInitParams {
-    SessionInitParams {
+///
+/// R311y820 — FALLIBLE, and the reason is the same one that already made
+/// `fresh_zid` fallible six lines above: this builder needs OS entropy, and
+/// there is no honest constant to fall back to. The cookie signing key was
+/// `vec![0xAB; 32]`, a literal in a public repository, so every session this C
+/// ABI opened as an acceptor minted its anti-amplification cookie under a key
+/// anyone could read.
+pub(crate) fn init_params(
+    whatami: WhatAmI,
+    zid: Vec<u8>,
+) -> Result<SessionInitParams, EntropyUnavailable> {
+    Ok(SessionInitParams {
         version: 0x09,
         whatami,
         zid,
@@ -172,9 +182,8 @@ pub(crate) fn init_params(whatami: WhatAmI, zid: Vec<u8>) -> SessionInitParams {
         lease_ms: 10_000,
         initial_sn: 0,
         cookie: Vec::new(),
-        cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-            .expect("32-byte demo key satisfies the >= 32 invariant"),
-    }
+        cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)?,
+    })
 }
 
 /// Everything both drive roles need that is not the endpoint itself.
@@ -238,7 +247,16 @@ async fn drive_dial(endpoint: String, whatami: WhatAmI, tls: CapiTlsConfig, ctx:
             return;
         }
     };
-    let params = init_params(whatami, zid.to_vec());
+    // R311y820 — the third fallible step in this prologue, and it fails the way
+    // the two above it do: report the open failure to the C caller rather than
+    // dial with a cookie key anybody could forge.
+    let params = match init_params(whatami, zid.to_vec()) {
+        Ok(p) => p,
+        Err(_) => {
+            let _ = tx.send(false);
+            return;
+        }
+    };
     let opened = initiate_and_open_session(dialed, params, clock, None, DEFAULT_OPEN_TICK_MS).await;
     let OpenedSession {
         mut engine,
@@ -597,6 +615,18 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
         let _ = tx.send(false);
         return;
     }
+    // R311y820 — drawn HERE, above the `tx.send(true)` below, and the placement
+    // is the point: after that send the C caller has already been told the open
+    // succeeded, so an entropy failure could only be reported as "no peer ever
+    // connects". Built before the bind is announced, it is an ordinary open
+    // failure like the two above.
+    let params = match init_params(WhatAmI::Peer, zid.to_vec()) {
+        Ok(p) => p,
+        Err(_) => {
+            let _ = tx.send(false);
+            return;
+        }
+    };
     // The bind is the WHOLE of pico's `z_open(listen)`: it binds + listens,
     // spawns an async accept task, and returns with zero peers and no error.
     // Unblocking here — before any peer exists — is the R2 fix; Round 1 awaited
@@ -614,7 +644,6 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
     // unwinds a pending `accept()` cleanly.
     let local_shared = shared.clone();
     let forwarder = CApiForwarder::new(shared);
-    let params = init_params(WhatAmI::Peer, zid.to_vec());
     // R311y557 — the LISTEN role is where the local plane matters most: a
     // listener is unblocked by the BIND, so every put it makes before its first
     // peer connects had nowhere to deliver in-process. The drain rides this
@@ -646,7 +675,10 @@ pub fn open_blocking(
     // Minted here, on the CALLING thread, so `SessionState` can hand it to
     // `z_info_zid` and the INIT cannot disagree with it — see the field doc.
     let zid = fresh_zid().ok_or(OpenError::DriveFailed)?;
-    let shared = Arc::new(SharedSession::new(clock, zid.to_vec()));
+    // R311y820 — one line below `fresh_zid`, and fallible for the same reason:
+    // both need OS entropy and neither has an honest constant to fall back to.
+    let shared =
+        Arc::new(SharedSession::new(clock, zid.to_vec()).map_err(|_| OpenError::DriveFailed)?);
     let shutdown = Arc::new(Notify::new());
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<bool>();
