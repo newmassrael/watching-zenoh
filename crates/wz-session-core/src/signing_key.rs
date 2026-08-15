@@ -129,8 +129,49 @@ impl SigningKey {
 /// constructed via `SigningKey::new(bytes)`; length validation +
 /// drop-time zeroize happen at the newtype layer so this function
 /// is panic-free given a non-null key.
-pub fn generate_cookie_hmac_sha256(cookie_signing_key: &SigningKey, peer_zid: &[u8]) -> Vec<u8> {
-    let full = compute_hmac_sha256_full(cookie_signing_key.as_slice(), peer_zid);
+///
+/// ## `nonce` is what binds the cookie to ONE handshake
+///
+/// R311y813. Without it the MAC input is `peer_zid` alone, so the cookie
+/// is a pure function of `(deploy key, claimed zid)` and never changes for
+/// the life of the process: an observer who captures ONE OpenSyn echo can
+/// replay that cookie against this acceptor forever, for that zid, without
+/// ever having completed a round trip. That defeats the whole point of the
+/// echo — the cookie is supposed to prove the initiator received OUR
+/// InitAck on THIS connection, and a deploy-static value proves only that
+/// someone, once, saw one.
+///
+/// zenoh draws a fresh `prng.gen::<u64>()` per accepted handshake, puts it
+/// in the cookie, keeps it in its own link state, and rejects an OpenSyn
+/// whose echoed nonce differs as an "Unknown cookie"
+/// (`unicast/establishment/accept.rs:362` and `:500-503`). This is that
+/// nonce, folded into the MAC rather than carried beside it — wz's cookie
+/// is 16 opaque bytes and the acceptor re-derives rather than decrypts, so
+/// the nonce never needs to ride the wire. Both shapes hold the same
+/// invariant: the acceptor accepts only the cookie IT minted for the
+/// handshake it is currently in.
+///
+/// **The nonce goes FIRST, and that is not cosmetic.** `peer_zid` is
+/// variable-length (1..=16 bytes on the wire), so `zid || nonce` is an
+/// ambiguous encoding — `[0x01,0x02] || 8 nonce bytes` and
+/// `[0x01,0x02,0x03] || 8 different nonce bytes` can be the same byte
+/// string, which would make two distinct handshakes share a cookie. A
+/// fixed-width prefix makes the split unambiguous by construction, with no
+/// length field to keep in sync.
+///
+/// The nonce is the acceptor's own secret-for-this-handshake and, unlike
+/// zenoh's, is never serialized, so it carries no endianness contract with
+/// any peer; `to_le_bytes` is named here only so the derivation is
+/// reproducible across the hosts a single deploy might mix.
+pub fn generate_cookie_hmac_sha256(
+    cookie_signing_key: &SigningKey,
+    peer_zid: &[u8],
+    nonce: u64,
+) -> Vec<u8> {
+    let mut input = Vec::with_capacity(8 + peer_zid.len());
+    input.extend_from_slice(&nonce.to_le_bytes());
+    input.extend_from_slice(peer_zid);
+    let full = compute_hmac_sha256_full(cookie_signing_key.as_slice(), &input);
     full[..16].to_vec()
 }
 
@@ -152,24 +193,77 @@ mod tests {
     use alloc::vec;
 
     /// HMAC-SHA256 cookie generator must produce 16-byte output and
-    /// be deterministic given the same (key, peer_zid) inputs.
+    /// be deterministic given the same (key, peer_zid, nonce) inputs.
     /// Cross-checks against the RustCrypto `hmac` + `sha2` baseline
     /// — if either crate drifts on us the byte sequence will move
     /// and this test catches it before the wire interop tests fail.
+    ///
+    /// Determinism is what makes the acceptor able to VERIFY without
+    /// storing the cookie: it re-derives from `(key, zid, nonce)` at
+    /// OpenSyn. R311y813 added the nonce, which is the term that stops
+    /// that determinism from also spanning handshakes — see
+    /// `a_fresh_nonce_moves_the_cookie_for_the_same_peer`.
     #[test]
     fn cookie_hmac_sha256_deterministic_16_byte_output() {
         let key = SigningKey::new(vec![0xAB; 32]).expect("32-byte key valid");
         let peer_zid = vec![0x01, 0x02, 0x03, 0x04];
-        let cookie_a = generate_cookie_hmac_sha256(&key, &peer_zid);
-        let cookie_b = generate_cookie_hmac_sha256(&key, &peer_zid);
+        let cookie_a = generate_cookie_hmac_sha256(&key, &peer_zid, 0xDEAD_BEEF);
+        let cookie_b = generate_cookie_hmac_sha256(&key, &peer_zid, 0xDEAD_BEEF);
         assert_eq!(cookie_a.len(), 16, "cookie wire width is 16 bytes");
         assert_eq!(cookie_a, cookie_b, "same inputs → same cookie");
 
         let different_peer = vec![0x05, 0x06, 0x07, 0x08];
-        let cookie_c = generate_cookie_hmac_sha256(&key, &different_peer);
+        let cookie_c = generate_cookie_hmac_sha256(&key, &different_peer, 0xDEAD_BEEF);
         assert_ne!(
             cookie_a, cookie_c,
             "different peer_zid must yield different cookie"
+        );
+    }
+
+    /// R311y813 THE DISCRIMINATOR. The SAME peer zid under the SAME deploy
+    /// key must not mint the same cookie twice across handshakes — that
+    /// equality IS the replayability the nonce removes, and before this
+    /// round it held by construction because the nonce was not an input.
+    ///
+    /// Deleting the `nonce` term from the MAC input fails exactly here and
+    /// nowhere else in this module: every other test in the file fixes one
+    /// nonce and would keep passing.
+    #[test]
+    fn a_fresh_nonce_moves_the_cookie_for_the_same_peer() {
+        let key = SigningKey::new(vec![0xAB; 32]).expect("32-byte key valid");
+        let peer_zid = vec![0x01, 0x02, 0x03, 0x04];
+        let first = generate_cookie_hmac_sha256(&key, &peer_zid, 1);
+        let second = generate_cookie_hmac_sha256(&key, &peer_zid, 2);
+        assert_ne!(
+            first, second,
+            "a captured cookie must not verify against the NEXT handshake \
+             with the same peer -- that is the replay this nonce closes",
+        );
+    }
+
+    /// The nonce is length-prefixed by being FIXED-WIDTH AND FIRST, so no
+    /// pair of `(zid, nonce)` inputs can collide by re-splitting the same
+    /// byte string. Written as the concrete collision the naive
+    /// `zid || nonce` order admits: a 2-byte zid whose trailing nonce bytes
+    /// begin `03` versus the 3-byte zid ending in `03`.
+    ///
+    /// Without the ordering rule both sides below concatenate to the same
+    /// ten bytes and two DIFFERENT handshakes share one cookie.
+    #[test]
+    fn the_zid_and_the_nonce_cannot_realign_into_one_another() {
+        let key = SigningKey::new(vec![0xAB; 32]).expect("32-byte key valid");
+        // `[0x01, 0x02] || 03 04 05 06 07 08 09 0A` and
+        // `[0x01, 0x02, 0x03] || 04 05 06 07 08 09 0A ..` are the same
+        // prefix under the rejected order.
+        let short_zid = vec![0x01, 0x02];
+        let long_zid = vec![0x01, 0x02, 0x03];
+        let nonce_a = u64::from_le_bytes([0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A]);
+        let nonce_b = u64::from_le_bytes([0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x00]);
+        assert_ne!(
+            generate_cookie_hmac_sha256(&key, &short_zid, nonce_a),
+            generate_cookie_hmac_sha256(&key, &long_zid, nonce_b),
+            "a variable-length zid adjacent to the nonce must not be able to \
+             borrow a byte from it",
         );
     }
 

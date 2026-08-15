@@ -144,20 +144,30 @@ pub fn signing_key_from_os_entropy() -> Result<SigningKey, getrandom::Error> {
         .expect("32-byte entropy buffer always satisfies the >= 32 length contract"))
 }
 
-/// R3b — draw a fresh usrpwd challenge nonce from OS-backed cryptographic
+/// R3b — draw a fresh per-handshake nonce from OS-backed cryptographic
 /// entropy. The wz mirror of zenoh drawing `prng.gen::<u64>()` per accepted
-/// handshake in usrpwd `StateAccept::new` (its `PseudoRng` is OS-entropy seeded
-/// at transport-manager build). Pulls 8 bytes from `getrandom` (the same source
-/// as `signing_key_from_os_entropy`) and little-endian-decodes them to a `u64`.
+/// handshake (its `PseudoRng` is OS-entropy seeded at transport-manager build).
+/// Pulls 8 bytes from `getrandom` (the same source as
+/// `signing_key_from_os_entropy`) and little-endian-decodes them to a `u64`.
 ///
 /// The no_std session core cannot draw entropy (`getrandom` has no bare-metal
-/// backend), so the AP accept path draws the nonce here and supplies it to the
-/// responder method via `SessionLinkActions::refresh_auth_challenge_nonce`. A
-/// FRESH nonce per accepted handshake is the usrpwd replay defense — a reused
-/// nonce lets a captured OpenSyn `{user, hmac}` replay against the responder.
+/// backend), so the AP layer draws here and supplies the value to whichever
+/// core-side slot needs it. Two consume it today, for the same replay reason on
+/// two different secrets:
+///
+/// - `SessionLinkActions::refresh_auth_challenge_nonce` — the usrpwd / pubkey
+///   responder challenge. A reused nonce lets a captured OpenSyn `{user, hmac}`
+///   replay against the responder.
+/// - `SessionLinkActions::refresh_cookie_nonce` — the anti-amplification cookie
+///   (R311y813). A reused nonce lets a captured OpenSyn cookie echo replay.
+///
+/// **Ungated as of R311y813** (it was `session-extauth`-only). The cookie
+/// consumer is not behind any feature — every acceptor mints a cookie — and
+/// `new_session_actions` calls this in every build, so widening the gate adds
+/// no dead code to any subset.
+///
 /// The fallible surface returns `getrandom::Error` for the same
 /// sandbox-without-entropy reason as the signing-key draw.
-#[cfg(feature = "session-extauth")]
 pub fn nonce_from_os_entropy() -> Result<u64, getrandom::Error> {
     let mut buf = [0u8; 8];
     getrandom::getrandom(&mut buf)?;
@@ -307,6 +317,14 @@ pub use wz_session_core::peer_init_caps::PeerInitCaps;
 /// `clock` is the shared monotonic clock (R263 + R294) that
 /// `drive_session_until_terminal` also receives, so the lease comparator's
 /// `now_ms` and the recorded `keepalive_ms` / `established_ms` share an epoch.
+///
+/// R311y813 — this is also where the per-handshake COOKIE NONCE is drawn. The
+/// construction seam, not each accept entry point: `accept_and_open_session`
+/// has six siblings today (`_with_auth`, `_with_multilink`, `_with_lowlatency`,
+/// …) plus the router / capi accept paths, and the auth nonce — installed at
+/// each seam instead — is why "a caller cannot forget it" had to be re-argued
+/// at every one of them. Drawing it once at construction makes a new accept
+/// path bound by default and costs an initiator-role bundle 8 unread bytes.
 pub fn new_session_actions<T: TimeSource>(
     driver: Arc<dyn BoxedLinkDriver + Send + Sync>,
     params: SessionInitParams,
@@ -317,6 +335,19 @@ pub fn new_session_actions<T: TimeSource>(
     // so neither the `Arc<dyn _>` driver arg nor the declared return type can
     // back-infer `R` the way the former `Arc<Self>` return did.
     let actions = SessionLinkActions::<TokioRuntime, T>::new_generic(driver, params, clock);
+    // R311y813 — bind this bundle's acceptor cookie to one handshake. An
+    // entropy failure leaves the slot at its fail-closed `None`: the acceptor
+    // then mints no HMAC cookie and admits no OpenSyn, which is loud (no
+    // session establishes) rather than quietly replayable. Reported at `error`
+    // because a host without `/dev/urandom` is a deploy fault, not a runtime
+    // condition to absorb.
+    match nonce_from_os_entropy() {
+        Ok(nonce) => actions.refresh_cookie_nonce(nonce),
+        Err(e) => log::error!(
+            "wz-session: no OS entropy for the anti-amplification cookie nonce ({e}); \
+             this bundle will refuse every inbound OpenSyn"
+        ),
+    }
     // Declare this profile's reassembly budget to the TX side, so an
     // oversize send is refused where the caller can see it instead of being
     // fragmented into a chain this host's own dispatcher would drop
@@ -1168,9 +1199,43 @@ mod tests {
         // peer_zid produce distinct cookies.
         let peer_zid = vec![0x01, 0x02, 0x03, 0x04];
         assert_ne!(
-            generate_cookie_hmac_sha256(&a, &peer_zid),
-            generate_cookie_hmac_sha256(&b, &peer_zid),
+            generate_cookie_hmac_sha256(&a, &peer_zid, 0),
+            generate_cookie_hmac_sha256(&b, &peer_zid, 0),
             "two OS-entropy keys must produce distinct cookies (2^256 space)"
+        );
+    }
+
+    /// R311y813 — `new_session_actions` must install a cookie nonce, and two
+    /// bundles must not share one. This is the half the FSM discriminator
+    /// (`a_cookie_from_an_earlier_handshake_is_refused_by_the_next`)
+    /// deliberately does not test: that test INSTALLS its nonces so its
+    /// outcome is decided by the binding, which leaves "does anything draw a
+    /// fresh one in production" unasserted. Here.
+    ///
+    /// A regression that drops the draw fails on `Some`; one that hoists it to
+    /// a process-wide constant fails on distinctness — the same 2^64 argument
+    /// the signing-key test above makes at 2^256.
+    #[test]
+    fn new_session_actions_draws_a_distinct_cookie_nonce_per_bundle() {
+        let mk = || {
+            let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> =
+                Arc::new(wz_runtime_tokio_test_support::NoopOutboundDriver::default());
+            new_session_actions(
+                outbound,
+                wz_runtime_tokio_test_support::fixture_session_init_params(),
+                TokioTime::new(),
+            )
+        };
+        let (a, b) = (mk(), mk());
+        let (na, nb) = (a.cookie_nonce(), b.cookie_nonce());
+        assert!(
+            na.is_some() && nb.is_some(),
+            "the AP construction seam must leave no bundle fail-closed"
+        );
+        assert_ne!(
+            na, nb,
+            "each bundle must draw its OWN nonce -- a shared one makes every \
+             acceptor on this node mint the same cookie for a given peer"
         );
     }
 

@@ -67,10 +67,16 @@ pub struct SessionInitParams {
     /// OpenSyn frame so the peer can MAC-verify ownership of the
     /// session start.
     ///
-    /// On the Accepting side this MUST be generated via
-    /// `generate_cookie_hmac_sha256(cookie_signing_key, peer_zid)`
-    /// per RFC §5.M. The integration test fixture matches this
-    /// path so the wire bytes are reproducible across runs.
+    /// On the Accepting side this field is only the FALLBACK: the live
+    /// mint is `generate_cookie_hmac_sha256(cookie_signing_key, peer_zid,
+    /// cookie_nonce)` per RFC §5.M, and it is what an initiator's echo is
+    /// checked against. R311y813 made the per-handshake nonce a required
+    /// input, so an acceptor's emitted cookie is NOT reproducible from this
+    /// bundle alone — a test that wants to predict it reads the nonce off
+    /// `SessionLinkActions::cookie_nonce` (a code span, not a link: the
+    /// accessor shares its name with the slot it reads). This
+    /// field reaches the wire only where no peer zid or no nonce is known,
+    /// and in that state `cookie_valid` admits nothing.
     pub cookie: Vec<u8>,
 
     /// Per-process secret key used by the Accepting side to MAC the

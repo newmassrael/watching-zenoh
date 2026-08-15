@@ -101,9 +101,15 @@ async fn r78_accepting_path_handshake_terminates_at_established() {
         // Accepting side minted on InitAck (R86) for the
         // `cookie_valid()` guard to pass. peer_zid was captured by
         // R86 on InitSyn arrival (= [0xB0..0xB3] from craft_initsyn_wire).
+        // R311y813 — the nonce comes from the ACCEPTOR, not from a constant:
+        // the cookie is bound to this handshake, so the test can no longer
+        // assume the derivation is reproducible from the deploy key alone.
         let expected_cookie = wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
             &fixture_session_init_params().cookie_signing_key,
             &FIXTURE_PEER_ZID,
+            actions
+                .cookie_nonce()
+                .expect("new_session_actions installs a cookie nonce at construction"),
         );
         let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
             &expected_cookie,
@@ -303,22 +309,203 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
         ),
     };
 
-    // The expected cookie is HMAC-SHA256(cookie_signing_key, peer_zid)
-    // truncated to 16 bytes per RFC §5.M. Recompute it inline using
-    // the same fixture key so the test is independent of the cookie
-    // module's internal constants.
+    // The expected cookie is HMAC-SHA256(cookie_signing_key,
+    // nonce || peer_zid) truncated to 16 bytes per RFC §5.M. Recompute it
+    // inline using the same fixture key so the test is independent of the
+    // cookie module's internal constants; the nonce is read off the acceptor
+    // because R311y813 made it per-handshake.
+    let nonce = actions
+        .cookie_nonce()
+        .expect("new_session_actions installs a cookie nonce at construction");
     let expected_cookie = generate_cookie_hmac_sha256(
         &fixture_session_init_params().cookie_signing_key,
         &FIXTURE_PEER_ZID,
+        nonce,
     );
     assert_eq!(
         cookie.as_slice(),
         expected_cookie.as_slice(),
         "R86: outbound InitAck cookie MUST be HMAC(cookie_signing_key, \
-         inbound_peer_zid)[..16] — pre-R86 this was params.cookie verbatim \
-         which violated RFC §5.M anti-amplification (deploy-static cookie \
-         offers no per-peer replay defense)"
+         nonce || inbound_peer_zid)[..16] — pre-R86 this was params.cookie \
+         verbatim which violated RFC §5.M anti-amplification (deploy-static \
+         cookie offers no per-peer replay defense)"
     );
+
+    // R311y813 — and it must be bound to THIS handshake, not merely to the
+    // peer. The same key and the same zid under a DIFFERENT nonce is what a
+    // captured cookie amounts to on the next connection; asserting the wire
+    // cookie differs from it is the assertion that the binding term reached
+    // the wire at all.
+    let cookie_under_another_nonce = generate_cookie_hmac_sha256(
+        &fixture_session_init_params().cookie_signing_key,
+        &FIXTURE_PEER_ZID,
+        nonce.wrapping_add(1),
+    );
+    assert_ne!(
+        cookie.as_slice(),
+        cookie_under_another_nonce.as_slice(),
+        "the emitted cookie must depend on the per-handshake nonce -- if it \
+         does not, every handshake with this peer mints the same 16 bytes",
+    );
+}
+
+/// R311y813 THE DISCRIMINATOR. A cookie an acceptor minted for ONE handshake
+/// must not open a LATER one with the same peer.
+///
+/// This is the replay the per-handshake nonce closes, and it is stated as an
+/// end-to-end FSM outcome rather than as a property of the MAC: the attacker's
+/// capability is "I saw one OpenSyn echo", and the question is whether
+/// re-sending those 16 bytes at a fresh acceptor reaches `Established`.
+///
+/// Before this round it did. The cookie was `HMAC(deploy key, peer zid)[..16]`
+/// — no term that changes between handshakes — so the second acceptor derived
+/// the identical expected value and admitted the replay. Deleting `nonce` from
+/// either the mint or the verify makes exactly this test fail; every other
+/// accept-path test fixes one bundle and cannot see across two.
+///
+/// The nonces are INSTALLED rather than drawn so the outcome is decided by the
+/// binding and not by entropy luck (that `new_session_actions` really draws
+/// distinct ones is a separate assertion, in `session_glue`'s unit tests).
+/// Both halves of the pair are asserted: the stale cookie is refused AND the
+/// second acceptor's OWN cookie is admitted, so a refusal cannot come from the
+/// second bundle simply being broken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cookie_from_an_earlier_handshake_is_refused_by_the_next() {
+    /// Drive a fresh acceptor bundle to `SentInitAck` with the shared crafted
+    /// InitSyn, under a caller-chosen cookie nonce.
+    async fn acceptor_at_sent_init_ack(
+        nonce: u64,
+    ) -> (
+        Arc<SessionLinkActions>,
+        Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+    ) {
+        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> =
+            Arc::new(NoopOutboundDriver::default());
+        let actions =
+            new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+        actions.refresh_cookie_nonce(nonce);
+        let mut engine = new_session_engine(&actions);
+        engine.initialize();
+        engine.process_event(E::InboundStart);
+        let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
+        let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+        assert_eq!(engine.get_current_state(), S::SentInitAck);
+        (actions, engine)
+    }
+
+    const FIRST_NONCE: u64 = 0x1111_1111_1111_1111;
+    const SECOND_NONCE: u64 = 0x2222_2222_2222_2222;
+    let key = || fixture_session_init_params().cookie_signing_key;
+
+    // Handshake 1 — the observer captures this cookie off the wire.
+    let (_first_actions, _first_engine) = acceptor_at_sent_init_ack(FIRST_NONCE).await;
+    let captured = wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
+        &key(),
+        &FIXTURE_PEER_ZID,
+        FIRST_NONCE,
+    );
+
+    // Handshake 2 — a NEW connection from the same peer, same deploy key.
+    let (actions, mut engine) = acceptor_at_sent_init_ack(SECOND_NONCE).await;
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
+        &captured,
+    )))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+
+    assert_eq!(
+        engine.get_current_state(),
+        S::SentInitAck,
+        "a cookie minted for an EARLIER handshake must not advance this one; \
+         reaching Established here is the replay window R311y813 closed"
+    );
+    assert_eq!(
+        actions.trace_snapshot().send_open_ack,
+        0,
+        "the replayed cookie must not reach send_open_ack"
+    );
+    assert!(
+        actions.trace_snapshot().cookie_valid_check >= 1,
+        "the guard must have RUN and rejected -- a refusal from never running \
+         would prove nothing about the binding"
+    );
+
+    // ANTI-VACUITY: the same acceptor admits the cookie IT minted.
+    let own = wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
+        &key(),
+        &FIXTURE_PEER_ZID,
+        SECOND_NONCE,
+    );
+    assert_ne!(
+        own, captured,
+        "the two handshakes must mint different cookies, else the refusal \
+         above is untestable"
+    );
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(&own)))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(
+        engine.get_current_state(),
+        S::Established,
+        "this handshake's OWN cookie must still be admitted -- otherwise the \
+         refusal above is just a broken acceptor"
+    );
+}
+
+/// R311y813 — an acceptor with NO cookie nonce installed is fail-CLOSED: it
+/// mints no HMAC cookie and admits no OpenSyn.
+///
+/// The alternative rejected here is a silent fallback to the un-bound
+/// derivation, which would be indistinguishable from the defect this round
+/// removed — an operator reading a healthy session could not tell whether the
+/// binding was in force. `new_generic`'s default is `None`, so this drives the
+/// core constructor directly rather than the AP seam that installs one.
+///
+/// The InitAck still goes out (anti-amplification is about not ANSWERING a
+/// forged OpenSyn, and the InitAck is the round-trip challenge itself); it
+/// carries `params.cookie` verbatim, which no initiator can turn into a
+/// passing echo because `cookie_valid` denies on the absent nonce regardless
+/// of what came back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_a_cookie_nonce_the_acceptor_admits_no_open_syn() {
+    use wz_runtime_tokio::runtime_impl::TokioRuntime;
+
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
+    // `new_generic`, not `new_session_actions`: the AP seam installs a nonce,
+    // and this test is about the state before one is installed.
+    let actions = SessionLinkActions::<TokioRuntime, TokioTime>::new_generic(
+        outbound,
+        fixture_session_init_params(),
+        TokioTime::new(),
+    );
+    assert_eq!(
+        actions.cookie_nonce(),
+        None,
+        "the core constructor must not invent a nonce it has no entropy for"
+    );
+    let mut engine = new_session_engine(&actions);
+    engine.initialize();
+    engine.process_event(E::InboundStart);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::SentInitAck);
+
+    // The cookie the OLD, un-bound derivation would have produced. If the mint
+    // had fallen back to it, this echo would establish the session.
+    let unbound = wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
+        &fixture_session_init_params().cookie_signing_key,
+        &FIXTURE_PEER_ZID,
+        0,
+    );
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
+        &unbound,
+    )))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(
+        engine.get_current_state(),
+        S::SentInitAck,
+        "no nonce installed must mean no OpenSyn is admitted, not a quiet \
+         fallback to the deploy-static cookie"
+    );
+    assert_eq!(actions.trace_snapshot().send_open_ack, 0);
 }
 
 // ── R311fb staleness guard: once the accept handshake reaches Established,
@@ -343,6 +530,9 @@ async fn r311fb_stale_accept_inactivity_timeout_after_established_is_discarded()
     let cookie = wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
         &fixture_session_init_params().cookie_signing_key,
         &FIXTURE_PEER_ZID,
+        actions
+            .cookie_nonce()
+            .expect("new_session_actions installs a cookie nonce at construction"),
     );
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
         &cookie,

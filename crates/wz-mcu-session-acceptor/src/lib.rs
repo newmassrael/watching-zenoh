@@ -113,6 +113,12 @@ const FRAG_SN_OOO: u64 = 12;
 /// first ~3 iterations; the remainder spin the (no-op, with a frozen clock)
 /// deadline branch. Bounds a regression so it fails fast instead of hanging.
 const MAX_ITERS: usize = 64;
+/// R311y813 — the fixture's per-handshake cookie nonce. Fixed, like
+/// `acceptor_params`' signing key: the peer echoes the cookie the acceptor
+/// really minted, so this e2e is nonce-VALUE-agnostic and only needs a nonce to
+/// be installed at all (the slot's default denies). A deploy draws it per
+/// handshake from the §5.I intrinsics RNG.
+const FIXTURE_COOKIE_NONCE: u64 = 0x5A5A_5A5A_5A5A_5A5A;
 
 /// What the reactive peer sends after the handshake reaches `Established`, to
 /// exercise the acceptor's data plane.
@@ -317,6 +323,16 @@ pub fn run_acceptor_e2e<C: ClockSource, H: FnMut()>(
         acceptor_params(),
         clock.clone(),
     );
+    // R311y813 — the cookie nonce binds the acceptor's anti-amplification
+    // cookie to ONE handshake, and its default is fail-closed, so an acceptor
+    // that installs none admits no OpenSyn. A FIXED value here for the same
+    // reason `acceptor_params` fixes the signing key: this is the e2e fixture,
+    // and the verdict is that the peer's echo of the REAL minted cookie passes
+    // the guard — which it must do for any nonce. A deploy sources this from
+    // the §5.I intrinsics tier (`sce_intrinsics_runtime::rng`), the MCU
+    // counterpart of the AP `nonce_from_os_entropy` draw that
+    // `new_session_actions` performs at construction.
+    actions.refresh_cookie_nonce(FIXTURE_COOKIE_NONCE);
     let timeouts = SessionTimeouts::spec_defaults();
 
     // Open the handshake: the initiator's first move. The reactive peer

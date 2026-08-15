@@ -512,6 +512,34 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// the handshake — one slot per role keeps the dispatch
     /// unambiguous.
     pub inbound_opensyn_cookie: R::Mutex<Option<Vec<u8>>>,
+    /// R311y813 — the per-handshake nonce that binds the Accepting side's
+    /// cookie to THIS handshake, the wz analogue of the `cookie_nonce` zenoh
+    /// keeps in its own accept state and compares the OpenSyn echo against
+    /// (`unicast/establishment/accept.rs:359-395` mints, `:500-503` rejects a
+    /// mismatch as "Unknown cookie").
+    ///
+    /// Both the mint (`SessionActionsBinding::send_init_ack_with_cookie`)
+    /// and the verify ([`Self::cookie_valid`]) read THIS slot, so the acceptor
+    /// admits exactly the cookie it minted for the handshake it is in. Before
+    /// this slot existed the two sides agreed on a value derived from
+    /// `(deploy key, peer zid)` alone, which is constant for the life of the
+    /// process — a captured OpenSyn echo replayed forever.
+    ///
+    /// `None` is FAIL-CLOSED and is the only default: the no_std core draws no
+    /// entropy (`getrandom` has no bare-metal backend), so the nonce is
+    /// installed from outside via [`Self::refresh_cookie_nonce`] — by
+    /// `new_session_actions` on the AP profile. An acceptor that never
+    /// received one mints no HMAC cookie and its `cookie_valid` denies every
+    /// OpenSyn; it does NOT fall back to the un-bound derivation, because a
+    /// fallback is indistinguishable from the defect this slot removes.
+    ///
+    /// Survives [`Self::reset_for_reopen`] alongside the ext-chain staging
+    /// slots and the auth challenge nonce, for the same reason: it is
+    /// locally-sourced configuration rather than captured peer state, and the
+    /// host that supplied it is the one positioned to refresh it. See
+    /// [`Self::refresh_cookie_nonce`] for what an acceptor-role re-handshake
+    /// owes.
+    pub cookie_nonce: R::Mutex<Option<u64>>,
     /// R68b — per-role ext chain slots. Indexed by `ExtChainRole`
     /// via `ext_chain_for`. Each slot lives behind its own `Mutex`
     /// so a setter can swap one chain without blocking the others
@@ -1467,6 +1495,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 remote_peer_zid: R::new_mutex(None::<Vec<u8>>),
                 peer_whatami: R::new_mutex(None::<u8>),
                 inbound_opensyn_cookie: R::new_mutex(None::<Vec<u8>>),
+                // R311y813 — fail-closed until a host with an entropy source
+                // installs one; this crate has none to draw from.
+                cookie_nonce: R::new_mutex(None::<u64>),
                 // R121f1 — default ext chains seed both Init roles with the
                 // patch-extension entry that zenoh-pico's accept-side
                 // size-negotiation requires. See
@@ -2010,6 +2041,50 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "session-extauth")]
     pub fn refresh_auth_challenge_nonce(&self, nonce: u64) {
         R::with_mutex_mut(&self.auth, |d| d.set_challenge_nonce(nonce));
+    }
+
+    /// R311y813 — install the per-handshake cookie nonce, the term that binds
+    /// the Accepting side's anti-amplification cookie to ONE handshake (the
+    /// `cookie_nonce` slot). Sibling of `refresh_auth_challenge_nonce` and
+    /// supplied the same way and for the same reason: the no_std core draws no
+    /// entropy, so the host that has a source installs it. Both siblings are
+    /// named as code spans rather than links — one is `session-extauth`-gated
+    /// and the other shares its name with a field, so a link would resolve in
+    /// some feature subsets and ambiguously in the rest.
+    ///
+    /// **Ungated, unlike the auth nonce.** The cookie is not an optional
+    /// extension — every acceptor mints one on InitAck — so a build that
+    /// carries the accept path at all carries this, and gating it would make
+    /// the fail-closed default the shipped behaviour in some feature subsets.
+    ///
+    /// Call it BEFORE the FSM reaches `SentInitAck`, i.e. before the InitSyn
+    /// that starts the handshake is dispatched; the AP profile does it at
+    /// construction (`new_session_actions`) so no accept seam can forget, the
+    /// way the auth seam had to be remembered at each of its entry points.
+    ///
+    /// **On a re-handshake.** The slot survives
+    /// [`reset_for_reopen`](Self::reset_for_reopen), so a bundle that
+    /// re-handshakes IN THE ACCEPTOR ROLE and is not refreshed re-mints the
+    /// cookie its previous handshake used — narrower than the deploy-lifetime
+    /// window this round closed, but the same shape. wz's reopen path is the
+    /// initiator-role auto-reconnect (`ReconnectingSession` builds a FRESH
+    /// bundle per attempt), so nothing reaches it today; a host that later
+    /// reopens as acceptor should call this again, exactly as the auth seam
+    /// documents for its own nonce.
+    pub fn refresh_cookie_nonce(&self, nonce: u64) {
+        R::with_mutex_mut(&self.cookie_nonce, |slot| *slot = Some(nonce));
+    }
+
+    /// R311y813 — the installed per-handshake cookie nonce, or `None` when no
+    /// host has supplied one (the fail-closed default).
+    ///
+    /// The acceptor's own state, exposed for the same reason zenoh carries its
+    /// nonce out of `send_init_ack` in `SendInitAckOut`: something has to be
+    /// able to say which handshake this is. In-process only — it is never
+    /// serialized, and a test that wants to reproduce the minted cookie reads
+    /// it here rather than assuming the derivation is nonce-free.
+    pub fn cookie_nonce(&self) -> Option<u64> {
+        R::with_mutex_mut(&self.cookie_nonce, |slot| *slot)
     }
 
     /// R3b — run `f` against the auth dispatch under its mutex. The recv-stage
@@ -7038,7 +7113,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // anti-amplification. If the inbound InitSyn already arrived
             // (`inbound_peer_zid` slot populated by `handle_inbound`),
             // mint a fresh cookie via HMAC-SHA256(cookie_signing_key,
-            // peer_zid)[..16] and pass it as the encode override; the
+            // nonce || peer_zid)[..16] and pass it as the encode override; the
             // cookie is now bound to the specific peer's claimed
             // identity, not a deploy-static value. Falls back to
             // `params.cookie` verbatim if no peer_zid has been observed.
@@ -7046,11 +7121,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // re-acquires `inbound_peer_init_caps` + the ext-chain mutex, so
             // the `inbound_peer_zid` guard must drop before the encode call
             // (non-reentrant per-profile mutex; 2b-① reentrancy discipline).
-            let cookie_hmac: Option<Vec<u8>> = R::with_mutex_mut(&a.inbound_peer_zid, |slot| {
-                slot.as_ref().map(|peer_zid| {
-                    generate_cookie_hmac_sha256(&a.params.cookie_signing_key, peer_zid)
-                })
-            });
+            //
+            // R311y813 — the nonce is the second REQUIRED input, read from its
+            // own slot in its own scope (sequential, never nested: the mutex is
+            // non-reentrant on the MCU profile). Absent nonce mints NO HMAC
+            // cookie: an acceptor with no per-handshake binding available must
+            // not silently emit the replayable derivation, and `cookie_valid`
+            // denies for the same reason, so the two halves fail together
+            // rather than one of them degrading.
+            let nonce: Option<u64> = R::with_mutex_mut(&a.cookie_nonce, |slot| *slot);
+            let peer_zid: Option<Vec<u8>> =
+                R::with_mutex_mut(&a.inbound_peer_zid, |slot| slot.clone());
+            let cookie_hmac: Option<Vec<u8>> = match (peer_zid, nonce) {
+                (Some(zid), Some(n)) => Some(generate_cookie_hmac_sha256(
+                    &a.params.cookie_signing_key,
+                    &zid,
+                    n,
+                )),
+                _ => None,
+            };
             let bytes = a
                 .encode_init_with_role(
                     /*is_ack=*/ true,
@@ -7244,13 +7333,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R89 — the inbound half of R86's outbound cookie binding. The
     /// Accepting side stored `peer_zid` on InitSyn arrival
     /// (`inbound_peer_zid` slot) and minted a cookie via
-    /// HMAC-SHA256(cookie_signing_key, peer_zid)[..16] on InitAck send
-    /// (`send_init_ack_with_cookie`). The Initiator echoes that cookie
+    /// HMAC-SHA256(cookie_signing_key, nonce || peer_zid)[..16] on InitAck
+    /// send (`send_init_ack_with_cookie`). The Initiator echoes that cookie
     /// verbatim on OpenSyn; here we re-compute the expected HMAC and
     /// compare against the captured inbound OpenSyn cookie
     /// (`inbound_opensyn_cookie` slot). Mismatch -> `false` -> the
     /// dispatcher drops the `OpenSynReceived` event so the FSM stays at
     /// SentInitAck instead of advancing to SentOpenAck.
+    ///
+    /// R311y813 — the expected value is re-derived from the SAME
+    /// `cookie_nonce` slot the mint read, which is what makes
+    /// this a check on THIS handshake rather than on the deploy: zenoh states
+    /// the same rule as `input.cookie_nonce != cookie.nonce -> Unknown cookie`
+    /// (`unicast/establishment/accept.rs:500-503`). An absent nonce denies,
+    /// like every other absent input here — an acceptor that cannot tell which
+    /// handshake it is in must not admit one.
     ///
     /// The counter increments on every invocation so tests can assert the
     /// guard actually fired (vs. R57's `bind_bool` placeholder which never
@@ -7259,7 +7356,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.trace, |t| t.cookie_valid_check += 1);
 
         // Defensive: any missing material rejects. A well-formed handshake
-        // populates both slots before this guard runs. Each slot is read in
+        // populates every slot before this guard runs. Each slot is read in
         // its own with_mutex_mut (sequential, no nesting).
         let peer_zid = match R::with_mutex_mut(&self.inbound_peer_zid, |s| s.clone()) {
             Some(z) => z,
@@ -7269,7 +7366,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Some(c) => c,
             None => return false,
         };
-        let expected = generate_cookie_hmac_sha256(&self.params.cookie_signing_key, &peer_zid);
+        let nonce = match R::with_mutex_mut(&self.cookie_nonce, |s| *s) {
+            Some(n) => n,
+            None => return false,
+        };
+        let expected =
+            generate_cookie_hmac_sha256(&self.params.cookie_signing_key, &peer_zid, nonce);
         // Byte-equality compare. Constant-time compare is overkill for a
         // single-peer test fixture path; if the HMAC verdict ever drives a
         // security-critical timing oracle on prod hardware, swap to
