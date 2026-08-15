@@ -3254,9 +3254,12 @@ pub enum OpenError {
     /// [`Self::InitAckCapsRejected`] — "less or equal than the one in the
     /// InitSyn" — applied to the establishment parameter that rides the ext
     /// chain rather than the body, so the body-only caps validator could
-    /// never have seen it. The dispatcher took the `framing.error` arm
-    /// (Closing with `CloseReason::Invalid`); typed separately because it
-    /// diagnoses a protocol-revision mismatch, not an over-large size.
+    /// never have seen it. The dispatcher took the
+    /// `establishment.ext_rejected` arm (Closing with `CloseReason::Generic`,
+    /// R311y823 — zenoh closes GENERIC for every extension handler's failure
+    /// and reserves INVALID for the body's size parameters); typed separately
+    /// because it diagnoses a protocol-revision mismatch, not an over-large
+    /// size.
     ///
     /// Ungated, like its sibling above: an open loop's typed vocabulary is
     /// the same in every build, and only the arm that PRODUCES it needs the
@@ -3264,8 +3267,9 @@ pub enum OpenError {
     InitAckPatchRejected,
     /// R3b — a Z_EXT_AUTH method rejected the peer during the handshake (a bad
     /// usrpwd credential, unknown user, missing required sub-ext, or a malformed
-    /// auth ext). The dispatcher took the `framing.error` arm (Closing with
-    /// `CloseReason::Invalid`, wire Close(INVALID)); the open loop surfaces the
+    /// auth ext). The dispatcher took the `establishment.ext_rejected` arm
+    /// (Closing with `CloseReason::Generic`, wire Close(GENERIC), R311y823);
+    /// the open loop surfaces the
     /// carried [`AuthError`](wz_session_core::auth_dispatch::AuthError) here
     /// instead of folding it into [`Self::Terminal`]. The wz mirror of zenoh's
     /// establishment FSM `?`-propagating the usrpwd verify error into a close.
@@ -3276,15 +3280,16 @@ pub enum OpenError {
     /// containment, a contradicting reliability, both QoS forms at once, or an
     /// invalid z64 body. Every one is a `zerror!` bail-out inside zenoh's
     /// `QoSFsm::recv_init_syn` / `recv_init_ack` that aborts establishment, so
-    /// the dispatcher took the `framing.error` arm (Closing with
-    /// `CloseReason::Invalid`) and the typed reason surfaces here rather than
-    /// folding into [`Self::Terminal`].
+    /// the dispatcher took the `establishment.ext_rejected` arm (Closing with
+    /// `CloseReason::Generic`, R311y823) and the typed reason surfaces here
+    /// rather than folding into [`Self::Terminal`].
     #[cfg(feature = "session-extqos")]
     QosLinkRejected(wz_session_core::extqos::QosLinkError),
     /// session-extshm (R311y507) — the peer's `init::ext::Shm` challenge body
     /// did not decode. zenoh `bail!`s on this in `recv_init_syn`, aborting
-    /// establishment; the dispatcher took the `framing.error` arm and the typed
-    /// reason surfaces here. Acceptor-only, per that method's asymmetry.
+    /// establishment; the dispatcher took the `establishment.ext_rejected` arm
+    /// (Closing with `CloseReason::Generic`, R311y823) and the typed reason
+    /// surfaces here. Acceptor-only, per that method's asymmetry.
     #[cfg(feature = "session-extshm")]
     ShmChallengeRejected,
     /// session-extshm (R311y507) — the SHM offer was accepted but this node

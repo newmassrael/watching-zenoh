@@ -15,7 +15,8 @@
 //!     ext on the wire (asserted directly by re-parsing the InitSyn).
 //!   - RECV: `dispatch_link_event` feeds each admitted handshake frame's ext
 //!     chain into the matching demux stage, and a usrpwd reject drives
-//!     `framing.error` (Accepting -> Closing, `CloseReason::Invalid`) surfaced as
+//!     `establishment.ext_rejected` (Accepting -> Closing,
+//!     `CloseReason::Generic` — R311y823) surfaced as
 //!     `DriverLoopOutcome::AuthRejected`.
 //!
 //! The responder challenge nonce is drawn fresh from OS entropy via
@@ -35,7 +36,8 @@ use wz_runtime_tokio::session_fsm_unicast::{
 };
 use wz_runtime_tokio::session_glue::{
     new_session_actions, new_session_engine, nonce_from_os_entropy, parse_inbound,
-    poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome, InboundFrame, SessionLinkActions,
+    poll_and_dispatch_one, BoxedLinkDriver, CloseReason, DriverLoopOutcome, InboundFrame,
+    SessionLinkActions,
 };
 use wz_runtime_tokio::session_open::{
     accept_and_open_session_with_auth, connect_and_open_session_with_auth, DialConfig, DialedLink,
@@ -228,7 +230,8 @@ async fn usrpwd_bad_password_rejects_and_tears_down_the_responder() {
         "a bad password must surface DriverLoopOutcome::AuthRejected; got {:?}",
         h.responder_open_syn_outcome
     );
-    // framing.error tears the Accepting session down to Closing(Invalid).
+    // establishment.ext_rejected tears the Accepting session down to
+    // Closing(Generic) — R311y823.
     assert_eq!(
         h.responder_state,
         S::Closing,
@@ -246,7 +249,20 @@ async fn usrpwd_bad_password_rejects_and_tears_down_the_responder() {
     );
     assert!(
         resp_trace.set_close_reason_count >= 1,
-        "the reject must run set_close_reason_invalid (wire Close(INVALID))"
+        "the reject must run a close-reason mutator on the way to Closing"
+    );
+    // R311y823 — this used to say `set_close_reason_invalid (wire
+    // Close(INVALID))` in prose while asserting only that SOME reason ran, so
+    // it could not have caught the value being wrong. It is now the AUTH arm's
+    // witness for the establishment-extension family: zenoh closes GENERIC on
+    // every ext handler's failure, and its usrpwd verify error reaches
+    // `link.close(Some(GENERIC))` through exactly that map_err
+    // (`unicast/establishment/accept.rs:302`, `open.rs:329`).
+    assert_eq!(
+        resp_trace.close_reason,
+        CloseReason::Generic,
+        "an auth reject is an establishment-EXTENSION failure, so it closes \
+         GENERIC (wire Close(GENERIC)) rather than the body family's INVALID"
     );
 }
 

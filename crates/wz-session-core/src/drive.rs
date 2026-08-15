@@ -248,10 +248,21 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                             engine.process_event(E::FramingError);
                             return DriverLoopOutcome::InitAckCapsRejected;
                         }
+                        // R311y823 — the PATCH reject leaves through
+                        // `establishment.ext_rejected`, not `framing.error`,
+                        // because the reason byte differs on the wire. zenoh
+                        // reserves INVALID for the three BODY size parameters
+                        // checked immediately above (`open.rs:288,304`) and
+                        // closes GENERIC for every EXTENSION handler failure
+                        // (`open.rs:321-364`) -- and `link.close` puts that
+                        // byte in a Close the peer reads
+                        // (`unicast/link.rs:103-114`). The patch is an
+                        // extension, so it takes the extension's reason even
+                        // though it is the fourth member of pico's rule block.
                         if !actions
                             .init_ack_patch_acceptable(crate::extpatch::peer_patch(extensions))
                         {
-                            engine.process_event(E::FramingError);
+                            engine.process_event(E::EstablishmentExtRejected);
                             return DriverLoopOutcome::InitAckPatchRejected;
                         }
                     }
@@ -328,7 +339,7 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                 } = &frame
                 {
                     if let Err(err) = actions.negotiate_qos_link_against_peer(*is_ack, extensions) {
-                        engine.process_event(E::FramingError);
+                        engine.process_event(E::EstablishmentExtRejected);
                         return DriverLoopOutcome::QosLinkRejected(err);
                     }
                 }
@@ -372,7 +383,7 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                     if *is_ack {
                         actions.shm_recv_init_ack(extensions);
                     } else if actions.shm_recv_init_syn(extensions).is_err() {
-                        engine.process_event(E::FramingError);
+                        engine.process_event(E::EstablishmentExtRejected);
                         return DriverLoopOutcome::ShmChallengeRejected;
                     }
                 }
@@ -436,7 +447,7 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                         _ => None,
                     };
                     if let Some(Err(e)) = auth {
-                        engine.process_event(E::FramingError);
+                        engine.process_event(E::EstablishmentExtRejected);
                         return DriverLoopOutcome::AuthRejected(e);
                     }
                 }
@@ -479,7 +490,7 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                         _ => None,
                     };
                     if let Some(Err(e)) = ml {
-                        engine.process_event(E::FramingError);
+                        engine.process_event(E::EstablishmentExtRejected);
                         return DriverLoopOutcome::AuthRejected(e);
                     }
                     // Latch the peer's captured ephemeral pubkey (no-op

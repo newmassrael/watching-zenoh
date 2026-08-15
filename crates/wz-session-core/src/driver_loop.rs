@@ -137,9 +137,18 @@ pub enum DriverLoopOutcome {
     /// of the body. zenoh `bail!`s out of `PatchFsm::recv_init_ack`
     /// (`unicast/establishment/ext/patch.rs:78-84`) and zenoh-pico
     /// returns `_Z_ERR_GENERIC` before building its OpenSyn
-    /// (`unicast/transport.c:142-148`), so the dispatcher has already
-    /// injected `FramingError` and the FSM tears the session down with
-    /// `CloseReason::Invalid`.
+    /// (`unicast/transport.c:142-148`), so the dispatcher injects
+    /// `EstablishmentExtRejected` and the FSM tears the session down with
+    /// `CloseReason::Generic` (wire Close(GENERIC)).
+    ///
+    /// R311y823 — GENERIC rather than the INVALID its body-side sibling
+    /// closes with, and that is upstream's split rather than a wz taste:
+    /// zenoh tags each establishment failure with the reason to close on,
+    /// and every EXTENSION handler's error carries `close::reason::GENERIC`
+    /// (`unicast/establishment/open.rs:321-364`) where the body's size
+    /// parameters carry `INVALID` (`open.rs:288,304`). The patch rides the
+    /// ext chain, so it takes the ext family's reason even though pico
+    /// checks it inside the same rule block as the three sizes.
     ///
     /// Its own variant rather than a fold into `InitAckCapsRejected`
     /// because the two answer different questions about the peer — "it
@@ -159,19 +168,22 @@ pub enum DriverLoopOutcome {
     /// both QoS forms at once, or its z64 body is not a valid state encoding.
     /// Every one of those is a `zerror!` bail-out inside zenoh's
     /// `QoSFsm::recv_init_syn` / `recv_init_ack`, which `?`s out of the
-    /// establishment FSM and aborts the handshake — so the dispatcher has
-    /// already injected `FramingError` and the FSM tears the session down with
-    /// `CloseReason::Invalid`. Its own variant (the `InitAckCapsRejected`
-    /// pattern) so the open loop can map it to a typed open error rather than
-    /// folding it into `Terminal`.
+    /// establishment FSM and aborts the handshake — so the dispatcher injects
+    /// `EstablishmentExtRejected` and the FSM tears the session down with
+    /// `CloseReason::Generic` (R311y823; zenoh's ext-handler `map_err` carries
+    /// `close::reason::GENERIC`, `establishment/open.rs:321`). Its own variant
+    /// (the `InitAckCapsRejected` pattern) so the open loop can map it to a
+    /// typed open error rather than folding it into `Terminal`.
     #[cfg(all(feature = "session-extqos", feature = "codec-init-body"))]
     QosLinkRejected(crate::extqos::QosLinkError),
     /// session-extshm (R311y507) — an initiator's `init::ext::Shm` challenge
     /// body did not decode. zenoh `recv_init_syn` `bail!`s on exactly this
-    /// (`ext/shm.rs`), aborting establishment, so the dispatcher has injected
-    /// `FramingError` and the FSM tears the session down with
-    /// `CloseReason::Invalid`. Its own variant (the `InitAckCapsRejected`
-    /// pattern) so the open loop can map it to a typed error.
+    /// (`ext/shm.rs`), aborting establishment, so the dispatcher injects
+    /// `EstablishmentExtRejected` and the FSM tears the session down with
+    /// `CloseReason::Generic` (R311y823; the accept side's ext `map_err` at
+    /// `establishment/accept.rs:242`). Its own variant (the
+    /// `InitAckCapsRejected` pattern) so the open loop can map it to a typed
+    /// error.
     ///
     /// ONLY the acceptor reaches this: the initiator's mirror of the same
     /// failure degrades to "no shared memory" instead, which is upstream's
@@ -180,11 +192,12 @@ pub enum DriverLoopOutcome {
     ShmChallengeRejected,
     /// R3b — a Z_EXT_AUTH method rejected the peer on a handshake recv stage
     /// (a bad usrpwd credential / unknown user / missing required sub-ext, or a
-    /// malformed auth ext). The dispatcher has already injected `FramingError`
-    /// so the FSM tears the session down with `CloseReason::Invalid` (wire
-    /// Close(INVALID)) — the wz mirror of zenoh's establishment FSM
+    /// malformed auth ext). The dispatcher injects `EstablishmentExtRejected`
+    /// so the FSM tears the session down with `CloseReason::Generic` (wire
+    /// Close(GENERIC), R311y823) — the wz mirror of zenoh's establishment FSM
     /// `?`-propagating the usrpwd verify error into a transport close
-    /// (`auth/usrpwd.rs:418/424`). Surfaced as its own variant so the open loop
+    /// (`auth/usrpwd.rs:418/424`), which its caller closes GENERIC on
+    /// (`establishment/open.rs:329`). Surfaced as its own variant so the open loop
     /// maps it to a typed open-loop auth-reject error (the
     /// `InitAckCapsRejected` pattern). The carried `AuthError` identifies the
     /// method failure for logging.

@@ -38,7 +38,9 @@ use wz_runtime_tokio::session_glue::{
 #[cfg(feature = "codec-push")]
 use wz_runtime_tokio::session_glue::NetworkMessage;
 use wz_runtime_tokio::{LinkEvent, LostCause, RxFrame};
-use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver, QueueDriver};
+use wz_runtime_tokio_test_support::{
+    fixture_session_init_params, LifecycleRecordingDriver, NoopOutboundDriver, QueueDriver,
+};
 // R311it — craft_initack_wire + the transport constants come from the
 // shared no_std SSOT (was copy-pasted across the session_fsm_* test files).
 // T_MID_INIT / FLAG_T_INIT_S / FLAG_T_INIT_A / T_MID_KEEP_ALIVE stay imported
@@ -46,6 +48,9 @@ use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDri
 use wz_session_wire_fixtures::{
     craft_initack_wire, FLAG_T_INIT_A, FLAG_T_INIT_S, T_MID_INIT, T_MID_KEEP_ALIVE,
 };
+// R311y823 — the Close header's MID, for reading the reason byte a reject
+// actually put on the wire rather than only the FSM action that chose it.
+use wz_codecs::wire_const::T_MID_CLOSE;
 
 fn fresh_setup() -> (
     Arc<SessionLinkActions>,
@@ -584,13 +589,21 @@ async fn r311y817_rx_init_ack_future_patch_rejects_session() {
     assert_eq!(
         engine.get_current_state(),
         S::Closing,
-        "patch rejection must drive the framing.error arm to Closing"
+        "patch rejection must drive the establishment.ext_rejected arm to Closing"
     );
     let trace = actions.trace_snapshot();
+    // R311y823 REVERSED THIS ASSERTION IN PLACE rather than deleting it. It
+    // read `CloseReason::Invalid` ("wire 'invalid parameters'") because
+    // R311y817 routed the patch reject through `framing.error` like every
+    // other ext reject. zenoh closes GENERIC for extension failures and
+    // reserves INVALID for the body's size parameters, so the same builder
+    // shape now asserts the opposite outcome and the reversal is visible at
+    // the site. The wire-byte half lives in
+    // `r311y823_init_ack_patch_reject_closes_generic_on_the_wire`.
     assert_eq!(
         trace.close_reason,
-        CloseReason::Invalid,
-        "patch rejection closes with INVALID (wire 'invalid parameters')"
+        CloseReason::Generic,
+        "an ext-chain rejection closes with GENERIC, not the body family's INVALID"
     );
     // The refused level must NOT have reached the min(): a torn-down
     // session that still recorded a negotiated patch would mean the
@@ -792,5 +805,166 @@ async fn a_batched_unit_delivers_every_message_it_carried() {
     assert!(
         matches!(third, DriverLoopOutcome::LinkLost(LostCause::PeerClosed)),
         "a drained unit must not keep answering; got {third:?}"
+    );
+}
+
+// ── R311y823: the CLOSE REASON BYTE an establishment-EXTENSION reject puts
+//              on the wire.
+//
+// zenoh splits the establishment reject family in two, and the split is a
+// wire fact rather than a log level. The BODY's size parameters close
+// INVALID (`recv_init_ack`'s FrameSN / RequestID arms,
+// `unicast/establishment/open.rs:288,304`), and every EXTENSION handler
+// failure closes GENERIC -- QoS, Shm, Auth, MultiLink, LowLatency,
+// Compression and Patch all reach `link.close(Some(GENERIC))` through the
+// same `map_err` (`open.rs:321-364`, mirrored on the accept side at
+// `accept.rs:234-356`). The reason is what a peer READS: `link.close`
+// encodes `Close { reason, session: false }` and sends it before dropping
+// the link (`unicast/link.rs:103-114`).
+//
+// wz routed the whole ext-reject family through the FSM's `framing.error`
+// arm, which closes INVALID -- so a wz initiator refusing an over-claiming
+// PATCH told the peer "invalid parameters" where zenoh says "generic".
+// zenoh-pico cannot arbitrate: it returns `_Z_ERR_GENERIC` and drops the
+// link WITHOUT sending any Close at all (`unicast/transport.c:141-152`),
+// so zenoh is the only upstream that puts a byte there.
+//
+// The three tests below are ONE discriminator, not three assertions. A and
+// B take the same path to `Closing` from the same state and differ only in
+// the family, so a change that moved both would be moving the FSM's
+// close-reason default rather than splitting the family; C holds the other
+// direction, where a teardown that never was an establishment reject at all
+// must keep INVALID.
+fn fresh_recording_setup() -> (
+    Arc<LifecycleRecordingDriver>,
+    Arc<SessionLinkActions>,
+    Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+) {
+    let recorder = Arc::new(LifecycleRecordingDriver::default());
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recorder.clone();
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let mut engine = new_session_engine(&actions);
+    engine.initialize();
+    (recorder, actions, engine)
+}
+
+/// The reason byte of the sole Close frame this session put on the wire.
+/// Panics when there is not exactly one: a silent teardown is a different
+/// defect from a wrong reason, and folding them together would let either
+/// pass as the other.
+fn sole_close_reason_byte(recorder: &LifecycleRecordingDriver) -> u8 {
+    let snap = recorder.snapshot();
+    let closes: Vec<&(Vec<u8>, wz_runtime_tokio::Reliability)> = snap
+        .sends
+        .iter()
+        .filter(|(bytes, _)| bytes.first().map(|h| h & 0x1f) == Some(T_MID_CLOSE))
+        .collect();
+    assert_eq!(
+        closes.len(),
+        1,
+        "expected exactly one Close frame on the wire; sends were {:?}",
+        snap.sends
+    );
+    let bytes = &closes[0].0;
+    assert_eq!(bytes.len(), 2, "Close is a header plus one reason byte");
+    bytes[1]
+}
+
+// ── R311y823 A: an InitAck announcing a PATCH level above ours closes
+//                GENERIC, because the patch rides the EXTENSION chain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r311y823_init_ack_patch_reject_closes_generic_on_the_wire() {
+    use wz_runtime_tokio::session_glue::CloseReason;
+    use wz_session_wire_fixtures::craft_initack_wire_with_patch;
+
+    let (recorder, actions, mut engine) = fresh_recording_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    // wz advertises CURRENT_PATCH = 1; the acceptor claims 2.
+    let wire = craft_initack_wire_with_patch(&[0xC0, 0x01], 2);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::InitAckPatchRejected),
+        "an InitAck patch above our InitSyn's must surface \
+         InitAckPatchRejected; got {outcome:?}"
+    );
+    assert_eq!(engine.get_current_state(), S::Closing);
+    assert_eq!(
+        actions.trace_snapshot().close_reason,
+        CloseReason::Generic,
+        "an EXTENSION reject closes GENERIC (zenoh routes every ext \
+         handler's error through the GENERIC map_err, not the body's \
+         INVALID arm)"
+    );
+    assert_eq!(
+        sole_close_reason_byte(&recorder),
+        CloseReason::Generic as u8,
+        "the byte the peer reads must be GENERIC(0), not INVALID(1)"
+    );
+}
+
+// ── R311y823 B (the NEGATIVE half of the pair): an InitAck enlarging a BODY
+//               size parameter still closes INVALID. Same state, same
+//               teardown arm, same wire assertion -- only the family differs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r311y823_init_ack_caps_reject_still_closes_invalid_on_the_wire() {
+    use wz_runtime_tokio::session_glue::CloseReason;
+    use wz_session_wire_fixtures::craft_initack_wire_with_caps;
+
+    let (recorder, actions, mut engine) = fresh_recording_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    // sn_res byte 0x01 = seq_num_res 1, above the fixture's advertised 0.
+    let wire = craft_initack_wire_with_caps(&[0xC0, 0x01], 0x01, 0);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::InitAckCapsRejected),
+        "enlarged InitAck caps must surface InitAckCapsRejected; got {outcome:?}"
+    );
+    assert_eq!(engine.get_current_state(), S::Closing);
+    assert_eq!(
+        actions.trace_snapshot().close_reason,
+        CloseReason::Invalid,
+        "a BODY size-parameter reject keeps INVALID (zenoh reserves it \
+         for exactly these fields)"
+    );
+    assert_eq!(
+        sole_close_reason_byte(&recorder),
+        CloseReason::Invalid as u8,
+        "the byte the peer reads must stay INVALID(1)"
+    );
+}
+
+// ── R311y823 C: a PAYLOAD framing error is not an establishment reject and
+//               must keep INVALID.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r311y823_malformed_frame_still_closes_invalid_on_the_wire() {
+    use wz_runtime_tokio::session_glue::CloseReason;
+
+    let (recorder, actions, mut engine) = fresh_recording_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    // A truncated InitAck: the header claims a body the bytes do not carry.
+    let wire = vec![T_MID_INIT | FLAG_T_INIT_A | FLAG_T_INIT_S, 0x00];
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::ParseError(_)),
+        "a truncated frame is a parse error; got {outcome:?}"
+    );
+    assert_eq!(engine.get_current_state(), S::Closing);
+    assert_eq!(
+        actions.trace_snapshot().close_reason,
+        CloseReason::Invalid,
+        "a framing error is not an establishment-extension reject"
+    );
+    assert_eq!(
+        sole_close_reason_byte(&recorder),
+        CloseReason::Invalid as u8
     );
 }

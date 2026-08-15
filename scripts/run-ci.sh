@@ -5313,8 +5313,12 @@ layer_c1ca_cargo_test_derived_initial_sn() {
 # and an addition to it should be a deliberate line in a diff. The count is
 # feature-set-dependent (two arms are `codec-push`-gated), so the lane
 # deliberately passes no `--features` and pins the default union.
+# R311y823 — 19 -> 22. The three added tests are the close-REASON half of the
+# same rejection rules: an establishment-EXTENSION reject closes GENERIC where
+# the body's size parameters close INVALID, and both are read off the Close
+# frame this session actually emitted rather than off the FSM action alone.
 layer_c1cb_cargo_test_init_ack_admission() {
-    _runci_guarded_test C1cb 19 \
+    _runci_guarded_test C1cb 22 \
         cargo test -p wz-runtime-tokio --test session_fsm_driver_loop --quiet || return 1
 }
 

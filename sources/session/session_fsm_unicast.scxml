@@ -79,6 +79,25 @@
     anti-amplification per the §2.7 trust-class hardening matrix). The
     transitions below are therefore unconditional in the statechart; the
     admission decision is owned by the dispatcher and documented here.
+
+  Close-reason split on the establishment rejects (R311y823):
+    `framing.error` closes INVALID and `establishment.ext_rejected` closes
+    GENERIC, because zenoh makes that distinction on the wire and a peer
+    reads the byte. Its establishment FSM tags each failure with the reason
+    to close on: the InitAck BODY's size parameters get
+    `close::reason::INVALID` (`unicast/establishment/open.rs:288,304`) while
+    EVERY extension handler's error — QoS, Shm, Auth, MultiLink,
+    LowLatency, Compression, Patch — gets `close::reason::GENERIC`
+    (`open.rs:321-364`, and `accept.rs:234-356` on the other side), and
+    `link.close(reason)` puts it in a `Close` before dropping the link
+    (`unicast/link.rs:103-114`). zenoh-pico does not arbitrate: it returns
+    `_Z_ERR_GENERIC` and sends no Close at all
+    (`unicast/transport.c:141-152`).
+
+    The new event exists ONLY on `Opening` and `Accepting`, which is the
+    whole of establishment. An ext reject cannot arise once Established, and
+    a handler-less event there is discarded by the engine — so the scope is
+    enforced by the statechart rather than by a dispatcher convention.
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
@@ -135,6 +154,9 @@
     <transition event="framing.error" target="Closing">
       <sce:action name="set_close_reason_invalid"/>
     </transition>
+    <transition event="establishment.ext_rejected" target="Closing">
+      <sce:action name="set_close_reason_generic"/>
+    </transition>
     <transition event="peer.close" target="Closed"/>
     <transition event="link.lost" target="Closed"/>
   </state>
@@ -166,6 +188,9 @@
     <transition event="accepting.inactivity_timeout" target="Closed"/>
     <transition event="framing.error" target="Closing">
       <sce:action name="set_close_reason_invalid"/>
+    </transition>
+    <transition event="establishment.ext_rejected" target="Closing">
+      <sce:action name="set_close_reason_generic"/>
     </transition>
     <transition event="peer.close" target="Closed"/>
     <transition event="link.lost" target="Closed"/>
