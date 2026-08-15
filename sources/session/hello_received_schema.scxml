@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  EventSchema for the `hello.received` event consumed by the active
+  scouting FSM (scouting.scxml). The typed `_event.data` channel the
+  scouting FSM's exit-on-first guard compares against — no script engine.
+
+  Field:
+    - exit_on_first : zenoh-pico's `__z_scout_loop(.., bool exit_on_first)`
+      parameter (src/session/scout.c:29-30), carried as uint8 (0 = collect
+      the whole window, non-zero = take the first Hello and stop). The
+      scouting FSM guards "leave AwaitingHello" against "stay in
+      AwaitingHello" on this typed field natively.
+
+  WHY THE MODE RIDES THE EVENT RATHER THAN A DATAMODEL VARIABLE. The
+  engine-free surface (`sce:kind="statechart"`, no IScriptEngine) has no
+  script-evaluated datamodel to hold a per-cycle constant, and the
+  scouting FSM deliberately carries no `<datamodel>` for the same reason
+  its actions are no-arg. A typed `_event.data` field is the ONE channel
+  a native guard can read, so the host re-states the cycle's parameter on
+  every `hello.received` it raises. The value is constant for a cycle by
+  construction: the drive loop reads it from `ScoutParams::exit_on_first`,
+  which is captured by value when the cycle's action bundle is built.
+
+  WHY THIS IS NOT THE FRAGMENT `more` BIT'S SHAPE. `fragment.chunk`'s
+  `more` is a WIRE fact decoded from the message that triggered the event;
+  `exit_on_first` is a CALLER fact about the scouting cycle. Both reach
+  the guard the same way because the engine-free surface offers one
+  channel, but the field is host configuration, not peer input — nothing a
+  Hello sender can influence.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       name="hello_received_schema"
+       sce:kind="event-schema"
+       sce:event-name="hello.received">
+  <datamodel>
+    <data id="exit_on_first" sce:type="uint8" sce:direction="in"/>
+  </datamodel>
+</scxml>

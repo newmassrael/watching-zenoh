@@ -31,18 +31,30 @@
 //! exported accessor), so a handle in slot 0 with zero padding to the pico size
 //! is a faithful representation.
 //!
-//! ## One divergence, named
+//! ## The cycle divergence, retired — and the claim it rested on, corrected
 //!
-//! pico's `z_scout` calls the user closure from the scouting task the instant a
-//! Hello decodes. wz drives discovery in CYCLES and emits each cycle's NEW
-//! hellos when that cycle returns, so a callback here can lag the wire by up to
-//! one cycle. The set delivered over the whole budget is the same; only the
-//! instant of each call differs. A program that measures Hello LATENCY from
-//! inside the callback would see the cycle, not the wire — `z_scout.c` counts
-//! and prints, so it cannot.
+//! This module used to carry a named divergence: "pico's `z_scout` calls the
+//! user closure the instant a Hello decodes", while wz drove discovery in
+//! CYCLES and emitted each cycle's new hellos when that cycle returned, so a
+//! callback could lag the wire by up to one cycle.
+//!
+//! The cycling is gone — it existed only because the scouting statechart left
+//! `AwaitingHello` on the FIRST Hello, so one window could report one peer, and
+//! the FSM now carries pico's `exit_on_first == false` arm
+//! (`src/session/scout.c:121-123`). One Scout goes out for the caller's whole
+//! budget instead of one per cycle, and the zid set that suppressed the
+//! duplicate answers the re-scouting provoked is gone with it.
+//!
+//! The premise was ALSO wrong, and reading `_z_scout` to close the divergence
+//! is what found it: upstream does NOT call the closure from inside its
+//! scouting loop. `_z_scout_inner` runs the whole window and RETURNS a list,
+//! which `_z_scout` then drains (`src/net/primitives.c:81-90`) — after the
+//! window, and newest-first, because the list is built by prepending. So the
+//! shape that looked like a wz concession is upstream's own, and wz matches it
+//! deliberately in `wz-capi-core::scouting::deliver_in_upstream_order` rather
+//! than firing per-Hello, which would have been a divergence in wz's favour.
 
 use std::ffi::c_void;
-use std::time::{Duration, Instant};
 
 use crate::abi::{z_loaned_string_t, z_view_string_t};
 use crate::config::ConfigState;
@@ -72,15 +84,9 @@ const SCOUTING_TIMEOUT_DEFAULT_MS: u32 = 1000;
 /// pico `Z_CONFIG_SCOUTING_WHAT_DEFAULT` (config.h.in:149) = ROUTER|PEER.
 const SCOUTING_WHAT_DEFAULT: u8 = 0x03;
 
-/// The protocol version byte wz announces in its Scout. Same constant the
-/// `--scout` demo path uses; a responder logs it back verbatim.
-const SCOUT_PROTO_VERSION: u8 = 0x09;
-/// One discovery cycle. The budget is spent across repeated cycles, so this is
-/// the granularity at which new hellos surface (see the module doc's divergence
-/// note), not the total.
-const SCOUT_CYCLE_MS: u64 = 1000;
-/// The scouting drive-loop tick.
-const SCOUT_TICK_MS: u64 = 50;
+// The Scout version byte and the drive-loop tick moved out with the copied
+// drive loop: they are `wz_capi_core::scouting`'s now, so both C ABIs announce
+// one protocol version and poll on one cadence by construction.
 
 // ---------------------------------------------------------------------------
 // z_whatami_t
@@ -1089,14 +1095,22 @@ pub unsafe extern "C" fn z_scout(
     crate::result::Z_OK
 }
 
-/// Drive `wz::runtime_tokio::scouting_glue` for `budget_ms`, invoking `on_hello`
-/// for each NEW peer as it is recorded. Returns the number delivered.
+/// Drive one scouting window for `budget_ms` and hand each peer that answered
+/// to `on_hello`. Returns the number delivered.
 ///
-/// Cycles rather than one long window: the scouting FSM resolves a cycle when it
-/// discovers a peer, so a single window would return after the FIRST Hello and
-/// a second responder on the same group would never be reported. Re-entering
-/// keeps collecting until the caller's budget is spent, which is what makes
-/// `z_scout` a SURVEY rather than a first-answer lookup.
+/// DELEGATES to [`wz_capi_core::scouting::run_scout`], the drive both C ABIs
+/// share. This function used to carry its own copy of that loop, and the copy
+/// is what let the two ABIs disagree — the pico side re-entered whole scouting
+/// CYCLES (because the statechart left `AwaitingHello` on the first Hello, so a
+/// single window could report only one peer), which re-sent a Scout per cycle
+/// and needed a zid set to suppress the duplicate answers its own re-scouting
+/// provoked. The FSM carries pico's `exit_on_first == false` survey arm now, so
+/// the shared drive is a single window, and the WHEN and the ORDER of the
+/// callbacks — after the window, last responder first — are settled once in
+/// `wz-capi-core` against upstream rather than twice here and there.
+///
+/// All this side keeps is the ABI mapping: a [`ScoutedHello`] becomes the
+/// `HelloState` behind pico's `z_loaned_hello_t`.
 fn run_scout(
     group: std::net::Ipv4Addr,
     port: u16,
@@ -1105,68 +1119,14 @@ fn run_scout(
     budget_ms: u64,
     mut on_hello: impl FnMut(&mut HelloState),
 ) -> usize {
-    use wz_runtime_tokio::scouting_glue::{
-        drive_scouting_until_resolved, new_scouting_engine, ScoutParams, ScoutingActions,
-    };
-    use wz_runtime_tokio::UdpDriver;
-
-    let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-    else {
-        return 0;
-    };
-
-    runtime.block_on(async move {
-        // `None`: the scouting group is deliberately NOT interface-narrowed —
-        // a discovery beacon must reach every interface a peer could answer on.
-        let Ok(mut driver) = UdpDriver::bind_multicast_v4(group, port, None).await else {
-            return 0;
-        };
-        let actions = ScoutingActions::new(ScoutParams {
-            version: SCOUT_PROTO_VERSION,
-            what,
-            zid,
-            timeout_ms: SCOUT_CYCLE_MS,
-        });
-        let mut engine = new_scouting_engine(&actions);
-        let clock = wz_runtime_tokio::runtime_impl::TokioTime::new();
-        let started = Instant::now();
-        let budget = Duration::from_millis(budget_ms);
-        let mut delivered = 0usize;
-        let mut seen_zids: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-
-        while started.elapsed() < budget {
-            let _ = drive_scouting_until_resolved(
-                &mut driver,
-                &actions,
-                &mut engine,
-                &clock,
-                None,
-                SCOUT_TICK_MS,
-            )
-            .await;
-            // Deliver each DISTINCT peer once. A cursor over the recorded list
-            // is NOT enough and the real pico says so: every cycle re-scouts,
-            // a live responder answers each Scout, and the registry records
-            // every answer -- so a cursor reports one peer N times. Measured
-            // against upstream's own `z_scout` binary on the same zenohd: it
-            // prints ONE line and drops. Keyed on the zid because that is the
-            // peer's identity; a peer that changes its advertised locators
-            // mid-scout is still one peer.
-            for hello in actions.scouted_hellos() {
-                if !seen_zids.insert(hello.zid.clone()) {
-                    continue;
-                }
-                let whatami = hello.whatami.map_or(0, |w| u32::from(w.to_api()));
-                let mut state =
-                    HelloState::new(z_id_t::from_wire(&hello.zid), whatami, hello.locators);
-                on_hello(&mut state);
-                delivered += 1;
-            }
-        }
-        delivered
+    wz_capi_core::scouting::run_scout(group, port, what, zid, budget_ms, |hello| {
+        let whatami = hello.whatami.map_or(0, |w| u32::from(w.to_api()));
+        let mut state = HelloState::new(
+            z_id_t::from_wire(&hello.zid),
+            whatami,
+            hello.locators.clone(),
+        );
+        on_hello(&mut state);
     })
 }
 

@@ -52,29 +52,44 @@
     - AwaitingHello (host clock)        <- scout.c:60-63 RX setup + clock
                                            + while elapsed < period
     - AwaitingHello hello.received      <- scout.c:80-119 _Z_MID_HELLO arm
-    - exit_on_first short-circuit       <- scout.c:121-123 (MVP active =
-                                           implicit-scout: one Hello, take
-                                           it, return to Idle)
+    - exit_on_first short-circuit       <- scout.c:121-123, BOTH arms
+
+  exit_on_first is a PARAMETER upstream, not a hardcode, and both of its
+  values ship: `_z_scout_inner(.., exit_on_first)` is called with `true`
+  by the session-open implicit scout (`src/net/session.c:69`, which needs
+  one dial target) and with `false` by the public `z_scout` survey API
+  (`src/net/primitives.c:81`, which reports every responder). This FSM
+  carries both, guarded natively on the typed `_event.data.exit_on_first`
+  field of `hello_received_schema.scxml`: exit-on-first leaves for Idle,
+  collecting self-transitions and lets the host's timeout close the
+  window — which is exactly what pico's `break` vs "keep looping" does.
 
   Host actions (the generated ScoutingActions trait, one method per
   distinct `<sce:action name>`; impl'd by the host in scouting_glue.rs):
     scout_emit            — encode Scout(what=3, local_zid) + stage the
                             datagram for the drive loop to send on the
                             udp_scout multicast link.
-    record_hello_and_emit — decode the staged Hello + capture the
-                            discovered locator for the session-open caller.
+    record_hello_and_emit — record the staged Hello (every field of it)
+                            + capture the discovered locator for the
+                            session-open caller.
     emit_scout_timeout    — record "no peer found within timeout".
     diag_scout_tx_failed  — observability: the scout frame TX failed.
   All four are no-arg: they read/write host staging slots via &mut self,
-  not `_event.data` (the loop owns the socket + the staging slots, so no
-  event-schema import is needed — cf. the IO-ownership note in
-  scouting_glue.rs).
+  not `_event.data` (the loop owns the socket + the staging slots — cf.
+  the IO-ownership note in scouting_glue.rs). The one event-schema import
+  below exists for a transition GUARD, not for an action; the actions
+  still take nothing.
 
   Events fed by the host runtime:
     session_open.requested — application/SCE asks to discover a peer.
     scout.tx.done          — host completed the multicast Scout send.
     link.tx_failed         — the scouting link TX errored.
     hello.received         — host decoded a Hello on the scouting link.
+                             Carries the typed `_event.data` payload of
+                             hello_received_schema.scxml (exit_on_first);
+                             the host re-states the cycle's mode on every
+                             raise because the engine-free surface has no
+                             datamodel to hold it.
     scout.timer.elapsed    — host drive loop's deadline (scouting.timeout_ms,
                              ScoutParams) elapsed with no Hello; raised by
                              the loop, not a self-armed <send> (see
@@ -93,6 +108,10 @@
        name="scouting"
        version="1.0"
        initial="Idle">
+
+  <!-- The typed `_event.data` channel for `hello.received`. Carries the
+       one field a native guard needs: the cycle's exit_on_first mode. -->
+  <sce:import src="hello_received_schema.scxml" kind="event-schema" as="HelloReceived"/>
 
   <!-- Waiting for a session-open trigger. Re-entered after every scout
        cycle (active mode is one-shot per request). scout_emit runs on the
@@ -121,11 +140,27 @@
        The FSM arms no timer of its own (engine-free no_std: a <send
        delay> would bind NoOpHal and never fire — see "Timeout ownership"
        in the header); the host loop owns the clock and raises
-       scout.timer.elapsed at the deadline. MVP active body is
-       implicit-scout (exit_on_first=true): the first Hello is taken and
-       the FSM returns to Idle. -->
+       scout.timer.elapsed at the deadline.
+
+       The two hello.received arms are pico's `if (!empty && exit_on_first)
+       break;` (scout.c:121-123) split into the statechart. The implicit
+       scout (exit_on_first != 0) records the Hello and returns to Idle,
+       which is what ends the host's drive loop. The survey arm
+       (exit_on_first == 0) records it and RE-ENTERS AwaitingHello, so the
+       window keeps running and later responders are recorded too; only
+       scout.timer.elapsed closes that window. AwaitingHello has no
+       onentry / onexit content, so the self-transition is observationally
+       an internal one — the same shape reassembly_slot.scxml's
+       Receiving -> Receiving continuation arm uses.
+
+       Both arms run record_hello_and_emit: pico pushes the hello to its
+       list BEFORE consulting exit_on_first, so the flag decides only
+       whether the loop keeps going, never whether the peer is recorded. -->
   <state id="AwaitingHello">
-    <transition event="hello.received" target="Idle">
+    <transition event="hello.received" cond="_event.data.exit_on_first !== 0" target="Idle">
+      <sce:action name="record_hello_and_emit"/>
+    </transition>
+    <transition event="hello.received" cond="_event.data.exit_on_first === 0" target="AwaitingHello">
       <sce:action name="record_hello_and_emit"/>
     </transition>
     <transition event="scout.timer.elapsed" target="Idle">

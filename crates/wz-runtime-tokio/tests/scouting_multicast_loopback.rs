@@ -77,6 +77,8 @@ async fn scout_discovers_peer_locator_over_multicast() {
         what: 0x03, // ROUTER | PEER
         zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
         timeout_ms: 1000,
+        // The implicit-scout arm: this e2e asserts ONE discovered locator.
+        exit_on_first: true,
     });
     let mut engine = new_scouting_engine(&actions);
 
@@ -224,6 +226,8 @@ mod round2 {
             what: 0x03, // ROUTER | PEER
             zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
             timeout_ms: 1000,
+            // The implicit-scout arm: this e2e asserts ONE discovered locator.
+            exit_on_first: true,
         });
         let mut engine = new_scouting_engine(&actions);
 
@@ -358,6 +362,8 @@ mod round3_tls {
             what: 0x03, // ROUTER | PEER
             zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
             timeout_ms: 1000,
+            // The implicit-scout arm: this e2e asserts ONE discovered locator.
+            exit_on_first: true,
         });
         let mut engine = new_scouting_engine(&actions);
 

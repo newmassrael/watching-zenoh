@@ -7,34 +7,40 @@
 //!
 //! `z_scout` exists in zenoh-pico's ABI and in zenoh-c's, with different
 //! argument types and different config spellings — but the thing between those
-//! two shims is identical: bind the multicast group, drive the scouting FSM in
-//! cycles until the caller's budget is spent, and report each DISTINCT peer
-//! once. That middle is what lives here, expressed over
+//! two shims is identical: bind the multicast group, drive the scouting FSM
+//! for the caller's budget, and report each peer as it answers. That middle is
+//! what lives here, expressed over
 //! [`ScoutedHello`](wz_runtime_tokio::scouting_glue::ScoutedHello), which is
 //! already an ABI-neutral type.
 //!
 //! Nothing here has a `z_` in its name, per this crate's contract; the ABI
 //! crates map a hello onto their own `z_owned_hello_t`.
 //!
-//! ## Cycles, not one long window
+//! ## One window, the survey arm
 //!
-//! The scouting FSM RESOLVES a cycle as soon as it discovers a peer, so a single
-//! window would return after the FIRST Hello and a second responder on the same
-//! group would never be reported. Re-entering keeps collecting until the budget
-//! is spent, which is what makes `z_scout` a SURVEY rather than a first-answer
-//! lookup.
+//! `ScoutParams::exit_on_first` is `false` here — pico's `_z_scout` passes
+//! exactly that (`src/net/primitives.c:81`), so its loop keeps reading until
+//! the budget expires and every responder reaches the closure. The window IS
+//! the caller's budget, and one Scout goes out for it.
 //!
-//! ## Distinct by ZID, not by arrival
+//! This module used to re-enter whole scouting CYCLES instead, because the
+//! statechart left `AwaitingHello` on the first Hello, and then had to key
+//! delivery on the zid to suppress the duplicate answers its own re-scouting
+//! provoked. The FSM carries the survey arm now, so both are gone: a peer that
+//! answers twice is delivered twice, which is what upstream's
+//! `_z_hello_slist_t` drain does.
 //!
-//! Every cycle re-scouts and a live responder answers each Scout, so the
-//! registry records the same peer once per cycle. A cursor over the recorded
-//! list therefore reports one peer N times. The real `z_scout` binary prints ONE
-//! line for one responder, so delivery is keyed on the zid — a peer that changes
-//! its advertised locators mid-scout is still one peer.
+//! ## When and in what order the closure is called
+//!
+//! Both are upstream's, and both are easy to get wrong in wz's favour — see
+//! `deliver_in_upstream_order` (private; a code span, not an intra-doc link,
+//! because the target does not exist in the public rustdoc). Upstream calls
+//! the closure AFTER the window
+//! (`_z_scout_inner` returns a list; only then is it drained) and in REVERSE
+//! arrival order (the list is built by prepending). A per-Hello, arrival-order
+//! delivery would be nicer and would still be a divergence.
 
-use std::collections::HashSet;
 use std::net::Ipv4Addr;
-use std::time::{Duration, Instant};
 
 use wz_runtime_tokio::scouting_glue::ScoutedHello;
 
@@ -48,8 +54,9 @@ pub const SCOUTING_TIMEOUT_DEFAULT_MS: u64 = 1000;
 pub const SCOUTING_WHAT_DEFAULT: u8 = 0x03;
 /// The protocol version byte wz announces in its Scout.
 pub const SCOUT_PROTO_VERSION: u8 = 0x09;
-/// One discovery cycle. The budget is spent across repeated cycles, so this is
-/// the granularity at which new hellos surface, not the total.
+/// One discovery cycle, for a caller that wants a FIRST-ANSWER lookup rather
+/// than a survey and re-enters until it gets one (the `wz-ap-demo` `--scout`
+/// path). `z_scout` does not use it: its window is the caller's whole budget.
 pub const SCOUT_CYCLE_MS: u64 = 1000;
 /// The scouting drive-loop tick.
 pub const SCOUT_TICK_MS: u64 = 50;
@@ -90,7 +97,36 @@ pub fn fresh_scout_zid() -> Vec<u8> {
     zid.to_vec()
 }
 
-/// Drive scouting for `budget_ms`, invoking `on_hello` once per DISTINCT peer.
+/// Hand the window's peers to `on_hello` in UPSTREAM'S DELIVERY ORDER, which is
+/// the REVERSE of arrival, and return how many were delivered.
+///
+/// This is not a detail — it is observable through both ABIs. `_z_scout_inner`
+/// accumulates with `_z_hello_slist_push_empty`, which PREPENDS
+/// (`collections/list.c:287-295`), and `_z_scout` then drains from the head
+/// (`net/primitives.c:81-90`). So a pico program's closure sees the LAST
+/// responder first. wz's accumulator is a `Vec` in arrival order — the useful
+/// order for everything else in this tree — so the reversal lives here, at the
+/// one seam where upstream's contract is being imitated, rather than in the
+/// accumulator where it would be a strange rule with no reason attached.
+///
+/// Delivery happens AFTER the window for the same reason: upstream's callback
+/// is not called from inside the scouting loop. `_z_scout_inner` returns a list
+/// and only then is it drained, so a pico program prints nothing for the whole
+/// budget and then everything at once. Firing per-Hello would be a divergence
+/// in wz's favour, which is still a divergence.
+fn deliver_in_upstream_order(
+    hellos: &[ScoutedHello],
+    mut on_hello: impl FnMut(&ScoutedHello),
+) -> usize {
+    for hello in hellos.iter().rev() {
+        on_hello(hello);
+    }
+    hellos.len()
+}
+
+/// Drive scouting for `budget_ms`, then invoke `on_hello` once per peer that
+/// answered, in `deliver_in_upstream_order` — after the window, last responder
+/// first, which is what both ABIs' `z_scout` does.
 ///
 /// Returns how many peers were delivered. A bind failure is 0 rather than an
 /// error: both ABIs' `z_scout` reports success and simply finds nothing, which
@@ -101,7 +137,7 @@ pub fn run_scout(
     what: u8,
     zid: Vec<u8>,
     budget_ms: u64,
-    mut on_hello: impl FnMut(&ScoutedHello),
+    on_hello: impl FnMut(&ScoutedHello),
 ) -> usize {
     use wz_runtime_tokio::scouting_glue::{
         drive_scouting_until_resolved, new_scouting_engine, ScoutParams, ScoutingActions,
@@ -116,45 +152,38 @@ pub fn run_scout(
         return 0;
     };
 
-    runtime.block_on(async move {
+    let hellos = runtime.block_on(async move {
         // `None`: the scouting group is deliberately NOT interface-narrowed — a
         // discovery beacon must reach every interface a peer could answer on.
         let Ok(mut driver) = UdpDriver::bind_multicast_v4(group, port, None).await else {
-            return 0;
+            return Vec::new();
         };
         let actions = ScoutingActions::new(ScoutParams {
             version: SCOUT_PROTO_VERSION,
             what,
             zid,
-            timeout_ms: SCOUT_CYCLE_MS,
+            // The caller's whole budget IS the window: upstream hands its
+            // `timeout` straight to `__z_scout_loop`'s `while elapsed <
+            // period` (`src/session/scout.c:60-63`).
+            timeout_ms: budget_ms,
+            // The survey arm — report every responder, do not stop at one.
+            exit_on_first: false,
         });
         let mut engine = new_scouting_engine(&actions);
         let clock = wz_runtime_tokio::runtime_impl::TokioTime::new();
-        let started = Instant::now();
-        let budget = Duration::from_millis(budget_ms);
-        let mut delivered = 0usize;
-        let mut seen_zids: HashSet<Vec<u8>> = HashSet::new();
 
-        while started.elapsed() < budget {
-            let _ = drive_scouting_until_resolved(
-                &mut driver,
-                &actions,
-                &mut engine,
-                &clock,
-                None,
-                SCOUT_TICK_MS,
-            )
-            .await;
-            for hello in actions.scouted_hellos() {
-                if !seen_zids.insert(hello.zid.clone()) {
-                    continue;
-                }
-                on_hello(&hello);
-                delivered += 1;
-            }
-        }
-        delivered
-    })
+        let _ = drive_scouting_until_resolved(
+            &mut driver,
+            &actions,
+            &mut engine,
+            &clock,
+            None,
+            SCOUT_TICK_MS,
+        )
+        .await;
+        actions.scouted_hellos()
+    });
+    deliver_in_upstream_order(&hellos, on_hello)
 }
 
 #[cfg(test)]
@@ -185,5 +214,45 @@ mod tests {
         assert!(parse_hex_zid("zz").is_none());
         assert!(parse_hex_zid(&"ab".repeat(17)).is_none());
         assert_eq!(fresh_scout_zid().len(), 16);
+    }
+
+    fn hello(zid: u8) -> ScoutedHello {
+        ScoutedHello {
+            version: 0x09,
+            whatami: None,
+            zid: vec![zid],
+            locators: Vec::new(),
+        }
+    }
+
+    /// Both ABIs' `z_scout` hands its closure the LAST responder first, because
+    /// upstream's accumulator is built by PREPENDING
+    /// (`_z_hello_slist_push_empty`, `collections/list.c:287-295`) and `_z_scout`
+    /// drains from the head (`net/primitives.c:81-90`).
+    ///
+    /// wz records in arrival order, so this seam is the only place the two
+    /// orders meet. Three peers, not two: a two-element reversal is also a swap,
+    /// a rotation, and a sort — three tells them apart.
+    #[test]
+    fn the_closure_sees_the_last_responder_first() {
+        let recorded = [hello(0xA1), hello(0xB2), hello(0xC3)];
+        let mut seen = Vec::new();
+        let n = deliver_in_upstream_order(&recorded, |h| seen.push(h.zid[0]));
+        assert_eq!(n, 3, "every recorded peer is delivered");
+        assert_eq!(
+            seen,
+            vec![0xC3, 0xB2, 0xA1],
+            "reverse arrival order — upstream's slist is newest-first"
+        );
+    }
+
+    /// The empty window delivers nothing and says so, which is the count both
+    /// ABIs' `z_scout` uses to decide between upstream's "Did not find any zenoh
+    /// process." and "Dropping scout results." lines.
+    #[test]
+    fn an_empty_window_delivers_nothing() {
+        let mut seen = 0usize;
+        assert_eq!(deliver_in_upstream_order(&[], |_| seen += 1), 0);
+        assert_eq!(seen, 0);
     }
 }

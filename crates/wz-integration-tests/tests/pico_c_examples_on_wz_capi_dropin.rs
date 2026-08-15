@@ -2178,9 +2178,14 @@ fn hello_line_for_port(printed: &str, port: u16) -> Option<&str> {
 ///   never gave to either scout, so no build that merely parsed a flag can
 ///   print it.
 ///
-/// It also pins the DEDUPE. wz drives discovery in cycles and a live responder
-/// answers every cycle, so a cursor over the recorded hellos reports one peer
-/// once per cycle; the oracle prints exactly one line, and so must wz.
+/// It also pins ONE LINE PER PEER, which the line comparison does not imply.
+/// When this leg was written wz drove discovery in repeated CYCLES — the
+/// scouting FSM left `AwaitingHello` on the first Hello, so a single window
+/// could report one peer — and a live responder answered every cycle, which is
+/// why delivery had to be keyed on the zid. The FSM carries pico's
+/// `exit_on_first == false` survey arm now (`src/session/scout.c:121-123`), so
+/// wz emits ONE Scout for the whole budget and this count is upstream's own
+/// arithmetic rather than a de-duplication of wz's own re-asking.
 ///
 /// The name carries `zenohd` deliberately: Layer E's sweep skips that token
 /// because it provisions no router, so this leg is registered by exact name in
@@ -2280,6 +2285,104 @@ fn pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd() {
          `drop` did not run last (or did not run).\n\
          --- z_scout.c on wz stdout ---\n{wz_printed}"
     );
+}
+
+/// LEG 15b (`wz->zenohd`, ORACLE) — upstream's `z_scout.c` on wz's C ABI
+/// reports BOTH routers answering one multicast group, exactly as the real
+/// zenoh-pico does.
+///
+/// LEG 15 has ONE responder, and that is the whole reason this leg exists: a
+/// single answer is reported identically by a survey and by a first-answer
+/// lookup, so LEG 15 cannot see the difference. Measured, not assumed — forcing
+/// `ScoutParams::exit_on_first` back to `true` in `wz-capi-pico`'s `run_scout`
+/// leaves LEG 15 GREEN. Two responders is the smallest topology in which
+/// pico's `exit_on_first == false` arm (`src/session/scout.c:121-123`, which
+/// `_z_scout` passes at `src/net/primitives.c:81`) is observable from outside
+/// wz at all.
+///
+/// The ORACLE runs first and must find both, for the same reason LEG 15 orders
+/// it first: a host that cannot carry two multicast responders must read as an
+/// environment fact, never as a wz defect.
+///
+/// Each router's line is selected by its OWN kernel-assigned tcp port, which
+/// this test never gives to either scout — it reaches them only through that
+/// router's Hello. So "wz found two peers" cannot be satisfied by printing one
+/// peer twice, and "wz found the right two" cannot be satisfied by a build that
+/// merely parsed a flag.
+// wz-proves: api-compat-pico wz->zenohd partial
+// wz-proves: scouting-active wz->zenohd partial
+#[test]
+#[ignore = "spawns two real zenohd routers and two cc-compiled binaries; run by run-ci Layer Z"]
+fn pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled binaries");
+    let dropin = dropin_binary("z_scout", dir.path());
+    let oracle = oracle_binary("z_scout", dir.path());
+
+    let (mut router_a, port_a) =
+        spawn_zenohd_multicast_scouting_on_ephemeral_tcp("zenohd A (multicast-scouting router)");
+    let (mut router_b, port_b) =
+        spawn_zenohd_multicast_scouting_on_ephemeral_tcp("zenohd B (multicast-scouting router)");
+    assert_ne!(port_a, port_b, "the two routers must be distinguishable");
+
+    let oracle_out = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&oracle)
+        .output()
+        .expect("run upstream z_scout linked to the REAL zenoh-pico");
+    let oracle_printed = String::from_utf8_lossy(&oracle_out.stdout).into_owned();
+
+    let wz_out = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&dropin)
+        .output()
+        .expect("run upstream z_scout linked to wz's C-ABI cdylib");
+    let wz_printed = String::from_utf8_lossy(&wz_out.stdout).into_owned();
+
+    let _ = router_a.child_mut().kill();
+    let _ = router_a.child_mut().wait();
+    let _ = router_b.child_mut().kill();
+    let _ = router_b.child_mut().wait();
+
+    for port in [port_a, port_b] {
+        if hello_line_for_port(&oracle_printed, port).is_none() {
+            panic!(
+                "the REAL zenoh-pico z_scout did not report the zenohd on \
+                 tcp/127.0.0.1:{port}, so this host cannot carry two multicast \
+                 responders and the comparison below would be vacuous.\n\
+                 --- oracle stdout ---\n{oracle_printed}"
+            );
+        }
+    }
+
+    for port in [port_a, port_b] {
+        let oracle_line = hello_line_for_port(&oracle_printed, port).expect("checked above");
+        let wz_line = hello_line_for_port(&wz_printed, port).unwrap_or_else(|| {
+            panic!(
+                "upstream z_scout.c on wz's C-ABI reported only some of the routers \
+                 the REAL zenoh-pico found on the same group — tcp/127.0.0.1:{port} \
+                 is missing, which is what a scout that stops at the FIRST answer \
+                 looks like from outside.\n\
+                 --- oracle stdout (found it) ---\n{oracle_printed}\n\
+                 --- z_scout.c on wz stdout ---\n{wz_printed}"
+            )
+        });
+        assert_eq!(
+            wz_line, oracle_line,
+            "upstream z_scout.c printed a DIFFERENT line on wz than on the real \
+             zenoh-pico for the zenohd on tcp/127.0.0.1:{port}.\n\
+             --- z_scout.c on wz stdout ---\n{wz_printed}\n\
+             --- oracle stdout ---\n{oracle_printed}"
+        );
+        let hits = wz_printed
+            .lines()
+            .filter(|l| l.starts_with("Hello {") && l.contains(&format!("tcp/127.0.0.1:{port}")))
+            .count();
+        assert_eq!(
+            hits, 1,
+            "wz reported the router on tcp/127.0.0.1:{port} {hits} times; one Scout \
+             draws one answer per peer.\n--- z_scout.c on wz stdout ---\n{wz_printed}"
+        );
+    }
 }
 
 /// LEG 16 (`pico->wz`) — upstream's `z_sub_channel.c`, running on wz, receives

@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 4c8405d45b084ed00fc84ee03f1da64a6569947bc99d231b158b2502274cb589
+// source-hash: 58db3056ce910d1010f3223c0ab129c0cca9bea900282730210062493eb12502
 // template-hash: 74ba562b33766da248288b5dadec1e79a0ebb46a66e38786f6a7a4b2ccd653e3
 // generated-at: 0
 
@@ -63,7 +63,7 @@
 // `clippy::suspicious`, `clippy::perf`) remain at warn so any genuine bug
 // the generator emits still surfaces.
 
-// SCE-MAP: scouting.scxml:88 :: _machine
+// SCE-MAP: scouting.scxml:103 :: _machine
 
 use core::time::Duration;
 use sce_rust_runtime::{Engine, StatePolicy};
@@ -122,6 +122,37 @@ impl ScoutingEvent {
     ];
 }
 
+// ── NL→IR Item C1 Path A: EventSchema typed `_event.data` payload ──
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ScoutingHelloReceivedPayload {
+    pub exit_on_first: u8,
+}
+
+/// NL→IR Item C1 Path A: typed `_event.data` payload sum for the EventSchema-imported events whose transition guards lowered natively.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum ScoutingPayload {
+    /// Schemaless / not-yet-populated default (W3C §5.10 empty `_event.data`).
+    #[default]
+    None,
+    HelloReceived(ScoutingHelloReceivedPayload),
+}
+
+/// NL→IR Item C1 Path A: per-event typed `_event.data` inject seam.
+/// Bring into scope with `use …::ScoutingInject;` to call the
+/// `raise_<event>` methods on the engine.
+pub trait ScoutingInject {
+    /// Typed `_event.data` inject for `hello.received`.
+    /// Binds the event name and payload variant in one call (name↔type
+    /// pairing cannot be constructed inconsistently).
+    fn raise_hello_received(&mut self, payload: ScoutingHelloReceivedPayload);
+}
+
+impl<A: ScoutingActions + 'static> ScoutingInject for ::sce_rust_runtime::Engine<ScoutingPolicy<A>> {
+    fn raise_hello_received(&mut self, payload: ScoutingHelloReceivedPayload) {
+        self.raise_external_typed(ScoutingEvent::HelloReceived, ScoutingPayload::HelloReceived(payload));
+    }
+}
+
 // ── W3C SCXML G.7: <sce:action> host-dispatch trait ──
 /// W3C SCXML G.7: host operations dispatched by `<sce:action>`.
 /// The generated `Policy` is generic over an implementation of this
@@ -150,6 +181,10 @@ pub struct ScoutingPolicy<A: ScoutingActions + 'static> {
     // W3C SCXML 3.13: Transition action tracking
     last_transition_index: usize,
     has_transition_actions: bool,
+    // NL→IR Item C1 Path A: typed `_event.data` payload for the current
+    // event, stored by `populate_event_payload` and read by native
+    // transition guards (`matches!(&self.pending_payload, …)`).
+    pending_payload: ScoutingPayload,
 }
 
 impl<A: ScoutingActions + 'static> ScoutingPolicy<A> {
@@ -161,6 +196,7 @@ impl<A: ScoutingActions + 'static> ScoutingPolicy<A> {
             last_transition_source_state: ScoutingState::Idle,
             last_transition_index: 0,
             has_transition_actions: false,
+            pending_payload: ScoutingPayload::default(),
         }
     }
 
@@ -180,7 +216,7 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
     // EventSchema native lowering: `()` = schemaless (dynamic
     // `_event.data` baseline); a `<Machine>Payload` sum is emitted when a
     // transition guard reads a typed `_event.data.<field>` (NL→IR C1 Path A).
-    type Payload = ();
+    type Payload = ScoutingPayload;
     // SCE Protocol-Synthesis RFC §synth-5-J-2: under no_std the std-backed `StdHal`
     // (`std::time::Instant` / `OnceLock`) does not implement `Hal`. The
     // generated machine defaults to `NoOpHal` so the no_std surface compiles
@@ -350,6 +386,14 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
 
 
 
+    // NL→IR Item C1 Path A: store the current event's typed `_event.data`
+    // payload so native transition guards can read it without a script
+    // engine. Called by the engine's pop loop for every dequeued event;
+    // events injected without a typed payload carry the `#[default] None`
+    // variant, against which the variant-specific guards simply fail.
+    fn populate_event_payload(&mut self, payload: &Self::Payload) {
+        self.pending_payload = payload.clone();
+    }
 
     // ======================================================================
     // Instance methods - generated executable content
@@ -358,15 +402,15 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
 
 
     // W3C SCXML 3.7: Execute <onentry> actions for a state
-    #[doc = "SCE-MAP: scouting.scxml:88 :: _machine"]
-// SCE-MAP: scouting.scxml:88 :: _machine
+    #[doc = "SCE-MAP: scouting.scxml:103 :: _machine"]
+// SCE-MAP: scouting.scxml:103 :: _machine
     fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>) {
 
     }
 
     // W3C SCXML 3.8: Execute <onexit> actions for a state
-    #[doc = "SCE-MAP: scouting.scxml:88 :: _machine"]
-// SCE-MAP: scouting.scxml:88 :: _machine
+    #[doc = "SCE-MAP: scouting.scxml:103 :: _machine"]
+// SCE-MAP: scouting.scxml:103 :: _machine
     fn execute_exit_actions(
         &mut self,
         state: Self::State,
@@ -378,8 +422,8 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
 
 
     // W3C SCXML 3.13: Evaluate guards and take a matching transition
-    #[doc = "SCE-MAP: scouting.scxml:88 :: _machine"]
-// SCE-MAP: scouting.scxml:88 :: _machine
+    #[doc = "SCE-MAP: scouting.scxml:103 :: _machine"]
+// SCE-MAP: scouting.scxml:103 :: _machine
     fn process_transition(
         &mut self,
         current_state: &mut Self::State,
@@ -396,8 +440,8 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
     }
 
     // W3C SCXML 3.13: Execute transition actions (called between exit and entry)
-    #[doc = "SCE-MAP: scouting.scxml:88 :: _machine"]
-// SCE-MAP: scouting.scxml:88 :: _machine
+    #[doc = "SCE-MAP: scouting.scxml:103 :: _machine"]
+// SCE-MAP: scouting.scxml:103 :: _machine
     fn execute_transition_actions(&mut self, engine: &mut sce_rust_runtime::Engine<Self>) {
         if !self.has_transition_actions {
             return;
@@ -408,15 +452,22 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
             ScoutingState::AwaitingHello => {
                 match self.last_transition_index {
                     0 => {
-                        // SCE-MAP: scouting.scxml:128 :: AwaitingHello :: _transition_0
+                        // SCE-MAP: scouting.scxml:160 :: AwaitingHello :: _transition_0
                         // W3C SCXML 3.13: Transition 0 actions
 
             // W3C SCXML G.7: <sce:action name="record_hello_and_emit">
             self.actions.record_hello_and_emit();
                     }
                     1 => {
-                        // SCE-MAP: scouting.scxml:131 :: AwaitingHello :: _transition_1
+                        // SCE-MAP: scouting.scxml:163 :: AwaitingHello :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
+
+            // W3C SCXML G.7: <sce:action name="record_hello_and_emit">
+            self.actions.record_hello_and_emit();
+                    }
+                    2 => {
+                        // SCE-MAP: scouting.scxml:166 :: AwaitingHello :: _transition_2
+                        // W3C SCXML 3.13: Transition 2 actions
 
             // W3C SCXML G.7: <sce:action name="emit_scout_timeout">
             self.actions.emit_scout_timeout();
@@ -427,7 +478,7 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
             ScoutingState::Idle => {
                 match self.last_transition_index {
                     0 => {
-                        // SCE-MAP: scouting.scxml:104 :: Idle :: _transition_0
+                        // SCE-MAP: scouting.scxml:123 :: Idle :: _transition_0
                         // W3C SCXML 3.13: Transition 0 actions
 
             // W3C SCXML G.7: <sce:action name="scout_emit">
@@ -439,7 +490,7 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
             ScoutingState::Sending => {
                 match self.last_transition_index {
                     1 => {
-                        // SCE-MAP: scouting.scxml:114 :: Sending :: _transition_1
+                        // SCE-MAP: scouting.scxml:133 :: Sending :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
 
             // W3C SCXML G.7: <sce:action name="diag_scout_tx_failed">
@@ -476,6 +527,8 @@ impl<A: ScoutingActions + 'static> ScoutingPolicy<A> {
                 // W3C SCXML 3.12: Event-triggered transitions (document order)
                 // W3C SCXML 5.9.3: Direct enum comparison
                 if event == ScoutingEvent::HelloReceived {
+                    // NL→IR Item C1 Path A: native typed `_event.data` guard
+                    if matches!(&self.pending_payload, ScoutingPayload::HelloReceived(ev) if ev.exit_on_first != 0) {
                         // W3C SCXML 3.4: Track transition metadata
                         self.last_transition_source_state = check_state;
                         self.last_transition_index = 0;
@@ -486,12 +539,29 @@ impl<A: ScoutingActions + 'static> ScoutingPolicy<A> {
                             *current_state = ScoutingState::Idle;
                             *transition_taken = true;
                         return true;
+                    }
+                }
+                // W3C SCXML 5.9.3: Direct enum comparison
+                if event == ScoutingEvent::HelloReceived {
+                    // NL→IR Item C1 Path A: native typed `_event.data` guard
+                    if matches!(&self.pending_payload, ScoutingPayload::HelloReceived(ev) if ev.exit_on_first == 0) {
+                        // W3C SCXML 3.4: Track transition metadata
+                        self.last_transition_source_state = check_state;
+                        self.last_transition_index = 1;
+                        self.has_transition_actions = true;
+                        self.last_transition_is_internal = false;
+                        self.last_transition_is_targetless = false;
+
+                            *current_state = ScoutingState::AwaitingHello;
+                            *transition_taken = true;
+                        return true;
+                    }
                 }
                 // W3C SCXML 5.9.3: Direct enum comparison
                 if event == ScoutingEvent::ScoutTimerElapsed {
                         // W3C SCXML 3.4: Track transition metadata
                         self.last_transition_source_state = check_state;
-                        self.last_transition_index = 1;
+                        self.last_transition_index = 2;
                         self.has_transition_actions = true;
                         self.last_transition_is_internal = false;
                         self.last_transition_is_targetless = false;

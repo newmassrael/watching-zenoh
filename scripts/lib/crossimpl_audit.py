@@ -360,7 +360,16 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # The substrate is the point. `wz_router_hat_liveliness_history_pico_interop.rs`
 # grades the same observable on `--router-hat`, whose token plane is a different
 # atom (`routing-token-tables`) and was already built; the star router's was not.
-FOREIGN_ADJUDICATOR_LINKS = 834
+# The exit_on_first round takes it to 836, in
+# pico_c_examples_on_wz_capi_dropin.rs. ONE new leg,
+# `pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group`, carrying TWO
+# links because it grades two atoms at once: `api-compat-pico` (upstream's own
+# `z_scout.c`, unmodified, on wz's cdylib) and `scouting-active` (pico's
+# `exit_on_first == false` survey arm, which wz gained this round). Its sibling
+# spawns ONE zenohd and therefore cannot grade the second — a single answer is
+# reported identically by a survey and by a first-answer lookup, measured by a
+# damage probe that leaves the one-router leg green and reds this one.
+FOREIGN_ADJUDICATOR_LINKS = 836
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

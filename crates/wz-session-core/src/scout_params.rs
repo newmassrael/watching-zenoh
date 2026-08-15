@@ -49,4 +49,25 @@ pub struct ScoutParams {
     /// `NoOpHal` and never fire), so this field is the deadline's single
     /// source of truth.
     pub timeout_ms: u64,
+    /// zenoh-pico's `__z_scout_loop(.., bool exit_on_first)`
+    /// (`src/session/scout.c:29-30`): `true` takes the FIRST Hello and
+    /// ends the cycle, `false` keeps the window open for its full
+    /// `timeout_ms` and records every responder.
+    ///
+    /// Upstream ships BOTH values and the choice belongs to the caller, not
+    /// to the FSM: the session-open implicit scout passes `true`
+    /// (`src/net/session.c:69` — it needs one dial target), the public
+    /// `z_scout` survey API passes `false` (`src/net/primitives.c:81` — it
+    /// reports every peer to its closure). The scouting statechart carries
+    /// both arms guarded on this value
+    /// (`sources/session/scouting.scxml`, the two `hello.received`
+    /// transitions); the host drive loop re-states it on every raise
+    /// because the engine-free surface has no datamodel to hold it.
+    ///
+    /// No `Default` — the field is REQUIRED at construction so the compiler
+    /// enumerates every scouting caller and none can inherit a mode it did
+    /// not choose. A survey that silently stops at the first answer and a
+    /// lookup that silently waits out the whole window are both wrong, and
+    /// neither is visible from the outcome.
+    pub exit_on_first: bool,
 }

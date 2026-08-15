@@ -514,6 +514,10 @@ pub(crate) async fn scout_for_peer_locator(zid: Vec<u8>, budget_ms: u64) -> io::
         what: SCOUT_WHAT,
         zid,
         timeout_ms: SCOUT_CYCLE_MS,
+        // The IMPLICIT scout: this path wants one dial target and returns as
+        // soon as it has one, which is what pico's session-open scout passes
+        // (`src/net/session.c:69`). The survey arm belongs to `z_scout`.
+        exit_on_first: true,
     });
     let mut engine = new_scouting_engine(&actions);
     let clock = TokioTime::new();

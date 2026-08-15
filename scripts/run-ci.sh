@@ -5212,8 +5212,19 @@ layer_c1h_arbitrary_subset_matrix() {
 # environment-dependent). `--lib` scopes the run to the in-crate unit
 # tests; the `scouting_multicast_loopback` integration test is `#[ignore]`
 # and only runs under Layer M.
+#
+# COUNT-GUARDED as of the exit_on_first round. This lane is the ONLY one in
+# the whole script that enables `scouting-active` on a `--lib` run — the
+# guarded-lane sweep over every `_runci_guarded_test` invocation reports zero
+# others — so nothing else can notice if these tests stop being SELECTED. The
+# module is `#[cfg(feature = "scouting-active")]`, and a filter that selects
+# zero tests still exits 0: that is exactly how R311y807 spent twelve minutes
+# on a vacuous green (`--lib scout_static` without the feature). The number is
+# the count, not a floor, because this suite is small enough that every
+# addition should be a deliberate line in a diff.
 layer_c1i_cargo_test_scouting() {
-    (cd crates && cargo test -p wz-runtime-tokio --features scouting-active --lib scouting_glue --quiet)
+    _runci_guarded_test C1i 12 \
+        cargo test -p wz-runtime-tokio --features scouting-active --lib scouting_glue --quiet
 }
 
 # ─── Layer C1k — cargo test ... --features scouting-static ──────────
@@ -10091,6 +10102,20 @@ layer_z_zenohd_interop() {
     _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test pico_c_examples_on_wz_capi_dropin \
         pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd \
+        -- --ignored --quiet --test-threads=1 || return 1
+    # The exit_on_first round — the TWO-RESPONDER twin of the leg above, and the
+    # only foreign witness the SURVEY arm has. The leg above spawns one zenohd,
+    # and one answer is reported identically by a survey and by a first-answer
+    # lookup: measured, by a damage probe that forces `exit_on_first: true` back
+    # into `wz-capi-pico`'s `run_scout` and leaves the one-router leg GREEN while
+    # reding this one with `tcp/127.0.0.1:<port> is missing`. Registered as its
+    # own invocation rather than widened into the filter above so each leg keeps
+    # its own count guard; the name carries `zenohd` for the same Layer E
+    # `--skip zenohd` reason its sibling's does, and it needs no prereq the
+    # sibling does not already have.
+    _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test pico_c_examples_on_wz_capi_dropin \
+        pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group \
         -- --ignored --quiet --test-threads=1 || return 1
     # R311y533 -- the LIVELINESS SNAPSHOT leg, moved here from Layer E because
     # its old topology was one the REFERENCE cannot serve. Measured: the real
