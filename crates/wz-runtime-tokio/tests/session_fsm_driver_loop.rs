@@ -549,6 +549,187 @@ async fn r311kj_acceptor_ignores_enlarging_init_ack() {
     );
 }
 
+// ── R311y817 Scenario: Rx(InitAck announcing a PATCH level above ours) →
+//                      InitAckPatchRejected + framing.error teardown.
+//
+// The ext-chain member of the same "less or equal than the one in the
+// InitSyn" family the R311kc tests above cover for the body's three size
+// parameters. zenoh `bail!`s out of `PatchFsm::recv_init_ack`
+// (`unicast/establishment/ext/patch.rs:78-84`) and zenoh-pico returns
+// `_Z_ERR_GENERIC` before it builds the OpenSyn
+// (`unicast/transport.c:142-148`); wz silently `min()`ed the level down and
+// continued the handshake, which is the clause this closes.
+//
+// DISCRIMINATING against the R311kc gate: the fixture's caps are the
+// all-zero conforming advertisement, so nothing the size rule looks at has
+// moved and the rejection can only be the patch's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r311y817_rx_init_ack_future_patch_rejects_session() {
+    use wz_runtime_tokio::session_glue::CloseReason;
+    use wz_session_wire_fixtures::craft_initack_wire_with_patch;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    // wz advertises CURRENT_PATCH = 1; the acceptor claims 2.
+    let wire = craft_initack_wire_with_patch(&[0xC0, 0x01], 2);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::InitAckPatchRejected),
+        "an InitAck patch above our InitSyn's must surface \
+         InitAckPatchRejected; got {outcome:?}"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        S::Closing,
+        "patch rejection must drive the framing.error arm to Closing"
+    );
+    let trace = actions.trace_snapshot();
+    assert_eq!(
+        trace.close_reason,
+        CloseReason::Invalid,
+        "patch rejection closes with INVALID (wire 'invalid parameters')"
+    );
+    // The refused level must NOT have reached the min(): a torn-down
+    // session that still recorded a negotiated patch would mean the
+    // rejection ran after the state it was supposed to protect.
+    assert!(
+        !actions.patch_was_negotiated(),
+        "a refused InitAck must not seed the negotiated patch level"
+    );
+}
+
+// ── R311y817 POSITIVE: an InitAck at OUR OWN level is admitted, and the
+//    level it announced is what the session negotiates. Without this arm
+//    the rejection above is satisfied by a gate that refuses everything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r311y817_rx_init_ack_at_our_own_patch_level_is_admitted() {
+    use wz_session_wire_fixtures::craft_initack_wire_with_patch;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    let wire = craft_initack_wire_with_patch(&[0xC0, 0x01], 1);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::AdvancedFsm),
+        "an InitAck at our own patch level must advance; got {outcome:?}"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        S::GotInitAck,
+        "the conforming InitAck still advances SentInitSyn -> GotInitAck"
+    );
+    assert_eq!(
+        actions.negotiated_patch(),
+        1,
+        "the admitted level is what the session negotiates"
+    );
+}
+
+// ── R311y817 POSITIVE: a PRE-PATCH acceptor — an InitAck with no `0x7`
+//    entry at all — must be admitted. The extension is non-mandatory in
+//    both references, so absence is a peer to negotiate DOWN to level 0,
+//    never one to refuse. This is the arm that breaks if the comparison is
+//    written as an equality or inverted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r311y817_rx_init_ack_without_a_patch_ext_is_admitted() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    // `craft_initack_wire` carries NO ext chain at all.
+    let wire = craft_initack_wire(&[0xC0, 0x01]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        !matches!(outcome, DriverLoopOutcome::InitAckPatchRejected),
+        "a pre-patch acceptor must not be refused; got {outcome:?}"
+    );
+    assert_eq!(
+        actions.negotiated_patch(),
+        0,
+        "an absent patch ext negotiates to NO_PATCH, markers off"
+    );
+}
+
+// ── R311y817 ASYMMETRY: the rule is INITIATOR-ONLY. An InitSyn announcing
+//    a level above ours is a newer peer to be negotiated DOWN, and neither
+//    reference refuses it — zenoh's `AcceptFsm::recv_init_syn` stores it
+//    unexamined (`ext/patch.rs:168-175`) and answers `min(CURRENT, peer)`;
+//    pico caps with the same `min` (`unicast/transport.c:237-241`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r311y817_acceptor_does_not_refuse_an_init_syn_announcing_a_future_patch() {
+    use wz_session_wire_fixtures::craft_initsyn_wire_with_patch;
+
+    let (actions, mut engine) = fresh_setup();
+    // Accepting role: InboundStart -> AwaitingInitSyn.
+    engine.process_event(E::InboundStart);
+
+    let wire = craft_initsyn_wire_with_patch(9);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        !matches!(outcome, DriverLoopOutcome::InitAckPatchRejected),
+        "an acceptor must never apply the InitAck patch rule; got {outcome:?}"
+    );
+    assert!(
+        !engine.is_in_final_state(),
+        "the acceptor session survives an initiator announcing a future patch"
+    );
+    assert_eq!(
+        actions.negotiated_patch(),
+        1,
+        "the future level is capped at ours by the min(), not refused"
+    );
+}
+
+// ── R311y817 DISCRIMINATOR: the ceiling is the chain wz ACTUALLY STAGED on
+//    its InitSyn, not the `CURRENT_PATCH` constant.
+//
+//    pico compares against `ism._body._init._patch` — the InitSyn it built
+//    — and that form is the one wz takes, so a build whose AP layer stages
+//    an InitSyn chain WITHOUT a patch entry holds its peer to NO_PATCH.
+//    An InitAck at level 1 is conforming against the default chain (the
+//    positive arm above proves it) and REFUSED against an empty one; only
+//    a ceiling read back from the slot can tell those two apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r311y817_the_patch_ceiling_is_the_staged_init_syn_chain() {
+    use wz_runtime_tokio::session_glue::ExtChainRole;
+    use wz_session_wire_fixtures::craft_initack_wire_with_patch;
+
+    let (actions, mut engine) = fresh_setup();
+    assert_eq!(
+        actions.advertised_patch(),
+        1,
+        "the default InitSyn chain advertises CURRENT_PATCH"
+    );
+
+    // This node now announces NO patch level at all.
+    actions.set_ext_chain(ExtChainRole::InitSyn, Vec::new());
+    assert_eq!(
+        actions.advertised_patch(),
+        0,
+        "the ceiling follows the staged chain"
+    );
+
+    drive_to_sent_init_syn(&mut engine);
+    let wire = craft_initack_wire_with_patch(&[0xC0, 0x01], 1);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::InitAckPatchRejected),
+        "level 1 exceeds an advertisement of none and must be refused; \
+         got {outcome:?}"
+    );
+}
+
 /// R311y632 (§17) — a framing unit holding TWO transport messages delivers
 /// BOTH, and the second arrives WITHOUT the peer sending again.
 ///

@@ -130,6 +130,29 @@ pub enum DriverLoopOutcome {
     /// a typed open error instead of folding it into `Terminal`.
     #[cfg(feature = "codec-init-body")]
     InitAckCapsRejected,
+    /// R311y817 — the InitAck's `0x7` PATCH extension announced a level
+    /// ABOVE our InitSyn's, the same "must be less or equal than the one
+    /// in the InitSyn" rule as [`Self::InitAckCapsRejected`] applied to
+    /// the one establishment parameter that rides the ext chain instead
+    /// of the body. zenoh `bail!`s out of `PatchFsm::recv_init_ack`
+    /// (`unicast/establishment/ext/patch.rs:78-84`) and zenoh-pico
+    /// returns `_Z_ERR_GENERIC` before building its OpenSyn
+    /// (`unicast/transport.c:142-148`), so the dispatcher has already
+    /// injected `FramingError` and the FSM tears the session down with
+    /// `CloseReason::Invalid`.
+    ///
+    /// Its own variant rather than a fold into `InitAckCapsRejected`
+    /// because the two answer different questions about the peer — "it
+    /// enlarged a size we have to allocate for" against "it speaks a
+    /// protocol revision we do not" — and pico itself separates them,
+    /// down to a different error code (`_Z_ERR_GENERIC`, carrying an
+    /// upstream `TODO: Use a better error code?`).
+    ///
+    /// INITIATOR-ONLY, and that asymmetry is upstream's: an InitSyn
+    /// announcing a future level is negotiated DOWN by the acceptor's
+    /// `min()`, never refused.
+    #[cfg(feature = "codec-init-body")]
+    InitAckPatchRejected,
     /// session-extqos (R311y506) — the peer's `init::ext::QoSLink` body could
     /// not be reconciled with ours: its priority band is not on the required
     /// side of the containment, its reliability contradicts ours, it carried

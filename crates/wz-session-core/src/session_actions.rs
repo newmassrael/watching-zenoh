@@ -2641,6 +2641,46 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
     }
 
+    /// R311y817 — the patch level THIS session put on its InitSyn, read back
+    /// out of the staged chain rather than assumed.
+    ///
+    /// [`crate::extpatch::CURRENT_PATCH`] for every build that keeps the
+    /// default slot ([`default_init_patch_ext_entry`], staged since R121f1),
+    /// and [`crate::extpatch::NO_PATCH`] for one whose AP layer replaced the
+    /// InitSyn chain with something that carries no patch entry. It is the
+    /// `ism._body._init._patch` of zenoh-pico's InitAck check
+    /// (`transport.c:142`) — the value we actually advertised, which is the
+    /// only ceiling a peer can be held to.
+    ///
+    /// Projected through [`crate::extpatch::peer_patch`], the same function
+    /// that reads a PEER's announcement, so the emitted entry and the ceiling
+    /// derived from it cannot drift into two spellings (the R311y605 lesson on
+    /// this exact extension).
+    pub fn advertised_patch(&self) -> u8 {
+        R::with_mutex_mut(&self.init_syn_ext, |chain| {
+            crate::extpatch::peer_patch(chain)
+        })
+    }
+
+    /// R311y817 — initiator-side InitAck PATCH admission: the ext-chain twin
+    /// of `init_ack_caps_acceptable`, which validates the body's size
+    /// parameters and structurally cannot see this one.
+    ///
+    /// `false` means the acceptor answered a level ABOVE our advertisement and
+    /// the session must be rejected — zenoh `bail!`s out of
+    /// `PatchFsm::recv_init_ack` (`ext/patch.rs:78-84`) and zenoh-pico returns
+    /// `_Z_ERR_GENERIC` before it builds the OpenSyn (`transport.c:142-148`).
+    /// The dispatcher drives the FSM's `framing.error` arm exactly as it does
+    /// for the size parameters.
+    ///
+    /// Takes the peer's already-projected level rather than the ext chain so
+    /// the caller reads the chain ONCE — [`crate::extpatch::peer_patch`] is
+    /// also what feeds [`Self::negotiate_patch_against_peer`] on the very next
+    /// step, and a rejected level must never reach that `min()`.
+    pub fn init_ack_patch_acceptable(&self, peer_patch: u8) -> bool {
+        crate::extpatch::init_ack_patch_acceptable(self.advertised_patch(), peer_patch)
+    }
+
     /// R311y578 — the negotiated level itself, [`crate::extpatch::NO_PATCH`]
     /// before any Init has been admitted. Read by
     /// [`Self::fragmentation_markers_negotiated`]; exposed because a

@@ -5265,6 +5265,36 @@ layer_c1ca_cargo_test_derived_initial_sn() {
         cargo test -p wz-runtime-tokio --lib derived_initial_sn --quiet || return 1
 }
 
+# ─── Layer C1cb — the INITIATOR's InitAck admission rules (R311y817) ──
+#
+# Both references refuse an InitAck that over-claims against the InitSyn the
+# initiator actually sent, and they refuse it on FOUR parameters, not three:
+# the body's `seq_num_res` / `req_id_res` / `batch_size` (zenoh-pico
+# `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION`, `unicast/transport.c:123-140`) and
+# the `0x7` PATCH level that rides the ext chain (`transport.c:142-148`;
+# zenoh `bail!`s the same out of `PatchFsm::recv_init_ack`,
+# `establishment/ext/patch.rs:78-84`). wz enforced the first three from
+# R311kc and, until R311y817, silently `min()`ed the fourth down and
+# completed the handshake.
+#
+# COUNT-GUARDED because a mechanical sweep over every
+# `_runci_guarded_test` invocation in this script reports ZERO that select
+# `--test session_fsm_driver_loop` — the file rides Layer C1's unfiltered
+# `--workspace` run, where a target that stopped being compiled, or a
+# `#[cfg]` that stopped matching, would only make a summary number
+# smaller. That is the R311y807 / R311y814 / R311y816 class: a run that
+# selects zero tests still exits 0.
+#
+# The guard is the WHOLE target, at the default feature set, rather than a
+# name filter: this is the file where the initiator's rejection rules live,
+# and an addition to it should be a deliberate line in a diff. The count is
+# feature-set-dependent (two arms are `codec-push`-gated), so the lane
+# deliberately passes no `--features` and pins the default union.
+layer_c1cb_cargo_test_init_ack_admission() {
+    _runci_guarded_test C1cb 19 \
+        cargo test -p wz-runtime-tokio --test session_fsm_driver_loop --quiet || return 1
+}
+
 layer_c1i_cargo_test_scouting() {
     _runci_guarded_test C1i 12 \
         cargo test -p wz-runtime-tokio --features scouting-active --lib scouting_glue --quiet
@@ -12616,6 +12646,7 @@ run_layer C1g layer_c1g_cargo_test_observer || overall=1
 run_layer C1own layer_c1own_own_space_witnesses || overall=1
 run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
 run_layer C1ca layer_c1ca_cargo_test_derived_initial_sn || overall=1
+run_layer C1cb layer_c1cb_cargo_test_init_ack_admission || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1
 run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1
 run_layer C1l layer_c1l_reassembly || overall=1

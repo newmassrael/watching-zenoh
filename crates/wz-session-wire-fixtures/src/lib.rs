@@ -127,6 +127,82 @@ pub fn craft_initack_wire_with_caps(cookie: &[u8], sn_res_byte: u8, batch_size: 
     wire
 }
 
+/// `_Z_FLAG_T_Z` — the transport header's chain-continuation bit: an ext
+/// chain follows the message body.
+pub const FLAG_T_Z: u8 = 0x80;
+
+/// `_Z_MSG_EXT_ID_INIT_PATCH | _Z_MSG_EXT_ENC_ZINT` — the `0x7` protocol
+/// patch extension's header byte in the establishment ext space, with the
+/// mandatory bit CLEAR and the chain-continuation bit CLEAR (a lone,
+/// final entry). Both references spell it this way: zenoh
+/// `init::ext::Patch = zextz64!(0x7, false)`
+/// (`commons/zenoh-protocol/src/transport/init.rs:174`), zenoh-pico
+/// `_Z_MSG_EXT_ID_INIT_PATCH (0x07 | _Z_MSG_EXT_ENC_ZINT)`
+/// (`include/zenoh-pico/protocol/ext.h:48`).
+pub const EXT_HDR_INIT_PATCH_ZINT: u8 = 0x27;
+
+/// R311y817 — the `0x7` PATCH ext as a lone terminal chain entry: header
+/// byte then the level as a single-byte VLE. Appended to an Init whose
+/// parent header carries [`FLAG_T_Z`].
+fn patch_ext_chain(level: u8) -> [u8; 2] {
+    assert!(level < 0x80, "fixture: single-byte VLE patch level only");
+    [EXT_HDR_INIT_PATCH_ZINT, level]
+}
+
+/// R311y817 — [`craft_initack_wire`] carrying a `0x7` PATCH extension at
+/// `patch_level`, so an initiator-side test can present the acceptor
+/// announcement both references REFUSE when it exceeds the InitSyn's
+/// (zenoh `PatchFsm::recv_init_ack`'s `bail!` at
+/// `unicast/establishment/ext/patch.rs:78-84`; zenoh-pico's
+/// `_Z_ERR_GENERIC` at `unicast/transport.c:142-148`).
+///
+/// Caps are the all-zero conforming advertisement, which is what makes
+/// this fixture DISCRIMINATING: a rejection it produces cannot be the
+/// size-parameter rule firing, because none of the three sizes moved.
+pub fn craft_initack_wire_with_patch(cookie: &[u8], patch_level: u8) -> Vec<u8> {
+    assert!(
+        cookie.len() < 0x80,
+        "fixture: single-byte VLE cookie_len only"
+    );
+    let mut wire = vec![
+        FLAG_T_Z | FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT,
+        0x05, // version
+        0x31, // cbyte: whatami=Peer, zid_len=4
+    ];
+    wire.extend_from_slice(&FIXTURE_LISTENER_ZID);
+    wire.extend_from_slice(&[
+        0x00, // sn_res (seq=0, req=0) — the conforming advertisement
+        0x00,
+        0x00,               // batch_size LE u16 = 0
+        cookie.len() as u8, // VLE cookie_len (< 0x80 single byte)
+    ]);
+    wire.extend_from_slice(cookie);
+    wire.extend_from_slice(&patch_ext_chain(patch_level));
+    wire
+}
+
+/// R311y817 — [`craft_initsyn_wire`] carrying a `0x7` PATCH extension at
+/// `patch_level`. The ACCEPTOR-role counterpart of
+/// [`craft_initack_wire_with_patch`], and the fixture that pins the
+/// asymmetry: neither reference refuses an initiator for announcing a
+/// level above its own — zenoh's `AcceptFsm::recv_init_syn` stores it
+/// unexamined (`ext/patch.rs:168-175`) and answers the `min`, and pico
+/// caps with the same `min` (`unicast/transport.c:237-241`).
+pub fn craft_initsyn_wire_with_patch(patch_level: u8) -> Vec<u8> {
+    let mut wire = vec![
+        FLAG_T_Z | FLAG_T_INIT_S | T_MID_INIT,
+        0x05, // version
+        0x31, // cbyte: whatami=Peer wire(0x01), zid_len=4 (high nibble = 3)
+    ];
+    wire.extend_from_slice(&FIXTURE_PEER_ZID);
+    wire.extend_from_slice(&[
+        0x00, // sn_res (seq=0, req=0)
+        0x00, 0x00, // batch_size LE u16 = 0
+    ]);
+    wire.extend_from_slice(&patch_ext_chain(patch_level));
+    wire
+}
+
 /// `OpenSyn` echoing `cookie` (parent flags 0x00 so the cookie carrier is
 /// present and the lease is in ms): lease VLE=0, initial_sn VLE=0,
 /// cookie_len VLE, cookie bytes.

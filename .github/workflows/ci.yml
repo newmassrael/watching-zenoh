@@ -577,6 +577,17 @@ jobs:
         # matching would just make a summary number smaller.
         run: bash scripts/run-ci.sh --layer C1ca
 
+      - name: Layer C1cb — the initiator's InitAck admission rules
+        # R311y817 — both references refuse an InitAck that over-claims
+        # against the InitSyn actually sent, on FOUR parameters: the body's
+        # three sizes (enforced since R311kc) and the `0x7` PATCH level on
+        # the ext chain, which wz silently min()ed down instead. The whole
+        # `session_fsm_driver_loop` target is count-guarded because no other
+        # lane in run-ci.sh selects it — it otherwise rides only Layer C1's
+        # unfiltered workspace run, where a target that stopped compiling
+        # would just make a summary number smaller.
+        run: bash scripts/run-ci.sh --layer C1cb
+
       - name: Layer C1i — scouting-active glue unit tests
         # R311ep — scouting-active is off by default, so Layer C1's
         # `cargo test --workspace` never builds the scouting glue. This

@@ -219,17 +219,41 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                 // lets the FSM ignore the no-transition event. Outside
                 // SentInitSyn the frame now falls through to the FSM,
                 // which ignores it (pico drops it).
+                //
+                // R311y817 — the PATCH extension is the FOURTH member of
+                // that same pico rule block and was the one wz did not
+                // enforce, because it rides the ext chain and
+                // `init_ack_caps_acceptable` reads only the body. pico
+                // checks it immediately after the three sizes
+                // (`transport.c:141-149`, under Z_FEATURE_FRAGMENTATION)
+                // and lets the same `ret` abort before the OpenSyn;
+                // zenoh `bail!`s the equivalent out of
+                // `PatchFsm::recv_init_ack`. Ordered after the size
+                // check for the same reason pico orders it there, and
+                // BEFORE the `negotiate_patch_against_peer` min() below,
+                // which must never see a level the session is refusing
+                // (zenoh's `state.patch = other_ext` likewise sits after
+                // its bail).
                 #[cfg(feature = "codec-init-body")]
                 if let InboundFrame::Init {
-                    is_ack: true, body, ..
+                    is_ack: true,
+                    body,
+                    extensions,
+                    ..
                 } = &frame
                 {
                     use crate::session_fsm_unicast::SessionFsmUnicastState as S;
-                    if engine.get_current_state() == S::SentInitSyn
-                        && !actions.init_ack_caps_acceptable(body.sn_res, body.batch_size)
-                    {
-                        engine.process_event(E::FramingError);
-                        return DriverLoopOutcome::InitAckCapsRejected;
+                    if engine.get_current_state() == S::SentInitSyn {
+                        if !actions.init_ack_caps_acceptable(body.sn_res, body.batch_size) {
+                            engine.process_event(E::FramingError);
+                            return DriverLoopOutcome::InitAckCapsRejected;
+                        }
+                        if !actions
+                            .init_ack_patch_acceptable(crate::extpatch::peer_patch(extensions))
+                        {
+                            engine.process_event(E::FramingError);
+                            return DriverLoopOutcome::InitAckPatchRejected;
+                        }
                     }
                 }
                 // R311il — §2.7 dispatcher admission pre-classify. The

@@ -149,6 +149,70 @@ pub fn encode_patch_ext() -> ExtEntryOwned {
     encode_patch_ext_at(CURRENT_PATCH)
 }
 
+/// R311y817 — the INITIATOR's admission rule on the acceptor's announced
+/// patch level: the InitAck's level must not EXCEED what we advertised on
+/// our InitSyn.
+///
+/// This is a rejection, not a cap. Both references abort the whole
+/// handshake on it, and they abort it in the same place — the one stage
+/// that awaits an InitAck:
+///
+/// ```text
+/// // zenoh, OpenFsm::recv_init_ack
+/// if other_ext > PatchType::CURRENT {
+///     bail!("Acceptor patch should be lesser or equal to {current:?}, ...");
+/// }
+/// state.patch = other_ext;
+/// ```
+///
+/// (`io/zenoh-transport/src/unicast/establishment/ext/patch.rs:78-85`), and
+///
+/// ```c
+/// if (iam._body._init._patch <= ism._body._init._patch) {
+///     param->_patch = iam._body._init._patch;
+/// } else {
+///     _Z_ERROR_LOG(_Z_ERR_GENERIC);
+///     ret = _Z_ERR_GENERIC;
+/// }
+/// ```
+///
+/// (`src/transport/unicast/transport.c:142-148`, under
+/// `Z_FEATURE_FRAGMENTATION`), whose `ret` returns before the OpenSyn is
+/// ever built. It is the PATCH member of the same rule family
+/// `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION` states for the size parameters
+/// three lines above it ("Any of the size parameters in the InitAck must
+/// be less or equal than the one in the InitSyn"), which wz already
+/// enforces at `SessionLinkActions::init_ack_caps_acceptable` — the patch
+/// was left out because it rides the ext chain and that validator reads
+/// only the body.
+///
+/// ## Why `advertised` is a parameter and not [`CURRENT_PATCH`]
+///
+/// The two references spell the ceiling differently — zenoh against the
+/// constant it unconditionally sends, pico against `ism`, the InitSyn it
+/// actually built — and the two spellings agree only because both always
+/// announce their own current level. wz takes pico's form so the ceiling
+/// is READ BACK from the chain wz actually staged
+/// (`SessionLinkActions::advertised_patch`): a build that stages a
+/// different level, or none, moves its own ceiling with it instead of
+/// checking a peer against a number it never put on the wire. R311y605
+/// paid for exactly the other shape on this extension — the emit spelled
+/// as a literal, the read spelled through the constants, one wire fact in
+/// two places and nothing crossing them.
+///
+/// ## Why only the initiator
+///
+/// The acceptor has no such rule in either reference and must not grow
+/// one. zenoh's `AcceptFsm::recv_init_syn` stores the initiator's level
+/// unexamined (`patch.rs:168-175`) and answers `min(CURRENT, state.patch)`;
+/// pico's accept path caps with the same `min` (`transport.c:237-241`).
+/// An initiator announcing a FUTURE level is a newer peer to be negotiated
+/// DOWN, not a malformed one to be refused — which is the asymmetry
+/// [`negotiate_patch`] serves and this predicate must not overrule.
+pub const fn init_ack_patch_acceptable(advertised: u8, peer: u8) -> bool {
+    peer <= advertised
+}
+
 /// The `min(local, peer)` negotiation both sides run. wz's local level is
 /// [`CURRENT_PATCH`]; the helper takes it as a parameter so a test can
 /// pin the asymmetric cases without reaching for a session.
@@ -284,6 +348,75 @@ mod tests {
             body: ExtEntryOwnedVariant::CodecZenohExtUnit(wz_codecs::ext_unit::ExtUnit::default()),
         };
         assert_eq!(peer_patch(&[wrong_encoding]), NO_PATCH);
+    }
+
+    /// R311y817 — the acceptor answering our own level is admitted, and the
+    /// one answering a HIGHER one is refused. The refusal is the whole
+    /// clause: before this round the higher level was silently `min()`ed
+    /// down and the handshake continued, where both references abort it.
+    #[test]
+    fn an_init_ack_above_our_advertisement_is_refused() {
+        assert!(init_ack_patch_acceptable(CURRENT_PATCH, CURRENT_PATCH));
+        assert!(!init_ack_patch_acceptable(CURRENT_PATCH, CURRENT_PATCH + 1));
+        assert!(!init_ack_patch_acceptable(CURRENT_PATCH, u8::MAX));
+    }
+
+    /// The NON-MANDATORY bit's consequence, stated as a test: an InitAck
+    /// carrying NO patch entry projects to [`NO_PATCH`], which is BELOW
+    /// every advertisement and must be admitted.
+    ///
+    /// This is the arm that would break every pre-patch peer if the
+    /// comparison were written the other way round, and it is the reason
+    /// the check is `peer <= advertised` rather than an equality.
+    #[test]
+    fn an_acceptor_that_announces_no_patch_at_all_is_admitted() {
+        assert_eq!(peer_patch(&[]), NO_PATCH);
+        assert!(init_ack_patch_acceptable(CURRENT_PATCH, peer_patch(&[]),));
+        // ...and a saturating wire value is refused rather than wrapping
+        // into the admitted range.
+        assert!(!init_ack_patch_acceptable(
+            CURRENT_PATCH,
+            peer_patch(&[patch_ext(300)]),
+        ));
+    }
+
+    /// R311y817 — the ceiling is OUR ADVERTISEMENT, not the constant.
+    ///
+    /// A build whose InitSyn chain carries no patch entry holds its peer to
+    /// [`NO_PATCH`]: pico compares against `ism`, the InitSyn it actually
+    /// built (`transport.c:142`), and a node that never announced a level
+    /// cannot accept one. This is the arm that fails if `advertised` is
+    /// replaced by [`CURRENT_PATCH`], which is why it is a parameter.
+    #[test]
+    fn a_node_that_advertised_nothing_holds_its_peer_to_nothing() {
+        assert!(init_ack_patch_acceptable(NO_PATCH, NO_PATCH));
+        assert!(!init_ack_patch_acceptable(NO_PATCH, CURRENT_PATCH));
+    }
+
+    /// The relationship between the two halves, pinned: wherever the check
+    /// ADMITS, the `min()` is a no-op and the negotiated level is exactly
+    /// the peer's — which is why zenoh can write `state.patch = other_ext`
+    /// (`ext/patch.rs:85`) with no `min` at all after its `bail!`. Where it
+    /// REFUSES is precisely where the two would have disagreed.
+    #[test]
+    fn the_min_is_redundant_exactly_where_the_check_admits() {
+        for advertised in [NO_PATCH, CURRENT_PATCH, 3u8] {
+            for peer in [NO_PATCH, CURRENT_PATCH, 3u8, u8::MAX] {
+                if init_ack_patch_acceptable(advertised, peer) {
+                    assert_eq!(
+                        negotiate_patch(advertised, peer),
+                        peer,
+                        "an admitted level is adopted whole"
+                    );
+                } else {
+                    assert_ne!(
+                        negotiate_patch(advertised, peer),
+                        peer,
+                        "a refused level is one the min would have silently changed"
+                    );
+                }
+            }
+        }
     }
 
     /// R311y605 — the emitted header is both references' wire form, bit for

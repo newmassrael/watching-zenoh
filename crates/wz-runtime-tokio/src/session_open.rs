@@ -3247,6 +3247,21 @@ pub enum OpenError {
     /// wire Close(INVALID)) and the open loop surfaces the typed reason
     /// here instead of folding it into [`Self::Terminal`].
     InitAckCapsRejected,
+    /// R311y817 — the peer's InitAck announced a `0x7` PATCH level ABOVE the
+    /// one our InitSyn advertised (zenoh `PatchFsm::recv_init_ack`'s
+    /// `bail!`, `ext/patch.rs:78-84`; zenoh-pico's `_Z_ERR_GENERIC` at
+    /// `unicast/transport.c:142-148`). Same rule family as
+    /// [`Self::InitAckCapsRejected`] — "less or equal than the one in the
+    /// InitSyn" — applied to the establishment parameter that rides the ext
+    /// chain rather than the body, so the body-only caps validator could
+    /// never have seen it. The dispatcher took the `framing.error` arm
+    /// (Closing with `CloseReason::Invalid`); typed separately because it
+    /// diagnoses a protocol-revision mismatch, not an over-large size.
+    ///
+    /// Ungated, like its sibling above: an open loop's typed vocabulary is
+    /// the same in every build, and only the arm that PRODUCES it needs the
+    /// codec.
+    InitAckPatchRejected,
     /// R3b — a Z_EXT_AUTH method rejected the peer during the handshake (a bad
     /// usrpwd credential, unknown user, missing required sub-ext, or a malformed
     /// auth ext). The dispatcher took the `framing.error` arm (Closing with
@@ -3457,6 +3472,16 @@ pub(crate) async fn drive_open_loop(
                     #[cfg(feature = "codec-init-body")]
                     DriverLoopOutcome::InitAckCapsRejected => {
                         return Err(OpenError::InitAckCapsRejected);
+                    }
+                    // R311y817 — the ext-chain member of the same rule: the
+                    // InitAck's PATCH level exceeded our InitSyn's. Same
+                    // shape as the arm above; a distinct typed reason
+                    // because a dialler retrying against a peer that speaks
+                    // a newer revision needs a different answer than one
+                    // that over-claimed a buffer size.
+                    #[cfg(feature = "codec-init-body")]
+                    DriverLoopOutcome::InitAckPatchRejected => {
+                        return Err(OpenError::InitAckPatchRejected);
                     }
                     // R3b — a usrpwd method rejected the peer; the FSM is already
                     // Closing(Invalid). Surface the typed reason (mirrors the
