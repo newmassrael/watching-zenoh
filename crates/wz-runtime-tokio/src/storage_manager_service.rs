@@ -185,6 +185,71 @@ impl<R: SessionRuntime, T: TimeSource> RuntimeStorageManager<R, T> {
     pub fn remove_storage(&mut self, name: &str) -> bool {
         self.services.remove(name).is_some()
     }
+
+    /// R311y827 — this manager's live state as the admin sub-tree below
+    /// `@/<zid>/<whatami>/status/plugins/storage_manager`, the wz analogue of
+    /// `StoragesPlugin`'s `adminspace_getter`
+    /// (`zenoh-plugin-storage-manager/src/lib.rs:336-389`). Feed the result to
+    /// [`AdminPlugin::with_status_leaves`](wz_session_core::adminspace::AdminPlugin::with_status_leaves)
+    /// on the `storage_manager` record the admin handler builds, and the answerer
+    /// serves it.
+    ///
+    /// The leaves, in upstream's own emission order:
+    ///
+    /// - `version` — `PLUGIN_VERSION` upstream (`:344-351`); the node build
+    ///   version here, since a statically composed subsystem has no version of its
+    ///   own to be at.
+    /// - `volumes/<id>/__path__` and `volumes/<id>` — one pair per REGISTERED
+    ///   volume (`:353-368`). Registered, not merely used: upstream walks its
+    ///   volume plugin manager, so a volume that currently backs no storage still
+    ///   appears, and an operator can tell "no such volume" from "that volume has
+    ///   no storages".
+    /// - `storages/<name>` — one per HOSTED storage (`:370-388`), body the
+    ///   storage's config, which is what upstream's `GetStatus` round-trip
+    ///   ultimately answers with. wz reads it straight off the retained
+    ///   `StorageConfig` instead of messaging the storage task: the config is
+    ///   immutable for the storage's lifetime, so the message would be a slower
+    ///   route to the same bytes — and upstream needs it only because its config
+    ///   lives inside the task.
+    ///
+    /// Taking a snapshot is what lets an admin handler that cannot borrow the
+    /// manager (`Send + 'static`) still report it; the caller refreshes the
+    /// snapshot wherever it already reflects a storage add/remove, so the
+    /// freshness contract is the one it already keeps for the `Started` bit.
+    #[cfg(feature = "adminspace-plugins-handlers")]
+    pub fn admin_status_leaves(
+        &self,
+        version: &str,
+    ) -> Vec<wz_session_core::adminspace::AdminPluginStatusLeaf> {
+        use wz_session_core::adminspace::{AdminPluginStatusLeaf, WZ_STATIC_PLUGIN_PATH};
+
+        let mut leaves = Vec::new();
+        let mut version_json = String::new();
+        wz_session_core::json::escape_into(version, &mut version_json);
+        leaves.push(AdminPluginStatusLeaf::new("version", version_json));
+        for (id, volume) in self.registry.volumes() {
+            let path = volume
+                .admin_path()
+                .unwrap_or_else(|| String::from(WZ_STATIC_PLUGIN_PATH));
+            let mut path_json = String::new();
+            wz_session_core::json::escape_into(&path, &mut path_json);
+            leaves.push(AdminPluginStatusLeaf::new(
+                format!("volumes/{id}/__path__"),
+                path_json,
+            ));
+            leaves.push(AdminPluginStatusLeaf::new(
+                format!("volumes/{id}"),
+                volume.capability().to_admin_json(),
+            ));
+        }
+        for (name, entry) in &self.services {
+            leaves.push(AdminPluginStatusLeaf::new(
+                format!("storages/{name}"),
+                entry.config.to_admin_json(),
+            ));
+        }
+        leaves
+    }
 }
 
 impl<R: SessionRuntime, T: TimeSource> Default for RuntimeStorageManager<R, T> {
@@ -320,6 +385,88 @@ mod tests {
         TokioSession::new(actions, observer, clock)
     }
 
+    // R311y827 — the admin sub-tree the `adminspace-plugins-handlers` atom's
+    // named residual said was unserved. It was NOT vacuous: `storage_manager` is
+    // the one subsystem wz claims to mirror, it is exactly the upstream plugin
+    // that implements `adminspace_getter`, and this manager owns live volumes and
+    // storages the admin plane could not see.
+    #[cfg(feature = "adminspace-plugins-handlers")]
+    #[tokio::test]
+    async fn admin_leaves_report_every_registered_volume_and_hosted_storage() {
+        let session = make_session();
+        let mut mgr = RuntimeStorageManager::new();
+        // TWO volumes, and only ONE of them ever backs a storage — upstream walks
+        // the volume registry, not the storages' volumes, so an operator can tell
+        // "no such volume" from "that volume is idle". A one-volume fixture would
+        // pass under either rule.
+        mgr.register_volume("mem", Box::new(MemoryVolume));
+        mgr.register_volume("spare", Box::new(MemoryVolume));
+
+        // Before any storage: the volumes are already visible, and no storage is.
+        let idle = mgr.admin_status_leaves("9.9.9");
+        let idle_keys: Vec<&str> = idle.iter().map(|l| l.suffix.as_str()).collect();
+        assert_eq!(
+            idle_keys,
+            vec![
+                "version",
+                "volumes/mem/__path__",
+                "volumes/mem",
+                "volumes/spare/__path__",
+                "volumes/spare",
+            ],
+            "registered volumes report before any storage exists"
+        );
+
+        mgr.add_storage(
+            &session,
+            &StorageConfig::new("s1", "demo/**", "mem"),
+            vec![0x01],
+        )
+        .expect("storage hosts");
+
+        let live = mgr.admin_status_leaves("9.9.9");
+        let by_suffix = |s: &str| -> String {
+            let have: Vec<&str> = live.iter().map(|l| l.suffix.as_str()).collect();
+            live.iter()
+                .find(|l| l.suffix == s)
+                .unwrap_or_else(|| panic!("no leaf at {s}; have {have:?}"))
+                .json_body
+                .clone()
+        };
+        assert_eq!(
+            by_suffix("version"),
+            "\"9.9.9\"",
+            "the version leaf is a JSON string, not a bare token"
+        );
+        assert_eq!(
+            by_suffix("volumes/mem/__path__"),
+            "\"__static__\"",
+            "a statically composed volume reports the static marker"
+        );
+        assert_eq!(
+            by_suffix("volumes/mem"),
+            r#"{"capability":{"history":"Latest","persistence":"Volatile"}}"#,
+            "the in-memory volume's real capability"
+        );
+        assert_eq!(
+            by_suffix("storages/s1"),
+            r#"{"key_expr":"demo/**","volume":"mem"}"#,
+            "the hosted storage's config, upstream's Storage::get_admin_status body"
+        );
+
+        // The DISCRIMINATOR: the sub-tree tracks the manager rather than being a
+        // constant. Removing the storage removes exactly its leaf and leaves both
+        // volumes in place — a snapshot rendered once at declare time would keep
+        // reporting `storages/s1` here.
+        assert!(mgr.remove_storage("s1"));
+        let torn_down = mgr.admin_status_leaves("9.9.9");
+        let after: Vec<&str> = torn_down.iter().map(|l| l.suffix.as_str()).collect();
+        assert_eq!(
+            after, idle_keys,
+            "the storage leaf is gone and nothing else moved"
+        );
+    }
+
     #[test]
     fn add_storage_unknown_volume_errs_and_hosts_nothing() {
         let session = make_session();
@@ -375,10 +522,11 @@ mod tests {
     // an admin config-WRITE `storage-add` decodes (wz-session-core) → to_storage_config →
     // RuntimeStorageManager::add_storage spawns a LIVE storage → the dynamic registry
     // BUILDER compiled_plugins_dyn(.., !mgr.is_empty()) reports storage_manager Started;
-    // a `storage-del` reverses it. NOTE: this drives compiled_plugins_dyn DIRECTLY with the
-    // manager's live state — it proves the parse→spawn→despawn→builder chain, NOT the
-    // answer_admin_query reply path (no shipping host feeds a live slice yet; that is the
-    // deferred storage-hosting host, see the compiled_plugins_dyn WIRING STATUS note).
+    // a `storage-del` reverses it. SCOPE: this drives compiled_plugins_dyn DIRECTLY with
+    // the manager's live state — it proves the parse→spawn→despawn→builder chain, not the
+    // answer_admin_query reply path. That path IS covered, by Layer E6h against a foreign
+    // pico client on the `--storage-host` demo mode; R311y827 corrected the parenthetical
+    // here, which claimed no shipping host fed a live slice.
     #[cfg(feature = "adminspace-config-hotreload")]
     // R311y503 — a live storage now starts its periodic garbage collector
     // (`tokio::spawn`), so a test that hosts one must run inside a runtime,

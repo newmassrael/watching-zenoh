@@ -111,6 +111,35 @@ impl StorageConfig {
             garbage_collection: GarbageCollectionConfig::default(),
         }
     }
+
+    /// R311y827 — this storage's admin-space status body, the wz analogue of
+    /// zenoh's `Storage::get_admin_status()`, which the storage task answers with
+    /// `self.config.to_json_value()` (`memory_backend/mod.rs:93-95`, reached from
+    /// `storages_mgt/service.rs:199-203`). Upstream's shape
+    /// (`zenoh-backend-traits/src/config.rs:406-425`) is
+    /// `{"key_expr":…, "strip_prefix"?:…, "volume":…}`: `strip_prefix` is OMITTED
+    /// when absent, and `volume` is the bare volume id (a string) unless the
+    /// storage carried a per-volume config object, which wz's [`StorageConfig`]
+    /// has no field for. The key order here is `serde_json`'s `Map` order, which
+    /// is a `BTreeMap` (alphabetical) and happens to equal the insertion order.
+    ///
+    /// `complete` and `garbage_collection` are wz fields upstream keeps OUT of
+    /// this body, and they stay out: a client parsing the admin plane of a wz node
+    /// and of a zenoh node must not have to branch on which it is talking to.
+    /// Hand-rolled for the same reason every other body in this workspace is —
+    /// `wz-session-core` carries no `serde_json`.
+    pub fn to_admin_json(&self) -> String {
+        let mut out = String::from("{\"key_expr\":");
+        crate::json::escape_into(&self.key_expr, &mut out);
+        if let Some(prefix) = &self.strip_prefix {
+            out.push_str(",\"strip_prefix\":");
+            crate::json::escape_into(prefix, &mut out);
+        }
+        out.push_str(",\"volume\":");
+        crate::json::escape_into(&self.volume_id, &mut out);
+        out.push('}');
+        out
+    }
 }
 
 #[cfg(test)]
@@ -137,6 +166,13 @@ mod tests {
         );
         assert_eq!(c.strip_prefix, None);
         assert_eq!(c.garbage_collection, GarbageCollectionConfig::default());
+        // R311y827 — the admin body upstream's `to_json_value` produces for the
+        // same config: no `strip_prefix` key at all when it is None, and `volume`
+        // as the bare id. `complete` / `garbage_collection` are absent by design.
+        assert_eq!(
+            c.to_admin_json(),
+            r#"{"key_expr":"demo/**","volume":"mem"}"#
+        );
     }
 
     #[test]
@@ -146,5 +182,26 @@ mod tests {
         c.strip_prefix = Some("a".into());
         assert!(c.complete);
         assert_eq!(c.strip_prefix.as_deref(), Some("a"));
+        // R311y827 — `strip_prefix` APPEARS once set (upstream's
+        // `if let Some(s) = &self.strip_prefix`), between `key_expr` and `volume`.
+        // `complete = true` changes nothing: upstream's body has no such key.
+        assert_eq!(
+            c.to_admin_json(),
+            r#"{"key_expr":"a/**","strip_prefix":"a","volume":"mem"}"#
+        );
+    }
+
+    #[test]
+    fn admin_json_escapes_a_keyexpr_that_would_break_the_body() {
+        // The bodies are hand-rolled, so the escaper is load-bearing rather than
+        // incidental: a `"` inside a keyexpr must not terminate the JSON string.
+        // Keyexpr grammar does not forbid it, and an admin client parsing the
+        // reply is the one that pays.
+        let mut c = StorageConfig::new("d", "a/\"quoted\"/**", "mem");
+        c.strip_prefix = Some("back\\slash".into());
+        assert_eq!(
+            c.to_admin_json(),
+            r#"{"key_expr":"a/\"quoted\"/**","strip_prefix":"back\\slash","volume":"mem"}"#
+        );
     }
 }

@@ -334,6 +334,12 @@ impl DynamicPlugin {
             version: Some(self.version.clone()),
             path: self.path.display().to_string(),
             state: self.state,
+            // R311y827 — a dlopen'd plugin publishes no admin sub-tree: the wz
+            // plugin ABI (`wz-plugin-abi`) carries no getter entry point, so there
+            // is nothing to ask. Upstream's `adminspace_getter` is a trait method
+            // every plugin answers; adding its analogue is an ABI change, which is
+            // the §5.22 plugin family's own question, not this one.
+            status_leaves: Vec::new(),
         }
     }
 }

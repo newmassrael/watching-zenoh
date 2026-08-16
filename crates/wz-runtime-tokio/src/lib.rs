@@ -345,13 +345,17 @@ pub fn compiled_plugins(version: &str) -> Vec<wz_session_core::adminspace::Admin
 /// `storage_manager` Loaded→Started in the y237 plugins admin surface (local_data
 /// `plugins` object + the Started-only `status/plugins` legs).
 ///
-/// WIRING STATUS (honest): no SHIPPING admin host calls this yet — the library Session
-/// host (`session/mod.rs`) and the demo forwarder hosts (`runner.rs`) hold NO storage
-/// manager, so they correctly pass the STATIC [`compiled_plugins`] slice (`Loaded`).
-/// Feeding a live slice needs a storage-hosting host, which is the SAME deferred demo
-/// storage-mode as the wire E2E; this builder + the composed integration test prove the
-/// mechanism, and the reflection is a one-line swap (`compiled_plugins` →
-/// `compiled_plugins_dyn`) in such a host.
+/// WIRING STATUS: WIRED. The `--storage-host` demo mode (`runner.rs`
+/// `run_storage_host`) owns a `RuntimeStorageManager` and builds its admin slice with
+/// THIS, feeding `!manager.is_empty()`; Layer E6h drives the resulting Loaded ->
+/// Started -> Loaded flip with a foreign zenoh-pico client. The library Session host
+/// (`session/mod.rs`) and the routing-peer / router-hat demo hosts hold no storage
+/// manager, so they still — correctly — pass the STATIC [`compiled_plugins`] slice.
+///
+/// (This note said "no SHIPPING admin host calls this yet" long after the storage
+/// host landed. R311y827 corrected it while wiring the status sub-tree through the
+/// same host; a stale "not wired" note reopens finished work exactly as the
+/// `Volume::create_storage` one did.)
 #[cfg(feature = "adminspace-config-hotreload")]
 pub fn compiled_plugins_dyn(
     version: &str,

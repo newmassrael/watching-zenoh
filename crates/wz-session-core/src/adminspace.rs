@@ -100,6 +100,44 @@ impl AdminPluginState {
 /// mirrors the form of zenoh's `"__not_loaded__"` sentinel.
 pub const WZ_STATIC_PLUGIN_PATH: &str = "__static__";
 
+/// One leaf of a plugin's OWN admin sub-tree, below
+/// `@/<zid>/<whatami>/status/plugins/<id>` — the wz analogue of a single
+/// `Response` a zenoh plugin returns from `PluginControl::adminspace_getter`,
+/// which the adminspace dispatches at `net/runtime/adminspace.rs:987` and replies
+/// as `serde_json::to_vec(&response.value)` with `APPLICATION_JSON` (`:992-996`).
+///
+/// The wz shape is a SNAPSHOT rather than a callback because wz's plugins are
+/// compiled-in subsystems, not `dyn PluginControl` objects: the host already
+/// rebuilds its `&[AdminPlugin]` slice inside the admin handler, once per GET, so
+/// a snapshot taken there is exactly as live as upstream's pull and cannot be
+/// served from a moment other than the one the rest of the reply came from. What
+/// upstream gets from the getter's `key_expr` argument — serving only the leaves
+/// the GET asks for — wz gets from the same per-leaf intersection test every
+/// other admin leg uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminPluginStatusLeaf {
+    /// The key suffix BELOW the plugin's status root, with no leading `/`
+    /// (e.g. `"version"`, `"volumes/mem"`, `"storages/s1"`). The full reply key is
+    /// `@/<zid>/<whatami>/status/plugins/<id>/<suffix>`.
+    pub suffix: String,
+    /// The already-serialized JSON body, replied verbatim as `APPLICATION_JSON`.
+    /// Pre-rendered rather than a typed value because the leaf bodies are
+    /// subsystem-specific (a volume's capability, a storage's config) and this
+    /// core has no business knowing their shapes — the subsystem that owns the
+    /// state owns its rendering.
+    pub json_body: String,
+}
+
+impl AdminPluginStatusLeaf {
+    /// A leaf at `suffix` carrying `json_body`.
+    pub fn new(suffix: impl Into<String>, json_body: impl Into<String>) -> Self {
+        Self {
+            suffix: suffix.into(),
+            json_body: json_body.into(),
+        }
+    }
+}
+
 /// One entry in the wz-native plugin registry — the compile-time analogue of a
 /// zenoh `PluginStatusRec` (`zenoh-plugin-trait/src/plugin.rs:92-102`). A wz
 /// "plugin" is a COMPILED-IN composable subsystem with a zenoh-plugin analogue
@@ -124,11 +162,21 @@ pub struct AdminPlugin {
     pub path: String,
     /// Compiled-in / activated state.
     pub state: AdminPluginState,
+    /// This plugin's OWN admin sub-tree (surface C below `__path__`) — the wz
+    /// analogue of what zenoh's `adminspace_getter` returns for this plugin. Empty
+    /// for a subsystem that publishes no state of its own, which is the honest
+    /// default: a plugin the node cannot introspect must answer nothing rather
+    /// than an empty object that a client would read as "introspected, and empty".
+    /// Served only when the plugin is [`Started`](AdminPluginState::Started), the
+    /// same gate `__path__` is behind.
+    pub status_leaves: Vec<AdminPluginStatusLeaf>,
 }
 
 impl AdminPlugin {
     /// Build a static wz-subsystem plugin entry: [`path`](Self::path) =
     /// [`WZ_STATIC_PLUGIN_PATH`]. `version` is the node build version (or `None`).
+    /// No status sub-tree — add one with
+    /// [`with_status_leaves`](Self::with_status_leaves).
     pub fn wz_static(id: &str, name: &str, version: Option<&str>, state: AdminPluginState) -> Self {
         Self {
             id: String::from(id),
@@ -136,7 +184,17 @@ impl AdminPlugin {
             version: version.map(String::from),
             path: String::from(WZ_STATIC_PLUGIN_PATH),
             state,
+            status_leaves: Vec::new(),
         }
+    }
+
+    /// Attach this plugin's admin sub-tree (surface C). Builder-form rather than a
+    /// setter so a host composes the record in one expression at the point it
+    /// takes the snapshot, which is the only point where the leaves are known to
+    /// match the state the rest of the record reports.
+    pub fn with_status_leaves(mut self, leaves: Vec<AdminPluginStatusLeaf>) -> Self {
+        self.status_leaves = leaves;
+        self
     }
 }
 
@@ -531,10 +589,22 @@ fn admin_plugin_key(zid_hex: &str, whatami: &str, id: &str) -> String {
 /// `__path__` leaf as `text/plain` (`adminspace.rs:963-969`).
 #[cfg(feature = "adminspace-plugins-handlers")]
 fn admin_plugin_status_path_key(zid_hex: &str, whatami: &str, id: &str) -> String {
+    let mut s = admin_plugin_status_root_key(zid_hex, whatami, id);
+    s.push_str("/__path__");
+    s
+}
+
+/// R311y827 (§5.23 `adminspace-plugins-handlers`) — the per-plugin STATUS ROOT
+/// `@/<zid>/<whatami>/status/plugins/<id>`, which is both the parent of the
+/// `__path__` leg and the prefix every [`AdminPluginStatusLeaf`] hangs off. zenoh
+/// builds the same string once as `plugin_key` and passes it to the plugin's
+/// `adminspace_getter` as `plugin_status_key` (`adminspace.rs:961, 987`), which is
+/// why the getter's own keys are relative to it.
+#[cfg(feature = "adminspace-plugins-handlers")]
+fn admin_plugin_status_root_key(zid_hex: &str, whatami: &str, id: &str) -> String {
     let mut s = admin_root_key(zid_hex, whatami);
     s.push_str("/status/plugins/");
     s.push_str(id);
-    s.push_str("/__path__");
     s
 }
 
@@ -720,13 +790,16 @@ pub fn answer_admin_query(
                 );
             }
         }
-        // Surface C — `@/<zid>/<whatami>/status/plugins/<id>/__path__`: for each
-        // STARTED plugin, the `__path__` leg (text/plain, the plugin path). zenoh
-        // iterates `started_plugins_iter()` and replies `__path__` as TEXT_PLAIN
-        // (adminspace.rs:960-969). The plugin-defined `adminspace_getter` delegation
-        // (adminspace.rs:987, the `.../<id>/**` sub-tree) has no wz analogue — wz
-        // subsystems expose no admin getter — so only the always-present `__path__`
-        // leg is served (a NAMED deferral; the getter sub-tree is an extension point).
+        // Surface C — `@/<zid>/<whatami>/status/plugins/<id>/**`: for each STARTED
+        // plugin, the `__path__` leg (text/plain, the plugin path) followed by the
+        // plugin's OWN sub-tree. zenoh iterates `started_plugins_iter()`, replies
+        // `__path__` as TEXT_PLAIN (adminspace.rs:960-969) and then delegates the
+        // rest of the sub-tree to the plugin's `adminspace_getter` (:987), replying
+        // each response as APPLICATION_JSON (:992-996). R311y827 closed that
+        // delegation: the leaves arrive on the record the host already rebuilds per
+        // GET ([`AdminPluginStatusLeaf`]), so the two halves of a reply describe the
+        // same instant. Emission order matches upstream — `__path__` first, then the
+        // getter's responses in the order the plugin produced them.
         for p in plugins {
             if p.state != AdminPluginState::Started {
                 continue;
@@ -739,6 +812,23 @@ pub fn answer_admin_query(
                     p.path.as_bytes(),
                     Some(&crate::sample::EncodingHint::TEXT_PLAIN),
                 );
+            }
+            if p.status_leaves.is_empty() {
+                continue;
+            }
+            let status_root = admin_plugin_status_root_key(ctx.zid_hex, ctx.whatami, &p.id);
+            for leaf in &p.status_leaves {
+                let mut leaf_key = status_root.clone();
+                leaf_key.push('/');
+                leaf_key.push_str(&leaf.suffix);
+                let leaf_chunks: Vec<&str> = leaf_key.split('/').collect();
+                if crate::keyexpr_match::keyexpr_intersects_target(ke, &leaf_chunks) {
+                    out.reply_keyed_encoded(
+                        &leaf_key,
+                        leaf.json_body.as_bytes(),
+                        Some(&crate::sample::EncodingHint::APPLICATION_JSON),
+                    );
+                }
             }
         }
     }
@@ -2017,6 +2107,114 @@ mod tests {
             assert_eq!(out.replies.len(), 1, "only the started rest __path__ leg");
             assert_eq!(out.replies[0].0, "@/a1b2/peer/status/plugins/rest/__path__");
             assert_eq!(out.replies[0].1, WZ_STATIC_PLUGIN_PATH.as_bytes());
+        }
+
+        // R311y827 — a plugin that publishes leaves. `storage_manager` is the one
+        // subsystem wz claims to mirror, and it is exactly the upstream plugin whose
+        // `adminspace_getter` publishes `/version`, `/volumes/**` and `/storages/**`
+        // (plugins/zenoh-plugin-storage-manager/src/lib.rs:336-389).
+        fn storage_started_with_leaves() -> AdminPlugin {
+            AdminPlugin::wz_static(
+                "storage_manager",
+                "storage_manager",
+                Some("0.1.0"),
+                AdminPluginState::Started,
+            )
+            .with_status_leaves(vec![
+                AdminPluginStatusLeaf::new("version", "\"0.1.0\""),
+                AdminPluginStatusLeaf::new("volumes/mem/__path__", "\"__static__\""),
+                AdminPluginStatusLeaf::new("volumes/mem", "{\"capability\":{}}"),
+                AdminPluginStatusLeaf::new("storages/s1", "{\"key_expr\":\"demo/**\"}"),
+            ])
+        }
+
+        #[test]
+        fn a_plugin_publishing_no_leaves_serves_only_path() {
+            // The CONTROL for the two tests below, and the state R311y827 measured
+            // before changing anything: with no leaves the sub-tree GET yields the
+            // `__path__` leg and NOTHING else. It is what makes a green
+            // `status_subtree_serves_every_leaf` mean the leaves were served rather
+            // than that the observation window was wrong.
+            let view = admin_view("@/a1b2/peer/status/plugins/**");
+            let mut out = RecordingReply::default();
+            let plugins = [rest_started()];
+            let _ = answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
+            assert_eq!(
+                out.replies.len(),
+                1,
+                "a plugin with no sub-tree answers only __path__: {:?}",
+                out.replies.iter().map(|(k, _)| k).collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
+        fn status_subtree_serves_every_leaf_as_json_under_the_plugin_root() {
+            // Surface C, the getter delegation: `__path__` FIRST (text/plain, zenoh's
+            // order at adminspace.rs:963 before :987), then one JSON reply per leaf,
+            // each keyed under the plugin's own status root.
+            let view = admin_view("@/a1b2/peer/status/plugins/**");
+            let mut out = RecordingReply::default();
+            let plugins = [storage_started_with_leaves()];
+            let _ = answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
+            let keys: Vec<&str> = out.replies.iter().map(|(k, _)| k.as_str()).collect();
+            assert_eq!(
+                keys,
+                vec![
+                    "@/a1b2/peer/status/plugins/storage_manager/__path__",
+                    "@/a1b2/peer/status/plugins/storage_manager/version",
+                    "@/a1b2/peer/status/plugins/storage_manager/volumes/mem/__path__",
+                    "@/a1b2/peer/status/plugins/storage_manager/volumes/mem",
+                    "@/a1b2/peer/status/plugins/storage_manager/storages/s1",
+                ],
+                "__path__ first, then the leaves in the order the plugin produced them"
+            );
+            // The BODY travels verbatim: the core does not re-render what the
+            // subsystem rendered.
+            assert_eq!(
+                out.replies[4].1, b"{\"key_expr\":\"demo/**\"}",
+                "the leaf body is replied byte-for-byte"
+            );
+        }
+
+        #[test]
+        fn a_narrowed_subtree_get_serves_only_the_leaves_it_covers() {
+            // The wz analogue of upstream passing the GET's `key_expr` INTO the
+            // getter so it filters its own responses (lib.rs:345, 357, 361, 374): a
+            // GET narrowed to `volumes/**` must not drag in `/version` or
+            // `/storages/**`, and must not drag in `__path__` either — that leg is a
+            // sibling of `volumes`, not a parent.
+            let view = admin_view("@/a1b2/peer/status/plugins/storage_manager/volumes/**");
+            let mut out = RecordingReply::default();
+            let plugins = [storage_started_with_leaves()];
+            let _ = answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
+            let keys: Vec<&str> = out.replies.iter().map(|(k, _)| k.as_str()).collect();
+            assert_eq!(
+                keys,
+                vec![
+                    "@/a1b2/peer/status/plugins/storage_manager/volumes/mem/__path__",
+                    "@/a1b2/peer/status/plugins/storage_manager/volumes/mem",
+                ],
+                "only the leaves the GET covers"
+            );
+        }
+
+        #[test]
+        fn a_loaded_plugins_leaves_are_not_served() {
+            // The sub-tree is behind the SAME Started gate as `__path__` (zenoh's
+            // `started_plugins_iter`, adminspace.rs:960): a subsystem that is
+            // compiled in but not activated publishes no state, so a client cannot
+            // read a stale sub-tree off a plugin that is not running.
+            let mut loaded = storage_started_with_leaves();
+            loaded.state = AdminPluginState::Loaded;
+            let view = admin_view("@/a1b2/peer/status/plugins/**");
+            let mut out = RecordingReply::default();
+            let plugins = [loaded];
+            let _ = answer_admin_query(&view, &mut out, &admin_ctx(true), &[], &[], &plugins, "{}");
+            assert!(
+                out.replies.is_empty(),
+                "a Loaded plugin serves neither __path__ nor its sub-tree: {:?}",
+                out.replies.iter().map(|(k, _)| k).collect::<Vec<_>>()
+            );
         }
 
         #[test]

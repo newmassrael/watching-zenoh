@@ -94,6 +94,20 @@ impl VolumeRegistry {
             .create_storage(config)
             .map_err(VolumeRegistryError::VolumeCreate)
     }
+
+    /// R311y827 — every registered volume as `(id, volume)`, id-sorted (the
+    /// backing `BTreeMap`). The enumeration the admin
+    /// `status/plugins/storage_manager/volumes/**` legs render from, the wz
+    /// counterpart of upstream walking its own `plugins_manager
+    /// .started_plugins_iter()` for the same sub-tree
+    /// (`zenoh-plugin-storage-manager/src/lib.rs:353-368`).
+    ///
+    /// Sorted rather than insertion-ordered for the reason the plugin registry is:
+    /// a reply SEQUENCE that varies per process is the kind of thing a foreign
+    /// client's transcript assertion breaks on, and it would break only sometimes.
+    pub fn volumes(&self) -> impl Iterator<Item = (&str, &dyn Volume)> {
+        self.volumes.iter().map(|(id, v)| (id.as_str(), &**v))
+    }
 }
 
 /// Why [`StorageManager::add_storage`] rejected a config.

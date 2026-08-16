@@ -72,6 +72,42 @@ pub struct Capability {
     pub history: History,
 }
 
+impl Capability {
+    /// R311y827 — this capability as the admin `status/plugins/storage_manager/
+    /// volumes/<id>` body.
+    ///
+    /// Upstream answers that key with the volume's CONFIG
+    /// (`VolumeConfig::to_json_value`, reached through `Volume::get_admin_status`
+    /// at `zenoh-plugin-storage-manager/src/lib.rs:361-366`), because a zenoh
+    /// volume is configured in JSON and keeps that object. A wz volume is a
+    /// registered Rust object with no config to echo — the module note at the top
+    /// of this file has said so since the seam was built — so echoing an empty
+    /// object would be a faithful shape carrying no information, and a client
+    /// would read it as "introspected, nothing there".
+    ///
+    /// What a wz volume DOES declare is its capability, so that is what this leg
+    /// reports, under an explicitly wz-named key rather than pretending to be
+    /// upstream's config object. The variant strings are zenoh's serde names
+    /// (`Volatile`/`Durable`, `Latest`/`All`), and the keys are alphabetical to
+    /// match `serde_json`'s `Map` ordering everywhere else on this plane.
+    pub fn to_admin_json(&self) -> String {
+        let history = match self.history {
+            History::Latest => "Latest",
+            History::All => "All",
+        };
+        let persistence = match self.persistence {
+            Persistence::Volatile => "Volatile",
+            Persistence::Durable => "Durable",
+        };
+        let mut out = String::from("{\"capability\":{\"history\":\"");
+        out.push_str(history);
+        out.push_str("\",\"persistence\":\"");
+        out.push_str(persistence);
+        out.push_str("\"}}");
+        out
+    }
+}
+
 /// Why a [`Volume`] could not create a storage — the wz analogue of zenoh's
 /// `ZResult` (`Volume::create_storage` is fallible, `backend-traits/lib.rs:194`).
 /// The in-memory volume never fails, but a future Durable volume (filesystem / db)
@@ -122,6 +158,26 @@ pub trait Volume {
         &self,
         config: &StorageConfig,
     ) -> Result<Box<dyn StorageBackend + Send>, VolumeError>;
+
+    /// R311y827 — where this volume's IMPLEMENTATION came from, for the admin
+    /// `status/plugins/storage_manager/volumes/<id>/__path__` leg. zenoh reports a
+    /// volume plugin's dylib path there (`plugin.path()`,
+    /// `zenoh-plugin-storage-manager/src/lib.rs:356-359`).
+    ///
+    /// `None` — the default, and the answer for every statically composed wz
+    /// volume — means "compiled in", which the admin renderer turns into the
+    /// `WZ_STATIC_PLUGIN_PATH` marker (the `adminspace` module, which this one
+    /// does not depend on) the plugin records already use. A `dlopen`'d volume
+    /// overrides this with its
+    /// real filesystem path, and that difference is the only thing on the admin
+    /// plane that distinguishes the two, exactly as it is for plugin records.
+    ///
+    /// Defaulted so an existing `impl Volume` — including one outside this
+    /// workspace — keeps compiling: a volume that has no path should not have to
+    /// say so.
+    fn admin_path(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The built-in in-memory volume — zenoh `MemoryBackend`

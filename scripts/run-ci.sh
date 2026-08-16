@@ -3744,7 +3744,13 @@ layer_c1am_cargo_test_adminspace() {
         cargo test -p wz-session-core --features adminspace-introspection-handlers --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM adminspace 21" 21 \
         cargo test -p wz-session-core --features adminspace-router-linkstate --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AM adminspace 25" 25 \
+    # R311y827 25 -> 29: the storage_manager status SUB-TREE. Four legs — the
+    # no-leaf CONTROL, the served sub-tree, the narrowed GET's own filtering, and
+    # the Started gate over the leaves. They land HERE and not on the hotreload
+    # guard below because `wz-session-core`'s own `adminspace-config-hotreload`
+    # does NOT compose `adminspace-plugins-handlers` (the runtime crate's does),
+    # so the whole `tests::plugins` module is absent from that build.
+    _runci_guarded_test "C1AM adminspace 29" 29 \
         cargo test -p wz-session-core --features adminspace-plugins-handlers --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM declare_adminspace 3" 3 \
         cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib declare_adminspace --quiet || return 1
@@ -3760,7 +3766,10 @@ layer_c1am_cargo_test_adminspace() {
     # pin is why the count moved visibly instead of the module quietly growing.
     _runci_guarded_test "C1AM adminspace 26" 26 \
         cargo test -p wz-session-core --features adminspace-config-hotreload --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AM storage_manager_service 5" 5 \
+    # R311y827 5 -> 6: the live manager's admin sub-tree render. It is gated on
+    # `adminspace-plugins-handlers`, so the C1z sibling guard over the SAME module
+    # (no adminspace feature) stays at 5 — measured, not assumed.
+    _runci_guarded_test "C1AM storage_manager_service 6" 6 \
         cargo test -p wz-runtime-tokio --features adminspace-config-hotreload --lib storage_manager_service --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-core,query-get --quiet -- -D warnings \
@@ -4628,29 +4637,33 @@ layer_c1y_cargo_test_routing_peer() {
 # are Locality::Remote, so no single-session loopback can drive them). `--lib`
 # excludes integration tests, so the e2e needs its own `--test` invocation.
 layer_c1z_cargo_test_storage_driver() {
-    _runci_guarded_test "C1z storage" 27 \
+    # R311y827 +1 on every `-p wz-session-core --lib storage` guard below: the
+    # `StorageConfig::to_admin_json` escaper test. The filter is a module PREFIX,
+    # so `storage_config` is inside it in every one of these feature subsets —
+    # each was re-measured rather than incremented on the assumption.
+    _runci_guarded_test "C1z storage" 28 \
         cargo test -p wz-session-core --features storage-backend --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 35 \
+    _runci_guarded_test "C1z storage" 36 \
         cargo test -p wz-session-core --features storage-mgr-multi-storage-host --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_manager_service" 5 \
         cargo test -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --lib storage_manager_service --quiet || return 1
     _runci_guarded_test "C1z storage_strip_prefix" 6 \
         cargo test -p wz-session-core --features storage-mgr-strip-prefix --lib storage_strip_prefix --quiet || return 1
-    _runci_guarded_test "C1z storage" 40 \
+    _runci_guarded_test "C1z storage" 41 \
         cargo test -p wz-session-core --features storage-backend,storage-mgr-strip-prefix --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 50 \
+    _runci_guarded_test "C1z storage" 51 \
         cargo test -p wz-session-core --features storage-history,storage-mgr-strip-prefix --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 39 \
+    _runci_guarded_test "C1z storage" 40 \
         cargo test -p wz-session-core --features storage-mgr-wildcard-updates --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 53 \
+    _runci_guarded_test "C1z storage" 54 \
         cargo test -p wz-session-core --features storage-mgr-wildcard-updates,storage-mgr-strip-prefix --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 127 \
+    _runci_guarded_test "C1z storage" 128 \
         cargo test -p wz-session-core --features storage-aligner,storage-mgr-wildcard-updates --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_service" 9 \
         cargo test -p wz-runtime-tokio --features storage-mgr-complete-flag --lib storage_service --quiet || return 1
     _runci_guarded_test "C1z storage_service" 10 \
         cargo test -p wz-runtime-tokio --features storage-backend,storage-mgr-strip-prefix,declare-subscriber,pubsub-allow-loop --lib storage_service --quiet || return 1
-    _runci_guarded_test "C1z storage" 46 \
+    _runci_guarded_test "C1z storage" 47 \
         cargo test -p wz-session-core --features storage-mgr-garbage-collection --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_gc_service" 3 \
         cargo test -p wz-runtime-tokio --features storage-mgr-garbage-collection --lib storage_gc_service --quiet || return 1
