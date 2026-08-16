@@ -9797,6 +9797,222 @@ fn query_without_consolidation_still_delivers_every_reply() {
     );
 }
 
+/// R311y833 — zenoh states this as a GUARANTEE of `get()` itself: "Unless
+/// explicitly requested via `accept_replies`, replies are guaranteed to have
+/// key expressions that match the requested selector"
+/// (`zenoh/src/api/session.rs:1181`), enforced at `session.rs:2845-2854`;
+/// zenoh-pico enforces the same at `vendor/zenoh-pico/src/session/query.c:121`.
+///
+/// MEASURED BEFORE THE FIX, on this tree: the identical body ran with a
+/// `panic!` reporting what arrived, and it printed BOTH payloads
+/// (`[[105, 110], [111, 117, 116]]` = `[b"in", b"out"]`). wz's native getter
+/// delivered a reply keyed `other/outside` for a query asked on `demo/**` —
+/// a reply every real zenoh and zenoh-pico client drops.
+///
+/// The CONTROL rides in the same test on purpose: an implementation that
+/// simply stopped delivering replies would satisfy the negative half alone.
+/// `demo/inside` must still arrive, and the final must still fire, because a
+/// caller whose replies are all refused must be TERMINATED, not hung.
+///
+/// The query is LITERAL here and the measured `demo/**` shape is pinned by the
+/// wildcard-gated twin below. The gate judges by this build's own matching
+/// rules, so a pattern fixture in an ungated test would silently be asserting
+/// `keyexpr-wildcard-double` instead of the acceptance policy — Layer C1f
+/// measured exactly that on the session-core side of this round.
+#[cfg(all(feature = "query-get", feature = "query-queryable"))]
+#[test]
+fn a_default_get_refuses_a_reply_keyed_outside_the_query() {
+    let (session, _driver) = build_session();
+    let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_cb = seen.clone();
+    let finals = Arc::new(AtomicUsize::new(0));
+    let finals_cb = finals.clone();
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .queryables
+        .register("demo/inside", |_q, responder| {
+            responder.reply_keyed("demo/inside", b"in");
+            responder.reply_keyed("other/outside", b"out");
+        });
+
+    session
+        .query(
+            "demo/inside",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| seen_cb.lock().unwrap().push(reply.payload().to_vec()),
+            move |_| {
+                finals_cb.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("query-get feature is ON in this test build");
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![b"in".to_vec()],
+        "the intersecting reply must arrive and the outside one must not"
+    );
+    assert_eq!(
+        finals.load(Ordering::SeqCst),
+        1,
+        "refusing every reply must still terminate the query"
+    );
+}
+
+/// The MEASURED shape, kept verbatim: a `demo/**` get whose queryable answers
+/// on both `demo/inside` and `other/outside`. Before y833 this delivered BOTH
+/// (`[[105, 110], [111, 117, 116]]`); a wildcard query is the ordinary case
+/// upstream's guarantee is written for, since a pattern get is exactly the one
+/// that reaches queryables free to answer under any key they like.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "keyexpr-wildcard-double"
+))]
+#[test]
+fn a_wildcard_get_refuses_a_reply_outside_the_pattern() {
+    let (session, _driver) = build_session();
+    let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_cb = seen.clone();
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .queryables
+        .register("demo/**", |_q, responder| {
+            responder.reply_keyed("demo/inside", b"in");
+            responder.reply_keyed("other/outside", b"out");
+        });
+
+    session
+        .query(
+            "demo/**",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| seen_cb.lock().unwrap().push(reply.payload().to_vec()),
+            |_| {},
+        )
+        .expect("query-get feature is ON in this test build");
+
+    assert_eq!(*seen.lock().unwrap(), vec![b"in".to_vec()]);
+}
+
+/// The opt-out, and the proof the gate is a policy rather than a hard-wired
+/// refusal. `accept_replies(Any)` is how zenoh spells "queryables may also
+/// reply on key expressions that don't intersect with the query's"
+/// (`zenoh/src/api/builders/query.rs:284-287`), and after it BOTH replies of
+/// the test above must arrive — the pre-y833 behaviour, now reachable only by
+/// asking for it.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "query-selector-parameters"
+))]
+#[test]
+fn accept_replies_any_reinstates_a_reply_keyed_outside_the_query() {
+    use wz_session_core::reply_acceptance::ReplyKeyExpr;
+
+    let (session, _driver) = build_session();
+    let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_cb = seen.clone();
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .queryables
+        .register("demo/inside", |_q, responder| {
+            responder.reply_keyed("demo/inside", b"in");
+            responder.reply_keyed("other/outside", b"out");
+        });
+
+    session
+        .query(
+            "demo/inside",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::SessionLocal)
+                .with_accept_replies(ReplyKeyExpr::Any),
+            move |reply| seen_cb.lock().unwrap().push(reply.payload().to_vec()),
+            |_| {},
+        )
+        .expect("query-get feature is ON in this test build");
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![b"in".to_vec(), b"out".to_vec()],
+        "an _anyke get must accept both, in arrival order"
+    );
+}
+
+/// The TX half of the same knob, and the reason there is no separate
+/// `accept_replies` field: the opt-out has to REACH THE RESPONDER, which learns
+/// it only from the selector parameters. zenoh's builder makes the identical
+/// single write (`Parameters::set_reply_key_expr_any`,
+/// `zenoh/src/api/builders/query.rs:288-300`); pico reads it back with
+/// `_z_parameters_has_anyke`. Without these bytes a remote queryable keeps
+/// refusing at ITS end (`vendor/zenoh-pico/src/net/primitives.c:438`) and the
+/// local opt-out would be a knob that changes nothing over the wire.
+#[cfg(all(feature = "query-get", feature = "query-selector-parameters"))]
+#[test]
+fn accept_replies_any_writes_the_anyke_selector_parameter() {
+    use wz_session_core::reply_acceptance::ReplyKeyExpr;
+
+    let bare = QueryOptions::get().with_accept_replies(ReplyKeyExpr::Any);
+    assert_eq!(bare.parameters.as_deref(), Some(b"_anyke".as_slice()));
+
+    // Appended to an existing list with the upstream `;` separator, not
+    // clobbering it.
+    let joined = QueryOptions::get()
+        .with_parameters(b"_max=5".to_vec())
+        .with_accept_replies(ReplyKeyExpr::Any);
+    assert_eq!(
+        joined.parameters.as_deref(),
+        Some(b"_max=5;_anyke".as_slice())
+    );
+
+    // Idempotent — pico's `implicit_anyke = _anyke_option &&
+    // !_anyke_in_parameters` (`vendor/zenoh-pico/src/net/primitives.c:575-578`).
+    let twice = QueryOptions::get()
+        .with_accept_replies(ReplyKeyExpr::Any)
+        .with_accept_replies(ReplyKeyExpr::Any);
+    assert_eq!(twice.parameters.as_deref(), Some(b"_anyke".as_slice()));
+
+    // The default writes nothing at all: a get that never asks carries no
+    // parameter, which is what keeps its wire bytes byte-identical to pre-y833.
+    let default = QueryOptions::get().with_accept_replies(ReplyKeyExpr::MatchingQuery);
+    assert_eq!(default.parameters, None);
+
+    // And a caller who wrote the flag by hand is the same caller as one who
+    // asked for it — pico's `_anyke_in_parameters || _anyke_option`.
+    let by_hand = QueryOptions::get().with_parameters(b"_anyke".to_vec());
+    assert_eq!(
+        by_hand.effective_accept_replies(),
+        ReplyKeyExpr::Any,
+        "the parameters ARE the state; there is no second flag to disagree with"
+    );
+}
+
+/// The `@adv` planes already emit `_anyke` on every history / recovery GET
+/// (R311y442), precisely because those replies are keyed on the CACHED
+/// SAMPLE's own expression rather than on the `@adv` selector the GET was
+/// asked under. This pins that the y833 gate reads that flag out of the
+/// selector those helpers build, so the round cannot have silently broken
+/// advanced-subscriber recovery.
+#[cfg(feature = "query-get")]
+#[test]
+fn an_adv_recovery_selector_reads_as_accept_any() {
+    use wz_session_core::reply_acceptance::ReplyKeyExpr;
+
+    let selector = wz_session_core::selector_params::anyke_params(&["_sn=3..".to_string()]);
+    let opts = QueryOptions {
+        parameters: Some(selector.into_bytes()),
+        ..QueryOptions::get()
+    };
+    assert_eq!(opts.effective_accept_replies(), ReplyKeyExpr::Any);
+}
+
 // --- R311y554: LocalDeliveryDrain ------------------------------------------
 
 #[test]

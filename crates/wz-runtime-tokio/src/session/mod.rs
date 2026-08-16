@@ -2552,10 +2552,28 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // drops the sink and its deferred cell — a complete rollback
             // with no cell kill, the same shape as `liveliness_get`
             // (R311ll).
+            // R311y833 — the pending entry is told which keyexpr this get was
+            // asked under, so it can keep zenoh's stated guarantee that "Unless
+            // explicitly requested via accept_replies, replies are guaranteed
+            // to have key expressions that match the requested selector"
+            // (`zenoh/src/api/session.rs:1181`). Measured before the fix: a
+            // default `Session::query("demo/**")` delivered a reply keyed
+            // `other/outside`, which zenoh (`session.rs:2847`) and pico
+            // (`vendor/zenoh-pico/src/session/query.c:121`) both drop.
+            //
+            // The mode comes from `effective_accept_replies`, i.e. from the
+            // selector parameters, so an `_anyke` GET — every `@adv` history /
+            // recovery GET this tree already emits — keeps accepting replies
+            // keyed on the cached sample's own expression.
+            let accept = wz_session_core::reply_acceptance::ReplyAcceptance::for_query(
+                keyexpr,
+                opts.effective_accept_replies(),
+            );
+
             let handle = R::with_mutex_mut(&self.observer, |observer| {
                 observer
                     .replies
-                    .register_sink(rid, expected_finals, deadline_ms, sink)
+                    .register_sink(rid, expected_finals, deadline_ms, accept, sink)
                     .expect("register on the alloc backing never exceeds declared capacity")
             });
 
@@ -2813,10 +2831,22 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // (mapping_id, inline_suffix); a failed emit rolls the FRESH
             // rid back with `unregister` alone (no loopback fanned yet,
             // no solicited reply can correlate before the send).
+            // R311y833 — same acceptance gate as `Session::query`. The aliased
+            // get routes its WIRE query by (mapping_id, inline_suffix), but the
+            // guarantee is about the expression the caller asked under, and
+            // `loopback_keyexpr` is that literal — the same value the loopback
+            // fan matches queryables against. Gating on anything else here
+            // would make the two getters keep different promises for the same
+            // options, which is the asymmetry this round exists to remove.
+            let accept = wz_session_core::reply_acceptance::ReplyAcceptance::for_query(
+                loopback_keyexpr,
+                opts.effective_accept_replies(),
+            );
+
             let handle = R::with_mutex_mut(&self.observer, |observer| {
                 observer
                     .replies
-                    .register_sink(rid, expected_finals, deadline_ms, sink)
+                    .register_sink(rid, expected_finals, deadline_ms, accept, sink)
                     .expect("register on the alloc backing never exceeds declared capacity")
             });
 

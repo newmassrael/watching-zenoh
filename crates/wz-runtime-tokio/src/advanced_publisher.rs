@@ -603,6 +603,38 @@ impl Drop for HeartbeatTask {
 mod tests {
     use super::*;
 
+    /// R311y833 — the options an `@adv` recovery GET must carry, and the reason
+    /// these three tests share one constructor rather than spelling
+    /// `QueryOptions::get()` inline.
+    ///
+    /// The GET is asked under `<ke>/@adv/**` and the cache answers under the
+    /// CACHED SAMPLE'S OWN key (`demo/data`), which does not intersect it. That
+    /// is precisely the case `_anyke` exists for, and production already carries
+    /// it unconditionally — `advanced_subscriber::history_selector` returns the
+    /// bare `"_anyke"` even with no other knobs (R311y442). These tests
+    /// hand-rolled the GET without it, so before y833 they asserted a delivery
+    /// that neither zenoh (`zenoh/src/api/session.rs:2847`) nor zenoh-pico
+    /// (`vendor/zenoh-pico/src/session/query.c:121`) performs. The acceptance
+    /// gate made that visible; the tests were what was wrong, not the cache.
+    ///
+    /// Written as the `parameters` field rather than through
+    /// `QueryOptions::with_accept_replies` deliberately: that setter is
+    /// `query-selector-parameters`-gated, and adding that gate to these tests
+    /// would change WHICH LANES RUN THEM for a reason orthogonal to what they
+    /// prove. The value itself comes from the same
+    /// [`wz_session_core::selector_params::anyke_params`] SSOT the production
+    /// selector is built from, so the two cannot drift.
+    #[cfg(feature = "query-get")]
+    fn adv_recovery_get_options() -> crate::session::QueryOptions {
+        use crate::session::QueryOptions;
+        use wz_session_core::locality::Locality;
+
+        QueryOptions {
+            parameters: Some(wz_session_core::selector_params::anyke_params(&[]).into_bytes()),
+            ..QueryOptions::get().with_allowed_destination(Locality::SessionLocal)
+        }
+    }
+
     /// Composed session-API loopback e2e (a real `session.query` through
     /// the declared queryable, NOT a kernel-proxy — though SessionLocal
     /// dispatch stays in-process and does NOT traverse the Push/Response
@@ -619,8 +651,7 @@ mod tests {
         use crate::observer::ApplicationLayerObserver;
         use crate::reply_sink::ReplyView;
         use crate::runtime_impl::TokioTime;
-        use crate::session::{QueryOptions, TokioSession};
-        use wz_session_core::locality::Locality;
+        use crate::session::TokioSession;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
@@ -665,7 +696,7 @@ mod tests {
         session
             .query(
                 "demo/data/@adv/**",
-                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                adv_recovery_get_options(),
                 move |reply: &dyn ReplyView| {
                     rec.lock()
                         .expect("reply recorder poisoned")
@@ -712,8 +743,7 @@ mod tests {
         use crate::observer::ApplicationLayerObserver;
         use crate::reply_sink::{ReplyKind, ReplyView};
         use crate::runtime_impl::TokioTime;
-        use crate::session::{QueryOptions, TokioSession};
-        use wz_session_core::locality::Locality;
+        use crate::session::TokioSession;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
@@ -751,7 +781,7 @@ mod tests {
         session
             .query(
                 "demo/data/@adv/**",
-                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                adv_recovery_get_options(),
                 move |reply: &dyn ReplyView| {
                     rec.lock().expect("reply recorder poisoned").push((
                         reply.kind(),
@@ -827,8 +857,7 @@ mod tests {
         use crate::observer::ApplicationLayerObserver;
         use crate::reply_sink::ReplyView;
         use crate::runtime_impl::TokioTime;
-        use crate::session::{QueryOptions, TokioSession};
-        use wz_session_core::locality::Locality;
+        use crate::session::TokioSession;
         use wz_session_core::sample::EncodingHint;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
@@ -867,7 +896,7 @@ mod tests {
         session
             .query(
                 "demo/data/@adv/**",
-                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                adv_recovery_get_options(),
                 move |reply: &dyn ReplyView| {
                     rec.lock().expect("reply recorder poisoned").push((
                         reply.payload().to_vec(),

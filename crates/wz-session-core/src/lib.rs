@@ -231,6 +231,16 @@ pub mod decl_sink;
 /// and what left the same bug live in the REST bridge one crate away.
 pub mod selector_params;
 
+/// R311y833 — the requester-side reply-keyexpr contract
+/// ([`reply_acceptance::ReplyKeyExpr`] + the acceptance policy a pending z_get
+/// registers with). zenoh states it as a GUARANTEE of `get()` itself and both
+/// upstreams enforce it in their reply dispatchers; wz enforced it only inside
+/// the C ABI shim, so the native `Session::query` delivered replies keyed
+/// outside the query. Lives here, beside [`selector_params`], because the
+/// opt-out travels as the bare `_anyke` selector parameter — one value read by
+/// the responder and by the requester's own gate.
+pub mod reply_acceptance;
+
 /// R223 — zenoh-style locality filter (no_std + no_alloc; pure enum + helpers).
 /// Mirrors zenoh-pico's `z_locality_t` and `_z_locality_allows_{local,remote}`.
 /// Available unconditionally because the type carries no allocations.

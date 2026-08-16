@@ -21,4 +21,10 @@
 //! (gated on the reply dispatch feature union in wz-session-core; the
 //! C1f lane runs it).
 
+//! R311y833 — the acceptance policy every registration now states lives in
+//! [`crate::reply_acceptance`], re-exported at the crate root beside
+//! `keyexpr_match` and its siblings: a REQUIRED parameter whose type an AP
+//! consumer cannot name is not a reachable API, and wz-ap-demo reaches
+//! `ReplyRegistry::register` without depending on `wz-session-core` at all.
+
 pub use wz_session_core::reply::{InboundReply, InboundReplyBody, ReplyHandle, ReplyRegistry};

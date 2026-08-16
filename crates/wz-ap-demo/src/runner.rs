@@ -71,6 +71,7 @@ use wz::runtime_tokio::reconnect::{
     reconnect_endpoint, ReconnectDriveOutcome, ReconnectPolicy, ReconnectTeardown,
     ReconnectingSession,
 };
+use wz::runtime_tokio::reply_acceptance::{ReplyAcceptance, ReplyKeyExpr};
 use wz::runtime_tokio::reply_sink::ReplyKind;
 use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioRuntime};
@@ -690,7 +691,7 @@ async fn establish_link(role: &Role) -> io::Result<DialedLink> {
 /// registers with `None`, preserving pre-R263 behaviour.
 fn install_observer_callbacks(
     observer: &Arc<Mutex<ApplicationLayerObserver>>,
-    query_spec: Option<&str>,
+    query_spec: Option<&crate::args::QueryEmitSpec>,
     remote_log_spec: &RemoteLogSpec,
     reply_log_spec: &ReplyConsumerSpec,
     session_clock: TokioTime,
@@ -746,11 +747,27 @@ fn install_observer_callbacks(
                 log::info!("wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={id}");
             });
     }
-    if query_spec.is_some() && (reply_log_spec.on_query_reply || reply_log_spec.on_query_final) {
+    if let Some(spec) =
+        query_spec.filter(|_| reply_log_spec.on_query_reply || reply_log_spec.on_query_final)
+    {
         let on_reply = reply_log_spec.on_query_reply;
         let on_final = reply_log_spec.on_query_final;
         let deadline_ms = (reply_log_spec.query_timeout_ms > 0)
             .then(|| session_clock.now_monotonic_ms() + reply_log_spec.query_timeout_ms as u64);
+        // R311y833 — the demo registers its pending entry by hand rather than
+        // through `Session::query`, so it states the same acceptance policy
+        // that method derives: gate on the keyexpr the Query actually carries,
+        // unless `--query-params` carries the `_anyke` opt-out. Deriving it
+        // from the SAME spec the outbound Query is built from is what keeps the
+        // demo an honest interop witness — a demo that accepted replies its own
+        // Query forbade would report interop that a real zenoh client does not
+        // have.
+        let accept = ReplyAcceptance::for_query(
+            spec.keyexpr.as_str(),
+            spec.parameters
+                .as_deref()
+                .map_or(ReplyKeyExpr::MatchingQuery, ReplyKeyExpr::from_parameters),
+        );
         observer_lock.replies.register(
             QUERY_RID,
             // R239 — wz-ap-demo issues an outbound Request(Query)
@@ -759,6 +776,7 @@ fn install_observer_callbacks(
             // exactly one Final from the peer.
             1,
             deadline_ms,
+            accept,
             move |reply| {
                 if !on_reply {
                     return;
@@ -1934,7 +1952,7 @@ pub(crate) async fn run_demo(
     let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
     install_observer_callbacks(
         &observer,
-        query_spec.as_ref().map(|q| q.keyexpr.as_str()),
+        query_spec.as_ref(),
         &remote_log_spec,
         &reply_log_spec,
         session_clock,

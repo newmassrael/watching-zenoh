@@ -17,6 +17,12 @@ use super::*;
 use crate::sample::QosLevel;
 use wz_session_core::qos::CongestionControl;
 use wz_session_core::qos::Priority;
+// R311y833 — the two consumers are `with_accept_replies`
+// (`query-selector-parameters`) and `effective_accept_replies` (`query-get`);
+// with neither composed the name is unused, which is the cfg-gated-import shape
+// Layer C1cf exists to catch.
+#[cfg(any(feature = "query-get", feature = "query-selector-parameters"))]
+use wz_session_core::reply_acceptance::ReplyKeyExpr;
 
 /// R311y326 — the platform default per-query timeout, in milliseconds.
 ///
@@ -405,6 +411,63 @@ impl QueryOptions {
         self
     }
 
+    /// R311y833 — opt out of (or back into) the matching-reply guarantee.
+    ///
+    /// zenoh: "By default, `get` guarantees that it will only receive replies
+    /// whose key expressions intersect with the queried key expression. If
+    /// allowed to through `accept_replies(ReplyKeyExpr::Any)`, queryables may
+    /// also reply on key expressions that don't intersect with the query's."
+    /// (`zenoh/src/api/builders/query.rs:281-287`.)
+    ///
+    /// [`ReplyKeyExpr::Any`] APPENDS the bare `_anyke` selector parameter, and
+    /// that is the entire effect — the same single write zenoh's builder makes
+    /// (`builders/query.rs:288-300`, via `Parameters::set_reply_key_expr_any`).
+    /// It is what the responder reads to stop refusing such replies, and what
+    /// `QueryOptions::effective_accept_replies` (crate-internal) reads back to stop refusing them
+    /// locally; one value, both sides. Idempotent: a parameter list that
+    /// already carries the flag is left alone, mirroring pico's `implicit_anyke
+    /// = _anyke_option && !_anyke_in_parameters`
+    /// (`vendor/zenoh-pico/src/net/primitives.c:575-578`).
+    ///
+    /// [`ReplyKeyExpr::MatchingQuery`] is the default and this setter does NOT
+    /// strip an `_anyke` a caller put in its own parameters — zenoh's builder
+    /// has no such arm either, and removing a parameter the caller wrote would
+    /// be a second, invisible edit of their selector.
+    ///
+    /// Gated on `query-selector-parameters` because the flag IS a selector
+    /// parameter: on a build that cannot put parameters on the wire there is no
+    /// honest way to ask a responder for this, so the knob does not exist
+    /// rather than half-working. The local gate in
+    /// `QueryOptions::effective_accept_replies` stays ungated — it must read whatever
+    /// the `pub` field holds, on every build.
+    #[cfg(feature = "query-selector-parameters")]
+    pub fn with_accept_replies(mut self, accept: ReplyKeyExpr) -> Self {
+        if accept == ReplyKeyExpr::MatchingQuery {
+            return self;
+        }
+        let existing = self.parameters.take().unwrap_or_default();
+        // Non-UTF-8 parameters cannot spell the ASCII flag, so they cannot
+        // already carry it; appending is still correct, and the `;` join keeps
+        // the byte list a valid parameter list either way.
+        let has_flag = core::str::from_utf8(&existing).is_ok_and(|params| {
+            wz_session_core::selector_params::has_param(
+                params,
+                wz_session_core::selector_params::ANYKE_PARAM,
+            )
+        });
+        if has_flag {
+            self.parameters = Some(existing);
+            return self;
+        }
+        let mut next = existing;
+        if !next.is_empty() {
+            next.push(wz_session_core::selector_params::PARAM_LIST_SEPARATOR as u8);
+        }
+        next.extend_from_slice(wz_session_core::selector_params::ANYKE_PARAM.as_bytes());
+        self.parameters = Some(next);
+        self
+    }
+
     /// Stamp the querier's source-info (zid / eid / sn) on the outbound
     /// Query body (ext 0x01 ZBUF). Gated on `query-source-info`
     /// (wire-data helper): the get path threads this into the Query
@@ -561,6 +624,49 @@ impl QueryOptions {
         #[cfg(not(feature = "query-get"))]
         {
             false
+        }
+    }
+
+    /// R311y833 — which replies this get accepts: zenoh's `accept_replies`
+    /// (`zenoh/src/api/builders/query.rs:287`), pico's
+    /// `z_get_options_t.accept_replies`.
+    ///
+    /// THERE IS NO `accept_replies` FIELD, DELIBERATELY. Upstream keeps the
+    /// state in the SELECTOR PARAMETERS and nowhere else: zenoh's builder
+    /// writes `_anyke` into the parameters when asked for
+    /// [`ReplyKeyExpr::Any`] (`builders/query.rs:288-300`) and its receive-side
+    /// gate reads the parameters back (`session.rs:2846`), while pico spells
+    /// the union out — `pq->_anyke = _anyke_in_parameters || _anyke_option`
+    /// (`vendor/zenoh-pico/src/net/primitives.c:598`). Storing a second flag
+    /// beside the parameters would make the two disagree, and it is the
+    /// PARAMETERS that reach the responder — a local flag the wire never
+    /// carries would let a caller believe it had opted out while every remote
+    /// queryable kept refusing.
+    ///
+    /// That also makes this accessor unbypassable for free. The `pub`
+    /// `parameters` field is the state; a caller that writes `_anyke` by hand
+    /// and one that calls [`Self::with_accept_replies`] are the same caller,
+    /// which is exactly pico's rule rather than a wz simplification. Non-UTF-8
+    /// parameters read as [`ReplyKeyExpr::MatchingQuery`]: the flag is an ASCII
+    /// token, so bytes that cannot spell it do not carry it.
+    ///
+    /// GATED ON `query-get`, like its three `effective_*` siblings, and NOT on
+    /// `query-selector-parameters` — that asymmetry is the point. The SETTER
+    /// carries the selector-parameter gate because writing the flag is a wire
+    /// act; this accessor must read whatever the `pub` field holds on any build
+    /// that has a getter at all, or the enforcement point would be bypassable
+    /// exactly as `timeout_ms` was before R311y317. With `query-get` off there
+    /// is no getter and no pending registration, so nothing is left unguarded —
+    /// the method simply has no caller, and Layer C1cf (the
+    /// `--no-default-features` build) is what said so.
+    #[cfg(feature = "query-get")]
+    pub(super) fn effective_accept_replies(&self) -> ReplyKeyExpr {
+        match self.parameters.as_deref() {
+            Some(bytes) => match core::str::from_utf8(bytes) {
+                Ok(params) => ReplyKeyExpr::from_parameters(params),
+                Err(_) => ReplyKeyExpr::MatchingQuery,
+            },
+            None => ReplyKeyExpr::MatchingQuery,
         }
     }
 

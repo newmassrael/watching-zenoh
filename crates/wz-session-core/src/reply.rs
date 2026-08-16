@@ -106,6 +106,7 @@ use alloc::vec::Vec;
 use crate::bounded::BoundedVec;
 use crate::caps;
 use crate::registry_error::RegisterError;
+use crate::reply_acceptance::{ReplyAcceptance, ReplyAcceptanceStored};
 
 // R311dy — `wz_codecs::{reply, response}` live in the `codec-response`
 // codec_group, so the wire-dispatch imports + the local
@@ -799,6 +800,18 @@ struct Pending<C: ReplySink> {
     /// closed `enum` on MCU. The per-pending `(on_reply, on_final)` pair
     /// the registration carried is now the sink's two methods.
     sink: C,
+    /// R311y833 — which replies this pending z_get may deliver to its caller:
+    /// zenoh-pico's `_z_pending_query_t::{_key, _anyke}` pair in one value
+    /// (`vendor/zenoh-pico/include/zenoh-pico/session/query.h`), read at the
+    /// fan by [`ReplyAcceptanceStored::admits`].
+    ///
+    /// It lives on the PENDING ENTRY rather than in the sink decorator stack
+    /// because that is where both upstreams keep it, and because the order
+    /// matters: pico runs this gate at `vendor/zenoh-pico/src/session/query.c:121`
+    /// and only then consolidates at `:130`. A reply the caller may never see
+    /// must not be able to displace one it may, which is exactly what a gate
+    /// installed INSIDE [`ConsolidatingSink`] would allow.
+    accept: ReplyAcceptanceStored,
 }
 
 /// Reply table backing the inbound `Response(Reply|Err)` and
@@ -867,19 +880,35 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// [`RegisterError::TableFull`] (fail-fast, no silent drop). On
     /// the `alloc` backing it never fails, so the convenience
     /// [`register`](Self::register) wrapper `.expect()`s the result.
+    /// R311y833 — `accept` is REQUIRED, and there is deliberately no shorter
+    /// overload that omits it. zenoh states the matching-keyexpr guarantee as
+    /// part of `get()`'s own contract (`zenoh/src/api/session.rs:1181`), so a
+    /// registration that cannot say which keyexpr it was asked under cannot
+    /// keep it. A caller that genuinely accepts anything passes
+    /// [`ReplyAcceptance::Any`], which reads as the decision it is; before
+    /// y833 that was the silent default and every wz `Session::query`
+    /// delivered replies both upstreams drop.
+    ///
+    /// Fails with [`RegisterError::KeyexprTooLong`] when a
+    /// [`ReplyAcceptance::Matching`] keyexpr exceeds
+    /// [`caps::MAX_KEYEXPR_BYTES`] on the no-alloc backing — see
+    /// `ReplyAcceptance::store` (private) for why refusing beats truncating.
     pub fn register_sink(
         &mut self,
         rid: u64,
         expected_finals: u32,
         deadline_ms: Option<u64>,
+        accept: ReplyAcceptance<'_>,
         sink: C,
     ) -> Result<ReplyHandle, RegisterError> {
+        let accept = accept.store()?;
         self.pending
             .push(Pending {
                 rid,
                 remaining_finals: expected_finals,
                 deadline_ms,
                 sink,
+                accept,
             })
             .map_err(|_| RegisterError::TableFull)?;
         Ok(ReplyHandle(rid))
@@ -1195,11 +1224,24 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// `alloc` loopback, which coerce `&InboundReply` to `&dyn ReplyView`)
     /// and the no-heap [`dispatch_borrowed`](Self::dispatch_borrowed)
     /// share one matcher. Returns the count of sinks fired.
+    /// R311y833 — the reply-keyexpr acceptance gate runs HERE, at the shared
+    /// fan, which is what makes it origin-blind: a reply keyed outside the
+    /// query is refused identically whether it arrived off the wire
+    /// ([`Self::dispatch_response`]), through the in-process loopback
+    /// ([`Self::deliver_local_reply`]) or through the no-heap borrowed path
+    /// ([`Self::dispatch_borrowed`]). Upstream places it at the same seam —
+    /// zenoh in its `ResponseBody::Reply` dispatcher
+    /// (`zenoh/src/api/session.rs:2845-2854`), pico in
+    /// `_z_trigger_query_reply_partial`
+    /// (`vendor/zenoh-pico/src/session/query.c:121`) — and pico places it
+    /// AHEAD of consolidation, which is why it is here rather than in a sink
+    /// decorator. A refused reply is not counted as fired: the return value is
+    /// the number of callers that actually saw it.
     fn fire_replies_for(&mut self, reply: &dyn ReplyView) -> usize {
         let rid = reply.rid();
         let mut fired: usize = 0;
         for pending in self.pending.iter_mut() {
-            if pending.rid == rid {
+            if pending.rid == rid && pending.accept.admits(reply) {
                 pending.sink.on_reply(reply);
                 fired = fired.saturating_add(1);
             }
@@ -1363,11 +1405,20 @@ impl ReplyRegistry<ConsolidatingSink<BoxedReplySink>> {
     /// entry is auto-unregistered. See
     /// [`register_sink`](Self::register_sink) for the `expected_finals`
     /// semantics.
+    ///
+    /// R311y833 — `accept` threads through unchanged to
+    /// [`register_sink`](Self::register_sink); see it for why the parameter is
+    /// required rather than defaulted. The `.expect()` below now also covers
+    /// [`RegisterError::KeyexprTooLong`], which the `alloc` backing cannot
+    /// produce: `BoundedString::push_str` is infallible there (the bound is
+    /// advisory), so on this instantiation the only reachable error was, and
+    /// remains, none.
     pub fn register(
         &mut self,
         rid: u64,
         expected_finals: u32,
         deadline_ms: Option<u64>,
+        accept: ReplyAcceptance<'_>,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> ReplyHandle {
@@ -1393,6 +1444,7 @@ impl ReplyRegistry<ConsolidatingSink<BoxedReplySink>> {
             rid,
             expected_finals,
             deadline_ms,
+            accept,
             ConsolidatingSink::passthrough(BoxedReplySink::new(on_reply, on_final)),
         )
         .expect("register on the alloc backing never exceeds declared capacity")
@@ -1609,6 +1661,7 @@ mod tests {
             42,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |reply| {
                 captured_cb
                     .lock()
@@ -1646,6 +1699,7 @@ mod tests {
             42,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |_reply| {
                 fired_cb.fetch_add(1, Ordering::SeqCst);
             },
@@ -1679,8 +1733,22 @@ mod tests {
     #[test]
     fn register_assigns_handle_and_grows_table() {
         let mut reg = ReplyRegistry::new();
-        let h1 = reg.register(7, 1, None, |_| {}, |_| {});
-        let h2 = reg.register(8, 1, None, |_| {}, |_| {});
+        let h1 = reg.register(
+            7,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            |_| {},
+            |_| {},
+        );
+        let h2 = reg.register(
+            8,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            |_| {},
+            |_| {},
+        );
         assert_eq!(h1.rid(), 7);
         assert_eq!(h2.rid(), 8);
         assert_eq!(reg.len(), 2);
@@ -1689,8 +1757,22 @@ mod tests {
     #[test]
     fn unregister_is_idempotent_and_removes_only_matching_rid() {
         let mut reg = ReplyRegistry::new();
-        reg.register(7, 1, None, |_| {}, |_| {});
-        reg.register(8, 1, None, |_| {}, |_| {});
+        reg.register(
+            7,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            |_| {},
+            |_| {},
+        );
+        reg.register(
+            8,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            |_| {},
+            |_| {},
+        );
         assert!(reg.unregister(7));
         assert!(
             !reg.unregister(7),
@@ -1710,6 +1792,7 @@ mod tests {
             42,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |reply| {
                 captured_cb
                     .lock()
@@ -1765,6 +1848,7 @@ mod tests {
             42,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |reply| {
                 captured_cb
                     .lock()
@@ -1812,6 +1896,7 @@ mod tests {
             42,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |reply| {
                 captured_cb
                     .lock()
@@ -1881,6 +1966,7 @@ mod tests {
             42,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |reply| {
                 captured_cb
                     .lock()
@@ -1941,6 +2027,7 @@ mod tests {
             42,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |reply| {
                 captured_cb
                     .lock()
@@ -1984,6 +2071,7 @@ mod tests {
             42,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |r| cb.lock().unwrap().push(InboundReply::from_view(r)),
             |_| {},
         );
@@ -2059,6 +2147,7 @@ mod tests {
             42,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |r| cb.lock().unwrap().push(InboundReply::from_view(r)),
             |_| {},
         );
@@ -2133,6 +2222,7 @@ mod tests {
             7,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |r| cb.lock().unwrap().push(InboundReply::from_view(r)),
             |_| {},
         );
@@ -2214,6 +2304,7 @@ mod tests {
             9,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |reply| {
                 count_cb.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(reply.kind(), ReplyKind::Del, "expected Del kind");
@@ -2235,6 +2326,7 @@ mod tests {
             5,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |reply| *captured_cb.lock().unwrap() = Some(InboundReply::from_view(reply)),
             |_| {},
         );
@@ -2267,6 +2359,7 @@ mod tests {
             7,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |_| {
                 count_cb.fetch_add(1, Ordering::SeqCst);
             },
@@ -2292,6 +2385,7 @@ mod tests {
             42,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             move |rid| {
                 assert_eq!(rid, 42, "on_final must receive the registered rid");
@@ -2320,6 +2414,7 @@ mod tests {
             42,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             |_| panic!("on_final must not fire on unknown rid"),
         );
@@ -2341,6 +2436,7 @@ mod tests {
             1,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |reply| *captured_cb.lock().unwrap() = Some(reply.keyexpr().to_string()),
             |_| {},
         );
@@ -2365,6 +2461,7 @@ mod tests {
             1,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |_| {
                 fired_cb.fetch_add(1, Ordering::SeqCst);
             },
@@ -2387,6 +2484,7 @@ mod tests {
             7,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |_| {
                 count_cb.fetch_add(1, Ordering::SeqCst);
             },
@@ -2416,9 +2514,23 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let order: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let order_a = order.clone();
-        reg.register(7, 1, None, move |_| order_a.lock().unwrap().push(1), |_| {});
+        reg.register(
+            7,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            move |_| order_a.lock().unwrap().push(1),
+            |_| {},
+        );
         let order_b = order.clone();
-        reg.register(7, 1, None, move |_| order_b.lock().unwrap().push(2), |_| {});
+        reg.register(
+            7,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            move |_| order_b.lock().unwrap().push(2),
+            |_| {},
+        );
 
         reg.dispatch_response(
             &response_reply_put(7, 0, Some("home/temp"), b"21.0"),
@@ -2446,6 +2558,7 @@ mod tests {
             42,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |_| {
                 r.fetch_add(1, Ordering::SeqCst);
             },
@@ -2488,6 +2601,7 @@ mod tests {
             7,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |_| {
                 fired_cb.fetch_add(1, Ordering::SeqCst);
             },
@@ -2523,6 +2637,7 @@ mod tests {
             7,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |reply| {
                 captured_cb
                     .lock()
@@ -2560,6 +2675,7 @@ mod tests {
             7,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |_| {
                 count_cb.fetch_add(1, Ordering::SeqCst);
             },
@@ -2579,6 +2695,226 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 0);
     }
 
+    // ── R311y833 reply-keyexpr acceptance ──────────────────────────────
+    //
+    // The gate lives on the pending entry and runs in `fire_replies_for`,
+    // the ONE matcher all three origins funnel through. These tests drive
+    // each origin separately, because "wired at the shared seam" is a claim
+    // about all three and a green wire test says nothing about the loopback.
+
+    /// The keyexprs here are LITERAL on purpose. This gate judges a reply by the
+    /// build's own matching rules, and a subset without `keyexpr-wildcard-double`
+    /// has no `**` arm at all — a pattern-shaped fixture would make these tests
+    /// assert the wildcard atoms rather than the acceptance policy, and Layer
+    /// C1f (which runs this module with `--no-default-features`) measured
+    /// exactly that. The pattern case is pinned where it belongs, in
+    /// [`crate::reply_acceptance`]'s own gated tests.
+    #[test]
+    fn a_wire_reply_keyed_outside_the_query_never_reaches_the_sink() {
+        let mut reg = ReplyRegistry::new();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_cb = seen.clone();
+        reg.register(
+            7,
+            1,
+            None,
+            ReplyAcceptance::Matching("demo/inside"),
+            move |reply| seen_cb.lock().unwrap().push(reply.keyexpr().to_string()),
+            |_| {},
+        );
+
+        // CONTROL first, so a test that stopped delivering everything cannot
+        // pass: the reply on the queried key must arrive.
+        reg.dispatch_response(
+            &response_reply_put(7, 0, Some("demo/inside"), b"in"),
+            &HashMap::new(),
+        );
+        reg.dispatch_response(
+            &response_reply_put(7, 0, Some("other/outside"), b"out"),
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["demo/inside".to_string()],
+            "zenoh drops the non-intersecting reply at session.rs:2847; so must this"
+        );
+        assert_eq!(
+            reg.len(),
+            1,
+            "a refused reply is not a Final: the entry stays pending"
+        );
+    }
+
+    #[test]
+    fn the_loopback_origin_is_gated_by_the_same_policy() {
+        let mut reg = ReplyRegistry::new();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_cb = seen.clone();
+        reg.register(
+            7,
+            1,
+            None,
+            ReplyAcceptance::Matching("demo/a"),
+            move |reply| seen_cb.lock().unwrap().push(reply.keyexpr().to_string()),
+            |_| {},
+        );
+
+        for keyexpr in ["demo/a", "other/outside"] {
+            reg.deliver_local_reply(&InboundReply {
+                rid: 7,
+                keyexpr_literal: keyexpr.to_string(),
+                body: InboundReplyBody::Put {
+                    payload: b"x".to_vec(),
+                    attachment: None,
+                    encoding: None,
+                    source_info: None,
+                    timestamp: None,
+                },
+            });
+        }
+
+        assert_eq!(*seen.lock().unwrap(), vec!["demo/a".to_string()]);
+    }
+
+    #[test]
+    fn a_refused_reply_is_not_counted_as_fired_on_the_borrowed_origin() {
+        // The no-heap third origin, and the count is the discriminator: a
+        // `dispatch_borrowed` that returned 1 for a refused reply would report
+        // a delivery that never happened to whatever drives the MCU loop.
+        let mut reg = ReplyRegistry::new();
+        reg.register(
+            7,
+            1,
+            None,
+            ReplyAcceptance::Matching("demo/a"),
+            |_| {},
+            |_| {},
+        );
+
+        let admitted = InboundReply {
+            rid: 7,
+            keyexpr_literal: "demo/a".to_string(),
+            body: InboundReplyBody::Del {
+                attachment: None,
+                source_info: None,
+                timestamp: None,
+            },
+        };
+        let refused = InboundReply {
+            rid: 7,
+            keyexpr_literal: "other/outside".to_string(),
+            body: InboundReplyBody::Del {
+                attachment: None,
+                source_info: None,
+                timestamp: None,
+            },
+        };
+        assert_eq!(reg.dispatch_borrowed(&admitted), 1);
+        assert_eq!(reg.dispatch_borrowed(&refused), 0);
+    }
+
+    #[test]
+    fn an_err_reply_is_admitted_whatever_it_is_keyed_on() {
+        // zenoh's `ResponseBody::Err` arm calls the callback directly and never
+        // reaches the intersection test (`zenoh/src/api/session.rs:2790-2825`),
+        // and an Err result carries no keyexpr of its own. Gating it would
+        // swallow the failure a caller is blocked on.
+        let mut reg = ReplyRegistry::new();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_cb = seen.clone();
+        reg.register(
+            7,
+            1,
+            None,
+            ReplyAcceptance::Matching("demo/a"),
+            move |reply| seen_cb.lock().unwrap().push(reply.keyexpr().to_string()),
+            |_| {},
+        );
+
+        reg.dispatch_response(
+            &response_err(7, "other/outside", 4, None, b"boom"),
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["other/outside".to_string()],
+            "an Err reply is never gated on either upstream"
+        );
+    }
+
+    #[test]
+    fn accept_any_delivers_what_matching_would_refuse() {
+        // The policy half: the SAME reply, the SAME registration shape, the
+        // only difference being what the caller asked for. Without this the
+        // suite could not tell an implemented gate from a broken dispatcher.
+        let mut reg = ReplyRegistry::new();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_cb = seen.clone();
+        reg.register(
+            7,
+            1,
+            None,
+            ReplyAcceptance::Any,
+            move |reply| seen_cb.lock().unwrap().push(reply.keyexpr().to_string()),
+            |_| {},
+        );
+
+        reg.dispatch_response(
+            &response_reply_put(7, 0, Some("other/outside"), b"out"),
+            &HashMap::new(),
+        );
+
+        assert_eq!(*seen.lock().unwrap(), vec!["other/outside".to_string()]);
+    }
+
+    #[test]
+    fn a_refused_reply_is_not_flushed_by_a_consolidating_final() {
+        // The gate sits AHEAD of `ConsolidatingSink`, where pico puts it
+        // (`vendor/zenoh-pico/src/session/query.c:121`, ahead of its
+        // consolidation at `:130`). The observable consequence is this: a
+        // Latest cache drains into the caller when the final arrives, so a
+        // refused reply that had been allowed to ENTER that cache would be
+        // delivered later by the flush — after the point any downstream filter
+        // runs. Nothing must arrive.
+        let mut reg = ReplyRegistry::new();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_cb = seen.clone();
+        let finals = Arc::new(AtomicUsize::new(0));
+        let finals_cb = finals.clone();
+        reg.register_sink(
+            7,
+            1,
+            None,
+            ReplyAcceptance::Matching("demo/a"),
+            ConsolidatingSink::new(
+                crate::query_mode::ConsolidationMode::Latest,
+                BoxedReplySink::new(
+                    move |reply: &dyn ReplyView| {
+                        seen_cb.lock().unwrap().push(reply.keyexpr().to_string())
+                    },
+                    move |_| {
+                        finals_cb.fetch_add(1, Ordering::SeqCst);
+                    },
+                ),
+            ),
+        )
+        .expect("the alloc backing never rejects");
+
+        reg.dispatch_response(
+            &response_reply_put(7, 0, Some("other/outside"), b"out"),
+            &HashMap::new(),
+        );
+        reg.deliver_local_final(7);
+
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "a refused reply must never be cached, so the final has nothing to flush"
+        );
+        assert_eq!(finals.load(Ordering::SeqCst), 1, "the final still fires");
+    }
+
     #[test]
     fn deliver_local_final_decrements_and_fires_when_expected_finals_was_one() {
         // expected_finals = 1 means one Final closes the chain. After
@@ -2591,6 +2927,7 @@ mod tests {
             1,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             move |rid| {
                 assert_eq!(rid, 1);
@@ -2619,6 +2956,7 @@ mod tests {
             5,
             2,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             move |_| {
                 final_count_cb.fetch_add(1, Ordering::SeqCst);
@@ -2649,6 +2987,7 @@ mod tests {
             7,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             |_| panic!("on_final must not fire on unknown rid"),
         );
@@ -2673,6 +3012,7 @@ mod tests {
             9,
             2,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             move |_| {
                 final_count_cb.fetch_add(1, Ordering::SeqCst);
@@ -2824,13 +3164,27 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         assert_eq!(reg.next_deadline_ms(), None, "an empty table arms no wake");
 
-        reg.register(1, 1, Some(3000), |_| {}, |_| {});
+        reg.register(
+            1,
+            1,
+            Some(3000),
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            |_| {},
+            |_| {},
+        );
         assert_eq!(reg.next_deadline_ms(), Some(3000));
 
         // A LATER registration with an EARLIER deadline must win — the table
         // is registration-ordered, so this is the case a "first entry" read
         // would get wrong.
-        reg.register(2, 1, Some(1500), |_| {}, |_| {});
+        reg.register(
+            2,
+            1,
+            Some(1500),
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            |_| {},
+            |_| {},
+        );
         assert_eq!(
             reg.next_deadline_ms(),
             Some(1500),
@@ -2840,7 +3194,14 @@ mod tests {
         // `deadline_ms == None` is the never-expire path (R311y326: reached on a
         // query-timeout-off build / register-level 0, not a default query): it
         // imposes no wake, exactly as `sweep_timed_out` never sweeps it.
-        reg.register(3, 1, None, |_| {}, |_| {});
+        reg.register(
+            3,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            |_| {},
+            |_| {},
+        );
         assert_eq!(
             reg.next_deadline_ms(),
             Some(1500),
@@ -2854,9 +3215,30 @@ mod tests {
     #[test]
     fn next_deadline_ms_re_arms_after_a_sweep() {
         let mut reg = ReplyRegistry::new();
-        reg.register(1, 1, Some(1000), |_| {}, |_| {});
-        reg.register(2, 1, Some(2000), |_| {}, |_| {});
-        reg.register(3, 1, None, |_| {}, |_| {});
+        reg.register(
+            1,
+            1,
+            Some(1000),
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            |_| {},
+            |_| {},
+        );
+        reg.register(
+            2,
+            1,
+            Some(2000),
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            |_| {},
+            |_| {},
+        );
+        reg.register(
+            3,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            |_| {},
+            |_| {},
+        );
         assert_eq!(reg.next_deadline_ms(), Some(1000));
 
         assert_eq!(reg.sweep_timed_out(1000), 1, "the boundary entry expires");
@@ -2887,6 +3269,7 @@ mod tests {
             7,
             1,
             Some(1000),
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             move |rid| {
                 assert_eq!(rid, 7, "on_final must carry the registered rid");
@@ -2946,6 +3329,7 @@ mod tests {
             7,
             1,
             Some(1000),
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |reply| {
                 order_reply.lock().unwrap().push("reply");
                 seen_cb
@@ -2981,6 +3365,7 @@ mod tests {
             9,
             1,
             Some(2000),
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             move |_| {
                 fired_cb.fetch_add(1, Ordering::SeqCst);
@@ -3009,6 +3394,7 @@ mod tests {
             13,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             move |_| {
                 fired_cb.fetch_add(1, Ordering::SeqCst);
@@ -3037,6 +3423,7 @@ mod tests {
             1,
             1,
             Some(1000),
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             move |_| {
                 fa.fetch_add(1, Ordering::SeqCst);
@@ -3046,6 +3433,7 @@ mod tests {
             2,
             1,
             Some(2000),
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             move |_| {
                 fb.fetch_add(1, Ordering::SeqCst);
@@ -3055,6 +3443,7 @@ mod tests {
             3,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             move |_| {
                 fc.fetch_add(1, Ordering::SeqCst);
@@ -3090,6 +3479,7 @@ mod tests {
             5,
             1,
             Some(1000),
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             move |_| {
                 fired_cb.fetch_add(1, Ordering::SeqCst);
@@ -3114,6 +3504,7 @@ mod tests {
             7,
             1,
             Some(1000),
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             move |_| {
                 fired_cb.fetch_add(1, Ordering::SeqCst);
@@ -3152,6 +3543,7 @@ mod tests {
             7,
             1,
             Some(1000),
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             move |rid| order_a.lock().unwrap().push(rid),
         );
@@ -3159,6 +3551,7 @@ mod tests {
             7,
             1,
             Some(1000),
+            crate::reply_acceptance::ReplyAcceptance::Any,
             |_| {},
             move |rid| order_b.lock().unwrap().push(rid),
         );
@@ -3188,6 +3581,7 @@ mod tests {
             42,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |v: &dyn ReplyView| {
                 assert_eq!(v.rid(), 42);
                 assert_eq!(v.payload(), b"v");
@@ -3362,6 +3756,7 @@ mod decode_isolation_tests {
             42,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |_| {
                 f.fetch_add(1, Ordering::SeqCst);
             },
@@ -3399,6 +3794,7 @@ mod decode_isolation_tests {
             9,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |_| {
                 f.fetch_add(1, Ordering::SeqCst);
             },
@@ -3493,6 +3889,7 @@ mod reply_timestamp_decode_isolation_tests {
             7,
             1,
             None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
             move |reply| seen_cb.lock().unwrap().push(reply.timestamp().is_some()),
             |_| {},
         );

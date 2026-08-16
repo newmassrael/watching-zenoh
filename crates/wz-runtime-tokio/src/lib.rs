@@ -161,6 +161,13 @@ mod test_fixtures;
 // impossible without reverting R311o's signature-stability ungating.
 pub use wz_session_core::keyexpr_canon;
 
+/// R311y833 — the requester-side reply-keyexpr contract, re-exported on the
+/// `keyexpr_canon` precedent below. `ReplyRegistry::register` REQUIRES a
+/// [`reply_acceptance::ReplyAcceptance`], and AP consumers reach that method
+/// without depending on `wz-session-core` (wz-ap-demo is one), so a required
+/// parameter whose type they cannot name would not be a reachable API.
+pub use wz_session_core::reply_acceptance;
+
 // R311y294 — the keyexpr MATCHING SSOT, re-exported on the `keyexpr_canon`
 // precedent above (unconditional: the module is alloc-gated in wz-session-core
 // and this crate is always-alloc). An AP consumer that must answer "does key A

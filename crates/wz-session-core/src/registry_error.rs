@@ -30,9 +30,14 @@ pub enum RegisterError {
     /// [`crate::caps`] capacity.
     TableFull,
     /// A stored keyexpr exceeds [`crate::caps::MAX_KEYEXPR_BYTES`].
-    /// Only produced by registries that store a keyexpr pattern
-    /// (subscriber / queryable / liveliness-subscriber); never by the
-    /// reply or declaration-observer registries.
+    /// Produced by registries that store a keyexpr pattern
+    /// (subscriber / queryable / liveliness-subscriber) and, since
+    /// R311y833, by the REPLY registry too: a pending z_get stores the
+    /// keyexpr it was asked under so it can keep zenoh's matching-reply
+    /// guarantee ([`crate::reply_acceptance`]). This doc previously said
+    /// "never by the reply ... registries"; that ceased to be true when the
+    /// guarantee landed. The declaration-observer registry still never
+    /// produces it.
     KeyexprTooLong,
 }
 

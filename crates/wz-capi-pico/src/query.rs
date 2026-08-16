@@ -67,7 +67,6 @@ use std::cell::{Cell, UnsafeCell};
 use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
-use wz_runtime_tokio::keyexpr_match;
 use wz_runtime_tokio::query::{QueryReply, QueryResponder};
 use wz_runtime_tokio::query_sink::{QueryView, ReplyMeta, ReplyOut};
 use wz_runtime_tokio::session::TokioSession;
@@ -206,14 +205,22 @@ pub(crate) fn parameters_has_anyke(parameters: &[u8]) -> bool {
 /// under is routinely a PATTERN (a queryable declared on `a/**` sees the
 /// querier's `a/**`), while its replies carry CONCRETE keys — so equality would
 /// reject the ordinary wildcard case, not an edge case. Routed through the one
-/// matching SSOT ([`wz_runtime_tokio::keyexpr_match`]) rather than re-derived.
+/// matching SSOT ([`wz_runtime_tokio::keyexpr_match`](wz_runtime_tokio::keyexpr_match))
+/// rather than re-derived.
+///
+/// R311y833 — the intersection half now DELEGATES to
+/// [`wz_runtime_tokio::reply_acceptance::reply_keyexpr_intersects`] rather than
+/// re-deriving it. The rule was correct here and absent from the native
+/// runtime, which is the asymmetry y833 removed: one codebase had two getters
+/// with opposite default behaviour because this function was `pub(crate)` and
+/// structurally unreachable from `Session::query`. It stays as the RESPONDER
+/// gate pico spells at `vendor/zenoh-pico/src/net/primitives.c:438` — a
+/// different seam from the requester gate, kept because pico enforces both.
 pub(crate) fn reply_keyexpr_is_covered(query_keyexpr: &str, reply: &str, anyke: bool) -> bool {
     if anyke {
         return true;
     }
-    let query_chunks: Vec<&str> = query_keyexpr.split('/').collect();
-    let reply_chunks: Vec<&str> = reply.split('/').collect();
-    keyexpr_match::keyexpr_intersect_patterns(&query_chunks, &reply_chunks)
+    wz_runtime_tokio::reply_acceptance::reply_keyexpr_intersects(query_keyexpr, reply)
 }
 
 /// R311y562 — the value metadata a staged reply carries, in the wz hint types
