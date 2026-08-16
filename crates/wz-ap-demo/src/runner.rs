@@ -495,17 +495,25 @@ pub(crate) async fn scout_for_peer_locator(zid: Vec<u8>, budget_ms: u64) -> io::
     // discovery beacon must reach every interface a peer could answer on, and
     // zenoh scopes `UDP_MULTICAST_IFACE` to a group locator rather than to the
     // scouting default too. `--multicast-locator` narrows the DATA-plane group.
-    let mut driver = UdpDriver::bind_multicast_v4(SCOUT_GROUP, SCOUT_PORT, None)
-        .await
-        .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "wz-ap-demo: --scout could not join the scouting group \
+    // The SCOUTING group stays unconfigured on purpose: a discovery beacon
+    // should reach every interface a peer might answer on, and zenoh likewise
+    // scopes its UDP multicast config keys to a group locator, not to the scout
+    // default (see the `--multicast-locator` block below).
+    let mut driver = UdpDriver::bind_multicast_v4(
+        SCOUT_GROUP,
+        SCOUT_PORT,
+        wz::runtime_tokio::McastSocketConfig::default(),
+    )
+    .await
+    .map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "wz-ap-demo: --scout could not join the scouting group \
                      {SCOUT_GROUP}:{SCOUT_PORT}: {e}"
-                ),
-            )
-        })?;
+            ),
+        )
+    })?;
     // The Scout announces the identity this node will open its session with, so
     // a responder logging the scouter sees the same zid the InitSyn then
     // carries. `--zid` therefore reaches here, not only the session params.
@@ -4288,15 +4296,21 @@ async fn run_router_hat_until(
     // answer on, and zenoh likewise scopes `UDP_MULTICAST_IFACE` to a group
     // locator, not to the scout default.
     #[cfg(feature = "router-multicast-faces")]
-    let (mcast_group, mcast_port, mcast_iface) = {
+    // R311y832 — the tuple's third slot became the WHOLE group config, not just
+    // `iface`: `#ttl=` and `#join=` ride the same locator and the same
+    // `parse_locator` call, so honouring them here is what makes them reachable
+    // from an operator's `--multicast-locator` rather than only from a struct
+    // literal in a test.
+    let (mcast_group, mcast_port, mcast_opts) = {
         use std::net::{Ipv4Addr, SocketAddr};
         use wz::runtime_tokio::locator::{parse_locator, Proto};
+        use wz::runtime_tokio::McastGroupOptions;
         // The demo's default data-plane router multicast group. Distinct port from
         // scouting (7446/7447) + the loopback e2e tests (7449/7450/7451).
         const MCAST_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 225);
         const MCAST_PORT: u16 = 7452;
         match multicast_locator {
-            None => (MCAST_GROUP, MCAST_PORT, None),
+            None => (MCAST_GROUP, MCAST_PORT, McastGroupOptions::default()),
             // A malformed value is a HARD ERROR, never a warn-and-default: a deploy
             // that meant to pin its group to one interface and silently got the
             // default multicast route would egress somewhere it did not ask for.
@@ -4313,7 +4327,15 @@ async fn run_router_hat_until(
                     ));
                 }
                 Ok(p) => match p.addr {
-                    SocketAddr::V4(v4) => (*v4.ip(), v4.port(), p.iface),
+                    SocketAddr::V4(v4) => (
+                        *v4.ip(),
+                        v4.port(),
+                        McastGroupOptions {
+                            iface: p.iface,
+                            ttl: p.mcast_ttl,
+                            joins: p.mcast_join,
+                        },
+                    ),
                     SocketAddr::V6(_) => {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
@@ -4340,12 +4362,12 @@ async fn run_router_hat_until(
             mcast_port,
             params.zid.clone(),
             multicast_qos,
-            mcast_iface.clone(),
+            mcast_opts.clone(),
         );
         forwarder.attach_mcast_group(mcast_tx);
         log::info!(
             "wz-ap-demo router-hat: multicast egress group {mcast_group}:{mcast_port} \
-             attached (router-multicast-faces, iface {mcast_iface:?}); routed Push \
+             attached (router-multicast-faces, {mcast_opts:?}); routed Push \
              forwards to the group"
         );
     }
@@ -4377,11 +4399,11 @@ async fn run_router_hat_until(
                 mcast_port,
                 params.zid.clone(),
                 multicast_qos,
-                mcast_iface.clone(),
+                mcast_opts.clone(),
             );
         log::info!(
             "wz-ap-demo router-hat: multicast ingress group {mcast_group}:{mcast_port} \
-             joined (router-multicast-faces, iface {mcast_iface:?}); received Push routes \
+             joined (router-multicast-faces, {mcast_opts:?}); received Push routes \
              to unicast subscribers"
         );
         (Some(rx), Some(members_rx), Some(group_subs_rx))

@@ -142,7 +142,7 @@ pub fn run_scout(
     use wz_runtime_tokio::scouting_glue::{
         drive_scouting_until_resolved, new_scouting_engine, ScoutParams, ScoutingActions,
     };
-    use wz_runtime_tokio::UdpDriver;
+    use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
 
     let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -155,7 +155,9 @@ pub fn run_scout(
     let hellos = runtime.block_on(async move {
         // `None`: the scouting group is deliberately NOT interface-narrowed — a
         // discovery beacon must reach every interface a peer could answer on.
-        let Ok(mut driver) = UdpDriver::bind_multicast_v4(group, port, None).await else {
+        let Ok(mut driver) =
+            UdpDriver::bind_multicast_v4(group, port, McastSocketConfig::default()).await
+        else {
             return Vec::new();
         };
         let actions = ScoutingActions::new(ScoutParams {
