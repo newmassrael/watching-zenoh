@@ -3931,8 +3931,14 @@ layer_c1aq_cargo_test_ext_pubsub_advanced() {
 # composed, not green-per-atom in isolation). pubsub-allow-loop supplies the loopback
 # dispatch; inbound source_info decode rides pubsub-source-info (pulled by the
 # features). The trailing `cargo build -p wz` validates the facade forward target.
+# R311y826 — 3 -> 4. The added test is the residual's own MEASUREMENT, kept
+# after the fix and retargeted: the option-free `declare()` form declares no
+# `@adv/sub` detection token, asserted beside a publisher CONTROL that proves
+# the recorder does see liveliness tokens. It runs HERE (recovery-OFF) because
+# it uses no options; the detection tests themselves are recovery-gated and are
+# counted by C1at.
 layer_c1ar_cargo_test_ext_pubsub_advanced_sub() {
-    _runci_guarded_test "C1ar advanced_subscriber" 3 \
+    _runci_guarded_test "C1ar advanced_subscriber" 4 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-subscriber,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \
@@ -4018,8 +4024,14 @@ layer_c1be_cargo_test_query_value() {
 # flush-miss state-machine units. This is the subscriber-composed e2e the C1as
 # header deferred "they need the reorder buffer"; it lands WITH the active flip.
 # Then clippy-gates the recovery surface + validates the facade forward target.
+# R311y826 — 15 -> 21. The six added tests are `subscriber_detection`: BOTH
+# references let an advanced subscriber declare a liveliness token on
+# `<ke>/@adv/sub/<zid>/<eid>/[meta|_]` (zenoh-ext advanced_subscriber.rs:1151,
+# zenoh-pico advanced_subscriber.c:1651) and wz declared none. They land in
+# THIS lane rather than C1ar because `AdvancedSubscriberOptions` — and so the
+# detection knob — is behind the recovery gate.
 layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
-    _runci_guarded_test "C1at advanced_subscriber" 15 \
+    _runci_guarded_test "C1at advanced_subscriber" 21 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \

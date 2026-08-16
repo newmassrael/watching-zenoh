@@ -178,6 +178,20 @@ pub enum AdvancedSubscribeError {
     /// `#[non_exhaustive]` enum.
     #[cfg(feature = "ext-pubsub-advanced-history")]
     Liveliness(LivelinessSubscriberAliasError),
+    /// R311y826 — the `@adv/sub` detection token declaration was rejected
+    /// (only reachable with
+    /// [`AdvancedSubscriberOptions::subscriber_detection`]). A REFUSAL, not a
+    /// degradation: the caller asked to be detectable, and a subscriber that
+    /// silently is not is the failure mode nobody can see from the outside.
+    DetectionToken(crate::session::LivelinessAliasError),
+    /// R311y826 — [`SubscriberDetection::local_zid`] was empty or longer than
+    /// 16 bytes, so no token key expression could name this node. Refused for
+    /// the same reason `AdvancedPublisher::declare` refuses it: a hex
+    /// rendering of a non-zid is not something either reference parses back.
+    DetectionZid {
+        /// The rejected length.
+        len: usize,
+    },
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -191,6 +205,13 @@ impl From<SubscribeError> for AdvancedSubscribeError {
 impl From<LivelinessSubscriberAliasError> for AdvancedSubscribeError {
     fn from(e: LivelinessSubscriberAliasError) -> Self {
         AdvancedSubscribeError::Liveliness(e)
+    }
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl From<crate::session::LivelinessAliasError> for AdvancedSubscribeError {
+    fn from(e: crate::session::LivelinessAliasError) -> Self {
+        AdvancedSubscribeError::DetectionToken(e)
     }
 }
 
@@ -257,8 +278,11 @@ impl RecoveryConfig {
 /// independent `Option`s — a `history`-only subscriber (no retransmission) is
 /// representable (R311y91, review M1: the prior `RecoveryConfig`-carries-everything
 /// shape made history-without-retransmission unrepresentable).
+///
+/// R311y826 — no longer `Copy`: [`Self::subscriber_detection_metadata`] is a
+/// caller-supplied key expression and so owns a `String`. `Clone` stays.
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct AdvancedSubscriberOptions {
     /// Retransmission (gap recovery). `None` (default) = no recovery: a forward gap
@@ -298,6 +322,64 @@ pub struct AdvancedSubscriberOptions {
     /// synthetic `Final` so [`State::finish_recovery`] / [`State::finish_history`]
     /// run (R311y89, review C3). Converted by [`recovery_query_timeout_ms`].
     pub query_timeout: Duration,
+    /// Make this subscriber DETECTABLE: declare a liveliness token on
+    /// `<key_expr>/@adv/sub/<zid>/<eid>/[meta|_]` so a third party can see the
+    /// subscriber exists (zenoh `.subscriber_detection()`,
+    /// advanced_subscriber.rs:292-309; zenoh-pico's `_has_token` / `_token`,
+    /// advanced_subscriber.h:118-119).
+    ///
+    /// `None` (default) declares no token, matching BOTH references (zenoh's
+    /// builder starts at `liveliness: false`, advanced_subscriber.rs:164) —
+    /// the token is extra wire traffic that only an observer wants. This
+    /// differs from wz's `AdvancedPublisherOptions::publisher_detection`,
+    /// which defaults `true` because wz's OWN recovery plane consumes the
+    /// `@adv/pub` token; nothing in wz consumes `@adv/sub`, and neither
+    /// reference consumes it either — `KE_SUB` is `pub use`d for third parties
+    /// and read nowhere inside zenoh or pico.
+    pub subscriber_detection: Option<SubscriberDetection>,
+}
+
+/// Detection configuration ([`AdvancedSubscriberOptions::with_subscriber_detection`]).
+///
+/// The local zid lives HERE, not on the options struct, because the token's
+/// key expression cannot be built without it: making detection an `Option` of
+/// a type that owns the zid means "detectable but nobody knows as whom" is not
+/// a representable state. wz's `Session` exposes no zid getter (`set_own_zid`
+/// has no counterpart), so the caller supplies it — the same shape
+/// `AdvancedPublisher::declare` already uses for its `local_zid` argument.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+#[derive(Clone, Debug)]
+pub struct SubscriberDetection {
+    /// This node's zid, 1..=16 bytes. Rendered into the token key expression
+    /// as zenoh's lowercase little-endian hex, the same rendering the
+    /// publisher's `@adv/pub` KE uses.
+    pub local_zid: Vec<u8>,
+    /// A key expression appended to the detection token's key expression to
+    /// convey application metadata (zenoh
+    /// `.subscriber_detection_metadata()`, advanced_subscriber.rs:299-309).
+    ///
+    /// `None` puts the concrete `_` chunk there instead — NOT an empty chunk.
+    /// Both references do this deliberately: zenoh's own comment calls it a
+    /// workaround for a routing matching bug, and a wildcard-tailed observer
+    /// query stops matching without it.
+    pub metadata: Option<String>,
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl SubscriberDetection {
+    /// Detectable as `local_zid`, with no metadata chunk.
+    pub fn new(local_zid: Vec<u8>) -> Self {
+        Self {
+            local_zid,
+            metadata: None,
+        }
+    }
+
+    /// Append a metadata key expression to the token's key expression.
+    pub fn with_metadata(mut self, meta: impl Into<String>) -> Self {
+        self.metadata = Some(meta.into());
+        self
+    }
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -310,6 +392,7 @@ impl Default for AdvancedSubscriberOptions {
             allowed_origin: Locality::Any,
             get_locality: Locality::Any,
             query_timeout: Duration::from_secs(10),
+            subscriber_detection: None,
         }
     }
 }
@@ -320,6 +403,15 @@ impl AdvancedSubscriberOptions {
     /// 10s GET timeout.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Allow this subscriber to be detected through liveliness (zenoh
+    /// `.subscriber_detection()` + `.subscriber_detection_metadata()`, which
+    /// [`SubscriberDetection`] carries as one value): declares a token on
+    /// `<key_expr>/@adv/sub/<zid>/<eid>/[meta|_]`.
+    pub fn with_subscriber_detection(mut self, detection: SubscriberDetection) -> Self {
+        self.subscriber_detection = Some(detection);
+        self
     }
 
     /// Enable retransmission (gap recovery) with the given [`RecoveryConfig`]
@@ -1514,7 +1606,23 @@ pub struct AdvancedSubscriber<R: SessionRuntime = crate::runtime_impl::TokioRunt
     /// `HistoryConfig::detect_late_publishers` was set. See [`LivelinessSubGuard`].
     #[cfg(feature = "ext-pubsub-advanced-history")]
     _liveliness_sub: Option<LivelinessSubGuard>,
+    /// R311y826 — the `@adv/sub` DETECTION liveliness token (RAII
+    /// undeclare-on-drop), `Some` only when
+    /// [`AdvancedSubscriberOptions::subscriber_detection`] was set.
+    ///
+    /// The sibling of the publisher's `@adv/pub` token: this is what makes the
+    /// subscriber visible to a third party, and dropping the subscriber must
+    /// retract it, or an observer keeps seeing a subscriber that is gone.
+    _detection_token: Option<DetectionTokenGuard>,
 }
+
+/// R311y826 — a named RAII keep-alive for the `@adv/sub` detection token, for
+/// the same reason [`LivelinessSubGuard`] exists:
+/// [`LivelinessToken`](crate::session::LivelinessToken) is generic over
+/// `(R, T)` while [`AdvancedSubscriber`] is `R`-only, so the handle is
+/// type-erased to `Box<dyn Send>`. Its only job is to undeclare on drop,
+/// through the boxed handle's `Drop` via the vtable.
+struct DetectionTokenGuard(#[allow(dead_code)] Box<dyn Send>);
 
 /// R311y102 (review LOW) — a named RAII keep-alive for the late-publisher
 /// liveliness subscriber. [`LivelinessSubscriber`](crate::session::LivelinessSubscriber)
@@ -1612,6 +1720,8 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         )?;
         Ok(Self {
             _subscriber: subscriber,
+            // The option-free `declare()` cannot ask for detection.
+            _detection_token: None,
         })
     }
 }
@@ -1678,6 +1788,8 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             // late-publisher liveliness subscriber.
             #[cfg(feature = "ext-pubsub-advanced-history")]
             _liveliness_sub: None,
+            // The option-free `declare()` cannot ask for detection.
+            _detection_token: None,
         })
     }
 
@@ -2001,6 +2113,13 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             }),
         });
 
+        // R311y826 — the `@adv/sub` detection token. Declared LAST, after the
+        // live subscription and every recovery channel, so a subscriber only
+        // advertises itself once it is actually able to receive: a token that
+        // outraces its own subscription tells an observer something untrue for
+        // the width of the gap.
+        let detection_token = declare_detection_token(session, &base_keyexpr, &options)?;
+
         Ok(Self {
             _subscriber: subscriber,
             #[cfg(test)]
@@ -2010,8 +2129,55 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             _heartbeat_sub: heartbeat_sub,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             _liveliness_sub: liveliness_sub,
+            _detection_token: detection_token,
         })
     }
+}
+
+/// R311y826 — declare the `@adv/sub` detection token when the caller asked for
+/// it, else `None`.
+///
+/// Split out of `declare_with_options` so the KE construction and the
+/// opt-in test have one home rather than being inlined into an already long
+/// constructor, and so the guard's type erasure happens once.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+fn declare_detection_token<R, T>(
+    session: &Session<R, T, Unicast>,
+    keyexpr: &str,
+    options: &AdvancedSubscriberOptions,
+) -> Result<Option<DetectionTokenGuard>, AdvancedSubscribeError>
+where
+    R: SessionRuntime + 'static,
+    T: TimeSource + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    let Some(detection) = options.subscriber_detection.as_ref() else {
+        return Ok(None);
+    };
+
+    // Same bound the advanced publisher enforces on its `local_zid`: a zid is
+    // 1..=16 bytes, and a hex rendering of anything else is not a zid any
+    // reference would parse back.
+    if detection.local_zid.is_empty() || detection.local_zid.len() > 16 {
+        return Err(AdvancedSubscribeError::DetectionZid {
+            len: detection.local_zid.len(),
+        });
+    }
+
+    // The subscriber's OWN entity id, from the same per-purpose counter the
+    // advanced publisher draws its `<eid>` discriminator from. zenoh reads
+    // `subscriber.id().eid()` here (advanced_subscriber.rs:1154); wz keeps no
+    // eid on the Subscriber handle, so it mints one for the token.
+    let eid = session.actions().alloc_next_entity_id();
+    let ke = crate::advanced_ke::subscriber_adv_ke(
+        keyexpr,
+        &zid_to_zenoh_hex(&detection.local_zid),
+        eid,
+        detection.metadata.as_deref(),
+    );
+    let token = session.declare_token(ke, crate::session::LivelinessOptions::default())?;
+    Ok(Some(DetectionTokenGuard(Box::new(token))))
 }
 
 #[cfg(test)]
@@ -3802,5 +3968,340 @@ mod tests {
             .replies
             .deliver_local_final(rid);
         session.drain_deferred_fires();
+    }
+
+    /// How many recorded outbound frames carry `needle` in their bytes. A
+    /// keyexpr travels the wire as its literal string, so a substring scan
+    /// over the recorded frames answers "did this key expression go out"
+    /// without decoding every frame shape.
+    #[cfg(feature = "ext-pubsub-advanced-publisher")]
+    fn frames_carrying(driver: &crate::test_fixtures::RecordingLinkDriver, needle: &str) -> usize {
+        let n = needle.as_bytes();
+        (0..driver.frame_count())
+            .filter(|&i| {
+                let bytes = driver.frame_bytes(i);
+                bytes.windows(n.len()).any(|w| w == n)
+            })
+            .count()
+    }
+
+    /// The option-free [`AdvancedSubscriber::declare`] declares no detection
+    /// token, and the publisher in the same test declares one.
+    ///
+    /// This began as the MEASUREMENT of the atom's `subscriber_detection`
+    /// residual — before R311y826 no wz form declared the token at all — and
+    /// it is kept, retargeted at the form that still declares none. The
+    /// publisher half is the CONTROL and it is what makes the subject
+    /// assertion mean anything: `@adv/pub` bytes DO appear, so the recorder
+    /// sees liveliness tokens, and "no `@adv/sub` frames" is a fact about this
+    /// declare form rather than about an observation window that catches
+    /// nothing.
+    ///
+    /// zenoh builds the suffix as `KE_ADV_PREFIX / KE_SUB / zid / eid /
+    /// [meta | KE_EMPTY]` (advanced_subscriber.rs:1151-1160, constants at
+    /// zenoh/src/api/admin.rs:48-58) and zenoh-pico spells the identical
+    /// suffix (advanced_subscriber.c:1651-1655).
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-publisher",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn option_free_declare_emits_no_detection_token_while_the_publisher_does() {
+        use crate::advanced_publisher::{AdvancedPublisher, AdvancedPublisherOptions};
+
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let _pub = AdvancedPublisher::declare(
+            &session,
+            "demo/data",
+            AdvancedPublisherOptions::default(),
+            vec![0x09],
+        )
+        .expect("advanced publisher declares");
+
+        let _sub = AdvancedSubscriber::declare(
+            &session,
+            "demo/data",
+            |_sample: Sample| {},
+            |_miss: Miss| {},
+        )
+        .expect("advanced subscriber declares");
+
+        assert!(
+            frames_carrying(&driver, "demo/data/@adv/pub/") > 0,
+            "CONTROL: the publisher's detection token must reach the wire, or \
+             this test observes nothing"
+        );
+        assert_eq!(
+            frames_carrying(&driver, "demo/data/@adv/sub/"),
+            0,
+            "the option-free declare form asks for no detection, so it must \
+             declare no @adv/sub token"
+        );
+    }
+
+    /// Detection is OPT-IN: default options declare no token, matching zenoh's
+    /// builder default (`liveliness: false`, advanced_subscriber.rs:164). The
+    /// publisher control is present for the same reason as above.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-recovery",
+        feature = "ext-pubsub-advanced-publisher",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn detection_is_off_by_default() {
+        let (driver, _declared) = declare_with_detection(None);
+        assert!(
+            frames_carrying(&driver, "demo/data/@adv/pub/") > 0,
+            "CONTROL: liveliness tokens do reach this recorder"
+        );
+        assert_eq!(
+            frames_carrying(&driver, "demo/data/@adv/sub/"),
+            0,
+            "default options must not declare a detection token"
+        );
+    }
+
+    /// Opting in declares the token, and its key expression is the suffix BOTH
+    /// references build: `<ke>/@adv/sub/<zid_hex>/<eid>/_`. The trailing `_` is
+    /// asserted explicitly — it is the routing-matching chunk zenoh's own
+    /// comment calls out, and an observer's wildcard-tailed query stops
+    /// matching if it is dropped.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-recovery",
+        feature = "ext-pubsub-advanced-publisher",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn subscriber_detection_declares_the_adv_sub_token() {
+        let zid = vec![0x0a, 0x0b];
+        let (driver, _declared) =
+            declare_with_detection(Some(SubscriberDetection::new(zid.clone())));
+        // The hex RENDERING is `zid_hex`'s contract and is tested there; this
+        // test asserts the KE is keyed by THIS zid, so it renders through the
+        // same SSOT rather than restating a spelling. (It is little-endian:
+        // 0a 0b renders "b0a", which an inline literal got wrong.)
+        let prefix = format!("demo/data/@adv/sub/{}/", zid_to_zenoh_hex(&zid));
+        assert_eq!(
+            frames_carrying(&driver, &prefix),
+            1,
+            "exactly one detection token, keyed by this node's zid ({prefix})"
+        );
+        let ke_tail_present = (0..driver.frame_count()).any(|i| {
+            let bytes = driver.frame_bytes(i);
+            let needle = prefix.as_bytes();
+            bytes
+                .windows(needle.len())
+                .position(|w| w == needle)
+                .map(|at| {
+                    // ... <eid digits> '/' '_'
+                    let rest = &bytes[at + needle.len()..];
+                    let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+                    rest.get(digits) == Some(&b'/') && rest.get(digits + 1) == Some(&b'_')
+                })
+                .unwrap_or(false)
+        });
+        assert!(
+            ke_tail_present,
+            "with no metadata the token's last chunk is the concrete `_`, not \
+             an empty chunk (zenoh KE_EMPTY, admin.rs:58)"
+        );
+    }
+
+    /// Metadata SUBSTITUTES for the `_` chunk rather than being appended after
+    /// it — zenoh picks one or the other (advanced_subscriber.rs:1156-1160).
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-recovery",
+        feature = "ext-pubsub-advanced-publisher",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn detection_metadata_replaces_the_empty_chunk() {
+        let zid = vec![0x0a, 0x0b];
+        let (driver, _declared) = declare_with_detection(Some(
+            SubscriberDetection::new(zid.clone()).with_metadata("room/kitchen"),
+        ));
+        let prefix = format!("demo/data/@adv/sub/{}/", zid_to_zenoh_hex(&zid));
+        assert_eq!(frames_carrying(&driver, &prefix), 1, "one detection token");
+
+        // Read the chunk that FOLLOWS `<eid>/` rather than searching the whole
+        // frame for the metadata string: a probe that appended the metadata
+        // after `_` instead of substituting for it left every substring
+        // assertion true, so the position is the whole claim.
+        let tail = token_tail_after_eid(&driver, &prefix).expect("the token KE is on the wire");
+        assert_eq!(
+            tail, "room/kitchen",
+            "metadata REPLACES the empty chunk; the token's tail must be the \
+             metadata alone, with no `_` on either side of it"
+        );
+    }
+
+    /// The remainder of a token key expression after `<prefix><eid>/`, i.e.
+    /// the meta-or-`_` tail, read out of the recorded frame that carries
+    /// `prefix`.
+    ///
+    /// Stops at the first byte that cannot appear in a key expression chunk
+    /// path, which is how the tail is delimited from whatever the frame
+    /// encodes next.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-recovery",
+        feature = "ext-pubsub-advanced-publisher",
+        feature = "pubsub-allow-loop"
+    ))]
+    fn token_tail_after_eid(
+        driver: &crate::test_fixtures::RecordingLinkDriver,
+        prefix: &str,
+    ) -> Option<String> {
+        let needle = prefix.as_bytes();
+        (0..driver.frame_count()).find_map(|i| {
+            let bytes = driver.frame_bytes(i);
+            let at = bytes.windows(needle.len()).position(|w| w == needle)?;
+            let rest = &bytes[at + needle.len()..];
+            let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+            if digits == 0 || rest.get(digits) != Some(&b'/') {
+                return None;
+            }
+            let tail: Vec<u8> = rest[digits + 1..]
+                .iter()
+                .copied()
+                .take_while(|b| b.is_ascii_alphanumeric() || *b == b'/' || *b == b'_' || *b == b'-')
+                .collect();
+            String::from_utf8(tail).ok()
+        })
+    }
+
+    /// A zid that is not 1..=16 bytes is REFUSED, not rendered — the same
+    /// bound `AdvancedPublisher::declare` enforces.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-recovery",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn detection_refuses_a_zid_that_is_not_a_zid() {
+        for bad in [vec![], vec![0u8; 17]] {
+            let len = bad.len();
+            let (actions, _driver) = crate::test_fixtures::recording_actions();
+            let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+            let clock = Arc::new(TokioTime::new());
+            let session = TokioSession::new(actions, observer, clock);
+            // `expect_err` would need AdvancedSubscriber: Debug; match instead.
+            let Err(err) = AdvancedSubscriber::declare_with_options(
+                &session,
+                "demo/data",
+                AdvancedSubscriberOptions::new()
+                    .with_subscriber_detection(SubscriberDetection::new(bad)),
+                |_s: Sample| {},
+                |_m: Miss| {},
+            ) else {
+                panic!("a non-zid must be refused, not accepted");
+            };
+            assert!(
+                matches!(err, AdvancedSubscribeError::DetectionZid { len: got } if got == len),
+                "refusal names the rejected length, got {err:?}"
+            );
+        }
+    }
+
+    /// Dropping the subscriber retracts its detection token. An observer that
+    /// keeps seeing a subscriber which is gone is the failure this guards.
+    ///
+    /// The assertion is a DIFFERENCE between a detectable subscriber's
+    /// teardown and a plain one's, not "something went out". The first version
+    /// of this test asserted the latter and a damage probe that removed the
+    /// token entirely still passed it: the subscriber's own undeclare already
+    /// emits a frame, so "more frames after drop" is true either way. What
+    /// only a token can add is one MORE frame than the same teardown without
+    /// one.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-recovery",
+        feature = "ext-pubsub-advanced-publisher",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn dropping_a_detectable_subscriber_retracts_its_token() {
+        let teardown_frames = |detection: Option<SubscriberDetection>| {
+            let (driver, declared) = declare_with_detection(detection);
+            let before = driver.frame_count();
+            drop(declared.subscriber);
+            driver.frame_count() - before
+        };
+
+        let plain = teardown_frames(None);
+        let detectable = teardown_frames(Some(SubscriberDetection::new(vec![0x0a, 0x0b])));
+        assert_eq!(
+            detectable,
+            plain + 1,
+            "a detectable subscriber's teardown must carry exactly one extra \
+             frame — the token's undeclare; plain teardown emitted {plain}, \
+             detectable emitted {detectable}"
+        );
+    }
+
+    /// Declare a publisher (the liveliness CONTROL) plus an advanced
+    /// subscriber carrying `detection`, over one recording session.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-recovery",
+        feature = "ext-pubsub-advanced-publisher",
+        feature = "pubsub-allow-loop"
+    ))]
+    fn declare_with_detection(
+        detection: Option<SubscriberDetection>,
+    ) -> (Arc<crate::test_fixtures::RecordingLinkDriver>, Declared) {
+        use crate::advanced_publisher::{AdvancedPublisher, AdvancedPublisherOptions};
+
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        // The publisher is the liveliness CONTROL and is returned to the
+        // caller, not dropped here: the teardown test drops the SUBSCRIBER and
+        // counts frames, so the publisher must still be alive at that point
+        // and must not contribute a teardown of its own.
+        let publisher = AdvancedPublisher::declare(
+            &session,
+            "demo/data",
+            AdvancedPublisherOptions::default(),
+            vec![0x09],
+        )
+        .expect("advanced publisher declares");
+
+        let mut options = AdvancedSubscriberOptions::new();
+        if let Some(detection) = detection {
+            options = options.with_subscriber_detection(detection);
+        }
+        let sub = AdvancedSubscriber::declare_with_options(
+            &session,
+            "demo/data",
+            options,
+            |_s: Sample| {},
+            |_m: Miss| {},
+        )
+        .expect("advanced subscriber declares");
+        (
+            driver,
+            Declared {
+                subscriber: sub,
+                _publisher: publisher,
+            },
+        )
+    }
+
+    /// What [`declare_with_detection`] hands back: the subscriber under test
+    /// plus the control publisher, kept alive alongside it.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-recovery",
+        feature = "ext-pubsub-advanced-publisher",
+        feature = "pubsub-allow-loop"
+    ))]
+    struct Declared {
+        subscriber: AdvancedSubscriber,
+        _publisher: crate::advanced_publisher::AdvancedPublisher<
+            crate::runtime_impl::TokioRuntime,
+            TokioTime,
+        >,
     }
 }

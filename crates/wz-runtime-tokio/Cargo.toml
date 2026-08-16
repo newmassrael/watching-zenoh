@@ -317,7 +317,18 @@ ext-pubsub-advanced-publisher = [
 # subscriber (declare-subscriber) + the inbound source_info decode
 # (pubsub-source-info). The timestamped-dedup path is deferred (see the
 # module docs), so no pubsub-timestamp dependency yet.
-ext-pubsub-advanced-subscriber = ["declare-subscriber", "pubsub-source-info"]
+# R311y826 — `liveliness-token` joins the set: BOTH references let an advanced
+# subscriber opt into being detectable by declaring a liveliness token on
+# `<ke>/@adv/sub/<zid>/<eid>/[meta|_]` (zenoh-ext advanced_subscriber.rs:1151,
+# zenoh-pico advanced_subscriber.c:1651), which is the exact sibling of the
+# `@adv/pub` token ext-pubsub-advanced-publisher already pulls `liveliness-token`
+# for. Gating the option behind a second feature instead would make the builder
+# method appear and disappear, which is a worse API than one more implied atom.
+ext-pubsub-advanced-subscriber = [
+    "declare-subscriber",
+    "pubsub-source-info",
+    "liveliness-token",
+]
 # R311y82 — ext-pubsub-advanced-subscriber + the gap-recovery query plane:
 # turns the advanced subscriber's forward-gap handling from "miss + deliver"
 # into "BUFFER + sample-driven `_sn`-range recovery GET + in-order drain"

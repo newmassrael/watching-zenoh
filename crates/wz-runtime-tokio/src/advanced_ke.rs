@@ -17,12 +17,29 @@ pub(crate) const KE_ADV_PREFIX: &str = "@adv";
 /// The publisher kind chunk under `@adv` (zenoh `pub`): `@adv/pub/...`.
 pub(crate) const KE_ADV_PUB: &str = "pub";
 
+/// The subscriber kind chunk under `@adv` (zenoh `KE_SUB`, admin.rs:56):
+/// `@adv/sub/...`. The sibling of [`KE_ADV_PUB`] — a subscriber that opts into
+/// detection publishes a liveliness token here so a third party can see it,
+/// exactly as a publisher does under `pub`.
+///
+/// Gated on `-recovery`, not on `-subscriber`, because that is where its only
+/// consumer lives: `AdvancedSubscriberOptions` (and so the detection option)
+/// is behind the recovery gate today. A recovery-OFF build caught this as
+/// dead code under `-D warnings` — the R311y809 / R311y811 reduced-feature
+/// class. If the options type is ever lifted to the `-subscriber` level, this
+/// gate moves with it.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+pub(crate) const KE_ADV_SUB: &str = "sub";
+
 /// The trailing empty meta chunk zenoh appends to the `@adv` suffix
 /// (`KE_EMPTY = ke!("_")`, zenoh admin.rs:58) "because of a routing matching bug"
 /// (advanced_publisher.rs:328-329): the wildcard-tailed detection / recovery queries
 /// (`.../@adv/*/<zid>/<eid>/**`) stay matchable through a zenoh router thanks to the
 /// concrete `_` chunk. wz mirrors it so the `@adv` namespace is byte-identical.
-#[cfg(feature = "ext-pubsub-advanced-publisher")]
+#[cfg(any(
+    feature = "ext-pubsub-advanced-publisher",
+    feature = "ext-pubsub-advanced-recovery"
+))]
 pub(crate) const KE_EMPTY: &str = "_";
 
 /// The publisher's own `@adv` KE: `<base>/@adv/pub/<zid_hex>/<discriminator>/_`
@@ -33,6 +50,27 @@ pub(crate) const KE_EMPTY: &str = "_";
 #[cfg(feature = "ext-pubsub-advanced-publisher")]
 pub(crate) fn publisher_adv_ke(base: &str, zid_hex: &str, discriminator: &str) -> String {
     format!("{base}/{KE_ADV_PREFIX}/{KE_ADV_PUB}/{zid_hex}/{discriminator}/{KE_EMPTY}")
+}
+
+/// The subscriber's own detection KE:
+/// `<base>/@adv/sub/<zid_hex>/<eid>/[<meta>|_]` — the liveliness token a
+/// subscriber declares when it opts into being detectable.
+///
+/// BOTH references build this suffix and they agree chunk for chunk: zenoh-ext
+/// `KE_ADV_PREFIX / KE_SUB / zid / eid / [meta | KE_EMPTY]`
+/// (advanced_subscriber.rs:1151-1160) and zenoh-pico's
+/// `// suffix = KE_ADV_PREFIX / KE_SUB / ZID / EID / [ metadata | KE_EMPTY ]`
+/// (advanced_subscriber.c:1651-1655). The trailing `_` when no metadata is
+/// given is not cosmetic — it is the same routing-matching workaround
+/// [`KE_EMPTY`] documents for the publisher, and zenoh's own comment says so.
+///
+/// `meta` is a caller-supplied key expression appended to convey application
+/// metadata; it may itself be multi-chunk, which is why it substitutes for the
+/// single `_` chunk rather than being appended after it.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+pub(crate) fn subscriber_adv_ke(base: &str, zid_hex: &str, eid: u32, meta: Option<&str>) -> String {
+    let tail = meta.unwrap_or(KE_EMPTY);
+    format!("{base}/{KE_ADV_PREFIX}/{KE_ADV_SUB}/{zid_hex}/{eid}/{tail}")
 }
 
 /// The sample-driven / bounded recovery GET KE: `<base>/@adv/*/<zid_hex>/<eid>/**`.

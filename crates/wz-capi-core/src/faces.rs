@@ -1009,7 +1009,10 @@ impl SharedSession {
             if let Ok(sub) = AdvancedSubscriber::declare_with_options(
                 &session,
                 entry.keyexpr.clone(),
-                entry.options,
+                // R311y826 — cloned, not moved: `AdvancedSubscriberOptions`
+                // stopped being `Copy` when detection gained an owned metadata
+                // key expression, and this entry is replayed on every reconnect.
+                entry.options.clone(),
                 on_sample,
                 on_miss,
             ) {
@@ -2088,7 +2091,9 @@ impl SharedSession {
             if let Ok(sub) = AdvancedSubscriber::declare_with_options(
                 &face.session,
                 keyexpr.clone(),
-                options,
+                // Cloned per face: the loop declares one subscriber on each,
+                // and the options are no longer `Copy` (R311y826).
+                options.clone(),
                 on_sample,
                 on_miss,
             ) {
