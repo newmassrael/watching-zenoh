@@ -77,6 +77,7 @@ use wz_session_core::query::QueryableRegistry;
 use wz_session_core::query_sink::{BorrowedQuery, QuerySink, QueryView, ReplyOut};
 use wz_session_core::reliability::Reliability;
 use wz_session_core::reply::ReplyRegistry;
+use wz_session_core::reply_acceptance::ReplyAcceptance;
 use wz_session_core::reply_sink::{BorrowedReply, ReplyKind, ReplySink, ReplyView};
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::sink::{BorrowedSample, SampleSink, SampleView};
@@ -328,10 +329,22 @@ fn main() -> ! {
     {
         // 3. reply — ReplyRegistry no-heap fire (rid correlation).
         let mut rr: ReplyRegistry<ReplyCounter> = ReplyRegistry::with_sink_backing();
+        // R311y834 — the registration states which replies it accepts
+        // (R311y833). `Matching` rather than `Any` on purpose: this probe is the
+        // ONLY witness the reply-keyexpr gate has on a real thumb target, and
+        // the `Matching` arm is the one that exercises the no-alloc
+        // `BoundedString` store — the `Any` arm stores nothing and would leave
+        // the bytes this costs untested on the profile that pays them.
         require(
             "reply register",
-            rr.register_sink(7, 1, None, ReplyCounter(&REPLY_HITS))
-                .is_ok(),
+            rr.register_sink(
+                7,
+                1,
+                None,
+                ReplyAcceptance::Matching("svc/a"),
+                ReplyCounter(&REPLY_HITS),
+            )
+            .is_ok(),
         );
         let reply_fired = rr.dispatch_borrowed(&BorrowedReply {
             rid: 7,
@@ -346,6 +359,23 @@ fn main() -> ! {
         require(
             "reply",
             reply_fired == 1 && REPLY_HITS.load(Ordering::SeqCst) == 1,
+        );
+        // R311y834 — and the REFUSAL, on the same registration, because a probe
+        // that only ever feeds a matching reply cannot tell the gate from its
+        // absence. Same rid, a keyexpr outside the query: zero sinks fire and
+        // the counter does not move. This is the gate's only run on thumbv6m.
+        let refused_fired = rr.dispatch_borrowed(&BorrowedReply {
+            rid: 7,
+            keyexpr: "other/b",
+            kind: ReplyKind::Put,
+            payload: b"v",
+            err_encoding: None,
+            attachment: None,
+            put_encoding: None,
+        });
+        require(
+            "reply keyexpr gate",
+            refused_fired == 0 && REPLY_HITS.load(Ordering::SeqCst) == 1,
         );
     }
 
