@@ -4085,8 +4085,16 @@ layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
 # not on C1at because all three are `ext-pubsub-advanced-history`-gated — the
 # startup history GET is the one GET that is reliably in flight at a chosen
 # moment, so it is what the cancellation is measured through.
+#
+# R311y827 28 -> 34: the R311y826 subscriber-detection six. They are gated on
+# `ext-pubsub-advanced-publisher` (the detection token is declared next to the
+# publisher's `@adv/pub`), which THIS lane composes too, so the same six that
+# moved C1at 15 -> 21 land here — R311y826 moved C1ar and C1at and missed this
+# lane, and only hosted CI said so. The filter is a MODULE path, so the sweep
+# that finds every affected lane is over the full libtest path
+# (`advanced_subscriber::tests::<fn>`), not over the new function names.
 layer_c1av_cargo_test_ext_pubsub_advanced_history() {
-    _runci_guarded_test "C1av advanced_subscriber" 28 \
+    _runci_guarded_test "C1av advanced_subscriber" 34 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \
