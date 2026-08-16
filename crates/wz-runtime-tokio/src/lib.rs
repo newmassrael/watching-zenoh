@@ -1888,16 +1888,20 @@ impl UdpDriver {
     pub async fn bind_multicast_v4(
         group: std::net::Ipv4Addr,
         port: u16,
-        iface: Option<&str>,
+        cfg: McastSocketConfig<'_>,
     ) -> io::Result<Self> {
         use socket2::{Domain, Protocol, Socket, Type};
 
         // Resolve BEFORE touching the socket, so a bad `#iface=` fails without
         // leaving a half-configured group membership behind.
-        let selector = match iface {
+        let selector = match cfg.iface {
             Some(iface) => crate::link_interfaces::multicast_iface_selector_v4(iface)?,
             None => None,
         };
+        // R311y832 — and resolve the extra `#join=` groups before it too, for
+        // the same reason: a typo in the third of four groups must not leave
+        // two memberships installed and the caller believing it has four.
+        let extra = cfg.resolved_joins()?;
 
         // Step 1: REUSEADDR + REUSEPORT must be set before bind, and
         // tokio's UdpSocket exposes no pre-bind setsockopt hook, so the
@@ -1920,8 +1924,24 @@ impl UdpDriver {
 
         // Step 2 done by the bind above; steps 3-4 use tokio's wrappers.
         let socket = UdpSocket::from_std(raw.into())?;
-        socket.join_multicast_v4(group, selector.unwrap_or(std::net::Ipv4Addr::UNSPECIFIED))?;
+        let membership_iface = selector.unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+        socket.join_multicast_v4(group, membership_iface)?;
+        // R311y832 — `#join=` groups, joined IN ADDITION to the locator's own
+        // and on the SAME socket, which is the whole point: one bound port
+        // serving several groups (zenoh `multicast.rs:316-347`). The membership
+        // interface is the locator's, not a per-group one — zenoh passes the
+        // same `src_ip4` to every join in that loop.
+        for g in &extra {
+            socket.join_multicast_v4(*g, membership_iface)?;
+        }
         socket.set_multicast_loop_v4(true)?;
+        // R311y832 — the hop limit. Set on THIS socket because this
+        // constructor's socket is the one that sends as well as receives (see
+        // the doc above); zenoh splits the roles and sets it on its `ucast_sock`
+        // (`multicast.rs:363`), which is the sending half there.
+        if let Some(ttl) = cfg.ttl {
+            socket.set_multicast_ttl_v4(ttl)?;
+        }
         let peer = SocketAddr::from((group, port));
         Ok(Self {
             socket: Some(socket),
@@ -1952,11 +1972,11 @@ impl UdpDriver {
     pub async fn bind_multicast_tx_v4(
         group: std::net::Ipv4Addr,
         port: u16,
-        iface: Option<&str>,
+        cfg: McastSocketConfig<'_>,
     ) -> io::Result<Self> {
         use socket2::{Domain, Protocol, Socket, Type};
 
-        let selector = match iface {
+        let selector = match cfg.iface {
             Some(iface) => crate::link_interfaces::multicast_iface_selector_v4(iface)?,
             None => None,
         };
@@ -1970,6 +1990,13 @@ impl UdpDriver {
         let bind_addr = SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0));
         raw.bind(&bind_addr.into())?;
         let socket = UdpSocket::from_std(raw.into())?;
+        // R311y832 — this is the SEND-only half, so the hop limit belongs here
+        // most directly; it is zenoh's `ucast_sock`, the socket
+        // `multicast.rs:363` sets the TTL on. `extra_joins` is deliberately not
+        // read: a sender installs no membership.
+        if let Some(ttl) = cfg.ttl {
+            socket.set_multicast_ttl_v4(ttl)?;
+        }
         Ok(Self {
             socket: Some(socket),
             peer: Some(SocketAddr::from((group, port))),
@@ -2060,5 +2087,215 @@ mod poll_framed_lowlatency_tests {
         let mut st = ReadState::Idle;
         let ev = poll_framed(&mut st, &mut src, true).await;
         assert!(matches!(ev, LinkEvent::Lost { .. }));
+    }
+}
+
+/// R311y832 — the three multicast knobs a UDP locator's `#`-config span can
+/// carry, as one value rather than three parameters.
+///
+/// zenoh names them together in one module (`config::UDP_MULTICAST_IFACE` /
+/// `_JOIN` / `_TTL`, `zenoh-link-udp/src/lib.rs:108-112`) and consumes them in
+/// one function, so they travel together here too. The struct is also what
+/// keeps the two constructors below from growing a fourth and fifth positional
+/// argument — the R311y808 shape, where folding two parameters into one value
+/// shortened the signature instead of lengthening it.
+///
+/// `Default` is the pre-R311y832 behaviour byte for byte: no interface pin, no
+/// extra groups, and the OS hop limit.
+#[derive(Debug, Default, Clone, Copy)]
+#[cfg(any(feature = "scouting-active", feature = "transport-multicast"))]
+pub struct McastSocketConfig<'a> {
+    /// `#iface=<name-or-ip>` (R311y454): which interface's membership is
+    /// installed and which one egress leaves by.
+    pub iface: Option<&'a str>,
+    /// `#ttl=<n>`: the multicast hop limit. `None` leaves the OS default, which
+    /// is 1 — one subnet.
+    pub ttl: Option<u32>,
+    /// `#join=<group>` values, joined in addition to the locator's own group.
+    pub extra_joins: &'a [String],
+}
+
+#[cfg(any(feature = "scouting-active", feature = "transport-multicast"))]
+impl McastSocketConfig<'_> {
+    /// Parse every `#join=` value into a v4 group address.
+    ///
+    /// Refused rather than skipped on a bad value, and refused BEFORE any
+    /// membership is installed: a partially-joined receiver is subscribed to
+    /// some of what it was told and silent about the rest, which is the shape
+    /// that looks configured and is not. wz is v4-only on this path (the whole
+    /// multicast surface is — `wz-ap-demo/src/runner.rs` says so of itself), so
+    /// a v6 group here is a refusal with its own message rather than a mis-parse.
+    fn resolved_joins(&self) -> io::Result<Vec<std::net::Ipv4Addr>> {
+        self.extra_joins
+            .iter()
+            .map(|g| {
+                g.parse::<std::net::Ipv4Addr>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("#join={g} is not an IPv4 multicast group"),
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+/// R311y832 — the owned form of [`McastSocketConfig`], for the seams that cross
+/// a `tokio::spawn` and so cannot borrow. Same three keys, same meaning; the
+/// borrowed view is taken back with [`as_socket_config`](Self::as_socket_config)
+/// at the socket.
+#[derive(Debug, Default, Clone)]
+#[cfg(any(feature = "scouting-active", feature = "transport-multicast"))]
+pub struct McastGroupOptions {
+    /// `#iface=<name-or-ip>`.
+    pub iface: Option<String>,
+    /// `#ttl=<n>`.
+    pub ttl: Option<u32>,
+    /// `#join=<group>` values.
+    pub joins: Vec<String>,
+}
+
+#[cfg(any(feature = "scouting-active", feature = "transport-multicast"))]
+impl McastGroupOptions {
+    /// Borrow this as the socket-facing config.
+    pub fn as_socket_config(&self) -> McastSocketConfig<'_> {
+        McastSocketConfig {
+            iface: self.iface.as_deref(),
+            ttl: self.ttl,
+            extra_joins: &self.joins,
+        }
+    }
+}
+
+/// R311y832 — the UDP multicast locator config surface
+/// (zenoh `zenoh-link-udp/src/lib.rs:108-112`: `iface` / `join` / `ttl`).
+#[cfg(all(test, feature = "transport-multicast", feature = "transport-link-udp"))]
+mod udp_multicast_config_tests {
+    use super::*;
+
+    /// A group and port nothing else on this host is expected to use, so two
+    /// cases in one test binary do not collide on the membership.
+    const GROUP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(239, 255, 91, 32);
+
+    #[tokio::test]
+    async fn a_multicast_socket_leaves_the_local_subnet_only_when_asked() {
+        // THE MEASUREMENT THIS ROUND STARTED FROM. A multicast datagram's reach
+        // is its TTL, and the OS default is 1 — one subnet. zenoh exposes the
+        // knob as the locator config key `ttl`
+        // (`zenoh-link-udp/src/multicast.rs:355-374`, `set_multicast_ttl_v4` on
+        // the sending socket); wz called `set_multicast_ttl_v4` NOWHERE, so no
+        // wz deployment could reach past its own subnet by any route.
+        let d = UdpDriver::bind_multicast_v4(GROUP, 0, McastSocketConfig::default())
+            .await
+            .expect("bind the group");
+        let sock = d.socket.as_ref().expect("bound");
+        assert_eq!(
+            sock.multicast_ttl_v4().expect("read ttl"),
+            1,
+            "the default is the single-subnet one, which is why the knob has to exist"
+        );
+
+        let d = UdpDriver::bind_multicast_v4(
+            GROUP,
+            0,
+            McastSocketConfig {
+                ttl: Some(8),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bind the group with a ttl");
+        let sock = d.socket.as_ref().expect("bound");
+        assert_eq!(
+            sock.multicast_ttl_v4().expect("read ttl"),
+            8,
+            "a requested ttl must reach the socket, or the config key is decoration"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_send_only_half_carries_the_hop_limit_too() {
+        // zenoh sets the TTL on its `ucast_sock` — the SENDING socket
+        // (`multicast.rs:363`). wz splits the roles the same way for the router
+        // egress, so a hop limit that only reached the bidirectional
+        // constructor would leave the one path that exists to send unbounded by
+        // it.
+        let d = UdpDriver::bind_multicast_tx_v4(
+            GROUP,
+            7446,
+            McastSocketConfig {
+                ttl: Some(5),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bind a sender");
+        let sock = d.socket.as_ref().expect("bound");
+        assert_eq!(sock.multicast_ttl_v4().expect("read ttl"), 5);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_extra_join_installs_no_membership_at_all() {
+        // The refusal is BEFORE the first join, so a typo in the second of two
+        // groups does not leave the first installed and the caller believing it
+        // has both.
+        let joins = vec!["239.255.91.33".to_string(), "not-an-address".to_string()];
+        // `expect_err` would need `UdpDriver: Debug`, which it is not.
+        let e = match UdpDriver::bind_multicast_v4(
+            GROUP,
+            0,
+            McastSocketConfig {
+                extra_joins: &joins,
+                ..Default::default()
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("a malformed #join= was accepted"),
+            Err(e) => e,
+        };
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            e.to_string().contains("not-an-address"),
+            "the message names the value: {e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_extra_join_makes_a_second_group_readable_on_one_socket() {
+        // THE POINT OF `join`, and the only assertion that distinguishes a real
+        // membership from a stored string: send to the EXTRA group and read it
+        // off the socket bound for the locator's own.
+        const EXTRA: std::net::Ipv4Addr = std::net::Ipv4Addr::new(239, 255, 91, 33);
+        let port = 47_446u16;
+        let joins = vec![EXTRA.to_string()];
+        let rx = UdpDriver::bind_multicast_v4(
+            GROUP,
+            port,
+            McastSocketConfig {
+                extra_joins: &joins,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bind with an extra join");
+
+        let tx = UdpDriver::bind_multicast_tx_v4(EXTRA, port, McastSocketConfig::default())
+            .await
+            .expect("bind a sender");
+        let sock = rx.socket.as_ref().expect("bound");
+        tx.socket
+            .as_ref()
+            .expect("bound")
+            .send_to(b"extra-group", SocketAddr::from((EXTRA, port)))
+            .await
+            .expect("send to the extra group");
+
+        let mut buf = [0u8; 32];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), sock.recv(&mut buf))
+            .await
+            .expect("the extra group's datagram arrives within the budget")
+            .expect("recv");
+        assert_eq!(&buf[..n], b"extra-group");
     }
 }

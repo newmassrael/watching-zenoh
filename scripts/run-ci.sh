@@ -5712,6 +5712,15 @@ layer_c1q_multicast_glue() {
         || return 1
     _runci_guarded_test C1q 29 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
         || return 1
+    # R311y832 — the UDP multicast locator config surface (`ttl` / `join`, the
+    # two keys of zenoh's `zenoh-link-udp` config module wz lacked). A NEW leg
+    # because the sweep found NO guarded lane selects these: every
+    # wz-runtime-tokio filter here is `multicast_glue`, and
+    # `udp_multicast_config_tests::…` does not contain that string. The tests
+    # would have run in nobody's lane — the zero-population trap in its
+    # "no lane watches this" form.
+    _runci_guarded_test C1q 4 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp --lib udp_multicast_config --quiet \
+        || return 1
 }
 
 # ─── Layer C1m — wz-session-lwip isolated host test + clippy ─────────

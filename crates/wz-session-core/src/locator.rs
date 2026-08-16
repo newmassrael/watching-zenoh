@@ -87,6 +87,7 @@
 //! - other transports not yet wired (`bt/...`).
 
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::net::SocketAddr;
 use core::str::FromStr;
 
@@ -162,6 +163,31 @@ pub struct ParsedLocator {
     /// Linux/Android and no-ops (with a warn) off-platform — mirroring zenoh
     /// (`zenoh-util::net::set_bind_to_device_*`, a Linux/Android-only syscall).
     pub iface: Option<String>,
+    /// R311y832 — the `#ttl=<n>` multicast hop limit (zenoh
+    /// `UDP_MULTICAST_TTL`, applied as `set_multicast_ttl_v4` on the SENDING
+    /// socket, `zenoh-link-udp/src/multicast.rs:355-374`). `None` leaves the
+    /// OS default, which is **1** — measured on this tree, and the reason the
+    /// key is not cosmetic: without it a wz multicast deployment cannot leave
+    /// its own subnet by any route.
+    ///
+    /// NAMED DIVERGENCE: wz parses and range-checks here, at parse time, while
+    /// zenoh parses at socket-setup time and `bail!`s
+    /// (`multicast.rs:358-361`). Failing earlier is the better answer — a
+    /// typo'd locator is refused before any socket exists — but "better" is
+    /// still different, so it is recorded rather than assumed harmless. The
+    /// accepted SET is identical either way.
+    pub mcast_ttl: Option<u32>,
+    /// R311y832 — every `#join=<group>` value, in the order written (zenoh
+    /// `UDP_MULTICAST_JOIN`, `multicast.rs:316-347`). These are joined IN
+    /// ADDITION to the locator's own group, on the same socket, which is what
+    /// lets one receiver serve several groups.
+    ///
+    /// Raw strings, not parsed addresses, and deliberately: zenoh resolves each
+    /// against the ADDRESS FAMILY of the locator's own group (v4 values for a
+    /// v4 group, v6 for v6) and that family is not known to this no_std parser.
+    /// The `ttl` field above has no such dependence, which is why the two are
+    /// typed differently.
+    pub mcast_join: Vec<String>,
 }
 
 /// Why a locator string did not parse into a [`ParsedLocator`]. Each
@@ -178,6 +204,12 @@ pub enum LocatorParseError {
     /// here. A well-formed `#iface=` tail no longer lands here (it parses); an
     /// address that is still non-numeric after the tail is stripped does.
     BadAddress(String),
+    /// R311y832 — a config key whose value this parser understands the SHAPE of
+    /// and this value does not fit: today only `#ttl=<n>` (not a `u32`).
+    /// Carries the key so the message can name it; an unknown key is still
+    /// ignored, not rejected, which is the forward-compat rule `lookup_param`
+    /// states (a private helper, so named in a code span rather than linked).
+    BadConfigValue { key: &'static str, value: String },
 }
 
 /// Parse a zenoh locator `proto/addr:port` into a [`ParsedLocator`].
@@ -217,6 +249,11 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
         proto,
         addr,
         iface: parse_iface(parts.config),
+        // R311y832 — CONFIG span, never metadata, for the same reason `iface`
+        // takes it: the two are distinct namespaces in zenoh even though they
+        // share a grammar, and `?ttl=8` is not a multicast hop limit.
+        mcast_ttl: parse_mcast_ttl(parts.config)?,
+        mcast_join: parse_mcast_join(parts.config),
     })
 }
 
@@ -233,6 +270,12 @@ const LOCATOR_PARAM_FIELD_SEPARATOR: char = '=';
 
 /// zenoh `BIND_INTERFACE` config key (`io/zenoh-link-commons/src/lib.rs:52`).
 const LOCATOR_IFACE_KEY: &str = "iface";
+
+/// zenoh `UDP_MULTICAST_TTL` config key (`zenoh-link-udp/src/lib.rs:111`).
+const LOCATOR_MCAST_TTL_KEY: &str = "ttl";
+
+/// zenoh `UDP_MULTICAST_JOIN` config key (`zenoh-link-udp/src/lib.rs:110`).
+const LOCATOR_MCAST_JOIN_KEY: &str = "join";
 
 /// zenoh `Metadata::RELIABILITY` metadata key
 /// (`zenoh-protocol/src/core/endpoint.rs:196`).
@@ -305,11 +348,22 @@ fn split_locator_parts(body: &str) -> LocatorParts<'_> {
 /// and config spans share this grammar in zenoh (one `parameters` module serves
 /// both, parameters.rs:32-33), so they share it here too. Unknown keys are
 /// ignored — forward-compat with zenoh's richer vocabulary.
-fn lookup_param<'a>(params: &'a str, key: &str) -> Option<&'a str> {
+fn lookup_param<'a>(params: &'a str, key: &'a str) -> Option<&'a str> {
+    lookup_param_all(params, key).next()
+}
+
+/// R311y832 — EVERY value for `key`, in written order. zenoh has both reads and
+/// they are not interchangeable: `Parameters::get` takes the first
+/// (`parameters.rs`) and `Parameters::values` takes them all, and the UDP link
+/// deliberately uses `values` for `join` (`multicast.rs:316`) so one socket can
+/// carry several group memberships. Using the singular read there would join
+/// the first group and silently drop the rest — a config that looks accepted
+/// and half works.
+fn lookup_param_all<'a>(params: &'a str, key: &'a str) -> impl Iterator<Item = &'a str> {
     params
         .split(LOCATOR_PARAM_LIST_SEPARATOR)
         .filter_map(|pair| pair.split_once(LOCATOR_PARAM_FIELD_SEPARATOR))
-        .find(|(k, _)| *k == key)
+        .filter(move |(k, _)| *k == key)
         .map(|(_, value)| value)
 }
 
@@ -325,6 +379,40 @@ fn parse_iface(config: &str) -> Option<String> {
     lookup_param(config, LOCATOR_IFACE_KEY)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+/// R311y832 — the `#ttl=<n>` multicast hop limit from the CONFIG span.
+///
+/// Absent or empty yields `Ok(None)`; a value that is not a `u32` is REFUSED
+/// rather than ignored. That refusal is the one judgement here: an unknown KEY
+/// is forward-compat and dropped ([`lookup_param`]), but a known key with an
+/// unusable value is a typo in the one field that decides how far this node's
+/// traffic travels, and silently defaulting it to 1 would look like a working
+/// configuration.
+fn parse_mcast_ttl(config: &str) -> Result<Option<u32>, LocatorParseError> {
+    match lookup_param(config, LOCATOR_MCAST_TTL_KEY).filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some(value) => {
+            value
+                .parse::<u32>()
+                .map(Some)
+                .map_err(|_| LocatorParseError::BadConfigValue {
+                    key: LOCATOR_MCAST_TTL_KEY,
+                    value: value.to_string(),
+                })
+        }
+    }
+}
+
+/// R311y832 — every `#join=<group>` value from the CONFIG span, in order.
+/// Empty values are dropped (an empty group name joins nothing); the addresses
+/// themselves are resolved by the socket seam, which knows the family. See
+/// [`ParsedLocator::mcast_join`].
+fn parse_mcast_join(config: &str) -> Vec<String> {
+    lookup_param_all(config, LOCATOR_MCAST_JOIN_KEY)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// R311y469 — apply the one metadata key that SELECTS A LINK KIND rather than
@@ -1110,6 +1198,68 @@ mod tests {
             any,
             AnyLocator::Ip(parse_locator("quic/127.0.0.1:7447").unwrap())
         );
+    }
+
+    // R311y832 — the two UDP multicast config keys zenoh has and wz did not
+    // (`zenoh-link-udp/src/lib.rs:108-112`). `iface`, the third, landed at
+    // R311y454.
+
+    #[test]
+    fn a_multicast_ttl_is_read_from_the_config_span() {
+        let p = parse_locator("udp/224.0.0.224:7446#ttl=8").expect("valid");
+        assert_eq!(p.mcast_ttl, Some(8));
+    }
+
+    #[test]
+    fn an_absent_multicast_ttl_leaves_the_os_default() {
+        let p = parse_locator("udp/224.0.0.224:7446").expect("valid");
+        assert_eq!(
+            p.mcast_ttl, None,
+            "None is what means 'do not call the setter'"
+        );
+    }
+
+    #[test]
+    fn a_multicast_ttl_that_is_not_a_number_is_refused() {
+        // The one key where ignoring a bad value would look like a working
+        // configuration: the node would run, publish, and reach one subnet.
+        let e = parse_locator("udp/224.0.0.224:7446#ttl=eight").expect_err("refused");
+        assert_eq!(
+            e,
+            LocatorParseError::BadConfigValue {
+                key: "ttl",
+                value: "eight".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn join_collects_every_value_not_only_the_first() {
+        // THE DISCRIMINATOR for the multi-value read. zenoh uses
+        // `Parameters::values` here, not `get` (`multicast.rs:316`), so a
+        // single-value lookup would join one group and drop the rest — a
+        // receiver that is half-subscribed and says nothing.
+        let p = parse_locator("udp/224.0.0.224:7446#join=224.0.0.1;join=224.0.0.2").expect("valid");
+        assert_eq!(p.mcast_join, ["224.0.0.1", "224.0.0.2"]);
+    }
+
+    #[test]
+    fn join_and_ttl_share_the_config_span_with_iface() {
+        let p =
+            parse_locator("udp/224.0.0.224:7446#iface=eth0;ttl=4;join=224.0.0.9").expect("valid");
+        assert_eq!(p.iface.as_deref(), Some("eth0"));
+        assert_eq!(p.mcast_ttl, Some(4));
+        assert_eq!(p.mcast_join, ["224.0.0.9"]);
+    }
+
+    #[test]
+    fn the_metadata_span_is_not_a_multicast_config() {
+        // Same namespace rule `parse_iface` states: `?` is metadata, `#` is
+        // config, and they are distinct in zenoh even though the grammar is
+        // shared. A `?ttl=` is not a hop limit and must not be read as one.
+        let p = parse_locator("udp/224.0.0.224:7446?ttl=8;join=224.0.0.1").expect("valid");
+        assert_eq!(p.mcast_ttl, None);
+        assert!(p.mcast_join.is_empty());
     }
 
     #[test]

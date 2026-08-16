@@ -41,7 +41,7 @@ use wz_runtime_tokio::multicast_glue::{
     drive_multicast_session, multicast_put_literal, spawn_router_mcast_egress, MulticastDriveConfig,
 };
 use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::UdpDriver;
+use wz_runtime_tokio::{McastGroupOptions, McastSocketConfig, UdpDriver};
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::observer::ApplicationLayerObserver;
@@ -78,7 +78,7 @@ fn mc_params(zid_byte: u8) -> MulticastParams {
 #[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
 async fn publisher_push_reaches_group_subscriber() {
     // Subscriber node B: group-joined socket + observer-backed drive loop.
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, PORT, None)
+    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, PORT, McastSocketConfig::default())
         .await
         .expect("bind multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
@@ -197,7 +197,7 @@ async fn qos_group_publish_qos_reaches_subscriber() {
     };
 
     // Subscriber node B: qos group-joined socket + observer-backed drive loop.
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, QOS_PORT, None)
+    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, QOS_PORT, McastSocketConfig::default())
         .await
         .expect("bind qos multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
@@ -323,9 +323,10 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
     const REFUSE_PORT: u16 = 7454;
 
     // Subscriber node B is NON-qos (the mc_params default is_qos=false).
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, REFUSE_PORT, None)
-        .await
-        .expect("bind non-qos multicast subscriber link");
+    let mut driver_b =
+        UdpDriver::bind_multicast_v4(GROUP, REFUSE_PORT, McastSocketConfig::default())
+            .await
+            .expect("bind non-qos multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = mc_params(0xBB);
     assert!(
@@ -444,7 +445,7 @@ async fn oversize_put_fragments_and_reassembles_across_nodes() {
         ..mc_params(zid_byte)
     };
 
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, FRAG_PORT, None)
+    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, FRAG_PORT, McastSocketConfig::default())
         .await
         .expect("bind multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
@@ -568,7 +569,7 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
     };
 
     // ── Subscriber B: joins the group, collects every delivered payload.
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, CONC_PORT, None)
+    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, CONC_PORT, McastSocketConfig::default())
         .await
         .expect("bind multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
@@ -715,9 +716,10 @@ async fn router_egress_helper_reaches_group_subscriber() {
     const HELPER_PORT: u16 = 7451;
 
     // Subscriber node: group-joined socket + observer-backed drive loop.
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, HELPER_PORT, None)
-        .await
-        .expect("bind multicast subscriber link");
+    let mut driver_b =
+        UdpDriver::bind_multicast_v4(GROUP, HELPER_PORT, McastSocketConfig::default())
+            .await
+            .expect("bind multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = mc_params(0xBB);
 
@@ -751,7 +753,13 @@ async fn router_egress_helper_reaches_group_subscriber() {
     // own task and returns the sender `RouterForwarder::attach_mcast_group` holds.
     // `qos = false`: this loopback witness pins the pico-faithful 2-channel group
     // (the per-priority conduit is exercised by the dedicated qos witness, R311y232).
-    let tx = spawn_router_mcast_egress(GROUP, HELPER_PORT, vec![0xAA; 4], false, None);
+    let tx = spawn_router_mcast_egress(
+        GROUP,
+        HELPER_PORT,
+        vec![0xAA; 4],
+        false,
+        McastGroupOptions::default(),
+    );
 
     let fired_probe = fired.clone();
     let scenario = async move {
@@ -870,12 +878,26 @@ async fn a_multicast_iface_pin_decides_whether_the_group_datagram_arrives() {
     /// One arm: join the group pinned to `rx_iface`, send one frame pinned to
     /// `tx_iface`, and report whether it arrived inside the budget.
     async fn arrives(group: Ipv4Addr, rx_iface: &str, tx_iface: &str, port: u16) -> bool {
-        let mut rx = UdpDriver::bind_multicast_v4(group, port, Some(rx_iface))
-            .await
-            .unwrap_or_else(|e| panic!("join {group}:{port} on {rx_iface}: {e}"));
-        let mut tx = UdpDriver::bind_multicast_tx_v4(group, port, Some(tx_iface))
-            .await
-            .unwrap_or_else(|e| panic!("multicast tx pinned to {tx_iface}: {e}"));
+        let mut rx = UdpDriver::bind_multicast_v4(
+            group,
+            port,
+            McastSocketConfig {
+                iface: Some(rx_iface),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("join {group}:{port} on {rx_iface}: {e}"));
+        let mut tx = UdpDriver::bind_multicast_tx_v4(
+            group,
+            port,
+            McastSocketConfig {
+                iface: Some(tx_iface),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("multicast tx pinned to {tx_iface}: {e}"));
         // A raw datagram, not a zenoh frame: the property under test is whether the
         // kernel delivers across the pinned interfaces at all, so decoding it would
         // only add ways for the test to fail for unrelated reasons.

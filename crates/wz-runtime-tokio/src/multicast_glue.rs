@@ -766,12 +766,17 @@ where
 /// interface the beacon and the group Pushes LEAVE by (`IP_MULTICAST_IF`). Owned
 /// rather than borrowed because it crosses into the spawned task. `None` leaves
 /// egress on the kernel's default multicast route, the pre-R311y454 behaviour.
+///
+/// R311y832 — `iface` became one field of [`McastGroupOptions`](crate::McastGroupOptions),
+/// which carries the other two keys of the same zenoh config module (`ttl`,
+/// `join`). Only `ttl` reaches this SEND-only half; a sender installs no
+/// membership, so `joins` is inert here by construction rather than by omission.
 pub fn spawn_router_mcast_egress(
     group: core::net::Ipv4Addr,
     port: u16,
     zid: Vec<u8>,
     qos: bool,
-    iface: Option<String>,
+    opts: crate::McastGroupOptions,
 ) -> UnboundedSender<MulticastTxItem> {
     // R311y454 — `Ipv4Addr` / `SocketAddr` were needed only for the bare
     // `UdpSocket::bind((UNSPECIFIED, 0))` + `from_socket(.., group:port)` this
@@ -817,16 +822,16 @@ pub fn spawn_router_mcast_egress(
         // the `IP_MULTICAST_IF` pin when `#iface=` names one, so an unnarrowed
         // egress is unchanged and a narrowed one fails LOUDLY here rather than
         // sending out an interface the deploy did not name.
-        let mut driver = match UdpDriver::bind_multicast_tx_v4(group, port, iface.as_deref()).await
-        {
-            Ok(driver) => driver,
-            Err(e) => {
-                log::error!(
-                    "router multicast egress: ephemeral bind failed ({e}); egress group absent"
-                );
-                return;
-            }
-        };
+        let mut driver =
+            match UdpDriver::bind_multicast_tx_v4(group, port, opts.as_socket_config()).await {
+                Ok(driver) => driver,
+                Err(e) => {
+                    log::error!(
+                        "router multicast egress: ephemeral bind failed ({e}); egress group absent"
+                    );
+                    return;
+                }
+            };
         let mut dispatcher =
             MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
         let clock = TokioTime::new();
@@ -914,12 +919,17 @@ type RouterMcastIngressChannels = (
 /// it selects which interface's group membership is installed (`imr_interface`),
 /// the mirror of the egress pin. Owned, for the same reason: it crosses into the
 /// spawned task.
+///
+/// R311y832 — now [`McastGroupOptions`](crate::McastGroupOptions). This is the
+/// half where `join` bites: every extra group is a second membership on THIS
+/// socket, so one bound port serves several groups (zenoh
+/// `zenoh-link-udp/src/multicast.rs:316-347`).
 pub fn spawn_router_mcast_ingress(
     group: core::net::Ipv4Addr,
     port: u16,
     zid: Vec<u8>,
     qos: bool,
-    iface: Option<String>,
+    opts: crate::McastGroupOptions,
 ) -> RouterMcastIngressChannels {
     use wz_session_core::driver_loop::DriverLoopOutcome;
     use wz_session_core::multicast_dispatch::MulticastConfig;
@@ -963,15 +973,16 @@ pub fn spawn_router_mcast_ingress(
     // the group's interest into the unicast mesh (cross-router reachability).
     let (group_subs_tx, group_subs_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
     tokio::spawn(async move {
-        let mut driver = match UdpDriver::bind_multicast_v4(group, port, iface.as_deref()).await {
-            Ok(driver) => driver,
-            Err(e) => {
-                log::error!(
-                    "router multicast ingress: group bind/join failed ({e}); ingress absent"
-                );
-                return;
-            }
-        };
+        let mut driver =
+            match UdpDriver::bind_multicast_v4(group, port, opts.as_socket_config()).await {
+                Ok(driver) => driver,
+                Err(e) => {
+                    log::error!(
+                        "router multicast ingress: group bind/join failed ({e}); ingress absent"
+                    );
+                    return;
+                }
+            };
         let mut dispatcher =
             MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
         let clock = TokioTime::new();
