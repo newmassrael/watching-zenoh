@@ -5288,7 +5288,7 @@ pub(crate) async fn run_storage_host(
     }
     // The flag the GET handler reads; shared with the Send+'static handler via Arc.
     let storage_started = Arc::new(AtomicBool::new(false));
-    // R311y827 — the storage_manager admin SUB-TREE
+    // R311y828 — the storage_manager admin SUB-TREE
     // (`status/plugins/storage_manager/{version,volumes/**,storages/**}`), shared
     // with the same Send+'static handler by the same means and for the same
     // reason: the manager is task-local and not `Send`, so the handler cannot read
@@ -5363,7 +5363,7 @@ pub(crate) async fn run_storage_host(
         // swaps compiled_plugins -> compiled_plugins_dyn(&version, storage_started) so
         // the plugins leg reports Started iff a storage is live.
         let get_started = storage_started.clone();
-        // R311y827 — the sub-tree snapshot, cloned per declare like the flag above.
+        // R311y828 — the sub-tree snapshot, cloned per declare like the flag above.
         let get_leaves = storage_leaves.clone();
         let get_zid = zid_hex.clone();
         let get_version = version.clone();
@@ -5403,7 +5403,7 @@ pub(crate) async fn run_storage_host(
                 // live (!manager.is_empty(), reflected into storage_started), Loaded
                 // otherwise. This is what binds the witness to REAL add_storage.
                 let mut plugins = compiled_plugins_dyn(&get_version, get_started.load(Relaxed));
-                // R311y827 — and the subsystem's OWN admin sub-tree, which is what
+                // R311y828 — and the subsystem's OWN admin sub-tree, which is what
                 // makes `storage_manager` introspectable rather than merely listed.
                 // Matched by id rather than by index: the registry gains entries
                 // (the `rest` extension point, the dlopen'd records below), and a
@@ -5515,7 +5515,7 @@ pub(crate) async fn run_storage_host(
         let session_for_dispatch = session.clone();
         let dispatch_pending = pending.clone();
         let dispatch_started = storage_started.clone();
-        // R311y827 — the sub-tree snapshot, refreshed next to the flag below, and
+        // R311y828 — the sub-tree snapshot, refreshed next to the flag below, and
         // the version it stamps. Cloned per iteration like every other capture here
         // rather than borrowed, so the closure's captures stay uniform.
         let dispatch_leaves = storage_leaves.clone();
@@ -5633,7 +5633,7 @@ pub(crate) async fn run_storage_host(
                 // — never a bare bool flip that would report Started without a live storage
                 // (an OVER-CLAIM this design forbids).
                 dispatch_started.store(!manager.is_empty(), Relaxed);
-                // R311y827 — and the sub-tree, re-rendered from the SAME manager in
+                // R311y828 — and the sub-tree, re-rendered from the SAME manager in
                 // the same statement group, so an admin GET can never see a
                 // storage_manager reported Started whose `storages/**` is still the
                 // pre-add snapshot (or the reverse after a `storage-del`).

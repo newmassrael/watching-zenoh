@@ -594,7 +594,7 @@ fn admin_plugin_status_path_key(zid_hex: &str, whatami: &str, id: &str) -> Strin
     s
 }
 
-/// R311y827 (§5.23 `adminspace-plugins-handlers`) — the per-plugin STATUS ROOT
+/// R311y828 (§5.23 `adminspace-plugins-handlers`) — the per-plugin STATUS ROOT
 /// `@/<zid>/<whatami>/status/plugins/<id>`, which is both the parent of the
 /// `__path__` leg and the prefix every [`AdminPluginStatusLeaf`] hangs off. zenoh
 /// builds the same string once as `plugin_key` and passes it to the plugin's
@@ -795,7 +795,7 @@ pub fn answer_admin_query(
         // plugin's OWN sub-tree. zenoh iterates `started_plugins_iter()`, replies
         // `__path__` as TEXT_PLAIN (adminspace.rs:960-969) and then delegates the
         // rest of the sub-tree to the plugin's `adminspace_getter` (:987), replying
-        // each response as APPLICATION_JSON (:992-996). R311y827 closed that
+        // each response as APPLICATION_JSON (:992-996). R311y828 closed that
         // delegation: the leaves arrive on the record the host already rebuilds per
         // GET ([`AdminPluginStatusLeaf`]), so the two halves of a reply describe the
         // same instant. Emission order matches upstream — `__path__` first, then the
@@ -2109,7 +2109,7 @@ mod tests {
             assert_eq!(out.replies[0].1, WZ_STATIC_PLUGIN_PATH.as_bytes());
         }
 
-        // R311y827 — a plugin that publishes leaves. `storage_manager` is the one
+        // R311y828 — a plugin that publishes leaves. `storage_manager` is the one
         // subsystem wz claims to mirror, and it is exactly the upstream plugin whose
         // `adminspace_getter` publishes `/version`, `/volumes/**` and `/storages/**`
         // (plugins/zenoh-plugin-storage-manager/src/lib.rs:336-389).
@@ -2130,7 +2130,7 @@ mod tests {
 
         #[test]
         fn a_plugin_publishing_no_leaves_serves_only_path() {
-            // The CONTROL for the two tests below, and the state R311y827 measured
+            // The CONTROL for the two tests below, and the state R311y828 measured
             // before changing anything: with no leaves the sub-tree GET yields the
             // `__path__` leg and NOTHING else. It is what makes a green
             // `status_subtree_serves_every_leaf` mean the leaves were served rather

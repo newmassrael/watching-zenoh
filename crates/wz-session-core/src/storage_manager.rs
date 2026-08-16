@@ -95,7 +95,7 @@ impl VolumeRegistry {
             .map_err(VolumeRegistryError::VolumeCreate)
     }
 
-    /// R311y827 — every registered volume as `(id, volume)`, id-sorted (the
+    /// R311y828 — every registered volume as `(id, volume)`, id-sorted (the
     /// backing `BTreeMap`). The enumeration the admin
     /// `status/plugins/storage_manager/volumes/**` legs render from, the wz
     /// counterpart of upstream walking its own `plugins_manager

@@ -3744,7 +3744,7 @@ layer_c1am_cargo_test_adminspace() {
         cargo test -p wz-session-core --features adminspace-introspection-handlers --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM adminspace 21" 21 \
         cargo test -p wz-session-core --features adminspace-router-linkstate --lib adminspace --quiet || return 1
-    # R311y827 25 -> 29: the storage_manager status SUB-TREE. Four legs — the
+    # R311y828 25 -> 29: the storage_manager status SUB-TREE. Four legs — the
     # no-leaf CONTROL, the served sub-tree, the narrowed GET's own filtering, and
     # the Started gate over the leaves. They land HERE and not on the hotreload
     # guard below because `wz-session-core`'s own `adminspace-config-hotreload`
@@ -3766,7 +3766,7 @@ layer_c1am_cargo_test_adminspace() {
     # pin is why the count moved visibly instead of the module quietly growing.
     _runci_guarded_test "C1AM adminspace 26" 26 \
         cargo test -p wz-session-core --features adminspace-config-hotreload --lib adminspace --quiet || return 1
-    # R311y827 5 -> 6: the live manager's admin sub-tree render. It is gated on
+    # R311y828 5 -> 6: the live manager's admin sub-tree render. It is gated on
     # `adminspace-plugins-handlers`, so the C1z sibling guard over the SAME module
     # (no adminspace feature) stays at 5 — measured, not assumed.
     _runci_guarded_test "C1AM storage_manager_service 6" 6 \
@@ -4637,7 +4637,7 @@ layer_c1y_cargo_test_routing_peer() {
 # are Locality::Remote, so no single-session loopback can drive them). `--lib`
 # excludes integration tests, so the e2e needs its own `--test` invocation.
 layer_c1z_cargo_test_storage_driver() {
-    # R311y827 +1 on every `-p wz-session-core --lib storage` guard below: the
+    # R311y828 +1 on every `-p wz-session-core --lib storage` guard below: the
     # `StorageConfig::to_admin_json` escaper test. The filter is a module PREFIX,
     # so `storage_config` is inside it in every one of these feature subsets —
     # each was re-measured rather than incremented on the assumption.

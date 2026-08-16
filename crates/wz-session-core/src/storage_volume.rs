@@ -73,7 +73,7 @@ pub struct Capability {
 }
 
 impl Capability {
-    /// R311y827 — this capability as the admin `status/plugins/storage_manager/
+    /// R311y828 — this capability as the admin `status/plugins/storage_manager/
     /// volumes/<id>` body.
     ///
     /// Upstream answers that key with the volume's CONFIG
@@ -159,7 +159,7 @@ pub trait Volume {
         config: &StorageConfig,
     ) -> Result<Box<dyn StorageBackend + Send>, VolumeError>;
 
-    /// R311y827 — where this volume's IMPLEMENTATION came from, for the admin
+    /// R311y828 — where this volume's IMPLEMENTATION came from, for the admin
     /// `status/plugins/storage_manager/volumes/<id>/__path__` leg. zenoh reports a
     /// volume plugin's dylib path there (`plugin.path()`,
     /// `zenoh-plugin-storage-manager/src/lib.rs:356-359`).

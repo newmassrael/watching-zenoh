@@ -8,7 +8,7 @@
 //! `z_get` `@/<zid>/peer/plugins/**` then decodes `storage_manager` state `Started`
 //! (`Loaded` before); a `storage-del demo` reverses it back to `Loaded`.
 //!
-//! R311y827 extends the same run with the STATUS SUB-TREE
+//! R311y828 extends the same run with the STATUS SUB-TREE
 //! (`@/<zid>/peer/status/plugins/storage_manager/**`), which the
 //! `adminspace-plugins-handlers` atom had recorded as unserved: the pico client
 //! reads the host's registered volume back as a capability object and the storage
@@ -78,7 +78,7 @@ fn pico_get_plugins_output(z_get: &Path, root: &str, addr: &str) -> String {
     pico_get_output(z_get, &format!("{root}/plugins/**"), addr)
 }
 
-/// R311y827 — the same one-shot pico `z_get`, on an ARBITRARY keyexpr. The
+/// R311y828 — the same one-shot pico `z_get`, on an ARBITRARY keyexpr. The
 /// `plugins/**` helper above now routes through this so the two GETs this test
 /// makes are byte-for-byte the same client behaviour on different keys, and a
 /// difference in what comes back cannot be a difference in how it was asked.
@@ -117,7 +117,7 @@ fn pico_get_output(z_get: &Path, keyexpr: &str, addr: &str) -> String {
     out
 }
 
-/// R311y827 — whether the pico-decoded output carries a reply keyed exactly `key`.
+/// R311y828 — whether the pico-decoded output carries a reply keyed exactly `key`.
 /// pico's `z_get` prints one `('<key>': '<payload>')` line per reply, so presence
 /// is read off the key literal rather than off a payload substring that could
 /// occur under some other key.
@@ -125,7 +125,7 @@ fn pico_replied_at(out: &str, key: &str) -> bool {
     out.lines().any(|l| l.contains(&format!("('{key}':")))
 }
 
-/// R311y827 — the pico-decoded reply body at `key`, or a panic naming what DID
+/// R311y828 — the pico-decoded reply body at `key`, or a panic naming what DID
 /// come back. Used for the `status/plugins/storage_manager/**` sub-tree legs.
 fn pico_body_at(out: &str, key: &str, when: &str) -> String {
     let marker = format!("('{key}': '");
@@ -267,7 +267,7 @@ fn wz_storage_host_config_hotreload_state_flip_via_pico() {
     let out_added = pico_get_plugins_output(&z_get, &root, &addr);
     assert_plugins_state(&out_added, &root, "Started", "after storage-add");
 
-    // ── (3b) R311y827 — the storage_manager STATUS SUB-TREE, over the wire, read
+    // ── (3b) R311y828 — the storage_manager STATUS SUB-TREE, over the wire, read
     //    by a FOREIGN client. This is the leg the `adminspace-plugins-handlers`
     //    atom recorded as unserved: upstream's `adminspace_getter` publishes
     //    `/version`, `/volumes/**` and `/storages/**`, and wz answered only
@@ -322,7 +322,7 @@ fn wz_storage_host_config_hotreload_state_flip_via_pico() {
     let out_removed = pico_get_plugins_output(&z_get, &root, &addr);
     assert_plugins_state(&out_removed, &root, "Loaded", "after storage-del");
 
-    // ── (5b) R311y827 — and the sub-tree FOLLOWS the manager rather than being a
+    // ── (5b) R311y828 — and the sub-tree FOLLOWS the manager rather than being a
     //    snapshot taken at host start: the storage leg is gone. Both halves are
     //    asserted because either alone is weak — a sub-tree that never appeared
     //    would also pass "it is gone now", which is why (3b) had to see it first.

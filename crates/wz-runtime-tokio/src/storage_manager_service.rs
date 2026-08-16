@@ -186,7 +186,7 @@ impl<R: SessionRuntime, T: TimeSource> RuntimeStorageManager<R, T> {
         self.services.remove(name).is_some()
     }
 
-    /// R311y827 — this manager's live state as the admin sub-tree below
+    /// R311y828 — this manager's live state as the admin sub-tree below
     /// `@/<zid>/<whatami>/status/plugins/storage_manager`, the wz analogue of
     /// `StoragesPlugin`'s `adminspace_getter`
     /// (`zenoh-plugin-storage-manager/src/lib.rs:336-389`). Feed the result to
@@ -385,7 +385,7 @@ mod tests {
         TokioSession::new(actions, observer, clock)
     }
 
-    // R311y827 — the admin sub-tree the `adminspace-plugins-handlers` atom's
+    // R311y828 — the admin sub-tree the `adminspace-plugins-handlers` atom's
     // named residual said was unserved. It was NOT vacuous: `storage_manager` is
     // the one subsystem wz claims to mirror, it is exactly the upstream plugin
     // that implements `adminspace_getter`, and this manager owns live volumes and
@@ -525,7 +525,7 @@ mod tests {
     // a `storage-del` reverses it. SCOPE: this drives compiled_plugins_dyn DIRECTLY with
     // the manager's live state — it proves the parse→spawn→despawn→builder chain, not the
     // answer_admin_query reply path. That path IS covered, by Layer E6h against a foreign
-    // pico client on the `--storage-host` demo mode; R311y827 corrected the parenthetical
+    // pico client on the `--storage-host` demo mode; R311y828 corrected the parenthetical
     // here, which claimed no shipping host fed a live slice.
     #[cfg(feature = "adminspace-config-hotreload")]
     // R311y503 — a live storage now starts its periodic garbage collector

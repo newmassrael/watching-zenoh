@@ -353,7 +353,7 @@ pub fn compiled_plugins(version: &str) -> Vec<wz_session_core::adminspace::Admin
 /// manager, so they still — correctly — pass the STATIC [`compiled_plugins`] slice.
 ///
 /// (This note said "no SHIPPING admin host calls this yet" long after the storage
-/// host landed. R311y827 corrected it while wiring the status sub-tree through the
+/// host landed. R311y828 corrected it while wiring the status sub-tree through the
 /// same host; a stale "not wired" note reopens finished work exactly as the
 /// `Volume::create_storage` one did.)
 #[cfg(feature = "adminspace-config-hotreload")]
