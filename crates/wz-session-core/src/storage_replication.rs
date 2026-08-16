@@ -314,6 +314,73 @@ impl ReplicationConfig {
         self.propagation_delay_ms
     }
 
+    /// The delay, from `now_unix_ms`, until the next interval boundary — what
+    /// a freshly started replica sleeps before its FIRST publication so its
+    /// digests land at every interval (+ δ) instead of at whatever offset the
+    /// process happened to start at. zenoh `duration_until_next_interval`
+    /// (core.rs:163-190), which spells it `interval - (now -
+    /// last_elapsed_interval * interval)`; since `last_elapsed_interval` is
+    /// `now / interval` (configuration.rs:113-120), that is `interval - (now %
+    /// interval)`, computed here in the shorter form.
+    ///
+    /// `now_unix_ms` is milliseconds since the UNIX epoch and NOT a monotonic
+    /// reading. The boundaries are shared across a fleet only because every
+    /// replica derives them from the same epoch, which is the entire point of
+    /// aligning; a monotonic clock would align each replica to its own start
+    /// and de-align the fleet.
+    ///
+    /// On an exact boundary this returns the FULL `interval_ms`, not `0` —
+    /// zenoh's arithmetic, kept: a replica that starts precisely on a boundary
+    /// has already missed that boundary's publication window.
+    pub fn alignment_delay_ms(&self, now_unix_ms: u64) -> u64 {
+        // `interval_ms >= sub_intervals >= 1` is a construction invariant
+        // (`new` asserts it), so the modulo cannot divide by zero.
+        self.interval_ms - (now_unix_ms % self.interval_ms)
+    }
+
+    /// The exclusive upper bound of the publication jitter: `interval / 3`
+    /// (zenoh `max_publication_delay`, core.rs:196).
+    pub fn max_publication_delay_ms(&self) -> u64 {
+        self.interval_ms / 3
+    }
+
+    /// Maps an arbitrary `draw` onto the jitter range `0..max`, i.e. zenoh's
+    /// `rand::thread_rng().gen_range(0..max_publication_delay)`
+    /// (core.rs:236). The jitter exists to stop a fleet publishing in
+    /// lockstep, so the reduction is a plain modulo: its bias across a range
+    /// this small is invisible against that purpose, and nothing here is a
+    /// security claim.
+    ///
+    /// Taking the draw as a VALUE rather than as a source is what keeps the
+    /// whole publication schedule a pure function of its inputs — see
+    /// [`JitterSequence`] for where a replica's draws come from.
+    ///
+    /// An `interval_ms` under 3ms yields a `max` of 0 and therefore no jitter,
+    /// rather than a modulo by zero.
+    pub fn publication_delay_ms(&self, draw: u64) -> u64 {
+        let max = self.max_publication_delay_ms();
+        if max == 0 {
+            0
+        } else {
+            draw % max
+        }
+    }
+
+    /// The sleep that CLOSES a publication cycle: `interval - cycle_duration`,
+    /// so the publication PERIOD stays `interval_ms` no matter how long the
+    /// cycle's own work (the propagation wait, the digest build, the jitter,
+    /// the put) took. zenoh core.rs:262-272.
+    ///
+    /// `None` means the cycle overran a whole interval; zenoh warns that the
+    /// interval is configured too short and re-enters the loop immediately,
+    /// so a caller that gets `None` should not sleep rather than treat it as
+    /// an error. Without this subtraction the period would be `interval +
+    /// work` and a replica would publish strictly less often than configured
+    /// — the drift compounds over a session.
+    pub fn post_publication_delay_ms(&self, cycle_duration_ms: u64) -> Option<u64> {
+        self.interval_ms.checked_sub(cycle_duration_ms)
+    }
+
     /// Classifies an NTP64 `time` into its `(interval, sub-interval)` bucket.
     /// zenoh `Configuration::get_time_classification`
     /// (configuration.rs:193-220): convert to milliseconds since the epoch,
@@ -368,6 +435,63 @@ impl ReplicationConfig {
                 .saturating_sub(self.warm)
                 .saturating_add(1),
         )
+    }
+}
+
+/// Where one replica's publication-jitter draws come from: a per-replica
+/// sequence, seeded from the replica's own zid, that feeds
+/// [`ReplicationConfig::publication_delay_ms`].
+///
+/// ## Why not an entropy source
+///
+/// zenoh draws the jitter from `rand::thread_rng()` (core.rs:236). wz seeds
+/// from the zid instead, and the reason is the purpose of the draw: upstream
+/// states it as "we do not want to create a coordinated update storm with all
+/// replicas publishing at the same time" (core.rs:234-235). What that needs is
+/// that DISTINCT replicas draw distinct sequences — and the zid is precisely
+/// the value a fleet is already guaranteed to differ on. Seeding from it gets
+/// the property directly, in a no_std kernel, with no entropy port and no
+/// failure path to invent a fallback for.
+///
+/// It is therefore NOT unpredictable to an observer, and it must not be
+/// borrowed for anything that needs it to be: this crate's
+/// [`EntropySource`](crate::entropy::EntropySource) is the port with that
+/// contract, and its own note says a source that satisfies the type while
+/// defeating the purpose is the failure to avoid. De-correlation and
+/// unpredictability are different requirements; only the first is claimed
+/// here.
+///
+/// The sequence is deterministic, so a restarted replica repeats its own
+/// draws. That is harmless — the anti-storm property is across replicas, not
+/// across one replica's restarts — and it is what makes the schedule testable
+/// end to end.
+pub struct JitterSequence {
+    state: u64,
+}
+
+impl JitterSequence {
+    /// Seed the sequence for the replica identified by `zid`, hashed with the
+    /// same `Xxh3` this module already uses for its fingerprints so no second
+    /// hashing dependency enters the kernel.
+    pub fn for_replica(zid: &[u8]) -> Self {
+        let mut hasher = Xxh3::default();
+        hasher.update(zid);
+        Self {
+            state: hasher.digest(),
+        }
+    }
+
+    /// Advance and return the next draw (SplitMix64), which the caller hands
+    /// to [`ReplicationConfig::publication_delay_ms`] to land it in the jitter
+    /// range. SplitMix64 is chosen for being a few wrapping operations over a
+    /// single `u64` of state — the whole requirement here is that successive
+    /// cycles do not repeat one offset, not statistical quality.
+    pub fn next_draw(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
     }
 }
 
@@ -1018,6 +1142,102 @@ mod tests {
 
     fn ts(time: u64, zid: alloc::vec::Vec<u8>) -> TimestampHint {
         TimestampHint { time, zid }
+    }
+
+    // -- Publication schedule (R311y829) ---------------------------------
+
+    /// zenoh's `duration_until_next_interval` (core.rs:163-190) as a pure
+    /// function: the delay a starting replica sleeps to land on the fleet's
+    /// shared boundary. The boundary case is the interesting one — a replica
+    /// that starts exactly ON a boundary waits a FULL interval rather than
+    /// publishing immediately, because it has already missed that boundary's
+    /// window.
+    #[test]
+    fn alignment_delay_lands_on_the_next_interval_boundary() {
+        let config = ReplicationConfig::new("demo/**", None, 1_000, 5, 6, 30, 250);
+
+        assert_eq!(config.alignment_delay_ms(7_000), 1_000);
+        assert_eq!(config.alignment_delay_ms(7_001), 999);
+        assert_eq!(config.alignment_delay_ms(7_999), 1);
+
+        // The point of the whole exercise: two replicas that start at
+        // different moments inside the same interval arrive at the SAME
+        // boundary.
+        assert_eq!(7_001 + config.alignment_delay_ms(7_001), 8_000);
+        assert_eq!(7_999 + config.alignment_delay_ms(7_999), 8_000);
+    }
+
+    /// The jitter range is `0..interval/3` (zenoh `max_publication_delay`,
+    /// core.rs:196), and an interval too short to have thirds yields NO
+    /// jitter rather than a modulo by zero.
+    #[test]
+    fn publication_delay_maps_a_draw_into_the_jitter_range() {
+        let config = ReplicationConfig::new("demo/**", None, 1_000, 5, 6, 30, 250);
+        assert_eq!(config.max_publication_delay_ms(), 333);
+
+        for draw in [0, 1, 332, 333, 334, u64::MAX] {
+            let delay = config.publication_delay_ms(draw);
+            assert!(delay < 333, "draw {draw} produced {delay}");
+        }
+        // The reduction is a plain modulo, pinned so a future change to it is
+        // a decision rather than a drift.
+        assert_eq!(config.publication_delay_ms(0), 0);
+        assert_eq!(config.publication_delay_ms(334), 1);
+
+        // `interval / 3 == 0`: no jitter, and specifically no panic.
+        let tiny = ReplicationConfig::new("demo/**", None, 2, 2, 6, 30, 0);
+        assert_eq!(tiny.max_publication_delay_ms(), 0);
+        assert_eq!(tiny.publication_delay_ms(u64::MAX), 0);
+    }
+
+    /// The closing sleep is `interval - cycle_work`, which is what holds the
+    /// publication PERIOD at `interval` instead of letting it grow to
+    /// `interval + work` (zenoh core.rs:262-272). `None` is the overrun
+    /// signal, not an error: upstream warns and re-enters immediately.
+    #[test]
+    fn post_publication_delay_holds_the_period_at_one_interval() {
+        let config = ReplicationConfig::new("demo/**", None, 1_000, 5, 6, 30, 250);
+
+        assert_eq!(config.post_publication_delay_ms(0), Some(1_000));
+        assert_eq!(config.post_publication_delay_ms(250), Some(750));
+        // A cycle that exactly fills the interval sleeps zero — still Some, so
+        // a caller cannot confuse "no time left" with "overran".
+        assert_eq!(config.post_publication_delay_ms(1_000), Some(0));
+        assert_eq!(config.post_publication_delay_ms(1_001), None);
+
+        // The invariant the subtraction exists for: work + closing sleep is
+        // one interval, whatever the work was.
+        for work in [0, 1, 250, 999, 1_000] {
+            assert_eq!(
+                work + config.post_publication_delay_ms(work).unwrap(),
+                1_000
+            );
+        }
+    }
+
+    /// The anti-storm property [`JitterSequence`] actually claims: DISTINCT
+    /// replicas draw distinct sequences. Unpredictability is explicitly not
+    /// claimed (that is what [`crate::entropy::EntropySource`] is for), so it
+    /// is not asserted here either.
+    #[test]
+    fn jitter_sequences_differ_per_replica_and_across_cycles() {
+        let draws = |zid: &[u8]| {
+            let mut seq = JitterSequence::for_replica(zid);
+            [seq.next_draw(), seq.next_draw(), seq.next_draw()]
+        };
+
+        let a = draws(&[0x01]);
+        let b = draws(&[0x02]);
+        assert_ne!(a, b, "two replicas must not publish in lockstep");
+
+        // Successive cycles move, or the jitter would be a fixed per-replica
+        // offset rather than a jitter.
+        assert_ne!(a[0], a[1]);
+        assert_ne!(a[1], a[2]);
+
+        // Seeded, so the same replica reproduces its own sequence — which is
+        // what lets the schedule be tested end to end.
+        assert_eq!(a, draws(&[0x01]));
     }
 
     // -- Fingerprint algebra --------------------------------------------

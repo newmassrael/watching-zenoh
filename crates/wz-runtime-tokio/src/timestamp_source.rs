@@ -111,6 +111,27 @@ pub fn wall_clock_ntp64() -> u64 {
     Ntp64::from_unix(since_epoch.as_secs(), since_epoch.subsec_nanos()).as_word()
 }
 
+/// The same wall clock as [`wall_clock_ntp64`], in plain milliseconds since
+/// the UNIX epoch — the unit a replication INTERVAL BOUNDARY is defined in.
+///
+/// Its one consumer is the digest publisher's start-up alignment
+/// ([`ReplicationConfig::alignment_delay_ms`](wz_session_core::storage_replication::ReplicationConfig::alignment_delay_ms),
+/// zenoh `Configuration::last_elapsed_interval`, configuration.rs:113-120),
+/// which needs an epoch every replica in the fleet agrees on. A monotonic
+/// reading cannot serve: two replicas' monotonic epochs are their own start
+/// times, so aligning against one would de-align the fleet.
+///
+/// Kept here, beside its NTP64 sibling, rather than derived from it: both are
+/// the same `SystemTime::now()` recipe in different units, and going through
+/// NTP64 would route an exact millisecond count through a fraction conversion
+/// that only exists to match uhlc.
+pub fn wall_clock_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 /// The fallback timestamp source for an un-timestamped sample: the seam that
 /// selects HOW the stamp's time word is produced. Constructed once per
 /// storage (over the storage's `zid`) and called on every captured

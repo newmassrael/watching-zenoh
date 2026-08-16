@@ -28,14 +28,24 @@
 //! (core.rs:45-48), filled with the replica zid and the configuration
 //! fingerprint (core.rs:136-148).
 //!
+//! ## The publication schedule
+//!
+//! R311y829 — the loop is upstream's, not a plain tick: it aligns to the
+//! fleet's shared interval boundaries before its first publication, waits the
+//! configured `propagation_delay` before reading the store, jitters the put by
+//! `0..interval/3` to de-correlate a fleet, and subtracts the cycle's own work
+//! from the closing sleep so the PERIOD stays `interval_ms`
+//! (core.rs:161-272). The arithmetic is four pure functions on
+//! [`ReplicationConfig`] (`alignment_delay_ms`, `propagation_delay_ms`,
+//! `publication_delay_ms`, `post_publication_delay_ms`) so the schedule is
+//! testable without a wall clock; this module supplies only the clock reads.
+//! The jitter draws come from
+//! [`JitterSequence`](wz_session_core::storage_replication::JitterSequence),
+//! seeded per replica from its zid — see that type for why de-correlation
+//! does not want the entropy port.
+//!
 //! ## Deliberate divergences (each documented)
 //!
-//! - **No propagation-delay pre-sleep or random jitter.** zenoh sleeps
-//!   `propagation_delay` before each compute (to catch in-transit pubs) and
-//!   adds `0..interval/3` random jitter (to de-correlate a fleet's
-//!   publications, core.rs:198-237). Both are mesh-tuning, not correctness;
-//!   wz publishes on a plain interval tick. They are a later tuning atom
-//!   (and randomness needs a seeded source in this deterministic kernel).
 //! - **Recompute, not an incremental log.** The digest is rebuilt from the
 //!   storage snapshot each tick (the kernel
 //!   [`StorageState::replication_digest`](wz_session_core::storage_state::StorageState::replication_digest)
@@ -48,14 +58,16 @@ use wz_session_core::link::SessionRuntime;
 use wz_session_core::locality::Locality;
 use wz_session_core::sink::SampleView;
 use wz_session_core::storage_backend::StorageBackend;
-use wz_session_core::storage_replication::{wire, zid_to_zenoh_hex, DigestDiff, ReplicationConfig};
+use wz_session_core::storage_replication::{
+    wire, zid_to_zenoh_hex, DigestDiff, JitterSequence, ReplicationConfig,
+};
 use wz_session_core::storage_state::StorageState;
 
 use crate::session::{
-    PublishError, PublishOptions, Session, SubscribeError, SubscribeOptions, Subscriber, Unicast,
+    PublishOptions, Session, SubscribeError, SubscribeOptions, Subscriber, Unicast,
 };
 use crate::session_glue::SessionLinkActions;
-use crate::timestamp_source::wall_clock_ntp64;
+use crate::timestamp_source::{wall_clock_ntp64, wall_clock_unix_ms};
 
 /// The keyexpr a replica publishes its Digest on:
 /// `@-digest/<zid-hex>/<config-fp>`. zenoh `digest_key_expr_formatter`
@@ -112,7 +124,11 @@ pub fn digest_keyexpr_zid_hex(keyexpr: &str) -> Option<&str> {
 /// testable). The Hot-era upper bound is the current interval,
 /// `config.classify(now).0` (zenoh `last_elapsed_interval`,
 /// configuration.rs:116-126). Pure over the shared state: no Session, no
-/// clock — the testable core of [`publish_digest_once`].
+/// clock — the testable core of the publication cycle, which
+/// [`DigestPublisher::spawn`] puts on the wire with `PublishOptions::put()`
+/// (`Locality::Any`, so a digest reaches remote replicas; a replica ignores
+/// its own copy via the Remote-only digest subscriber, the R7 atom — zenoh
+/// `zenoh_session.put(digest_key, ..)`, core.rs:244-257).
 fn digest_frame<B: StorageBackend>(
     state: &Arc<Mutex<StorageState<B>>>,
     config: &ReplicationConfig,
@@ -125,29 +141,6 @@ fn digest_frame<B: StorageBackend>(
         guard.replication_digest(config, hot_upper)
     };
     (digest_keyexpr(config, local_zid), wire::encode(&digest))
-}
-
-/// Builds and publishes this storage's Digest once on the digest keyexpr,
-/// `now` taken from the wall clock. `PublishOptions::put()` is
-/// `Locality::Any`, so the digest reaches remote replicas (a replica ignores
-/// its own copy via the Remote-only digest subscriber, the R7 atom). Returns
-/// how many subscribers the publish reached. zenoh per-interval
-/// `zenoh_session.put(digest_key, ..)` (core.rs:244-257).
-fn publish_digest_once<R, T, B>(
-    state: &Arc<Mutex<StorageState<B>>>,
-    session: &Session<R, T, Unicast>,
-    config: &ReplicationConfig,
-    local_zid: &[u8],
-) -> Result<usize, PublishError>
-where
-    R: SessionRuntime,
-    T: TimeSource,
-    B: StorageBackend,
-    <R as SessionRuntime>::LinkSink: Send + Sync,
-    SessionLinkActions<R, T>: Send + Sync + 'static,
-{
-    let (keyexpr, bytes) = digest_frame(state, config, local_zid, wall_clock_ntp64());
-    session.publish(&keyexpr, &bytes, PublishOptions::put())
 }
 
 /// A running digest publisher bound to a [`Session`]: a spawned task that
@@ -170,10 +163,11 @@ impl DigestPublisher {
     /// Spawn the periodic digest publisher. `state` is shared with the
     /// [`StorageService`](crate::storage_service::StorageService) (pass
     /// [`StorageService::shared_state`](crate::storage_service::StorageService::shared_state)),
-    /// so the published digest reflects the live stored data. The loop sleeps
-    /// `config.interval_ms` then publishes (zenoh `spawn_digest_publisher`
-    /// loop, core.rs:202-272). The publish body is the deterministically
-    /// tested [`publish_digest_once`]; this is the thin timer glue over it.
+    /// so the published digest reflects the live stored data. The loop is
+    /// zenoh's `spawn_digest_publisher` (core.rs:161-272) — see the module's
+    /// "publication schedule" note for the four sleeps it is built from. The
+    /// frame body is the deterministically tested [`digest_frame`]; this is
+    /// the timer glue over it.
     pub fn spawn<R, T, B>(
         session: &Session<R, T, Unicast>,
         state: Arc<Mutex<StorageState<B>>>,
@@ -190,13 +184,55 @@ impl DigestPublisher {
     {
         let session = session.clone();
         let clock = Arc::clone(session.clock());
-        let interval_ms = config.interval_ms();
         let task = tokio::spawn(async move {
+            // Align to the interval boundaries the whole fleet shares, rather
+            // than to whenever this process happened to start (zenoh
+            // core.rs:161-191). Read once, before the loop: from here on the
+            // period is maintained by the closing sleep below, so the schedule
+            // never re-reads a clock that could have been stepped.
+            clock
+                .sleep(config.alignment_delay_ms(wall_clock_unix_ms()))
+                .await;
+
+            let mut jitter = JitterSequence::for_replica(&local_zid);
             loop {
-                clock.sleep(interval_ms).await;
+                // Measured on the SAME timeline the sleeps below run on, which
+                // is what makes the closing subtraction mean anything.
+                let cycle_start = clock.now_monotonic_ms();
+
+                // Wait out the configured propagation delay BEFORE reading the
+                // store, so publications still in transit toward this node have
+                // landed and the digest describes a settled interval
+                // (core.rs:203-209). This is the parameter that
+                // [`ReplicationConfig`] has always hashed into the
+                // configuration fingerprint that gates digest exchange.
+                clock.sleep(config.propagation_delay_ms()).await;
+
+                let (keyexpr, bytes) =
+                    digest_frame(&state, &config, &local_zid, wall_clock_ntp64());
+
+                // The JITTER sits between the build and the put, as upstream's
+                // does (core.rs:234-243): it de-correlates when the fleet
+                // TRANSMITS, while the digest still describes the moment the
+                // propagation window closed. Jittering before the build would
+                // move the observation instead.
+                clock
+                    .sleep(config.publication_delay_ms(jitter.next_draw()))
+                    .await;
+
                 // A publish error (e.g. a torn-down link) is non-fatal to the
-                // loop — the next tick republishes the full current digest.
-                let _ = publish_digest_once(&state, &session, &config, &local_zid);
+                // loop — the next cycle republishes the full current digest.
+                let _ = session.publish(&keyexpr, &bytes, PublishOptions::put());
+
+                // Close the cycle so the PERIOD is interval_ms: the cycle's own
+                // work is subtracted, not added on top (core.rs:262-272).
+                // `None` = the cycle overran an interval, where upstream warns
+                // and re-enters immediately; re-entering is the honest
+                // response, since sleeping would push the drift further.
+                let elapsed = clock.now_monotonic_ms().saturating_sub(cycle_start);
+                if let Some(rest) = config.post_publication_delay_ms(elapsed) {
+                    clock.sleep(rest).await;
+                }
             }
         });
         Self { task }
@@ -558,7 +594,7 @@ mod tests {
     // A REAL live-session test: spawn the publisher against a session and a
     // loopback subscriber on the digest keyexpr; the loop must publish a
     // decodable digest carrying this replica's configuration fingerprint.
-    // Exercises spawn -> clock.sleep -> publish_digest_once -> keyexpr ->
+    // Exercises spawn -> the publication cycle -> digest_frame -> keyexpr ->
     // wire payload -> a subscriber, plus the RAII abort on drop.
     #[cfg(all(feature = "declare-subscriber", feature = "pubsub-allow-loop"))]
     #[tokio::test]
@@ -609,5 +645,172 @@ mod tests {
         assert_eq!(digest.configuration_fingerprint(), config.fingerprint());
 
         drop(publisher); // RAII abort the loop.
+    }
+
+    /// Records, in the publisher's own virtual clock, the millisecond offset
+    /// from spawn of the first `count` digests a `config`-configured publisher
+    /// emits.
+    ///
+    /// The instant is taken INSIDE the subscriber callback, at the exact
+    /// virtual moment the digest lands, so an offset is never conflated with
+    /// the granularity of a poll. The wait is a `Notify` rather than a poll
+    /// sleep: under `start_paused` the runtime auto-advances to the earliest
+    /// pending deadline, so with no poll timer of our own the clock jumps
+    /// straight to the publisher's next wake — the offsets are exact, not
+    /// rounded to a polling period. Returning FEWER than `count` offsets is a
+    /// distinct failure from a wrong offset, and the callers assert the length
+    /// before the values.
+    #[cfg(all(feature = "declare-subscriber", feature = "pubsub-allow-loop"))]
+    async fn publication_offsets_ms(config: &ReplicationConfig, count: usize) -> Vec<u64> {
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::TokioSession;
+        use std::time::Duration;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let zid = vec![0x01];
+        let state = put_state(wall_clock_ntp64());
+
+        let spawned_at = tokio::time::Instant::now();
+        let offsets: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let landed = Arc::new(tokio::sync::Notify::new());
+
+        let rx = Arc::clone(&offsets);
+        let tx = Arc::clone(&landed);
+        let _sub = session
+            .declare_subscriber(
+                digest_keyexpr(config, &zid),
+                SubscribeOptions::default(),
+                move |_v: &dyn SampleView| {
+                    let dt = tokio::time::Instant::now().duration_since(spawned_at);
+                    rx.lock().unwrap().push(dt.as_millis() as u64);
+                    // `notify_one` stores a permit, so a digest that lands
+                    // while nobody is parked is not lost — the waiter wakes on
+                    // the stored permit and re-reads the length.
+                    tx.notify_one();
+                },
+            )
+            .expect("digest keyexpr subscriber declares");
+
+        let publisher = DigestPublisher::spawn(&session, state, config.clone(), zid);
+
+        // Virtual time, so this budget costs no wall-clock; it is the
+        // fail-loud bound for a publisher that stopped emitting, not a race.
+        let _ = tokio::time::timeout(Duration::from_secs(600), async {
+            loop {
+                if offsets.lock().unwrap().len() >= count {
+                    return;
+                }
+                landed.notified().await;
+            }
+        })
+        .await;
+
+        drop(publisher); // RAII abort before reading, so the vector is stable.
+        let out = offsets.lock().unwrap().clone();
+        out
+    }
+
+    /// R311y829 — the residual this round pays off, with its own CONTROL in
+    /// the same test.
+    ///
+    /// [`ReplicationConfig`] has always carried `propagation_delay_ms` and
+    /// hashed it into the configuration fingerprint that gates digest exchange
+    /// (zenoh `configuration.rs:72`), while the publisher never read it: the
+    /// loop was a plain `interval_ms` tick, so this measured `[20, 40]` before
+    /// the fix — identical to a replica configured with no delay at all.
+    ///
+    /// The zero-delay half is what makes the green mean something: "the first
+    /// digest is late" would also be true of a publisher that is simply slow,
+    /// or of a dead observation window. Two configurations differing ONLY in
+    /// this parameter must land in disjoint windows.
+    #[cfg(all(feature = "declare-subscriber", feature = "pubsub-allow-loop"))]
+    #[tokio::test(start_paused = true)]
+    async fn the_publisher_waits_the_configured_propagation_delay() {
+        // interval 20ms, propagation delay 250ms — an order of magnitude
+        // LARGER than the interval, so honouring it cannot be mistaken for
+        // tick jitter.
+        let delayed = cfg();
+        assert_eq!(delayed.interval_ms(), 20);
+        assert_eq!(delayed.propagation_delay_ms(), 250);
+        let prompt = ReplicationConfig::new("demo/**", None, 20, 5, 6, 30, 0);
+
+        let delayed_offsets = publication_offsets_ms(&delayed, 1).await;
+        let prompt_offsets = publication_offsets_ms(&prompt, 1).await;
+        assert_eq!(delayed_offsets.len(), 1, "{delayed_offsets:?}");
+        assert_eq!(prompt_offsets.len(), 1, "{prompt_offsets:?}");
+
+        // The first digest lands at `alignment + propagation + jitter`, and
+        // the two outer terms are bounded by the config rather than known
+        // exactly: the alignment is `interval - (unix_ms % interval)` on the
+        // real wall clock, so 1..=20, and the jitter is `0..interval/3`, so
+        // 0..=5. The two windows below are therefore [251, 275] and [1, 25] —
+        // disjoint, which is the whole point.
+        let window = |base: u64| (base + 1)..=(base + 20 + 5);
+
+        assert!(
+            window(250).contains(&delayed_offsets[0]),
+            "the 250ms propagation delay precedes the first digest: {} not in \
+             {:?}",
+            delayed_offsets[0],
+            window(250)
+        );
+        assert!(
+            window(0).contains(&prompt_offsets[0]),
+            "CONTROL — with no configured delay the same publisher emits \
+             within one interval: {} not in {:?}",
+            prompt_offsets[0],
+            window(0)
+        );
+    }
+
+    /// R311y829 — the publication PERIOD is `interval_ms`, not `interval_ms`
+    /// plus however long the cycle's own work took.
+    ///
+    /// zenoh subtracts the elapsed cycle from the closing sleep
+    /// (core.rs:262-272); without that subtraction a replica configured for a
+    /// 1s interval publishes every 1.1s here, and the drift compounds for the
+    /// life of the session. The propagation delay is deliberately non-zero so
+    /// the cycle has real work to absorb — with a zero-work cycle the
+    /// compensated and uncompensated schedules are indistinguishable, which
+    /// is exactly the measurement this test must not make.
+    ///
+    /// The span is measured over TEN cycles rather than one because the
+    /// jitter re-randomises the transmit instant inside each cycle: one
+    /// interval is `1000 + (jₙ − jₙ₋₁)`, which at ±332ms overlaps an
+    /// uncompensated cycle and would decide nothing. Over ten, the jitter
+    /// difference is still one draw wide while the drift has accumulated ten
+    /// times over. Measured: dropping the subtraction spans 12651ms here,
+    /// since an uncompensated period is `interval + propagation + jitter`
+    /// rather than `interval`.
+    #[cfg(all(feature = "declare-subscriber", feature = "pubsub-allow-loop"))]
+    #[tokio::test(start_paused = true)]
+    async fn the_publication_period_absorbs_the_cycles_own_work() {
+        // 100ms propagation + at most 333ms jitter fits inside the 1s
+        // interval, so every cycle has something to subtract and none of them
+        // overruns.
+        let config = ReplicationConfig::new("demo/**", None, 1_000, 5, 6, 30, 100);
+        let jitter_bound = config.max_publication_delay_ms();
+        assert_eq!(jitter_bound, 333);
+
+        let offsets = publication_offsets_ms(&config, 11).await;
+
+        assert_eq!(
+            offsets.len(),
+            11,
+            "eleven digests are observed: {offsets:?}"
+        );
+        let span = offsets[10] - offsets[0];
+        assert!(
+            span.abs_diff(10_000) < jitter_bound,
+            "ten cycles span ten intervals, whatever each cycle spent on its \
+             propagation wait and jitter: {span} is not within {jitter_bound} \
+             of 10000 (dropping the subtraction measured 12651 here, eight \
+             jitter-widths away). offsets: {offsets:?}"
+        );
     }
 }

@@ -4657,7 +4657,12 @@ layer_c1z_cargo_test_storage_driver() {
         cargo test -p wz-session-core --features storage-mgr-wildcard-updates --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage" 54 \
         cargo test -p wz-session-core --features storage-mgr-wildcard-updates,storage-mgr-strip-prefix --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 128 \
+    # R311y829 128 -> 132: the four publication-schedule tests. This is the
+    # ONLY `-p wz-session-core --lib storage` subset that moved — the schedule
+    # lives behind `storage-replication`, which only `storage-aligner` pulls in
+    # here, and the other seven subsets were re-measured at their old counts
+    # rather than assumed unaffected.
+    _runci_guarded_test "C1z storage" 132 \
         cargo test -p wz-session-core --features storage-aligner,storage-mgr-wildcard-updates --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_service" 9 \
         cargo test -p wz-runtime-tokio --features storage-mgr-complete-flag --lib storage_service --quiet || return 1
@@ -4667,7 +4672,11 @@ layer_c1z_cargo_test_storage_driver() {
         cargo test -p wz-session-core --features storage-mgr-garbage-collection --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_gc_service" 3 \
         cargo test -p wz-runtime-tokio --features storage-mgr-garbage-collection --lib storage_gc_service --quiet || return 1
-    _runci_guarded_test "C1z storage" 38 \
+    # R311y829 38 -> 40: the two publication-schedule driver tests. This is
+    # the lane that WATCHES them — `storage-aligner` is the only guarded
+    # wz-runtime-tokio subset here that pulls in both the digest publisher and
+    # the loopback subscriber the tests observe it through.
+    _runci_guarded_test "C1z storage" 40 \
         cargo test -p wz-runtime-tokio --features storage-aligner --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_aligner_convergence_e2e" 1 \
         cargo test -p wz-runtime-tokio --features storage-aligner --test storage_aligner_convergence_e2e --quiet || return 1
