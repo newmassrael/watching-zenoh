@@ -174,7 +174,19 @@ impl StatePolicy for TimerProbePolicy {
         self.last_source = s;
     }
 
-    fn execute_entry_actions(&mut self, _s: Self::State, _eng: &mut Engine<Self>) {}
+    // `_path_child` distinguishes an entry TARGET (`None`) from an ancestor on
+    // the way to a deeper one (`Some(child)`), which is what keeps a compound
+    // state from taking its default child while a descendant is already
+    // entering (SCE `StatePolicy`, policy.rs:332-348). This fixture is a
+    // single flat state with no entry actions at all, so both answers are the
+    // same empty one.
+    fn execute_entry_actions(
+        &mut self,
+        _s: Self::State,
+        _eng: &mut Engine<Self>,
+        _path_child: Option<Self::State>,
+    ) {
+    }
     fn execute_exit_actions(
         &mut self,
         _s: Self::State,

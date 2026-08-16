@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: 99260466e63c238c521b53a49c2d24ed893cd4da2faa8f8e2153cc050b338ba0
-// template-hash: 74ba562b33766da248288b5dadec1e79a0ebb46a66e38786f6a7a4b2ccd653e3
+// template-hash: eef83a0380a6f32e69bd8e491d75a942150e8193a11c5aedb68d2fc11fa47b6e
 // generated-at: 0
 
 
@@ -372,7 +372,11 @@ impl StatePolicy for ThermostatPolicy {
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: thermostat.scxml:24 :: _machine"]
 // SCE-MAP: thermostat.scxml:24 :: _machine
-    fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>) {
+    fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>, path_child: Option<Self::State>) {
+        // Only a `<parallel>` machine descends into defaults here — see the
+        // blocks at the end of this function — so a machine without one has
+        // nothing to tell an ancestor entry from a target entry.
+        let _ = path_child;
 
     }
 

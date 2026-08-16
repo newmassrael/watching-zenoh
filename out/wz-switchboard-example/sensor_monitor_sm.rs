@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: 91a77c65b9ff315d1e598ccdfbd2c78143f04b68090b070cf1e93f77d628b543
-// template-hash: 74ba562b33766da248288b5dadec1e79a0ebb46a66e38786f6a7a4b2ccd653e3
+// template-hash: eef83a0380a6f32e69bd8e491d75a942150e8193a11c5aedb68d2fc11fa47b6e
 // generated-at: 0
 
 
@@ -405,7 +405,11 @@ impl StatePolicy for SensorMonitorPolicy {
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: sensor_monitor.scxml:35 :: _machine"]
 // SCE-MAP: sensor_monitor.scxml:35 :: _machine
-    fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>) {
+    fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>, path_child: Option<Self::State>) {
+        // Only a `<parallel>` machine descends into defaults here — see the
+        // blocks at the end of this function — so a machine without one has
+        // nothing to tell an ancestor entry from a target entry.
+        let _ = path_child;
 
     }
 
