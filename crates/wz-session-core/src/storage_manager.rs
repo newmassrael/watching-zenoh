@@ -292,7 +292,7 @@ mod tests {
             .unwrap();
         let s = m.storage_mut("s1").expect("s1 hosted");
         assert_eq!(
-            s.put(Some("demo/a"), vec![1], None, ts(10)),
+            s.put(Some("demo/a"), vec![1], None, ts(10)).unwrap(),
             StorageInsertionResult::Inserted
         );
         assert_eq!(
@@ -327,7 +327,7 @@ mod tests {
             .create_backend(&StorageConfig::new("s1", "demo/**", "mem"))
             .expect("the mem volume creates a backend");
         assert_eq!(
-            backend.put(Some("demo/a"), vec![1], None, ts(10)),
+            backend.put(Some("demo/a"), vec![1], None, ts(10)).unwrap(),
             StorageInsertionResult::Inserted
         );
     }
@@ -379,7 +379,8 @@ mod tests {
             .unwrap();
         m.storage_mut("s1")
             .unwrap()
-            .put(Some("a/x"), vec![1], None, ts(1));
+            .put(Some("a/x"), vec![1], None, ts(1))
+            .unwrap();
         // s2 is a separate store from one MemoryVolume: it does not see s1's key.
         assert!(m.storage("s2").unwrap().get(Some("a/x")).is_none());
         let names: Vec<&str> = m.storage_names().collect();

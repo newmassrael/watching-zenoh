@@ -540,11 +540,17 @@ mod tests {
     fn answer_query_wildcard_replies_each_matching_key_under_its_own_keyexpr() {
         let mut state = fresh();
         assert_eq!(
-            state.process_put(Some("demo/a"), vec![1], None, ts(10, 1)),
+            state
+                .process_put(Some("demo/a"), vec![1], None, ts(10, 1))
+                .unwrap(),
             StorageInsertionResult::Inserted
         );
-        state.process_put(Some("demo/b"), vec![2], None, ts(10, 1));
-        state.process_put(Some("other/c"), vec![3], None, ts(10, 1));
+        state
+            .process_put(Some("demo/b"), vec![2], None, ts(10, 1))
+            .unwrap();
+        state
+            .process_put(Some("other/c"), vec![3], None, ts(10, 1))
+            .unwrap();
 
         let mut out = RecordingReplyOut::default();
         state.answer_into(&query("demo/*"), &mut out);
@@ -564,7 +570,9 @@ mod tests {
     #[test]
     fn answer_query_exact_key_replies_the_single_value() {
         let mut state = fresh();
-        state.process_put(Some("demo/a"), vec![42], None, ts(10, 1));
+        state
+            .process_put(Some("demo/a"), vec![42], None, ts(10, 1))
+            .unwrap();
         let mut out = RecordingReplyOut::default();
         state.answer_into(&query("demo/a"), &mut out);
         assert_eq!(out.keyed, vec![(String::from("demo/a"), vec![42])]);
@@ -573,8 +581,10 @@ mod tests {
     #[test]
     fn answer_query_does_not_reply_a_deleted_key() {
         let mut state = fresh();
-        state.process_put(Some("demo/a"), vec![1], None, ts(10, 1));
-        state.process_delete(Some("demo/a"), ts(20, 1));
+        state
+            .process_put(Some("demo/a"), vec![1], None, ts(10, 1))
+            .unwrap();
+        state.process_delete(Some("demo/a"), ts(20, 1)).unwrap();
         let mut out = RecordingReplyOut::default();
         state.answer_into(&query("demo/**"), &mut out);
         assert!(out.keyed.is_empty(), "a deleted key is not replied");

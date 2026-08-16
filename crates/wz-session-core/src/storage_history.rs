@@ -47,7 +47,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::sample::{EncodingHint, TimestampHint};
-use crate::storage_backend::{History, StorageBackend, StorageInsertionResult, StoredData};
+use crate::storage_backend::{
+    History, StorageBackend, StorageInsertionResult, StorageWriteResult, StoredData,
+};
 
 use crate::sample::timestamp_order_key;
 
@@ -94,7 +96,7 @@ impl StorageBackend for HistoryStorage {
         payload: Vec<u8>,
         encoding: Option<EncodingHint>,
         timestamp: TimestampHint,
-    ) -> StorageInsertionResult {
+    ) -> StorageWriteResult {
         let data = StoredData {
             payload,
             encoding,
@@ -115,18 +117,21 @@ impl StorageBackend for HistoryStorage {
             Ok(pos) => versions[pos] = data,
             Err(pos) => versions.insert(pos, data),
         }
-        if existed {
+        // Always `Ok`: an in-memory version list has no medium that can
+        // refuse the write (the `StorageWriteError` channel exists for the
+        // backends that do).
+        Ok(if existed {
             StorageInsertionResult::Replaced
         } else {
             StorageInsertionResult::Inserted
-        }
+        })
     }
 
-    fn delete(&mut self, key: Option<&str>, _timestamp: TimestampHint) -> StorageInsertionResult {
+    fn delete(&mut self, key: Option<&str>, _timestamp: TimestampHint) -> StorageWriteResult {
         // Minimal in-memory shape: a delete clears the whole version list
         // (see the module-level divergence note on versioned tombstones).
         self.map.remove(&key.map(String::from));
-        StorageInsertionResult::Deleted
+        Ok(StorageInsertionResult::Deleted)
     }
 
     fn get(&self, key: Option<&str>) -> Option<&StoredData> {
@@ -182,11 +187,11 @@ mod tests {
     fn put_retains_every_version_newest_last() {
         let mut s = HistoryStorage::new();
         assert_eq!(
-            s.put(Some("demo/a"), vec![1], None, ts(10, 1)),
+            s.put(Some("demo/a"), vec![1], None, ts(10, 1)).unwrap(),
             StorageInsertionResult::Inserted
         );
         assert_eq!(
-            s.put(Some("demo/a"), vec![2], None, ts(20, 1)),
+            s.put(Some("demo/a"), vec![2], None, ts(20, 1)).unwrap(),
             StorageInsertionResult::Replaced
         );
         assert_eq!(s.version_count(Some("demo/a")), 2, "both versions retained");
@@ -201,9 +206,9 @@ mod tests {
     #[test]
     fn out_of_order_put_is_inserted_in_timestamp_order() {
         let mut s = HistoryStorage::new();
-        s.put(Some("demo/a"), vec![3], None, ts(30, 1));
-        s.put(Some("demo/a"), vec![1], None, ts(10, 1)); // older, arrives later
-        s.put(Some("demo/a"), vec![2], None, ts(20, 1));
+        s.put(Some("demo/a"), vec![3], None, ts(30, 1)).unwrap();
+        s.put(Some("demo/a"), vec![1], None, ts(10, 1)).unwrap(); // older, later
+        s.put(Some("demo/a"), vec![2], None, ts(20, 1)).unwrap();
         let versions = s.get_versions(Some("demo/a"));
         let payloads: Vec<&Vec<u8>> = versions.iter().map(|d| &d.payload).collect();
         assert_eq!(
@@ -221,8 +226,8 @@ mod tests {
     #[test]
     fn exact_timestamp_duplicate_replaces_not_appends() {
         let mut s = HistoryStorage::new();
-        s.put(Some("demo/a"), vec![1], None, ts(10, 1));
-        s.put(Some("demo/a"), vec![9], None, ts(10, 1)); // same (time, zid)
+        s.put(Some("demo/a"), vec![1], None, ts(10, 1)).unwrap();
+        s.put(Some("demo/a"), vec![9], None, ts(10, 1)).unwrap(); // same (time, zid)
         assert_eq!(
             s.version_count(Some("demo/a")),
             1,
@@ -234,10 +239,10 @@ mod tests {
     #[test]
     fn delete_clears_the_version_list() {
         let mut s = HistoryStorage::new();
-        s.put(Some("demo/a"), vec![1], None, ts(10, 1));
-        s.put(Some("demo/a"), vec![2], None, ts(20, 1));
+        s.put(Some("demo/a"), vec![1], None, ts(10, 1)).unwrap();
+        s.put(Some("demo/a"), vec![2], None, ts(20, 1)).unwrap();
         assert_eq!(
-            s.delete(Some("demo/a"), ts(30, 1)),
+            s.delete(Some("demo/a"), ts(30, 1)).unwrap(),
             StorageInsertionResult::Deleted
         );
         assert_eq!(s.version_count(Some("demo/a")), 0);
@@ -248,9 +253,9 @@ mod tests {
     #[test]
     fn get_all_entries_lists_each_key_once_with_its_newest_timestamp() {
         let mut s = HistoryStorage::new();
-        s.put(Some("demo/a"), vec![1], None, ts(10, 1));
-        s.put(Some("demo/a"), vec![2], None, ts(20, 1));
-        s.put(Some("demo/b"), vec![3], None, ts(15, 1));
+        s.put(Some("demo/a"), vec![1], None, ts(10, 1)).unwrap();
+        s.put(Some("demo/a"), vec![2], None, ts(20, 1)).unwrap();
+        s.put(Some("demo/b"), vec![3], None, ts(15, 1)).unwrap();
         let mut entries = s.get_all_entries();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
@@ -277,11 +282,11 @@ mod tests {
         let mut b: alloc::boxed::Box<dyn StorageBackend + Send> =
             alloc::boxed::Box::new(HistoryStorage::new());
         assert_eq!(
-            b.put(Some("a"), vec![1], None, ts(10, 1)),
+            b.put(Some("a"), vec![1], None, ts(10, 1)).unwrap(),
             StorageInsertionResult::Inserted
         );
         assert_eq!(
-            b.put(Some("a"), vec![2], None, ts(20, 1)),
+            b.put(Some("a"), vec![2], None, ts(20, 1)).unwrap(),
             StorageInsertionResult::Replaced
         );
         assert_eq!(

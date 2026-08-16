@@ -223,6 +223,9 @@ where
                     zid: vec![0x02],
                 },
             )
+            // The seam is fallible since R311y831; this fixture's backend is
+            // in-memory, so an Err here is a harness fault, not a verdict.
+            .expect("the in-memory backend commits")
     };
 
     let put_deleted = seed_put(3, V_DELETED);
@@ -241,7 +244,8 @@ where
                 time: 4,
                 zid: vec![0x02],
             },
-        );
+        )
+        .expect("the in-memory backend commits");
     assert!(
         matches!(deleted, StorageInsertionResult::Deleted),
         "the t=4 delete did not land ({deleted:?}); without it there is no tombstone \

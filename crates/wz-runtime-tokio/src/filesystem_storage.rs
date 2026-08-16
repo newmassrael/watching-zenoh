@@ -33,32 +33,41 @@
 //!   process restart (that is what upgrades the volume from
 //!   [`Persistence::Volatile`] to [`Persistence::Durable`]).
 //!
-//! ## Durability under the *infallible* seam (honest scope)
+//! ## A write that fails (R311y831)
 //!
-//! The [`StorageBackend`] `put` / `delete` methods are **infallible** by a
-//! prior seam decision (`storage_backend.rs`: "the in-memory mutations are
-//! infallible") — they return a bare
+//! A filesystem write can fail (`ENOSPC` / `EACCES` / `EIO`) where an
+//! in-memory map cannot, and until R311y831 the seam had no way to say so:
+//! `put` / `delete` returned a bare
 //! [`StorageInsertionResult`](wz_session_core::storage_backend::StorageInsertionResult),
-//! with no error channel. A filesystem write, however, can fail
-//! (`ENOSPC` / `EACCES` / `EIO`). This backend resolves the tension honestly
-//! within the fixed seam:
+//! this backend logged the I/O error and **updated the mirror anyway**, and
+//! the caller was told the mutation had succeeded. The consequence was not
+//! confined to one process: the newer-wins record above the backend
+//! (`StorageState::latest`) is what
+//! [`replication_events`](wz_session_core::storage_state::StorageState::replication_events)
+//! and the aligner digest are derived from, so a `Durable` store advertised to
+//! every aligning peer that it held a value it had never written — and a peer
+//! that believes you hold it does not send it.
 //!
-//! - the mutation is **always applied to the in-memory mirror** (so a
-//!   subsequent `get` in the same process reflects what the caller just did,
-//!   exactly like `MemoryStorage`), and
-//! - the disk write is attempted; **an I/O failure is logged at
-//!   `log::error!`** (fail-clearly) and leaves the value serving from memory
-//!   but not durably persisted (it would be lost on the next restart).
+//! The seam now carries
+//! [`StorageWriteError`](wz_session_core::storage_backend::StorageWriteError)
+//! (zenoh's `ZResult<StorageInsertionResult>`, whose own filesystem backend
+//! propagates the write error with `?`, `zenoh-backend-filesystem/src/lib.rs:294-353`),
+//! and this backend holds two invariants:
+//!
+//! - **the mirror shows what a reopen would show** — a write that never
+//!   reached the target path does not move it, and one that landed but was not
+//!   fsync-confirmed does (see [`Unpersisted`]);
+//! - **`Err` means nothing above may record the mutation** — the newer-wins
+//!   version record, the replication log and the digest all stay silent, which
+//!   is exactly what upstream's storage service does on a failed `put`
+//!   (`storages_mgt/service.rs:352-366` skips the cache insert on `Err`), so
+//!   the peer re-sends instead of assuming convergence.
 //!
 //! On a healthy filesystem this is genuinely `Durable`; a disk fault is an
-//! environmental error surfaced loudly, not a silent lie in the in-process
-//! view. Making the *per-operation* seam fallible (propagating the write
-//! error to the caller, à la zenoh's `ZResult` `Storage::put`) is a
-//! cross-cutting change to the shared trait — it touches `MemoryStorage`,
-//! `HistoryStorage`, and every service driver — and is intentionally a
-//! **separate follow-up atom**, not this single-backend one. Volume-*open*
-//! failure, by contrast, IS reported ([`create_storage`](Volume::create_storage)
-//! returns [`VolumeError::CreateFailed`]).
+//! environmental error surfaced loudly AND refused, not a silent lie.
+//! Volume-*open* failure has always been reported
+//! ([`create_storage`](Volume::create_storage) returns
+//! [`VolumeError::CreateFailed`]).
 //!
 //! ## Concurrency
 //!
@@ -79,7 +88,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use wz_session_core::sample::{EncodingHint, TimestampHint};
 use wz_session_core::storage_backend::{
-    History, StorageBackend, StorageInsertionResult, StoredData,
+    History, StorageBackend, StorageInsertionResult, StorageWriteError, StorageWriteResult,
+    StoredData,
 };
 use wz_session_core::storage_config::StorageConfig;
 use wz_session_core::storage_volume::{Capability, Persistence, Volume, VolumeError};
@@ -313,7 +323,7 @@ impl FilesystemStorage {
     /// serialize, write a process-unique temp file, `fsync` it, `rename` it
     /// over the target, then `fsync` the directory so the rename itself
     /// survives a power loss.
-    fn persist(&self, file: &str, key: Option<&str>, data: &StoredData) -> io::Result<()> {
+    fn persist(&self, file: &str, key: Option<&str>, data: &StoredData) -> Result<(), Unpersisted> {
         let bytes = serialize(key, data);
         let tmp_name = format!(
             ".wztmp.{}.{}{}",
@@ -322,14 +332,53 @@ impl FilesystemStorage {
             TMP_SUFFIX
         );
         let tmp_path = self.dir.join(&tmp_name);
-        {
+        let write_tmp = || -> io::Result<()> {
             let mut f = fs::File::create(&tmp_path)?;
             f.write_all(&bytes)?;
-            f.sync_all()?;
+            f.sync_all()
+        };
+        if let Err(err) = write_tmp() {
+            // The temp file never became the target; leave no debris behind
+            // (a crash leftover is swept on the next `open`, but a live store
+            // should not accumulate them).
+            let _ = fs::remove_file(&tmp_path);
+            return Err(Unpersisted {
+                visible: false,
+                err,
+            });
         }
-        fs::rename(&tmp_path, self.dir.join(file))?;
-        fsync_dir(&self.dir)
+        if let Err(err) = fs::rename(&tmp_path, self.dir.join(file)) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(Unpersisted {
+                visible: false,
+                err,
+            });
+        }
+        // The rename LANDED: the directory now resolves `file` to the new
+        // bytes, so a reopen in this process's lifetime reads them. Only the
+        // durability of that directory entry is unconfirmed.
+        fsync_dir(&self.dir).map_err(|err| Unpersisted { visible: true, err })
     }
+}
+
+/// A filesystem mutation that did not complete, and — the part the caller
+/// needs — WHICH side of it did not.
+///
+/// The in-memory mirror's contract is that it shows what a *reopen of the
+/// directory* would show, so "did the visible filesystem change?" is exactly
+/// the question that decides whether the mirror moves. `visible == false`
+/// means nothing reached the target path and the mirror must stay put;
+/// `visible == true` means the target path already resolves to the new state
+/// (the rename landed / the file is unlinked) but that directory entry is not
+/// confirmed durable, so the mirror MUST move — otherwise the store would
+/// serve one thing and a reopen another, which is the same class of lie in the
+/// opposite direction.
+///
+/// Either way the seam answer is [`StorageWriteError`]: the mutation is not
+/// committed and nothing above may record it.
+struct Unpersisted {
+    visible: bool,
+    err: io::Error,
 }
 
 impl StorageBackend for FilesystemStorage {
@@ -339,7 +388,7 @@ impl StorageBackend for FilesystemStorage {
         payload: Vec<u8>,
         encoding: Option<EncodingHint>,
         timestamp: TimestampHint,
-    ) -> StorageInsertionResult {
+    ) -> StorageWriteResult {
         let key_owned = key.map(String::from);
         let data = StoredData {
             payload,
@@ -350,46 +399,86 @@ impl StorageBackend for FilesystemStorage {
             Some(e) => (e.file.clone(), true),
             None => (self.allocate_filename(&key_owned), false),
         };
-        // Write-through FIRST so a persist failure is logged before we return;
-        // the mirror is updated regardless (infallible-seam honesty — see the
-        // module doc), so `get` reflects the mutation in-process either way.
-        if let Err(e) = self.persist(&file, key_owned.as_deref(), &data) {
+        // Write-through FIRST: the disk decides, and the mirror follows it.
+        // R311y831 — before, the mirror was updated even when the write failed
+        // and the seam had no way to say so, so a Durable store served (and,
+        // through the newer-wins record, ADVERTISED to aligning peers) a value
+        // it had not written. `visible` splits the two failure sides; see
+        // [`Unpersisted`].
+        let outcome = self.persist(&file, key_owned.as_deref(), &data);
+        if let Err(Unpersisted { visible, err }) = &outcome {
             log::error!(
-                "wz-fs-storage: persist of key {key_owned:?} to {} failed ({e}); value kept in memory only (not durable)",
-                self.dir.join(&file).display()
+                "wz-fs-storage: persist of key {key_owned:?} to {} failed ({err}); the {} \
+                 (this put is NOT committed)",
+                self.dir.join(&file).display(),
+                if *visible {
+                    "bytes are in place but the directory entry is not confirmed durable"
+                } else {
+                    "stored value is unchanged"
+                }
             );
+            if !*visible {
+                return Err(StorageWriteError);
+            }
         }
         self.used.insert(file.clone());
         self.map.insert(key_owned, Entry { data, file });
-        if existed {
-            StorageInsertionResult::Replaced
-        } else {
-            StorageInsertionResult::Inserted
+        match outcome {
+            // Landed but unconfirmed: the mirror had to move (a reopen sees
+            // the new bytes) and the caller still must not record it.
+            Err(_) => Err(StorageWriteError),
+            Ok(()) if existed => Ok(StorageInsertionResult::Replaced),
+            Ok(()) => Ok(StorageInsertionResult::Inserted),
         }
     }
 
-    fn delete(&mut self, key: Option<&str>, _timestamp: TimestampHint) -> StorageInsertionResult {
+    fn delete(&mut self, key: Option<&str>, _timestamp: TimestampHint) -> StorageWriteResult {
         let key_owned = key.map(String::from);
-        if let Some(entry) = self.map.remove(&key_owned) {
-            self.used.remove(&entry.file);
-            let path = self.dir.join(&entry.file);
-            match fs::remove_file(&path) {
-                Ok(()) => {
-                    // Persist the unlink itself (dir fsync), so the delete
-                    // survives a power loss like a put does.
-                    if let Err(e) = fsync_dir(&self.dir) {
-                        log::error!("wz-fs-storage: dir fsync after delete failed ({e})");
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        // Look the entry up WITHOUT removing it: an unlink the filesystem
+        // refuses leaves the record on disk, so the mirror must keep it too
+        // (R311y831 — it used to be removed first, which made a failed unlink
+        // read back as a successful delete).
+        let Some(file) = self.map.get(&key_owned).map(|e| e.file.clone()) else {
+            // Absent-key delete is still `Deleted` — the seam contract, and
+            // upstream's own `if file.exists()` rule (`files_mgt.rs:198`).
+            return Ok(StorageInsertionResult::Deleted);
+        };
+        let path = self.dir.join(&file);
+        let durable = match fs::remove_file(&path) {
+            // Persist the unlink itself (dir fsync), so the delete survives a
+            // power loss like a put does. A failure here leaves the record
+            // already gone from the live directory, so the mirror still
+            // follows — only the caller's answer changes.
+            Ok(()) => match fsync_dir(&self.dir) {
+                Ok(()) => true,
                 Err(e) => {
-                    log::error!("wz-fs-storage: remove of {} failed ({e})", path.display());
+                    log::error!(
+                        "wz-fs-storage: dir fsync after delete of {} failed ({e}); the record \
+                         is unlinked but the removal is not confirmed durable (this delete is \
+                         NOT committed)",
+                        path.display()
+                    );
+                    false
                 }
+            },
+            // Already absent: the removal this call was asked for has happened.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+            Err(e) => {
+                log::error!(
+                    "wz-fs-storage: remove of {} failed ({e}); the key is NOT deleted (its \
+                     record is still on disk and still served)",
+                    path.display()
+                );
+                return Err(StorageWriteError);
             }
+        };
+        self.map.remove(&key_owned);
+        self.used.remove(&file);
+        if durable {
+            Ok(StorageInsertionResult::Deleted)
+        } else {
+            Err(StorageWriteError)
         }
-        // Deleted unconditionally, matching the seam contract (an absent-key
-        // delete is still Deleted).
-        StorageInsertionResult::Deleted
     }
 
     fn get(&self, key: Option<&str>) -> Option<&StoredData> {
@@ -655,12 +744,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut s = FilesystemStorage::open(dir.path().to_path_buf()).unwrap();
         assert_eq!(
-            s.put(Some("demo/a"), vec![1, 2, 3], None, ts(10)),
+            s.put(Some("demo/a"), vec![1, 2, 3], None, ts(10)).unwrap(),
             StorageInsertionResult::Inserted
         );
         assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![1, 2, 3]);
         assert_eq!(
-            s.put(Some("demo/a"), vec![4], None, ts(20)),
+            s.put(Some("demo/a"), vec![4], None, ts(20)).unwrap(),
             StorageInsertionResult::Replaced
         );
         assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![4]);
@@ -670,14 +759,14 @@ mod tests {
     fn delete_removes_and_absent_delete_is_deleted() {
         let dir = tempdir().unwrap();
         let mut s = FilesystemStorage::open(dir.path().to_path_buf()).unwrap();
-        s.put(Some("demo/a"), vec![1], None, ts(10));
+        s.put(Some("demo/a"), vec![1], None, ts(10)).unwrap();
         assert_eq!(
-            s.delete(Some("demo/a"), ts(20)),
+            s.delete(Some("demo/a"), ts(20)).unwrap(),
             StorageInsertionResult::Deleted
         );
         assert!(s.get(Some("demo/a")).is_none());
         assert_eq!(
-            s.delete(Some("demo/missing"), ts(1)),
+            s.delete(Some("demo/missing"), ts(1)).unwrap(),
             StorageInsertionResult::Deleted
         );
     }
@@ -687,10 +776,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut s = FilesystemStorage::open(dir.path().to_path_buf()).unwrap();
         assert_eq!(
-            s.put(None, vec![7], None, ts(10)),
+            s.put(None, vec![7], None, ts(10)).unwrap(),
             StorageInsertionResult::Inserted
         );
-        s.put(Some("a"), vec![1], None, ts(10));
+        s.put(Some("a"), vec![1], None, ts(10)).unwrap();
         assert_eq!(s.get(None).unwrap().payload, vec![7]);
         assert_eq!(s.get(Some("a")).unwrap().payload, vec![1]);
     }
@@ -699,8 +788,8 @@ mod tests {
     fn get_all_entries_orders_none_first() {
         let dir = tempdir().unwrap();
         let mut s = FilesystemStorage::open(dir.path().to_path_buf()).unwrap();
-        s.put(Some("demo/a"), vec![1], None, ts(10));
-        s.put(None, vec![9], None, ts(20));
+        s.put(Some("demo/a"), vec![1], None, ts(10)).unwrap();
+        s.put(None, vec![9], None, ts(20)).unwrap();
         let entries = s.get_all_entries();
         assert_eq!(
             entries,
@@ -716,11 +805,11 @@ mod tests {
         let root = dir.path().to_path_buf();
         {
             let mut s = FilesystemStorage::open(root.clone()).unwrap();
-            s.put(Some("demo/a"), vec![1, 2, 3], enc(), ts(10));
-            s.put(Some("wild/*/x"), vec![9], None, ts(11));
-            s.put(None, vec![0xff], None, ts(12));
-            s.put(Some("to/delete"), vec![5], None, ts(13));
-            s.delete(Some("to/delete"), ts(14));
+            s.put(Some("demo/a"), vec![1, 2, 3], enc(), ts(10)).unwrap();
+            s.put(Some("wild/*/x"), vec![9], None, ts(11)).unwrap();
+            s.put(None, vec![0xff], None, ts(12)).unwrap();
+            s.put(Some("to/delete"), vec![5], None, ts(13)).unwrap();
+            s.delete(Some("to/delete"), ts(14)).unwrap();
         } // drop -> a fresh instance must see only the on-disk state
         let s = FilesystemStorage::open(root).unwrap();
         assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![1, 2, 3]);
@@ -739,8 +828,8 @@ mod tests {
         let root = dir.path().to_path_buf();
         {
             let mut s = FilesystemStorage::open(root.clone()).unwrap();
-            s.put(Some("k/1"), vec![1], None, ts(10));
-            s.put(Some("k/1"), vec![2], enc(), ts(20)); // overwrite same key
+            s.put(Some("k/1"), vec![1], None, ts(10)).unwrap();
+            s.put(Some("k/1"), vec![2], enc(), ts(20)).unwrap(); // overwrite same key
         }
         let s = FilesystemStorage::open(root.clone()).unwrap();
         assert_eq!(
@@ -775,12 +864,79 @@ mod tests {
         {
             let mut s = FilesystemStorage::open(root.clone()).unwrap();
             assert_eq!(
-                s.put(Some(&key), vec![42], None, ts(1)),
+                s.put(Some(&key), vec![42], None, ts(1)).unwrap(),
                 StorageInsertionResult::Inserted
             );
         }
         let s = FilesystemStorage::open(root).unwrap();
         assert_eq!(s.get(Some(&key)).unwrap().payload, vec![42]);
+    }
+
+    // ---- write failure: what a store that could not persist may claim ----
+
+    /// Break every subsequent persist for EVERY uid (root included) by
+    /// removing the store directory: the temp-file `create` then fails
+    /// `ENOENT`. A read-only-directory fixture would be uid-dependent.
+    fn break_persistence(root: &Path) {
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_put_whose_persist_fails_does_not_replace_the_durable_value() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut s = FilesystemStorage::open(root.clone()).unwrap();
+        s.put(Some("demo/a"), vec![1], None, ts(10)).unwrap();
+        break_persistence(&root);
+        assert!(
+            s.put(Some("demo/a"), vec![2], None, ts(20)).is_err(),
+            "a put that could not be persisted must be reported to the caller"
+        );
+        assert_eq!(
+            s.get(Some("demo/a")).map(|d| d.payload.clone()),
+            Some(vec![1]),
+            "a Durable store must keep serving the last value it actually \
+             persisted, not one it failed to write"
+        );
+    }
+
+    #[test]
+    fn a_new_key_whose_first_persist_fails_is_not_served_at_all() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut s = FilesystemStorage::open(root.clone()).unwrap();
+        break_persistence(&root);
+        assert!(s.put(Some("demo/a"), vec![1], None, ts(10)).is_err());
+        assert!(
+            s.get(Some("demo/a")).is_none(),
+            "a key that never reached the disk must not be readable"
+        );
+    }
+
+    #[test]
+    fn a_delete_whose_unlink_fails_keeps_serving_the_key() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut s = FilesystemStorage::open(root.clone()).unwrap();
+        s.put(Some("demo/a"), vec![1], None, ts(10)).unwrap();
+        // Replace the key's data file with a DIRECTORY of the same name:
+        // `unlink` on a directory is an error for every uid, root included.
+        let file = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| is_our_key_filename(&p.file_name().unwrap().to_string_lossy()))
+            .expect("the put allocated exactly one data file");
+        fs::remove_file(&file).unwrap();
+        fs::create_dir(&file).unwrap();
+        assert!(
+            s.delete(Some("demo/a"), ts(20)).is_err(),
+            "a delete that could not remove the record must be reported"
+        );
+        assert!(
+            s.get(Some("demo/a")).is_some(),
+            "a key whose on-disk record the store could not remove is not deleted"
+        );
     }
 
     // ---- file-format round-trip ----
@@ -860,7 +1016,7 @@ mod tests {
         let root = dir.path().to_path_buf();
         {
             let mut s = FilesystemStorage::open(root.clone()).unwrap();
-            s.put(Some("good/key"), vec![7], None, ts(10));
+            s.put(Some("good/key"), vec![7], None, ts(10)).unwrap();
         }
         // A file with an "ours" name (k + hex) but garbage content.
         let corrupt = root.join(format!("k{}", "0".repeat(16)));
@@ -885,8 +1041,8 @@ mod tests {
         let file_of_b;
         {
             let mut s = FilesystemStorage::open(root.clone()).unwrap();
-            s.put(Some("a"), vec![1], None, ts(10));
-            s.put(Some("b"), vec![2], None, ts(11));
+            s.put(Some("a"), vec![1], None, ts(10)).unwrap();
+            s.put(Some("b"), vec![2], None, ts(11)).unwrap();
             file_of_b = s.map.get(&Some("b".to_string())).unwrap().file.clone();
         }
         // Corrupt exactly one key's file (flip a byte).
@@ -928,7 +1084,7 @@ mod tests {
         {
             let mut s = vol.create_storage(&cfg).unwrap();
             assert_eq!(
-                s.put(Some("demo/a"), vec![1, 2, 3], None, ts(10)),
+                s.put(Some("demo/a"), vec![1, 2, 3], None, ts(10)).unwrap(),
                 StorageInsertionResult::Inserted
             );
         } // drop the backend, then re-create over the same name -> durable

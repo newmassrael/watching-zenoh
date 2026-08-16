@@ -65,7 +65,8 @@ use std::sync::Arc;
 
 use wz_session_core::sample::{EncodingHint, TimestampHint};
 use wz_session_core::storage_backend::{
-    History, StorageBackend, StorageInsertionResult, StoredData,
+    History, StorageBackend, StorageInsertionResult, StorageWriteError, StorageWriteResult,
+    StoredData,
 };
 use wz_session_core::storage_config::StorageConfig;
 use wz_session_core::storage_volume::{Capability, Persistence, Volume, VolumeError};
@@ -678,7 +679,7 @@ impl StorageBackend for DynamicStore {
         payload: Vec<u8>,
         encoding: Option<EncodingHint>,
         timestamp: TimestampHint,
-    ) -> StorageInsertionResult {
+    ) -> StorageWriteResult {
         let rc = with_entry(key, &payload, encoding.as_ref(), &timestamp, |entry| {
             // SAFETY: the gated vtable's `store_put` on a live handle; the
             // entry's pointers are valid for this call, per `with_entry`.
@@ -689,46 +690,50 @@ impl StorageBackend for DynamicStore {
         // out of contract, and reading it as success is how a value that was never
         // written comes to be believed persisted.
         if rc != INSERTED && rc != REPLACED {
-            // The mirror is still updated, exactly as the filesystem backend does
-            // under this infallible seam: a subsequent read in this process must
-            // reflect what the caller just did, and the write failure is reported
-            // rather than swallowed.
+            // R311y831 — the mirror is NOT updated. It used to be, "exactly as
+            // the filesystem backend does under this infallible seam"; the seam
+            // is no longer infallible, and both backends now hold the same
+            // invariant instead: what this store serves is what a REOPEN of the
+            // volume would serve. Serving a value the volume rejected is how a
+            // replication digest comes to advertise data no peer can ever get.
             log::error!(
                 "wz dynamic volume: store_put did not report a write (code {rc}) for key \
-                 {key:?}; the value serves from memory but is NOT persisted in the volume"
+                 {key:?}; the value is NOT stored (the mirror keeps what the volume holds)"
             );
+            return Err(StorageWriteError);
         }
-        // The RESULT is the mirror's, not the volume's. That is the same choice
-        // the filesystem backend makes and for the same reason: Inserted vs
-        // Replaced is a statement about what this store now serves, which the
-        // mirror is authoritative for.
+        // The RESULT is the mirror's, not the volume's: Inserted vs Replaced is a
+        // statement about what this store now serves, which the mirror is
+        // authoritative for — and the mirror is only reached on a volume success.
         let data = StoredData {
             payload,
             encoding,
             timestamp,
         };
-        match self.mirror.insert(key.map(String::from), data) {
+        Ok(match self.mirror.insert(key.map(String::from), data) {
             Some(_) => StorageInsertionResult::Replaced,
             None => StorageInsertionResult::Inserted,
-        }
+        })
     }
 
-    fn delete(&mut self, key: Option<&str>, timestamp: TimestampHint) -> StorageInsertionResult {
+    fn delete(&mut self, key: Option<&str>, timestamp: TimestampHint) -> StorageWriteResult {
         let rc = with_entry(key, &[], None, &timestamp, |entry| {
             // SAFETY: as `put`'s.
             unsafe { ((*self.vtable).store_delete)(self.handle, entry as *const StoredEntry) }
         });
-        // As `put`: only the documented success counts as one.
+        // As `put`: only the documented success counts as one, and a removal the
+        // volume did not perform is not a removal this store may report.
         if rc != DELETED {
             log::error!(
                 "wz dynamic volume: store_delete did not report a removal (code {rc}) for \
-                 key {key:?}; the key is gone from memory but may remain in the volume"
+                 key {key:?}; the key is NOT deleted (it remains in the volume)"
             );
+            return Err(StorageWriteError);
         }
         self.mirror.remove(&key.map(String::from));
         // Deleted unconditionally, including for an absent key — the seam's
         // contract (zenoh memory_backend `remove_entry` then `Deleted`).
-        StorageInsertionResult::Deleted
+        Ok(StorageInsertionResult::Deleted)
     }
 
     fn get(&self, key: Option<&str>) -> Option<&StoredData> {
@@ -960,18 +965,18 @@ mod tests {
         {
             let mut store = vol.create_storage(&cfg).expect("create a store");
             assert_eq!(
-                store.put(Some("a"), b"v1".to_vec(), None, ts(10)),
+                store.put(Some("a"), b"v1".to_vec(), None, ts(10)).unwrap(),
                 StorageInsertionResult::Inserted
             );
             assert_eq!(
-                store.put(Some("a"), b"v2".to_vec(), None, ts(11)),
+                store.put(Some("a"), b"v2".to_vec(), None, ts(11)).unwrap(),
                 StorageInsertionResult::Replaced,
                 "a second put on the same key replaces"
             );
             // The mount-root slot: a strip-configured storage's exact-match value,
             // which is the `None` key the ABI encodes as a null pointer.
             assert_eq!(
-                store.put(None, b"root".to_vec(), None, ts(12)),
+                store.put(None, b"root".to_vec(), None, ts(12)).unwrap(),
                 StorageInsertionResult::Inserted
             );
             assert_eq!(
@@ -1026,18 +1031,20 @@ mod tests {
         let cfg = StorageConfig::new("enc", "demo/**", "wzvol_example");
         {
             let mut store = vol.create_storage(&cfg).expect("create");
-            store.put(
-                Some("k"),
-                b"body".to_vec(),
-                Some(EncodingHint {
-                    packed_id: 0x2B,
-                    schema: Some(String::from("application/json")),
-                }),
-                TimestampHint {
-                    time: 0xDEAD_BEEF,
-                    zid: vec![1, 2, 3, 4],
-                },
-            );
+            store
+                .put(
+                    Some("k"),
+                    b"body".to_vec(),
+                    Some(EncodingHint {
+                        packed_id: 0x2B,
+                        schema: Some(String::from("application/json")),
+                    }),
+                    TimestampHint {
+                        time: 0xDEAD_BEEF,
+                        zid: vec![1, 2, 3, 4],
+                    },
+                )
+                .unwrap();
         }
         let store2 = vol.create_storage(&cfg).expect("re-create");
         let d = store2.get(Some("k")).expect("present after reload");
@@ -1067,13 +1074,13 @@ mod tests {
         let cfg = StorageConfig::new("del", "demo/**", "wzvol_example");
         {
             let mut store = vol.create_storage(&cfg).expect("create");
-            store.put(Some("a"), b"v".to_vec(), None, ts(1));
+            store.put(Some("a"), b"v".to_vec(), None, ts(1)).unwrap();
             assert_eq!(
-                store.delete(Some("a"), ts(2)),
+                store.delete(Some("a"), ts(2)).unwrap(),
                 StorageInsertionResult::Deleted
             );
             assert_eq!(
-                store.delete(Some("absent"), ts(3)),
+                store.delete(Some("absent"), ts(3)).unwrap(),
                 StorageInsertionResult::Deleted,
                 "an absent-key delete is still Deleted — the seam's contract"
             );
@@ -1088,6 +1095,50 @@ mod tests {
              the ABI"
         );
         assert!(store2.get_all_entries().is_empty());
+    }
+
+    /// R311y831 — a volume that REFUSES a write. The claim is the seam's new
+    /// one: the store may not serve what the volume did not take, because a
+    /// reload rebuilds the mirror from `store_entries` and would then disagree
+    /// with what a caller had just read back.
+    ///
+    /// The refusal is made by a real `.so` on a real failure rather than by a
+    /// stub: the store directory is removed after `create_storage`, so the
+    /// example's `write_atomically` fails `ENOENT` and `store_put` returns
+    /// `ERR`. Removing the directory (rather than chmod-ing it) is what makes
+    /// the fixture uid-independent — root can write into a read-only directory.
+    #[test]
+    fn a_put_the_volume_refuses_is_reported_and_not_served() {
+        let Some(so) = require_example() else {
+            return;
+        };
+        let _guard = volume_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vol = DynamicVolume::load(&so).expect("loads");
+        vol.configure(Some(dir.path().to_str().expect("utf-8 tempdir")))
+            .expect("configure");
+        let cfg = StorageConfig::new("refuse", "demo/**", "wzvol_example");
+        let mut store = vol.create_storage(&cfg).expect("create");
+        store.put(Some("a"), b"v1".to_vec(), None, ts(1)).unwrap();
+
+        std::fs::remove_dir_all(dir.path()).expect("break the volume's medium");
+        assert!(
+            store.put(Some("a"), b"v2".to_vec(), None, ts(2)).is_err(),
+            "a write the volume rejected must be reported to the caller"
+        );
+        assert_eq!(
+            store.get(Some("a")).map(|d| d.payload.clone()),
+            Some(b"v1".to_vec()),
+            "the store must keep serving what the volume actually holds"
+        );
+        assert!(
+            store.put(Some("b"), b"new".to_vec(), None, ts(3)).is_err(),
+            "a refused new key is refused too"
+        );
+        assert!(
+            store.get(Some("b")).is_none(),
+            "a key the volume never took must not be readable"
+        );
     }
 
     /// The OUT-OF-BAND witness: the example exports counters that are not in the
@@ -1124,8 +1175,8 @@ mod tests {
         let (puts_before, creates_before) = unsafe { (puts(), creates()) };
         let cfg = StorageConfig::new("count", "demo/**", "wzvol_example");
         let mut store = vol.create_storage(&cfg).expect("create");
-        store.put(Some("a"), b"v".to_vec(), None, ts(1));
-        store.put(Some("b"), b"v".to_vec(), None, ts(2));
+        store.put(Some("a"), b"v".to_vec(), None, ts(1)).unwrap();
+        store.put(Some("b"), b"v".to_vec(), None, ts(2)).unwrap();
         // SAFETY: as above.
         let (puts_after, creates_after) = unsafe { (puts(), creates()) };
 

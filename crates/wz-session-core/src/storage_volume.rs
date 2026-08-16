@@ -254,7 +254,7 @@ mod tests {
             .create_storage(&cfg)
             .expect("in-memory create never fails");
         assert_eq!(
-            s1.put(Some("demo/a"), vec![1, 2, 3], None, ts(10)),
+            s1.put(Some("demo/a"), vec![1, 2, 3], None, ts(10)).unwrap(),
             StorageInsertionResult::Inserted
         );
         assert_eq!(

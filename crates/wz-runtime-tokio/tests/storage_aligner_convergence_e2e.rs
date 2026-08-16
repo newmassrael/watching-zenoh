@@ -152,15 +152,19 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
     //    queryable + spawn the periodic digest publisher. The service handles
     //    are held for the whole test (RAII: dropping undeclares / aborts).
     let state_a: SharedState = Arc::new(StdMutex::new(StorageState::new(MemoryStorage::new())));
-    state_a.lock().unwrap().process_put(
-        Some(DATA_KEY),
-        DATA_VALUE.to_vec(),
-        None,
-        TimestampHint {
-            time: wall_clock_ntp64(),
-            zid: zid_a.clone(),
-        },
-    );
+    state_a
+        .lock()
+        .unwrap()
+        .process_put(
+            Some(DATA_KEY),
+            DATA_VALUE.to_vec(),
+            None,
+            TimestampHint {
+                time: wall_clock_ntp64(),
+                zid: zid_a.clone(),
+            },
+        )
+        .expect("the in-memory backend commits");
     let observer_a = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
     let session_a = TokioSession::new(
         opened_a.actions.clone(),

@@ -713,7 +713,8 @@ mod tests {
                 time: now,
                 zid: vec![0x01],
             },
-        );
+        )
+        .unwrap();
         Arc::new(Mutex::new(st))
     }
 

@@ -4641,34 +4641,40 @@ layer_c1z_cargo_test_storage_driver() {
     # `StorageConfig::to_admin_json` escaper test. The filter is a module PREFIX,
     # so `storage_config` is inside it in every one of these feature subsets —
     # each was re-measured rather than incremented on the assumption.
-    _runci_guarded_test "C1z storage" 28 \
+    # R311y831 +5 on every `-p wz-session-core --lib storage` subset below and
+    # +6 on the storage-aligner one: the six `refused_writes` tests, of which
+    # the replication-events one is `storage-aligner`-gated. The DIFFERENT
+    # delta on exactly that lane is the check that the gate holds — a uniform
+    # +6 would mean the gated test was compiled everywhere. All ten subsets
+    # were re-measured; the two `-p wz-runtime-tokio` ones did not move.
+    _runci_guarded_test "C1z storage" 33 \
         cargo test -p wz-session-core --features storage-backend --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 36 \
+    _runci_guarded_test "C1z storage" 41 \
         cargo test -p wz-session-core --features storage-mgr-multi-storage-host --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_manager_service" 5 \
         cargo test -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --lib storage_manager_service --quiet || return 1
     _runci_guarded_test "C1z storage_strip_prefix" 6 \
         cargo test -p wz-session-core --features storage-mgr-strip-prefix --lib storage_strip_prefix --quiet || return 1
-    _runci_guarded_test "C1z storage" 41 \
+    _runci_guarded_test "C1z storage" 46 \
         cargo test -p wz-session-core --features storage-backend,storage-mgr-strip-prefix --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 51 \
+    _runci_guarded_test "C1z storage" 56 \
         cargo test -p wz-session-core --features storage-history,storage-mgr-strip-prefix --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 40 \
+    _runci_guarded_test "C1z storage" 45 \
         cargo test -p wz-session-core --features storage-mgr-wildcard-updates --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 54 \
+    _runci_guarded_test "C1z storage" 59 \
         cargo test -p wz-session-core --features storage-mgr-wildcard-updates,storage-mgr-strip-prefix --lib storage --quiet || return 1
     # R311y829 128 -> 132: the four publication-schedule tests. This is the
     # ONLY `-p wz-session-core --lib storage` subset that moved — the schedule
     # lives behind `storage-replication`, which only `storage-aligner` pulls in
     # here, and the other seven subsets were re-measured at their old counts
     # rather than assumed unaffected.
-    _runci_guarded_test "C1z storage" 132 \
+    _runci_guarded_test "C1z storage" 138 \
         cargo test -p wz-session-core --features storage-aligner,storage-mgr-wildcard-updates --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_service" 9 \
         cargo test -p wz-runtime-tokio --features storage-mgr-complete-flag --lib storage_service --quiet || return 1
     _runci_guarded_test "C1z storage_service" 10 \
         cargo test -p wz-runtime-tokio --features storage-backend,storage-mgr-strip-prefix,declare-subscriber,pubsub-allow-loop --lib storage_service --quiet || return 1
-    _runci_guarded_test "C1z storage" 47 \
+    _runci_guarded_test "C1z storage" 52 \
         cargo test -p wz-session-core --features storage-mgr-garbage-collection --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_gc_service" 3 \
         cargo test -p wz-runtime-tokio --features storage-mgr-garbage-collection --lib storage_gc_service --quiet || return 1
@@ -7406,7 +7412,7 @@ layer_c1bn_passive_dissection_features() {
 # three other inline forms. `>= 1` catches the empty selection but not a set that
 # silently shrinks; the counts below are measured on this tree.
 layer_c1bg_cargo_test_storage_backend_filesystem() {
-    _runci_guarded_test "C1bg filesystem_storage" 14 \
+    _runci_guarded_test "C1bg filesystem_storage" 17 \
         cargo test -p wz-runtime-tokio \
         --features storage-backend-filesystem --lib filesystem_storage --quiet || return 1
     # R311y280 — the live-driver composition + durability proof (+ its discriminator).

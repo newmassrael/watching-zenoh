@@ -47,9 +47,13 @@
 //!   was a bare `&str` (no `strip_prefix` support); the Option key is the
 //!   seam change that lets a strip-configured storage hold the mount-root
 //!   value.
-//! - **no `ZResult` wrapper**: the in-memory mutations are infallible, so
-//!   the result is the bare [`StorageInsertionResult`] (zenoh wraps it in
-//!   `ZResult` for the fallible-backend case).
+//! - **a payload-free error, not `ZResult`**: zenoh wraps the mutation result
+//!   in `ZResult` (a boxed, message-carrying error). wz keeps the error
+//!   *channel* — a backend over a real medium can refuse a write, and R311y831
+//!   made the seam say so — but the error is the unit
+//!   [`StorageWriteError`], for the reasons on that type. Before R311y831 the
+//!   seam had no channel at all, which let the durable filesystem backend
+//!   serve a value it had failed to persist.
 //! - **`BTreeMap`, not `HashMap`**: zenoh's memory backend is a
 //!   `HashMap<Option<OwnedKeyExpr>, StoredData>` (memory_backend/mod.rs:79);
 //!   the no_std kernel has no std hasher, and the exact-key lookup is
@@ -107,6 +111,42 @@ pub enum StorageInsertionResult {
     /// A key's entry was removed.
     Deleted,
 }
+
+/// A mutation the backend could not commit to its medium. zenoh's `Storage`
+/// trait returns `ZResult<StorageInsertionResult>` and its filesystem backend
+/// propagates the write error with `?`
+/// (`zenoh-backend-filesystem/src/lib.rs:294-353`); wz mirrors the *presence*
+/// of the error channel, not its payload.
+///
+/// **Payload-free on purpose** (the [`EntropyUnavailable`](crate::entropy::EntropyUnavailable)
+/// precedent). Two things follow from that choice. The kernel is `no_std` and
+/// this type sits in the return value of every `put` / `delete`, so a
+/// `String`/`Box<dyn Error>` payload would be carried on the success path of an
+/// MCU profile to describe a failure only an AP-side backend can produce. And
+/// there is nothing a caller can DO with the detail: every caller in this tree
+/// takes the same branch — do not record the mutation — while the backend that
+/// owns the medium already has the concrete `io::Error` and logs it. The
+/// operator reads the cause; the caller reads the fact.
+///
+/// The distinction between "nothing reached the medium" and "the medium
+/// changed but the change is not confirmed durable" is deliberately NOT at this
+/// seam either: it decides whether a backend's own in-memory mirror moves,
+/// which is that backend's bookkeeping, and both answers mean the same thing
+/// here — this mutation is not committed, so nothing above may claim it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageWriteError;
+
+impl core::fmt::Display for StorageWriteError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("the storage backend could not commit the mutation")
+    }
+}
+
+/// The outcome of a backend mutation: the four-way
+/// [`StorageInsertionResult`], or [`StorageWriteError`] when the backend could
+/// not commit it. zenoh `ZResult<StorageInsertionResult>`
+/// (`zenoh-backend-traits/src/lib.rs:219-260`).
+pub type StorageWriteResult = Result<StorageInsertionResult, StorageWriteError>;
 
 /// How many values a backend keeps per key. zenoh `History`
 /// (`zenoh-backend-traits/src/lib.rs:164-168`).
@@ -177,21 +217,39 @@ pub trait StorageBackend {
     /// `memory_backend/mod.rs:97-122`: Occupied -> Replaced, Vacant ->
     /// Inserted). `key` is `None` for the exact-prefix-match (mount-root)
     /// slot.
+    ///
+    /// # Contract on failure
+    ///
+    /// [`Err`] means **the mutation is not committed**, and the two halves of
+    /// that are separate obligations. A backend that returns `Err` must not
+    /// leave a caller able to read the mutation back as if it had succeeded:
+    /// whatever this backend serves from [`get`](StorageBackend::get) and
+    /// lists from [`get_all_entries`](StorageBackend::get_all_entries) must be
+    /// what a *reopen of the same medium* would show. And the layers above —
+    /// the newer-wins gate, the replication log, the aligner digest — must
+    /// record nothing, which is what [`StorageState::process_put`](crate::storage_state::StorageState::process_put)
+    /// enforces by propagating rather than recording.
+    ///
+    /// An in-memory backend is infallible and always returns [`Ok`].
     fn put(
         &mut self,
         key: Option<&str>,
         payload: Vec<u8>,
         encoding: Option<EncodingHint>,
         timestamp: TimestampHint,
-    ) -> StorageInsertionResult;
+    ) -> StorageWriteResult;
 
     /// Remove `key`. Returns [`Deleted`](StorageInsertionResult::Deleted)
     /// unconditionally — even for an absent key (zenoh memory_backend
     /// `delete`, `memory_backend/mod.rs:126-133`: `remove_entry` then
-    /// `Deleted`). `timestamp` is accepted for contract parity (a
-    /// history / replication backend records the delete version); the bare
-    /// in-memory backend drops the entry.
-    fn delete(&mut self, key: Option<&str>, timestamp: TimestampHint) -> StorageInsertionResult;
+    /// `Deleted`; the filesystem backend's `if file.exists()` is the same
+    /// absent-is-success rule, `files_mgt.rs:198`). `timestamp` is accepted
+    /// for contract parity (a history / replication backend records the delete
+    /// version); the bare in-memory backend drops the entry.
+    ///
+    /// [`Err`] carries the same contract as [`put`](StorageBackend::put): the
+    /// key was NOT removed as far as anything above this seam is concerned.
+    fn delete(&mut self, key: Option<&str>, timestamp: TimestampHint) -> StorageWriteResult;
 
     /// Retrieve the value stored under an exact `key`, if any. zenoh `get`
     /// (`zenoh-backend-traits/src/lib.rs:250-254`) returns
@@ -266,7 +324,7 @@ impl StorageBackend for MemoryStorage {
         payload: Vec<u8>,
         encoding: Option<EncodingHint>,
         timestamp: TimestampHint,
-    ) -> StorageInsertionResult {
+    ) -> StorageWriteResult {
         let data = StoredData {
             payload,
             encoding,
@@ -276,20 +334,21 @@ impl StorageBackend for MemoryStorage {
         // a fresh key — the exact Occupied/Vacant split zenoh's memory
         // backend keys Replaced/Inserted off of (memory_backend/mod.rs:108
         // / :121). The map key is `Option<String>`; `None` is the
-        // exact-prefix-match slot.
-        match self.map.insert(key.map(String::from), data) {
+        // exact-prefix-match slot. Always `Ok`: an in-memory map has no
+        // medium that can refuse the write.
+        Ok(match self.map.insert(key.map(String::from), data) {
             Some(_) => StorageInsertionResult::Replaced,
             None => StorageInsertionResult::Inserted,
-        }
+        })
     }
 
-    fn delete(&mut self, key: Option<&str>, _timestamp: TimestampHint) -> StorageInsertionResult {
+    fn delete(&mut self, key: Option<&str>, _timestamp: TimestampHint) -> StorageWriteResult {
         // zenoh `remove_entry` then `Deleted` unconditionally
         // (memory_backend/mod.rs:132-133): absent-key delete is still
         // Deleted (the storage-history / tombstone semantics live above
         // the bare backend).
         self.map.remove(&key.map(String::from));
-        StorageInsertionResult::Deleted
+        Ok(StorageInsertionResult::Deleted)
     }
 
     fn get(&self, key: Option<&str>) -> Option<&StoredData> {
@@ -320,11 +379,11 @@ impl<B: StorageBackend + ?Sized> StorageBackend for Box<B> {
         payload: Vec<u8>,
         encoding: Option<EncodingHint>,
         timestamp: TimestampHint,
-    ) -> StorageInsertionResult {
+    ) -> StorageWriteResult {
         (**self).put(key, payload, encoding, timestamp)
     }
 
-    fn delete(&mut self, key: Option<&str>, timestamp: TimestampHint) -> StorageInsertionResult {
+    fn delete(&mut self, key: Option<&str>, timestamp: TimestampHint) -> StorageWriteResult {
         (**self).delete(key, timestamp)
     }
 
@@ -364,7 +423,7 @@ mod tests {
     #[test]
     fn put_new_key_is_inserted_and_readable() {
         let mut s = MemoryStorage::new();
-        let r = s.put(Some("demo/a"), vec![1, 2, 3], enc(), ts(10));
+        let r = s.put(Some("demo/a"), vec![1, 2, 3], enc(), ts(10)).unwrap();
         assert_eq!(r, StorageInsertionResult::Inserted);
         assert_eq!(s.len(), 1);
         let stored = s.get(Some("demo/a")).expect("key present after put");
@@ -376,10 +435,10 @@ mod tests {
     fn put_existing_key_is_replaced() {
         let mut s = MemoryStorage::new();
         assert_eq!(
-            s.put(Some("demo/a"), vec![1], enc(), ts(10)),
+            s.put(Some("demo/a"), vec![1], enc(), ts(10)).unwrap(),
             StorageInsertionResult::Inserted
         );
-        let r = s.put(Some("demo/a"), vec![2], enc(), ts(20));
+        let r = s.put(Some("demo/a"), vec![2], enc(), ts(20)).unwrap();
         assert_eq!(r, StorageInsertionResult::Replaced);
         assert_eq!(s.len(), 1, "replace does not grow the key set");
         assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![2]);
@@ -393,7 +452,7 @@ mod tests {
         // key and round-trips on get.
         let mut s = MemoryStorage::new();
         assert_eq!(
-            s.put(None, vec![7], enc(), ts(10)),
+            s.put(None, vec![7], enc(), ts(10)).unwrap(),
             StorageInsertionResult::Inserted
         );
         assert_eq!(
@@ -401,7 +460,7 @@ mod tests {
             vec![7]
         );
         // The `None` slot is independent of any `Some` key.
-        s.put(Some("a"), vec![1], enc(), ts(10));
+        s.put(Some("a"), vec![1], enc(), ts(10)).unwrap();
         assert_eq!(s.len(), 2);
         assert_eq!(s.get(None).unwrap().payload, vec![7]);
         assert_eq!(s.get(Some("a")).unwrap().payload, vec![1]);
@@ -410,8 +469,8 @@ mod tests {
     #[test]
     fn delete_removes_entry_and_returns_deleted() {
         let mut s = MemoryStorage::new();
-        s.put(Some("demo/a"), vec![1], enc(), ts(10));
-        let r = s.delete(Some("demo/a"), ts(20));
+        s.put(Some("demo/a"), vec![1], enc(), ts(10)).unwrap();
+        let r = s.delete(Some("demo/a"), ts(20)).unwrap();
         assert_eq!(r, StorageInsertionResult::Deleted);
         assert!(s.get(Some("demo/a")).is_none(), "key gone after delete");
         assert!(s.is_empty());
@@ -424,7 +483,7 @@ mod tests {
         // (memory_backend/mod.rs:132-133).
         let mut s = MemoryStorage::new();
         assert_eq!(
-            s.delete(Some("demo/missing"), ts(1)),
+            s.delete(Some("demo/missing"), ts(1)).unwrap(),
             StorageInsertionResult::Deleted
         );
     }
@@ -432,8 +491,8 @@ mod tests {
     #[test]
     fn get_all_entries_lists_every_key_with_its_timestamp() {
         let mut s = MemoryStorage::new();
-        s.put(Some("demo/a"), vec![1], enc(), ts(10));
-        s.put(Some("demo/b"), vec![2], enc(), ts(20));
+        s.put(Some("demo/a"), vec![1], enc(), ts(10)).unwrap();
+        s.put(Some("demo/b"), vec![2], enc(), ts(20)).unwrap();
         let mut entries = s.get_all_entries();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
@@ -450,8 +509,8 @@ mod tests {
         // BTreeMap<Option<String>, _> orders `None` before every `Some`, so
         // the exact-prefix-match slot lists first.
         let mut s = MemoryStorage::new();
-        s.put(Some("demo/a"), vec![1], enc(), ts(10));
-        s.put(None, vec![9], enc(), ts(20));
+        s.put(Some("demo/a"), vec![1], enc(), ts(10)).unwrap();
+        s.put(None, vec![9], enc(), ts(20)).unwrap();
         let entries = s.get_all_entries();
         assert_eq!(
             entries,
@@ -466,8 +525,8 @@ mod tests {
         // backend is what would reject it as Outdated). This is the
         // invariant the follow-up newer-wins atom relies on.
         let mut s = MemoryStorage::new();
-        s.put(Some("demo/a"), vec![9], enc(), ts(100));
-        let r = s.put(Some("demo/a"), vec![1], enc(), ts(1));
+        s.put(Some("demo/a"), vec![9], enc(), ts(100)).unwrap();
+        let r = s.put(Some("demo/a"), vec![1], enc(), ts(1)).unwrap();
         assert_eq!(r, StorageInsertionResult::Replaced);
         assert_eq!(
             s.get(Some("demo/a")).unwrap().payload,

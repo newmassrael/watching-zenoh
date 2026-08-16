@@ -625,15 +625,19 @@ async fn zenohd_converges_to_wz_replica() {
     //    zenoh storage requires a timestamp).
     let replica: Arc<StdMutex<StorageState<MemoryStorage>>> =
         Arc::new(StdMutex::new(StorageState::new(MemoryStorage::new())));
-    replica.lock().unwrap().process_put(
-        Some(WZ_DATA_KEY),
-        WZ_SEED_VALUE.as_bytes().to_vec(),
-        None,
-        TimestampHint {
-            time: wall_clock_ntp64(),
-            zid: wz_zid.clone(),
-        },
-    );
+    replica
+        .lock()
+        .unwrap()
+        .process_put(
+            Some(WZ_DATA_KEY),
+            WZ_SEED_VALUE.as_bytes().to_vec(),
+            None,
+            TimestampHint {
+                time: wall_clock_ntp64(),
+                zid: wz_zid.clone(),
+            },
+        )
+        .expect("the in-memory backend commits");
 
     let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
     let session = TokioSession::new(opened.actions.clone(), observer, Arc::new(opened.clock));
