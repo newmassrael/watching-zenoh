@@ -5641,12 +5641,25 @@ layer_c1l_reassembly() {
 #
 # R311y784 moved both counts by 1 (the departure observer case) and R311y787 by
 # 3 more (the `multicast_peer_lost` value tests, which the `multicast` filter
-# selects by module path); the STEP is 16 across all three revisions, which is
+# selects by module path); the STEP is 16 across all four revisions, which is
 # the part of this guard that carries meaning.
+#
+# R311y833 moved both by 4 more, and the cause is the reason this comment keeps
+# growing: the filter is the bare word `multicast`, matched against the WHOLE
+# test path, so it selects by NAME as well as by module. R311y832 added four
+# `locator::tests` cases about the `#ttl=` multicast key — measured here:
+# `a_multicast_ttl_is_read_from_the_config_span`,
+# `a_multicast_ttl_that_is_not_a_number_is_refused`,
+# `an_absent_multicast_ttl_leaves_the_os_default`,
+# `the_metadata_span_is_not_a_multicast_config` — and its own count-guard sweep
+# looked for the module string `multicast_glue` and so never saw them. They sit
+# in neither reassembly-dependent module, so both arms move by the same 4 and
+# the step is untouched. Paid here rather than in y832 because that round's
+# hosted run is where it surfaced.
 layer_c1p_multicast() {
-    _runci_guarded_test C1p 36 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
+    _runci_guarded_test C1p 40 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
         || return 1
-    _runci_guarded_test C1p 52 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    _runci_guarded_test C1p 56 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated

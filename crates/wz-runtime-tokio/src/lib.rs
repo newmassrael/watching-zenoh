@@ -2132,6 +2132,15 @@ impl McastSocketConfig<'_> {
     /// that looks configured and is not. wz is v4-only on this path (the whole
     /// multicast surface is — `wz-ap-demo/src/runner.rs` says so of itself), so
     /// a v6 group here is a refusal with its own message rather than a mis-parse.
+    ///
+    /// R311y833 — gated on `transport-link-udp` as well as this impl's own
+    /// `any(scouting-active, transport-multicast)`, because its ONE caller is
+    /// `UdpDriver::bind_multicast_v4` and that whole impl block carries the udp
+    /// gate (`:1801`). The union `wz-runtime-tokio-multicast-tests` forces —
+    /// multicast ON, `transport-link-udp` OFF under `--no-default-features` —
+    /// left this method compiled and uncalled, which Layer C1cf reads as dead
+    /// code. R311y832 added the method with the impl's gate alone.
+    #[cfg(feature = "transport-link-udp")]
     fn resolved_joins(&self) -> io::Result<Vec<std::net::Ipv4Addr>> {
         self.extra_joins
             .iter()
