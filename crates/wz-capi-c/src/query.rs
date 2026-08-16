@@ -132,6 +132,11 @@ enum PendingReply {
 struct DeferredResponder {
     session: TokioSession,
     rid: u64,
+    /// R311y834 — the escaped query's own `_anyke`, for the reason its
+    /// `wz-capi-pico` twin carries one: the deferred emit must build the SAME
+    /// acceptance policy as the in-dispatch leg, and neither default is right
+    /// without the query's actual selector.
+    accept: wz_runtime_tokio::reply_acceptance::ReplyKeyExpr,
 }
 
 impl DeferredResponder {
@@ -140,8 +145,12 @@ impl DeferredResponder {
     fn emit(&self, query_keyexpr: &str, reply: PendingReply) {
         let mut replies: Vec<QueryReply> = Vec::new();
         {
-            let mut responder =
-                QueryResponder::new(self.rid, query_keyexpr.to_owned(), &mut replies);
+            let mut responder = QueryResponder::new(
+                self.rid,
+                query_keyexpr.to_owned(),
+                self.accept,
+                &mut replies,
+            );
             let mut out: &mut dyn ReplyOut = &mut responder;
             flush_one(&mut out, reply);
         }
@@ -417,6 +426,11 @@ impl QueryMarshal {
             deferred: Some(DeferredResponder {
                 session,
                 rid: self.rid,
+                accept: if self.anyke {
+                    wz_runtime_tokio::reply_acceptance::ReplyKeyExpr::Any
+                } else {
+                    wz_runtime_tokio::reply_acceptance::ReplyKeyExpr::MatchingQuery
+                },
             }),
             replies: UnsafeCell::new(Vec::new()),
         }

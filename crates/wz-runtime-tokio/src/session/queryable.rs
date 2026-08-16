@@ -204,9 +204,23 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     };
                     let mut replies: Vec<crate::query::QueryReply> = Vec::new();
                     {
+                        // R311y834 — the DEFERRED job runs the handler outside
+                        // the observer lock, so it rebuilds the responder and
+                        // must rebuild its acceptance policy from the SAME
+                        // query it captured. Reading it off `owned.parameters`
+                        // rather than carrying a flag keeps this path and the
+                        // in-lock dispatcher on one derivation.
                         let mut responder = wz_session_core::query::QueryResponder::new(
                             owned.rid,
                             owned.keyexpr.clone(),
+                            owned
+                                .parameters
+                                .as_deref()
+                                .and_then(|b| core::str::from_utf8(b).ok())
+                                .map_or(
+                                    wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
+                                    wz_session_core::reply_acceptance::ReplyKeyExpr::from_parameters,
+                                ),
                             &mut replies,
                         );
                         handler(&view, &mut responder);

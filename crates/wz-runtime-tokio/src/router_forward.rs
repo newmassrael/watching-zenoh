@@ -4482,7 +4482,16 @@ impl RouterForwarder {
         };
         let mut replies: Vec<QueryReply> = Vec::new();
         {
-            let mut responder = QueryResponder::new(request.rid, keyexpr.to_string(), &mut replies);
+            // R311y834 — `MatchingQuery`: the self-hosted admin handler renders
+            // net data under concrete keys inside the queried admin namespace,
+            // and `LocalQueryView` carries no selector parameters, so there is
+            // no `_anyke` to honour. Absent the opt-out, the guarantee holds.
+            let mut responder = QueryResponder::new(
+                request.rid,
+                keyexpr.to_string(),
+                wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
+                &mut replies,
+            );
             for handler in &matched {
                 // The self-hosted admin handler renders net data + replies; it never
                 // re-queries its own keyexpr, so try_borrow_mut always succeeds and

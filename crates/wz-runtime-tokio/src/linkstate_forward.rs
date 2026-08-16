@@ -2749,7 +2749,19 @@ impl LinkstateForwarder {
         let mut replies: Vec<QueryReply> = Vec::new();
         let mut deferred: Vec<Rc<RefCell<LocalQueryHandler>>> = Vec::new();
         {
-            let mut responder = QueryResponder::new(request.rid, keyexpr.to_string(), &mut replies);
+            // R311y834 — `MatchingQuery`, and it is a decision rather than a
+            // default: `LocalQueryView` carries no selector parameters, so there
+            // is no `_anyke` to read here, and the safe direction when the
+            // opt-out cannot be seen is the GUARANTEE. These handlers are the
+            // router's own admin/linkstate renderers, which answer under
+            // concrete keys inside the queried namespace; one that answers
+            // outside it is a defect the gate should surface, not permit.
+            let mut responder = QueryResponder::new(
+                request.rid,
+                keyexpr.to_string(),
+                wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
+                &mut replies,
+            );
             for handler in &matched {
                 match handler.try_borrow_mut() {
                     Ok(mut h) => (**h)(&view, &mut responder),
@@ -2875,7 +2887,15 @@ impl LinkstateForwarder {
             };
             let mut replies: Vec<QueryReply> = Vec::new();
             {
-                let mut responder = QueryResponder::new(dq.rid, dq.keyexpr.clone(), &mut replies);
+                // R311y834 — same reasoning as the immediate leg above; the
+                // deferred redelivery answers the same query under the same
+                // keyexpr and must keep the same contract.
+                let mut responder = QueryResponder::new(
+                    dq.rid,
+                    dq.keyexpr.clone(),
+                    wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
+                    &mut replies,
+                );
                 for handler in &dq.handlers {
                     if let Ok(mut h) = handler.try_borrow_mut() {
                         (**h)(&view, &mut responder);

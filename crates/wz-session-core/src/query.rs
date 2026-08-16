@@ -105,6 +105,11 @@ use crate::caps;
 use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
 use crate::query_mode::QueryTarget;
 use crate::registry_error::RegisterError;
+// R311y834 — the only consumers are `QueryResponder` and the dispatcher, both
+// of which carry `all(codec-request, alloc)`; without them the name is unused,
+// which is the cfg-gated-import shape Layer C1cf exists to catch.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+use crate::reply_acceptance::ReplyKeyExpr;
 // `CodecError` is referenced only by `into_response`, which lives in the
 // `all(codec-response, alloc)` impl block (ResponseOwned is alloc-backed),
 // so the import must carry the same gate — otherwise a
@@ -629,6 +634,25 @@ pub struct QueryResponder<'a> {
     /// [`crate::response_build::ResponseErrBuilder::responder`].
     /// Set via [`Self::with_responder`]; clears via [`Self::clear_responder`].
     responder: Option<(Vec<u8>, u32)>,
+    /// R311y834 — which replies THIS query accepts, read off its own selector
+    /// parameters exactly as the requester side reads them
+    /// ([`crate::reply_acceptance::ReplyKeyExpr::from_parameters`]).
+    ///
+    /// Only the MODE is stored, not a second keyexpr: the expression to gate
+    /// against is `keyexpr_literal`, which this responder already holds because
+    /// it is the query's own. That is also why the check is free for the
+    /// bound-keyexpr methods ([`Self::send_reply`] and kin) — they stage under
+    /// `keyexpr_literal` itself, which always intersects itself, so they are
+    /// deliberately not routed through the gate.
+    accept: ReplyKeyExpr,
+    /// R311y834 — how many replies the gate refused. Upstream tells the CALLER
+    /// (zenoh `bail!`s out of `Query::_reply_sample`,
+    /// `zenoh/src/api/queryable.rs:284-286`; pico returns
+    /// `_Z_ERR_KEYEXPR_NOT_MATCH`, `vendor/zenoh-pico/src/net/primitives.c:438`)
+    /// and wz's void `ReplyOut` seam cannot, so the count is kept here and read
+    /// back through [`Self::refused_replies`] by whoever owns the responder.
+    /// The divergence is named rather than hidden — see that accessor.
+    refused: u32,
 }
 
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
@@ -640,13 +664,64 @@ impl<'a> QueryResponder<'a> {
     /// (wire -> `ResponseSink::send_response`, local ->
     /// `ReplyRegistry::deliver_local_reply`). In-module dispatch keeps
     /// building the struct literally.
-    pub fn new(rid: u64, keyexpr_literal: String, replies: &'a mut Vec<QueryReply>) -> Self {
+    /// R311y834 — `accept` is REQUIRED, for the reason the requester-side
+    /// registration takes one (R311y833): a responder that cannot say what its
+    /// query accepts cannot keep the contract, and the silent default is what
+    /// shipped the gap. Derive it with
+    /// [`crate::reply_acceptance::ReplyKeyExpr::from_parameters`] over the
+    /// query's OWN parameters — never from a local opinion — so the two ends of
+    /// the exchange read the same `_anyke` token.
+    pub fn new(
+        rid: u64,
+        keyexpr_literal: String,
+        accept: ReplyKeyExpr,
+        replies: &'a mut Vec<QueryReply>,
+    ) -> Self {
         Self {
             rid,
             keyexpr_literal,
             replies,
             responder: None,
+            accept,
+            refused: 0,
         }
+    }
+
+    /// How many replies this responder REFUSED because their keyexpr did not
+    /// intersect the query's, i.e. how many times the handler tried to answer
+    /// outside what it was asked.
+    ///
+    /// NAMED DIVERGENCE. Upstream reports this to the caller synchronously and
+    /// wz does not: zenoh's `Query::_reply_sample` returns `Err`
+    /// (`zenoh/src/api/queryable.rs:284-286`) and pico's `_z_send_reply`
+    /// returns `_Z_ERR_KEYEXPR_NOT_MATCH`
+    /// (`vendor/zenoh-pico/src/net/primitives.c:438`), while every `ReplyOut`
+    /// method here returns `()`. Making them fallible is a 61-callsite API
+    /// change across the whole responder seam INCLUDING the no_std MCU sinks,
+    /// and it is a separate decision from having the gate at all. Until it is
+    /// taken, the refusal is not silent — it is counted here, and the owner of
+    /// the responder (the dispatcher, or wz-runtime-tokio's deferred queryable
+    /// job) can read it.
+    pub fn refused_replies(&self) -> u32 {
+        self.refused
+    }
+
+    /// Whether a reply keyed `keyexpr` may be staged for this query, counting
+    /// the refusal when it may not.
+    ///
+    /// The rule and its source are the requester side's
+    /// ([`crate::reply_acceptance`]), which is the whole reason this gate needed
+    /// no new mechanism: `_anyke` is one token read by both ends, and the
+    /// intersection is one SSOT.
+    fn admit(&mut self, keyexpr: &str) -> bool {
+        if self.accept == ReplyKeyExpr::Any {
+            return true;
+        }
+        if crate::reply_acceptance::reply_keyexpr_intersects(&self.keyexpr_literal, keyexpr) {
+            return true;
+        }
+        self.refused = self.refused.saturating_add(1);
+        false
     }
 
     /// Emit a Put-form data reply with the given payload bytes.
@@ -679,6 +754,9 @@ impl<'a> QueryResponder<'a> {
     /// The caller must pass a keyexpr the inbound query covers
     /// (`reply ⊆ query`); not re-checked here.
     pub fn send_reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
+        if !self.admit(keyexpr) {
+            return;
+        }
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -708,6 +786,9 @@ impl<'a> QueryResponder<'a> {
         encoding: Option<&EncodingHint>,
         timestamp: &TimestampHint,
     ) {
+        if !self.admit(keyexpr) {
+            return;
+        }
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -740,6 +821,9 @@ impl<'a> QueryResponder<'a> {
         timestamp: &TimestampHint,
         source_info: Option<&SourceInfo>,
     ) {
+        if !self.admit(keyexpr) {
+            return;
+        }
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -774,6 +858,9 @@ impl<'a> QueryResponder<'a> {
         encoding: Option<&EncodingHint>,
         attachment: &[u8],
     ) {
+        if !self.admit(keyexpr) {
+            return;
+        }
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -801,6 +888,9 @@ impl<'a> QueryResponder<'a> {
         payload: &[u8],
         encoding: Option<&EncodingHint>,
     ) {
+        if !self.admit(keyexpr) {
+            return;
+        }
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -852,6 +942,9 @@ impl<'a> QueryResponder<'a> {
     /// counterpart takes an arbitrary keyexpr
     /// (`~/zenoh-pico/include/zenoh-pico/api/primitives.h:2846`).
     pub fn send_reply_keyed_del(&mut self, keyexpr: &str) {
+        if !self.admit(keyexpr) {
+            return;
+        }
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.into(),
@@ -912,6 +1005,9 @@ impl<'a> QueryResponder<'a> {
         timestamp: &TimestampHint,
         source_info: Option<&SourceInfo>,
     ) {
+        if !self.admit(keyexpr) {
+            return;
+        }
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -938,6 +1034,9 @@ impl<'a> QueryResponder<'a> {
     /// `reply-source-info`) — this seam adds no wire arm, it only stops
     /// dropping the ones already built.
     pub fn send_reply_keyed_meta(&mut self, keyexpr: &str, payload: &[u8], meta: ReplyMeta<'_>) {
+        if !self.admit(keyexpr) {
+            return;
+        }
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -975,6 +1074,9 @@ impl<'a> QueryResponder<'a> {
     /// so a C caller's attachment travelled the whole way and died on this one
     /// hardcoded `None`.
     pub fn send_reply_keyed_del_meta(&mut self, keyexpr: &str, meta: ReplyMeta<'_>) {
+        if !self.admit(keyexpr) {
+            return;
+        }
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -1727,6 +1829,17 @@ impl<C: QuerySink> QueryableRegistry<C> {
         // queryable's `BorrowedQuery` lends both, matching the source_info
         // borrow shape.
         let value_view = extract_query_value(query);
+        // R311y834 — resolved ONCE per inbound query beside the other
+        // projections, because it is a property of the query rather than of any
+        // matched queryable. Non-UTF-8 parameters cannot spell the ASCII
+        // `_anyke` token, so they read as `MatchingQuery`.
+        let accept_mode = match parameters_view {
+            Some(bytes) => match core::str::from_utf8(bytes) {
+                Ok(params) => ReplyKeyExpr::from_parameters(params),
+                Err(_) => ReplyKeyExpr::MatchingQuery,
+            },
+            None => ReplyKeyExpr::MatchingQuery,
+        };
         let mut matched = 0;
         for queryable in self.queryables.iter_mut() {
             // R311gb (Track 2) — shared match SSOT with the no-heap
@@ -1735,11 +1848,19 @@ impl<C: QuerySink> QueryableRegistry<C> {
             // `Queryable::matches`.
             if queryable.matches(keyexpr, is_remote, target) {
                 matched += 1;
+                // R311y834 — the acceptance mode comes from the QUERY's own
+                // selector parameters, the same token the requester's gate
+                // reads (R311y833). `parameters_view` is already the
+                // `query-selector-parameters`-gated projection, so a build that
+                // cannot see parameters reads `MatchingQuery` — the guarantee,
+                // never the opt-out — which is the safe direction.
                 let mut responder = QueryResponder {
                     rid,
                     keyexpr_literal: keyexpr.to_string(),
                     replies,
                     responder: None,
+                    accept: accept_mode,
+                    refused: 0,
                 };
                 // R311gb-3b-cleanup — dispatch through the QuerySink seam
                 // with no intermediate wrapper: `QueryResponder` impls
@@ -2758,7 +2879,21 @@ mod tests {
                 packed_id: 13,
                 schema: None,
             };
-            responder.reply_keyed_attached("demo/a", b"stored-value", Some(&enc), b"align-reply");
+            // R311y834 — keyed on the QUERY's own expression, which is what the
+            // real aligner does on BOTH arms
+            // (`storage_aligner_service.rs:253,262` pass `view.keyexpr()`) and
+            // what zenoh's does (`.reply(query.key_expr(), ..)`,
+            // `plugins/zenoh-plugin-storage-manager/src/replication/core/aligner_query.rs:351,356`).
+            // This fixture used to say `"demo/a"` — a key that does not
+            // intersect `@zid/aligner` — and so asserted a staging neither
+            // upstream nor wz's own aligner performs. The responder gate is what
+            // surfaced it; the fixture was what was wrong.
+            responder.reply_keyed_attached(
+                "@zid/aligner",
+                b"stored-value",
+                Some(&enc),
+                b"align-reply",
+            );
         });
 
         let mut replies = Vec::new();
@@ -2779,7 +2914,7 @@ mod tests {
                 timestamp,
                 ..
             } => {
-                assert_eq!(keyexpr_literal, "demo/a");
+                assert_eq!(keyexpr_literal, "@zid/aligner");
                 assert_eq!(payload, b"stored-value");
                 assert_eq!(attachment.as_deref(), Some(&b"align-reply"[..]));
                 assert!(encoding.is_some(), "value encoding present");
@@ -3694,6 +3829,118 @@ mod tests {
         assert_eq!(replies.len(), 2);
     }
 
+    // ── R311y834 responder-side reply-keyexpr gate ──────────────────────
+    //
+    // The other half of R311y833's contract, and upstream has BOTH: zenoh
+    // refuses in `Query::_reply_sample` (`zenoh/src/api/queryable.rs:284-286`,
+    // an `Err` to the caller) and zenoh-pico in `_z_send_reply`
+    // (`vendor/zenoh-pico/src/net/primitives.c:438`,
+    // `_Z_ERR_KEYEXPR_NOT_MATCH`). wz had it only inside the C ABI shim, and
+    // `send_reply_keyed`'s own doc admitted the hole in as many words: "The
+    // caller must pass a keyexpr the inbound query covers (`reply ⊆ query`);
+    // not re-checked here."
+
+    /// MEASURED BEFORE THE FIX, by this exact body with a `panic!` reporting
+    /// what got staged: `["demo/inside", "other/outside"]`. A queryable
+    /// answering a `demo/**` query staged a reply keyed `other/outside`, and wz
+    /// put it on the wire.
+    ///
+    /// The CONTROL is in the same test: `demo/inside` intersects the query and
+    /// must still be staged, so an implementation that simply stopped staging
+    /// cannot pass. And the refusal is COUNTED, not swallowed — that count is
+    /// what stands in for the `Err` upstream returns.
+    #[test]
+    fn a_reply_staged_outside_the_query_is_refused() {
+        let mut reg = QueryableRegistry::new();
+        reg.register("demo/**", move |_q, responder| {
+            responder.reply_keyed("demo/inside", b"in");
+            responder.reply_keyed("other/outside", b"out");
+        });
+
+        let mut replies = Vec::new();
+        let query = Query::default().try_into_owned().unwrap();
+        reg.local_query(7, "demo/**", &query, None, &mut replies);
+
+        let staged: Vec<&str> = replies
+            .iter()
+            .filter_map(|r| match r {
+                QueryReply::Reply {
+                    keyexpr_literal, ..
+                } => Some(keyexpr_literal.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            staged,
+            vec!["demo/inside"],
+            "zenoh refuses the non-intersecting reply at queryable.rs:285; so must this"
+        );
+    }
+
+    /// The responder counts what it refused, which is how wz keeps the refusal
+    /// from being silent while its `ReplyOut` seam stays `()`-returning. Driven
+    /// at the responder directly, because the count lives on the responder and
+    /// the dispatcher drops it per matched queryable.
+    #[test]
+    fn the_responder_counts_what_it_refused() {
+        let mut replies: Vec<QueryReply> = Vec::new();
+        let mut responder = QueryResponder::new(
+            7,
+            "demo/**".to_string(),
+            ReplyKeyExpr::MatchingQuery,
+            &mut replies,
+        );
+        assert_eq!(responder.refused_replies(), 0, "nothing refused yet");
+
+        responder.send_reply_keyed("demo/inside", b"in");
+        assert_eq!(responder.refused_replies(), 0, "an intersecting reply");
+
+        responder.send_reply_keyed("other/outside", b"out");
+        responder.send_reply_keyed_del("other/gone");
+        assert_eq!(
+            responder.refused_replies(),
+            2,
+            "both the Put and the Del arms refuse, and both are counted"
+        );
+        assert_eq!(replies.len(), 1, "only the intersecting reply was staged");
+    }
+
+    /// The opt-out, on the responder side, and it is the SAME `_anyke` token the
+    /// requester reads — which is the whole reason this gate needed no new
+    /// mechanism. pico derives the responder's flag from the received
+    /// parameters (`dst->_anyke = implicit_anyke || _z_parameters_has_anyke`,
+    /// `vendor/zenoh-pico/include/zenoh-pico/net/query.h:104`), never from a
+    /// local opinion.
+    #[test]
+    fn an_anyke_query_lets_a_queryable_reply_anywhere() {
+        let mut reg = QueryableRegistry::new();
+        reg.register("demo/**", move |_q, responder| {
+            responder.reply_keyed("demo/inside", b"in");
+            responder.reply_keyed("other/outside", b"out");
+        });
+
+        let mut replies = Vec::new();
+        let query = Query {
+            parameters_len: Some(b"_anyke".len() as u64),
+            parameters: Some(b"_anyke"),
+            ..Query::default()
+        }
+        .try_into_owned()
+        .unwrap();
+        reg.local_query(7, "demo/**", &query, None, &mut replies);
+
+        let staged: Vec<&str> = replies
+            .iter()
+            .filter_map(|r| match r {
+                QueryReply::Reply {
+                    keyexpr_literal, ..
+                } => Some(keyexpr_literal.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(staged, vec!["demo/inside", "other/outside"]);
+    }
+
     // ── R238 Self-query loopback (local_query) ──
 
     #[test]
@@ -4020,6 +4267,8 @@ mod tests {
             keyexpr_literal: "a/b".to_string(),
             replies: &mut replies,
             responder: None,
+            accept: ReplyKeyExpr::MatchingQuery,
+            refused: 0,
         };
         let fired = reg.dispatch_borrowed(
             &BorrowedQuery {
