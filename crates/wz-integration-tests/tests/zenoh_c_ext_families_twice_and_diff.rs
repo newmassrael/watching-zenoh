@@ -175,6 +175,15 @@ int main(int argc, char **argv) {
     z_fifo_channel_reply_new(&rclosure, &rhandler, 16);
     z_get_options_t gopts;
     z_get_options_default(&gopts);
+    /* R311y837 — NAME the mode. This get exists to observe the whole ring, and
+       a get that names nothing resolves to Latest on BOTH implementations,
+       which keeps one reply per keyexpr; all four publications share one
+       keyexpr, so the ring collapses to its newest sample and the depth this
+       probe varies becomes unobservable. zenoh-ext's own cache-facing GETs pin
+       None at every call site for exactly this reason. Measured: with the
+       default this printed `get.replies=1` while the querying subscriber, which
+       pins None itself, still saw all three. */
+    gopts.consolidation = z_query_consolidation_none();
     z_result_t grc = z_get(z_loan(s), z_loan(ke), "", z_move(rclosure), &gopts);
     printf("get.rc=%d\n", (int)grc);
     drain_replies("get", z_loan(rhandler));

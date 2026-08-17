@@ -74,7 +74,14 @@ fn build_session() -> (TokioSession, Arc<RecordingLinkDriver>) {
 /// the setter's gate would change WHICH LANES RUN THESE TESTS for a reason
 /// orthogonal to what they prove. With the feature off the field is inert
 /// (`effective_consolidation` hard-returns `None`).
-#[cfg(feature = "query-get")]
+///
+/// R311y837 — the gate GAINED `query-queryable`, which is the cfg all five of
+/// its callers already carry. `query-get` alone was too wide: the C1j
+/// `zget-reply-only` subset composes `query-get` WITHOUT `query-queryable`, so
+/// the helper had no caller there and the lane failed to BUILD under
+/// `-D warnings` — hosted-only, because no local lane composes that subset.
+/// A private test helper inherits its callers' cfg or it is dead somewhere.
+#[cfg(all(feature = "query-get", feature = "query-queryable"))]
 fn get_opts_in_arrival_order() -> QueryOptions {
     QueryOptions {
         consolidation: Some(wz_session_core::query_mode::ConsolidationMode::None),
