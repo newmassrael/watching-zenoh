@@ -2720,6 +2720,81 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
     }
 
+    /// R311y838 — stage the ACCEPTOR's InitAck `0x7` PATCH entry at the level
+    /// this session NEGOTIATED, in place of the `CURRENT` the slot was seeded
+    /// with at construction.
+    ///
+    /// Both references answer the `min`, and both compute it at SEND time from
+    /// the state the InitSyn left behind:
+    ///
+    /// ```text
+    /// // zenoh, AcceptFsm::send_init_ack
+    /// Ok(min(PatchType::CURRENT, state.patch))
+    /// ```
+    ///
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/patch.rs:180-186`,
+    /// over the level `recv_init_syn` stored unexamined at :167-175, starting
+    /// from `PatchType::NONE` when the InitSyn carried no entry), and
+    ///
+    /// ```c
+    /// if (iam._body._init._patch > tmsg._body._init._patch) {
+    ///     iam._body._init._patch = tmsg._body._init._patch;
+    /// }
+    /// ```
+    ///
+    /// (`src/transport/unicast/transport.c:237-241`) — pico's InitAck is BUILT
+    /// carrying `_Z_CURRENT_PATCH` (`protocol/definitions/transport.c:178`) and
+    /// then capped here, in the same block that caps the three size parameters.
+    /// wz seeded its slot the way pico builds its message and then never ran
+    /// pico's cap, so it announced `CURRENT` to every peer.
+    ///
+    /// ## Why this is not cosmetic
+    ///
+    /// The answer is the PEER's input, not ours. The negotiated level is the
+    /// sole gate on the Fragment `First` / `Drop` chain-boundary markers
+    /// (`PatchType::has_fragmentation_markers`), so answering above the peer's
+    /// announcement tells it to expect markers on a link where they were never
+    /// agreed — and an InitAck exceeding the InitSyn's level is one BOTH
+    /// references refuse outright (zenoh `bail!`s at `ext/patch.rs:78-85`, pico
+    /// returns `_Z_ERR_GENERIC` before building the OpenSyn at
+    /// `transport.c:142-148`), which is the same rule wz itself enforces as an
+    /// initiator ([`Self::init_ack_patch_acceptable`]).
+    ///
+    /// ## Replaced IN PLACE, not cleared and pushed
+    ///
+    /// Unlike `stage_capability` (a code span, not a link: it is private and
+    /// cfg-gated on the four capability features, so a link would dangle in
+    /// every subset that lacks them), whose entry is present only when the
+    /// capability is still offered, this entry is unconditional — so the
+    /// position it already holds in the chain is the wire order wz has emitted
+    /// since R121f1, and only the VALUE byte is this round's business. pico
+    /// likewise assigns into the message it already built rather than
+    /// re-appending.
+    ///
+    /// ⚠ That position is a CONSERVATISM WITH NO WITNESS, measured rather than
+    /// assumed: swapping this for `stage_capability`'s `retain` + `push` (which
+    /// moves the entry to the chain's end whenever another ext was staged
+    /// above) reds NOTHING across `wz-session-core`, `wz-runtime-tokio` and
+    /// `wz-integration-tests`. Nothing should — an ext chain is order-free to
+    /// both reference decoders, which walk it by header id. So this is the
+    /// cheaper of two correct forms, chosen to avoid an unforced change to
+    /// bytes the layer3 fixtures pin, and not a property any gate defends.
+    ///
+    /// The level is read BEFORE the chain guard is taken: both are per-profile
+    /// mutexes and the MCU profile's is a non-reentrant critical section (the
+    /// 2b-① discipline the Init encode sites follow for the same reason).
+    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+    fn stage_negotiated_patch(&self, role: ExtChainRole) {
+        let level = self.negotiated_patch();
+        R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            let entry = crate::extpatch::encode_patch_ext_at(level);
+            match chain.iter().position(|e| e.ext_id() == entry.ext_id()) {
+                Some(at) => chain[at] = entry,
+                None => chain.push(entry),
+            }
+        });
+    }
+
     /// R311y817 — the patch level THIS session put on its InitSyn, read back
     /// out of the staged chain rather than assumed.
     ///
@@ -7282,6 +7357,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     crate::extshm::encode_shm_establishment_ext,
                 );
             }
+            // R311y838 — the `0x7` PATCH answer, lowered to the NEGOTIATED
+            // level. Staged here with the capability reflections above and for
+            // the same reason: everything the acceptor answers is derived from
+            // the post-InitSyn merge at send time, never from the value the
+            // slot was constructed with. The patch was the one that still was
+            // — `min()` had run and only the wire did not know.
+            a.stage_negotiated_patch(ExtChainRole::InitAck);
             // R86 — Accepting-side cookie binding per RFC §5.M
             // anti-amplification. If the inbound InitSyn already arrived
             // (`inbound_peer_zid` slot populated by `handle_inbound`),

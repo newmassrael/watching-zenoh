@@ -215,12 +215,29 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     );
     // R121f1 — patch-ext entry trails the cookie field. Last two
     // bytes of the InitAck wire = [0x27 (INIT_PATCH | ENC_ZINT),
-    //                              0x01 (VLE _Z_CURRENT_PATCH)].
+    //                              VLE(the NEGOTIATED level)].
+    //
+    // R311y838 — the value is 0x00 here, and the contrast with the InitSyn
+    // assertion above (which stays `_Z_CURRENT_PATCH`) is now this pair's
+    // content rather than a coincidence. The two Inits answer different
+    // questions in both references: an INITIATOR announces its own current
+    // level unconditionally (zenoh `send_init_syn` -> `Ok(PatchType::CURRENT)`,
+    // `ext/patch.rs:63-68`; pico `_z_t_msg_make_init_syn`), while an ACCEPTOR
+    // answers `min(CURRENT, peer)` (zenoh `send_init_ack`, :180-186; pico's cap
+    // at `transport.c:237-241`).
+    //
+    // This script fires the accept-side action in ISOLATION and never delivers
+    // an InitSyn, so there is no peer level to min against — which is precisely
+    // zenoh's `StateAccept::new() { patch: PatchType::NONE }` (:119-124), and
+    // `min(CURRENT, NONE) = 0`. Asserting 0x01 here, as this test did until
+    // R311y838, asserted the seeded slot rather than any answer either
+    // reference gives.
     let init_ack_tail = &init_ack[init_ack.len() - 2..];
     assert_eq!(
         init_ack_tail,
-        &[0x27u8, 0x01u8],
-        "InitAck must terminate with the default patch-ext entry"
+        &[0x27u8, 0x00u8],
+        "InitAck must terminate with the patch-ext entry at the NEGOTIATED \
+         level, which is 0 for an acceptor that has been given no InitSyn"
     );
 
     // OpenAck — flags=T|A, no cookie.

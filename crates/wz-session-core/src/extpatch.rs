@@ -139,12 +139,30 @@ pub fn encode_patch_ext_at(level: u8) -> ExtEntryOwned {
 /// the `min`, so announcing the ceiling is how a patch-0 peer still settles
 /// on 0.
 ///
-/// ⚠ A DIVERGENCE worth naming: zenoh's ACCEPTOR answers `min(CURRENT, peer)`
-/// (`patch.rs::send_init_ack`) while pico answers `_Z_CURRENT_PATCH`
-/// unconditionally, and wz seeds its InitAck slot with CURRENT — so wz matches
-/// PICO here, not zenoh. Benign in both directions (the ext is advisory and
-/// wz's own negotiated level is still the `min`), and recorded rather than
-/// silently picked.
+/// ⚠ R311y838 CORRECTION — this doc used to say "pico answers
+/// `_Z_CURRENT_PATCH` unconditionally, so wz matches PICO here, not zenoh …
+/// benign in both directions". Every clause of that was wrong, and it read as
+/// a ratified choice, which is how it survived.
+///
+/// It was derived from pico's CONSTRUCTOR and stopped there.
+/// `_z_t_msg_make_init_ack` does set `_Z_CURRENT_PATCH`
+/// (`src/protocol/definitions/transport.c:178`), but the accept path then caps
+/// the message it just built — `if (iam._patch > tmsg._patch) iam._patch =
+/// tmsg._patch;` (`src/transport/unicast/transport.c:237-241`), in the same
+/// block as the three size parameters. So BOTH references answer the `min` and
+/// wz matched neither; the seeded slot is pico's *construction*, and what was
+/// missing was pico's *cap*. Nor was it benign: the level is the sole gate on
+/// the Fragment chain-boundary markers, and an InitAck above the InitSyn's
+/// level is one both references REFUSE (`ext/patch.rs:78-85`,
+/// `transport.c:142-148`) — the rule wz enforces itself as an initiator.
+///
+/// The answer is now derived at send time by `stage_negotiated_patch` in
+/// `crate::session_actions` — both named as code spans rather than linked. The
+/// method is private and the MODULE is itself cfg-gated, so neither resolves in
+/// the default `cargo doc` build; the two `session_actions` links already above
+/// in this file are among the findings Layer C1bz carries as budget, and adding
+/// a third is how that budget grows. This function stays the INITIATOR's
+/// unconditional announcement, which is what both references do on InitSyn.
 pub fn encode_patch_ext() -> ExtEntryOwned {
     encode_patch_ext_at(CURRENT_PATCH)
 }
