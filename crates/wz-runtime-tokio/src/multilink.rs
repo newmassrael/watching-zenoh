@@ -531,14 +531,21 @@ mod tests {
         );
     }
 
-    /// R311y217 (#3 — the sharp SN-safety case) — a BATCH reopen-flush routes the
-    /// flushed frame by ITS OWN pinned conduit (`batch.priority` + the frame's own
-    /// R flag as of R311y222's (priority, reliability) key), NOT the triggering
-    /// message's priority. Open a HIGH frame in a batch window, then
-    /// send a LOW message: the priority change flushes the open HIGH frame, which
-    /// MUST ride the HIGH-band link (its own conduit) — if it routed by the LOW
-    /// trigger it would land on the low-band link, splitting one conduit across
-    /// links and tripping the peer's per-(priority,reliability) RX SN gate.
+    /// R311y217 (#3 — the sharp SN-safety case) — a BATCH drain routes each
+    /// flushed frame by ITS OWN conduit (the stage's priority + the frame's own
+    /// R flag, R311y222's (priority, reliability) key), NOT by whatever message
+    /// happened to trigger the drain. Stage a HIGH frame and a LOW frame in one
+    /// batch window: the HIGH frame MUST ride the HIGH-band link and the LOW
+    /// frame the low-band one — routing either by the other's priority would
+    /// split one conduit across links and trip the peer's
+    /// per-(priority,reliability) RX SN gate.
+    ///
+    /// R311y835 moved the TRIGGER, not the claim: this body used to assert that
+    /// the LOW message's arrival flushed the open HIGH frame, which was wz's
+    /// flush-on-priority-change stand-in for per-priority staging. zenoh does
+    /// not do that — an arriving Background message never drains a RealTime
+    /// batch (`pipeline.rs` stages each priority independently) — so the
+    /// interleave now defers and the DRAIN is what routes.
     #[cfg(all(
         feature = "transport-qos",
         feature = "codec-push",
@@ -546,7 +553,7 @@ mod tests {
         feature = "transport-batching"
     ))]
     #[test]
-    fn multilink_batch_reopen_flush_routes_by_frame_conduit() {
+    fn multilink_batch_drain_routes_each_frame_by_its_own_conduit() {
         use wz_session_core::qos::Priority;
         use wz_session_core::session_actions::LinkPriorityRange;
 
@@ -577,34 +584,33 @@ mod tests {
             "nothing on the low-band link yet"
         );
 
-        // A LOW message on a DIFFERENT conduit flushes the open HIGH frame. The
-        // HIGH frame must route by its OWN conduit (RealTime -> high-band link),
-        // never the LOW trigger's priority.
+        // A LOW message opens its OWN conduit's frame (R311y835) — it neither
+        // rides the HIGH frame nor drains it.
         primary
             .send_push_literal_qos("b/low", b"L", true, Priority::Background)
-            .expect("batched low send (forces the reopen-flush)");
+            .expect("batched low send opens the low conduit");
         assert_eq!(
             primary_driver.frame_count(),
-            1,
-            "the reopen-flushed HIGH frame rode the HIGH-band link (its own conduit, not the LOW trigger)"
+            0,
+            "an arriving LOW message must not drain the staged HIGH frame"
         );
         assert_eq!(
             secondary_driver.frame_count(),
             0,
-            "the HIGH frame did NOT leak onto the low-band link"
+            "nor emit its own frame before the window drains"
         );
 
-        // Draining the window emits the open LOW frame on the low-band link.
+        // The drain emits BOTH, each on the link its own band selects.
         primary.batch_flush().expect("batch_flush");
+        assert_eq!(
+            primary_driver.frame_count(),
+            1,
+            "the HIGH frame rode the HIGH-band link (its own conduit, not the LOW frame's)"
+        );
         assert_eq!(
             secondary_driver.frame_count(),
             1,
             "the LOW frame rode the low-band link"
-        );
-        assert_eq!(
-            primary_driver.frame_count(),
-            1,
-            "the high-band link keeps only its HIGH frame"
         );
     }
 

@@ -2747,6 +2747,16 @@ layer_c1bb_cargo_test_qos() {
     # goes unexercised — the R311y513 shape, one feature key over.
     _runci_guarded_test C1bb 11 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --lib multilink:: --quiet \
         || return 1
+    # R311y835 — the per-priority TX staging + strict-priority drain. `batch_tx_tests`
+    # otherwise rides the DEFAULT Layer C1 workspace run, and `transport-qos` is not a
+    # default feature of wz-runtime-tokio: the three cases this round adds are
+    # `cfg(transport-qos)` and would be compiled out there, so without this line the
+    # scheduling claim has no lane that sees it. 9 = the whole module under this
+    # feature set (the six pre-existing cases plus the three), measured with `--list`;
+    # the fragmentation-interplay case is NOT among them (it needs
+    # transport-fragmentation and is pinned by Layer C1l instead).
+    _runci_guarded_test C1bb 9 cargo test -p wz-runtime-tokio --features transport-qos,transport-batching,codec-push,codec-close,transport-unicast --lib batch_tx_tests:: --quiet \
+        || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --quiet -- -D warnings) \
         || return 1

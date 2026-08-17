@@ -3424,6 +3424,160 @@ mod batch_tx_tests {
             );
         }
     }
+
+    /// Decode an emitted FRAME into its `(priority, message count, payload
+    /// bytes)` — the three things the R311y835 scheduling assertions read. The
+    /// payload comes back so a test can prove WHICH message rode WHICH band
+    /// rather than only how many did.
+    #[cfg(feature = "transport-qos")]
+    fn frame_band(frame: &[u8]) -> (wz_session_core::qos::Priority, usize, Vec<u8>) {
+        let InboundFrame::Frame {
+            payload, priority, ..
+        } = parse_inbound(frame).expect("parse emitted frame")
+        else {
+            panic!("emitted bytes are not a T_MID_FRAME");
+        };
+        let count = parse_frame_payload(&payload)
+            .expect("parse frame payload")
+            .len();
+        (priority, count, payload.to_vec())
+    }
+
+    /// R311y835 — the batch window drains ASCENDING BY PRIORITY, so a RealTime
+    /// message staged SECOND leaves the link BEFORE a Background message staged
+    /// FIRST. This is zenoh's strict-priority pull over its per-priority
+    /// `stage_in` (`io/zenoh-transport/src/common/pipeline.rs`), and wz had none
+    /// of it: measured on the unperturbed tree, this exact body put
+    /// `["Background", "RealTime"]` on the wire — arrival order, with the ext_qos
+    /// band carried faithfully and then ignored by the schedule.
+    ///
+    /// The CONTROL rides in the same test: each frame must still carry its OWN
+    /// single message, so an implementation that reaches the asserted order by
+    /// dropping or merging the Background message cannot pass.
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn batch_drains_conduits_in_ascending_priority_order() {
+        use wz_session_core::qos::Priority;
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        assert!(actions.set_qos_offer(true), "qos offer applies");
+        actions.batch_start().expect("batch_start");
+
+        actions
+            .send_push_literal_qos("home/bg", b"BGBGBGBG", true, Priority::Background)
+            .expect("background push");
+        actions
+            .send_push_literal_qos("home/rt", b"RTRTRTRT", true, Priority::RealTime)
+            .expect("realtime push");
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "the two conduits stage INDEPENDENTLY — pre-y835 the RealTime message \
+             flushed the open Background frame on its way in"
+        );
+
+        actions.batch_flush().expect("batch_flush");
+        assert_eq!(driver.frame_count(), 2, "one frame per staged conduit");
+
+        let (p0, n0, body0) = frame_band(&driver.frame_bytes(0));
+        let (p1, n1, body1) = frame_band(&driver.frame_bytes(1));
+        assert_eq!(
+            (p0, p1),
+            (Priority::RealTime, Priority::Background),
+            "the drain is ascending by priority, NOT arrival order"
+        );
+        assert_eq!((n0, n1), (1, 1), "each conduit carries its own message");
+        assert!(
+            body0.windows(8).any(|w| w == b"RTRTRTRT")
+                && !body0.windows(8).any(|w| w == b"BGBGBGBG"),
+            "the first frame carries the RealTime payload and only that"
+        );
+        assert!(
+            body1.windows(8).any(|w| w == b"BGBGBGBG")
+                && !body1.windows(8).any(|w| w == b"RTRTRTRT"),
+            "the Background message was DEFERRED, not dropped"
+        );
+    }
+
+    /// R311y835 — the other half of the per-priority stage: an interleaved
+    /// higher-priority message no longer SPLITS a lower conduit's open frame.
+    /// Two Data pushes with a RealTime push between them coalesce into ONE Data
+    /// frame (pre-y835: three frames, because every priority change flushed and
+    /// reopened). Distinct from the ordering assertion above — this is the
+    /// batching efficiency zenoh gets from independent `stage_in`s, and it is
+    /// what makes a mixed-priority session cost fewer frames, not more.
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn batch_keeps_a_conduit_open_across_a_higher_priority_interleave() {
+        use wz_session_core::qos::Priority;
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        assert!(actions.set_qos_offer(true), "qos offer applies");
+        actions.batch_start().expect("batch_start");
+
+        actions
+            .send_push_literal_qos("home/d", b"D1", true, Priority::Data)
+            .expect("first data push");
+        actions
+            .send_push_literal_qos("home/rt", b"R1", true, Priority::RealTime)
+            .expect("interleaved realtime push");
+        actions
+            .send_push_literal_qos("home/d", b"D2", true, Priority::Data)
+            .expect("second data push");
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "no conduit change may flush another conduit's open frame"
+        );
+
+        actions.batch_flush().expect("batch_flush");
+        assert_eq!(
+            driver.frame_count(),
+            2,
+            "two conduits staged, so two frames — pre-y835 the interleave made three"
+        );
+        let (p0, n0, _) = frame_band(&driver.frame_bytes(0));
+        let (p1, n1, _) = frame_band(&driver.frame_bytes(1));
+        assert_eq!((p0, n0), (Priority::RealTime, 1), "RealTime drains first");
+        assert_eq!(
+            (p1, n1),
+            (Priority::Data, 2),
+            "BOTH Data messages rode ONE frame across the interleave"
+        );
+    }
+
+    /// R311y835 — the no-regression control for every session that did NOT
+    /// negotiate QoS, which is the shape a `transport-qos` build still spends
+    /// most of its life in. `dispatch_network_message` forces `Priority::DEFAULT`
+    /// there before the stage lookup, so all eight bands collapse onto one
+    /// conduit and the window drains as the single coalesced frame it always
+    /// did — the per-priority stages must not split a non-QoS session's wire.
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn a_non_qos_session_stages_every_band_on_one_conduit() {
+        use wz_session_core::qos::Priority;
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        assert!(!actions.is_qos(), "the fixture session negotiated no QoS");
+        actions.batch_start().expect("batch_start");
+        actions
+            .send_push_literal_qos("home/bg", b"BG", true, Priority::Background)
+            .expect("background push");
+        actions
+            .send_push_literal_qos("home/rt", b"RT", true, Priority::RealTime)
+            .expect("realtime push");
+        actions.batch_flush().expect("batch_flush");
+
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "a non-QoS session has ONE conduit; both bands share its frame"
+        );
+        let (priority, count, _) = frame_band(&driver.frame_bytes(0));
+        assert_eq!(
+            priority,
+            Priority::DEFAULT,
+            "a non-QoS frame carries no ext_qos, so it reads back as DEFAULT"
+        );
+        assert_eq!(count, 2, "both messages coalesced into the one frame");
+    }
 }
 
 /// A4 (session-reconnect) — declaration-cache + transport-replacement
