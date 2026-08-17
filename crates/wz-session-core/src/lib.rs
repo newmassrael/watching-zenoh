@@ -587,6 +587,12 @@ pub mod zid_hex;
 #[cfg(feature = "alloc")]
 pub mod json;
 
+/// R311y842 — the READ direction of [`json`]: a hand-rolled JSON5 reader, so
+/// the stock zenoh config an operator already holds is an INPUT to wz rather
+/// than only ever an output of it. `alloc`-only, same as its emit twin.
+#[cfg(feature = "alloc")]
+pub mod json5;
+
 /// §5.23 — admin space `local_data` view: the `@/<zid>/<whatami>/**` built-in
 /// queryable keyexpr helpers + the `local_data` JSON body, the wz mirror of
 /// zenoh `net/runtime/adminspace.rs`. Pure data-view (the queryable wiring lives

@@ -723,6 +723,13 @@ storage-replication = ["storage-backend", "wz-runtime-tokio?/storage-replication
 # source the HLC wraps), time-timestamp-source (the FallbackStamp seam) —
 # they stay no-op markers (A3: active <=> a real cfg toggle).
 time-hlc = ["wz-runtime-tokio?/time-hlc"]
+# R311y842 — the stock-zenoh CONFIG SURFACE, both directions: emit the JSON5 a
+# `zenohd -c` reads, and READ the one an operator already has. Deliberately not
+# an inventory atom: it toggles no wire behaviour and no protocol capability,
+# it decides whether wz can be handed a deployment's own configuration. The
+# name predates the read half (R311y579 emitted only) and is kept because the
+# feature is a surface rather than a direction; the module doc says so.
+zenoh-config-emit = ["wz-runtime-tokio?/zenoh-config-emit"]
 time-ntp64 = []
 time-system-clock = []
 time-timestamp-source = []

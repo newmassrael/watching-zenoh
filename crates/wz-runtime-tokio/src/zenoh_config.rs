@@ -18,13 +18,41 @@
 //!
 //! This module closes that in both directions:
 //!
-//! * **emit** — [`ZenohNodeConfig::to_json5`] renders the config zenoh's own
+//! * **emit** — `ZenohNodeConfig::to_json5` renders the config zenoh's own
 //!   `-c` flag reads, with the key paths taken from the reference's
 //!   `DEFAULT_CONFIG.json5` rather than from memory.
 //! * **validate** — [`ZenohNodeConfig::validate`] answers "can this topology
 //!   work" WITHOUT starting a node: an unknown link protocol, a client that
 //!   can reach nothing, the QoS-with-lowlatency pair zenoh's own config
 //!   documents as incompatible.
+//! * **ingest** (R311y842) — `ZenohNodeConfig::from_json5` reads the file
+//!   `zenohd -c` reads.
+//!
+//! (The three item names in this module doc are CODE SPANS, not intra-doc
+//! links, for the reason `json5`'s module doc records: a link from a
+//! cfg-gated module's own `//!` doc to its own item does not resolve, while
+//! the same link inside an ITEM's doc below does. Measured here under
+//! `--features zenoh-config-emit`, which is a feature set Layer C1bz never
+//! selects, so nothing would have caught them.)
+//!
+//! ## Why the READ direction is the one that makes wz a replacement
+//!
+//! Emit and validate serve a wz deployment that stands a stock zenoh node up
+//! NEXT to itself. Neither helps the operator who wants to stand wz up INSTEAD
+//! of that node: until R311y842 every wz setting arrived as a bespoke
+//! command-line flag, so the config file the deployment already had was an
+//! input to nothing, and "drop-in" meant hand-translating a document into
+//! ninety flags. A replacement that cannot read the deployment's own
+//! configuration is not one.
+//!
+//! The reader is deliberately PARTIAL and says so out loud. wz models 14 of
+//! the 111 leaf keys a real zenohd resolves, and
+//! `ZenohConfigIngest::ignored` names every key in the document that is not
+//! one of them. The alternative shapes are both worse: refusing an unknown key
+//! makes the reader useless against a real config, and applying what it knows
+//! while staying silent lets an operator believe a TLS root-CA path took
+//! effect. The partition is also what a coverage census compares against the
+//! upstream surface, which is why it is a value rather than a log line.
 //!
 //! ## Why the validator is worth having when zenoh will also complain
 //!
@@ -53,6 +81,7 @@ use core::fmt::Write as _;
 
 use wz_codecs::whatami::WhatAmI;
 use wz_session_core::json::escape_into;
+use wz_session_core::json5::{number_as_u64, Json5Value};
 
 /// Link protocols a stock zenoh 1.5.0 can carry, read off the reference's own
 /// `io/zenoh-links/*/src/lib.rs` `*_LOCATOR_PREFIX` constants plus
@@ -366,6 +395,466 @@ impl ZenohNodeConfig {
     }
 }
 
+/// Every upstream config leaf path [`ZenohNodeConfig::from_json5`] HONOURS,
+/// in the order `to_json5` emits them.
+///
+/// This is the SSOT for both directions and for the coverage census: the
+/// reader reads exactly these, the emitter writes exactly these, and
+/// [`ZenohConfigIngest::ignored`] is "every leaf the document carried that is
+/// not in here". A path added to the reader without being added here would
+/// report itself ignored while being applied — which is why
+/// `every_honoured_key_is_actually_read` drives each entry to a non-default
+/// value and requires the ingest to move.
+pub const HONOURED_CONFIG_KEYS: &[&str] = &[
+    "mode",
+    "connect/endpoints",
+    "listen/endpoints",
+    "scouting/multicast/enabled",
+    "timestamping/enabled",
+    "transport/unicast/max_links",
+    "transport/unicast/lowlatency",
+    "transport/unicast/qos/enabled",
+    "transport/unicast/compression/enabled",
+    "transport/link/tx/batch_size",
+    "transport/link/tx/lease",
+    "adminspace/enabled",
+    "adminspace/permissions/read",
+    "adminspace/permissions/write",
+];
+
+/// Every leaf key a real zenoh 1.5.0 resolves that wz does NOT honour.
+///
+/// Together with [`HONOURED_CONFIG_KEYS`] this is the UPSTREAM CONFIG SURFACE
+/// — the whole of it, obtained by execution rather than by reading
+/// `DEFAULT_CONFIG.json5` (which documents a subset and comments most of it
+/// out). `wz_reads_a_stock_zenohd_config` adjudicates it against a running
+/// zenohd's own resolved config, so this list is a claim about zenoh that
+/// zenoh checks, not a wz-side opinion.
+///
+/// These are not defects. wz models the topology-and-transport subset it can
+/// act on; `transport/auth/*` needs an auth stack, `plugins*` a plugin host,
+/// `qos/*` and `downsampling` an interceptor chain configured from the same
+/// file. Naming them is what turns "wz does not honour this" from an absence
+/// nobody can see into a recorded fact with a place to change.
+pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
+    "access_control/default_permission",
+    "access_control/enabled",
+    "access_control/policies",
+    "access_control/rules",
+    "access_control/subjects",
+    "aggregation/publishers",
+    "aggregation/subscribers",
+    "connect/exit_on_failure",
+    "connect/retry",
+    "connect/timeout_ms",
+    "downsampling",
+    "id",
+    "listen/exit_on_failure",
+    "listen/retry",
+    "listen/timeout_ms",
+    "low_pass_filter",
+    "metadata",
+    "namespace",
+    "open/return_conditions/connect_scouted",
+    "open/return_conditions/declares",
+    "plugins",
+    "plugins_loading/enabled",
+    "plugins_loading/search_dirs",
+    "qos/network",
+    "qos/publication",
+    "queries_default_timeout",
+    "routing/interests/timeout",
+    "routing/peer/linkstate/transport_weights",
+    "routing/peer/mode",
+    "routing/router/linkstate/transport_weights",
+    "routing/router/peers_failover_brokering",
+    "scouting/delay",
+    "scouting/gossip/autoconnect",
+    "scouting/gossip/autoconnect_strategy",
+    "scouting/gossip/enabled",
+    "scouting/gossip/multihop",
+    "scouting/gossip/target",
+    "scouting/multicast/address",
+    "scouting/multicast/autoconnect",
+    "scouting/multicast/autoconnect_strategy",
+    "scouting/multicast/interface",
+    "scouting/multicast/listen",
+    "scouting/multicast/ttl",
+    "scouting/timeout",
+    "timestamping/drop_future_timestamp",
+    "transport/auth/pubkey/key_size",
+    "transport/auth/pubkey/known_keys_file",
+    "transport/auth/pubkey/private_key_file",
+    "transport/auth/pubkey/private_key_pem",
+    "transport/auth/pubkey/public_key_file",
+    "transport/auth/pubkey/public_key_pem",
+    "transport/auth/usrpwd/dictionary_file",
+    "transport/auth/usrpwd/password",
+    "transport/auth/usrpwd/user",
+    "transport/link/protocols",
+    "transport/link/rx/buffer_size",
+    "transport/link/rx/max_message_size",
+    "transport/link/tcp/so_rcvbuf",
+    "transport/link/tcp/so_sndbuf",
+    "transport/link/tls/close_link_on_expiration",
+    "transport/link/tls/connect_certificate",
+    "transport/link/tls/connect_private_key",
+    "transport/link/tls/enable_mtls",
+    "transport/link/tls/listen_certificate",
+    "transport/link/tls/listen_private_key",
+    "transport/link/tls/root_ca_certificate",
+    "transport/link/tls/so_rcvbuf",
+    "transport/link/tls/so_sndbuf",
+    "transport/link/tls/verify_name_on_connect",
+    "transport/link/tx/keep_alive",
+    "transport/link/tx/queue/allocation/mode",
+    "transport/link/tx/queue/batching/enabled",
+    "transport/link/tx/queue/batching/time_limit",
+    "transport/link/tx/queue/congestion_control/block/wait_before_close",
+    "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
+    "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
+    "transport/link/tx/queue/size/background",
+    "transport/link/tx/queue/size/control",
+    "transport/link/tx/queue/size/data",
+    "transport/link/tx/queue/size/data_high",
+    "transport/link/tx/queue/size/data_low",
+    "transport/link/tx/queue/size/interactive_high",
+    "transport/link/tx/queue/size/interactive_low",
+    "transport/link/tx/queue/size/real_time",
+    "transport/link/tx/sequence_number_resolution",
+    "transport/link/tx/threads",
+    "transport/link/unixpipe/file_access_mask",
+    "transport/multicast/compression/enabled",
+    "transport/multicast/join_interval",
+    "transport/multicast/max_sessions",
+    "transport/multicast/qos/enabled",
+    "transport/shared_memory/enabled",
+    "transport/shared_memory/mode",
+    "transport/unicast/accept_pending",
+    "transport/unicast/accept_timeout",
+    "transport/unicast/max_sessions",
+    "transport/unicast/open_timeout",
+];
+
+/// Is `path` a key stock zenoh knows — itself, or under a subtree it knows?
+///
+/// The DESCENDANT half is not a looseness: several upstream keys are whole
+/// subtrees that resolve to `null` when unset (`connect/retry`, `metadata`,
+/// `plugins`), so a config that fills one in carries leaves BELOW the path the
+/// resolved tree shows. Refusing those would refuse valid configs.
+///
+/// The residual, stated rather than hidden: zenoh's own check is finer. It
+/// deserialises into typed structs with `deny_unknown_fields`, so it refuses a
+/// bogus field INSIDE `connect/retry` too, where this accepts anything under a
+/// known opaque node. wz's boundary is therefore a SUPERSET of zenoh's by
+/// exactly the fields nested inside subtrees wz does not model.
+fn upstream_knows(path: &str) -> bool {
+    HONOURED_CONFIG_KEYS
+        .iter()
+        .chain(UNHONOURED_UPSTREAM_CONFIG_KEYS)
+        .any(|known| {
+            path == *known
+                || (path.len() > known.len()
+                    && path.starts_with(known)
+                    && path.as_bytes()[known.len()] == b'/')
+        })
+}
+
+/// The result of reading a stock zenoh config: what wz took from it, and —
+/// just as load-bearing — what it did not.
+///
+/// The ignored list is not diagnostics padding. A config reader that applies
+/// the keys it knows and says nothing about the rest lets an operator run a
+/// node believing `transport/link/tls/root_ca_certificate` took effect. Every
+/// leaf the document carried that wz does not honour is named here, so the
+/// caller can print it, and so a census can compare the partition against the
+/// upstream surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZenohConfigIngest {
+    /// The subset wz models, with an absent or `null` key left at its zenoh
+    /// default.
+    pub config: ZenohNodeConfig,
+    /// The [`HONOURED_CONFIG_KEYS`] the document actually NAMED, in table
+    /// order.
+    ///
+    /// Distinct from reading [`ZenohConfigIngest::config`], and the
+    /// distinction is load-bearing for any caller that turns a config into
+    /// instructions: `qos` resolves to `true` for a document that never
+    /// mentioned it, so a caller acting on the merged value alone would carry
+    /// a decision the operator never made. A key present but `null` is NOT
+    /// named — that is zenoh's own spelling of "left unset".
+    pub named: Vec<&'static str>,
+    /// Leaf paths the document carried that wz does not honour, sorted.
+    pub ignored: Vec<String>,
+}
+
+/// Why a stock zenoh config could not be read.
+///
+/// A key ZENOH knows and wz does not honour is never one of these — it is
+/// reported through [`ZenohConfigIngest::ignored`], because a real deployment's
+/// config is full of them and refusing those would make the reader useless. A
+/// key NEITHER implementation knows IS one, and that split was settled by
+/// measurement rather than taste (R311y842): a real zenohd refuses an unknown
+/// field outright (`unknown field 'x', expected one of ...`, serde
+/// `deny_unknown_fields`), so a wz that accepted it would let a TYPO through
+/// on exactly the migration where the operator's old node would have caught
+/// it — silently running a node whose mistyped setting never applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigIngestError {
+    /// The document is not JSON5.
+    Syntax(wz_session_core::json5::Json5Error),
+    /// The top level is not an object.
+    NotAnObject,
+    /// A honoured key carried the wrong JSON type.
+    WrongType {
+        /// The key path.
+        path: &'static str,
+        /// What that key has to be.
+        expected: &'static str,
+    },
+    /// `mode` named something that is not a zenoh node role.
+    UnknownMode {
+        /// The value as given.
+        value: String,
+    },
+    /// A honoured numeric key carried a value outside its type.
+    OutOfRange {
+        /// The key path.
+        path: &'static str,
+        /// The value as given.
+        value: String,
+    },
+    /// A key stock zenoh does not know either — a typo, or a config for
+    /// something that is not zenoh. Refused because zenoh refuses it.
+    UnknownKey {
+        /// The key path as the document spelled it.
+        path: String,
+    },
+}
+
+impl core::fmt::Display for ConfigIngestError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ConfigIngestError::Syntax(e) => write!(f, "not a JSON5 document: {e}"),
+            ConfigIngestError::NotAnObject => write!(f, "the top level is not an object"),
+            ConfigIngestError::WrongType { path, expected } => {
+                write!(f, "{path} must be {expected}")
+            }
+            ConfigIngestError::UnknownMode { value } => {
+                write!(f, "mode {value:?} is not one of router, peer, client")
+            }
+            ConfigIngestError::OutOfRange { path, value } => {
+                write!(f, "{path} value {value} is out of range")
+            }
+            ConfigIngestError::UnknownKey { path } => {
+                write!(f, "unknown config key {path:?}; stock zenoh refuses it too")
+            }
+        }
+    }
+}
+
+impl core::error::Error for ConfigIngestError {}
+
+/// A honoured key's value, with zenoh's "null means default" already applied.
+fn honoured<'a>(doc: &'a Json5Value, path: &str) -> Option<&'a Json5Value> {
+    match doc.get(path) {
+        // zenoh's own resolved config writes `null` for every key left unset,
+        // so a null is the ABSENCE of an instruction rather than one.
+        Some(Json5Value::Null) | None => None,
+        other => other,
+    }
+}
+
+fn want_bool(doc: &Json5Value, path: &'static str) -> Result<Option<bool>, ConfigIngestError> {
+    match honoured(doc, path) {
+        None => Ok(None),
+        Some(Json5Value::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(ConfigIngestError::WrongType {
+            path,
+            expected: "a boolean",
+        }),
+    }
+}
+
+fn want_u64(doc: &Json5Value, path: &'static str) -> Result<Option<u64>, ConfigIngestError> {
+    match honoured(doc, path) {
+        None => Ok(None),
+        Some(Json5Value::Number(text)) => {
+            number_as_u64(text)
+                .map(Some)
+                .ok_or_else(|| ConfigIngestError::OutOfRange {
+                    path,
+                    value: text.clone(),
+                })
+        }
+        Some(_) => Err(ConfigIngestError::WrongType {
+            path,
+            expected: "a non-negative integer",
+        }),
+    }
+}
+
+fn want_endpoints(
+    doc: &Json5Value,
+    path: &'static str,
+) -> Result<Option<Vec<String>>, ConfigIngestError> {
+    match honoured(doc, path) {
+        None => Ok(None),
+        Some(Json5Value::Array(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                let Json5Value::String(s) = item else {
+                    return Err(ConfigIngestError::WrongType {
+                        path,
+                        expected: "an array of endpoint strings",
+                    });
+                };
+                out.push(s.clone());
+            }
+            Ok(Some(out))
+        }
+        Some(_) => Err(ConfigIngestError::WrongType {
+            path,
+            expected: "an array of endpoint strings",
+        }),
+    }
+}
+
+impl ZenohNodeConfig {
+    /// Read the config a stock zenoh node would have been started with.
+    ///
+    /// This is the inverse of [`ZenohNodeConfig::to_json5`] over
+    /// [`HONOURED_CONFIG_KEYS`], and the two share that table so they cannot
+    /// drift. Keys outside it are reported rather than refused — see
+    /// [`ZenohConfigIngest`].
+    ///
+    /// An absent key takes zenoh's default rather than wz's, because that is
+    /// what a partial config means to zenoh: the document says what to change,
+    /// not what everything is.
+    pub fn from_json5(source: &str) -> Result<ZenohConfigIngest, ConfigIngestError> {
+        let doc = wz_session_core::json5::parse(source).map_err(ConfigIngestError::Syntax)?;
+        if !matches!(doc, Json5Value::Object(_)) {
+            return Err(ConfigIngestError::NotAnObject);
+        }
+
+        // The ACCEPTANCE BOUNDARY, matched to zenoh's before anything is read.
+        // Checked first so a typo is reported as a typo rather than as a
+        // missing value somewhere downstream.
+        let leaves = doc.leaf_paths();
+        if let Some(unknown) = leaves.iter().find(|p| !upstream_knows(p)) {
+            return Err(ConfigIngestError::UnknownKey {
+                path: unknown.clone(),
+            });
+        }
+
+        let mut out = Self::default();
+        let mut named: Vec<&'static str> = Vec::new();
+
+        if let Some(mode) = honoured(&doc, "mode") {
+            let Json5Value::String(name) = mode else {
+                return Err(ConfigIngestError::WrongType {
+                    path: "mode",
+                    expected: "a string",
+                });
+            };
+            // Matched against `to_str` so the two directions cannot disagree
+            // about a spelling.
+            out.mode = [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client]
+                .into_iter()
+                .find(|w| w.to_str() == name)
+                .ok_or_else(|| ConfigIngestError::UnknownMode {
+                    value: name.clone(),
+                })?;
+            named.push("mode");
+        }
+        if let Some(v) = want_endpoints(&doc, "connect/endpoints")? {
+            out.connect = v;
+            named.push("connect/endpoints");
+        }
+        if let Some(v) = want_endpoints(&doc, "listen/endpoints")? {
+            out.listen = v;
+            named.push("listen/endpoints");
+        }
+        if let Some(v) = want_bool(&doc, "scouting/multicast/enabled")? {
+            out.multicast_scouting = v;
+            named.push("scouting/multicast/enabled");
+        }
+        if let Some(v) = want_bool(&doc, "timestamping/enabled")? {
+            out.timestamping = v;
+            named.push("timestamping/enabled");
+        }
+        if let Some(v) = want_u64(&doc, "transport/unicast/max_links")? {
+            out.max_links = usize::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                path: "transport/unicast/max_links",
+                value: v.to_string(),
+            })?;
+            named.push("transport/unicast/max_links");
+        }
+        if let Some(v) = want_bool(&doc, "transport/unicast/lowlatency")? {
+            out.lowlatency = v;
+            named.push("transport/unicast/lowlatency");
+        }
+        if let Some(v) = want_bool(&doc, "transport/unicast/qos/enabled")? {
+            out.qos = v;
+            named.push("transport/unicast/qos/enabled");
+        }
+        if let Some(v) = want_bool(&doc, "transport/unicast/compression/enabled")? {
+            out.compression = v;
+            named.push("transport/unicast/compression/enabled");
+        }
+        if let Some(v) = want_u64(&doc, "transport/link/tx/batch_size")? {
+            out.batch_size = u16::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                path: "transport/link/tx/batch_size",
+                value: v.to_string(),
+            })?;
+            named.push("transport/link/tx/batch_size");
+        }
+        if let Some(v) = want_u64(&doc, "transport/link/tx/lease")? {
+            out.lease_ms = v;
+            named.push("transport/link/tx/lease");
+        }
+        // `adminspace` is a block rather than a field: an absent block is not
+        // `enabled: false`, which is why the struct models it as an Option and
+        // why `enabled: false` here has to erase the block rather than record
+        // two permissions nobody can use.
+        let admin_enabled = want_bool(&doc, "adminspace/enabled")?;
+        let admin_read = want_bool(&doc, "adminspace/permissions/read")?;
+        let admin_write = want_bool(&doc, "adminspace/permissions/write")?;
+        // Read all three unconditionally rather than only under `enabled`: a
+        // document that sets a permission without the flag would otherwise be
+        // neither honoured NOR reported ignored, which is the one outcome this
+        // whole partition exists to make impossible.
+        for (key, present) in [
+            ("adminspace/enabled", admin_enabled.is_some()),
+            ("adminspace/permissions/read", admin_read.is_some()),
+            ("adminspace/permissions/write", admin_write.is_some()),
+        ] {
+            if present {
+                named.push(key);
+            }
+        }
+        let admin_described =
+            admin_enabled.is_some() || admin_read.is_some() || admin_write.is_some();
+        if admin_described && admin_enabled != Some(false) {
+            out.adminspace = Some(AdminspaceConfig {
+                read: admin_read.unwrap_or(true),
+                write: admin_write.unwrap_or(false),
+            });
+        }
+
+        let mut ignored: Vec<String> = leaves
+            .into_iter()
+            .filter(|p| !HONOURED_CONFIG_KEYS.contains(&p.as_str()))
+            .collect();
+        ignored.dedup();
+        Ok(ZenohConfigIngest {
+            config: out,
+            named,
+            ignored,
+        })
+    }
+}
+
 fn push_endpoints(endpoints: &[String], out: &mut String) {
     out.push('[');
     for (i, e) in endpoints.iter().enumerate() {
@@ -530,6 +1019,409 @@ mod tests {
             json.contains(&format!("\"lease\": {}", wz.lease_ms)),
             "{json}"
         );
+    }
+
+    /// The emit and the ingest are inverses over [`HONOURED_CONFIG_KEYS`].
+    ///
+    /// This is the property that keeps the two directions from drifting: a
+    /// field added to the emitter and forgotten in the reader (or the reverse)
+    /// breaks it without anyone having to remember to write a case for that
+    /// field.
+    #[test]
+    fn emit_and_ingest_are_inverses_over_the_honoured_keys() {
+        for original in [
+            ZenohNodeConfig::default(),
+            ZenohNodeConfig::default()
+                .listening_on("tcp/127.0.0.1:7447")
+                .listening_on("ws/0.0.0.0:8000")
+                .connecting_to("quic/example:7447")
+                .with_multicast_scouting(false)
+                .with_adminspace(true, true),
+            ZenohNodeConfig {
+                mode: WhatAmI::Router,
+                batch_size: 4096,
+                lease_ms: 7000,
+                max_links: 4,
+                qos: false,
+                lowlatency: true,
+                compression: true,
+                timestamping: true,
+                ..ZenohNodeConfig::default()
+            },
+        ] {
+            let ingest = ZenohNodeConfig::from_json5(&original.to_json5())
+                .unwrap_or_else(|e| panic!("{e} for {original:?}"));
+            assert_eq!(ingest.config, original);
+            // Nothing wz emits may be a key wz cannot read back.
+            assert!(ingest.ignored.is_empty(), "{:?}", ingest.ignored);
+        }
+    }
+
+    /// Every entry of [`HONOURED_CONFIG_KEYS`] is genuinely READ.
+    ///
+    /// The table is the SSOT for the ignored partition, so an entry the reader
+    /// does not actually consult would report itself honoured while doing
+    /// nothing — the exact failure the ignored list exists to prevent. Each
+    /// key is driven to a value that differs from the default and the ingest
+    /// is required to move.
+    #[test]
+    fn every_honoured_key_is_actually_read() {
+        let cases: &[(&str, &str)] = &[
+            ("mode", r#"{ "mode": "client" }"#),
+            (
+                "connect/endpoints",
+                r#"{ "connect": { "endpoints": ["tcp/1.2.3.4:7447"] } }"#,
+            ),
+            (
+                "listen/endpoints",
+                r#"{ "listen": { "endpoints": ["tcp/1.2.3.4:7447"] } }"#,
+            ),
+            (
+                "scouting/multicast/enabled",
+                r#"{ "scouting": { "multicast": { "enabled": false } } }"#,
+            ),
+            (
+                "timestamping/enabled",
+                r#"{ "timestamping": { "enabled": true } }"#,
+            ),
+            (
+                "transport/unicast/max_links",
+                r#"{ "transport": { "unicast": { "max_links": 7 } } }"#,
+            ),
+            (
+                "transport/unicast/lowlatency",
+                r#"{ "transport": { "unicast": { "lowlatency": true } } }"#,
+            ),
+            (
+                "transport/unicast/qos/enabled",
+                r#"{ "transport": { "unicast": { "qos": { "enabled": false } } } }"#,
+            ),
+            (
+                "transport/unicast/compression/enabled",
+                r#"{ "transport": { "unicast": { "compression": { "enabled": true } } } }"#,
+            ),
+            (
+                "transport/link/tx/batch_size",
+                r#"{ "transport": { "link": { "tx": { "batch_size": 4096 } } } }"#,
+            ),
+            (
+                "transport/link/tx/lease",
+                r#"{ "transport": { "link": { "tx": { "lease": 7000 } } } }"#,
+            ),
+            (
+                "adminspace/enabled",
+                r#"{ "adminspace": { "enabled": true } }"#,
+            ),
+            (
+                "adminspace/permissions/read",
+                r#"{ "adminspace": { "enabled": true, "permissions": { "read": false } } }"#,
+            ),
+            (
+                "adminspace/permissions/write",
+                r#"{ "adminspace": { "enabled": true, "permissions": { "write": true } } }"#,
+            ),
+        ];
+        // The case list IS the table, so a key added to one and not the other
+        // fails here rather than going unmeasured.
+        let covered: Vec<&str> = cases.iter().map(|(k, _)| *k).collect();
+        assert_eq!(covered, HONOURED_CONFIG_KEYS.to_vec());
+
+        for (key, doc) in cases {
+            let ingest = ZenohNodeConfig::from_json5(doc).unwrap_or_else(|e| panic!("{key}: {e}"));
+            assert!(
+                ingest.ignored.is_empty(),
+                "{key} reported ignored: {:?}",
+                ingest.ignored
+            );
+            assert!(
+                ingest.named.contains(key),
+                "{key} was read but not reported as named: {:?}",
+                ingest.named
+            );
+            assert_ne!(
+                ingest.config,
+                ZenohNodeConfig::default(),
+                "{key} parsed but changed nothing"
+            );
+        }
+    }
+
+    /// A resolved value is not an instruction: `qos` reads `true` out of a
+    /// document that never mentioned it, so a caller that turns a config into
+    /// actions has to be able to tell the two apart.
+    #[test]
+    fn what_the_document_said_is_distinguishable_from_what_it_defaulted_to() {
+        let quiet = ZenohNodeConfig::from_json5(r#"{ "mode": "peer" }"#).unwrap();
+        assert!(quiet.config.qos, "zenoh's default is on");
+        assert_eq!(quiet.named, vec!["mode"]);
+
+        let loud = ZenohNodeConfig::from_json5(
+            r#"{ "mode": "peer", "transport": { "unicast": { "qos": { "enabled": true } } } }"#,
+        )
+        .unwrap();
+        assert_eq!(loud.config, quiet.config, "the same resolved value ...");
+        assert_eq!(
+            loud.named,
+            vec!["mode", "transport/unicast/qos/enabled"],
+            "... reached two different ways"
+        );
+
+        // A null is zenoh's own spelling of "left unset", so it is not named.
+        let nulled = ZenohNodeConfig::from_json5(
+            r#"{ "mode": "peer", "transport": { "unicast": { "qos": { "enabled": null } } } }"#,
+        )
+        .unwrap();
+        assert_eq!(nulled.named, vec!["mode"]);
+    }
+
+    /// An adminspace permission set without the `enabled` flag must be either
+    /// honoured or reported — never silently dropped between the two.
+    #[test]
+    fn an_adminspace_permission_without_the_flag_is_not_lost_between_the_two_lists() {
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ "adminspace": { "permissions": { "write": true } } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ingest.config.adminspace,
+            Some(AdminspaceConfig {
+                read: true,
+                write: true
+            })
+        );
+        assert_eq!(ingest.named, vec!["adminspace/permissions/write"]);
+        assert!(ingest.ignored.is_empty(), "{:?}", ingest.ignored);
+    }
+
+    /// A key wz does not model is APPLIED BY NOBODY and SAID OUT LOUD.
+    #[test]
+    fn an_unmodelled_key_is_reported_rather_than_refused_or_swallowed() {
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{
+                mode: "peer",
+                transport: {
+                    link: {
+                        tls: { root_ca_certificate: "/etc/ca.pem" },
+                        tx: { batch_size: 4096, threads: 8 },
+                    },
+                },
+                queries_default_timeout: 10000,
+                plugins: {},
+            }"#,
+        )
+        .unwrap();
+        // Refusing would make the reader useless against a real config.
+        assert_eq!(ingest.config.batch_size, 4096);
+        // Swallowing would let an operator believe the CA path took effect.
+        assert_eq!(
+            ingest.ignored,
+            vec![
+                "plugins",
+                "queries_default_timeout",
+                "transport/link/tls/root_ca_certificate",
+                "transport/link/tx/threads",
+            ]
+        );
+    }
+
+    /// wz's ACCEPTANCE BOUNDARY is zenoh's: a key zenoh knows and wz does not
+    /// honour is reported, a key NEITHER knows is refused.
+    ///
+    /// The second half is not symmetry for its own sake — it was measured. A
+    /// real zenohd handed `transport: { link_unknown_to_wz: { .. } }` refuses
+    /// to start: "unknown field `link_unknown_to_wz`, expected one of
+    /// `unicast`, `multicast`, `link`, `shared_memory`, `auth`". A wz that
+    /// accepted it would let a typo through on exactly the migration where the
+    /// operator's old node caught it.
+    #[test]
+    fn a_key_stock_zenoh_refuses_is_refused_here_too() {
+        for (doc, path) in [
+            (
+                r#"{ "transport": { "link_unknown_to_wz": { "nothing": true } } }"#,
+                "transport/link_unknown_to_wz/nothing",
+            ),
+            // A near miss of a real key is the case that matters most.
+            (r#"{ "modes": "peer" }"#, "modes"),
+            (
+                r#"{ "listen": { "endpoint": ["tcp/1.2.3.4:7447"] } }"#,
+                "listen/endpoint",
+            ),
+        ] {
+            assert_eq!(
+                ZenohNodeConfig::from_json5(doc).unwrap_err(),
+                ConfigIngestError::UnknownKey {
+                    path: String::from(path)
+                },
+                "{doc}"
+            );
+        }
+
+        // The descendant rule: an upstream key that resolves to `null` is an
+        // opaque SUBTREE, and a config filling it in carries leaves below the
+        // path the resolved tree shows. Refusing those would refuse valid
+        // configs.
+        let filled = ZenohNodeConfig::from_json5(
+            r#"{ "connect": { "retry": { "period_init_ms": 1000 } },
+                 "metadata": { "name": "strawberry" },
+                 "plugins": { "rest": { "http_port": 8000 } } }"#,
+        )
+        .expect("a filled-in upstream subtree is a valid config");
+        assert_eq!(
+            filled.ignored,
+            vec![
+                "connect/retry/period_init_ms",
+                "metadata/name",
+                "plugins/rest/http_port"
+            ]
+        );
+    }
+
+    /// The two key lists are the upstream surface, so they must be disjoint and
+    /// each internally unique — a path in both would be honoured and reported
+    /// at once.
+    #[test]
+    fn the_two_halves_of_the_upstream_surface_do_not_overlap() {
+        let mut all: Vec<&str> = HONOURED_CONFIG_KEYS
+            .iter()
+            .chain(UNHONOURED_UPSTREAM_CONFIG_KEYS)
+            .copied()
+            .collect();
+        let total = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), total, "a path appears in both halves");
+        // Pinned as a value so a silently shrinking surface is visible here as
+        // well as in the zenohd census.
+        assert_eq!(total, 111);
+        let mut unhonoured = UNHONOURED_UPSTREAM_CONFIG_KEYS.to_vec();
+        unhonoured.sort_unstable();
+        assert_eq!(
+            unhonoured,
+            UNHONOURED_UPSTREAM_CONFIG_KEYS.to_vec(),
+            "the unhonoured list is compared against a sorted census, so it \
+             has to be sorted itself"
+        );
+    }
+
+    /// zenoh writes `null` for every key it left unset, so a null is the
+    /// ABSENCE of an instruction, not an instruction to zero the field.
+    #[test]
+    fn a_null_at_a_honoured_key_leaves_zenohs_default_rather_than_erasing_it() {
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ "mode": "peer",
+                 "transport": { "link": { "tx": { "batch_size": null, "lease": null } },
+                                "unicast": { "max_links": null } } }"#,
+        )
+        .unwrap();
+        assert_eq!(ingest.config, ZenohNodeConfig::default());
+        assert!(ingest.config.validate().is_empty());
+        // A null is not an unmodelled key either — wz knows that key.
+        assert!(ingest.ignored.is_empty(), "{:?}", ingest.ignored);
+    }
+
+    /// A key wz DOES honour, carrying a value it cannot mean, is a hard error
+    /// rather than a default — that one the operator has to see.
+    #[test]
+    fn a_honoured_key_with_an_impossible_value_is_refused_at_the_key() {
+        for (doc, want) in [
+            (
+                r#"{ "mode": "gateway" }"#,
+                ConfigIngestError::UnknownMode {
+                    value: "gateway".into(),
+                },
+            ),
+            (
+                r#"{ "mode": 5 }"#,
+                ConfigIngestError::WrongType {
+                    path: "mode",
+                    expected: "a string",
+                },
+            ),
+            (
+                r#"{ "listen": { "endpoints": "tcp/1.2.3.4:7447" } }"#,
+                ConfigIngestError::WrongType {
+                    path: "listen/endpoints",
+                    expected: "an array of endpoint strings",
+                },
+            ),
+            (
+                r#"{ "transport": { "unicast": { "qos": { "enabled": 1 } } } }"#,
+                ConfigIngestError::WrongType {
+                    path: "transport/unicast/qos/enabled",
+                    expected: "a boolean",
+                },
+            ),
+            (
+                // 65536 is one past a u16 — zenoh's own ceiling for the field.
+                r#"{ "transport": { "link": { "tx": { "batch_size": 65536 } } } }"#,
+                ConfigIngestError::OutOfRange {
+                    path: "transport/link/tx/batch_size",
+                    value: "65536".into(),
+                },
+            ),
+        ] {
+            assert_eq!(ZenohNodeConfig::from_json5(doc).unwrap_err(), want, "{doc}");
+        }
+        assert!(matches!(
+            ZenohNodeConfig::from_json5("[]").unwrap_err(),
+            ConfigIngestError::NotAnObject
+        ));
+        assert!(matches!(
+            ZenohNodeConfig::from_json5("{").unwrap_err(),
+            ConfigIngestError::Syntax(_)
+        ));
+    }
+
+    /// An `adminspace` BLOCK is not a field: absent, present-and-off, and
+    /// present-and-on are three different instructions.
+    #[test]
+    fn the_adminspace_block_keeps_its_three_states() {
+        assert_eq!(
+            ZenohNodeConfig::from_json5("{}").unwrap().config.adminspace,
+            None
+        );
+        assert_eq!(
+            ZenohNodeConfig::from_json5(r#"{ "adminspace": { "enabled": false } }"#)
+                .unwrap()
+                .config
+                .adminspace,
+            None
+        );
+        // zenoh's own defaults for the permissions when the block says only
+        // `enabled` (DEFAULT_CONFIG.json5: read true, write false).
+        assert_eq!(
+            ZenohNodeConfig::from_json5(r#"{ "adminspace": { "enabled": true } }"#)
+                .unwrap()
+                .config
+                .adminspace,
+            Some(AdminspaceConfig {
+                read: true,
+                write: false
+            })
+        );
+    }
+
+    /// The reader takes the JSON5 an operator's file is actually written in,
+    /// not the strict-JSON subset wz's own emitter happens to produce.
+    #[test]
+    fn a_hand_written_json5_config_reads_the_same_as_its_strict_json_twin() {
+        let json5 = ZenohNodeConfig::from_json5(
+            r#"
+            /// The operator's own file, comments and all.
+            {
+              mode: 'router',           // single quotes are JSON5
+              listen: { endpoints: ["tcp/0.0.0.0:7447",], },  /* trailing comma */
+            }
+            "#,
+        )
+        .unwrap();
+        let strict = ZenohNodeConfig::from_json5(
+            r#"{"mode": "router", "listen": {"endpoints": ["tcp/0.0.0.0:7447"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(json5, strict);
+        assert_eq!(json5.config.mode, WhatAmI::Router);
+        assert_eq!(json5.config.listen, vec!["tcp/0.0.0.0:7447".to_string()]);
     }
 
     #[test]

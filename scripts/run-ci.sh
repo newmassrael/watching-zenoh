@@ -3222,6 +3222,14 @@ layer_c1ay_cargo_test_router_hat() {
     # accept/reject SET is its whole content.
     _runci_guarded_test "C1AY connect_retry_args 5" 5 \
         cargo test -p wz-ap-demo --features router-hat-router,router-connect-reconcile connect_retry_tests --quiet || return 1
+    # R311y842 — the stock-zenoh config -> argv expansion, for the same reason
+    # the parser above states: it returns Result rather than exiting, precisely
+    # so the accept/reject SET can be tested, and an exiting expander could not
+    # be. Its own lane because the feature is not in the demo's default preset,
+    # so a default-features run compiles the module out and would report a
+    # cheerful `0 passed`.
+    _runci_guarded_test "C1AY stock_config_tests 7" 7 \
+        cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings \
@@ -10286,7 +10294,13 @@ layer_z_zenohd_interop() {
     # by R311y471) pulls `wz/adminspace-core` (wz-ap-demo/Cargo.toml), so the FULL
     # build line already carries it. Resolved from wz-ap-demo's own feature table,
     # not read off one preset.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink --quiet) || return 1
+    # R311y842 adds `zenoh-config`: the new `wz_reads_a_stock_zenohd_config`
+    # drop-in leg drives `--config`, which is parsed only under that feature and
+    # is REJECTED with a build hint without it, so a binary built without the key
+    # would fail the leg rather than skip it. Additive like the rest: the flag is
+    # absent from every other leg's argv, so they all dial through the unchanged
+    # binary.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -10458,6 +10472,31 @@ layer_z_zenohd_interop() {
     # bits rather than answering any interest at all.
     _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_querier_matching_through_zenohd_router -- --ignored --quiet --test-threads=1 \
+        || return 1
+    # R311y842 — the stock-zenoh CONFIG SURFACE, both directions, registered
+    # together because the second of these two files had never been registered
+    # ANYWHERE.
+    #
+    # `zenoh_config_emit_zenohd_interop` (R311y579) carries the `zenohd` token in
+    # both its test names ON PURPOSE, so Layer E's `--skip zenohd` sweep skips it
+    # — and no Layer Z entry ever named it, so it has run on no hosted CI since
+    # the round that wrote it. Measured, not inferred: `grep` over run-ci.sh and
+    # ci.yml finds the file nowhere. It passes (2 legs), so the fix is the line
+    # below rather than a debt item.
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test zenoh_config_emit_zenohd_interop -- --ignored --quiet --test-threads=1 \
+        || return 1
+    # The READ direction, which is the one that bears on replacement: an operator
+    # standing wz up in place of a zenoh node already HAS the config file, and
+    # until R311y842 it was an input to nothing. Four legs: the differential
+    # oracle (wz and zenohd resolve the same bytes and are compared key by key),
+    # the upstream-surface census (zenohd's own resolved config enumerated, every
+    # one of its 111 leaf keys honoured or in the pinned unhonoured SET), the
+    # acceptance boundary (a key zenohd refuses is one wz refuses), and the
+    # drop-in itself (`wz-ap-demo --config` and nothing else, dialling a port that
+    # exists only inside the file).
+    _runci_guarded_test Z 4 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_reads_a_stock_zenohd_config -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked
     # against wz's cdylib, must report a REAL zenohd's zid under "Routers IDs".

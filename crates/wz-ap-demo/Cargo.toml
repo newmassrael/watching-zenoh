@@ -273,7 +273,18 @@ preset-ap-full = [
     # `--interest-timeout` stays unreachable from argv — exactly the held-back
     # incoherence Layer A5 checks for.
     "routing-interest-pending-gc",
+    # R311y842 — `--config <stock zenoh config>`. Named here by the same rule
+    # as every key above: without it the AP-full binary links the config reader
+    # in and argv cannot reach it, which is the held-back incoherence Layer A5
+    # refuses. It is NOT in `preset-ap-client`: the default preset's footprint
+    # is a measured baseline (Layer F) and this is an operator convenience, not
+    # a protocol capability.
+    "zenoh-config",
 ]
+# R311y842 — read the JSON5 config a stock zenoh node is started with, and turn
+# it into the argv this binary would otherwise have to be given by hand. The
+# demo key gates the CLI surface; `wz/zenoh-config-emit` is the library half.
+zenoh-config = ["wz/zenoh-config-emit"]
 # gc-3 carry #2 — the live application machine + observer switchboard fan-out.
 # Pulls the wz-ap-demo-app crate (the app statechart + generated injector) and
 # the wz facade's switchboard feature (ApplicationLayerObserver.switchboard +

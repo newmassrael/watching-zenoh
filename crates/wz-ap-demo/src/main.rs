@@ -128,6 +128,48 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // R311y842 — `--config <file>`: the stock zenoh config an operator already
+    // has, expanded into the argv every branch below already knows how to
+    // parse. Handled HERE, ahead of every mode branch, because it can select
+    // the mode. The expansion is owned by `args::expand_stock_zenoh_config`;
+    // this is only where it is applied and reported.
+    #[cfg(feature = "zenoh-config")]
+    let expanded;
+    #[cfg(feature = "zenoh-config")]
+    let rest = match crate::args::expand_stock_zenoh_config(rest, |p| {
+        std::fs::read_to_string(p).map_err(|e| format!("--config: cannot read {p}: {e}"))
+    }) {
+        Err(message) => {
+            eprintln!("wz-ap-demo: {message}");
+            return ExitCode::from(2);
+        }
+        Ok(None) => rest,
+        Ok(Some(exp)) => {
+            eprintln!(
+                "wz-ap-demo: --config {}: honoured {:?}",
+                exp.path, exp.named
+            );
+            // Said out loud rather than swallowed: the operator's file is full
+            // of keys wz has no opinion about, and a reader that applies what
+            // it knows in silence lets a TLS root-CA path look like it took
+            // effect. See `zenoh_config::ZenohConfigIngest`.
+            for key in &exp.ignored {
+                eprintln!("wz-ap-demo: --config {}: IGNORED {key}", exp.path);
+            }
+            eprintln!("wz-ap-demo: --config {}: argv += {:?}", exp.path, exp.added);
+            expanded = exp.argv;
+            &expanded[..]
+        }
+    };
+    #[cfg(not(feature = "zenoh-config"))]
+    if rest.iter().any(|a| a == "--config") {
+        eprintln!(
+            "wz-ap-demo: --config requires the `zenoh-config` feature \
+             (build: cargo build -p wz-ap-demo --features zenoh-config)"
+        );
+        return ExitCode::from(2);
+    }
+
     // R311qa — `--router <addr>` selects the multi-peer router mode (bind once,
     // HOLD N concurrent peer faces — the routing-router foundation), handled
     // before the single-session role parse below (which requires exactly one of

@@ -245,6 +245,335 @@ pub(crate) fn parse_pair(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
+/// R311y842 — turn the stock zenoh config an operator already has into the
+/// argv this binary would otherwise have to be given by hand.
+///
+/// ## Why an argv EXPANSION rather than a second configuration path
+///
+/// Every flag below already has a meaning, a parser and tests. A `--config`
+/// that reached past them into the runtime would be a second way to say the
+/// same things, and the two would drift the first time a flag's semantics
+/// moved. Expanding the file into the argv the operator would have typed keeps
+/// exactly one configuration path and makes the translation a pure function
+/// over strings — which is why this is testable without a session, a socket or
+/// a file.
+///
+/// ## The mapping, and why each case
+///
+/// | the config says | argv gains |
+/// |---|---|
+/// | `mode: "router"` + a listen endpoint | `--router <ep>` |
+/// | `mode: "peer"` + listen AND connect | `--peer <listen>` `--connect <a,b>` |
+/// | a listen endpoint otherwise | `--listen <ep>` |
+/// | a connect endpoint, nothing listening | `--connect <ep>` |
+/// | `transport/unicast/max_links` | `--max-links <n>` |
+/// | `transport/unicast/qos/enabled: true` | `--qos` |
+/// | `transport/unicast/lowlatency: true` | `--lowlatency` |
+///
+/// A role the command line ALREADY named is left alone: the file supplies
+/// defaults, the command line overrides them, which is the precedence zenohd
+/// itself uses for its own `--listen` against a `-c` file.
+///
+/// Only keys the document NAMED are applied — never a value that merely
+/// resolved to a default. `qos` reads `true` out of a config that never
+/// mentions it, so acting on the merged value would add `--qos` to every
+/// invocation and change the transport an operator asked for.
+#[cfg(feature = "zenoh-config")]
+pub(crate) fn expand_stock_zenoh_config(
+    rest: &[String],
+    read_file: impl FnOnce(&str) -> Result<String, String>,
+) -> Result<Option<StockConfigExpansion>, String> {
+    use wz::runtime_tokio::zenoh_config::ZenohNodeConfig;
+
+    let Some(path) = parse_pair(rest, "--config") else {
+        return Ok(None);
+    };
+    let source = read_file(&path)?;
+    let ingest =
+        ZenohNodeConfig::from_json5(&source).map_err(|e| format!("--config: {path}: {e}"))?;
+    // A defect is refused HERE rather than surfacing as a failed bind some
+    // milliseconds later, which is the whole reason `validate` exists.
+    let defects = ingest.config.validate();
+    if !defects.is_empty() {
+        let mut msg = format!("--config: {path} cannot work:");
+        for d in &defects {
+            msg.push_str("\n  ");
+            msg.push_str(&d.to_string());
+        }
+        return Err(msg);
+    }
+
+    let named = |key: &str| ingest.named.contains(&key);
+    let cfg = &ingest.config;
+    let mut added: Vec<String> = Vec::new();
+
+    // The role flags, as a set: naming ANY of them on the command line means
+    // the operator has chosen the topology and the file must not second-guess
+    // it. `--scout` is here because it is a role too (discover, do not dial).
+    const ROLE_FLAGS: &[&str] = &[
+        "--listen",
+        "--connect",
+        "--router",
+        "--peer",
+        "--storage-host",
+        "--scout",
+    ];
+    let role_on_cli = rest.iter().any(|a| ROLE_FLAGS.contains(&a.as_str()));
+    if !role_on_cli {
+        let listen = cfg.listen.first();
+        let connect = &cfg.connect;
+        match (cfg.mode, listen, connect.is_empty()) {
+            (WhatAmI::Router, Some(ep), _) => {
+                added.push("--router".into());
+                added.push(ep.clone());
+            }
+            (WhatAmI::Peer, Some(ep), false) => {
+                added.push("--peer".into());
+                added.push(ep.clone());
+                added.push("--connect".into());
+                added.push(connect.join(","));
+            }
+            (_, Some(ep), _) => {
+                added.push("--listen".into());
+                added.push(ep.clone());
+            }
+            (_, None, false) => {
+                added.push("--connect".into());
+                added.push(connect[0].clone());
+            }
+            (_, None, true) => {}
+        }
+    }
+    if named("transport/unicast/max_links") && !rest.iter().any(|a| a == "--max-links") {
+        added.push("--max-links".into());
+        added.push(cfg.max_links.to_string());
+    }
+    if named("transport/unicast/qos/enabled") && cfg.qos && !rest.iter().any(|a| a == "--qos") {
+        added.push("--qos".into());
+    }
+    if named("transport/unicast/lowlatency")
+        && cfg.lowlatency
+        && !rest.iter().any(|a| a == "--lowlatency")
+    {
+        added.push("--lowlatency".into());
+    }
+
+    let mut argv: Vec<String> = rest.to_vec();
+    argv.extend(added.iter().cloned());
+    Ok(Some(StockConfigExpansion {
+        path,
+        argv,
+        added,
+        named: ingest.named,
+        ignored: ingest.ignored,
+    }))
+}
+
+/// What [`expand_stock_zenoh_config`] made of an operator's config file.
+///
+/// `ignored` is carried out rather than logged inside so the caller decides
+/// where it goes — and so a test can assert on it as a value.
+#[cfg(feature = "zenoh-config")]
+#[derive(Debug)]
+pub(crate) struct StockConfigExpansion {
+    /// The file that was read.
+    pub(crate) path: String,
+    /// The command line the rest of `main` should parse.
+    pub(crate) argv: Vec<String>,
+    /// Only what the file contributed, in the order it was appended.
+    pub(crate) added: Vec<String>,
+    /// The honoured keys the file actually named.
+    pub(crate) named: Vec<&'static str>,
+    /// The keys the file carried that wz does not honour.
+    pub(crate) ignored: Vec<String>,
+}
+
+#[cfg(all(test, feature = "zenoh-config"))]
+mod stock_config_tests {
+    use super::*;
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| String::from(*s)).collect()
+    }
+
+    fn expand(cli: &[&str], file: &str) -> Result<StockConfigExpansion, String> {
+        expand_stock_zenoh_config(&argv(cli), |_| Ok(String::from(file)))
+            .map(|o| o.expect("--config was on the command line"))
+    }
+
+    #[test]
+    fn no_config_flag_leaves_the_command_line_untouched() {
+        let out = expand_stock_zenoh_config(&argv(&["--listen", "127.0.0.1:1"]), |_| {
+            panic!("must not read a file")
+        })
+        .unwrap();
+        assert!(out.is_none());
+    }
+
+    /// The four topology cases, each stated as the argv an operator would
+    /// otherwise have typed.
+    #[test]
+    fn each_topology_the_config_can_describe_becomes_the_argv_for_it() {
+        for (file, want) in [
+            (
+                r#"{ mode: "router", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
+                vec!["--router", "tcp/0.0.0.0:7447"],
+            ),
+            (
+                r#"{ mode: "peer",
+                     listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     connect: { endpoints: ["tcp/a:7447", "tcp/b:7447"] } }"#,
+                vec![
+                    "--peer",
+                    "tcp/0.0.0.0:7447",
+                    "--connect",
+                    "tcp/a:7447,tcp/b:7447",
+                ],
+            ),
+            (
+                r#"{ mode: "client", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
+                vec!["--listen", "tcp/0.0.0.0:7447"],
+            ),
+            (
+                r#"{ mode: "client", connect: { endpoints: ["tcp/router:7447"] } }"#,
+                vec!["--connect", "tcp/router:7447"],
+            ),
+        ] {
+            let out = expand(&["--config", "z.json5"], file).unwrap();
+            assert_eq!(out.added, argv(&want), "{file}");
+            // The expansion APPENDS; it never rewrites what was already there.
+            assert_eq!(&out.argv[..2], &argv(&["--config", "z.json5"])[..]);
+        }
+    }
+
+    /// A topology named on the command line wins — the file supplies defaults,
+    /// it does not overrule the operator standing in front of the machine.
+    #[test]
+    fn a_role_on_the_command_line_is_not_second_guessed_by_the_file() {
+        for role in [
+            vec!["--listen", "127.0.0.1:1"],
+            vec!["--connect", "127.0.0.1:1"],
+            vec!["--router", "127.0.0.1:1"],
+            vec!["--peer", "127.0.0.1:1"],
+            vec!["--storage-host", "127.0.0.1:1"],
+            vec!["--scout"],
+        ] {
+            let mut cli = vec!["--config", "z.json5"];
+            cli.extend(role.iter().copied());
+            let out = expand(
+                &cli,
+                r#"{ mode: "router", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
+            )
+            .unwrap();
+            assert!(out.added.is_empty(), "{role:?} -> {:?}", out.added);
+        }
+    }
+
+    /// Only what the document SAID is applied. `qos` resolves to zenoh's `true`
+    /// for a file that never mentions it, and adding `--qos` on the strength of
+    /// that would change the transport the operator asked for.
+    #[test]
+    fn a_defaulted_value_is_not_an_instruction_but_a_named_one_is() {
+        let silent = expand(
+            &["--config", "z.json5"],
+            r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] } }"#,
+        )
+        .unwrap();
+        assert!(
+            !silent.added.iter().any(|a| a == "--qos"),
+            "{:?}",
+            silent.added
+        );
+        assert!(!silent.added.iter().any(|a| a == "--max-links"));
+
+        let explicit = expand(
+            &["--config", "z.json5"],
+            r#"{ mode: "client",
+                 connect: { endpoints: ["tcp/r:7447"] },
+                 transport: { unicast: { qos: { enabled: true },
+                                         lowlatency: false,
+                                         max_links: 4 } } }"#,
+        )
+        .unwrap();
+        assert!(
+            explicit.added.iter().any(|a| a == "--qos"),
+            "{:?}",
+            explicit.added
+        );
+        assert_eq!(
+            explicit
+                .added
+                .iter()
+                .position(|a| a == "--max-links")
+                .map(|i| explicit.added[i + 1].clone()),
+            Some(String::from("4"))
+        );
+        // Named but FALSE is still not an instruction to turn it on.
+        assert!(!explicit.added.iter().any(|a| a == "--lowlatency"));
+    }
+
+    /// A transport flag the command line already set is left alone, the same
+    /// rule the role flags follow.
+    #[test]
+    fn a_transport_flag_on_the_command_line_is_not_duplicated() {
+        let out = expand(
+            &["--config", "z.json5", "--max-links", "9", "--qos"],
+            r#"{ mode: "client",
+                 connect: { endpoints: ["tcp/r:7447"] },
+                 transport: { unicast: { qos: { enabled: true }, max_links: 4 } } }"#,
+        )
+        .unwrap();
+        // The ROLE still expands — no role flag was given — so the claim here
+        // is about the transport pair only, and stating it that way is what
+        // keeps this test from passing for the wrong reason.
+        assert_eq!(out.added, argv(&["--connect", "tcp/r:7447"]));
+    }
+
+    /// A config that cannot work is refused BEFORE anything is started, which
+    /// is the difference between a message and a node that is silently alone.
+    #[test]
+    fn a_topology_that_cannot_work_is_refused_up_front() {
+        let err = expand(
+            &["--config", "z.json5"],
+            r#"{ mode: "peer", scouting: { multicast: { enabled: false } } }"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot work"), "{err}");
+        assert!(err.contains("nothing to connect to"), "{err}");
+
+        let bad = expand(&["--config", "z.json5"], "{ mode: ").unwrap_err();
+        assert!(bad.contains("not a JSON5 document"), "{bad}");
+
+        let unreadable = expand_stock_zenoh_config(&argv(&["--config", "gone.json5"]), |p| {
+            Err(format!("--config: cannot read {p}: no such file"))
+        })
+        .unwrap_err();
+        assert!(unreadable.contains("gone.json5"), "{unreadable}");
+    }
+
+    /// The keys wz does not honour reach the caller so they can be printed —
+    /// the operator has to be able to see what their file did NOT do.
+    #[test]
+    fn the_keys_wz_does_not_honour_are_carried_out_to_be_reported() {
+        let out = expand(
+            &["--config", "z.json5"],
+            r#"{ mode: "client",
+                 connect: { endpoints: ["tcp/r:7447"] },
+                 transport: { link: { tls: { root_ca_certificate: "/etc/ca.pem" } } },
+                 queries_default_timeout: 10000 }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            out.ignored,
+            vec![
+                "queries_default_timeout",
+                "transport/link/tls/root_ca_certificate"
+            ]
+        );
+        assert_eq!(out.named, vec!["mode", "connect/endpoints"]);
+    }
+}
+
 /// R311y791 — every occurrence of a repeatable `--flag <value>` pair, in argv
 /// order. [`parse_pair`] returns the FIRST and silently discards the rest,
 /// which is the right shape for a flag that names one thing (one endpoint, one
