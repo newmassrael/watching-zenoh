@@ -670,22 +670,24 @@ impl QueryOptions {
         }
     }
 
-    /// See [`Self::effective_target`]. `None` elides Q_C → peer decodes
-    /// `Z_CONSOLIDATION_MODE_AUTO`.
+    /// See [`Self::effective_target`]. THE CALLER'S READING: exactly what this
+    /// get named, with `None` meaning it named nothing.
     ///
-    /// THE WIRE READING. Its local twin is [`Self::resolved_consolidation`], and
-    /// the two differ ON PURPOSE — see that method for why wz does not transmit
-    /// what it resolves the way zenoh does.
-    #[cfg(feature = "query-get")]
+    /// R311y837 — this is no longer the wire reading. It is the INPUT to the
+    /// two readings that are: [`Self::resolved_consolidation`] (local) and
+    /// [`Self::wire_consolidation`] (wire), which since this round agree,
+    /// because zenoh resolves once and feeds the result to both
+    /// (`zenoh/src/api/session.rs:2294` and `:2316`).
+    ///
+    /// GATED ON `query-consolidation` TOO since R311y837, and the OFF build is
+    /// what said so: with the field's only two readers both short-circuiting on
+    /// that feature, an accessor gated on `query-get` alone is dead code there,
+    /// and Layer C1cf / the `zget-reply-only` subset build rejected it as such.
+    /// The gate is the honest shape rather than an `allow` — a build with no
+    /// consolidation capability has no reading of the caller's slot to take.
+    #[cfg(all(feature = "query-get", feature = "query-consolidation"))]
     pub(super) fn effective_consolidation(&self) -> Option<ConsolidationMode> {
-        #[cfg(feature = "query-consolidation")]
-        {
-            self.consolidation
-        }
-        #[cfg(not(feature = "query-consolidation"))]
-        {
-            None
-        }
+        self.consolidation
     }
 
     /// R311y836 — THE LOCAL READING: the mode this get's `ConsolidatingSink`
@@ -721,6 +723,37 @@ impl QueryOptions {
         #[cfg(not(feature = "query-consolidation"))]
         {
             ConsolidationMode::None
+        }
+    }
+
+    /// R311y837 — THE WIRE READING, and since this round it is the LOCAL one
+    /// transmitted rather than a second, quieter policy.
+    ///
+    /// zenoh resolves `Auto` once and feeds the resolved mode to both its local
+    /// cache (`zenoh/src/api/session.rs:2294`) and the outbound Query body
+    /// (`:2316`), so a stock default get puts `Latest` on the wire. wz elided it
+    /// until now, and R311y836 said why in as many words: transmitting was
+    /// blocked on the wire BYTE being pico's rather than zenoh's, so a
+    /// transmitted `Latest` would have been read as `Monotonic` by the router it
+    /// was sent to. R311y837 measured the byte on both planes and moved
+    /// [`ConsolidationMode::wire_byte`] onto zenoh's numbering, which is what
+    /// unblocks this half — the two are one change in two steps and the order
+    /// between them is load-bearing.
+    ///
+    /// STILL AN `Option`, AND THE `None` ARM IS NOT THE OLD BEHAVIOUR: it is the
+    /// `query-consolidation`-OFF build, which has no consolidation capability at
+    /// all and must not acquire zenoh's default through the wire when it cannot
+    /// honour it locally. That arm elides the field, which both upstreams' decoders
+    /// read as `Auto` — the honest statement for a build that consolidates nothing.
+    #[cfg(feature = "query-get")]
+    pub(super) fn wire_consolidation(&self) -> Option<ConsolidationMode> {
+        #[cfg(feature = "query-consolidation")]
+        {
+            Some(self.resolved_consolidation())
+        }
+        #[cfg(not(feature = "query-consolidation"))]
+        {
+            None
         }
     }
 
@@ -803,7 +836,10 @@ impl QueryOptions {
     pub(super) fn query_metadata(&self) -> QueryMetadata {
         QueryMetadata {
             target: self.effective_target(),
-            consolidation: self.effective_consolidation(),
+            // R311y837 — the RESOLVED mode, not the caller's raw slot. zenoh
+            // transmits what it resolved (`api/session.rs:2316`); wz elided
+            // until the wire byte was measured and corrected this round.
+            consolidation: self.wire_consolidation(),
             attachment: self.attachment.clone(),
             parameters: self.parameters.clone(),
             source_info: self.source_info.clone(),

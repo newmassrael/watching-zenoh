@@ -3405,6 +3405,27 @@ fn expected_query_request_bytes(
     if meta.timeout_ms == 0 {
         meta.timeout_ms = DEFAULT_QUERY_TIMEOUT_MS;
     }
+    // R311y837 — the consolidation is the SECOND resolved default this helper
+    // back-fills, and it is here for the reason the timeout is: `Session::query`
+    // now TRANSMITS the mode it resolves (zenoh's `Auto -> Latest`,
+    // `api/session.rs:2316`), so a bare builder carrying no mode stopped
+    // producing the bytes the query path emits. Every caller's load-bearing
+    // claim — "my knob reached the wire" — is unchanged; only the envelope it
+    // sits in grew, exactly as it grew when the timeout ext landed.
+    //
+    // Resolved through the production SSOT and from the SAME `parameters` the
+    // outbound Query carries, so the `_time` carve-out is honoured without this
+    // helper restating a rule that lives in one place.
+    #[cfg(feature = "query-consolidation")]
+    if meta.consolidation.is_none() {
+        let params = meta
+            .parameters
+            .as_deref()
+            .and_then(|bytes| core::str::from_utf8(bytes).ok())
+            .unwrap_or("");
+        meta.consolidation =
+            Some(wz_session_core::query_mode::ConsolidationMode::resolve_auto(None, params));
+    }
     wz_session_core::request_build::build_request_query_with_meta(0, mapping_id, keyexpr, &meta)
         .unwrap()
         .try_as_borrowed()
@@ -3520,6 +3541,101 @@ fn query_wire_branch_with_consolidation_threads_consolidation_through_with_meta(
             .windows(standalone_bytes.len())
             .any(|w| w == standalone_bytes),
         "wire frame must contain with-consolidation Request bytes"
+    );
+}
+
+/// R311y837 — the UNNAMED get now puts zenoh's resolved `Latest` ON THE WIRE,
+/// where until this round it put nothing at all.
+///
+/// The expectation is built with the mode NAMED LITERALLY rather than through
+/// the helper's back-fill, which is what keeps the assertion from being
+/// circular: `expected_query_request_bytes` resolves an absent mode the same way
+/// production does, so a version of this test that passed `Default::default()`
+/// would agree with production no matter which mode either of them chose.
+///
+/// The value is anchored outside this crate. `Latest` is what a stock zenohd was
+/// MEASURED writing for a get that names no mode
+/// (`wz-integration-tests/tests/query_consolidation_wire_byte_divergence.rs`,
+/// which relays that byte off a real router's wire); this test is the unit-level
+/// sentry for the same fact, so a refactor reds here without needing a zenohd.
+#[cfg(all(
+    feature = "codec-request",
+    feature = "query-consolidation",
+    feature = "query-get"
+))]
+#[test]
+fn query_wire_branch_default_transmits_the_resolved_latest_mode() {
+    let (session, driver) = build_session();
+    session
+        .query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+            |_| {},
+            |_| {},
+        )
+        .expect("query-get feature is ON in this test build");
+
+    let standalone_bytes = expected_query_request_bytes(
+        0,
+        Some("home/temp"),
+        wz_session_core::metadata::QueryMetadata {
+            consolidation: Some(ConsolidationMode::Latest),
+            ..Default::default()
+        },
+    );
+    let frame = driver.frame_bytes(0);
+    assert!(
+        frame
+            .windows(standalone_bytes.len())
+            .any(|w| w == standalone_bytes),
+        "a get naming no mode must transmit the RESOLVED Latest, as zenoh does \
+         (`api/session.rs:2316`); wz elided this field until R311y837"
+    );
+}
+
+/// R311y837 — the `_time` carve-out reaches THE WIRE, not just the local sink.
+///
+/// R311y836 gave the carve-out a unit and an e2e, both about what the getter
+/// consolidates LOCALLY, because the mode was not transmitted at all. Now that
+/// it is, "an unnamed get under a `_time` range resolves to None" is a claim
+/// about a byte a peer reads, and this is the test that says so. Mode named
+/// literally, for the anti-circularity reason its sibling above states.
+#[cfg(all(
+    feature = "codec-request",
+    feature = "query-consolidation",
+    feature = "query-get",
+    feature = "query-selector-parameters"
+))]
+#[test]
+fn query_wire_branch_time_range_transmits_none_rather_than_latest() {
+    let (session, driver) = build_session();
+    session
+        .query(
+            "home/temp",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::Remote)
+                .with_parameters(b"_time=[now(-1h)..now()]".to_vec()),
+            |_| {},
+            |_| {},
+        )
+        .expect("query-get feature is ON in this test build");
+
+    let standalone_bytes = expected_query_request_bytes(
+        0,
+        Some("home/temp"),
+        wz_session_core::metadata::QueryMetadata {
+            consolidation: Some(ConsolidationMode::None),
+            parameters: Some(b"_time=[now(-1h)..now()]".to_vec()),
+            ..Default::default()
+        },
+    );
+    let frame = driver.frame_bytes(0);
+    assert!(
+        frame
+            .windows(standalone_bytes.len())
+            .any(|w| w == standalone_bytes),
+        "a get carrying a `_time` range must transmit None, not Latest — both \
+         upstreams key the carve-out on the parameter's PRESENCE"
     );
 }
 

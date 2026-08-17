@@ -10955,6 +10955,29 @@ ZENOHD_VSOCK=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
             cargo test -p wz-integration-tests \
             --test wz_rest_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
             | tee /dev/stderr | grep -qE '^test result: ok\. 2 passed') || return 1
+        # R311y837 (debt 161 + 162) — the Query consolidation wire byte, witnessed
+        # on BOTH reference planes and then pinned against wz's own. It rides
+        # INSIDE this block because one of its three legs drives zenohd's REST
+        # plugin to make a real zenoh `Session::get` (the plugin resolves an
+        # unnamed HTTP GET to `ConsolidationMode::Latest`), and that is the only
+        # zenoh-side requester this tree can start without building a second
+        # foreign binary. Its pico leg needs `z_get`, which this lane already
+        # guards above.
+        #
+        # Count-guarded (`3 passed`): all three are `#[ignore]`d, and the two
+        # foreign legs are MEASUREMENTS of upstream encoders — a dropped attribute
+        # or a renamed file would select 0 tests and still exit 0, reporting that
+        # zenoh and pico agree by never having asked either of them.
+        #
+        # The two wz binaries are BUILT, never SKIPped on, per this file's
+        # standing rule: a lane that skips green on a wz artifact it could
+        # produce proves nothing.
+        (cd crates && cargo build -p wz-ap-demo -p wz-e2e-queryable --quiet) || return 1
+        (cd crates && WZ_ZENOHD_BIN="$zenohd" WZ_REST_PLUGIN_SO="$rest_plugin" \
+            cargo test -p wz-integration-tests \
+            --test query_consolidation_wire_byte_divergence \
+            -- --ignored --quiet --test-threads=1 2>&1 \
+            | tee /dev/stderr | grep -qE '^test result: ok\. 3 passed') || return 1
     else
         _z_unavailable "REST plugin not built ($rest_plugin; build it with \
 scripts/build-zenohd.sh from a source checkout)" || return 1

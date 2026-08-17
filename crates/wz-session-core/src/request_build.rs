@@ -1198,18 +1198,27 @@ mod tests {
     /// the three transmitted modes (NONE / MONOTONIC / LATEST); the
     /// AUTO/DEFAULT case stays the responsibility of plain
     /// [`build_request_query`] (no Q_C, no extra byte).
+    ///
+    /// R311y837 — THE THREE VALUES MOVED, AND THE NAME MOVED WITH THEM. They
+    /// were pinned to zenoh-pico's numbering; a stock zenohd and a stock
+    /// zenoh-pico were then each MEASURED writing this field for the same
+    /// logical mode (`wz-integration-tests/tests/query_consolidation_wire_byte_divergence.rs`)
+    /// and they disagreed — 3 against 2. wz follows zenoh, so these vectors do
+    /// too, and calling them "zenoh-pico compatible" would now be a false
+    /// statement in a test name. See [`ConsolidationMode::wire_byte`] for why
+    /// the divergence is pico's and what following zenoh costs.
     #[cfg(feature = "codec-request")]
     #[test]
-    fn build_request_query_with_consolidation_emits_zenoh_pico_compatible_wire_bytes() {
+    fn build_request_query_with_consolidation_emits_zenoh_compatible_wire_bytes() {
         // Baseline shape derived from build_request_query alias case
         // (rid=42, mapping_id=7, no suffix): Request prefix bytes are
         // [0x5C, 0x2A, 0x07] (MID|M, VLE(42), VLE(7)). The Query
         // header changes from 0x03 to 0x23 (Q_C set) and the
         // consolidation byte follows.
         let cases: [(ConsolidationMode, u8); 3] = [
-            (ConsolidationMode::None, 0x00),
-            (ConsolidationMode::Monotonic, 0x01),
-            (ConsolidationMode::Latest, 0x02),
+            (ConsolidationMode::None, 0x01),
+            (ConsolidationMode::Monotonic, 0x02),
+            (ConsolidationMode::Latest, 0x03),
         ];
         for (mode, expected_byte) in cases {
             let request = build_request_query_with_consolidation(42, 7, None, mode).unwrap();
@@ -1224,7 +1233,9 @@ mod tests {
             assert_eq!(
                 wire, expected,
                 "Request(Query+consolidation) wire bytes for mode {mode:?} \
-                 must match zenoh-pico reference (msg.c:402-413)",
+                 must match the ZENOH reference (zenoh-codec query.rs:38-44); \
+                 the Q_C flag position is still pico's msg.c:402-413, only the \
+                 VALUE numbering differs between the two upstreams",
             );
         }
 
@@ -1239,7 +1250,7 @@ mod tests {
                     q.header, 0x23,
                     "Query.header must carry MID(0x03) | Q_C(0x20)"
                 );
-                assert_eq!(q.consolidation, Some(0x01));
+                assert_eq!(q.consolidation, Some(0x02));
                 assert!(
                     q.parameters_len.is_none() && q.parameters.is_none() && q.extensions.is_none(),
                     "consolidation-only layered helper must not set \
@@ -1953,7 +1964,7 @@ mod tests {
         //   VLE(rid=42) = 0x2A
         //   wireexpr Local: id=7 → 0x07
         //   Query.header = MID(0x03) | Q_C(0x20) | Q_P(0x40) = 0x63
-        //   consolidation byte = 0x01 (Monotonic)
+        //   consolidation byte = 0x02 (Monotonic, ZENOH numbering — R311y837)
         //   parameters_len VLE = 0x03
         //   "k=v" 3 bytes
         let request = RequestQueryBuilder::new(42, 7, None)
@@ -1967,7 +1978,7 @@ mod tests {
             0x2A, // VLE(rid=42)
             0x07, // wireexpr.id VLE(7)
             0x63, // Query: MID | Q_C | Q_P
-            0x01, // consolidation = Monotonic
+            0x02, // consolidation = Monotonic
             0x03, // parameters_len VLE(3)
         ];
         expected.extend_from_slice(b"k=v");
@@ -2001,7 +2012,7 @@ mod tests {
         //   Request ext 2: timeout (ENC_ZINT|id_timeout=0x26), no Z = 0x26
         //   ExtZint VLE(1000) = 0xE8 0x07
         //   Query.header = MID(0x03) | Q_C(0x20) | Q_P(0x40) | Q_Z(0x80) = 0xE3
-        //   consolidation = Latest = 0x02
+        //   consolidation = Latest = 0x03 (ZENOH numbering — R311y837)
         //   parameters_len VLE(3) = 0x03
         //   "k=v"
         //   Q-attachment ext: header (ENC_ZBUF|id_attachment=0x45), no Z = 0x45
@@ -2027,7 +2038,7 @@ mod tests {
             0xE8, 0x07, // VLE(timeout_ms=1000)
             // Query body
             0xE3, // Query: MID | Q_C | Q_P | Q_Z
-            0x02, // consolidation = Latest
+            0x03, // consolidation = Latest
             0x03, // parameters_len VLE(3)
         ];
         expected.extend_from_slice(b"k=v");

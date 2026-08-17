@@ -24,44 +24,81 @@
 /// the minimal-shape baseline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConsolidationMode {
-    /// `Z_CONSOLIDATION_MODE_NONE = 0` — no consolidation; the
-    /// peer forwards every reply in arrival order.
+    /// No consolidation; every reply is delivered in arrival order.
+    /// `Z_CONSOLIDATION_MODE_NONE` / `ConsolidationMode::None`; wire byte 1
+    /// (see [`Self::wire_byte`] — the API enums agree, the two upstreams'
+    /// wire numbering does not).
     None,
-    /// `Z_CONSOLIDATION_MODE_MONOTONIC = 1` — the peer guarantees
-    /// each reply for a given keyexpr is monotonic in some local
-    /// ordering (typically timestamp).
+    /// Each reply for a given keyexpr is monotonic in some local ordering
+    /// (typically timestamp). `Z_CONSOLIDATION_MODE_MONOTONIC` /
+    /// `ConsolidationMode::Monotonic`; wire byte 2.
     Monotonic,
-    /// `Z_CONSOLIDATION_MODE_LATEST = 2` — the peer keeps only
-    /// the latest reply per keyexpr; duplicates earlier in the
-    /// stream are dropped.
+    /// Only the latest reply per keyexpr survives; earlier duplicates are
+    /// dropped. `Z_CONSOLIDATION_MODE_LATEST` /
+    /// `ConsolidationMode::Latest`; wire byte 3.
     Latest,
 }
 
 impl ConsolidationMode {
-    /// Wire byte value as written by zenoh-pico's `_z_uint8_encode`
-    /// invocation in `_z_query_encode` (message.c:412). The mapping
-    /// follows the enum literal values verbatim.
-    ///
-    /// R311y836 — NAMED DIVERGENCE, measured against both upstreams rather than
-    /// assumed. pico writes its API enum straight to the wire
-    /// (`_z_uint8_encode(wbf, msg->_consolidation)`,
-    /// `vendor/zenoh-pico/src/protocol/codec/message.c:412`, over
-    /// `constants.h:184-188` NONE=0/MONOTONIC=1/LATEST=2) and this mapping is
-    /// bit-faithful to THAT. zenoh's codec numbers the same modes one higher
-    /// because its enum carries `Auto` in slot 0 —
+    /// Wire byte value, in ZENOH'S numbering:
     /// `Auto => 0, None => 1, Monotonic => 2, Latest => 3`
-    /// (`commons/zenoh-codec/src/zenoh/query.rs:38-44`). The two upstreams
-    /// therefore disagree on this byte, and wz currently follows pico. It is
-    /// unobservable today — the field is purely requester-side and zenoh's
-    /// routing layer never reads it (0 `consolidation` occurrences under
-    /// `zenoh/src/net/routing/`, measured) — which is why nobody has been bitten
-    /// by it, but it is a real divergence and it is this atom's residual, NOT
-    /// something to "fix" without a foreign witness on both planes.
+    /// (`commons/zenoh-codec/src/zenoh/query.rs:38-44`). `Auto` has no variant
+    /// here (see [`Self::resolve_auto`]), so this method returns 1..=3 and slot
+    /// 0 is reachable only by ELIDING the field, which is what an unset Q_C
+    /// flag means to both upstreams' decoders.
+    ///
+    /// R311y837 — THIS MOVED, AND IT MOVED ONTO MEASURED GROUND. R311y836 named
+    /// the divergence and left the mapping on pico's numbering; the byte was
+    /// then witnessed on both planes by execution, one real foreign encoder per
+    /// leg, in
+    /// `wz-integration-tests/tests/query_consolidation_wire_byte_divergence.rs`:
+    ///
+    /// * a stock `zenohd` 1.5.0, asked through its REST plugin for a get that
+    ///   names no mode (which that plugin resolves to `Latest`), wrote **3**;
+    /// * a stock zenoh-pico `z_get`, whose AUTO resolves client-side to LATEST,
+    ///   wrote **2**.
+    ///
+    /// So the two references genuinely disagree, and the disagreement is pico's
+    /// one-off: pico encodes its API enum raw (`_z_uint8_encode(wbf,
+    /// msg->_consolidation)`, `vendor/zenoh-pico/src/protocol/codec/message.c:412`,
+    /// over `constants.h:184-188` NONE=0/MONOTONIC=1/LATEST=2) and its `AUTO =
+    /// -1` sentinel is never written, so every mode lands one slot low. wz
+    /// follows ZENOH because zenoh-protocol is the wire's normative definition
+    /// and a zenohd is the router a deployment actually has — a wz `Latest` on
+    /// pico's numbering was read as `Monotonic` by every zenohd it ever met.
+    ///
+    /// WHAT THIS COSTS, STATED RATHER THAN HIDDEN: wz is now deliberately NOT
+    /// byte-equal to zenoh-pico on this one field. That is a divergence from an
+    /// implementation wz also replaces, taken knowingly, and it is the better
+    /// half of the trade only because the field is requester-side and no
+    /// decoder on either plane acts on it (which is also why pico's bug has
+    /// survived). A wz that matched pico here would be wrong against the
+    /// reference router; a wz that matches zenoh is wrong only against pico's
+    /// own defect.
     pub const fn wire_byte(self) -> u8 {
         match self {
-            Self::None => 0u8,
-            Self::Monotonic => 1u8,
-            Self::Latest => 2u8,
+            Self::None => 1u8,
+            Self::Monotonic => 2u8,
+            Self::Latest => 3u8,
+        }
+    }
+
+    /// The inverse of [`wire_byte`](Self::wire_byte), mirroring zenoh's decoder
+    /// (`commons/zenoh-codec/src/zenoh/query.rs:55-64`): `1 -> None`,
+    /// `2 -> Monotonic`, `3 -> Latest`, and ANY other value — including `0`,
+    /// which is zenoh's `Auto` — yields `None`, the "the peer named no mode"
+    /// reading a decoder also infers from an absent field.
+    ///
+    /// Zenoh's decoder falls back to `Auto` on an unknown value rather than
+    /// erroring, and this mirrors that rather than being stricter: a reader
+    /// that rejected a byte the reference implementation accepts would drop
+    /// sessions the reference keeps.
+    pub const fn from_wire_byte(byte: u64) -> Option<Self> {
+        match byte {
+            1 => Some(Self::None),
+            2 => Some(Self::Monotonic),
+            3 => Some(Self::Latest),
+            _ => Option::None,
         }
     }
 
@@ -188,18 +225,47 @@ impl QueryTarget {
 mod tests {
     use super::*;
 
-    /// R121j-1a — wire byte mapping invariant for `ConsolidationMode`.
-    /// The mapping mirrors zenoh-pico's `z_consolidation_mode_t` enum
-    /// integer values (constants.h:185-187). A regression here would
-    /// silently miswire the consolidation policy at the peer — the
-    /// dedicated test guards the mapping independently of the encode
-    /// path so a refactor that touches the `wire_byte` method without
-    /// touching the encoder gets caught.
+    /// R311y837 — wire byte mapping invariant for `ConsolidationMode`, on
+    /// ZENOH's numbering. The three values are anchored to what a stock zenohd
+    /// was MEASURED writing, not to a source file: the `Latest => 3` line is
+    /// the byte
+    /// `query_consolidation_wire_byte_divergence::a_real_zenohd_writes_latest_as_the_consolidation_byte_zenoh_numbers_it`
+    /// relayed off a real router's wire, and the same file's pico leg is why
+    /// the other numbering is NOT what this asserts.
+    ///
+    /// Kept as its own test rather than folded into an encoder test (the R121j-1a
+    /// rationale, unchanged): a refactor that touches this method without
+    /// touching the encode path would otherwise silently miswire the policy at
+    /// the peer.
     #[test]
-    fn consolidation_mode_wire_byte_matches_zenoh_pico_enum_values() {
-        assert_eq!(ConsolidationMode::None.wire_byte(), 0u8);
-        assert_eq!(ConsolidationMode::Monotonic.wire_byte(), 1u8);
-        assert_eq!(ConsolidationMode::Latest.wire_byte(), 2u8);
+    fn consolidation_mode_wire_byte_matches_zenoh_enum_values() {
+        assert_eq!(ConsolidationMode::None.wire_byte(), 1u8);
+        assert_eq!(ConsolidationMode::Monotonic.wire_byte(), 2u8);
+        assert_eq!(ConsolidationMode::Latest.wire_byte(), 3u8);
+    }
+
+    /// R311y837 — `from_wire_byte` is the inverse of `wire_byte` over the three
+    /// transmitted modes, and maps everything else — `0` (zenoh's `Auto`) and
+    /// any unknown value — to `None`, which is what an ABSENT field also means.
+    ///
+    /// The unknown arm is pinned deliberately: zenoh's decoder falls back to
+    /// `Auto` instead of erroring, so a stricter reader here would reject a
+    /// message the reference implementation accepts.
+    #[test]
+    fn consolidation_mode_from_wire_byte_round_trips_and_reads_auto_as_unnamed() {
+        for mode in [
+            ConsolidationMode::None,
+            ConsolidationMode::Monotonic,
+            ConsolidationMode::Latest,
+        ] {
+            assert_eq!(
+                ConsolidationMode::from_wire_byte(mode.wire_byte() as u64),
+                Some(mode)
+            );
+        }
+        assert_eq!(ConsolidationMode::from_wire_byte(0), Option::None);
+        assert_eq!(ConsolidationMode::from_wire_byte(4), Option::None);
+        assert_eq!(ConsolidationMode::from_wire_byte(255), Option::None);
     }
 
     /// R311y836 — an explicitly named mode passes through untouched. This is

@@ -328,12 +328,33 @@ fn layer3_request_timeout_byte_equivalent() {
     }
 }
 
-/// wz's `RequestQueryBuilder::consolidation` must set the Query-body Q_C flag and the
-/// mode byte byte-for-byte as zenoh-pico's `_consolidation`.
+/// wz's `RequestQueryBuilder::consolidation` must produce zenoh-pico's Query
+/// SHAPE — same length, same Q_C flag, same field position — and must differ
+/// from it in EXACTLY ONE BYTE: the mode value, which wz numbers one higher
+/// because it follows zenoh and pico does not.
+///
+/// # Why this test asserts a difference where it used to assert equality
+///
+/// R311y837 measured the field on both reference planes by execution
+/// (`query_consolidation_wire_byte_divergence.rs`): asked for the same logical
+/// mode, a stock zenohd wrote `3` and a stock zenoh-pico wrote `2`. The two
+/// upstreams genuinely disagree, and pico is the one that is off — it encodes
+/// its API enum raw while its `AUTO = -1` sentinel is never written, so every
+/// mode lands one slot below zenoh's `Auto=0 / None=1 / Monotonic=2 / Latest=3`.
+/// wz follows zenoh, because zenoh-protocol defines this wire and a zenohd is
+/// the router a deployment has.
+///
+/// So byte-equality with pico is no longer the property wz wants, and asserting
+/// it would pin pico's defect. What this test pins instead is STRICTLY STRONGER
+/// than the old equality was for everything except the one value: every other
+/// byte still has to match the foreign encoder, the divergence has to be exactly
+/// one byte wide, and its magnitude has to be exactly the one-slot shift the
+/// measurement explains. A wz that regressed to pico's numbering reds here; so
+/// does a wz that moved the field, resized it, or dropped the flag.
 // wz-proves: query-consolidation codec-parity partial
 // wz-proves: codec-request codec-parity partial
 #[test]
-fn layer3_request_consolidation_byte_equivalent() {
+fn layer3_request_consolidation_diverges_from_zenoh_pico_by_exactly_one_slot() {
     use wz_session_core::query_mode::ConsolidationMode;
     use wz_session_core::request_build::RequestQueryBuilder;
 
@@ -371,9 +392,46 @@ fn layer3_request_consolidation_byte_equivalent() {
             "anti-vacuity: the Q_C flag + mode byte must actually reach the wire"
         );
         assert_eq!(
-            wz, pico,
-            "Query consolidation ({wz_mode:?}) must match zenoh-pico byte-for-byte; \
+            wz.len(),
+            pico.len(),
+            "the divergence is a VALUE, not a shape: wz must encode the same \
+             number of bytes as zenoh-pico for mode {wz_mode:?}; \
              wz={wz:02x?} pico={pico:02x?}"
+        );
+        let differing: Vec<usize> = wz
+            .iter()
+            .zip(pico.iter())
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            differing.len(),
+            1,
+            "exactly one byte may differ from zenoh-pico for mode {wz_mode:?} — \
+             every other byte of the Request/Query envelope is still parity; \
+             wz={wz:02x?} pico={pico:02x?} differing={differing:?}"
+        );
+        let at = differing[0];
+        assert_eq!(
+            pico[at], pico_mode as u8,
+            "the differing byte must be the CONSOLIDATION field: zenoh-pico wrote \
+             its API enum there, so pico[{at}] must equal the mode it was asked \
+             for; wz={wz:02x?} pico={pico:02x?}"
+        );
+        assert_eq!(
+            wz[at],
+            pico[at] + 1,
+            "wz numbers this field one slot above zenoh-pico, because zenoh's \
+             enum carries Auto in slot 0 and pico's -1 sentinel is never written \
+             (measured on both planes by query_consolidation_wire_byte_divergence); \
+             wz={wz:02x?} pico={pico:02x?}"
+        );
+        assert_eq!(
+            wz[at],
+            wz_mode.wire_byte(),
+            "and that byte is exactly what ConsolidationMode::wire_byte returns \
+             for {wz_mode:?} — the builder must not re-derive the mapping"
         );
     }
 }
