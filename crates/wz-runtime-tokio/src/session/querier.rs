@@ -672,6 +672,10 @@ impl QueryOptions {
 
     /// See [`Self::effective_target`]. `None` elides Q_C → peer decodes
     /// `Z_CONSOLIDATION_MODE_AUTO`.
+    ///
+    /// THE WIRE READING. Its local twin is [`Self::resolved_consolidation`], and
+    /// the two differ ON PURPOSE — see that method for why wz does not transmit
+    /// what it resolves the way zenoh does.
     #[cfg(feature = "query-get")]
     pub(super) fn effective_consolidation(&self) -> Option<ConsolidationMode> {
         #[cfg(feature = "query-consolidation")]
@@ -681,6 +685,42 @@ impl QueryOptions {
         #[cfg(not(feature = "query-consolidation"))]
         {
             None
+        }
+    }
+
+    /// R311y836 — THE LOCAL READING: the mode this get's `ConsolidatingSink`
+    /// is installed with, which for a caller who named none is zenoh's
+    /// `Auto -> Latest` (`zenoh/src/api/session.rs:2247-2252`) rather than the
+    /// pass-through `None` wz delivered until this round.
+    ///
+    /// It routes through [`ConsolidationMode::resolve_auto`], the SSOT that owns
+    /// both upstream arms including the `_time` carve-out; this method's job is
+    /// only to supply the two inputs and to carry the feature gate.
+    ///
+    /// GATED ON `query-consolidation`, and that is the honest boundary: the
+    /// feature IS the consolidation capability, so a build without it keeps the
+    /// pre-y836 pass-through instead of acquiring zenoh's default through a back
+    /// door. Layer C1cf and the `not(query-consolidation)` NEG tests are what
+    /// hold that arm; the A3 `active <=> cfg-site` invariant is unaffected.
+    ///
+    /// The parameters are read through the same `pub` field
+    /// [`Self::effective_accept_replies`] reads, and for the same R311y317
+    /// reason: a caller can assign the field directly, so the gate must sit on
+    /// the last hop that knows rather than on a setter.
+    #[cfg(feature = "query-get")]
+    pub(super) fn resolved_consolidation(&self) -> ConsolidationMode {
+        #[cfg(feature = "query-consolidation")]
+        {
+            let params = self
+                .parameters
+                .as_deref()
+                .and_then(|bytes| core::str::from_utf8(bytes).ok())
+                .unwrap_or("");
+            ConsolidationMode::resolve_auto(self.effective_consolidation(), params)
+        }
+        #[cfg(not(feature = "query-consolidation"))]
+        {
+            ConsolidationMode::None
         }
     }
 

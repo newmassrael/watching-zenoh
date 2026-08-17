@@ -559,6 +559,23 @@ fn issue_member_query<R, T>(
     let opts = QueryOptions::get()
         .with_allowed_destination(state.get_locality)
         .with_timeout_ms(MEMBER_QUERY_TIMEOUT_MS);
+    // R311y836 — pin the mode rather than ride the default, which now resolves
+    // to LATEST. zenoh-ext's group does the same thing at a STRUCTURALLY
+    // IDENTICAL site: it builds the same per-member keyexpr
+    // (`format!("{}/{}/{}", GROUP_PREFIX, &state.gid, kae.mid)`) and names the
+    // mode right before the get — `let qc = zenoh::query::ConsolidationMode::None;`
+    // (`zenoh-ext/src/group.rs:304-307`).
+    //
+    // HONEST ABOUT ITS OWN WEIGHT: no test in this tree discriminates this pin,
+    // and that was MEASURED — a probe that dropped every caller's explicit mode
+    // reddened 16 cases and not one of them was a group case. Collapsing needs
+    // TWO answers on ONE member key, which needs a `Locality::Any` member
+    // answered by both a loopback queryable and a wire peer; no fixture stages
+    // that. It is kept because the upstream site is the same call with the same
+    // decision, not because a local red proves it. Do not read it as
+    // load-bearing.
+    #[cfg(feature = "query-consolidation")]
+    let opts = opts.with_consolidation(wz_session_core::query_mode::ConsolidationMode::None);
     let reply_state = Arc::clone(state);
     let reply_clock = Arc::clone(clock);
     let _ = session.query(

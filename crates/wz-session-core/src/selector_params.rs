@@ -70,6 +70,16 @@ pub const PARAM_FIELD_SEPARATOR: char = '=';
 /// `"_anyke;_filter;_time=[now(-2s)..now(2s)];_timetrick"` (`selector.rs:381`).
 pub const ANYKE_PARAM: &str = "_anyke";
 
+/// The time-range token (zenoh `TIME_RANGE_KEY`, `zenoh/src/api/selector.rs:145`;
+/// pico `_Z_QUERY_PARAMS_KEY_TIME`, `query_params.h`). Unlike [`ANYKE_PARAM`] it
+/// carries a value — `_time=[now(-3s)..]` — but the consolidation carve-out that
+/// reads it keys on PRESENCE alone, because upstream's does: `time_range()`
+/// returns `Some(Err(..))` for an unparseable range and `session.rs:2249` tests
+/// `is_some()`, so a malformed `_time` still holds the resolution at
+/// [`crate::query_mode::ConsolidationMode::None`] rather than silently
+/// consolidating a window the caller asked for.
+pub const TIME_RANGE_PARAM: &str = "_time";
+
 /// Trim the trailing separators zenoh strips when a receiver builds its
 /// `Parameters` from an owned string (`trim_end_matches` over
 /// `;` / `=` / `|`, `parameters.rs:359-366`; the queryable side goes through that

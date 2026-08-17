@@ -1085,6 +1085,23 @@ fn issue_recovery_query<R, T>(
         .with_allowed_destination(dest)
         .with_parameters(params)
         .with_timeout_ms(timeout_ms);
+    // R311y836 — PIN THE MODE, do not ride the default. An `_sn` range asks for
+    // EVERY sample in the gap; the resolved default is now LATEST
+    // (`ConsolidationMode::resolve_auto`), which would collapse a retransmission
+    // burst to one sample per keyexpr and silently unfix the very gap this GET
+    // exists to close. Both upstreams pay exactly this cost explicitly and for
+    // exactly this reason — zenoh-ext at every one of its recovery / history
+    // GETs (`zenoh-ext/src/advanced_subscriber.rs:636,743,806,882,946,1008,1137`)
+    // and zenoh-pico immediately after `z_get_options_default`
+    // (`vendor/zenoh-pico/src/api/advanced_subscriber.c:915`). The `_time` arm of
+    // the resolution would cover the history GETs below but NOT this one, which
+    // carries `_sn` and no `_time`; an explicit pin covers all three alike.
+    //
+    // Gated because the pin is only MEANINGFUL where the capability exists:
+    // without `query-consolidation` nothing consolidates and the requirement is
+    // already met, so a feature edge here would buy footprint and no behaviour.
+    #[cfg(feature = "query-consolidation")]
+    let opts = opts.with_consolidation(wz_session_core::query_mode::ConsolidationMode::None);
 
     // The finish action decrements the source's in-flight count + flushes
     // (`finish_recovery` also handles the C3 failed-to-issue rollback via the
@@ -1232,6 +1249,12 @@ fn issue_history_query<R, T>(
     // R311y442 — the selector is now unconditional (it carries `_anyke` even when
     // neither knob is set), so there is no longer a no-parameters arm.
     let opts = opts.with_parameters(history_selector(sample_depth, max_age).into_bytes());
+    // R311y836 — pin the mode; see `issue_sn_recovery_get`'s note for the full
+    // reasoning and the seven upstream sites that do the same. A history GET
+    // asks the cache for a RING, and `_max=N` alone carries no `_time`, so the
+    // resolution's carve-out would not save this call.
+    #[cfg(feature = "query-consolidation")]
+    let opts = opts.with_consolidation(wz_session_core::query_mode::ConsolidationMode::None);
 
     // `finish_history` clears `history_pending` + flushes the buffer oldest-first
     // (the shared [`issue_recovery_get`] also runs it on the C3 failed-to-issue
@@ -1285,6 +1308,11 @@ fn issue_late_publisher_query<R, T>(
         .with_allowed_destination(dest)
         .with_timeout_ms(timeout_ms)
         .with_parameters(history_selector(sample_depth, max_age).into_bytes());
+    // R311y836 — pin the mode; see `issue_sn_recovery_get`. A late publisher's
+    // WHOLE cache arrives through this one GET, so consolidating it would leave
+    // the subscriber holding a single sample of a ring it just discovered.
+    #[cfg(feature = "query-consolidation")]
+    let opts = opts.with_consolidation(wz_session_core::query_mode::ConsolidationMode::None);
     let key = (zid, eid);
     issue_recovery_get(
         session,

@@ -41,11 +41,81 @@ impl ConsolidationMode {
     /// Wire byte value as written by zenoh-pico's `_z_uint8_encode`
     /// invocation in `_z_query_encode` (message.c:412). The mapping
     /// follows the enum literal values verbatim.
+    ///
+    /// R311y836 — NAMED DIVERGENCE, measured against both upstreams rather than
+    /// assumed. pico writes its API enum straight to the wire
+    /// (`_z_uint8_encode(wbf, msg->_consolidation)`,
+    /// `vendor/zenoh-pico/src/protocol/codec/message.c:412`, over
+    /// `constants.h:184-188` NONE=0/MONOTONIC=1/LATEST=2) and this mapping is
+    /// bit-faithful to THAT. zenoh's codec numbers the same modes one higher
+    /// because its enum carries `Auto` in slot 0 —
+    /// `Auto => 0, None => 1, Monotonic => 2, Latest => 3`
+    /// (`commons/zenoh-codec/src/zenoh/query.rs:38-44`). The two upstreams
+    /// therefore disagree on this byte, and wz currently follows pico. It is
+    /// unobservable today — the field is purely requester-side and zenoh's
+    /// routing layer never reads it (0 `consolidation` occurrences under
+    /// `zenoh/src/net/routing/`, measured) — which is why nobody has been bitten
+    /// by it, but it is a real divergence and it is this atom's residual, NOT
+    /// something to "fix" without a foreign witness on both planes.
     pub const fn wire_byte(self) -> u8 {
         match self {
             Self::None => 0u8,
             Self::Monotonic => 1u8,
             Self::Latest => 2u8,
+        }
+    }
+
+    /// Resolve the mode a get will APPLY LOCALLY from the mode its caller named
+    /// (or did not) plus the selector parameters, mirroring zenoh's `get()`:
+    ///
+    /// ```text
+    /// ConsolidationMode::Auto if parameters.time_range().is_some() => ConsolidationMode::None,
+    /// ConsolidationMode::Auto => ConsolidationMode::Latest,
+    /// mode => mode,
+    /// ```
+    ///
+    /// (`zenoh/src/api/session.rs:2247-2252`, tag 1.5.0 / 49c8a53.)
+    ///
+    /// BOTH UPSTREAMS CARRY THE SAME RULE, which is what makes it the protocol's
+    /// and not one implementation's habit: zenoh-pico resolves AUTO on the client
+    /// before encoding — `_time=` in the selector yields NONE, otherwise LATEST
+    /// (`vendor/zenoh-pico/src/net/primitives.c:567-573`). wz-capi-pico has
+    /// mirrored pico's copy since R311y321 (`wz-capi-pico/src/get.rs:945-953`) and
+    /// KEEPS it rather than delegating here: it must resolve BEFORE the wire,
+    /// because pico's get always emits Q_C with the resolved byte and never
+    /// elides it. Of the three request paths wz owns, the native Rust one was the
+    /// only one without this rule until R311y836.
+    ///
+    /// `None` IS wz's spelling of zenoh's `Auto`. wz deliberately has no `Auto`
+    /// VARIANT — this enum only names the three modes that are transmitted, and
+    /// "the caller named nothing" is carried by the `Option` exactly as both
+    /// upstreams carry it by an out-of-band sentinel that is never written
+    /// (zenoh's header flag is set only when the mode `!= DEFAULT`,
+    /// `commons/zenoh-codec/src/zenoh/query.rs:84`; pico's `has_consolidation`
+    /// predicate is `!= Z_CONSOLIDATION_MODE_DEFAULT`,
+    /// `vendor/zenoh-pico/src/protocol/codec/message.c:402`). So the argument
+    /// here is `Option<Self>`, not a fourth variant.
+    ///
+    /// WHY THIS IS A SEPARATE READING FROM THE WIRE'S. zenoh resolves ONCE and
+    /// feeds the resolved value to both its local cache (`session.rs:2294`) and
+    /// the outbound Query body (`session.rs:2316`), so a zenoh default get puts
+    /// LATEST on the wire. wz keeps eliding the ext when the caller named no
+    /// mode, because the alternative is transmitting a byte that the divergence
+    /// documented on [`Self::wire_byte`] makes WRONG for a zenoh peer — an
+    /// elided ext reads as `Auto` on both upstreams, which is what the caller
+    /// actually said. Converging the two readings is this atom's residual and
+    /// it is blocked on the byte, not on this function.
+    pub fn resolve_auto(requested: Option<Self>, parameters: &str) -> Self {
+        match requested {
+            Some(mode) => mode,
+            None if crate::selector_params::has_param(
+                parameters,
+                crate::selector_params::TIME_RANGE_PARAM,
+            ) =>
+            {
+                Self::None
+            }
+            None => Self::Latest,
         }
     }
 }
@@ -130,6 +200,72 @@ mod tests {
         assert_eq!(ConsolidationMode::None.wire_byte(), 0u8);
         assert_eq!(ConsolidationMode::Monotonic.wire_byte(), 1u8);
         assert_eq!(ConsolidationMode::Latest.wire_byte(), 2u8);
+    }
+
+    /// R311y836 — an explicitly named mode passes through untouched. This is
+    /// zenoh's `mode => mode` arm (`session.rs:2251`) and it is what keeps the
+    /// resolution from being a policy that overrides callers.
+    #[test]
+    fn an_explicit_mode_resolves_to_itself() {
+        for mode in [
+            ConsolidationMode::None,
+            ConsolidationMode::Monotonic,
+            ConsolidationMode::Latest,
+        ] {
+            assert_eq!(ConsolidationMode::resolve_auto(Some(mode), ""), mode);
+            // ... and the `_time` arm must not reach an explicit mode either:
+            // upstream's guard is `ConsolidationMode::Auto if ..`, so the range
+            // only ever redirects the UNNAMED case.
+            assert_eq!(
+                ConsolidationMode::resolve_auto(Some(mode), "_time=[now(-3s)..]"),
+                mode,
+                "a caller who named a mode keeps it even under a `_time` range"
+            );
+        }
+    }
+
+    /// The default path, and the whole point: no mode named resolves to LATEST
+    /// (`zenoh/src/api/session.rs:2250`).
+    #[test]
+    fn an_unnamed_mode_resolves_to_latest() {
+        assert_eq!(
+            ConsolidationMode::resolve_auto(None, ""),
+            ConsolidationMode::Latest
+        );
+        // Other parameters must not disturb it — only `_time` is the carve-out.
+        assert_eq!(
+            ConsolidationMode::resolve_auto(None, "_max=5;_anyke"),
+            ConsolidationMode::Latest
+        );
+    }
+
+    /// The carve-out (`session.rs:2249`), including the two shapes that would
+    /// slip past a naive `contains("_time")`.
+    #[test]
+    fn an_unnamed_mode_under_a_time_range_resolves_to_none() {
+        assert_eq!(
+            ConsolidationMode::resolve_auto(None, "_time=[now(-3s)..]"),
+            ConsolidationMode::None
+        );
+        assert_eq!(
+            ConsolidationMode::resolve_auto(None, "_max=5;_time=[now(-3s)..];_anyke"),
+            ConsolidationMode::None
+        );
+        // Upstream tests `is_some()`, not "parses" — a malformed range still
+        // holds the resolution at None rather than truncating the window.
+        assert_eq!(
+            ConsolidationMode::resolve_auto(None, "_time=nonsense"),
+            ConsolidationMode::None
+        );
+        // A key that merely CONTAINS the token is not the token.
+        assert_eq!(
+            ConsolidationMode::resolve_auto(None, "_timeout=5"),
+            ConsolidationMode::Latest
+        );
+        assert_eq!(
+            ConsolidationMode::resolve_auto(None, "no_time=1"),
+            ConsolidationMode::Latest
+        );
     }
 
     /// R121j-1e — wire byte mapping invariant for `QueryTarget`. The

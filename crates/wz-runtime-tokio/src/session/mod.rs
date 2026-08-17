@@ -2520,9 +2520,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // locally. `effective_consolidation` is the gate (R311y317's "last
             // hop that knows"), so a build without the feature reads `None` here
             // and the wrapper is a passthrough — same delivery as pre-y321.
+            //
+            // R311y836 — the `.unwrap_or(None)` that used to stand here was the
+            // DEFAULT-path divergence: a caller who named no mode got no
+            // consolidation, where zenoh resolves the unnamed case to LATEST
+            // (`zenoh/src/api/session.rs:2247-2252`). `resolved_consolidation`
+            // is that resolution, `_time` carve-out included.
             let sink = wz_session_core::reply_sink::ConsolidatingSink::new(
-                opts.effective_consolidation()
-                    .unwrap_or(wz_session_core::query_mode::ConsolidationMode::None),
+                opts.resolved_consolidation(),
                 self.deferred_reply_sink(on_reply, on_final),
             );
 
@@ -2816,9 +2821,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // the aliased get is the same requester plane and must consolidate
             // the same way, or `Querier::get` and `Session::query` would honour
             // the mode differently for the same options.
+            //
+            // R311y836 — including the resolution of the UNNAMED mode. Both
+            // getters share `resolved_consolidation` for the same reason they
+            // shared the wrap: a default that differed between them would be a
+            // parity gap wz created rather than inherited.
             let sink = wz_session_core::reply_sink::ConsolidatingSink::new(
-                opts.effective_consolidation()
-                    .unwrap_or(wz_session_core::query_mode::ConsolidationMode::None),
+                opts.resolved_consolidation(),
                 self.deferred_reply_sink(on_reply, on_final),
             );
 

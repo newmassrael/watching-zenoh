@@ -624,6 +624,21 @@ mod tests {
     /// prove. The value itself comes from the same
     /// [`wz_session_core::selector_params::anyke_params`] SSOT the production
     /// selector is built from, so the two cannot drift.
+    ///
+    /// R311y836 — the SAME class again, one axis over, and the same remedy.
+    /// These three tests ask the cache for a RING and assert they get all of it;
+    /// they named no consolidation mode, and y836 made the unnamed mode resolve
+    /// to LATEST (`zenoh/src/api/session.rs:2250`), which collapses a ring to one
+    /// sample per keyexpr. MEASURED: all three went red together, e.g.
+    /// `left: [("demo/data", [2])]` against `right: [("demo/data", [0]),
+    /// ("demo/data", [1]), ("demo/data", [2])]`. Once more the TEST was what
+    /// diverged from production, not the cache — the real advanced subscriber
+    /// pins `None` on every one of its recovery / history GETs, as zenoh-ext
+    /// (`zenoh-ext/src/advanced_subscriber.rs:636,743,806,882,946,1008,1137`) and
+    /// zenoh-pico (`vendor/zenoh-pico/src/api/advanced_subscriber.c:915`) do.
+    /// Set as the FIELD for the same lane-preserving reason as `parameters`
+    /// above; with `query-consolidation` off the field is inert, because
+    /// `effective_consolidation` hard-returns `None` there.
     #[cfg(feature = "query-get")]
     fn adv_recovery_get_options() -> crate::session::QueryOptions {
         use crate::session::QueryOptions;
@@ -631,6 +646,7 @@ mod tests {
 
         QueryOptions {
             parameters: Some(wz_session_core::selector_params::anyke_params(&[]).into_bytes()),
+            consolidation: Some(wz_session_core::query_mode::ConsolidationMode::None),
             ..QueryOptions::get().with_allowed_destination(Locality::SessionLocal)
         }
     }

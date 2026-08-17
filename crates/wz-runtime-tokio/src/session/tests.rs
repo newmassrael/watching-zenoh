@@ -52,6 +52,36 @@ fn build_session() -> (TokioSession, Arc<RecordingLinkDriver>) {
     (TokioSession::new(actions, observer, clock), driver)
 }
 
+/// R311y836 — `QueryOptions::get()` for a test whose SUBJECT IS NOT
+/// CONSOLIDATION, and which therefore needs replies delivered one by one, in
+/// arrival order, as they land.
+///
+/// y836 made the unnamed mode resolve to `Latest` (`zenoh/src/api/session.rs:2250`),
+/// and `Latest` is defined as holding samples back to emit one set at the end —
+/// "Holds back samples to only send the set of samples that had the highest
+/// timestamp for their key" (`commons/zenoh-protocol/src/zenoh/query.rs:37`). So
+/// under the default a reply is no longer observable INLINE, and the flush order
+/// is the cache's rather than the wire's. Four locality / aliasing tests and the
+/// `_anyke` acceptance test asserted exactly those two things while proving
+/// something else entirely; MEASURED, they read `left: 0 / right: 1` on
+/// "loopback reply fires inline" and `left: [out, in] / right: [in, out]` on
+/// arrival order. Neither is a property zenoh's DEFAULT get has, so the trigger
+/// was wrong, not the claim — the claims survive verbatim under an explicit
+/// `None`.
+///
+/// Assigned as the FIELD, not through the `query-consolidation`-gated setter,
+/// for the reason `advanced_publisher::tests::adv_recovery_get_options` states:
+/// the setter's gate would change WHICH LANES RUN THESE TESTS for a reason
+/// orthogonal to what they prove. With the feature off the field is inert
+/// (`effective_consolidation` hard-returns `None`).
+#[cfg(feature = "query-get")]
+fn get_opts_in_arrival_order() -> QueryOptions {
+    QueryOptions {
+        consolidation: Some(wz_session_core::query_mode::ConsolidationMode::None),
+        ..QueryOptions::get()
+    }
+}
+
 #[test]
 fn publish_options_default_is_put_any_reliable() {
     let opts = PublishOptions::default();
@@ -2258,7 +2288,7 @@ fn query_locality_any_fires_both_branches_and_waits_for_wire_final() {
     let f = final_count.clone();
     let _handle = session.query(
         "home/temp",
-        QueryOptions::get(),
+        get_opts_in_arrival_order(),
         // Any (default)
         move |_reply| {
             r.fetch_add(1, Ordering::SeqCst);
@@ -3966,7 +3996,7 @@ fn query_aliased_locality_any_fires_both_branches() {
             7,
             None,
             "home/temp",
-            QueryOptions::get(),
+            get_opts_in_arrival_order(),
             // Any
             move |_| {
                 r.fetch_add(1, Ordering::SeqCst);
@@ -4009,7 +4039,7 @@ fn query_aliased_inline_suffix_passes_through_to_wire_and_loopback() {
             7,
             Some("/kitchen"),
             "home/temp/kitchen",
-            QueryOptions::get(),
+            get_opts_in_arrival_order(),
             move |reply| {
                 *cap_cb.lock().unwrap() = Some(InboundReply::from_view(reply));
             },
@@ -4059,7 +4089,7 @@ fn query_aliased_auto_resolves_loopback_from_outbound_mapping_table() {
         .query_aliased_auto(
             7,
             None,
-            QueryOptions::get(),
+            get_opts_in_arrival_order(),
             move |reply| {
                 *cap_cb.lock().unwrap() = Some(InboundReply::from_view(reply));
             },
@@ -9736,18 +9766,95 @@ fn query_with_latest_consolidation_delivers_one_reply_per_keyexpr() {
     );
 }
 
-/// The companion NEG at the same seam: the SAME two replies, with the default
-/// (no consolidation) options, must BOTH arrive. Without this, a decorator that
-/// consolidated unconditionally would pass the test above and silently break
-/// every non-consolidating z_get in the tree — the wrapper is installed on every
+/// The companion NEG at the same seam: the SAME two replies, with an EXPLICIT
+/// `None`, must BOTH arrive. Without this, a decorator that consolidated
+/// unconditionally would pass the test above and silently break every
+/// non-consolidating z_get in the tree — the wrapper is installed on every
 /// pending, so "does None still passthrough" is a real question, not a given.
+///
+/// R311y836 — this test was `query_without_consolidation_still_delivers_every_reply`
+/// and reached the `None` mode by naming NO mode at all, asserting "the default
+/// get must not consolidate". That was wz's default, never zenoh's: upstream
+/// resolves the unnamed case to LATEST (`zenoh/src/api/session.rs:2250`), so the
+/// old trigger was pinning a divergence. The LOAD-BEARING claim is unchanged and
+/// still asserted — `ConsolidationMode::None` is a pass-through — only the
+/// trigger moved, from "named nothing" to "named None", which is the one that
+/// actually expresses it. The default now has its own test above.
 #[cfg(all(
     feature = "query-get",
     feature = "query-queryable",
+    feature = "query-consolidation",
     feature = "pubsub-timestamp"
 ))]
 #[test]
-fn query_without_consolidation_still_delivers_every_reply() {
+fn query_with_explicit_none_consolidation_still_delivers_every_reply() {
+    use wz_session_core::query_mode::ConsolidationMode;
+    use wz_session_core::sample::TimestampHint;
+
+    let (session, _driver) = build_session();
+    let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_cb = seen.clone();
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .queryables
+        .register("hist/key", |_q, responder| {
+            responder.reply_keyed_stamped(
+                "hist/key",
+                b"old",
+                None,
+                &TimestampHint {
+                    time: 10,
+                    zid: vec![0x01],
+                },
+            );
+            responder.reply_keyed_stamped(
+                "hist/key",
+                b"new",
+                None,
+                &TimestampHint {
+                    time: 20,
+                    zid: vec![0x01],
+                },
+            );
+        });
+
+    session
+        .query(
+            "hist/key",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::SessionLocal)
+                .with_consolidation(ConsolidationMode::None),
+            move |reply| seen_cb.lock().unwrap().push(reply.payload().to_vec()),
+            |_| {},
+        )
+        .expect("query-get feature is ON in this test build");
+
+    let got = seen.lock().unwrap();
+    assert_eq!(
+        *got,
+        vec![b"old".to_vec(), b"new".to_vec()],
+        "an explicit None must not consolidate: both versions, in arrival order"
+    );
+}
+
+/// R311y836 — the OFF arm of the resolution, and it needs its own witness
+/// because it is the arm no `query-consolidation` build can express: with the
+/// feature compiled out, `resolved_consolidation` reads `None` and the default
+/// get keeps its pre-y836 pass-through. A resolution that leaked past the gate
+/// — say by living in the `ConsolidatingSink` instead of behind the accessor —
+/// would consolidate here and break the A3 `active <=> cfg-site` invariant
+/// silently, since every ON-arm test would stay green.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    not(feature = "query-consolidation"),
+    feature = "pubsub-timestamp"
+))]
+#[test]
+fn a_default_get_does_not_consolidate_without_the_query_consolidation_feature() {
     use wz_session_core::sample::TimestampHint;
 
     let (session, _driver) = build_session();
@@ -9789,11 +9896,159 @@ fn query_without_consolidation_still_delivers_every_reply() {
         )
         .expect("query-get feature is ON in this test build");
 
-    let got = seen.lock().unwrap();
     assert_eq!(
-        *got,
+        *seen.lock().unwrap(),
         vec![b"old".to_vec(), b"new".to_vec()],
-        "the default get must not consolidate: both versions, in arrival order"
+        "with query-consolidation OFF the default get must stay a pass-through: \
+         the feature IS the capability, and it must not arrive through a default"
+    );
+}
+
+/// R311y836 — the DEFAULT get's consolidation, which is a different claim from
+/// the two tests above: they pin what an EXPLICIT mode does, this pins what the
+/// absence of one means.
+///
+/// zenoh's option default is `QueryConsolidation::DEFAULT = AUTO`
+/// (`zenoh/src/api/query.rs:43-46`) and `get()` RESOLVES it before it does
+/// anything else — `ConsolidationMode::Auto => ConsolidationMode::Latest`
+/// (`zenoh/src/api/session.rs:2250`). So a zenoh caller who names no mode gets
+/// LATEST, and the two versions below collapse to one.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "query-consolidation",
+    feature = "pubsub-timestamp"
+))]
+#[test]
+fn a_default_get_consolidates_to_the_latest_reply_like_zenoh() {
+    use wz_session_core::sample::TimestampHint;
+
+    let (session, _driver) = build_session();
+    let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_cb = seen.clone();
+    let finals = Arc::new(AtomicUsize::new(0));
+    let finals_cb = finals.clone();
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .queryables
+        .register("hist/key", |_q, responder| {
+            responder.reply_keyed_stamped(
+                "hist/key",
+                b"old",
+                None,
+                &TimestampHint {
+                    time: 10,
+                    zid: vec![0x01],
+                },
+            );
+            responder.reply_keyed_stamped(
+                "hist/key",
+                b"new",
+                None,
+                &TimestampHint {
+                    time: 20,
+                    zid: vec![0x01],
+                },
+            );
+        });
+
+    session
+        .query(
+            "hist/key",
+            // NO consolidation named — this is the whole point of the test.
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| seen_cb.lock().unwrap().push(reply.payload().to_vec()),
+            move |_| {
+                finals_cb.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("query-get feature is ON in this test build");
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![b"new".to_vec()],
+        "a get that names no mode must resolve AUTO -> LATEST as zenoh's \
+         session.rs:2250 does, delivering only the newest version per keyexpr"
+    );
+    // CONTROL, in the same test on purpose: an implementation that reached the
+    // asserted set by delivering NOTHING would satisfy the assertion above. The
+    // caller must still be terminated, and exactly once.
+    assert_eq!(
+        finals.load(Ordering::SeqCst),
+        1,
+        "consolidating the default get must not cost the caller its final"
+    );
+}
+
+/// The carve-out that rides with the resolution, and it is upstream's, not an
+/// invention: `ConsolidationMode::Auto if parameters.time_range().is_some() =>
+/// ConsolidationMode::None` (`zenoh/src/api/session.rs:2249`), keyed on the
+/// `_time` selector parameter (`TIME_RANGE_KEY`, `zenoh/src/api/selector.rs:145`).
+///
+/// A `_time` range asks for a WINDOW of history; collapsing it to one sample per
+/// keyexpr would answer a different question. Without this arm the resolution
+/// would silently truncate every time-ranged get, which is the same data-loss
+/// shape the `@adv` history GETs are pinned against below.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "query-consolidation",
+    feature = "query-selector-parameters",
+    feature = "pubsub-timestamp"
+))]
+#[test]
+fn a_default_get_with_a_time_range_selector_does_not_consolidate() {
+    use wz_session_core::sample::TimestampHint;
+
+    let (session, _driver) = build_session();
+    let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_cb = seen.clone();
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .queryables
+        .register("hist/key", |_q, responder| {
+            responder.reply_keyed_stamped(
+                "hist/key",
+                b"old",
+                None,
+                &TimestampHint {
+                    time: 10,
+                    zid: vec![0x01],
+                },
+            );
+            responder.reply_keyed_stamped(
+                "hist/key",
+                b"new",
+                None,
+                &TimestampHint {
+                    time: 20,
+                    zid: vec![0x01],
+                },
+            );
+        });
+
+    session
+        .query(
+            "hist/key",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::SessionLocal)
+                .with_parameters(b"_time=[now(-10s)..]".to_vec()),
+            move |reply| seen_cb.lock().unwrap().push(reply.payload().to_vec()),
+            |_| {},
+        )
+        .expect("query-get feature is ON in this test build");
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![b"old".to_vec(), b"new".to_vec()],
+        "a `_time` range must hold the resolution at NONE (session.rs:2249): the \
+         caller asked for a window of history, not the newest sample in it"
     );
 }
 
@@ -9931,7 +10186,7 @@ fn accept_replies_any_reinstates_a_reply_keyed_outside_the_query() {
     session
         .query(
             "demo/inside",
-            QueryOptions::get()
+            get_opts_in_arrival_order()
                 .with_allowed_destination(Locality::SessionLocal)
                 .with_accept_replies(ReplyKeyExpr::Any),
             move |reply| seen_cb.lock().unwrap().push(reply.payload().to_vec()),

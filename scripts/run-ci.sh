@@ -4053,6 +4053,28 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
     _runci_guarded_test "C1at advanced_subscriber" 21 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
+    # R311y836 — the SAME 21 cases again, with `query-consolidation` composed on
+    # top. Not a re-run for its own sake: `ext-pubsub-advanced-recovery` does not
+    # pull `query-consolidation`, so in the leg above the three
+    # `#[cfg(feature = "query-consolidation")]` pins in `advanced_subscriber.rs`
+    # are compiled OUT and the recovery GETs cannot express "do not consolidate".
+    # y836 made the UNNAMED mode resolve to LATEST, which collapses a
+    # retransmission burst to one sample per keyexpr — measured: with the pins
+    # removed under THIS feature set, `composed_recovery_refills_gap_from_cache_
+    # over_loopback` and `composed_recovery_replays_a_cached_delete_as_a_delete`
+    # both go red, and under the leg above they stay green because the code is
+    # not there.
+    #
+    # THE PINS ARE NOT UNWITNESSED WITHOUT THIS LEG — that was the first draft of
+    # this comment and it was refuted by running it. Layer C1's `--workspace` run
+    # unifies `query-consolidation` ON and reddens SIX advanced_subscriber cases
+    # when the mode is dropped. What this leg buys is that the coverage stops
+    # being INCIDENTAL: C1 has it only because some other workspace member
+    # happens to enable the feature, so a Cargo.toml edit elsewhere could retire
+    # it silently. Here it is named.
+    _runci_guarded_test "C1at advanced_subscriber (query-consolidation)" 21 \
+        cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop,query-consolidation \
+        --lib advanced_subscriber --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets \
             --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop \
@@ -4878,7 +4900,24 @@ query_timeout_pub_field_cannot_bypass_the_query_timeout_gate"
     fi
     (cd crates \
         && cargo test -p wz-runtime-tokio --no-default-features --features "$feats" --lib pub_field --quiet \
-        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features "$feats" --quiet -- -D warnings)
+        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features "$feats" --quiet -- -D warnings) || return 1
+    # R311y836 — the OFF arm of the consolidation RESOLUTION, which belongs in
+    # this lane for the reason this lane's own header gives: the guard is
+    # `not(feature = "query-consolidation")`-gated, `query-consolidation` is a
+    # DEFAULT feature, and Layer C1's `--workspace` unification turns it on — so
+    # in every other lane the test is cfg'd out and its absence reads green.
+    # MEASURED: 227 filtered out, 1 run.
+    #
+    # It is a distinct claim from the four pub-field guards above, which is why
+    # it is its own leg rather than another name in the `--list` set: those pin
+    # that a pub-field write cannot put a BYTE ON THE WIRE without its atom, this
+    # pins that y836's LOCAL default cannot consolidate without its atom either.
+    # The subset adds `pubsub-timestamp` + the loopback pieces because the claim
+    # is about DELIVERY of two stamped replies, not about a frame.
+    _runci_guarded_test "C1bk consolidation-resolution OFF" 1 \
+        cargo test -p wz-runtime-tokio --no-default-features \
+        --features transport-unicast,codec-push,codec-request,codec-response,codec-response-final,query-get,query-queryable,query-reply,pubsub-put,pubsub-allow-loop,pubsub-timestamp \
+        --lib a_default_get_does_not_consolidate_without --quiet
 }
 
 # ─── Layer C1bj — Push loopback metadata gates (R311y308) ──────────────
