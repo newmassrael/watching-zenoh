@@ -158,6 +158,35 @@ pub fn set_request_keyexpr_literal(
     )
 }
 
+/// R311y840 — re-key a `Request` for routing to a face that has no expr-id
+/// mapping for the querier's keyexpr: the query-plane twin of
+/// `push_build::reliteralize_push`, with the same contract. A Request already
+/// carrying a literal (`id == 0`) keyexpr is decodable by any peer and is
+/// returned verbatim; an aliased one is cloned and re-keyed to `keyexpr` as a
+/// literal.
+///
+/// Separate from [`set_request_keyexpr_literal`] rather than layered over it at
+/// the call site because the VERBATIM arm is the load-bearing half: rewriting an
+/// already-literal Request would rebuild bytes the router is meant to pass
+/// through untouched, and a router that re-encodes what it could relay is a
+/// router whose output drifts from its input for no reason.
+#[cfg(feature = "codec-request")]
+pub fn reliteralize_request(
+    request: &RequestOwned,
+    keyexpr: &str,
+) -> Result<RequestOwned, CodecError> {
+    let already_literal = match &request.keyexpr.body {
+        WireexprOwnedVariant::WireexprLocal(arm) => arm.id == 0,
+        WireexprOwnedVariant::WireexprNonlocal(arm) => arm.id == 0,
+    };
+    if already_literal {
+        return Ok(request.clone());
+    }
+    let mut routed = request.clone();
+    set_request_keyexpr_literal(&mut routed, keyexpr)?;
+    Ok(routed)
+}
+
 /// R311mu (Level B, B5b-2b-2) — metadata-bearing `Request(Query)`
 /// builder: the build half of the prior
 /// `SessionLinkActions::send_request_query_with_meta` (dispatch stays on

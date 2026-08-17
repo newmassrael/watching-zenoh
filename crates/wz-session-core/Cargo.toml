@@ -585,7 +585,22 @@ switchboard = ["codec-push"]
 # build routes). Gated together with `alloc` at the module (AP router; an MCU
 # router is a far-future profile). The kernel reuses the `wireexpr_resolve` /
 # `keyexpr_match` SSOTs already shipped for the subscriber data plane.
-routing-routes = ["codec-push", "declare-subscriber", "session-unicast"]
+# R311y840 — the QUERY half of the same data plane. zenoh's dispatcher routes
+# Push AND Request/Response/ResponseFinal from one table
+# (`dispatcher/pubsub.rs` + `dispatcher/queries.rs` over the same
+# `Resource::session_ctxs`), so a router that forwards only Push is a router a
+# `z_get` cannot traverse. `declare-queryable` supplies the inbound
+# DeclareQueryable the query route is built from, and the three codecs supply
+# the query carriers themselves.
+routing-routes = [
+    "codec-push",
+    "declare-subscriber",
+    "session-unicast",
+    "declare-queryable",
+    "codec-request",
+    "codec-response",
+    "codec-response-final",
+]
 
 # R311y105 — routing-namespace (§5.21): the per-participant keyexpr namespace
 # prefix/strip decorator (the `namespace` module), the wz mirror of zenoh's

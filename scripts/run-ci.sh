@@ -4467,9 +4467,15 @@ layer_c1x_cargo_test_routing_routes() {
     # (advertise, interest gate, CURRENT dump, retraction by advertised id, the
     # face-departure retraction, the second-holder guard, and both sourced
     # forms), again none of them gated on transport-qos, so again +8 on both.
-    _runci_guarded_test "C1X routing_forward 37" 37 \
+    # R311y840: 37/38 -> 51/52. Fourteen cases landed with the QUERY plane (the
+    # fan-out, the minted request id, re-literalization, the empty-route final,
+    # the reply return path, the one-final rule, undeclare, face departure, the
+    # self-query guard, the cross-face reply refusal, and the four
+    # advertisement-plane cases), and again +14 on BOTH arms -- an unequal delta
+    # would mean a case is accidentally gated on transport-qos.
+    _runci_guarded_test "C1X routing_forward 51" 51 \
         cargo test -p wz-runtime-tokio --features routing-routes --lib routing_forward --quiet || return 1
-    _runci_guarded_test "C1X routing_forward 38" 38 \
+    _runci_guarded_test "C1X routing_forward 52" 52 \
         cargo test -p wz-runtime-tokio --features routing-routes,transport-qos --lib routing_forward --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-routes --quiet -- -D warnings \

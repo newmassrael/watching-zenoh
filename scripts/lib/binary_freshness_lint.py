@@ -75,7 +75,19 @@ FRESHNESS_CALL = "assert_demo_binary_newer_than_sources"
 # readiness, which surfaces as a connect or read error on the next line, never as
 # a wrong verdict about zenohd's byte. Adding the call would make a foreign-oracle
 # measurement depend on the freshness of a wz artifact it never inspects.
-MISSING_FRESHNESS = 111
+# R311y840 LOWERS it to 110, the downward arm this gate exists to catch.
+# `wz_router_routes_pico_interop.rs` gained the call, and it gained it in the
+# shared `spawn_wz_router` helper rather than per test, so ONE edit covers the
+# file's five fixtures. The net is -1 even though the same commit ADDS two of
+# those five, which is the arithmetic worth writing down: a per-file count moves
+# by the file, not by the fixture.
+#
+# It is the right file to fix rather than an arbitrary one. Its two new legs
+# assert a code path a demo built before this round DOES NOT HAVE (the router's
+# query plane), so a stale binary there does not merely weaken the proof — it
+# reproduces exactly the red the legs are written to detect, and the diagnosis
+# goes hunting in the routing kernel for a defect that is in the build.
+MISSING_FRESHNESS = 110
 
 
 def main() -> int:

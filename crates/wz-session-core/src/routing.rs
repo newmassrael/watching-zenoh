@@ -105,14 +105,47 @@
 //! Multi-hop declaration propagation (a router forwarding a peer's
 //! DeclareSubscriber to the *other* peers so they gate their own emit — an
 //! interest optimisation, not required for a single-hop star: a producer
-//! sends its Put unconditionally and the router routes it), zid-keyed mesh
+//! sends its Put unconditionally and the router routes it) and zid-keyed mesh
 //! de-duplication (the `src != dst` skip suffices for the star topology; a
-//! mesh needs source-zid suppression), and QUERYABLE routing — that one is
-//! not symmetry left undone but the same message-kind argument running the
-//! other way: a queryable advertised from here would invite a `Request` this
-//! table has no arm for, so the empty dump it answers with is truthful.
+//! mesh needs source-zid suppression).
 //! Self-echo cannot occur: a face never receives its own Put back (`src_id`
 //! is skipped).
+//!
+//! ## The QUERY plane (R311y840)
+//!
+//! Queryable routing used to be listed above as a non-goal, on the argument
+//! that "a queryable advertised from here would invite a `Request` this table
+//! has no arm for". That was true of the table and false of the protocol: it
+//! made a wz `--router` a router a `z_get` cannot traverse, so every queryable
+//! behind one was unreachable and every querier waited out its own timeout with
+//! no reply and no `ResponseFinal`. The premise is what this section removes.
+//!
+//! zenoh routes both planes from ONE dispatcher over the same per-face state
+//! (`dispatcher/pubsub.rs` and `dispatcher/queries.rs` over
+//! `Resource::session_ctxs`), and the query half has three parts wz now
+//! mirrors:
+//!
+//! - **Fan-out** ([`RouteTable::route_query`], zenoh `route_query`): the faces
+//!   whose declared queryable matches receive the `Request` under a
+//!   router-minted request id, because the querier's id is unique only within
+//!   ITS face and two faces may mint the same one. An empty route is answered
+//!   with an immediate `ResponseFinal` (upstream's `if route.is_empty()` arm)
+//!   rather than silence — the same "a requester is entitled to a termination"
+//!   rule R311y773 applied to `declare-final`.
+//! - **Return path** ([`RouteTable::route_response`] /
+//!   [`RouteTable::route_response_final`], zenoh's `face.pending_queries` ->
+//!   `query.src_qid`): a reply is re-stamped with the querier's own id, and the
+//!   querier is closed by exactly ONE `ResponseFinal` once the LAST outstanding
+//!   answerer finishes — upstream gets that count from `Drop for Query` over an
+//!   `Arc`; here it is an explicit outstanding counter, because the same
+//!   accounting has to survive a face DEPARTING mid-query, which a refcount
+//!   would only handle by making the face own the `Arc`.
+//! - **Advertisement** ([`RouteTable::propagate_qabl_declaration`] and the
+//!   QUERYABLES arm of [`RouteTable::record_interest`]): the same two rules the
+//!   token plane already follows — a CURRENT interest is dumped, a FUTURE one
+//!   registers — because a zenoh ROUTER forwards a queryable declaration only
+//!   to a face that registered a QUERYABLES interest
+//!   (`hat/router/queries.rs:255-259`).
 
 #[cfg(all(feature = "alloc", feature = "routing-routes"))]
 pub use imp::{FaceRoute, RouteTable};
@@ -128,19 +161,25 @@ mod imp {
     use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
     use wz_codecs::interest::InterestOwned;
     use wz_codecs::push::PushOwned;
+    use wz_codecs::request::RequestOwned;
+    use wz_codecs::response::ResponseOwned;
+    use wz_codecs::response_final::ResponseFinalOwned;
     use wz_runtime_core::TimeSource;
 
     use crate::declare::declared_intersects;
     use crate::declare_build::{
-        build_declare_final_reply, build_declare_subscriber_reply,
-        build_declare_subscriber_reply_with_id, build_declare_token, build_declare_token_reply,
-        build_declare_token_reply_with_id, build_undeclare_token,
+        build_declare_final_reply, build_declare_queryable_reply,
+        build_declare_queryable_reply_with_id, build_declare_queryable_with_id_info,
+        build_declare_subscriber_reply, build_declare_subscriber_reply_with_id,
+        build_declare_token, build_declare_token_reply, build_declare_token_reply_with_id,
+        build_undeclare_queryable, build_undeclare_queryable_with_keyexpr, build_undeclare_token,
         build_undeclare_token_with_keyexpr,
     };
     use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
     use crate::link::SessionRuntime;
     use crate::network_message::NetworkMessage;
     use crate::qos::Priority;
+    use crate::queryable_info::{read_queryable_info, QueryableInfo};
     use crate::session_actions::SessionLinkActions;
     use crate::wireexpr_resolve::resolve_wireexpr;
     use alloc::sync::Arc;
@@ -204,6 +243,85 @@ mod imp {
         /// of these matching (`hat/router/token.rs::propagate_simple_token_to`),
         /// which is why a face that never asks for tokens hears none.
         token_interests: Vec<TokenInterest>,
+        /// QUERYABLES this face has declared: the resolved keyexpr and the
+        /// carried [`QueryableInfo`], keyed by the wire queryable id so an
+        /// `UndeclareQueryable` — which carries only the id — removes exactly
+        /// the matching one. The query-plane twin of [`subs`](Self::subs), and
+        /// the set [`RouteTable::route_query`] computes a query's destinations
+        /// from (zenoh's `Resource::session_ctxs[face].qabl`).
+        qabls: HashMap<u64, QueryableRoute>,
+        /// Queryables this table has ADVERTISED TO this face: advertised
+        /// keyexpr -> the id that advertisement carried. The exact twin of
+        /// [`local_tokens`](Self::local_tokens), load-bearing for the same
+        /// reason — the retraction must name the id the declaration did,
+        /// because the receiver keys its remote-queryable table by it.
+        local_qabls: HashMap<String, u64>,
+        /// QUERYABLES-kind interests this face registered. The gate every
+        /// queryable advertisement to this face passes, because a zenoh ROUTER
+        /// propagates a queryable declaration only to a face that asked
+        /// (`hat/router/queries.rs:255-259`) — the same rule
+        /// [`token_interests`](Self::token_interests) enforces on the
+        /// liveliness plane.
+        qabl_interests: Vec<QueryableInterest>,
+        /// Queries this table has SENT to this face and not yet closed: the
+        /// router-minted request id -> the [`PendingQuery`] key it belongs to.
+        /// Kept per-face rather than only table-wide so a departing face's
+        /// outstanding queries are findable from the face alone
+        /// ([`RouteTable::remove_face`]), and so a `Response` is only honoured
+        /// on the face the `Request` actually went to — a face cannot answer
+        /// another face's query by guessing its id.
+        pending_queries: HashMap<u64, u64>,
+    }
+
+    /// One queryable a face declared: the resolved keyexpr plus the
+    /// [`QueryableInfo`] the declaration carried. The info is kept (rather than
+    /// discarded as the subscriber plane discards its lack of one) because an
+    /// advertisement of this queryable to an interested face must carry it —
+    /// `complete` is what tells a querier the answer needs no other responder,
+    /// and dropping it would silently downgrade every relayed queryable to
+    /// incomplete.
+    struct QueryableRoute {
+        keyexpr: String,
+        info: QueryableInfo,
+    }
+
+    /// One QUERYABLES-kind `Interest` a face registered — the query-plane twin
+    /// of [`TokenInterest`], with the same fields for the same reasons: the id
+    /// is held for dedup of a repeated identical interest (the unsolicited
+    /// advertisement carries none), and `aggregate` decides whether the
+    /// advertisement names the interest's own keyexpr or the queryable's.
+    struct QueryableInterest {
+        interest_id: u64,
+        keyexpr: String,
+        aggregate: bool,
+    }
+
+    /// One query in flight through this table: who asked, under which id, and
+    /// how many answerers are still outstanding.
+    ///
+    /// zenoh carries the first two in `Query { src_face, src_qid }` and gets the
+    /// third from the `Arc<Query>` refcount, closing the querier in
+    /// `Drop for Query` (`dispatcher/queries.rs`). The count is explicit here
+    /// because the event this table has to survive is a DESTINATION FACE
+    /// DEPARTING mid-query: with a refcount that is only expressible by making
+    /// each face own a clone, and the departure then has to find every clone it
+    /// owns — which is [`FaceRoute::pending_queries`] doing the refcount's job
+    /// anyway, minus the ability to say how many are left.
+    struct PendingQuery {
+        /// The face that asked. Absent from
+        /// [`RouteTable::faces`](RouteTable) once it departs, at which point the
+        /// whole entry is dropped un-answered (there is nobody to answer).
+        src_face: u64,
+        /// The request id the QUERIER minted. Every reply routed back to it is
+        /// re-stamped with this, and the single closing `ResponseFinal` carries
+        /// it.
+        src_rid: u64,
+        /// How many destination faces have been sent this query and not yet
+        /// sent their `ResponseFinal`. The querier is closed when this reaches
+        /// zero — never before, because a querier that counts finals (zenoh and
+        /// zenoh-pico both do) would otherwise stop reading at the first
+        /// answerer and drop the rest.
+        outstanding: usize,
     }
 
     /// One FUTURE subscriber interest a face registered — the state
@@ -273,7 +391,26 @@ mod imp {
                 tokens: HashMap::new(),
                 local_tokens: HashMap::new(),
                 token_interests: Vec::new(),
+                qabls: HashMap::new(),
+                local_qabls: HashMap::new(),
+                qabl_interests: Vec::new(),
+                pending_queries: HashMap::new(),
             }
+        }
+
+        /// Does any of this face's QUERYABLES match the already-split
+        /// `target_chunks`? The query-plane twin of [`matches`](Self::matches),
+        /// through the same
+        /// [`keyexpr_intersects_target`](crate::keyexpr_match::keyexpr_intersects_target)
+        /// SSOT that [`declared_intersects`] wraps — so a router's query route
+        /// and the destination queryable's own fire decision are computed by one
+        /// function, exactly as on the Push plane. Takes the pre-split chunks
+        /// rather than the keyexpr because the caller scans every face against
+        /// ONE target and the split is the expensive half.
+        fn matches_queryable(&self, target_chunks: &[&str]) -> bool {
+            self.qabls
+                .values()
+                .any(|q| crate::keyexpr_match::keyexpr_intersects_target(&q.keyexpr, target_chunks))
         }
 
         /// Does any of this face's subscriptions match `keyexpr`? Routes through
@@ -381,6 +518,32 @@ mod imp {
         /// `!mode.future()`), so a non-zero id always means "this advertisement
         /// is retractable by id".
         next_local_token_id: Cell<u64>,
+        /// Queries in flight, keyed by a table-minted query key. One entry per
+        /// INBOUND query (not per destination); the per-destination side lives
+        /// in [`FaceRoute::pending_queries`], which maps a router-minted request
+        /// id back to a key here.
+        pending_queries: HashMap<u64, PendingQuery>,
+        /// Monotonic allocator shared by the query key and the router-minted
+        /// per-destination request id. One counter for both because both need
+        /// exactly one property — uniqueness — and drawing them from one source
+        /// makes it impossible for a key and a live request id to collide while
+        /// a reader is deciding which map to look in. Starts at 1 so 0 is never
+        /// a live id (a zero rid on the wire is a legitimate QUERIER id, which
+        /// is precisely why the router mints its own).
+        next_query_id: Cell<u64>,
+        /// Monotonic allocator for the id an advertised `DeclareQueryable`
+        /// carries — the queryable twin of
+        /// [`next_local_token_id`](Self::next_local_token_id), with the same
+        /// table-wide-is-enough argument and the same reservation of 0 for the
+        /// CURRENT-only dump.
+        next_local_qabl_id: Cell<u64>,
+        /// Cumulative count of queries this table ROUTED (one per inbound
+        /// `Request` that reached at least one queryable). Deliberately NOT
+        /// folded into [`forward_push`](Self::forward_push)'s count, which the
+        /// demo router logs as its Put throughput: two planes with different
+        /// units — a Put counts one per DESTINATION, a query counts one per
+        /// QUERY however many answerers it fanned to.
+        queries_routed: u64,
     }
 
     impl<R: SessionRuntime, T: TimeSource> Default for RouteTable<R, T> {
@@ -402,6 +565,10 @@ mod imp {
                 route_computations: Cell::new(0),
                 next_future_sub_id: Cell::new(1),
                 next_local_token_id: Cell::new(1),
+                pending_queries: HashMap::new(),
+                next_query_id: Cell::new(1),
+                next_local_qabl_id: Cell::new(1),
+                queries_routed: 0,
             }
         }
 
@@ -430,6 +597,15 @@ mod imp {
         /// (`hat/router/mod.rs:541-544`, `hat/client/mod.rs:209-212`) — the
         /// retraction the ROUTER synthesises, as opposed to the one a departing
         /// peer sends for itself.
+        /// The QUERY plane departs with it too, in both directions. A face that
+        /// was ANSWERING queries can no longer finish them, so each is counted
+        /// down and the querier closed if it was the last outstanding answerer —
+        /// otherwise a `z_get` whose only responder crashed hangs to its own
+        /// timeout, which is the very failure the empty-route arm of
+        /// [`route_query`](Self::route_query) refuses to cause. A face that was
+        /// ASKING has nobody to answer to, so its entries are dropped silently.
+        /// zenoh does both in `close_face` (draining `pending_queries` and
+        /// `Drop for Query`).
         pub fn remove_face(&mut self, id: u64) {
             // A removed face may have carried subscriptions that fed cached
             // routes (and its id must never resurface in one), so its departure
@@ -438,6 +614,44 @@ mod imp {
                 return;
             };
             self.invalidate_routes();
+            // The query plane FIRST, while the departed face's own pending map
+            // is still in hand: every query it owed an answer to is one
+            // outstanding fewer, and the querier may now be closable.
+            for query_key in face.pending_queries.values() {
+                self.close_one_answerer(*query_key);
+            }
+            // Queries this face ASKED are unanswerable now. Drop the pending
+            // entries and, with them, every destination face's mapping into
+            // them — leaving those behind would let a late reply resolve to a
+            // querier that no longer exists.
+            let orphaned: Vec<u64> = self
+                .pending_queries
+                .iter()
+                .filter(|(_, q)| q.src_face == id)
+                .map(|(k, _)| *k)
+                .collect();
+            for key in &orphaned {
+                self.pending_queries.remove(key);
+            }
+            if !orphaned.is_empty() {
+                for f in self.faces.values_mut() {
+                    f.pending_queries.retain(|_, key| !orphaned.contains(key));
+                }
+            }
+            // Its queryables leave with it, and the faces that were told about
+            // them are told they are gone — the same argument the token
+            // retraction below makes: an observer that is never corrected keeps
+            // routing queries at a peer that is not there. zenoh drains the
+            // departing face's `qabls` in `close_face` the same way.
+            let mut retracted_qabls: Vec<String> = Vec::new();
+            for q in face.qabls.values() {
+                if !retracted_qabls.contains(&q.keyexpr) {
+                    retracted_qabls.push(q.keyexpr.clone());
+                }
+            }
+            for keyexpr in &retracted_qabls {
+                self.propagate_qabl_forget(None, keyexpr);
+            }
             // Deduplicated: one face may hold several token ids on the SAME
             // keyexpr, and each retraction is per-keyexpr.
             let mut retracted: Vec<String> = Vec::new();
@@ -471,6 +685,29 @@ mod imp {
         /// emitted onto other faces.
         pub fn token_count(&self) -> usize {
             self.faces.values().map(|f| f.tokens.len()).sum()
+        }
+
+        /// Total queryables recorded across all faces — the query-plane twin of
+        /// [`subscription_count`](Self::subscription_count).
+        pub fn queryable_count(&self) -> usize {
+            self.faces.values().map(|f| f.qabls.len()).sum()
+        }
+
+        /// Queries currently in flight (routed, not yet closed). A LEAK
+        /// WITNESS: every path that ends a query — the last `ResponseFinal`, an
+        /// answerer departing, the querier departing — must drive this back to
+        /// zero, and a router whose count only grows is one that will exhaust
+        /// memory on query traffic alone.
+        pub fn pending_query_count(&self) -> usize {
+            self.pending_queries.len()
+        }
+
+        /// Total queries routed to at least one queryable. The query-plane
+        /// counterpart of the Push forward count (see
+        /// [`queries_routed`](Self::queries_routed) on the field for why they
+        /// are not one number).
+        pub fn queries_routed(&self) -> u64 {
+            self.queries_routed
         }
 
         /// Number of currently-valid cached routes — the cache-state witness a
@@ -534,6 +771,14 @@ mod imp {
                     // matching subscriptions so the publisher's filter releases.
                     // NOT counted as a forward (control plane, not data).
                     NetworkMessage::Interest(interest) => self.record_interest(src_id, interest),
+                    // R311y840 — the QUERY plane. Not added to `forwarded`: that
+                    // is the Push destination count the demo router logs, and a
+                    // query's unit is the query (see `queries_routed`).
+                    NetworkMessage::Request(request) => self.route_query(src_id, request),
+                    NetworkMessage::Response(response) => self.route_response(src_id, response),
+                    NetworkMessage::ResponseFinal(final_msg) => {
+                        self.route_response_final(src_id, final_msg)
+                    }
                     _ => {}
                 }
             }
@@ -568,6 +813,9 @@ mod imp {
             // the OTHER faces.
             let mut new_token_keyexpr = None;
             let mut forgotten_token_keyexpr = None;
+            // The query-plane counterparts, carried out for the same reason.
+            let mut new_qabl_keyexpr = None;
+            let mut forgotten_qabl_keyexpr = None;
             let subscriptions_changed = match &declare.body {
                 // R311qd — record the peer's expr-id -> literal-keyexpr mapping
                 // so a later aliased subscription / Put resolves through it.
@@ -656,6 +904,59 @@ mod imp {
                     });
                     false
                 }
+                // The QUERY plane (R311y840). Recorded on the same rules as a
+                // subscription — the id keys the entry so the id-only
+                // `UndeclareQueryable` removes exactly one — but like the token
+                // plane it feeds no PUSH route, so `subscriptions_changed` stays
+                // false and the Put cache is not invalidated. Query routes are
+                // computed per query rather than cached (see
+                // [`route_query`](Self::route_query)), which is what makes that
+                // safe rather than merely cheap.
+                DeclareOwnedVariant::CodecZenohDeclQueryable(decl) => {
+                    match resolve_wireexpr(&decl.keyexpr.body, &face.peer_aliases) {
+                        Some(keyexpr) => {
+                            // The carried info is READ rather than defaulted: a
+                            // relayed queryable that silently lost `complete`
+                            // would make every querier behind this router keep
+                            // waiting for a second answerer that does not exist.
+                            let info = read_queryable_info(decl.extensions.as_ref());
+                            face.qabls.insert(
+                                decl.id,
+                                QueryableRoute {
+                                    keyexpr: keyexpr.clone(),
+                                    info,
+                                },
+                            );
+                            new_qabl_keyexpr = Some(keyexpr);
+                        }
+                        None => {
+                            log::debug!(
+                                "RouteTable: face {src_id} declared queryable id={} on an \
+                                 expr-id with no prior DeclareKeyexpr mapping; not recorded",
+                                decl.id
+                            );
+                        }
+                    }
+                    false
+                }
+                DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl) => {
+                    // Id first, then the SOURCED form — the same two-step, for
+                    // the same reason, as the token retraction above: an
+                    // `id == 0` retraction carrying its keyexpr in
+                    // `ext_wire_expr` is the ordinary shape of a sourced
+                    // undeclare, so a table miss is not "unknown queryable".
+                    forgotten_qabl_keyexpr = face
+                        .qabls
+                        .remove(&undecl.id)
+                        .map(|q| q.keyexpr)
+                        .or_else(|| {
+                            crate::declare_ext_keyexpr::resolve_ext_keyexpr(
+                                undecl.extensions.as_ref(),
+                                &face.peer_aliases,
+                            )
+                        });
+                    false
+                }
                 _ => false,
             };
             // `face`'s borrow of `self.faces` ends with the match; bump the epoch
@@ -679,6 +980,18 @@ mod imp {
             if let Some(keyexpr) = forgotten_token_keyexpr {
                 self.propagate_token_forget(Some(src_id), &keyexpr);
             }
+            // The query plane's fan-out, on the token plane's rules. Unlike a
+            // subscription this is not an optimisation a later message papers
+            // over: a face that asked for QUERYABLES and is never told has no
+            // remote queryable to match a `Querier` against, so its
+            // matching-status stays false and (against zenoh's own client
+            // behaviour) it can decline to send the query at all.
+            if let Some(keyexpr) = new_qabl_keyexpr {
+                self.propagate_qabl_declaration(src_id, &keyexpr);
+            }
+            if let Some(keyexpr) = forgotten_qabl_keyexpr {
+                self.propagate_qabl_forget(Some(src_id), &keyexpr);
+            }
         }
 
         /// Reply to an inbound subscriber `Interest` from face `src_id` — a pico
@@ -694,14 +1007,14 @@ mod imp {
         /// matching subscription is pushed (see
         /// [`push_future_subscriber`](Self::push_future_subscriber)).
         ///
-        /// The TOKENS kind is answered on exactly the same two rules
-        /// ([`propagate_token_declaration`](Self::propagate_token_declaration) is
-        /// the FUTURE half), because the liveliness plane rides the same two
-        /// message kinds this table already dispatches — `Declare` and
-        /// `Interest` — and needs no other. QUERYABLES does not, and that is not
-        /// symmetry left undone: a queryable is an invitation to send a
-        /// `Request`, which this table has no arm for, so advertising one would
-        /// advertise something no query could reach.
+        /// The TOKENS and QUERYABLES kinds are answered on exactly the same two
+        /// rules ([`propagate_token_declaration`](Self::propagate_token_declaration)
+        /// and [`propagate_qabl_declaration`](Self::propagate_qabl_declaration)
+        /// are the FUTURE halves). QUERYABLES was excluded until R311y840 on the
+        /// argument that "a queryable is an invitation to send a `Request`,
+        /// which this table has no arm for" — true when written, and now false
+        /// in its premise rather than its logic: [`route_query`](Self::route_query)
+        /// is that arm.
         fn record_interest(&mut self, src_id: u64, interest: &InterestOwned) {
             let Some(body) = interest.body.as_ref() else {
                 return;
@@ -720,13 +1033,11 @@ mod imp {
             // holds the pending interest until a Final arrives, so silence is not
             // "no matches" but a HANG to the requester's own timeout.
             //
-            // This table can DUMP the subscriber and token planes and no other,
-            // so a QUERYABLES-only CURRENT interest gets an EMPTY dump. That is
-            // a truthful "I have none" (`routing.rs` dispatches no `Request`, so
-            // a queryable advertised from here would name a service no query
-            // could reach), and it is exactly what the subscriber path already
-            // sends when nothing matches (the Final below is emitted with zero
-            // replies).
+            // As of R311y840 this table dumps all three declaration planes it
+            // can hold; only the KEYEXPRS kind remains undumpable (an alias
+            // table is per-face state, not a declaration another face can be
+            // told about), and a KEYEXPRS-only CURRENT interest still gets the
+            // bare Final below — a truthful "I have none".
             //
             // Newly load-bearing as of R311y771: wz itself now emits QUERYABLES
             // interests from `Querier::declare_matching_listener`, so a wz face
@@ -734,7 +1045,8 @@ mod imp {
             // The defect predates that and was reachable from pico and zenoh.
             let wants_subscribers = body.su();
             let wants_tokens = body.to();
-            if !wants_subscribers && !wants_tokens {
+            let wants_queryables = body.qu();
+            if !wants_subscribers && !wants_tokens && !wants_queryables {
                 if interest.c() {
                     let _ = src_actions.send_network_message(
                         NetworkMessage::Declare(Box::new(build_declare_final_reply(interest_id))),
@@ -815,6 +1127,15 @@ mod imp {
                         );
                     }
                 }
+                if wants_queryables {
+                    self.dump_current_queryables(
+                        src_id,
+                        interest_id,
+                        &interest_ke,
+                        aggregate,
+                        future,
+                    );
+                }
                 if wants_tokens {
                     self.dump_current_tokens(src_id, interest_id, &interest_ke, aggregate, future);
                 }
@@ -846,6 +1167,18 @@ mod imp {
                             keyexpr: interest_ke.clone(),
                             aggregate,
                             pushed: HashMap::new(),
+                        });
+                    }
+                    if wants_queryables
+                        && !src
+                            .qabl_interests
+                            .iter()
+                            .any(|qi| qi.interest_id == interest_id && qi.keyexpr == interest_ke)
+                    {
+                        src.qabl_interests.push(QueryableInterest {
+                            interest_id,
+                            keyexpr: interest_ke.clone(),
+                            aggregate,
                         });
                     }
                     if wants_tokens
@@ -1090,6 +1423,451 @@ mod imp {
                     true,
                 );
             }
+        }
+
+        // ─── The QUERY plane (R311y840) ──────────────────────────────────
+        //
+        // Three groups below, in the order a query meets them: the
+        // advertisement of a queryable (so a peer knows to ask at all), the
+        // fan-out of a `Request`, and the return path of `Response` /
+        // `ResponseFinal`.
+
+        /// The CURRENT half of a QUERYABLES interest: the queryables already
+        /// held on OTHER faces that match `interest_ke`, each sent back as a
+        /// `Declare(DeclQueryable)` stamped with the soliciting `interest_id`
+        /// (zenoh's `declare_qabl_interest`, `hat/router/queries.rs`). The exact
+        /// twin of [`dump_current_tokens`](Self::dump_current_tokens), including
+        /// the `future`-decides-the-id rule and the dedup — see that method for
+        /// why both are load-bearing rather than cosmetic.
+        ///
+        /// The one field the token twin has no counterpart for is the
+        /// [`QueryableInfo`], and the dedup is where it matters: when two faces
+        /// cover the same advertised keyexpr they collapse to ONE declaration,
+        /// so its info must be the MERGE of theirs (zenoh's `merge_qabl_infos`)
+        /// — advertising only the first contributor's would drop a `complete`
+        /// the other one had.
+        fn dump_current_queryables(
+            &mut self,
+            src_id: u64,
+            interest_id: u64,
+            interest_ke: &str,
+            aggregate: bool,
+            future: bool,
+        ) {
+            let Some(src) = self.faces.get(&src_id) else {
+                return;
+            };
+            let src_actions = src.actions.clone();
+            let target_chunks: Vec<&str> = interest_ke.split('/').collect();
+            let mut replies: Vec<(String, QueryableInfo)> = Vec::new();
+            for (id, f) in self.faces.iter() {
+                if *id == src_id {
+                    continue;
+                }
+                for q in f.qabls.values() {
+                    if !crate::keyexpr_match::keyexpr_intersects_target(&q.keyexpr, &target_chunks)
+                    {
+                        continue;
+                    }
+                    let reply_ke = if aggregate {
+                        interest_ke
+                    } else {
+                        q.keyexpr.as_str()
+                    };
+                    match replies.iter_mut().find(|(k, _)| k == reply_ke) {
+                        Some((_, info)) => *info = info.merge(q.info),
+                        None => replies.push((String::from(reply_ke), q.info)),
+                    }
+                }
+            }
+            for (reply_ke, info) in &replies {
+                let qabl_id = if future {
+                    self.advertised_qabl_id(src_id, reply_ke)
+                } else {
+                    0
+                };
+                let built = if qabl_id == 0 {
+                    build_declare_queryable_reply(interest_id, reply_ke, *info)
+                } else {
+                    build_declare_queryable_reply_with_id(interest_id, qabl_id, reply_ke, *info)
+                };
+                if let Ok(decl) = built {
+                    let _ = src_actions.send_network_message(
+                        NetworkMessage::Declare(Box::new(decl)),
+                        true,
+                        true,
+                    );
+                }
+            }
+        }
+
+        /// The id under which a queryable on `keyexpr` is advertised to face
+        /// `face_id`, allocating and remembering one on first use — the exact
+        /// twin of [`advertised_token_id`](Self::advertised_token_id), and 0 for
+        /// an unknown face for the same reason.
+        fn advertised_qabl_id(&mut self, face_id: u64, keyexpr: &str) -> u64 {
+            let next = self.next_local_qabl_id.get();
+            let Some(face) = self.faces.get_mut(&face_id) else {
+                return 0;
+            };
+            if let Some(id) = face.local_qabls.get(keyexpr) {
+                return *id;
+            }
+            face.local_qabls.insert(String::from(keyexpr), next);
+            self.next_local_qabl_id.set(next.saturating_add(1));
+            next
+        }
+
+        /// Advertise a newly-declared queryable on `keyexpr` (held by face
+        /// `src_id`) to every OTHER face whose registered QUERYABLES interest
+        /// matches — the FUTURE half, and the query-plane twin of
+        /// [`propagate_token_declaration`](Self::propagate_token_declaration).
+        /// Interest-GATED for the same reason and by the same upstream rule
+        /// (`hat/router/queries.rs:255-259`).
+        ///
+        /// The advertised [`QueryableInfo`] is the MERGE over every face
+        /// covering the advertised keyexpr, not just the newly-declared one:
+        /// the advertisement is one declaration standing for all of them (the
+        /// `local_qabls` skip guarantees exactly one), so it must describe all
+        /// of them. A second queryable that arrives later and is `complete`
+        /// where the first was not is the case this gets wrong if the merge is
+        /// skipped — and it is why the already-advertised skip does NOT simply
+        /// return: it re-sends the same id with the widened info, which is
+        /// upstream's own idempotent re-declare (`propagate_simple_qabl_to`
+        /// sends whenever the computed info differs from the advertised one).
+        fn propagate_qabl_declaration(&mut self, src_id: u64, keyexpr: &str) {
+            let target_chunks: Vec<&str> = keyexpr.split('/').collect();
+            let mut targets: Vec<(u64, String, QueryableInfo)> = Vec::new();
+            for (fid, face) in self.faces.iter() {
+                if *fid == src_id {
+                    continue;
+                }
+                for qi in face.qabl_interests.iter() {
+                    if !crate::keyexpr_match::keyexpr_intersects_target(&qi.keyexpr, &target_chunks)
+                    {
+                        continue;
+                    }
+                    let advertised = if qi.aggregate {
+                        qi.keyexpr.clone()
+                    } else {
+                        String::from(keyexpr)
+                    };
+                    if targets
+                        .iter()
+                        .any(|(f, k, _)| *f == *fid && *k == advertised)
+                    {
+                        continue;
+                    }
+                    let info = self.covering_queryable_info(*fid, &advertised);
+                    targets.push((*fid, advertised, info));
+                }
+            }
+            let mut sends: Vec<(Arc<SessionLinkActions<R, T>>, DeclareOwned)> = Vec::new();
+            for (fid, advertised, info) in &targets {
+                let qabl_id = self.advertised_qabl_id(*fid, advertised);
+                if qabl_id == 0 {
+                    continue;
+                }
+                let Some(face) = self.faces.get(fid) else {
+                    continue;
+                };
+                if let Ok(decl) =
+                    build_declare_queryable_with_id_info(qabl_id, advertised.as_str(), *info)
+                {
+                    sends.push((face.actions.clone(), decl));
+                }
+            }
+            for (actions, decl) in sends {
+                let _ = actions.send_network_message(
+                    NetworkMessage::Declare(Box::new(decl)),
+                    true,
+                    true,
+                );
+            }
+        }
+
+        /// The merged [`QueryableInfo`] of every queryable — held on a face
+        /// OTHER than `dst_id` — that intersects `advertised`. zenoh's
+        /// `compute_qabl_info` fold; seeded from the FIRST contributor rather
+        /// than from [`QueryableInfo::DEFAULT`], because `DEFAULT.distance == 0`
+        /// would collapse the `min` (the fold's own documented trap).
+        fn covering_queryable_info(&self, dst_id: u64, advertised: &str) -> QueryableInfo {
+            let target_chunks: Vec<&str> = advertised.split('/').collect();
+            let mut merged: Option<QueryableInfo> = None;
+            for (fid, face) in self.faces.iter() {
+                if *fid == dst_id {
+                    continue;
+                }
+                for q in face.qabls.values() {
+                    if !crate::keyexpr_match::keyexpr_intersects_target(&q.keyexpr, &target_chunks)
+                    {
+                        continue;
+                    }
+                    merged = Some(match merged {
+                        Some(acc) => acc.merge(q.info),
+                        None => q.info,
+                    });
+                }
+            }
+            merged.unwrap_or(QueryableInfo::DEFAULT)
+        }
+
+        /// Retract a queryable on `keyexpr` from every face that was told about
+        /// it — the query-plane twin of
+        /// [`propagate_token_forget`](Self::propagate_token_forget), with the
+        /// same still-held guard (another face covering the same keyexpr keeps
+        /// the advertisement alive), the same id-only-when-we-advertised /
+        /// sourced-when-we-did-not pair, and the same aggregate exclusion on the
+        /// sourced arm.
+        fn propagate_qabl_forget(&mut self, src_id: Option<u64>, keyexpr: &str) {
+            if self
+                .faces
+                .values()
+                .any(|f| f.qabls.values().any(|q| q.keyexpr == keyexpr))
+            {
+                return;
+            }
+            let target_chunks: Vec<&str> = keyexpr.split('/').collect();
+            let mut sends: Vec<(Arc<SessionLinkActions<R, T>>, DeclareOwned)> = Vec::new();
+            for (fid, face) in self.faces.iter_mut() {
+                if let Some(id) = face.local_qabls.remove(keyexpr) {
+                    sends.push((face.actions.clone(), build_undeclare_queryable(id)));
+                    continue;
+                }
+                if src_id == Some(*fid) {
+                    continue;
+                }
+                let interested = face.qabl_interests.iter().any(|qi| {
+                    !qi.aggregate
+                        && crate::keyexpr_match::keyexpr_intersects_target(
+                            &qi.keyexpr,
+                            &target_chunks,
+                        )
+                });
+                if !interested {
+                    continue;
+                }
+                if let Ok(decl) = build_undeclare_queryable_with_keyexpr(keyexpr) {
+                    sends.push((face.actions.clone(), decl));
+                }
+            }
+            for (actions, decl) in sends {
+                let _ = actions.send_network_message(
+                    NetworkMessage::Declare(Box::new(decl)),
+                    true,
+                    true,
+                );
+            }
+        }
+
+        /// Route an inbound `Request(Query)` from face `src_id` to every OTHER
+        /// face holding a matching queryable — zenoh's `route_query`
+        /// (`dispatcher/queries.rs`).
+        ///
+        /// Three things this does that a naive fan-out would not:
+        ///
+        /// 1. **It mints its own request id per destination.** The querier's id
+        ///    is unique only within its own face; two faces querying at once
+        ///    routinely both use `0`, and a reply could then not be attributed.
+        ///    zenoh mints from `face.next_qid` for exactly this.
+        /// 2. **It re-literalizes the keyexpr.** A destination face never saw
+        ///    the querier's `DeclareKeyexpr` aliases, so an aliased Request
+        ///    forwarded verbatim names an id that face cannot resolve — the
+        ///    same rule (and the same reason) as
+        ///    [`forward_push`](Self::forward_push)'s `reliteralize_push`.
+        /// 3. **An empty route is ANSWERED, not dropped.** A querier holds the
+        ///    query open until a `ResponseFinal` arrives, so silence costs it a
+        ///    full timeout rather than telling it there are no queryables.
+        ///    Upstream's `route_query` sends the final itself on an empty route;
+        ///    this is the same class of defect R311y773 fixed for
+        ///    `declare-final`, and the same fix.
+        fn route_query(&mut self, src_id: u64, request: &RequestOwned) {
+            let Some(src) = self.faces.get(&src_id) else {
+                return;
+            };
+            let src_actions = src.actions.clone();
+            let src_rid = request.rid;
+            let Some(keyexpr) = resolve_wireexpr(&request.keyexpr.body, &src.peer_aliases) else {
+                log::debug!(
+                    "RouteTable: face {src_id} queried on an expr-id with no prior \
+                     DeclareKeyexpr mapping; finalized without routing"
+                );
+                Self::send_final_to(&src_actions, src_rid);
+                return;
+            };
+            let target_chunks: Vec<&str> = keyexpr.split('/').collect();
+            let targets: Vec<u64> = self
+                .faces
+                .iter()
+                .filter(|(id, face)| **id != src_id && face.matches_queryable(&target_chunks))
+                .map(|(id, _)| *id)
+                .collect();
+            if targets.is_empty() {
+                Self::send_final_to(&src_actions, src_rid);
+                return;
+            }
+            // Built ONCE, then re-stamped per destination with that
+            // destination's own router-minted id.
+            let routed = match crate::request_build::reliteralize_request(request, &keyexpr) {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!(
+                        "RouteTable: face {src_id} query keyexpr could not be re-literalized \
+                         for routing ({e:?}); finalized without routing"
+                    );
+                    Self::send_final_to(&src_actions, src_rid);
+                    return;
+                }
+            };
+            let query_key = self.mint_id();
+            let mut outstanding = 0usize;
+            let mut sends: Vec<(Arc<SessionLinkActions<R, T>>, RequestOwned)> = Vec::new();
+            for dst_id in &targets {
+                let out_rid = self.mint_id();
+                let Some(face) = self.faces.get_mut(dst_id) else {
+                    continue;
+                };
+                face.pending_queries.insert(out_rid, query_key);
+                let mut out = routed.clone();
+                out.rid = out_rid;
+                sends.push((face.actions.clone(), out));
+                outstanding += 1;
+            }
+            if outstanding == 0 {
+                // Unreachable in practice (every target came out of `faces` a
+                // statement ago); still answered rather than dropped, because
+                // the one thing a querier must never get is silence.
+                Self::send_final_to(&src_actions, src_rid);
+                return;
+            }
+            self.pending_queries.insert(
+                query_key,
+                PendingQuery {
+                    src_face: src_id,
+                    src_rid,
+                    outstanding,
+                },
+            );
+            self.queries_routed = self.queries_routed.saturating_add(1);
+            for (actions, out) in sends {
+                let _ = actions.send_network_message(
+                    NetworkMessage::Request(Box::new(out)),
+                    true,
+                    true,
+                );
+            }
+        }
+
+        /// Route a `Response` (a query reply) from an answering face back to the
+        /// face that asked, re-stamped with the request id THAT face minted —
+        /// zenoh's `route_send_response` reading `face.pending_queries` and
+        /// sending under `query.src_qid`.
+        ///
+        /// The lookup is per-face on purpose: an id is honoured only on the face
+        /// the matching `Request` was sent to, so a peer cannot answer (or
+        /// poison) another peer's query by guessing an id. An unknown id is
+        /// dropped — it is either a late reply after the final or a fabricated
+        /// one, and neither has a querier to reach.
+        fn route_response(&mut self, src_id: u64, response: &ResponseOwned) {
+            let Some(src) = self.faces.get(&src_id) else {
+                return;
+            };
+            let Some(query_key) = src.pending_queries.get(&response.request_id).copied() else {
+                log::debug!(
+                    "RouteTable: face {src_id} replied to request id {} it was never sent; dropped",
+                    response.request_id
+                );
+                return;
+            };
+            // Resolved in the RESPONDER's alias context and re-literalized for
+            // the querier, the same reason the Request was on the way out: the
+            // querier never saw the responder's expr-id mappings.
+            let keyexpr = resolve_wireexpr(&response.keyexpr.body, &src.peer_aliases);
+            let Some(pending) = self.pending_queries.get(&query_key) else {
+                return;
+            };
+            let (src_face, src_rid) = (pending.src_face, pending.src_rid);
+            let Some(querier) = self.faces.get(&src_face) else {
+                return;
+            };
+            let querier_actions = querier.actions.clone();
+            let mut out = response.clone();
+            out.request_id = src_rid;
+            if let Some(keyexpr) = keyexpr {
+                if let Err(e) =
+                    crate::response_build::set_response_keyexpr_literal(&mut out, &keyexpr)
+                {
+                    log::debug!(
+                        "RouteTable: reply keyexpr could not be re-literalized ({e:?}); dropped"
+                    );
+                    return;
+                }
+            }
+            let _ = querier_actions.send_network_message(
+                NetworkMessage::Response(Box::new(out)),
+                true,
+                true,
+            );
+        }
+
+        /// Route a `ResponseFinal` from an answering face: that answerer is
+        /// done. The querier is closed only when the LAST one is
+        /// ([`close_one_answerer`](Self::close_one_answerer)) — zenoh gets the
+        /// same behaviour from `Drop for Query` once the last `Arc` clone goes.
+        fn route_response_final(&mut self, src_id: u64, final_msg: &ResponseFinalOwned) {
+            let Some(src) = self.faces.get_mut(&src_id) else {
+                return;
+            };
+            let Some(query_key) = src.pending_queries.remove(&final_msg.request_id) else {
+                log::debug!(
+                    "RouteTable: face {src_id} finalized request id {} it was never sent; dropped",
+                    final_msg.request_id
+                );
+                return;
+            };
+            self.close_one_answerer(query_key);
+        }
+
+        /// One answerer of `query_key` has finished (replied and finalized, or
+        /// departed). Drop the outstanding count and, when it reaches zero, send
+        /// the querier the single `ResponseFinal` that closes its query and
+        /// forget the pending entry.
+        fn close_one_answerer(&mut self, query_key: u64) {
+            let Some(pending) = self.pending_queries.get_mut(&query_key) else {
+                return;
+            };
+            pending.outstanding = pending.outstanding.saturating_sub(1);
+            if pending.outstanding > 0 {
+                return;
+            }
+            let (src_face, src_rid) = (pending.src_face, pending.src_rid);
+            self.pending_queries.remove(&query_key);
+            if let Some(querier) = self.faces.get(&src_face) {
+                Self::send_final_to(&querier.actions.clone(), src_rid);
+            }
+        }
+
+        /// Mint the next unique id (a query key or a router-minted request id) —
+        /// see [`next_query_id`](Self::next_query_id) for why one counter serves
+        /// both.
+        fn mint_id(&self) -> u64 {
+            let id = self.next_query_id.get();
+            self.next_query_id.set(id.saturating_add(1));
+            id
+        }
+
+        /// Send a `ResponseFinal` for `rid` on `actions`. The one place the
+        /// closing message is built, so the four paths that close a query (empty
+        /// route, unresolvable keyexpr, last answerer, answerer departure) cannot
+        /// drift apart.
+        fn send_final_to(actions: &Arc<SessionLinkActions<R, T>>, rid: u64) {
+            let _ = actions.send_network_message(
+                NetworkMessage::ResponseFinal(crate::response_final_build::build_response_final(
+                    rid,
+                )),
+                true,
+                true,
+            );
         }
 
         /// Push an unsolicited `DeclareSubscriber` for a newly-declared

@@ -56,8 +56,9 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, spawn_on_ephemeral_port, spawn_publishing_zpub,
-    spawn_subscribed_zsub, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary,
+    assert_demo_binary_newer_than_sources, graceful_terminate, read_captured,
+    spawn_on_ephemeral_port, spawn_publishing_zpub, spawn_subscribed_zsub, wait_for_substring,
+    wz_ap_demo_binary, zenoh_pico_cli_binary,
 };
 
 /// The literal keyexpr the pico clients agree on — distinct per test so parallel
@@ -82,6 +83,15 @@ fn spawn_wz_router() -> (
     String,
 ) {
     let demo = wz_ap_demo_binary();
+    // R311y840 — every fixture in this file spawns THIS binary and every one of
+    // them can be misled by a stale copy: the demo prints the same feature
+    // banner whether or not it carries the change under test, so a router built
+    // before the query plane landed would read as "the query plane does not
+    // work" and send the diagnosis somewhere else. That is not hypothetical
+    // (R311y774 -> R311y776 spent two rounds on exactly it), and it is sharpest
+    // for the query legs below, whose whole subject is a code path the older
+    // binary does not have.
+    assert_demo_binary_newer_than_sources(&demo);
     let router_stderr = tempfile::tempfile().expect("tempfile for router stderr");
     let (guard, reader, port) = spawn_on_ephemeral_port(
         &demo,
@@ -322,4 +332,240 @@ fn wz_router_routes_pico_pub_before_sub() {
     });
     assert_routed(&received_text, KEY_FUTURE, VALUE_FUTURE);
     assert_router_forwarded(&r_captured);
+}
+
+// ─── R311y840 — the QUERY plane, cross-impl ─────────────────────────────
+//
+// The three legs above are the PUSH plane. Until this round a wz `--router`
+// carried Push and nothing else, so a real `z_get` through one reached no
+// queryable and — worse — got no `ResponseFinal` either, which is not a slow
+// answer but a permanent hang: pico's `z_get` blocks on a condvar the reply
+// DROPPER signals (`examples/unix/c11/z_get.c:101`), and the dropper runs when
+// the query is finalized. Both legs below therefore have a hang as their
+// failure mode rather than a wrong value, which is why each carries its own
+// bounded `wait_for_substring` deadline.
+
+/// The keyexpr / value the query legs agree on — distinct from the Push legs'
+/// so a parallel Layer E run never cross-matches.
+const KEY_QUERY: &str = "demo/pico-route-query";
+const VALUE_QUERY: &str = "hello-pico-reply-via-wz-router";
+/// A keyexpr NO queryable is declared on, for the empty-route leg.
+const KEY_QUERY_UNMATCHED: &str = "demo/pico-route-query-nobody";
+
+/// pico `z_get`'s per-reply marker and its terminator.
+const GET_RECEIVED: &str = ">> Received PUT";
+const GET_FINAL: &str = ">> Received query final notification";
+/// How long the final may take before it stops being evidence about wz.
+///
+/// MEASURED, NOT CHOSEN. pico gives every `z_get` its OWN deadline —
+/// `Z_GET_TIMEOUT_DEFAULT 10000` (`include/zenoh-pico/config.h.in:208`) — and
+/// when it expires pico drops the pending query itself, which runs the reply
+/// dropper and prints the SAME `GET_FINAL` line. So "the final appeared inside
+/// 15s" is true whether the router closed the query or ignored it entirely, and
+/// the first version of the empty-route leg below passed under a probe that
+/// deleted the whole query plane. A router-sent final is a round trip over
+/// loopback (milliseconds); pico's self-timeout is ten seconds. Five seconds
+/// separates them with a factor of two of margin on the side that matters.
+const GET_FINAL_BUDGET: Duration = Duration::from_secs(5);
+/// pico `z_queryable`'s ready marker and its per-query marker.
+const QABL_READY: &str = "Creating Queryable on";
+const QABL_RECEIVED: &str = ">> [Queryable handler] Received Query";
+
+/// Spawn a zenoh-pico `z_queryable` as a CLIENT of `endpoint`, returning once it
+/// has opened its session and declared the queryable. Same retry-on-transient-
+/// open-failure shape as `common::spawn_subscribed_zsub`, and for the same
+/// reason: a session that fails to open is a flake, not a finding, and a fixture
+/// that cannot tell them apart reports the wrong one.
+fn spawn_declared_zqueryable(
+    z_queryable: &std::path::Path,
+    key: &str,
+    value: &str,
+    endpoint: &str,
+) -> (wz_integration_tests::common::ChildGuard, std::fs::File) {
+    const ATTEMPTS: usize = 6;
+    for attempt in 1..=ATTEMPTS {
+        let out = tempfile::tempfile().expect("tempfile for z_queryable stdout");
+        let out_writer = out.try_clone().expect("dup z_queryable stdout handle");
+        let mut out_reader = out;
+        let mut child = wz_integration_tests::common::ChildGuard::wrap(
+            "z_queryable (zenoh-pico)",
+            Command::new("stdbuf")
+                .args(["-oL", "-eL"])
+                .arg(z_queryable)
+                .args(["-k", key, "-v", value, "-e", endpoint, "-m", "client"])
+                .stderr(Stdio::from(
+                    out_writer.try_clone().expect("dup stderr handle"),
+                ))
+                .stdout(Stdio::from(out_writer))
+                .spawn()
+                .expect("spawn z_queryable via stdbuf"),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let cap = read_captured(&mut out_reader);
+            if cap.contains(QABL_READY) {
+                return (child, out_reader);
+            }
+            if cap.contains("Unable to open session") || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.child_mut().kill();
+        let _ = child.child_mut().wait();
+        eprintln!("z_queryable open attempt {attempt}/{ATTEMPTS} did not declare; retrying");
+    }
+    panic!("pico z_queryable failed to declare against the wz --router after {ATTEMPTS} attempts");
+}
+
+/// Spawn a zenoh-pico `z_get` as a CLIENT of `endpoint`. Returns as soon as the
+/// process is up — unlike the queryable there is nothing to wait FOR, since the
+/// query is the first thing it does and the whole point is what comes back.
+fn spawn_zget(
+    z_get: &std::path::Path,
+    key: &str,
+    endpoint: &str,
+) -> (wz_integration_tests::common::ChildGuard, std::fs::File) {
+    let out = tempfile::tempfile().expect("tempfile for z_get stdout");
+    let out_writer = out.try_clone().expect("dup z_get stdout handle");
+    let child = wz_integration_tests::common::ChildGuard::wrap(
+        "z_get (zenoh-pico)",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(z_get)
+            .args(["-k", key, "-e", endpoint, "-m", "client"])
+            .stderr(Stdio::from(
+                out_writer.try_clone().expect("dup stderr handle"),
+            ))
+            .stdout(Stdio::from(out_writer))
+            .spawn()
+            .expect("spawn z_get via stdbuf"),
+    );
+    (child, out)
+}
+
+/// THE CROSS-IMPL HEADLINE. A real pico `z_get` reaches a real pico
+/// `z_queryable` THROUGH a wz `--router`, and its reply comes back — two foreign
+/// endpoints that cannot hear each other, joined only by wz. This is the query
+/// half of what "wz replaces zenohd" has to mean, and before R311y840 it was
+/// impossible: the router had no `Request` arm, so the query was dropped and the
+/// pico querier blocked on its condvar until the harness killed it.
+// wz-proves: routing-routes wz->pico partial
+// wz-proves: declare-queryable wz->pico partial
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-routes + zenoh-pico z_get/z_queryable); Layer E5 runs via --ignored"]
+fn wz_router_routes_a_pico_get_to_a_pico_queryable() {
+    let z_get = zenoh_pico_cli_binary("z_get");
+    let z_queryable = zenoh_pico_cli_binary("z_queryable");
+    let (mut r_guard, mut r_reader, endpoint) = spawn_wz_router();
+
+    let (mut qabl_child, mut qabl_reader) =
+        spawn_declared_zqueryable(&z_queryable, KEY_QUERY, VALUE_QUERY, &endpoint);
+
+    // Ordering barrier, not a race: the queryable's link is Established on the
+    // router (face 0 — it connected first), so its DeclareQueryable is recorded
+    // before the querier below exists. Without this the query can legitimately
+    // find an empty route and be finalized at once, which is the OTHER leg's
+    // subject and would pass this one for the wrong reason.
+    let face0 = wait_for_substring(&mut r_reader, "face 0 UP", Duration::from_secs(10));
+
+    let query_sent = std::time::Instant::now();
+    let (mut get_child, mut get_reader) = spawn_zget(&z_get, KEY_QUERY, &endpoint);
+
+    let received = wait_for_substring(&mut get_reader, GET_RECEIVED, Duration::from_secs(15));
+    let finalized = wait_for_substring(&mut get_reader, GET_FINAL, GET_FINAL_BUDGET);
+    let final_after = query_sent.elapsed();
+
+    let _ = get_child.child_mut().kill();
+    let _ = get_child.child_mut().wait();
+    let _ = qabl_child.child_mut().kill();
+    let _ = qabl_child.child_mut().wait();
+    graceful_terminate(r_guard.child_mut(), Duration::from_secs(5));
+
+    let r_captured = read_captured(&mut r_reader);
+    let qabl_captured = read_captured(&mut qabl_reader);
+    eprintln!("--- wz router stderr ---\n{r_captured}");
+    eprintln!("--- pico z_queryable stdout ---\n{qabl_captured}");
+
+    face0.unwrap_or_else(|c| {
+        panic!(
+            "wz router never logged 'face 0 UP' within 10s — the pico queryable's link did not \
+             reach Established on the router\n--- router stderr ---\n{c}"
+        )
+    });
+    assert!(
+        qabl_captured.contains(QABL_RECEIVED),
+        "the pico QUERYABLE never logged '{QABL_RECEIVED}' — the wz router did not carry the \
+         foreign query across faces\n--- pico z_queryable stdout ---\n{qabl_captured}\n--- router \
+         stderr ---\n{r_captured}"
+    );
+    let received_text = received.unwrap_or_else(|c| {
+        panic!(
+            "pico z_get never logged '{GET_RECEIVED}' within 15s — the foreign queryable's REPLY \
+             did not come back through the wz router\n--- pico z_get stdout ---\n{c}\n--- pico \
+             z_queryable stdout ---\n{qabl_captured}\n--- router stderr ---\n{r_captured}"
+        )
+    });
+    assert!(
+        received_text.contains(KEY_QUERY) && received_text.contains(VALUE_QUERY),
+        "the pico querier received a reply, but not '{KEY_QUERY}' = '{VALUE_QUERY}' — the routed \
+         reply's keyexpr or payload did not survive the relay\n--- pico z_get stdout \
+         ---\n{received_text}"
+    );
+    finalized.unwrap_or_else(|c| {
+        panic!(
+            "pico z_get received its reply but never logged '{GET_FINAL}' within \
+             {GET_FINAL_BUDGET:?} — the wz router did not close the query, and pico's z_get blocks \
+             on its condvar until the reply dropper runs, so what follows is pico's own 10s \
+             self-timeout rather than an answer\n--- pico z_get stdout ---\n{c}\n--- router \
+             stderr ---\n{r_captured}"
+        )
+    });
+    eprintln!("router-sent final arrived {final_after:?} after the query was sent");
+}
+
+/// The empty-route leg, and the one that makes the hang concrete. A real pico
+/// `z_get` on a keyexpr NO queryable covers must still be CLOSED by the router —
+/// zenoh's `route_query` sends the `ResponseFinal` itself when the route is
+/// empty. Silence here is not "no answers"; it is a client that never returns.
+// wz-proves: routing-routes wz->pico partial
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-routes + zenoh-pico z_get); Layer E5 runs via --ignored"]
+fn wz_router_finalizes_a_pico_get_that_matches_no_queryable() {
+    let z_get = zenoh_pico_cli_binary("z_get");
+    let (mut r_guard, mut r_reader, endpoint) = spawn_wz_router();
+
+    let query_sent = std::time::Instant::now();
+    let (mut get_child, mut get_reader) = spawn_zget(&z_get, KEY_QUERY_UNMATCHED, &endpoint);
+
+    // BOUNDED BY `GET_FINAL_BUDGET`, NOT BY PATIENCE. pico closes its own query
+    // at ten seconds and prints the identical line, so a generous deadline here
+    // makes the leg pass whether or not wz did anything — measured: the first
+    // version of this test used 15s and stayed GREEN under the probe that
+    // deletes `route_query` outright.
+    let finalized = wait_for_substring(&mut get_reader, GET_FINAL, GET_FINAL_BUDGET);
+    let final_after = query_sent.elapsed();
+    let get_captured = read_captured(&mut get_reader);
+
+    let _ = get_child.child_mut().kill();
+    let _ = get_child.child_mut().wait();
+    graceful_terminate(r_guard.child_mut(), Duration::from_secs(5));
+
+    let r_captured = read_captured(&mut r_reader);
+    eprintln!("--- wz router stderr ---\n{r_captured}");
+
+    finalized.unwrap_or_else(|c| {
+        panic!(
+            "pico z_get on an unmatched keyexpr never logged '{GET_FINAL}' within \
+             {GET_FINAL_BUDGET:?} — the wz router dropped the query instead of finalizing it, so \
+             the client is left waiting out its own 10s timeout rather than being told there are \
+             no queryables\n--- pico z_get stdout ---\n{c}\n--- router stderr ---\n{r_captured}"
+        )
+    });
+    eprintln!("router-sent empty-route final arrived {final_after:?} after the query was sent");
+    assert!(
+        !get_captured.contains(GET_RECEIVED),
+        "the querier was closed, but it also received a REPLY on a keyexpr no queryable was \
+         declared on\n--- pico z_get stdout ---\n{get_captured}"
+    );
 }

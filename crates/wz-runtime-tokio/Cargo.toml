@@ -954,6 +954,11 @@ routing-routes = [
     "wz-session-core/routing-routes",
     "codec-push",
     "declare-subscriber",
+    # R311y840 — the query half (see the session-core feature's own note).
+    "declare-queryable",
+    "codec-request",
+    "codec-response",
+    "codec-response-final",
 ]
 # R311qg — routing-peer atom 1: the dial+accept mesh-node foundation. Gates the
 # `peer_loop` entry in `accept_loop` — a node that DIALS a configured peer set

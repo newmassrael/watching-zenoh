@@ -393,7 +393,23 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # scope byte on the strength of a claim about zenoh's SOURCE, and the class of
 # claim this tree keeps retracting is exactly that one -- R311y838 ratified a
 # divergence off zenoh-pico's constructor and missed the cap one function later.
-FOREIGN_ADJUDICATOR_LINKS = 844
+# The router QUERY-plane round takes it to 847, in
+# wz_router_routes_pico_interop.rs. TWO new legs, THREE links, MEASURED not
+# guessed (844 -> 847 is exactly the three `wz-proves` lines added). The
+# headline leg grades `routing-routes` AND `declare-queryable`: a real pico
+# `z_get` reaches a real pico `z_queryable` through a wz `--router`, so the
+# router's query fan-out and the DeclareQueryable it built the route from are
+# both under a foreign endpoint at each end. The empty-route leg grades
+# `routing-routes` alone -- a query nothing matches must still be CLOSED, and
+# what it grades is the router's own termination, not any queryable.
+#
+# The second leg's deadline is 5s rather than the file's usual 15s, and that is
+# a load-bearing number rather than impatience: pico closes its OWN query at
+# `Z_GET_TIMEOUT_DEFAULT 10000` and prints the identical final line, so a
+# generous deadline makes the leg green whether or not wz answered. Measured
+# both ways -- at 15s it stayed GREEN under the probe that deletes `route_query`
+# outright; at 5s it reds, and the real router-sent final arrives in 50ms.
+FOREIGN_ADJUDICATOR_LINKS = 847
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

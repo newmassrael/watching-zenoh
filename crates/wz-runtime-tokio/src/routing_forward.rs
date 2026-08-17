@@ -88,6 +88,27 @@ impl RoutingForwarder {
     pub fn route_computations(&self) -> u64 {
         self.table.borrow().route_computations()
     }
+
+    /// Total queryables currently recorded across all held faces
+    /// ([`RouteTable::queryable_count`]) — the query-plane twin of
+    /// [`subscription_count`](Self::subscription_count).
+    pub fn queryable_count(&self) -> usize {
+        self.table.borrow().queryable_count()
+    }
+
+    /// Queries currently in flight ([`RouteTable::pending_query_count`]) — the
+    /// LEAK witness: every path that ends a query must drive this back to zero,
+    /// and a router whose count only grows exhausts memory on query traffic.
+    pub fn pending_query_count(&self) -> usize {
+        self.table.borrow().pending_query_count()
+    }
+
+    /// Total queries routed to at least one queryable
+    /// ([`RouteTable::queries_routed`]). Deliberately separate from
+    /// [`forwarded`](Self::forwarded), which counts Push DESTINATIONS.
+    pub fn queries_routed(&self) -> u64 {
+        self.table.borrow().queries_routed()
+    }
 }
 
 impl Default for RoutingForwarder {
@@ -1774,5 +1795,663 @@ mod tests {
         );
         assert_eq!(fwd.forwarded(), 1, "the now-matching Put routed");
         assert_eq!(consumer_sink.frame_count(), 1);
+    }
+
+    // ─── R311y840 — the QUERY plane ──────────────────────────────────────
+    //
+    // zenoh routes a `z_get` through the SAME dispatcher that routes a Put:
+    // `route_query` (`dispatcher/queries.rs`) picks the faces whose declared
+    // queryable matches, sends each one a Request under a face-local request
+    // id, and maps the Responses back to the querier's own id; the querier is
+    // closed by exactly one ResponseFinal however many queryables answered
+    // (`Drop for Query`). Everything below asserts that behaviour.
+
+    /// Every non-Declare `NetworkMessage` a face's recording sink captured,
+    /// flattened across frames in emit order — the query-plane twin of
+    /// [`captured_declares`], decoded through the same production RX path so a
+    /// malformed emit fails here rather than passing silently.
+    fn captured_messages(sink: &RecordingLinkDriver) -> Vec<NetworkMessage> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let mut out = Vec::new();
+        for i in 0..sink.frame_count() {
+            let bytes = sink.frame_bytes(i);
+            let InboundFrame::Frame { payload, .. } =
+                parse_inbound(&bytes).expect("parse emitted frame")
+            else {
+                panic!("emitted bytes are not a T_MID_FRAME");
+            };
+            for m in parse_frame_payload(&payload).expect("parse frame payload") {
+                out.push(m);
+            }
+        }
+        out
+    }
+
+    /// The `(request_id, keyexpr)` of every `Request` a face received.
+    fn captured_requests(sink: &RecordingLinkDriver) -> Vec<(u64, String)> {
+        captured_messages(sink)
+            .into_iter()
+            .filter_map(|m| match m {
+                NetworkMessage::Request(r) => {
+                    Some((r.rid, wireexpr_literal(&r.keyexpr, "Request")))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `(request_id, keyexpr)` of every `Response` a face received.
+    fn captured_responses(sink: &RecordingLinkDriver) -> Vec<(u64, String)> {
+        captured_messages(sink)
+            .into_iter()
+            .filter_map(|m| match m {
+                NetworkMessage::Response(r) => {
+                    Some((r.request_id, wireexpr_literal(&r.keyexpr, "Response")))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The request id of every `ResponseFinal` a face received.
+    fn captured_finals(sink: &RecordingLinkDriver) -> Vec<u64> {
+        captured_messages(sink)
+            .into_iter()
+            .filter_map(|m| match m {
+                NetworkMessage::ResponseFinal(rf) => Some(rf.request_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn wireexpr_literal(keyexpr: &wz_codecs::wireexpr::WireexprOwned, what: &str) -> String {
+        match &keyexpr.body {
+            wz_codecs::wireexpr::WireexprOwnedVariant::WireexprLocal(w) => {
+                String::from(w.suffix.as_deref().unwrap_or_default())
+            }
+            other => panic!("expected a literal wireexpr on the {what}, got {other:?}"),
+        }
+    }
+
+    /// Feed `forwarder` a literal-keyexpr DeclareQueryable for `(qabl_id,
+    /// keyexpr)` on face `face`.
+    fn declare_qabl(forwarder: &RoutingForwarder, face: u64, qabl_id: u64, keyexpr: &str) {
+        let outcome = declare_frame(
+            wz_session_core_test_support::declare_envelope_decl_queryable(
+                wz_session_core_test_support::decl_queryable(qabl_id, 0, Some(keyexpr)),
+            ),
+        );
+        forwarder.forward(FaceId(face), IterationEvent::Poll(&outcome));
+    }
+
+    fn undeclare_qabl(forwarder: &RoutingForwarder, face: u64, qabl_id: u64) {
+        let outcome = declare_frame(
+            wz_session_core_test_support::declare_envelope_undecl_queryable(
+                wz_session_core_test_support::undecl_queryable(qabl_id),
+            ),
+        );
+        forwarder.forward(FaceId(face), IterationEvent::Poll(&outcome));
+    }
+
+    /// Feed `forwarder` a `Request(Query)` on `keyexpr` from face `face`, built
+    /// by the PRODUCTION builder a querying peer uses.
+    fn send_query(forwarder: &RoutingForwarder, face: u64, rid: u64, keyexpr: &str) {
+        let request = wz_session_core::request_build::build_request_query(rid, 0, Some(keyexpr))
+            .expect("literal query request");
+        let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Request(Box::new(request))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        forwarder.forward(FaceId(face), IterationEvent::Poll(&outcome));
+    }
+
+    /// Feed `forwarder` a `Response(Reply)` from face `face` answering `rid`.
+    fn send_reply(forwarder: &RoutingForwarder, face: u64, rid: u64, keyexpr: &str, body: &[u8]) {
+        let response =
+            wz_session_core::response_build::build_response_reply_literal(rid, keyexpr, body)
+                .expect("literal reply");
+        let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Response(Box::new(response))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        forwarder.forward(FaceId(face), IterationEvent::Poll(&outcome));
+    }
+
+    /// Feed `forwarder` a `ResponseFinal` from face `face` closing `rid`.
+    fn send_final(forwarder: &RoutingForwarder, face: u64, rid: u64) {
+        let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::ResponseFinal(
+                wz_session_core::response_final_build::build_response_final(rid),
+            )],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        forwarder.forward(FaceId(face), IterationEvent::Poll(&outcome));
+    }
+
+    /// THE HEADLINE. A `z_get` traversing a wz router must reach the face that
+    /// declared a matching queryable. Before this round `record_declare` had no
+    /// DeclareQueryable arm and `observe` had no Request arm at all, so a
+    /// queryable behind a wz `--router` was unreachable — the router silently
+    /// dropped every query, and the querier waited out its own timeout.
+    #[test]
+    fn routes_a_query_to_a_face_that_declared_a_matching_queryable() {
+        let fwd = RoutingForwarder::new();
+        let (qabl, qabl_sink) = recording_actions();
+        let (querier, querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &qabl);
+        fwd.register(FaceId(1), &querier);
+
+        declare_qabl(&fwd, 0, 7, "demo/**");
+        send_query(&fwd, 1, 42, "demo/example");
+
+        let seen = captured_requests(&qabl_sink);
+        assert_eq!(
+            seen.len(),
+            1,
+            "the queryable's face received exactly one Request, got {seen:?}"
+        );
+        assert_eq!(
+            seen[0].1, "demo/example",
+            "the routed Request carries the QUERIED keyexpr, not the queryable's pattern"
+        );
+        assert!(
+            captured_requests(&querier_sink).is_empty(),
+            "the querier is never sent its own query back"
+        );
+    }
+
+    /// zenoh does NOT leave a querier hanging when nothing matches: an empty
+    /// route sends the ResponseFinal straight back (`route_query`'s
+    /// `if route.is_empty()` arm), so `z_get` completes immediately instead of
+    /// waiting out its timeout. The same shape R311y773 fixed for `declare-final`.
+    #[test]
+    fn a_query_with_no_matching_queryable_is_finalized_immediately() {
+        let fwd = RoutingForwarder::new();
+        let (qabl, qabl_sink) = recording_actions();
+        let (querier, querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &qabl);
+        fwd.register(FaceId(1), &querier);
+
+        declare_qabl(&fwd, 0, 7, "other/**");
+        send_query(&fwd, 1, 42, "demo/example");
+
+        assert!(
+            captured_requests(&qabl_sink).is_empty(),
+            "a non-matching queryable is not queried"
+        );
+        assert_eq!(
+            captured_finals(&querier_sink),
+            vec![42],
+            "the querier is closed at once under its OWN request id"
+        );
+        assert_eq!(
+            fwd.pending_query_count(),
+            0,
+            "an unrouted query is never entered as pending"
+        );
+        assert_eq!(
+            fwd.queries_routed(),
+            0,
+            "and it is not counted as a routed query"
+        );
+    }
+
+    /// A reply must come back to the querier under the id the QUERIER minted,
+    /// not the face-local id the router used downstream — the router owns the
+    /// mapping both ways (zenoh's `face.pending_queries` -> `query.src_qid`).
+    #[test]
+    fn routes_a_reply_back_to_the_querier_under_its_own_request_id() {
+        let fwd = RoutingForwarder::new();
+        let (qabl, qabl_sink) = recording_actions();
+        let (querier, querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &qabl);
+        fwd.register(FaceId(1), &querier);
+
+        declare_qabl(&fwd, 0, 7, "demo/**");
+        send_query(&fwd, 1, 42, "demo/example");
+
+        let downstream_rid = captured_requests(&qabl_sink)[0].0;
+        send_reply(&fwd, 0, downstream_rid, "demo/example", b"answer");
+        send_final(&fwd, 0, downstream_rid);
+
+        assert_eq!(
+            captured_responses(&querier_sink),
+            vec![(42, String::from("demo/example"))],
+            "the reply reached the querier re-stamped with its own request id"
+        );
+        assert_eq!(
+            captured_finals(&querier_sink),
+            vec![42],
+            "and the stream was closed under that same id"
+        );
+        assert_eq!(
+            fwd.pending_query_count(),
+            0,
+            "the closed query left no state behind"
+        );
+        assert_eq!(fwd.queries_routed(), 1);
+    }
+
+    /// Two queryables, ONE final. zenoh closes the querier when the last
+    /// outstanding downstream query drops (`Drop for Query`), so a querier that
+    /// counts finals (both zenoh and pico do) is not closed early by the first
+    /// answerer.
+    #[test]
+    fn closes_the_querier_with_one_final_however_many_queryables_answered() {
+        let fwd = RoutingForwarder::new();
+        let (qabl_a, sink_a) = recording_actions();
+        let (qabl_b, sink_b) = recording_actions();
+        let (querier, querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &qabl_a);
+        fwd.register(FaceId(1), &qabl_b);
+        fwd.register(FaceId(2), &querier);
+
+        declare_qabl(&fwd, 0, 7, "demo/**");
+        declare_qabl(&fwd, 1, 9, "demo/example");
+        send_query(&fwd, 2, 42, "demo/example");
+
+        let rid_a = captured_requests(&sink_a)[0].0;
+        let rid_b = captured_requests(&sink_b)[0].0;
+        send_reply(&fwd, 0, rid_a, "demo/example", b"a");
+        send_final(&fwd, 0, rid_a);
+        assert!(
+            captured_finals(&querier_sink).is_empty(),
+            "the FIRST answerer's final must not close the querier — one is still outstanding"
+        );
+
+        send_reply(&fwd, 1, rid_b, "demo/example", b"b");
+        send_final(&fwd, 1, rid_b);
+
+        assert_eq!(
+            captured_responses(&querier_sink).len(),
+            2,
+            "both replies reached the querier"
+        );
+        assert_eq!(
+            captured_finals(&querier_sink),
+            vec![42],
+            "exactly one final closed the querier, after the last answerer"
+        );
+        assert_eq!(
+            fwd.pending_query_count(),
+            0,
+            "and the fan-out left no state behind"
+        );
+    }
+
+    /// The undeclare counterpart — the query route must go away with the
+    /// queryable, and the querier must then be finalized immediately.
+    #[test]
+    fn stops_routing_queries_after_the_queryable_is_undeclared() {
+        let fwd = RoutingForwarder::new();
+        let (qabl, qabl_sink) = recording_actions();
+        let (querier, querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &qabl);
+        fwd.register(FaceId(1), &querier);
+
+        declare_qabl(&fwd, 0, 7, "demo/**");
+        undeclare_qabl(&fwd, 0, 7);
+        send_query(&fwd, 1, 42, "demo/example");
+
+        assert!(
+            captured_requests(&qabl_sink).is_empty(),
+            "an undeclared queryable is no longer a query destination"
+        );
+        assert_eq!(captured_finals(&querier_sink), vec![42]);
+    }
+
+    /// A face that leaves takes its queryables with it (zenoh `close_face`
+    /// drains the departing face's `qabls`), and any query still outstanding on
+    /// it must not strand the querier — the router closes it on the departure.
+    #[test]
+    fn a_departing_queryable_face_frees_the_querier_it_was_answering() {
+        let fwd = RoutingForwarder::new();
+        let (qabl, qabl_sink) = recording_actions();
+        let (querier, querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &qabl);
+        fwd.register(FaceId(1), &querier);
+
+        declare_qabl(&fwd, 0, 7, "demo/**");
+        send_query(&fwd, 1, 42, "demo/example");
+        assert_eq!(captured_requests(&qabl_sink).len(), 1, "the query went out");
+        assert!(
+            captured_finals(&querier_sink).is_empty(),
+            "still outstanding before the departure"
+        );
+
+        fwd.deregister(FaceId(0));
+
+        assert_eq!(
+            captured_finals(&querier_sink),
+            vec![42],
+            "the departure closed the query the departed face was answering"
+        );
+        assert_eq!(
+            fwd.pending_query_count(),
+            0,
+            "and dropped the pending entry with it"
+        );
+    }
+
+    /// The loop guard, the query twin of
+    /// `never_forwards_a_put_back_to_its_source_face`: a face that declares its
+    /// own queryable and then queries it is answered locally, never through the
+    /// router.
+    #[test]
+    fn never_routes_a_query_back_to_its_source_face() {
+        let fwd = RoutingForwarder::new();
+        let (peer, peer_sink) = recording_actions();
+        fwd.register(FaceId(0), &peer);
+
+        declare_qabl(&fwd, 0, 7, "demo/**");
+        send_query(&fwd, 0, 42, "demo/example");
+
+        assert!(
+            captured_requests(&peer_sink).is_empty(),
+            "a face never receives its own query"
+        );
+        assert_eq!(
+            captured_finals(&peer_sink),
+            vec![42],
+            "and it is finalized rather than left hanging"
+        );
+    }
+
+    /// The control-plane half. R311y802 terminated a CURRENT queryable interest
+    /// with a bare Final, and its own argument was that advertising a queryable
+    /// "would invite a Request no arm answers". That premise is what this round
+    /// removes, so the interest now DUMPS the matching queryables ahead of the
+    /// Final — the same shape the subscriber and token planes already have.
+    #[test]
+    fn a_current_queryable_interest_dumps_the_queryables_already_held() {
+        let fwd = RoutingForwarder::new();
+        let (holder, _holder_sink) = recording_actions();
+        let (asker, asker_sink) = recording_actions();
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &asker);
+
+        declare_qabl(&fwd, 0, 7, "demo/**");
+        send_built_interest(
+            &fwd,
+            1,
+            wz_session_core::interest_build::build_interest_queryables(
+                5,
+                true,
+                false,
+                0,
+                Some("demo/**"),
+            )
+            .expect("queryable interest"),
+        );
+
+        let declares = captured_declares(&asker_sink);
+        assert_eq!(
+            declares.len(),
+            2,
+            "a queryable declaration then the Final, got {declares:?}"
+        );
+        assert!(
+            matches!(
+                declares[0].body,
+                DeclareOwnedVariant::CodecZenohDeclQueryable(_)
+            ),
+            "the held queryable is dumped first, got {:?}",
+            declares[0]
+        );
+        assert!(
+            is_decl_final(&declares[1]),
+            "and the interest is still terminated"
+        );
+    }
+
+    /// WHY THE ROUTER MINTS ITS OWN REQUEST ID. A querier's id is unique only
+    /// within its own face — two faces routinely both use 0 — so a router that
+    /// forwarded the id verbatim could not attribute the replies. This is the
+    /// test that makes that claim falsifiable at all: with one querier the
+    /// verbatim id works by accident.
+    #[test]
+    fn mints_its_own_request_id_so_two_queriers_can_share_one() {
+        let fwd = RoutingForwarder::new();
+        let (qabl, qabl_sink) = recording_actions();
+        let (querier_a, sink_a) = recording_actions();
+        let (querier_b, sink_b) = recording_actions();
+        fwd.register(FaceId(0), &qabl);
+        fwd.register(FaceId(1), &querier_a);
+        fwd.register(FaceId(2), &querier_b);
+
+        declare_qabl(&fwd, 0, 7, "demo/**");
+        // BOTH queriers use request id 7 — legal, and indistinguishable to a
+        // router that does not re-stamp.
+        send_query(&fwd, 1, 7, "demo/a");
+        send_query(&fwd, 2, 7, "demo/b");
+
+        let out = captured_requests(&qabl_sink);
+        assert_eq!(out.len(), 2, "both queries reached the queryable");
+        assert_ne!(
+            out[0].0, out[1].0,
+            "the router minted DISTINCT ids for two queries that shared one, got {out:?}"
+        );
+
+        // Answer the SECOND one only. If the ids had collided, this reply would
+        // be attributable to either querier.
+        let rid_b = out
+            .iter()
+            .find(|(_, ke)| ke == "demo/b")
+            .expect("the second query went out")
+            .0;
+        send_reply(&fwd, 0, rid_b, "demo/b", b"b");
+        send_final(&fwd, 0, rid_b);
+
+        assert!(
+            captured_responses(&sink_a).is_empty(),
+            "querier A, which asked for demo/a, received nothing"
+        );
+        assert_eq!(
+            captured_responses(&sink_b),
+            vec![(7, String::from("demo/b"))],
+            "querier B received its own reply under its own id"
+        );
+        assert_eq!(
+            fwd.pending_query_count(),
+            1,
+            "querier A's query is still outstanding"
+        );
+    }
+
+    /// The routed Request must be self-contained. A destination face never saw
+    /// the querier's `DeclareKeyexpr`, so an aliased query forwarded verbatim
+    /// names an expr-id that face cannot resolve — the query twin of the
+    /// `the_relay_emits_no_alias_of_its_own` premise on the Push plane.
+    #[test]
+    fn re_literalizes_an_aliased_query_for_a_face_that_never_saw_the_alias() {
+        let fwd = RoutingForwarder::new();
+        let (qabl, qabl_sink) = recording_actions();
+        let (querier, _querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &qabl);
+        fwd.register(FaceId(1), &querier);
+
+        declare_qabl(&fwd, 0, 7, "demo/**");
+        declare_kexpr(&fwd, 1, 9, "demo/example");
+        let request = wz_session_core::request_build::build_request_query(42, 9, None)
+            .expect("aliased query request");
+        let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Request(Box::new(request))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(1), IterationEvent::Poll(&outcome));
+
+        let out = captured_requests(&qabl_sink);
+        assert_eq!(out.len(), 1, "the aliased query still routed");
+        assert_eq!(
+            out[0].1, "demo/example",
+            "and reached the queryable as a LITERAL keyexpr it can resolve"
+        );
+    }
+
+    /// A `Response` is honoured only on the face the matching `Request` went to.
+    /// The per-face pending map is what makes that true; a table-wide one would
+    /// let any peer answer — or poison — another peer's query by guessing an id.
+    #[test]
+    fn drops_a_reply_from_a_face_that_was_never_sent_the_query() {
+        let fwd = RoutingForwarder::new();
+        let (qabl, qabl_sink) = recording_actions();
+        let (bystander, _bystander_sink) = recording_actions();
+        let (querier, querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &qabl);
+        fwd.register(FaceId(1), &bystander);
+        fwd.register(FaceId(2), &querier);
+
+        declare_qabl(&fwd, 0, 7, "demo/**");
+        send_query(&fwd, 2, 42, "demo/example");
+        let routed_rid = captured_requests(&qabl_sink)[0].0;
+
+        // The bystander guesses the router-minted id correctly and answers.
+        send_reply(&fwd, 1, routed_rid, "demo/example", b"forged");
+        send_final(&fwd, 1, routed_rid);
+
+        assert!(
+            captured_responses(&querier_sink).is_empty(),
+            "a face that was never sent the query cannot answer it"
+        );
+        assert!(
+            captured_finals(&querier_sink).is_empty(),
+            "nor close it — the real answerer is still outstanding"
+        );
+        assert_eq!(fwd.pending_query_count(), 1, "the query is untouched");
+    }
+
+    /// The FUTURE half of the advertisement plane: a queryable declared AFTER a
+    /// face registered a QUERYABLES interest is pushed to it unsolicited, so its
+    /// `Querier` has a remote queryable to match against. A zenoh router
+    /// propagates on exactly this gate (`hat/router/queries.rs:255-259`).
+    #[test]
+    fn a_queryable_declared_later_reaches_a_face_that_asked_for_queryables() {
+        let fwd = RoutingForwarder::new();
+        let (holder, _holder_sink) = recording_actions();
+        let (asker, asker_sink) = recording_actions();
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &asker);
+
+        send_built_interest(
+            &fwd,
+            1,
+            wz_session_core::interest_build::build_interest_queryables(
+                5,
+                false,
+                true,
+                0,
+                Some("demo/**"),
+            )
+            .expect("future queryable interest"),
+        );
+        declare_qabl(&fwd, 0, 7, "demo/example");
+
+        let declares = captured_declares(&asker_sink);
+        assert_eq!(
+            declares.len(),
+            1,
+            "one unsolicited queryable declaration, got {declares:?}"
+        );
+        assert!(
+            matches!(
+                declares[0].body,
+                DeclareOwnedVariant::CodecZenohDeclQueryable(_)
+            ),
+            "and it is a DeclQueryable, got {:?}",
+            declares[0]
+        );
+        assert_ne!(
+            decl_queryable_id(&declares[0]),
+            0,
+            "carrying a NON-ZERO id, so the later retraction can name it"
+        );
+    }
+
+    /// The gate's negative. A face that asked for nothing is told nothing —
+    /// otherwise every peer learns every queryable, which is the CLIENT rule,
+    /// not the router rule this table follows.
+    #[test]
+    fn a_face_that_never_asked_for_queryables_is_told_nothing() {
+        let fwd = RoutingForwarder::new();
+        let (holder, _holder_sink) = recording_actions();
+        let (quiet, quiet_sink) = recording_actions();
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &quiet);
+
+        declare_qabl(&fwd, 0, 7, "demo/example");
+
+        assert!(
+            captured_declares(&quiet_sink).is_empty(),
+            "an uninterested face heard nothing"
+        );
+        assert_eq!(fwd.queryable_count(), 1, "but the table recorded it");
+    }
+
+    /// The retraction must name the id the advertisement carried — the receiver
+    /// keys its remote-queryable table by that id, so a retraction under any
+    /// other id leaves a dead queryable in it forever.
+    #[test]
+    fn an_undeclared_queryable_is_retracted_by_the_id_it_was_advertised_under() {
+        let fwd = RoutingForwarder::new();
+        let (holder, _holder_sink) = recording_actions();
+        let (asker, asker_sink) = recording_actions();
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &asker);
+
+        send_built_interest(
+            &fwd,
+            1,
+            wz_session_core::interest_build::build_interest_queryables(
+                5,
+                false,
+                true,
+                0,
+                Some("demo/**"),
+            )
+            .expect("future queryable interest"),
+        );
+        declare_qabl(&fwd, 0, 7, "demo/example");
+        let advertised_id = decl_queryable_id(&captured_declares(&asker_sink)[0]);
+
+        undeclare_qabl(&fwd, 0, 7);
+
+        let declares = captured_declares(&asker_sink);
+        assert_eq!(declares.len(), 2, "declaration then retraction");
+        assert_eq!(
+            undecl_queryable_id(&declares[1]),
+            advertised_id,
+            "the retraction names the advertised id"
+        );
+        assert_eq!(fwd.queryable_count(), 0, "and the table forgot it");
+    }
+
+    fn decl_queryable_id(d: &DeclareOwned) -> u64 {
+        match &d.body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(q) => q.id,
+            other => panic!("expected a DeclQueryable, got {other:?}"),
+        }
+    }
+
+    fn undecl_queryable_id(d: &DeclareOwned) -> u64 {
+        match &d.body {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(q) => q.id,
+            other => panic!("expected an UndeclQueryable, got {other:?}"),
+        }
     }
 }
