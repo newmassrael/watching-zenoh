@@ -1190,7 +1190,7 @@ jobs:
   # therefore stay local-only until that flakiness is root-caused, and A4's
   # EXECUTION line keeps saying so.
   interop:
-    name: cross-impl proof lanes (E2 + E6 + E6b + E6e + E6f + E6g + E6h + E6i + E7 + E8 + E8t + E9 + E10 + E11 + E12 + E13 + E14 + E15 + C1bp + Z)
+    name: cross-impl proof lanes (E2 + E5z + E6 + E6b + E6e + E6f + E6g + E6h + E6i + E7 + E8 + E8t + E9 + E10 + E11 + E12 + E13 + E14 + E15 + C1bp + Z)
     runs-on: ubuntu-22.04
     # A cold cache must build: the zenoh-pico CMake tree, the whole zenoh workspace in
     # release (zenohd AND the storage-manager plugin), four differently-featured
