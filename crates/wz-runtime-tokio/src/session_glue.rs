@@ -1339,10 +1339,13 @@ mod tests {
     /// FSM-driven Close goes through.
     ///
     /// Four-vector check across all `CloseReason` variants pins the
-    /// reason discriminator byte; `_Z_FLAG_T_CLOSE_S` (graceful
-    /// session close) is hard-set inside `encode_close`, so the outer
-    /// header byte is invariant. Reliable channel is hard-pinned too
-    /// (zenoh-pico drops Close on best-effort).
+    /// reason discriminator byte. R311y839 — the header byte is
+    /// invariant HERE because `recording_actions()` is a single-link
+    /// session, not because the flag is hard-set: `_Z_FLAG_T_CLOSE_S`
+    /// is derived per emit from the link set now, and this fixture's
+    /// set is empty, which is the "this link IS the session" answer.
+    /// The aggregate case is `close_link_scope.rs`. Reliable channel
+    /// is hard-pinned too (zenoh-pico drops Close on best-effort).
     ///
     /// The trace counter for Close emits bumps once per call so a
     /// downstream test counting Close emits across the script + Rust

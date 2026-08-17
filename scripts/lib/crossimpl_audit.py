@@ -384,7 +384,16 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # carries it. proven/partial did NOT move -- all four atoms were already
 # `partial` -- which is the case this counter exists for: a first witness on a
 # NEW plane of an already-graded atom is invisible to the per-atom bit.
-FOREIGN_ADJUDICATOR_LINKS = 842
+# The close-scope round takes it to 844, in close_scope_zenohd_witness.rs. ONE
+# new leg, TWO links: it reads the scope flag off a Close a real zenohd wrote,
+# which grades `codec-close` (the flag is a field of that message) and
+# `session-unicast-open` (the Close it reads is the establishment-phase reject,
+# reached by handing zenohd's accept FSM a KeepAlive where it demands an
+# InitSyn). The leg exists because the round it lands with changed wz's own
+# scope byte on the strength of a claim about zenoh's SOURCE, and the class of
+# claim this tree keeps retracting is exactly that one -- R311y838 ratified a
+# divergence off zenoh-pico's constructor and missed the cap one function later.
+FOREIGN_ADJUDICATOR_LINKS = 844
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

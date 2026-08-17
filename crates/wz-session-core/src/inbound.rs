@@ -149,9 +149,23 @@ pub enum InboundFrame {
         extensions: Vec<ExtEntryOwned>,
     },
     /// `_Z_MID_T_CLOSE` (0x03). `reason` is the single body byte.
+    ///
+    /// R311y839 — `session` mirrors `_Z_FLAG_T_CLOSE_S`, the SCOPE the peer asked
+    /// for: `true` = tear the whole session down, `false` = drop only the link the
+    /// frame arrived on. It sits here for the same reason `is_ack` sits on
+    /// [`Self::Open`] and `reliable` on [`Self::Frame`] — the parent flag is a
+    /// field of the message, and this arm was the one that dropped its flag on the
+    /// floor. Without it a link-only Close and a session Close decoded to the same
+    /// value, so no consumer could act on the difference zenoh's receiver branches
+    /// on (`delete()` vs `del_link(link)`,
+    /// `io/zenoh-transport/src/unicast/universal/rx.rs:60-73`) — and `false` is
+    /// the value EVERY unicast Close zenoh 1.5.0 constructs carries
+    /// (`unicast/link.rs:103-113`, `universal/transport.rs:383-403`,
+    /// `lowlatency/transport.rs:91-108`).
     #[cfg(feature = "codec-close")]
     Close {
         reason: u8,
+        session: bool,
         has_ext: bool,
         extensions: Vec<ExtEntryOwned>,
     },
@@ -522,6 +536,10 @@ pub fn parse_inbound_consuming(bytes: &[u8]) -> Result<(InboundFrame, usize), In
             Ok((
                 InboundFrame::Close {
                     reason: body.reason,
+                    // R311y839 — the scope bit, read off the parent header exactly
+                    // as the Open arm reads `FLAG_T_OPEN_A` and the Frame arm reads
+                    // `FLAG_T_FRAME_R`.
+                    session: (flags & wire_const::FLAG_T_CLOSE_S) != 0,
                     has_ext,
                     extensions,
                 },

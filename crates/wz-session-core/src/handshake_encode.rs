@@ -210,8 +210,16 @@ pub fn encode_open(
 /// session is dropped (over the `max_links` limit, or a per-link teardown)
 /// while the logical session survives on its other links. zenoh distinguishes
 /// these with the same S flag (`close.rs`); pico's `_z_close_encode` carries it.
-/// The [`send_close_with_reason`](crate::session_actions::SessionLinkActions::send_close_with_reason)
-/// wrapper passes `session = true`, so every existing call site is byte-identical.
+///
+/// R311y839 — the last sentence here used to read "the
+/// [`send_close_with_reason`](crate::session_actions::SessionLinkActions::send_close_with_reason)
+/// wrapper passes `session = true`, so every existing call site is
+/// byte-identical". It no longer does, and neither does the FSM's `Closing`
+/// emit: both DERIVE the flag from the link set at emit time, because both tear
+/// down ONE link and only the last one is the session. The receivers act on the
+/// difference — zenoh branches `delete()` vs `del_link(link)`
+/// (`io/zenoh-transport/src/unicast/universal/rx.rs:60-73`), which is why a
+/// per-link teardown announcing S=1 made a peer drop links wz was still using.
 #[cfg(feature = "codec-close")]
 pub fn encode_close(reason: u8, session: bool) -> Vec<u8> {
     let parent_flags = if session {

@@ -2637,10 +2637,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Emit a LINK-ONLY close (`FLAG_T_CLOSE_S` = 0) on THIS binding's link with
-    /// `reason` — the aggregation-reject path. Unlike the whole-session close
-    /// ([`Self::send_close_with_reason`], S=1), S=0 tells the peer to drop just
+    /// `reason` — the aggregation-reject path. S=0 tells the peer to drop just
     /// THIS physical link while the logical session survives on its others (zenoh
-    /// `close` with S unset). The reject reasons use zenoh's close-reason wire
+    /// `close` with S unset).
+    ///
+    /// R311y839 — this is the UNCONDITIONAL S=0 emit, and it stays a separate
+    /// method from [`Self::send_close_with_reason`] even though that one now
+    /// derives the same flag. The reject fires on a link that is being refused
+    /// entry to the set, so `close_scope_is_session` would read a count this link
+    /// is not in and answer for the wrong session. (Until R311y839 the contrast
+    /// this doc drew was with a hard-coded `S=1`; that literal is gone.)
+    ///
+    /// The reject reasons use zenoh's close-reason wire
     /// codes ([`CLOSE_REASON_MAX_LINKS`] / [`CLOSE_REASON_INVALID`]), NOT the wz
     /// [`CloseReason`] enum (whose discriminants differ), so the frame is
     /// cross-impl faithful. Emitted on the REJECTED link's own (throwaway) actions
@@ -2649,6 +2657,52 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_link_close(&self, reason: u8) {
         let bytes = crate::handshake_encode::encode_close(reason, /*session=*/ false);
         self.send_wire_this_link(&bytes, Reliability::Reliable);
+    }
+
+    /// R311y839 — the SCOPE a teardown on THIS link should announce: `true` for a
+    /// whole-session close (`FLAG_T_CLOSE_S` set), `false` when the session keeps
+    /// running on links this one is not.
+    ///
+    /// Both Close emit sites route through here rather than through a literal,
+    /// because the answer is a property of the LINK SET at emit time and neither
+    /// site can see it otherwise. The teardown they serve is per-link by
+    /// construction — the FSM's `Closing` fires on the drive loop of one link and
+    /// its sibling `release_link` action removes exactly that link
+    /// (`del_link(&a.link)`) — so before this method the announcement contradicted
+    /// the action beside it: wz told the peer to delete the whole transport and
+    /// then went on sending over the links it still held. zenoh's receiver acts on
+    /// the difference (`delete()` vs `del_link(link)`,
+    /// `io/zenoh-transport/src/unicast/universal/rx.rs:60-73`).
+    ///
+    /// The count is read BEFORE `release_link` runs, so this link is still in the
+    /// set: `>= 2` means others survive it. `link_count()` is `0` for a session
+    /// that never aggregated (the set is populated by `register_first_link` at
+    /// join time), and `1` once this is the only member left, so both of those are
+    /// the same answer — closing the only link IS closing the session.
+    ///
+    /// The single-link byte therefore does not move, and that is deliberate: the
+    /// two references DISAGREE there and both are reachable. zenoh sends S=0 from
+    /// every unicast site including the user-triggered whole-transport close
+    /// (`unicast/universal/transport.rs:383-403`, whose comment records that S
+    /// "should always be true for user-triggered close" and chooses `false` for
+    /// multilink safety), while zenoh-pico's live lease-expiry close passes
+    /// `link_only = false` and SETS the bit (`src/transport/unicast/lease.c:99` ->
+    /// `_z_unicast_transport_close`, `transport.c:322-324`). Neither receiver can
+    /// tell: zenoh's `del_link` on the last link closes the transport anyway
+    /// (`universal/transport.rs:172-196`) and zenoh-pico never reads the bit at
+    /// all (`src/transport/unicast/rx.c:309-316`). Only the multilink case changes
+    /// an outcome, and there the answer is unanimous.
+    #[cfg(feature = "codec-close")]
+    fn close_scope_is_session(&self) -> bool {
+        #[cfg(feature = "transport-multilink")]
+        {
+            self.link_count() <= 1
+        }
+        #[cfg(not(feature = "transport-multilink"))]
+        {
+            // No aggregation set exists, so a link is always the whole session.
+            true
+        }
     }
 
     /// transport-lowlatency — the AP layer's "this deploy offers lowlatency
@@ -6584,8 +6638,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// R284 — encode + dispatch a session-layer `Close` frame
-    /// (`T_MID_CLOSE` with `_Z_FLAG_T_CLOSE_S` for session-close
-    /// semantics, body carries the single-byte reason discriminator).
+    /// (`T_MID_CLOSE`, body carries the single-byte reason discriminator).
+    /// R311y839 — `_Z_FLAG_T_CLOSE_S` is no longer implied by this method:
+    /// it is derived per emit from the link set, so this frame is a
+    /// whole-session close only when THIS link is the whole session. See
+    /// `close_scope_is_session`.
     /// Rust-side counterpart of the Lua-bound
     /// `send_close_frame_with_reason` action, taking `reason`
     /// explicitly rather than reading it from
@@ -6636,7 +6693,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(feature = "transport-batching")]
             self.flush_open_batch();
             R::with_mutex_mut(&self.trace, |t| t.send_close_frame_with_reason += 1);
-            let bytes = encode_close(reason as u8, /*session=*/ true);
+            // R311y839 — the S flag is derived, not literal: this path tears down
+            // ONE link, so it announces a whole-session close only when no other
+            // link survives it. See `close_scope_is_session`.
+            let bytes = encode_close(reason as u8, self.close_scope_is_session());
             // R311y205 (transport-multilink) — CLOSE is per-link (targets the
             // link this path is tearing down), not reliability-routed.
             self.send_wire_this_link(&bytes, Reliability::Reliable);
@@ -7451,10 +7511,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 t.send_close_frame_with_reason += 1;
                 reason
             });
-            // R311y205 (transport-multilink) — the FSM `Closing` close is a
-            // whole-SESSION close (S=1), and per-link (rides the link whose drive
-            // loop reached Closing), not reliability-routed.
-            let bytes = encode_close(reason, /*session=*/ true);
+            // R311y205 (transport-multilink) — the FSM `Closing` close rides the
+            // link whose drive loop reached Closing, and is not reliability-routed.
+            // R311y839 — and its SCOPE follows that: the sibling `release_link`
+            // action removes only this link, so the announcement says session only
+            // when this link was the session. See `close_scope_is_session`.
+            let bytes = encode_close(reason, a.close_scope_is_session());
             a.send_wire_this_link(&bytes, Reliability::Reliable);
         }
     }

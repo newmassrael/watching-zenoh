@@ -192,15 +192,31 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
         Some(SessionFsmUnicastEvent::OpenAckReceived)
     );
 
-    let close = InboundFrame::Close {
-        reason: Close::default().reason,
-        has_ext: false,
-        extensions: Vec::new(),
-    };
-    assert_eq!(
-        inbound_to_fsm_event(&close),
-        Some(SessionFsmUnicastEvent::PeerClose)
-    );
+    // R311y839 — BOTH scopes of a peer Close reach the FSM as `PeerClose`. The
+    // per-link teardown that follows is right for `session: false` by
+    // construction (`release_link` removes exactly the link the frame arrived
+    // on), and it is the only scope any upstream puts on a unicast Close: zenoh
+    // 1.5.0 passes `session: false` at every unicast construction site
+    // (`unicast/link.rs:103-113`, `universal/transport.rs:383-403`,
+    // `lowlatency/transport.rs:91-108`), and zenoh-pico is single-link, so its
+    // `session: true` arrives on a session that has no other link to spare.
+    // A `session: true` alongside surviving links is therefore unreachable from
+    // either reference — recorded here rather than handled, because handling it
+    // would be code no witness can reach.
+    for session in [false, true] {
+        let close = InboundFrame::Close {
+            reason: Close::default().reason,
+            session,
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        assert_eq!(
+            inbound_to_fsm_event(&close),
+            Some(SessionFsmUnicastEvent::PeerClose),
+            "a peer Close drives the link's FSM to Closing at either scope \
+             (session={session})",
+        );
+    }
 
     let keep_alive = InboundFrame::KeepAlive {
         has_ext: false,

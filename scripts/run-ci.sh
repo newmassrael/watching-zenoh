@@ -10095,6 +10095,22 @@ layer_z_zenohd_interop() {
         _z_unavailable "zenohd not built ($zenohd; run: bash scripts/build-zenohd.sh)" || return 1
         return 0
     fi
+    # R311y839 — the CLOSE SCOPE witness, run HERE: above every pico-CLI check
+    # below, because it needs zenohd and nothing else, and a SKIP on an absent
+    # z_sub would take a zenohd-only measurement down with it.
+    #
+    # It reads `FLAG_T_CLOSE_S` off a Close a real zenohd wrote, by handing its
+    # accept FSM a KeepAlive where an InitSyn is demanded. That byte is the
+    # premise of the same round's `close_scope_is_session` derivation, and it was
+    # otherwise supported only by a reading of zenoh's source -- the exact class
+    # of claim R311y838 had to retract.
+    #
+    # Count-guarded (`1 passed`): the leg is `#[ignore]`d, so a renamed file or a
+    # dropped attribute selects 0 tests and exits 0, which would report that a
+    # real zenohd agrees with wz by never having asked it.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test close_scope_zenohd_witness -- --ignored --quiet --test-threads=1 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
     if [[ ! -x target/zenoh-pico-cli/z_sub ]]; then
         _z_unavailable "zenoh-pico z_sub not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0

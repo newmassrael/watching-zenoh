@@ -1605,6 +1605,13 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             "Open"
         }
         wire_const::T_MID_CLOSE => {
+            // R311y839 — the SCOPE flag, rendered for the same reason JOIN's
+            // `t`/`s` and FRAME's `r` are: it is a header bit a reader has to act
+            // on. zenoh's receiver branches `delete()` vs `del_link(link)` on it
+            // (`io/zenoh-transport/src/unicast/universal/rx.rs:60-73`), so a
+            // capture that shows only `reason` cannot tell a session teardown from
+            // one link of an aggregate going away.
+            out.push(flag("s", carrier, (header & 0x20) != 0));
             let (_, reason) = c.u8("reason")?;
             out.push(reason);
             "Close"
@@ -3256,12 +3263,41 @@ mod tests {
         assert_eq!(uint(&f, "reason"), 2);
         match parse_inbound(&close).expect("parse_inbound rejected the close") {
             InboundFrame::Close {
-                reason, extensions, ..
+                reason,
+                session,
+                extensions,
+                ..
             } => {
                 assert_eq!(reason, 2);
                 assert_eq!(extensions.len(), 1);
+                assert!(!session, "S is clear on this header, so the scope is link");
             }
             other => panic!("not a Close: {other:?}"),
+        }
+
+        // R311y839 — the SCOPE flag, on both settings of the same header. It is
+        // the field zenoh's receiver branches on (`delete()` vs
+        // `del_link(link)`), so a dissection that omits it cannot tell a session
+        // teardown from one link of an aggregate leaving. Asserted through the
+        // rendered tree AND the decode, because the two are separate readers and
+        // this round wired the bit into both.
+        for (header, expected) in [(0x03u8, false), (0x03u8 | 0x20, true)] {
+            let bytes = alloc::vec![header, 0x00];
+            let f = dissect_transport_message(&bytes, 0).expect("close did not dissect");
+            assert_eq!(f.name, "Close");
+            match f.find("s").map(|field| &field.value) {
+                Some(FieldValue::Flag(set)) => assert_eq!(
+                    *set, expected,
+                    "dissected scope flag for header 0x{header:02X}",
+                ),
+                other => panic!("Close has no `s` scope flag: {other:?}"),
+            }
+            match parse_inbound(&bytes).expect("parse_inbound rejected the close") {
+                InboundFrame::Close { session, .. } => {
+                    assert_eq!(session, expected, "decoded scope for header 0x{header:02X}",)
+                }
+                other => panic!("not a Close: {other:?}"),
+            }
         }
 
         // KEEP_ALIVE — an empty body, so the whole message is its header.

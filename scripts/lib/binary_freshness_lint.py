@@ -65,7 +65,17 @@ FRESHNESS_CALL = "assert_demo_binary_newer_than_sources"
 # The three that do are the zenohd-adjudicated witnesses added R311y774-y778,
 # which is not a coincidence -- they are the ones whose red was actually
 # misdiagnosed, so they are where the check was written.
-MISSING_FRESHNESS = 110
+#
+# R311y839 raises it to 111 for `close_scope_zenohd_witness.rs`, and this is the
+# "say why this one cannot be misled" branch rather than a missing edit. That
+# fixture asserts nothing about wz: it reads two bytes a real zenohd wrote and
+# checks the scope flag in them. The demo enters only INSIDE
+# `spawn_zenohd_on_ephemeral_tcp`, whose handshake probe is how the helper knows
+# zenohd is past TCP-accept -- so a stale demo can make the probe fail to detect
+# readiness, which surfaces as a connect or read error on the next line, never as
+# a wrong verdict about zenohd's byte. Adding the call would make a foreign-oracle
+# measurement depend on the freshness of a wz artifact it never inspects.
+MISSING_FRESHNESS = 111
 
 
 def main() -> int:

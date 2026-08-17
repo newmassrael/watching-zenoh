@@ -5608,6 +5608,11 @@ mod message_name_tests {
             0,
             Ok(wz_session_core::inbound::InboundFrame::Close {
                 reason: 0,
+                // R311y839 — a fabricated CROSSED verdict; what matters is that
+                // it names Close where the bytes are a KeepAlive, so the scope is
+                // inert here. `false` is the value every zenoh unicast Close
+                // carries, so the stand-in is the ordinary one.
+                session: false,
                 has_ext: false,
                 extensions: Vec::new(),
             }),
@@ -5732,6 +5737,7 @@ mod message_name_tests {
             0,
             Ok(wz_session_core::inbound::InboundFrame::Close {
                 reason: 0,
+                session: false,
                 has_ext: false,
                 extensions: Vec::new(),
             }),
