@@ -1471,13 +1471,41 @@ import pathlib, re, sys
 # check has to fail LOUD if the two drift, and the drift itself is caught by the
 # self-check below, which requires every token to appear in that skip block.
 TOKENS = ["wz_e2e_", "multicast", "zenohd", "wz_router", "wz_peer",
-          "wz_storage_host", "zenoh_ext", "inert", "capi_c"]
+          "wz_storage_host", "zenoh_ext", "inert", "apfull", "wz_plugin",
+          "capi_c", "analyzer"]
 
+# R311y838 — the selfcheck is BIDIRECTIONAL now, and scoped to Layer E's own
+# invocation instead of the whole file.
+#
+# It used to ask only `is every declared token present somewhere in run-ci.sh`,
+# which is satisfied by any lane's `--skip`, and which says nothing when the
+# drift runs the other way. It had drifted that way: `apfull` and `wz_plugin`
+# were in Layer E's sweep and NOT in this list, so the two families they cover
+# were graded against a token set that did not contain their token, silently,
+# for as long as they have existed. A one-way check on a two-way invariant is
+# the same class of hole as the naming obligation it guards.
+#
+# Scoped to the FUNCTION, not to the file: this very check quotes the sweep's
+# command line to find it, so a whole-file search finds its own source first and
+# scrapes the surrounding prose instead of the lane. Measured while writing it --
+# the first draft's `actual` came out as {block, matches}, both of them words
+# following a `--skip` in an English sentence.
 runci = pathlib.Path("scripts/run-ci.sh").read_text()
-missing = [t for t in TOKENS if f"--skip {t}" not in runci]
-if missing:
-    print(f"SELFCHECK this check's token list has drifted from Layer E's "
-          f"--skip block; not present there: {missing}")
+fn_at = runci.find("\nlayer_e_ap_demo_round_trip() {")
+if fn_at < 0:
+    print("SELFCHECK layer_e_ap_demo_round_trip was not found; this check "
+          "cannot know what Layer E skips")
+    sys.exit(0)
+sweep = runci[fn_at:runci.find("\n}", fn_at)]
+if "cargo test -p wz-integration-tests --quiet -- --ignored" not in sweep:
+    print("SELFCHECK layer_e_ap_demo_round_trip no longer runs the --ignored "
+          "sweep this check grades against")
+    sys.exit(0)
+actual = set(re.findall(r"--skip\s+([A-Za-z0-9_]+)", sweep))
+if actual != set(TOKENS):
+    print(f"SELFCHECK this check's token list and Layer E's --skip block "
+          f"disagree; declared-not-swept={sorted(set(TOKENS) - actual)} "
+          f"swept-not-declared={sorted(actual - set(TOKENS))}")
     sys.exit(0)
 
 TEST_ATTR = re.compile(r"#\[(?:tokio::)?test\b")
@@ -1516,6 +1544,41 @@ for path in TESTS:
                 print(f"{path}::{fn} carries NO Layer E skip token while its "
                       f"filename declares the family; the token set is {TOKENS}")
             pending = False
+
+# R311y838 — the OWNERSHIP obligation. The check above keys on the FILE
+# basename, so a fixture with a neutral name whose individual tests belong to
+# another lane is invisible to it. That is not hypothetical: R311y837 added
+# `query_consolidation_wire_byte_divergence.rs`, all three of whose legs are
+# owned and count-guarded by Layer Z, and whose pico leg carried no token. Layer
+# E's sweep adopted that leg, Layer E does not build `wz-e2e-queryable`, and the
+# hosted run for d2a31d08 died in the helper that looks for the binary.
+#
+# Each test states its own owner in its `#[ignore]` reason, by the convention
+# every fixture in this crate follows: `...; Layer <X> runs via --ignored`. That
+# string is the authority this check reads. A test that names a lane OTHER than
+# E is asserting E does not run it -- so it owes a token that makes the
+# assertion true, exactly as the filename-driven case does.
+IGNORE_REASON = re.compile(r'#\[ignore\s*=\s*"(.*?)"\s*\]')
+OWNING_LANE = re.compile(r"Layer\s+([A-Za-z0-9]+)\s+runs via")
+
+for path in TESTS:
+    reason = None
+    for line in path.read_text().splitlines():
+        m = IGNORE_REASON.search(line)
+        if m:
+            reason = m.group(1)
+            continue
+        fm = FN_NAME.match(line)
+        if reason and fm:
+            fn = fm.group(1)
+            lane = OWNING_LANE.search(reason)
+            if lane and lane.group(1) != "E" and not any(t in fn for t in TOKENS):
+                print(f"{path}::{fn} declares `Layer {lane.group(1)} runs via "
+                      f"--ignored` but carries NO Layer E skip token, so Layer "
+                      f"E's default sweep runs it as well -- against whatever "
+                      f"binaries THAT lane happens to build; the token set is "
+                      f"{TOKENS}")
+            reason = None
 PY
 )" || {
         echo "Layer C0 FAIL: the skip-token naming check errored" >&2
@@ -1526,11 +1589,16 @@ PY
         echo "" >&2
         echo "$naming_violations" >&2
         echo "" >&2
-        echo "libtest --skip matches the FUNCTION name, not the file name. A" >&2
-        echo "fixture whose basename carries a family token but whose test fns" >&2
-        echo "do not is run by Layer E's default sweep against an" >&2
-        echo "arbitrary-feature binary -- exactly how the hosted run for" >&2
-        echo "2ab214a4 went red." >&2
+        echo "libtest --skip matches the FUNCTION name, not the file name and" >&2
+        echo "not the #[ignore] reason. A test Layer E's default sweep does not" >&2
+        echo "skip is a test Layer E RUNS, against whatever binaries that lane" >&2
+        echo "happens to build. Two shapes reach this failure:" >&2
+        echo "  * the fixture's basename declares an excluded family but its" >&2
+        echo "    test fns do not carry the token -- how the hosted run for" >&2
+        echo "    2ab214a4 went red;" >&2
+        echo "  * the test's #[ignore] reason names an owning lane other than" >&2
+        echo "    E -- how the hosted run for d2a31d08 went red, on a" >&2
+        echo "    wz-e2e-queryable only Layer Z builds." >&2
         echo "" >&2
         echo "Fix: rename the test fn so it contains the token (e.g." >&2
         echo "  fn wz_peer_<what_it_asserts>()), which is how the zenohd and" >&2
@@ -8596,10 +8664,21 @@ layer_e_ap_demo_round_trip() {
     # families above carry, and R311y500 renamed both fixtures and one test fn so
     # every fn in the family contains `capi_c`; Layer C0's naming gate lists the
     # token, so a future leg that omits it fails there rather than here.
+    # R311y838 — `analyzer`, the LAST family this sweep was running on someone
+    # else's behalf. `pico_wire_dissection`'s single leg declares `Layer Ewire
+    # runs via --ignored` and Ewire does run it, count-guarded at 1; this sweep
+    # ran it a SECOND time because its fn name carried no token. Harmless only by
+    # accident — E provisions the same wz-ap-demo + z_put pair Ewire does — and
+    # the accident is the hazard: the sibling case in the same round was
+    # `query_consolidation_wire_byte_divergence`'s pico leg, owned by Layer Z,
+    # which this sweep also adopted and then PANICKED on a `wz-e2e-queryable`
+    # only Z builds. MEASURED before adding: of the 76 tests this sweep selects,
+    # exactly one fn contains `analyzer`, so the token moves that leg and nothing
+    # else. The sweep is not count-guarded, so there is no number to follow it.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
         --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull \
-        --skip wz_plugin --skip capi_c)
+        --skip wz_plugin --skip capi_c --skip analyzer)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────

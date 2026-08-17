@@ -376,7 +376,15 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # the requester) and `liveliness-subscriber` (and reaches nobody else). Its
 # claim is an ABSENCE, which is why the file's lane is count-guarded in the same
 # commit -- a de-selected absence assertion reports success by silence.
-FOREIGN_ADJUDICATOR_LINKS = 838
+# The consolidation-byte round takes it to 842, in
+# query_consolidation_wire_byte_divergence.rs. THREE new legs carrying FOUR
+# links: the zenohd leg and the pico leg each grade `codec-request` on their own
+# encoder, and the wz parity leg grades `query-consolidation` and `query-get`
+# together because the byte it pins is meaningless without the request that
+# carries it. proven/partial did NOT move -- all four atoms were already
+# `partial` -- which is the case this counter exists for: a first witness on a
+# NEW plane of an already-graded atom is invisible to the per-atom bit.
+FOREIGN_ADJUDICATOR_LINKS = 842
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

@@ -268,7 +268,7 @@ fn spawn_zenohd_with_rest(rest_port: u16) -> (ChildGuard, u16) {
 /// THE ZENOH-PLANE WITNESS: what stock zenoh writes for an unnamed get.
 // wz-proves: codec-request zenohd->wz
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo + zenohd + REST plugin); Layer Ewirez runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo + zenohd + REST plugin); Layer Z runs via --ignored"]
 fn a_real_zenohd_writes_latest_as_the_consolidation_byte_zenoh_numbers_it() {
     let demo = wz_ap_demo_binary();
     // A stale demo would answer this leg's REST GET from code that predates the
@@ -383,8 +383,8 @@ fn a_real_zenohd_writes_latest_as_the_consolidation_byte_zenoh_numbers_it() {
 /// THE PICO-PLANE WITNESS: what stock zenoh-pico writes for the same mode.
 // wz-proves: codec-request pico->wz
 #[test]
-#[ignore = "binary-dep e2e (wz-e2e-queryable + zenoh-pico CLI); Layer E2 runs via --ignored"]
-fn a_real_zenoh_pico_writes_latest_as_the_consolidation_byte_pico_numbers_it() {
+#[ignore = "binary-dep e2e (wz-e2e-queryable + zenoh-pico CLI); Layer Z runs via --ignored"]
+fn wz_e2e_queryable_sees_a_real_zenoh_pico_write_latest_as_the_consolidation_byte() {
     let bin = wz_e2e_queryable_binary();
     let z_get = zenoh_pico_cli_binary("z_get");
     let port_res = PortReservation::pick();
@@ -506,7 +506,7 @@ fn a_real_zenoh_pico_writes_latest_as_the_consolidation_byte_pico_numbers_it() {
 // wz-proves: query-consolidation wz->zenohd
 // wz-proves: query-get wz->zenohd
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "binary-dep e2e (zenohd); Layer Ewirez runs via --ignored"]
+#[ignore = "binary-dep e2e (zenohd); Layer Z runs via --ignored"]
 async fn wz_writes_the_consolidation_byte_a_real_zenohd_writes_for_the_same_get() {
     let query_key = "demo/consolidation";
 
