@@ -1285,6 +1285,15 @@ jobs:
             test -x "target/zenohd/$ex" \
               || { echo "::error::$ex missing — the wz<->zenoh-ext proofs cannot run"; exit 1; }
           done
+          # R311y841 — the CORE zenoh example oracles, for Layer E5z. They are
+          # the only foreign binaries that can express a queryable's
+          # COMPLETENESS: zenohd declares no queryable, and zenoh-pico's
+          # z_queryable hardcodes complete=false. Without them the QueryTarget
+          # proof SKIPs green and A4 keeps counting it as executed.
+          for ex in zenoh_z_queryable zenoh_z_get; do
+            test -x "target/zenohd/$ex" \
+              || { echo "::error::$ex missing — the wz QueryTarget proof cannot run"; exit 1; }
+          done
 
       - name: Build zenoh-pico CLI binaries
         run: bash scripts/build-zenoh-pico-cli.sh
@@ -1712,6 +1721,19 @@ jobs:
         env:
           WZ_Z_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer Z
+
+      - name: Layer E5z — router QueryTarget e2e vs real zenoh queryables
+        # R311y841 — the wz `--router` must HONOUR a query's QueryTarget, not
+        # relay it: `BestMatching` (the wire default a plain z_get sends) asks
+        # the single nearest COMPLETE queryable, `AllComplete` filters, `All`
+        # fans out. Wired HERE rather than beside Layer E5 because the oracle is
+        # `zenoh_z_queryable --complete` / `zenoh_z_get --target`, which this job
+        # is what provisions — zenoh-pico's queryable cannot declare itself
+        # complete at all, so a pico-job placement would SKIP green forever.
+        # WZ_Z_REQUIRE=1 for the same reason as Layer Z above.
+        env:
+          WZ_Z_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer E5z
 
       - name: Layer Ewirez — the analyzer, on bytes a real zenohd wrote
         # R311y760 (carry N65) — the sibling of Layer Ewire against the OTHER

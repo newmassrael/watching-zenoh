@@ -4473,9 +4473,16 @@ layer_c1x_cargo_test_routing_routes() {
     # self-query guard, the cross-face reply refusal, and the four
     # advertisement-plane cases), and again +14 on BOTH arms -- an unequal delta
     # would mean a case is accidentally gated on transport-qos.
-    _runci_guarded_test "C1X routing_forward 51" 51 \
+    # R311y841: 51/52 -> 61/62. Ten cases landed with the QUERY TARGET being
+    # HONOURED rather than relayed (BestMatching selecting the one complete
+    # queryable, its nearest-wins ordering, its All fallback, the per-query
+    # completeness that an intersect-but-not-cover queryable fails, AllComplete
+    # as a filter, the All control, the immediate final on an emptied filter,
+    # the source-face exclusion, the deterministic tiebreak, and the one-final
+    # rule on a narrowed route). Again +10 on BOTH arms.
+    _runci_guarded_test "C1X routing_forward 61" 61 \
         cargo test -p wz-runtime-tokio --features routing-routes --lib routing_forward --quiet || return 1
-    _runci_guarded_test "C1X routing_forward 52" 52 \
+    _runci_guarded_test "C1X routing_forward 62" 62 \
         cargo test -p wz-runtime-tokio --features routing-routes,transport-qos --lib routing_forward --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-routes --quiet -- -D warnings \
@@ -11241,6 +11248,48 @@ layer_e5_router_forward() {
         --test wz_router_routes_pico_interop -- --ignored --test-threads=1 --quiet) || return 1
 }
 
+# ─── Layer E5z — router QUERY-TARGET e2e vs real zenoh (R311y841) ────
+#
+# The E5 pico legs above prove the router FORWARDS; this proves it forwards to
+# the RIGHT SUBSET. R311y840 fanned every Query to every matching queryable and
+# recorded the target as relayed-verbatim; zenoh branches three ways in
+# `compute_final_route` (`dispatcher/queries.rs:205-266`) and the branch a plain
+# `z_get` takes by DEFAULT is the narrowest one.
+#
+# WHY THIS IS ITS OWN LANE AND NOT A THIRD BLOCK IN E5. The oracle is different.
+# The decision is made on COMPLETENESS, and zenoh-pico's `z_queryable` hardcodes
+# the DEFAULT `complete = false` (`session/queryable.h:42`) with no flag to
+# change it — a pico pair can only ever witness the fallback arm. The only
+# foreign binaries that can drive both sides are upstream's own `z_queryable
+# --complete` / `z_get --target`, which `build-zenohd.sh` provisions, so this
+# lane belongs in the JOB THAT HAS ZENOHD. Folding it into E5 would have put a
+# zenohd-family prereq behind a pico-family guard in a job that provisions no
+# zenohd: the leg would SKIP green on every hosted run and Layer A4 would go on
+# counting its proof as executed — the false-authority shape ci.yml's own
+# assert-the-oracles step exists to stop.
+#
+# The demo build here is `--features routing-routes`, matching E5's line rather
+# than Layer Z's wider one. Two lanes writing ONE binary path at different
+# feature sets is a documented misdiagnosis shape in this file; these two agree,
+# and Layer Z's build (which lacks routing-routes) runs in its own invocation.
+layer_e5z_router_query_target() {
+    (cd crates && cargo build -p wz-ap-demo --features routing-routes --quiet) || return 1
+    local core_examples_dir="${WZ_ZENOH_CORE_EXAMPLES_DIR:-$PWD/target/zenohd}"
+    local missing_core_example=""
+    for ex in zenoh_z_queryable zenoh_z_get; do
+        [[ -x "$core_examples_dir/$ex" ]] || missing_core_example="$ex"
+    done
+    if [[ -n "$missing_core_example" ]]; then
+        _z_unavailable "zenoh core example oracle not built \
+($core_examples_dir/$missing_core_example; run: bash scripts/build-zenohd.sh)" || return 1
+        return 0
+    fi
+    _runci_guarded_test E5z 1 env WZ_ZENOH_CORE_EXAMPLES_DIR="$core_examples_dir" \
+        cargo test -p wz-integration-tests \
+        --test wz_router_query_target_zenoh_interop -- --ignored --quiet --test-threads=1 \
+        || return 1
+}
+
 # ─── Layer E5u — router data-plane FORWARDING e2e OVER UNIXPIPE (R311y395) ──
 #
 # The ACCEPTOR-concurrency counterpart of R311y394 (the Layer Z dialer-concurrency
@@ -13061,6 +13110,9 @@ run_layer Q layer_q_qemu_mcu_e2e || overall=1
 run_layer Qz layer_qz_zephyr_boot || overall=1
 run_layer M layer_m_scouting_multicast || overall=1
 run_layer Z layer_z_zenohd_interop || overall=1
+# R311y841 — beside Z rather than beside E5: its oracle is the zenoh core
+# examples build-zenohd.sh provisions, so it belongs wherever zenohd does.
+run_layer E5z layer_e5z_router_query_target || overall=1
 
 echo ""
 # R311y414 — a `--layer <name>` that matches NO lane used to run nothing and

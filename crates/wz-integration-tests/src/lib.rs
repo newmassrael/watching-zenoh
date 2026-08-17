@@ -1126,6 +1126,41 @@ pub mod common {
         path
     }
 
+    /// R311y841 — locate a CORE `zenoh-examples` binary (`z_queryable` / `z_get`),
+    /// installed by `scripts/build-zenohd.sh` under a `zenoh_` prefix so which
+    /// IMPLEMENTATION a leg spawned is legible at the call site: this tree also
+    /// carries a `z_get` and a `z_queryable` from zenoh-pico, and the two are
+    /// different oracles with different capabilities.
+    ///
+    /// These exist because a `QueryTarget` route selects on COMPLETENESS, and
+    /// neither oracle already provisioned can express it. zenohd is a router and
+    /// declares no queryable of its own; zenoh-pico's `z_queryable` example takes
+    /// `z_queryable_options_default()`, whose `complete` is hardcoded `false`
+    /// (`_Z_QUERYABLE_COMPLETE_DEFAULT`, `vendor/zenoh-pico/include/zenoh-pico/session/queryable.h:42`)
+    /// with no flag to change it. Upstream's own `z_queryable --complete` and
+    /// `z_get --target` are the only foreign binaries that can drive both sides
+    /// of the decision.
+    ///
+    /// `WZ_ZENOH_CORE_EXAMPLES_DIR` overrides the directory. Panics with the
+    /// build hint if absent, the same prereq discipline as
+    /// [`zenoh_ext_example_binary`]: a missing oracle must not degrade into a
+    /// green run.
+    pub fn zenoh_core_example_binary(name: &str) -> PathBuf {
+        let dir = match std::env::var("WZ_ZENOH_CORE_EXAMPLES_DIR") {
+            Ok(d) => PathBuf::from(d),
+            Err(_) => project_root().join("target/zenohd"),
+        };
+        let path = dir.join(format!("zenoh_{name}"));
+        assert!(
+            path.is_file(),
+            "zenoh_{name} binary missing at {}; set WZ_ZENOH_CORE_EXAMPLES_DIR or run \
+             scripts/build-zenohd.sh first (it builds the core zenoh examples \
+             alongside zenohd from the same pinned checkout)",
+            path.display()
+        );
+        path
+    }
+
     /// Locate the UNIXPIPE-enabled `zenohd` (R311y392): the `WZ_ZENOHD_UNIXPIPE_BIN`
     /// env override, else `scripts/build-zenohd.sh ZENOHD_UNIXPIPE=1`'s
     /// `target/zenohd-unixpipe/zenohd` install. A SEPARATE binary from

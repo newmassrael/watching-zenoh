@@ -126,12 +126,18 @@
 //! mirrors:
 //!
 //! - **Fan-out** ([`RouteTable::route_query`], zenoh `route_query`): the faces
-//!   whose declared queryable matches receive the `Request` under a
-//!   router-minted request id, because the querier's id is unique only within
-//!   ITS face and two faces may mint the same one. An empty route is answered
-//!   with an immediate `ResponseFinal` (upstream's `if route.is_empty()` arm)
-//!   rather than silence — the same "a requester is entitled to a termination"
-//!   rule R311y773 applied to `declare-final`.
+//!   the query's own `QueryTarget` selects out of those whose declared queryable
+//!   matches receive the `Request` under a router-minted request id, because the
+//!   querier's id is unique only within ITS face and two faces may mint the same
+//!   one. The target is HONOURED here rather than merely relayed (R311y841,
+//!   correcting R311y840): zenoh branches three ways in `compute_final_route`
+//!   (`dispatcher/queries.rs:205-266`), and the branch a plain `z_get` takes —
+//!   `BestMatching`, which pico signals by OMITTING the ext — asks the single
+//!   nearest queryable that covers the whole keyexpr, falling back to all
+//!   matches only when none does. An empty route is answered with an immediate
+//!   `ResponseFinal` (upstream's `if route.is_empty()` arm) rather than silence
+//!   — the same "a requester is entitled to a termination" rule R311y773 applied
+//!   to `declare-final`.
 //! - **Return path** ([`RouteTable::route_response`] /
 //!   [`RouteTable::route_response_final`], zenoh's `face.pending_queries` ->
 //!   `query.src_qid`): a reply is re-stamped with the querier's own id, and the
@@ -179,6 +185,7 @@ mod imp {
     use crate::link::SessionRuntime;
     use crate::network_message::NetworkMessage;
     use crate::qos::Priority;
+    use crate::query_mode::QueryTarget;
     use crate::queryable_info::{read_queryable_info, QueryableInfo};
     use crate::session_actions::SessionLinkActions;
     use crate::wireexpr_resolve::resolve_wireexpr;
@@ -398,19 +405,62 @@ mod imp {
             }
         }
 
-        /// Does any of this face's QUERYABLES match the already-split
-        /// `target_chunks`? The query-plane twin of [`matches`](Self::matches),
-        /// through the same
-        /// [`keyexpr_intersects_target`](crate::keyexpr_match::keyexpr_intersects_target)
-        /// SSOT that [`declared_intersects`] wraps — so a router's query route
+        /// Is this face a destination for a query on the already-split
+        /// `target_chunks`, and if so, can it answer the WHOLE query by itself?
+        /// The query-plane twin of [`matches`](Self::matches), widened in
+        /// R311y841 from a bare bool because a `QueryTarget` route needs the
+        /// completeness as well as the membership.
+        ///
+        /// - `None` — no queryable here intersects the query; not a destination.
+        /// - `Some(None)` — a destination, but nothing it holds COVERS the whole
+        ///   query, so it can only contribute a partial answer.
+        /// - `Some(Some(d))` — it can answer alone, `d` being the nearest such
+        ///   queryable's declared hop distance (the BestMatching ordering key).
+        ///
+        /// Membership is [`keyexpr_intersects_target`](crate::keyexpr_match::keyexpr_intersects_target),
+        /// the same SSOT [`declared_intersects`] wraps, so a router's query route
         /// and the destination queryable's own fire decision are computed by one
-        /// function, exactly as on the Push plane. Takes the pre-split chunks
-        /// rather than the keyexpr because the caller scans every face against
-        /// ONE target and the split is the expensive half.
-        fn matches_queryable(&self, target_chunks: &[&str]) -> bool {
-            self.qabls
-                .values()
-                .any(|q| crate::keyexpr_match::keyexpr_intersects_target(&q.keyexpr, target_chunks))
+        /// function exactly as on the Push plane. COMPLETENESS is the strictly
+        /// stronger [`keyexpr_includes_target`](crate::keyexpr_match::keyexpr_includes_target)
+        /// ANDed with the declared flag — zenoh's
+        /// `complete && qabl_info.complete` where the left operand is
+        /// `DEFAULT_INCLUDER.includes(queryable_ke, queried_ke)`
+        /// (`hat/router/queries.rs:1464`, `:1510`). The distinction is
+        /// load-bearing: a queryable on `demo/a` that declared itself complete
+        /// still cannot serve all of `demo/*`, and treating it as if it could
+        /// would silence every other answerer.
+        ///
+        /// Takes the pre-split chunks rather than the keyexpr because the caller
+        /// scans every face against ONE target and the split is the expensive
+        /// half.
+        fn query_fit(&self, target_chunks: &[&str]) -> Option<Option<u16>> {
+            let mut matched = false;
+            let mut complete: Option<u16> = None;
+            for q in self.qabls.values() {
+                if !crate::keyexpr_match::keyexpr_intersects_target(&q.keyexpr, target_chunks) {
+                    continue;
+                }
+                matched = true;
+                if q.info.complete
+                    && crate::keyexpr_match::keyexpr_includes_target(&q.keyexpr, target_chunks)
+                {
+                    // NEAREST wins when a face holds several complete
+                    // queryables: zenoh's route set carries one entry per
+                    // queryable and is sorted by distance, so the entry that
+                    // survives the BestMatching find is the closest one.
+                    complete = Some(match complete {
+                        Some(d) => {
+                            if q.info.distance < d {
+                                q.info.distance
+                            } else {
+                                d
+                            }
+                        }
+                        None => q.info.distance,
+                    });
+                }
+            }
+            matched.then_some(complete)
         }
 
         /// Does any of this face's subscriptions match `keyexpr`? Routes through
@@ -1696,12 +1746,54 @@ mod imp {
                 return;
             };
             let target_chunks: Vec<&str> = keyexpr.split('/').collect();
-            let targets: Vec<u64> = self
+            // Every face that could answer, paired with whether it can answer
+            // ALONE and from how far. The source face is excluded HERE rather
+            // than in each target arm — zenoh carries the same exclusion inside
+            // its BestMatching predicate and its `egress_filter`, so a query is
+            // never a candidate for its own asker whatever the target says.
+            let mut candidates: Vec<(u64, Option<u16>)> = self
                 .faces
                 .iter()
-                .filter(|(id, face)| **id != src_id && face.matches_queryable(&target_chunks))
-                .map(|(id, _)| *id)
+                .filter(|(id, _)| **id != src_id)
+                .filter_map(|(id, face)| face.query_fit(&target_chunks).map(|fit| (*id, fit)))
                 .collect();
+            // NEAREST-COMPLETE FIRST, then by face id. The first key is zenoh's
+            // `route.sort_by_key(|qabl| qabl.info.map_or(u16::MAX, |i| i.distance))`
+            // (`hat/router/queries.rs:1520`); a face that cannot answer alone
+            // sorts to the end, which selects the same element as zenoh's
+            // sort-then-find because that find skips it anyway. The SECOND key
+            // has no zenoh counterpart and needs one here: zenoh's stable sort
+            // runs over an insertion-ordered `Vec`, while this scans a
+            // `HashMap` whose iteration order is randomised per process, so
+            // without an explicit tiebreak a tie would be resolved by a coin
+            // flip and the router would answer the same query from a different
+            // peer each time.
+            candidates.sort_unstable_by_key(|(id, fit)| (fit.unwrap_or(u16::MAX), *id));
+            let targets: Vec<u64> =
+                match crate::request_routing_context::read_request_target(request) {
+                    // BestMatching — the WIRE DEFAULT, and what a plain `z_get`
+                    // asks for: pico omits the ext entirely for it
+                    // (`network.c:27`). ONE queryable, the nearest that covers the
+                    // whole query; if none does, no single answer exists and the
+                    // route degrades to All rather than dropping the others
+                    // (zenoh `dispatcher/queries.rs:243-266`).
+                    None => match candidates.iter().find(|(_, fit)| fit.is_some()) {
+                        Some((id, _)) => alloc::vec![*id],
+                        None => candidates.iter().map(|(id, _)| *id).collect(),
+                    },
+                    // AllComplete — a FILTER, not a selection: every AUTHORITATIVE
+                    // answerer and no other (`dispatcher/queries.rs:228-241`). An
+                    // empty result is a real empty route and falls through to the
+                    // immediate-final arm below.
+                    Some(QueryTarget::AllComplete) => candidates
+                        .iter()
+                        .filter(|(_, fit)| fit.is_some())
+                        .map(|(id, _)| *id)
+                        .collect(),
+                    // All — everyone that matches, completeness irrelevant
+                    // (`dispatcher/queries.rs:206-227`).
+                    Some(QueryTarget::All) => candidates.iter().map(|(id, _)| *id).collect(),
+                };
             if targets.is_empty() {
                 Self::send_final_to(&src_actions, src_rid);
                 return;

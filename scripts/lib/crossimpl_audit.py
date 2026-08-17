@@ -409,7 +409,16 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # generous deadline makes the leg green whether or not wz answered. Measured
 # both ways -- at 15s it stayed GREEN under the probe that deletes `route_query`
 # outright; at 5s it reds, and the real router-sent final arrives in 50ms.
-FOREIGN_ADJUDICATOR_LINKS = 847
+# R311y841 takes it to 849, in the NEW wz_router_query_target_zenoh_interop.rs.
+# ONE leg, TWO links, MEASURED not guessed (847 -> 849 is exactly the two
+# `wz-proves` lines added). It grades `routing-routes` AND `declare-queryable`
+# against a counterparty class this tree did not have: the CORE zenoh examples
+# (`zenoh-core`), which are the only foreign binaries that can declare a
+# queryable `--complete` and query with an explicit `--target`. zenohd declares
+# no queryable at all and zenoh-pico's hardcodes `complete = false`, so before
+# this round the QueryTarget decision had no foreign adjudicator that could even
+# express its input.
+FOREIGN_ADJUDICATOR_LINKS = 849
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

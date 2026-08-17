@@ -191,6 +191,7 @@ if [[ -n "$ZH" ]]; then
         SO_SRC=""
         REST_SO_SRC=""
         EXT_EXAMPLES_SRC=""
+        CORE_EXAMPLES_SRC=""
     else
         echo "build-zenohd: building zenoh-plugin-storage-manager (release) ..." >&2
         CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build \
@@ -233,6 +234,21 @@ if [[ -n "$ZH" ]]; then
             --example z_view_size \
             --release --manifest-path "$ZH/Cargo.toml"
         EXT_EXAMPLES_SRC="$BUILD_DIR/release/examples"
+        # R311y841 — the CORE `zenoh-examples` query pair, for the same reason
+        # the ext pair above exists: the counterparty a leg needs does not exist
+        # in any oracle already provisioned. zenohd is a router and declares no
+        # queryable of its own, and zenoh-pico's `z_queryable` hardcodes the
+        # DEFAULT `complete = false` (`_Z_QUERYABLE_COMPLETE_DEFAULT`,
+        # `session/queryable.h:42`) with no flag to change it — so neither can
+        # play a COMPLETE queryable, which is precisely what a `QueryTarget`
+        # route selects on. `z_queryable --complete` and `z_get --target` are the
+        # only foreign binaries in existence that can drive both sides of that
+        # decision. Same source-A-only constraint as the ext examples.
+        echo "build-zenohd: building zenoh core examples (z_queryable, z_get) ..." >&2
+        CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build \
+            -p zenoh-examples --example z_queryable --example z_get \
+            --release --manifest-path "$ZH/Cargo.toml"
+        CORE_EXAMPLES_SRC="$BUILD_DIR/release/examples"
     fi
 else
     # A transport variant CANNOT come from source B: `cargo install` builds the
@@ -257,6 +273,8 @@ else
     REST_SO_SRC=""
     # Nor the zenoh-ext examples: `cargo install` publishes zenohd's binaries only.
     EXT_EXAMPLES_SRC=""
+    # Nor the core zenoh examples, for the same reason.
+    CORE_EXAMPLES_SRC=""
 fi
 
 mkdir -p "$INSTALL_DIR"
@@ -293,4 +311,13 @@ if [[ -n "$EXT_EXAMPLES_SRC" ]]; then
 else
     echo "build-zenohd: zenoh-ext examples NOT provisioned (variant or source B);" >&2
     echo "  the wz<->zenoh-ext advanced-pubsub interop legs cannot run." >&2
+fi
+if [[ -n "$CORE_EXAMPLES_SRC" ]]; then
+    for ex in z_queryable z_get; do
+        install -m 0755 "$CORE_EXAMPLES_SRC/$ex" "$INSTALL_DIR/zenoh_$ex"
+        echo "build-zenohd: installed -> $INSTALL_DIR/zenoh_$ex" >&2
+    done
+else
+    echo "build-zenohd: zenoh core examples NOT provisioned (variant or source B);" >&2
+    echo "  the wz<->zenoh QueryTarget interop legs cannot run." >&2
 fi

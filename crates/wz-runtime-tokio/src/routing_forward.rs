@@ -2441,6 +2441,445 @@ mod tests {
         assert_eq!(fwd.queryable_count(), 0, "and the table forgot it");
     }
 
+    // ---------------------------------------------------------------------
+    // R311y841 — QueryTarget honoured ROUTE-SIDE.
+    //
+    // R311y840 shipped the query plane fanning every Query out to EVERY
+    // matching queryable, and recorded the target as relayed-verbatim. That is
+    // not what a zenoh router does: `compute_final_route`
+    // (`zenoh/src/net/routing/dispatcher/queries.rs:205-266`) branches on the
+    // target THREE ways, and the branch a stock `z_get` takes by DEFAULT is the
+    // one that fans out least.
+    // ---------------------------------------------------------------------
+
+    /// Declare a queryable carrying a [`QueryableInfo`] — the `complete` /
+    /// `distance` pair a `BestMatching` route selects on. Built through the
+    /// PRODUCTION stamp (`set_declare_queryable_info`), so the ext the table
+    /// reads is the ext a real peer writes, not a test-only shape.
+    fn declare_qabl_info(
+        forwarder: &RoutingForwarder,
+        face: u64,
+        qabl_id: u64,
+        keyexpr: &str,
+        info: wz_session_core::queryable_info::QueryableInfo,
+    ) {
+        let mut declare = wz_session_core_test_support::declare_envelope_decl_queryable(
+            wz_session_core_test_support::decl_queryable(qabl_id, 0, Some(keyexpr)),
+        );
+        wz_session_core::declare_build::set_declare_queryable_info(&mut declare, info);
+        let outcome = declare_frame(declare);
+        forwarder.forward(FaceId(face), IterationEvent::Poll(&outcome));
+    }
+
+    /// `{ complete: true, distance }` — the shape a queryable that can serve the
+    /// whole keyexpr by itself advertises.
+    fn complete_at(distance: u16) -> wz_session_core::queryable_info::QueryableInfo {
+        wz_session_core::queryable_info::QueryableInfo {
+            complete: true,
+            distance,
+        }
+    }
+
+    /// `{ complete: false, distance }` — zenoh's DEFAULT completeness with an
+    /// explicit hop count.
+    fn partial_at(distance: u16) -> wz_session_core::queryable_info::QueryableInfo {
+        wz_session_core::queryable_info::QueryableInfo {
+            complete: false,
+            distance,
+        }
+    }
+
+    /// Feed `forwarder` a `Request(Query)` carrying an explicit `ext_target`,
+    /// built by the production builder. Note there is deliberately no
+    /// `BestMatching` value to pass: pico CLEARS the ext for that case
+    /// (`network.c:27`), so the wire default is the plain [`send_query`] above.
+    fn send_query_with_target(
+        forwarder: &RoutingForwarder,
+        face: u64,
+        rid: u64,
+        keyexpr: &str,
+        target: wz_session_core::query_mode::QueryTarget,
+    ) {
+        let request = wz_session_core::request_build::build_request_query_with_target(
+            rid,
+            0,
+            Some(keyexpr),
+            target,
+        )
+        .expect("literal query request with a target ext");
+        let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Request(Box::new(request))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        forwarder.forward(FaceId(face), IterationEvent::Poll(&outcome));
+    }
+
+    /// THE HEADLINE. `BestMatching` is what a `z_get` sends when it asks for
+    /// nothing in particular — pico omits the target ext for it entirely — and
+    /// zenoh answers it from ONE queryable: `qabls.iter().find(|q| .. info.complete)`
+    /// (`dispatcher/queries.rs:243-250`). Fanning it to every match is not a
+    /// slower answer, it is a DIFFERENT one: the querier gets N replies where
+    /// stock zenoh delivers 1, and every incomplete answerer is woken for a
+    /// question the complete one already covers.
+    #[test]
+    fn a_default_target_query_goes_to_the_one_complete_queryable_not_to_every_match() {
+        let fwd = RoutingForwarder::new();
+        let (whole, whole_sink) = recording_actions();
+        let (partial, partial_sink) = recording_actions();
+        let (querier, _querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &whole);
+        fwd.register(FaceId(1), &partial);
+        fwd.register(FaceId(2), &querier);
+
+        declare_qabl_info(&fwd, 0, 7, "demo/**", complete_at(1));
+        declare_qabl_info(&fwd, 1, 8, "demo/**", partial_at(1));
+        send_query(&fwd, 2, 42, "demo/example");
+
+        assert_eq!(
+            captured_requests(&whole_sink).len(),
+            1,
+            "the COMPLETE queryable is the one BestMatching selects"
+        );
+        assert!(
+            captured_requests(&partial_sink).is_empty(),
+            "and the incomplete one is not queried at all, got {:?}",
+            captured_requests(&partial_sink)
+        );
+    }
+
+    /// The other half of zenoh's BestMatching arm, and the half that keeps the
+    /// optimisation from becoming a REGRESSION: when nothing is complete there
+    /// is no single queryable that can answer, so the route falls back to
+    /// `QueryTarget::All` (`dispatcher/queries.rs:252-262`). A router that
+    /// picked "the first one" regardless would silently drop answers.
+    #[test]
+    fn a_default_target_query_falls_back_to_every_match_when_none_is_complete() {
+        let fwd = RoutingForwarder::new();
+        let (a, a_sink) = recording_actions();
+        let (b, b_sink) = recording_actions();
+        let (querier, _querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        fwd.register(FaceId(2), &querier);
+
+        declare_qabl_info(&fwd, 0, 7, "demo/**", partial_at(1));
+        declare_qabl_info(&fwd, 1, 8, "demo/**", partial_at(1));
+        send_query(&fwd, 2, 42, "demo/example");
+
+        assert_eq!(
+            captured_requests(&a_sink).len(),
+            1,
+            "no complete queryable exists, so BestMatching degrades to All"
+        );
+        assert_eq!(captured_requests(&b_sink).len(), 1, "for BOTH of them");
+    }
+
+    /// zenoh's BestMatching takes the FIRST complete entry out of a set the
+    /// router sorted by distance (`hat/router/queries.rs:1520`), so "best" means
+    /// NEAREST-complete, not merely any-complete. The witness needs the nearer
+    /// queryable declared SECOND, otherwise a first-wins implementation passes.
+    #[test]
+    fn a_default_target_query_prefers_the_nearest_complete_queryable() {
+        let fwd = RoutingForwarder::new();
+        let (far, far_sink) = recording_actions();
+        let (near, near_sink) = recording_actions();
+        let (querier, _querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &far);
+        fwd.register(FaceId(1), &near);
+        fwd.register(FaceId(2), &querier);
+
+        declare_qabl_info(&fwd, 0, 7, "demo/**", complete_at(5));
+        declare_qabl_info(&fwd, 1, 8, "demo/**", complete_at(2));
+        send_query(&fwd, 2, 42, "demo/example");
+
+        assert_eq!(
+            captured_requests(&near_sink).len(),
+            1,
+            "the nearer complete queryable wins even though it declared later"
+        );
+        assert!(
+            captured_requests(&far_sink).is_empty(),
+            "and the farther one is left alone, got {:?}",
+            captured_requests(&far_sink)
+        );
+    }
+
+    /// `Z_QUERY_TARGET_ALL_COMPLETE` asks every AUTHORITATIVE answerer and no
+    /// one else — zenoh filters on `info.complete` and keeps the rest of the
+    /// fan-out (`dispatcher/queries.rs:228-241`). Distinct from BestMatching in
+    /// exactly one way, which this test pins: TWO complete queryables both get
+    /// the query.
+    #[test]
+    fn an_all_complete_query_reaches_every_complete_queryable_and_no_other() {
+        let fwd = RoutingForwarder::new();
+        let (whole_a, whole_a_sink) = recording_actions();
+        let (whole_b, whole_b_sink) = recording_actions();
+        let (partial, partial_sink) = recording_actions();
+        let (querier, _querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &whole_a);
+        fwd.register(FaceId(1), &whole_b);
+        fwd.register(FaceId(2), &partial);
+        fwd.register(FaceId(3), &querier);
+
+        declare_qabl_info(&fwd, 0, 7, "demo/**", complete_at(1));
+        declare_qabl_info(&fwd, 1, 8, "demo/**", complete_at(1));
+        declare_qabl_info(&fwd, 2, 9, "demo/**", partial_at(1));
+        send_query_with_target(
+            &fwd,
+            3,
+            42,
+            "demo/example",
+            wz_session_core::query_mode::QueryTarget::AllComplete,
+        );
+
+        assert_eq!(
+            captured_requests(&whole_a_sink).len(),
+            1,
+            "AllComplete is a FILTER, not a selection — both complete ones are asked"
+        );
+        assert_eq!(captured_requests(&whole_b_sink).len(), 1);
+        assert!(
+            captured_requests(&partial_sink).is_empty(),
+            "the incomplete queryable is filtered out, got {:?}",
+            captured_requests(&partial_sink)
+        );
+    }
+
+    /// The CONTROL for the two filtering tests above: `Z_QUERY_TARGET_ALL`
+    /// explicitly asks for everyone, so an implementation that filtered on
+    /// completeness unconditionally would red here while passing the rest.
+    #[test]
+    fn an_all_target_query_reaches_incomplete_queryables_too() {
+        let fwd = RoutingForwarder::new();
+        let (whole, whole_sink) = recording_actions();
+        let (partial, partial_sink) = recording_actions();
+        let (querier, _querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &whole);
+        fwd.register(FaceId(1), &partial);
+        fwd.register(FaceId(2), &querier);
+
+        declare_qabl_info(&fwd, 0, 7, "demo/**", complete_at(1));
+        declare_qabl_info(&fwd, 1, 8, "demo/**", partial_at(1));
+        send_query_with_target(
+            &fwd,
+            2,
+            42,
+            "demo/example",
+            wz_session_core::query_mode::QueryTarget::All,
+        );
+
+        assert_eq!(captured_requests(&whole_sink).len(), 1);
+        assert_eq!(
+            captured_requests(&partial_sink).len(),
+            1,
+            "an explicit All target still fans out to everyone"
+        );
+    }
+
+    /// COMPLETENESS IS PER-QUERY, NOT PER-QUERYABLE. zenoh computes
+    /// `complete && qabl_info.complete` where the left operand is
+    /// `DEFAULT_INCLUDER.includes(queryable_ke, queried_ke)`
+    /// (`hat/router/queries.rs:1464`): a queryable that only INTERSECTS the
+    /// query cannot answer the whole of it however complete it declared itself.
+    /// The discriminator is that both halves of this test use the SAME
+    /// declaration and differ only in what was asked.
+    #[test]
+    fn a_complete_queryable_that_only_intersects_the_query_is_not_complete_for_it() {
+        // Asked for `demo/*` — `demo/a` intersects it but does not cover it, so
+        // the complete flag does not apply and the route degrades to All.
+        let fwd = RoutingForwarder::new();
+        let (narrow, narrow_sink) = recording_actions();
+        let (wide, wide_sink) = recording_actions();
+        let (querier, _querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &narrow);
+        fwd.register(FaceId(1), &wide);
+        fwd.register(FaceId(2), &querier);
+
+        declare_qabl_info(&fwd, 0, 7, "demo/a", complete_at(1));
+        declare_qabl_info(&fwd, 1, 8, "demo/**", partial_at(1));
+        send_query(&fwd, 2, 42, "demo/*");
+
+        assert_eq!(
+            captured_requests(&narrow_sink).len(),
+            1,
+            "`demo/a` does not COVER `demo/*`, so its complete flag does not select it alone"
+        );
+        assert_eq!(
+            captured_requests(&wide_sink).len(),
+            1,
+            "and the fan-out therefore degrades to All"
+        );
+
+        // The CONTROL, same declarations: asked for `demo/a`, which `demo/a`
+        // does cover, the complete flag applies and selects it alone.
+        let fwd = RoutingForwarder::new();
+        let (narrow, narrow_sink) = recording_actions();
+        let (wide, wide_sink) = recording_actions();
+        let (querier, _querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &narrow);
+        fwd.register(FaceId(1), &wide);
+        fwd.register(FaceId(2), &querier);
+
+        declare_qabl_info(&fwd, 0, 7, "demo/a", complete_at(1));
+        declare_qabl_info(&fwd, 1, 8, "demo/**", partial_at(1));
+        send_query(&fwd, 2, 42, "demo/a");
+
+        assert_eq!(
+            captured_requests(&narrow_sink).len(),
+            1,
+            "`demo/a` covers `demo/a`, so it is complete FOR THIS QUERY"
+        );
+        assert!(
+            captured_requests(&wide_sink).is_empty(),
+            "and it answers alone, got {:?}",
+            captured_requests(&wide_sink)
+        );
+    }
+
+    /// A narrowed route must still TERMINATE the querier. The selection changes
+    /// how many faces are asked; it must not change the one-final contract or
+    /// leak the pending entry.
+    #[test]
+    fn a_best_matching_query_is_closed_by_the_single_answerer_it_selected() {
+        let fwd = RoutingForwarder::new();
+        let (whole, whole_sink) = recording_actions();
+        let (partial, _partial_sink) = recording_actions();
+        let (querier, querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &whole);
+        fwd.register(FaceId(1), &partial);
+        fwd.register(FaceId(2), &querier);
+
+        declare_qabl_info(&fwd, 0, 7, "demo/**", complete_at(1));
+        declare_qabl_info(&fwd, 1, 8, "demo/**", partial_at(1));
+        send_query(&fwd, 2, 42, "demo/example");
+
+        let downstream_rid = captured_requests(&whole_sink)[0].0;
+        send_reply(&fwd, 0, downstream_rid, "demo/example", b"answer");
+        send_final(&fwd, 0, downstream_rid);
+
+        assert_eq!(
+            captured_responses(&querier_sink),
+            vec![(42, String::from("demo/example"))],
+            "the selected queryable's reply reached the querier"
+        );
+        assert_eq!(
+            captured_finals(&querier_sink),
+            vec![42],
+            "and closed it under its own id"
+        );
+        assert_eq!(
+            fwd.pending_query_count(),
+            0,
+            "a narrowed route leaves no pending state behind"
+        );
+        assert_eq!(fwd.queries_routed(), 1);
+    }
+
+    /// An `AllComplete` query whose filter empties the route is an EMPTY route,
+    /// and R311y840's rule for those is unchanged: answer it now rather than let
+    /// the querier wait out its own timeout. The failure this refuses is the
+    /// exact one the target filter could newly introduce.
+    #[test]
+    fn an_all_complete_query_with_no_complete_queryable_is_finalized_immediately() {
+        let fwd = RoutingForwarder::new();
+        let (a, a_sink) = recording_actions();
+        let (b, b_sink) = recording_actions();
+        let (querier, querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        fwd.register(FaceId(2), &querier);
+
+        declare_qabl_info(&fwd, 0, 7, "demo/**", partial_at(1));
+        declare_qabl_info(&fwd, 1, 8, "demo/**", partial_at(1));
+        send_query_with_target(
+            &fwd,
+            2,
+            42,
+            "demo/example",
+            wz_session_core::query_mode::QueryTarget::AllComplete,
+        );
+
+        assert!(
+            captured_requests(&a_sink).is_empty(),
+            "no complete queryable, so nobody is asked"
+        );
+        assert!(captured_requests(&b_sink).is_empty());
+        assert_eq!(
+            captured_finals(&querier_sink),
+            vec![42],
+            "and the querier is closed at once rather than hung"
+        );
+        assert_eq!(fwd.pending_query_count(), 0);
+        assert_eq!(fwd.queries_routed(), 0);
+    }
+
+    /// The source face is excluded BEFORE completeness is considered — zenoh's
+    /// find carries `qabl.direction.0.id != src_face.id` inside the predicate
+    /// (`dispatcher/queries.rs:244`). A BestMatching scan written over the whole
+    /// face map would select the querier's own queryable and route the query
+    /// back to its asker.
+    #[test]
+    fn a_best_matching_query_never_selects_the_queriers_own_queryable() {
+        let fwd = RoutingForwarder::new();
+        let (querier, querier_sink) = recording_actions();
+        let (other, other_sink) = recording_actions();
+        fwd.register(FaceId(0), &querier);
+        fwd.register(FaceId(1), &other);
+
+        // The QUERIER holds the only complete queryable.
+        declare_qabl_info(&fwd, 0, 7, "demo/**", complete_at(1));
+        declare_qabl_info(&fwd, 1, 8, "demo/**", partial_at(1));
+        send_query(&fwd, 0, 42, "demo/example");
+
+        assert!(
+            captured_requests(&querier_sink).is_empty(),
+            "a query is never routed back to its source, complete or not, got {:?}",
+            captured_requests(&querier_sink)
+        );
+        assert_eq!(
+            captured_requests(&other_sink).len(),
+            1,
+            "so the only candidate is the other face, and All is the fallback"
+        );
+    }
+
+    /// zenoh's tie-break is its route Vec's insertion order under a STABLE sort;
+    /// wz scans a `HashMap` of faces, whose iteration order is randomised per
+    /// process, so the selection needs a total order of its own or it is a coin
+    /// flip. Twenty queries make a nondeterministic implementation fail with
+    /// probability `1 - 2^-19` rather than flake once in a while.
+    #[test]
+    fn a_tie_between_equally_near_complete_queryables_resolves_deterministically() {
+        let fwd = RoutingForwarder::new();
+        let (a, a_sink) = recording_actions();
+        let (b, b_sink) = recording_actions();
+        let (querier, _querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        fwd.register(FaceId(2), &querier);
+
+        declare_qabl_info(&fwd, 0, 7, "demo/**", complete_at(3));
+        declare_qabl_info(&fwd, 1, 8, "demo/**", complete_at(3));
+        for rid in 0..20u64 {
+            send_query(&fwd, 2, rid, "demo/example");
+        }
+
+        assert_eq!(
+            captured_requests(&a_sink).len(),
+            20,
+            "every one of the twenty queries picked the SAME tied queryable"
+        );
+        assert!(
+            captured_requests(&b_sink).is_empty(),
+            "the tie is broken by face id, not by hash order, got {:?}",
+            captured_requests(&b_sink)
+        );
+    }
+
     fn decl_queryable_id(d: &DeclareOwned) -> u64 {
         match &d.body {
             DeclareOwnedVariant::CodecZenohDeclQueryable(q) => q.id,

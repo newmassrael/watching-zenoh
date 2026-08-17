@@ -100,6 +100,15 @@ FOREIGN_ROOTS = {
     # family read `wz->zenohd` against a counterparty that is not zenohd — a
     # record that is mildly false to whoever reads it next.
     "zenoh_ext_example_binary": "zenoh-ext",
+    # R311y841 — the CORE `zenoh-examples` applications (`z_queryable` /
+    # `z_get`), a class of their own on the reasoning the zenoh-ext entry above
+    # states. They are the real zenoh-full Rust stack at the pinned version and
+    # they are NOT the router: `z_queryable` DECLARES a queryable and answers
+    # queries, which zenohd does not do and cannot witness, and `z_get` is a
+    # querier with a `--target` flag no other oracle in this tree has. Folding
+    # them into `zenohd` would make every claim in this family read
+    # `wz->zenohd` against a counterparty that is not zenohd.
+    "zenoh_core_example_binary": "zenoh-core",
     # R311y536 — the real pico as a LIBRARY. Both resolvers were previously
     # inlined in the test files (a `project_root().join(..)` for the dlopen
     # oracle, a local `libdir` for the compile-twice reference arm), so this
@@ -162,7 +171,11 @@ PICO_FFI_CRATE = "zenoh_pico_sys"
 CLAIM_RE = re.compile(
     r"^\s*//[/!]?\s*wz-proves:\s*(?P<atom>[A-Za-z0-9_-]+)\s+"
     r"(?P<kind>wz->pico|pico->wz|wz->zenoh-ext|zenoh-ext->wz|wz->zenoh-c|zenoh-c->wz"
-    r"|wz->zenohd|zenohd->wz|codec-parity)"
+    # R311y841 — `wz->zenoh` / `zenoh->wz` MUST follow the two hyphen-suffixed
+    # zenoh kinds above: alternation is first-match, so listing the shorter one
+    # first would claim the `wz->zenoh` prefix of `wz->zenoh-ext` and leave
+    # `-ext` to fail the tail anchor.
+    r"|wz->zenohd|zenohd->wz|wz->zenoh|zenoh->wz|codec-parity)"
     r"\s*(?P<partial>partial)?\s*$"
 )
 # A corpus test that witnesses NO atom must say so, with a reason, rather than be
@@ -177,6 +190,11 @@ KINDS = {
     "zenohd->wz",
     "wz->zenoh-ext",
     "zenoh-ext->wz",
+    # R311y841 — the core zenoh example applications. Distinct from `zenohd`
+    # because the counterparty is a zenoh SESSION with a queryable, not the
+    # router; see the `zenoh_core_example_binary` note in FOREIGN_ROOTS.
+    "wz->zenoh",
+    "zenoh->wz",
     # R311y565 — the reference implementation, linked rather than spawned. There
     # is no zenoh-c BINARY to spawn: zenoh-c is a library, so the only witness
     # shape available is the compile-once-link-twice differential, which is also
@@ -215,6 +233,12 @@ KIND_CLASS = {
     # kind would have encoded the retired assumption a second time.
     "wz->zenoh-ext": {"zenoh-ext"},
     "zenoh-ext->wz": {"zenoh-ext"},
+    # R311y841 — only the core zenoh examples can witness a `zenoh` kind, for
+    # the same reason only zenohd can witness a zenohd one. `zenoh-ext` is NOT
+    # accepted here: those binaries carry the advanced plane and, for the
+    # QUERYABLE question this kind exists for, they are a different application.
+    "wz->zenoh": {"zenoh-core"},
+    "zenoh->wz": {"zenoh-core"},
     # Only the library can witness a zenoh-c kind, for the same reason only
     # zenohd can witness a zenohd one — and unlike pico there is no spawned-CLI
     # alternative to also accept.
