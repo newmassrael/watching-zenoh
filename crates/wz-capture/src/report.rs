@@ -5269,6 +5269,344 @@ mod tests {
         udp
     }
 
+    /// A bare IPv4 packet that is ONE PIECE of a fragmented datagram.
+    fn ipv4_frag_packet(
+        proto: u8,
+        src: [u8; 4],
+        dst: [u8; 4],
+        ident: u16,
+        offset_bytes: usize,
+        more: bool,
+        body: &[u8],
+    ) -> alloc::vec::Vec<u8> {
+        assert_eq!(
+            offset_bytes % 8,
+            0,
+            "an IP fragment offset is in 8-byte units"
+        );
+        let mut ip = alloc::vec::Vec::new();
+        ip.push(0x45);
+        ip.push(0);
+        ip.extend_from_slice(&((20 + body.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&ident.to_be_bytes());
+        let flags_off = (offset_bytes as u16 / 8) | if more { 0x2000 } else { 0 };
+        ip.extend_from_slice(&flags_off.to_be_bytes());
+        ip.push(64);
+        ip.push(proto);
+        ip.extend_from_slice(&0u16.to_be_bytes());
+        ip.extend_from_slice(&src);
+        ip.extend_from_slice(&dst);
+        ip.extend_from_slice(body);
+        ip
+    }
+
+    /// Ethernet framing around one already-built IP packet.
+    fn eth(ip: &[u8]) -> alloc::vec::Vec<u8> {
+        let mut frame = alloc::vec![0u8; 12];
+        frame.extend_from_slice(&0x0800u16.to_be_bytes());
+        frame.extend_from_slice(ip);
+        while frame.len() < 60 {
+            frame.push(0);
+        }
+        frame
+    }
+
+    /// Feed `packet` to a fresh dissection as TWO fragments of one carrier.
+    ///
+    /// The carrier's endpoints are `10.0.0.x`, distinct from every inner
+    /// address these tests use, so a flow keyed by the wrong header is visible
+    /// as a wrong address rather than only as a wrong count.
+    fn push_fragmented_carrier(
+        d: &mut crate::Dissection,
+        proto: u8,
+        ident: u16,
+        first_index: usize,
+        packet: &[u8],
+    ) {
+        let cut = (packet.len() / 2) / 8 * 8;
+        assert!(
+            cut > 0 && cut < packet.len(),
+            "the split must produce two pieces"
+        );
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            first_index,
+            &eth(&ipv4_frag_packet(
+                proto,
+                [10, 0, 0, 1],
+                [10, 0, 0, 2],
+                ident,
+                0,
+                true,
+                &packet[..cut],
+            )),
+        );
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            first_index + 1,
+            &eth(&ipv4_frag_packet(
+                proto,
+                [10, 0, 0, 1],
+                [10, 0, 0, 2],
+                ident,
+                cut,
+                false,
+                &packet[cut..],
+            )),
+        );
+    }
+
+    /// R311y863 — a carrier the sender FRAGMENTED is walked like one that
+    /// arrived whole.
+    ///
+    /// THE DEFECT THIS REPLACES, measured on R311y862's build as a pair whose
+    /// only variable is the number of packets: one IPIP packet carrying
+    /// `IPv4 / UDP:7447 / 48 KeepAlives` read `datagram_flows=1, 48 messages`;
+    /// the SAME session split across two fragments of the same carrier read
+    /// `datagram_flows=0, messages decoded: 0`, with the census naming
+    /// `unwalked_encapsulation: {4}` — protocol 4 reported as a tunnel this
+    /// build cannot open, one packet after it opened one.
+    ///
+    /// The reassembly was never the problem: the chain completed and the whole
+    /// inner packet was in hand. R311y862 put the tunnel walk inside
+    /// `decapsulate`, and a reassembled datagram does not come through that
+    /// door — it comes through `transport_from_ip`, which refused what the
+    /// other door walks. A tunnel adds header bytes to packets that are already
+    /// at the path MTU, so the fragmented carrier is the ORDINARY case and the
+    /// unfragmented one is the small-packet exception.
+    #[test]
+    fn a_fragmented_carrier_is_walked_like_an_unfragmented_one() {
+        let inner = ipv4_packet(17, [192, 168, 0, 1], [192, 168, 0, 2], &zenoh_udp(48));
+
+        let mut d = crate::Dissection::new();
+        push_fragmented_carrier(&mut d, 4, 0x1234, 0, &inner);
+        d.finish();
+
+        assert_eq!(
+            d.datagram_flows().len(),
+            1,
+            "the session inside the fragmented carrier must reach a row: {:?}",
+            d.skip_census()
+        );
+        assert_eq!(
+            d.datagram_flows()[0].frames.len(),
+            48,
+            "and every message in it must decode"
+        );
+        let flow = &d.datagram_flows()[0].flow;
+        assert_eq!(
+            (flow.low.addr(), flow.high.addr()),
+            (&[192, 168, 0, 1][..], &[192, 168, 0, 2][..]),
+            "keyed by the innermost header, not by the carrier's 10.0.0.x ends"
+        );
+        let sk = d.skip_census();
+        assert_eq!(
+            sk.unwalked_encapsulation, 0,
+            "and protocol 4 is NOT reported as a tunnel this build cannot \
+             open, because it opened it: {sk:?}"
+        );
+        assert!(
+            sk.unwalked_encapsulations.is_empty(),
+            "so no protocol number is named on that line: {sk:?}"
+        );
+        assert_eq!(sk.bytes_absent(), 0, "no bytes are absent: {sk:?}");
+        let r = CaptureReport::of(&d);
+        assert_eq!(
+            r.reasons(),
+            alloc::vec![],
+            "and the capture is complete because it was READ: {}",
+            r.to_text()
+        );
+
+        // THE OTHER HALF OF THE PAIR, and the reason this is a discriminator
+        // rather than an assertion: the same bytes through ONE packet already
+        // read, so the fragmentation is the only variable in the comparison.
+        let mut whole = crate::Dissection::new();
+        whole.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &eth_ipv4_proto(4, &inner),
+        );
+        whole.finish();
+        assert_eq!(
+            whole.datagram_flows()[0].frames.len(),
+            d.datagram_flows()[0].frames.len(),
+            "one carrier packet and two must yield the same session"
+        );
+    }
+
+    /// R311y863 — a fragment found INSIDE a reassembled carrier goes back to
+    /// the table, not to the furniture class.
+    ///
+    /// The arm this replaces called `Ok(Transport::IpFragment(_))` from the
+    /// reassembly door impossible and booked it as `NotTransport(4)` — the
+    /// exact mislabelling R311y862 fixed, regenerated one layer down by the
+    /// fix for it. A tunnel ingress that fragments a packet which was already a
+    /// fragment produces this shape, and there is no other path on which those
+    /// bytes reach a row.
+    #[test]
+    fn a_fragment_inside_a_reassembled_carrier_is_reassembled_too() {
+        let udp = zenoh_udp(48);
+        let inner_a = ipv4_frag_packet(
+            17,
+            [192, 168, 0, 1],
+            [192, 168, 0, 2],
+            0x5678,
+            0,
+            true,
+            &udp[..24],
+        );
+        let inner_b = ipv4_frag_packet(
+            17,
+            [192, 168, 0, 1],
+            [192, 168, 0, 2],
+            0x5678,
+            24,
+            false,
+            &udp[24..],
+        );
+
+        let mut d = crate::Dissection::new();
+        push_fragmented_carrier(&mut d, 4, 0xA000, 0, &inner_a);
+        push_fragmented_carrier(&mut d, 4, 0xB000, 2, &inner_b);
+        d.finish();
+
+        let sk = d.skip_census();
+        assert_eq!(
+            d.datagram_flows().len(),
+            1,
+            "a fragmented session inside a fragmented carrier still reads: {sk:?}"
+        );
+        assert_eq!(d.datagram_flows()[0].frames.len(), 48);
+        assert_eq!(
+            sk.not_transport, 0,
+            "and no piece of it is filed as a protocol that terminates at the \
+             host: {sk:?}"
+        );
+        assert_eq!(
+            sk.unwalked_encapsulation, 0,
+            "nor as an unopened tunnel: {sk:?}"
+        );
+        assert_eq!(sk.bytes_absent(), 0, "no bytes absent: {sk:?}");
+        assert_eq!(
+            d.unfinished_fragment_chains(),
+            0,
+            "and both chains closed: {:?}",
+            d.fragment_stats()
+        );
+    }
+
+    /// R311y863 — CONTROL. Walking a reassembled IPIP carrier does not make
+    /// every reassembled carrier walkable.
+    ///
+    /// Without this leg the round reads as "make the verdict fire less often",
+    /// which is the regression in the other direction: a capture whose GRE
+    /// tunnel this build cannot open must still say so, whether the tunnel
+    /// arrived in one packet or in two.
+    #[test]
+    fn a_reassembled_carrier_this_build_cannot_open_is_still_a_shortfall() {
+        let mut d = crate::Dissection::new();
+        // 47 = GRE. The body is never walked, so its contents do not matter.
+        push_fragmented_carrier(&mut d, 47, 0x2222, 0, &[0u8; 64]);
+        d.finish();
+
+        let sk = d.skip_census();
+        assert_eq!(sk.unwalked_encapsulation, 1, "counted as a tunnel: {sk:?}");
+        assert!(
+            sk.unwalked_encapsulations.contains(&47),
+            "and by its number: {sk:?}"
+        );
+        assert_eq!(sk.not_transport, 0, "not as furniture: {sk:?}");
+        assert_eq!(
+            CaptureReport::of(&d).reasons(),
+            alloc::vec![VerdictReason::PacketsSkipped],
+            "so the capture is a floor and says so: {}",
+            CaptureReport::of(&d).to_text()
+        );
+    }
+
+    /// R311y863 — CONTROL. A reassembled protocol that TERMINATES at the host
+    /// is still furniture.
+    ///
+    /// The other half of the same guard: R311y860 paid for widening the
+    /// bytes-absent class until ARP made every capture incomplete, and the
+    /// split R311y862 drew has to survive the reassembly door too.
+    #[test]
+    fn a_reassembled_protocol_that_terminates_at_the_host_is_still_furniture() {
+        let mut d = crate::Dissection::new();
+        // 1 = ICMP: it carries no session, whether fragmented or not.
+        push_fragmented_carrier(&mut d, 1, 0x3333, 0, &[0u8; 64]);
+        d.finish();
+
+        let sk = d.skip_census();
+        assert_eq!(sk.not_transport, 1, "furniture: {sk:?}");
+        assert!(
+            sk.not_transport_protos.contains(&1),
+            "and the number is printed so a reader can check the claim: {sk:?}"
+        );
+        assert_eq!(sk.unwalked_encapsulation, 0, "not a tunnel: {sk:?}");
+        assert_eq!(sk.bytes_absent(), 0, "and no bytes are absent: {sk:?}");
+        assert_eq!(
+            CaptureReport::of(&d).reasons(),
+            alloc::vec![],
+            "so the capture stays complete: {}",
+            CaptureReport::of(&d).to_text()
+        );
+    }
+
+    /// R311y863 — the reassembled carrier COUNTS toward the chain's bound.
+    ///
+    /// This is what pins `start_depth = 1` at the reassembly door. The header
+    /// that declared the reassembled body was itself a carrier and the
+    /// reassembler already consumed it, so a door that started counting at zero
+    /// would walk five headers on the fragmented path and four on the
+    /// unfragmented one — the same chain, two limits, decided by whether the
+    /// sender happened to fragment.
+    ///
+    /// The claim is about ONE datagram's chain. A capture in which several
+    /// carriers are each separately fragmented re-enters the walk once per
+    /// reassembly and is bounded by `push_fragment`'s own counter instead; that
+    /// second bound is not this test's subject and is not the same number.
+    #[test]
+    fn a_reassembled_carrier_counts_toward_the_chain_bound() {
+        fn nest(carriers: usize) -> alloc::vec::Vec<u8> {
+            let mut packet = ipv4_packet(17, [192, 168, 0, 1], [192, 168, 0, 2], &zenoh_udp(4));
+            for i in 0..carriers {
+                packet = ipv4_packet(4, [172, 16, i as u8, 1], [172, 16, i as u8, 2], &packet);
+            }
+            packet
+        }
+
+        // Three more carriers inside the reassembled one is four in the chain,
+        // which is the bound, so it WALKS — the leg that makes this a bound
+        // rather than a refusal.
+        let mut ok = crate::Dissection::new();
+        push_fragmented_carrier(&mut ok, 4, 0x4444, 0, &nest(3));
+        ok.finish();
+        assert_eq!(
+            ok.datagram_flows().len(),
+            1,
+            "four carriers deep still reads: {:?}",
+            ok.skip_census()
+        );
+
+        // One more is five, and it is reported rather than walked.
+        let mut over = crate::Dissection::new();
+        push_fragmented_carrier(&mut over, 4, 0x5555, 0, &nest(4));
+        over.finish();
+        let sk = over.skip_census();
+        assert_eq!(
+            over.datagram_flows().len(),
+            0,
+            "five is past the bound: {sk:?}"
+        );
+        assert_eq!(
+            sk.unwalked_encapsulation, 1,
+            "and is reported as a chain this reader did not walk: {sk:?}"
+        );
+        assert_eq!(sk.bytes_absent(), 1, "which is bytes absent: {sk:?}");
+    }
+
     /// R311y862 — zenoh inside an IPIP tunnel is READ, not called furniture.
     ///
     /// THE DEFECT THIS REPLACES, measured on the previous build: one packet,

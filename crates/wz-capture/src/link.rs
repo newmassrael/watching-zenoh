@@ -71,7 +71,7 @@ const IP_PROTO_IPV6_IN_IP: u8 = 41;
 /// and nothing this workspace has seen goes further — and a chain beyond it is
 /// reported as an encapsulation this reader did not walk, which is the same
 /// answer as for GRE and is honest for the same reason.
-const MAX_ENCAPSULATION_DEPTH: usize = 4;
+pub(crate) const MAX_ENCAPSULATION_DEPTH: usize = 4;
 
 /// R311y862 — IP protocol numbers whose body is ANOTHER packet.
 ///
@@ -564,49 +564,7 @@ pub fn decapsulate(
         }
     }
     let (ip_bytes, is_v6) = strip_link(link_type, bytes)?;
-    // R311y862 — a LOOP where this was one strip, because an IP packet's body
-    // can be another IP packet and the walk for it is the walk already here.
-    //
-    // The checksum verdict is folded across every v4 header the chain carries
-    // rather than read off the outermost one. Three states and each is a real
-    // answer: `Some(false)` if any header that HAS a checksum failed,
-    // `Some(true)` if at least one had one and all passed, `None` if none did
-    // (an all-v6 chain). Reporting only the outer header would let a tunnel
-    // whose inner header is corrupt read as verified, and reporting only the
-    // inner would drop the outer's verdict on the floor.
-    let mut cursor = ip_bytes;
-    let mut v6 = is_v6;
-    let mut ip_checksum: Option<bool> = None;
-    let mut depth = 0usize;
-    let ip = loop {
-        let d = if v6 {
-            strip_ipv6(cursor)?
-        } else {
-            strip_ipv4(cursor)?
-        };
-        if !v6 {
-            let ok = ipv4_header_ok(&cursor[..ipv4_header_len(cursor)]);
-            ip_checksum = Some(ip_checksum.unwrap_or(true) && ok);
-        }
-        // A FRAGMENT ENDS THE WALK, and it must: the body behind this header is
-        // a prefix of the inner packet, so stepping into it would read a
-        // truncated header as a whole one — the same mistake R311y606 fixed one
-        // layer down. The piece is reported and the reassembled datagram meets
-        // the encapsulation arm of `transport_from_ip` instead.
-        if d.fragment.is_some() {
-            break d;
-        }
-        if d.proto == IP_PROTO_IPV4_IN_IP || d.proto == IP_PROTO_IPV6_IN_IP {
-            depth += 1;
-            if depth > MAX_ENCAPSULATION_DEPTH {
-                return Err(SkipReason::Encapsulation(d.proto));
-            }
-            v6 = d.proto == IP_PROTO_IPV6_IN_IP;
-            cursor = d.payload;
-            continue;
-        }
-        break d;
-    };
+    let (ip, ip_checksum) = walk_ip_chain(ip_bytes, is_v6, 0, None)?;
     // R311y606 — a fragment leaves here before the transport strip, because
     // there is no transport to strip. Even the FIRST fragment must: its header
     // is present but the body behind it is a prefix, and reading it as whole is
@@ -644,6 +602,69 @@ pub fn decapsulate(
     )
 }
 
+/// Walk an IP-in-IP chain down to the header whose body is NOT another packet.
+///
+/// R311y862 wrote this loop inside [`decapsulate`]; R311y863 lifted it out
+/// because the walk has TWO doors and only one of them reached it. A packet
+/// that arrives whole comes through `decapsulate`; a packet the sender
+/// fragmented is rebuilt by [`crate::frag`] and comes through
+/// [`transport_from_ip`], and a tunnel is exactly as much a tunnel on that
+/// second path. Leaving the loop in one function made the same carrier
+/// readable at one packet and unreadable at two.
+///
+/// The checksum verdict is folded across every v4 header the chain carries
+/// rather than read off the outermost one. Three states and each is a real
+/// answer: `Some(false)` if any header that HAS a checksum failed, `Some(true)`
+/// if at least one had one and all passed, `None` if none did (an all-v6
+/// chain). Reporting only the outer header would let a tunnel whose inner
+/// header is corrupt read as verified, and reporting only the inner would drop
+/// the outer's verdict on the floor. `start_checksum` is what the caller
+/// already folded — for the reassembly door, the outer header's verdict, which
+/// was reached before this chain was in hand.
+///
+/// `start_depth` is likewise the caller's count of carriers already consumed,
+/// so [`MAX_ENCAPSULATION_DEPTH`] bounds the CHAIN and not the call.
+fn walk_ip_chain<'a>(
+    bytes: &'a [u8],
+    is_v6: bool,
+    start_depth: usize,
+    start_checksum: Option<bool>,
+) -> Result<(IpDatagram<'a>, Option<bool>), SkipReason> {
+    let mut cursor: &'a [u8] = bytes;
+    let mut v6 = is_v6;
+    let mut ip_checksum = start_checksum;
+    let mut depth = start_depth;
+    loop {
+        let d = if v6 {
+            strip_ipv6(cursor)?
+        } else {
+            strip_ipv4(cursor)?
+        };
+        if !v6 {
+            let ok = ipv4_header_ok(&cursor[..ipv4_header_len(cursor)]);
+            ip_checksum = Some(ip_checksum.unwrap_or(true) && ok);
+        }
+        // A FRAGMENT ENDS THE WALK, and it must: the body behind this header is
+        // a prefix of the inner packet, so stepping into it would read a
+        // truncated header as a whole one — the same mistake R311y606 fixed one
+        // layer down. The piece is reported, and the datagram the reassembler
+        // rebuilds out of it re-enters this walk through `transport_from_ip`.
+        if d.fragment.is_some() {
+            return Ok((d, ip_checksum));
+        }
+        if d.proto == IP_PROTO_IPV4_IN_IP || d.proto == IP_PROTO_IPV6_IN_IP {
+            depth += 1;
+            if depth > MAX_ENCAPSULATION_DEPTH {
+                return Err(SkipReason::Encapsulation(d.proto));
+            }
+            v6 = d.proto == IP_PROTO_IPV6_IN_IP;
+            cursor = d.payload;
+            continue;
+        }
+        return Ok((d, ip_checksum));
+    }
+}
+
 /// Read the transport layer of a whole IP datagram.
 ///
 /// Split out of [`decapsulate`] so a REASSEMBLED datagram takes the same path
@@ -661,11 +682,60 @@ pub fn transport_from_ip(
     match proto {
         IP_PROTO_TCP => strip_tcp(src, dst, payload, packet_index, checksums).map(Transport::Tcp),
         IP_PROTO_UDP => strip_udp(src, dst, payload, packet_index, checksums).map(Transport::Udp),
+        // R311y863 — a REASSEMBLED datagram whose body is another packet is
+        // WALKED here, not refused.
+        //
+        // R311y862's comment below said what lands on the encapsulation arm is
+        // "a tunnel this build does not open ... or a reassembled datagram that
+        // was one", and treated the two as the same answer. They are not. A
+        // capture in which the carrier was fragmented — which is the ORDINARY
+        // shape, since a tunnel adds header bytes to a packet that was already
+        // at the path MTU — held a session this build can read, reassembled it
+        // correctly, and then reported protocol 4 as a tunnel it could not
+        // open, one packet after opening one.
+        //
+        // `start_depth` is 1 because the header that declared this body is the
+        // one the reassembler already consumed.
+        IP_PROTO_IPV4_IN_IP | IP_PROTO_IPV6_IN_IP => {
+            let (ip, ip_checksum) =
+                walk_ip_chain(payload, proto == IP_PROTO_IPV6_IN_IP, 1, checksums.ip)?;
+            if let Some(info) = ip.fragment {
+                // A FRAGMENT INSIDE A REASSEMBLED CARRIER, which is a real
+                // shape: a tunnel ingress fragments a packet that was itself a
+                // fragment. Handed back so the caller re-enters the reassembler
+                // with it. Refusing it here is how this fix would have
+                // regenerated the very defect it closes, one layer down.
+                return Ok(Transport::IpFragment(IpFragment {
+                    src: ip.src,
+                    dst: ip.dst,
+                    proto: ip.proto,
+                    info,
+                    payload: ip.payload.to_vec(),
+                    packet_index,
+                    checksums: Checksums {
+                        ip: ip_checksum,
+                        transport: None,
+                    },
+                }));
+            }
+            // The transport checksum is recomputed from the INNERMOST header,
+            // because the pseudo-header is the inner one's addresses. The value
+            // handed in covers a carrier whose protocol has no transport
+            // checksum at all, so carrying it forward would report a verdict
+            // about the wrong packet.
+            let inner = Checksums {
+                ip: ip_checksum,
+                transport: transport_checksum(&ip.src, &ip.dst, ip.proto, ip.payload),
+            };
+            // Recursion of depth exactly ONE: `walk_ip_chain` returns either a
+            // fragment (handled above) or a header whose proto is not 4 or 41,
+            // so this call cannot reach this arm again.
+            transport_from_ip(ip.src, ip.dst, ip.proto, ip.payload, packet_index, inner)
+        }
         // R311y862 — an encapsulation is NOT furniture, and this arm is what
-        // stops it being filed as such. `decapsulate` walks the two IP-in-IP
-        // numbers before reaching here, so what lands on this arm is either a
-        // tunnel this build does not open (GRE, ESP, L2TP) or a reassembled
-        // datagram that was one — both bytes the capture holds and no row does.
+        // stops it being filed as such. What lands here is a tunnel this build
+        // has no parser for (GRE, ESP, L2TP): bytes the capture holds and no
+        // row does.
         p if is_encapsulation(p) => Err(SkipReason::Encapsulation(p)),
         other => Err(SkipReason::NotTransport(other)),
     }

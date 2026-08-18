@@ -2976,51 +2976,81 @@ impl Dissection {
     /// they are in the table, and the packet that completes the datagram is
     /// the one that produces frames.
     fn push_fragment(&mut self, piece: link::IpFragment, ts_millis: Option<u64>) {
-        let packet_index = piece.packet_index;
-        let ip_checksum = piece.checksums.ip;
-        let Some(done) = self.fragments.push(piece, ts_millis) else {
-            self.note_skip(packet_index, SkipReason::IpFragmentPending);
-            return;
-        };
-        // The transport checksum covers the whole datagram, so this is the
-        // first point at which it CAN be judged — and it must be judged here,
-        // because `transport_from_ip` is handed the verdict rather than
-        // computing it (a reassembled datagram has no header to recompute the
-        // pseudo-header lengths from without doing exactly this).
-        let checksums = link::Checksums {
-            ip: ip_checksum,
-            transport: link::reassembled_transport_checksum(
-                &done.key.src,
-                &done.key.dst,
+        // R311y863 — a LOOP, because completing one datagram can yield a piece
+        // of ANOTHER. A reassembled carrier is walked into by
+        // `transport_from_ip`, and what it finds inside may itself be a
+        // fragment: a tunnel ingress that fragments an already-fragmented
+        // packet produces exactly that. Handing such a piece back to this table
+        // is the only path on which its bytes reach a row; the arm that used to
+        // stand here called it `NotTransport(4)` — furniture — which is the
+        // defect R311y862 fixed, regenerated one layer down.
+        let mut piece = piece;
+        let mut carriers = 0usize;
+        loop {
+            let packet_index = piece.packet_index;
+            let ip_checksum = piece.checksums.ip;
+            let Some(done) = self.fragments.push(piece, ts_millis) else {
+                self.note_skip(packet_index, SkipReason::IpFragmentPending);
+                return;
+            };
+            // The transport checksum covers the whole datagram, so this is the
+            // first point at which it CAN be judged — and it must be judged
+            // here, because `transport_from_ip` is handed the verdict rather
+            // than computing it (a reassembled datagram has no header to
+            // recompute the pseudo-header lengths from without doing exactly
+            // this). When the datagram turns out to be a carrier, that function
+            // recomputes it from the inner header instead.
+            let checksums = link::Checksums {
+                ip: ip_checksum,
+                transport: link::reassembled_transport_checksum(
+                    &done.key.src,
+                    &done.key.dst,
+                    done.key.proto,
+                    &done.payload,
+                ),
+            };
+            match link::transport_from_ip(
+                done.key.src,
+                done.key.dst,
                 done.key.proto,
                 &done.payload,
-            ),
-        };
-        match link::transport_from_ip(
-            done.key.src,
-            done.key.dst,
-            done.key.proto,
-            &done.payload,
-            done.packet_index,
-            checksums,
-        ) {
-            // R311y608 — `Udp` unconditionally, and it is not a shortcut:
-            // `transport_from_ip` answers only `Tcp` or `Udp` (`link.rs:536`),
-            // because a raweth frame is recognised BEFORE the IP walk and never
-            // has an IP header to be fragmented.
-            Ok(Transport::Udp(d) | Transport::RawEth(d)) => {
-                self.push_datagram(d, ts_millis, DatagramLink::Udp)
-            }
-            Ok(Transport::Tcp(s)) => self.push_segment(s, ts_millis),
-            // A reassembled datagram cannot be either of these: vsock never
-            // reaches the IP path, and a fragment of a fragment is not a shape
-            // IP has. Recorded rather than ignored so the impossibility is
-            // observable if it ever stops being one.
-            Ok(Transport::Vsock(_) | Transport::IpFragment(_)) => {
-                self.note_skip(done.packet_index, SkipReason::NotTransport(done.key.proto));
-            }
-            Err(reason) => {
-                self.note_skip(done.packet_index, reason);
+                done.packet_index,
+                checksums,
+            ) {
+                // R311y608 — `Udp` unconditionally, and it is not a shortcut:
+                // a raweth frame is recognised BEFORE the IP walk and never has
+                // an IP header to be fragmented.
+                Ok(Transport::Udp(d) | Transport::RawEth(d)) => {
+                    self.push_datagram(d, ts_millis, DatagramLink::Udp);
+                    return;
+                }
+                Ok(Transport::Tcp(s)) => {
+                    self.push_segment(s, ts_millis);
+                    return;
+                }
+                Ok(Transport::IpFragment(inner)) => {
+                    carriers += 1;
+                    if carriers > link::MAX_ENCAPSULATION_DEPTH {
+                        self.note_skip(
+                            done.packet_index,
+                            SkipReason::Encapsulation(done.key.proto),
+                        );
+                        return;
+                    }
+                    piece = inner;
+                    continue;
+                }
+                // vsock never reaches the IP path at all. Recorded rather than
+                // ignored so the impossibility is observable if it ever stops
+                // being one.
+                Ok(Transport::Vsock(_)) => {
+                    self.note_skip(done.packet_index, SkipReason::NotTransport(done.key.proto));
+                    return;
+                }
+                Err(reason) => {
+                    self.note_skip(done.packet_index, reason);
+                    return;
+                }
             }
         }
     }
