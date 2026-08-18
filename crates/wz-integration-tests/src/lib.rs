@@ -3196,6 +3196,24 @@ pub mod common {
     pub fn spawn_zenohd_multicast_scouting_on_ephemeral_tcp(
         label: &'static str,
     ) -> (ChildGuard, u16) {
+        spawn_zenohd_multicast_scouting_with_args(label, &[])
+    }
+
+    /// R311y846 — the same spawn with EXTRA argv, for the mirror direction.
+    ///
+    /// The no-argument form above spawns zenohd in its default ROUTER mode,
+    /// which answers scouts and never dials one: a router's
+    /// `scouting/multicast/autoconnect` default is the EMPTY list
+    /// (`DEFAULT_CONFIG.json5:149`, `{ router: [], peer: ["router", "peer"], …}`).
+    /// So a test that needs zenohd to DISCOVER something and connect to it must
+    /// pass `--mode peer`, and that is the argv this exists to carry. Kept as a
+    /// separate entry point rather than a changed signature so the R311y428 call
+    /// site is byte-identical and the two directions cannot drift apart in what
+    /// they consider "a scouting zenohd".
+    pub fn spawn_zenohd_multicast_scouting_with_args(
+        label: &'static str,
+        extra_args: &[&str],
+    ) -> (ChildGuard, u16) {
         const LISTEN_LINE: &str = "Zenoh can be reached at: tcp/127.0.0.1:";
         /// zenohd's scout-listener announcement. The group is spelled out so a
         /// zenohd whose `scouting/multicast/address` ever moved would fail the
@@ -3222,6 +3240,10 @@ pub mod common {
                 writer.try_clone().expect("dup zenohd stderr handle"),
             ))
             .stdout(Stdio::from(writer));
+        // LAST, so a caller can override anything above it: zenohd's clap parse
+        // keeps the final occurrence, and the readiness needles this helper waits
+        // on are what constrain what a caller may sensibly override.
+        command.args(extra_args);
         let mut guard = ChildGuard::wrap(
             label,
             command

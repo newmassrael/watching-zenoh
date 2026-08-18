@@ -1535,6 +1535,24 @@ scouting-active = [
     "dep:socket2",
 ]
 
+# R311y846 — the ANSWERING half: `scouting_responder` (the socket loop) over
+# `wz-session-core/scout_responder` (the decision). Deliberately NOT implied by
+# `scouting-active` and not implying it: discovering and being discoverable are
+# opposite directions and a deploy wants either alone (see the module comment in
+# lib.rs). The wz-session-core forwards are the two CODEC gates rather than
+# `scouting-active`, which is exactly the saving — no `sce-rust-runtime` engine
+# for a decision with no states. `dep:socket2` and the UDP link come along
+# because `bind_multicast_v4` is what binds and joins the group; that
+# constructor's cfg names this feature alongside the other two consumers.
+scouting-responder = [
+    "wz-session-core/codec-scout",
+    "wz-session-core/codec-hello",
+    "transport-link-udp",
+    "codec-scout",
+    "codec-hello",
+    "dep:socket2",
+]
+
 # R311if — static scouting mode wire-up. Forwards to
 # wz-session-core/scouting-static (the `scout_static` synth module) and
 # gates the `session_open::open_session_static` consumer + its

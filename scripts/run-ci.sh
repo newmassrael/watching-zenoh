@@ -9975,6 +9975,20 @@ PY
     # clippy shape). This is the one lane that builds this feature combination.
     (cd crates && cargo clippy -p wz-runtime-tokio --all-targets \
         --features scouting-active,transport-link-tls --quiet -- -D warnings) || return 1
+    # R311y846 — the ANSWERING half's own loopback e2e: a foreign scouter's
+    # Scout is answered with wz's Hello, UNICAST back to the asker, plus the
+    # `what`-gate control that gets no reply. Count-guarded at 2 for the reason
+    # the y454 leg is guarded: this selects a whole binary, but the binary is
+    # `#![cfg(feature = "scouting-responder")]`-gated, so a build that lost the
+    # feature would compile an EMPTY target and `cargo test` would exit 0 having
+    # run nothing.
+    (cd crates && cargo test -p wz-runtime-tokio --features scouting-responder \
+        --test scouting_responder_multicast -- --ignored --quiet 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 2 passed') || return 1
+    # And clippy over that feature, which no other lane builds — the same
+    # gate-skew argument as the scouting-active clippy above.
+    (cd crates && cargo clippy -p wz-runtime-tokio --all-targets \
+        --features scouting-responder --quiet -- -D warnings) || return 1
     (cd crates && cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation \
         --test multicast_pubsub_loopback -- --ignored --quiet) || return 1
@@ -10056,6 +10070,25 @@ run: bash scripts/build-zenohd.sh)"
         _runci_guarded_test "M scout->zenohd" 1 \
             cargo test -p wz-integration-tests \
             --test wz_scout_zenohd_interop -- --ignored || return 1
+        # R311y846 — THE MIRROR: a stock zenohd, told nothing about wz,
+        # DISCOVERS it and dials the locator wz's own Hello advertised. The leg
+        # above proves wz can find a zenohd; this proves a zenohd can find wz,
+        # which is the direction a drop-in replacement is judged on — until this
+        # round nothing in wz answered a Scout at all, so an existing zenoh
+        # network could only reach a wz node by being reconfigured.
+        #
+        # Its own demo build, for the reason the y428 leg keeps its own: the
+        # feature set that carries the responder is `scouting-responder` plus
+        # `routing-peer` (the responder is spawned from `run_peer`'s advertise
+        # seam), and merging it into the build above would prove only that the
+        # two scouting directions work together. KEEP ON ONE LINE —
+        # `feature_closure.py`'s scraper cannot cross a newline, and the
+        # `scouting-responder` claim must sit inside this build's closure or
+        # A4-5 containment reds.
+        (cd crates && cargo build -p wz-ap-demo --features scouting-responder,routing-peer --quiet) || return 1
+        _runci_guarded_test "M zenohd->wz scout" 1 \
+            cargo test -p wz-integration-tests \
+            --test zenohd_scouts_wz_interop -- --ignored || return 1
     fi
     # R311nm — wz->pico multicast JOIN+Push interop e2e: a wz in-library
     # multicast publisher's JOIN beacon + framed Push are admitted and

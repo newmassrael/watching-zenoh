@@ -285,6 +285,20 @@ pub struct ZenohNodeConfig {
     /// `scouting/multicast/ttl` — the multicast hop limit. Upstream's default
     /// is `1` (one subnet); `None` leaves the OS default, which is also 1.
     pub scout_multicast_ttl: Option<u32>,
+    /// R311y846 — `scouting/multicast/listen`: whether this node ANSWERS a
+    /// Scout, upstream's "listen for scout messages on UDP multicast and reply
+    /// to them" (`DEFAULT_CONFIG.json5:163`).
+    ///
+    /// The direction the three keys above do not cover. They say WHERE the node
+    /// looks; this says whether anyone can find IT — and until R311y846 wz had
+    /// no behaviour to attach it to at all, which is why it sat in
+    /// `UNHONOURED_UPSTREAM_CONFIG_KEYS` while its siblings moved out.
+    ///
+    /// `Option<bool>` and NOT a plain `bool` defaulting to upstream's `true`,
+    /// for the reason the three above are Options: a running zenohd resolves
+    /// this key to `null`, so defaulting it here would make an unmentioned key
+    /// indistinguishable from a stated one at the expansion boundary.
+    pub scout_multicast_listen: Option<bool>,
 }
 
 impl Default for ZenohNodeConfig {
@@ -327,6 +341,7 @@ impl Default for ZenohNodeConfig {
             scout_multicast_address: None,
             scout_multicast_interface: None,
             scout_multicast_ttl: None,
+            scout_multicast_listen: None,
         }
     }
 }
@@ -502,6 +517,9 @@ impl ZenohNodeConfig {
         if let Some(ttl) = self.scout_multicast_ttl {
             let _ = write!(out, ", \"ttl\": {ttl}");
         }
+        if let Some(listen) = self.scout_multicast_listen {
+            let _ = write!(out, ", \"listen\": {listen}");
+        }
         out.push_str(" }");
         if let Some(ms) = self.scouting_timeout_ms {
             let _ = write!(out, ", \"timeout\": {ms}");
@@ -620,6 +638,13 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "scouting/multicast/address",
     "scouting/multicast/interface",
     "scouting/multicast/ttl",
+    // R311y846 — the fourth, and the one that took a BEHAVIOUR to move rather
+    // than only a reader. The three above were the y844 class (wz could already
+    // do it and the reader could not be told); this one wz genuinely could not
+    // do, because no wz mode ever answered a Scout. It moves here now that
+    // `scouting_responder` exists. Surface total below unchanged: it is a
+    // resolved leaf of a real zenohd either way.
+    "scouting/multicast/listen",
 ];
 
 /// Every leaf key a real zenoh 1.5.0 resolves that wz does NOT honour.
@@ -672,7 +697,6 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "scouting/gossip/target",
     "scouting/multicast/autoconnect",
     "scouting/multicast/autoconnect_strategy",
-    "scouting/multicast/listen",
     "timestamping/drop_future_timestamp",
     "transport/auth/pubkey/key_size",
     "transport/auth/pubkey/known_keys_file",
@@ -1014,6 +1038,13 @@ impl ZenohNodeConfig {
                     value: v.to_string(),
                 })?);
             named.push("scouting/multicast/ttl");
+        }
+        // R311y846 — the ANSWERING half. Read next to the three socket keys
+        // because it is the same subsystem read the other way round: those
+        // three say where to look, this says whether to be findable.
+        if let Some(v) = want_bool(&doc, "scouting/multicast/listen")? {
+            out.scout_multicast_listen = Some(v);
+            named.push("scouting/multicast/listen");
         }
         if let Some(v) = want_bool(&doc, "timestamping/enabled")? {
             out.timestamping = v;
@@ -1499,6 +1530,14 @@ mod tests {
             (
                 "scouting/multicast/ttl",
                 r#"{ "scouting": { "multicast": { "ttl": 4 } } }"#,
+            ),
+            // R311y846 — whether the node is FINDABLE. Driven to `false`, which
+            // is the non-default (upstream's is `true`), so a reader that
+            // hardcoded "always answer" fails here rather than reporting the key
+            // honoured while ignoring what it said.
+            (
+                "scouting/multicast/listen",
+                r#"{ "scouting": { "multicast": { "listen": false } } }"#,
             ),
         ];
         // The case list IS the table, so a key added to one and not the other

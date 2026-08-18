@@ -801,6 +801,18 @@ pub use wz_session_core::session_fsm_unicast;
 #[cfg(feature = "scouting-active")]
 pub mod scouting_glue;
 
+// R311y846 — the ANSWERING half of multicast scouting: the socket loop that
+// replies to a Scout with this node's Hello. Gated separately from
+// `scouting-active` on purpose rather than folded into it: the two are opposite
+// directions and a node genuinely wants one without the other. A wz peer that is
+// told its endpoints still has to be FINDABLE by the stock zenoh peers around it
+// (responder, no initiator); an embedded node that discovers a router and never
+// needs to be discovered itself is the reverse. Folding them would also make the
+// responder drag in `sce-rust-runtime`, which it has no use for — the decision it
+// makes has no states (see `wz_session_core::scout_responder`).
+#[cfg(feature = "scouting-responder")]
+pub mod scouting_responder;
+
 /// Round C — multicast transport drive loop (the AP host loop that drives
 /// the `wz-session-core` `MulticastDispatcher` over a UDP-multicast link:
 /// periodic JOIN beacon, RX classify -> dispatch, lease sweep). Gated on
@@ -1891,7 +1903,11 @@ impl UdpDriver {
     // `INADDR_ANY` does not mean "every interface" either — the kernel resolves it
     // to exactly one via the routing table. So this change is implicit -> explicit,
     // not one -> many.
-    #[cfg(any(feature = "scouting-active", feature = "transport-multicast"))]
+    #[cfg(any(
+        feature = "scouting-active",
+        feature = "scouting-responder",
+        feature = "transport-multicast"
+    ))]
     pub async fn bind_multicast_v4(
         group: std::net::Ipv4Addr,
         port: u16,
@@ -1975,7 +1991,11 @@ impl UdpDriver {
     /// and that IS a divergence from upstream, which sets `IP_MULTICAST_LOOP`
     /// nowhere; it is load-bearing for wz's same-host tests, where the ZID
     /// self-echo gate is what keeps a node from admitting its own JOIN.)
-    #[cfg(any(feature = "scouting-active", feature = "transport-multicast"))]
+    #[cfg(any(
+        feature = "scouting-active",
+        feature = "scouting-responder",
+        feature = "transport-multicast"
+    ))]
     pub async fn bind_multicast_tx_v4(
         group: std::net::Ipv4Addr,
         port: u16,
@@ -2008,6 +2028,45 @@ impl UdpDriver {
             socket: Some(socket),
             peer: Some(SocketAddr::from((group, port))),
         })
+    }
+
+    /// R311y846 — write one datagram to an address OTHER than the driver's
+    /// `peer`.
+    ///
+    /// [`LinkDriver::send`] targets `self.peer`, which for a multicast driver
+    /// is the GROUP — correct for a Scout and wrong for the Hello that answers
+    /// one. Upstream replies unicast to the asker
+    /// (`socket.send_to(wbuf.as_slice(), peer)`, zenoh
+    /// `net/runtime/orchestrator.rs:1168`) and it has to: a scouting node reads
+    /// replies on the ephemeral unicast socket it sent FROM, so a Hello
+    /// multicast to the group is not delivered where the asker is listening.
+    ///
+    /// Deliberately NOT a `LinkDriver` method. That trait's contract is a link
+    /// with one peer; a per-datagram destination is the shared-medium seam, the
+    /// send-side mirror of [`wz_session_core::link::RxFrame::src`].
+    pub async fn send_datagram_to(&self, bytes: &[u8], dst: SocketAddr) -> io::Result<()> {
+        let socket = self
+            .socket
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no socket"))?;
+        socket.send_to(bytes, dst).await?;
+        Ok(())
+    }
+
+    /// The address this driver's socket is bound to.
+    ///
+    /// For a group-joined receiver that is `0.0.0.0:<group port>` — a wildcard,
+    /// which is why it is NOT a self-echo discriminator on its own (see gate 3
+    /// in `wz_session_core::scout_responder`, deliberately unlinked: that module
+    /// is behind the two scouting CODEC features and an intra-doc link to it
+    /// does not resolve in the default rustdoc). It is here so a caller can
+    /// REPORT which socket answered, which is what an operator checks when a
+    /// node is not being found.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.socket
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no socket"))?
+            .local_addr()
     }
 }
 
@@ -2110,7 +2169,11 @@ mod poll_framed_lowlatency_tests {
 /// `Default` is the pre-R311y832 behaviour byte for byte: no interface pin, no
 /// extra groups, and the OS hop limit.
 #[derive(Debug, Default, Clone, Copy)]
-#[cfg(any(feature = "scouting-active", feature = "transport-multicast"))]
+#[cfg(any(
+    feature = "scouting-active",
+    feature = "scouting-responder",
+    feature = "transport-multicast"
+))]
 pub struct McastSocketConfig<'a> {
     /// `#iface=<name-or-ip>` (R311y454): which interface's membership is
     /// installed and which one egress leaves by.
@@ -2122,7 +2185,11 @@ pub struct McastSocketConfig<'a> {
     pub extra_joins: &'a [String],
 }
 
-#[cfg(any(feature = "scouting-active", feature = "transport-multicast"))]
+#[cfg(any(
+    feature = "scouting-active",
+    feature = "scouting-responder",
+    feature = "transport-multicast"
+))]
 impl McastSocketConfig<'_> {
     /// Parse every `#join=` value into a v4 group address.
     ///
@@ -2161,7 +2228,11 @@ impl McastSocketConfig<'_> {
 /// borrowed view is taken back with [`as_socket_config`](Self::as_socket_config)
 /// at the socket.
 #[derive(Debug, Default, Clone)]
-#[cfg(any(feature = "scouting-active", feature = "transport-multicast"))]
+#[cfg(any(
+    feature = "scouting-active",
+    feature = "scouting-responder",
+    feature = "transport-multicast"
+))]
 pub struct McastGroupOptions {
     /// `#iface=<name-or-ip>`.
     pub iface: Option<String>,
@@ -2171,7 +2242,11 @@ pub struct McastGroupOptions {
     pub joins: Vec<String>,
 }
 
-#[cfg(any(feature = "scouting-active", feature = "transport-multicast"))]
+#[cfg(any(
+    feature = "scouting-active",
+    feature = "scouting-responder",
+    feature = "transport-multicast"
+))]
 impl McastGroupOptions {
     /// Borrow this as the socket-facing config.
     pub fn as_socket_config(&self) -> McastSocketConfig<'_> {

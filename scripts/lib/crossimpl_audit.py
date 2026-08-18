@@ -418,7 +418,7 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # no queryable at all and zenoh-pico's hardcodes `complete = false`, so before
 # this round the QueryTarget decision had no foreign adjudicator that could even
 # express its input.
-FOREIGN_ADJUDICATOR_LINKS = 849
+FOREIGN_ADJUDICATOR_LINKS = 851
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

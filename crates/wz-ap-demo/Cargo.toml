@@ -412,6 +412,13 @@ query-attachment = ["wz/query-attachment"]
 # it from `--connect` — the plumbing the scouting cross-impl leg needs to prove
 # wz actively scouts a foreign zenohd and dials what its HELLO advertised.
 scouting-active = ["wz/scouting-active"]
+# R311y846 — `--scout-listen`: the demo's ANSWERING half. Forwards the wz
+# facade's `scouting-responder`. NOT in `default` for the same reason
+# `scouting-active` is not (the footprint baseline is unchanged), and NOT implied
+# by `scouting-active`: a peer that only needs to BE found should not carry the
+# initiator FSM, and one that only scouts should not open a group socket to
+# answer on. Only run-ci Layer M builds the demo with it.
+scouting-responder = ["wz/scouting-responder"]
 # R311y442 — opt-in ADVANCED-PUBSUB history subscriber (`--advanced-subscribe
 # <keyexpr>` / `--history-max <N>`), forwarding the wz facade's
 # `ext-pubsub-advanced-history` (which pulls -recovery -> -subscriber, and with

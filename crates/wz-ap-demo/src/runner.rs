@@ -91,7 +91,7 @@ use wz::runtime_tokio::session_open::{
 };
 use wz::runtime_tokio::sync::Mutex;
 
-#[cfg(feature = "scouting-active")]
+#[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
 use crate::args::DEMO_PROTO_VERSION;
 use crate::args::{
     demo_session_init_params, DeclareEmitSpec, LivelinessGetSpec, PublisherSpec, QueryEmitSpec,
@@ -439,9 +439,13 @@ fn apply_quic_ca(cfg: DialConfig, _quic_ca: &Option<String>) -> io::Result<DialC
 /// PARAMETERS since R311y454. The override now arrives the way zenoh's does,
 /// from `scouting/multicast/address`, with `--scout-addr` as the argv that
 /// config expands into.
-#[cfg(feature = "scouting-active")]
+///
+/// R311y846 — read by the RESPONDER too, which is why the cfg widened. The two
+/// directions must join the same default or a network that moved neither would
+/// still have wz asking on one group and answering on another.
+#[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
 const SCOUT_GROUP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 0, 224);
-#[cfg(feature = "scouting-active")]
+#[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
 const SCOUT_PORT: u16 = 7446;
 
 /// The WhatAmI bitmask the Scout asks for: `ROUTER (0x01) | PEER (0x02)`. The
@@ -644,6 +648,118 @@ pub(crate) async fn scout_for_peer_locator(
             }
         }
     }
+}
+
+/// R311y846 — `--scout-listen`: join the scouting group and ANSWER Scouts, so
+/// foreign nodes can discover this one.
+///
+/// The opposite direction from [`scout_for_peer_locator`] above, and deliberately
+/// not folded into it. That function RESOLVES — it is the Initiator's way of
+/// learning where to dial, and it returns a locator. This one never returns
+/// anything: it makes the node findable and keeps doing so for the process's
+/// life. A `--scout` node asks; a `--scout-listen` node is asked.
+///
+/// `locators` is what the node ADVERTISES, taken from the same
+/// `advertised_locator()` seam the linkstate self-flood carries, so a foreign
+/// peer that autoconnects to the Hello dials the string wz itself chose. Handing
+/// this a locator composed here would recreate exactly the blind spot R311y471
+/// opened up: two advertise decisions that agree with each other and not with the
+/// wire.
+///
+/// Returns once the responder is LISTENING; the answering runs on a spawned
+/// task. A bind failure is propagated rather than warned, for the reason
+/// `--scout-addr` aborts on a malformed value: a node that was told to be
+/// discoverable and silently is not has no downstream symptom that names the
+/// cause.
+#[cfg(feature = "scouting-responder")]
+pub(crate) async fn spawn_scouting_responder(
+    socket: &crate::args::ScoutSocketArgs,
+    whatami: wz::runtime_tokio::session_glue::WhatAmI,
+    zid: &[u8],
+    locators: Vec<String>,
+) -> io::Result<()> {
+    use wz::runtime_tokio::scouting_responder::{
+        serve, ResponderIdentity, ResponderStep, ScoutingResponder,
+    };
+    use wz::runtime_tokio::UdpDriver;
+
+    let (group, port) = socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
+    let driver = UdpDriver::bind_multicast_v4(
+        group,
+        port,
+        wz::runtime_tokio::McastSocketConfig {
+            iface: socket.interface.as_deref(),
+            ttl: socket.ttl,
+            extra_joins: &[],
+        },
+    )
+    .await
+    .map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "wz-ap-demo: --scout-listen could not join the scouting group \
+                 {group}:{port}: {e}"
+            ),
+        )
+    })?;
+    let identity =
+        ResponderIdentity::try_new(DEMO_PROTO_VERSION, whatami, zid.to_vec(), locators.clone())
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("wz-ap-demo: --scout-listen cannot answer: {e}"),
+                )
+            })?;
+    let zid_hex = zid.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    // The socket ACTUALLY joined and the identity ACTUALLY answered with — the
+    // y845 discipline. An operator reads this line to find out why nothing is
+    // discovering them, and a banner naming the compiled-in default would be the
+    // one place that cannot tell them.
+    log::info!(
+        "wz-ap-demo: SCOUT RESPONDER listening on {group}:{port} \
+         as {} zid {zid_hex} advertising {:?}",
+        whatami.to_str(),
+        locators
+    );
+    if locators.is_empty() {
+        // Not an error: upstream tolerates a locator-less Hello on the receiving
+        // side and simply does not connect (`orchestrator.rs:1102`). But it is
+        // the difference between "findable" and "dialable", and the node that
+        // reaches it did so via the unspecified-bind branch above, which already
+        // warned about the advertise and not about this consequence.
+        log::warn!(
+            "wz-ap-demo: --scout-listen advertises NO locator, so a peer that \
+             discovers this node still cannot dial it (bind a concrete address)"
+        );
+    }
+    tokio::spawn(serve(ScoutingResponder::new(driver, identity), |step| {
+        match step {
+            ResponderStep::Answered { to, bytes } => {
+                log::info!("wz-ap-demo: SCOUT ANSWERED {to} ({bytes} byte Hello)");
+            }
+            // At debug: a busy group carries Scouts for roles this node does not
+            // have, and its own echo, on every cycle of every neighbour. The
+            // information is kept rather than dropped because "a Scout arrived
+            // and was refused" is the diagnosis an unfindable node needs.
+            ResponderStep::Ignored { from, why } => {
+                log::debug!("wz-ap-demo: scout ignored from {from:?}: {why:?}");
+            }
+            ResponderStep::SourceUnknown => {
+                log::warn!(
+                    "wz-ap-demo: a Scout arrived with no source address; \
+                     there is nowhere to send the Hello"
+                );
+            }
+            ResponderStep::SendFailed { to, error } => {
+                log::warn!("wz-ap-demo: could not answer the scout at {to}: {error}");
+            }
+            ResponderStep::LinkLost { cause } => {
+                log::warn!("wz-ap-demo: SCOUT RESPONDER link lost: {cause:?}");
+            }
+        }
+    }));
+    Ok(())
 }
 
 async fn establish_link(role: &Role) -> io::Result<DialedLink> {
@@ -2806,6 +2922,18 @@ pub(crate) struct PeerOpts {
     /// leaf; a test shortens it so the GC edge is reachable inside a bounded run.
     #[cfg(feature = "routing-interest-pending-gc")]
     pub interest_timeout_ms: Option<u64>,
+    /// R311y846 — `--scout-listen` (zenoh `scouting/multicast/listen`): answer
+    /// Scouts on the multicast group so foreign nodes DISCOVER this peer instead
+    /// of having to be told its endpoint.
+    ///
+    /// Carries the socket the responder joins, not a bare `bool`, because the
+    /// group is a value and not a switch: `--scout-addr` / `--scout-iface` /
+    /// `--scout-ttl` mean the same thing for answering as for asking, and a
+    /// network that moved its scouting group moved it for both directions.
+    /// `None` = the flag was absent, which is a node that is reachable only by
+    /// configuration — wz's behaviour before this round.
+    #[cfg(feature = "scouting-responder")]
+    pub scout_listen: Option<crate::args::ScoutSocketArgs>,
 }
 
 #[cfg(feature = "routing-peer")]
@@ -3043,6 +3171,22 @@ async fn run_peer_until(
     // Clone so `self_locators` survives for the §5.23 admin handler below (the
     // forwarder-hosted admin's `local_data` advertises the same dial locators).
     forwarder.set_self_locators(self_locators.clone());
+
+    // R311y846 — and the same strings go into the Hello this peer answers Scouts
+    // with, so the node a foreign scouter discovers is dialable at the address
+    // its own neighbours were flooded. Started HERE, after the advertise decision
+    // and before the face loop: a responder that came up first would answer with
+    // a locator list it did not have yet.
+    #[cfg(feature = "scouting-responder")]
+    if let Some(scout_socket) = opts.scout_listen.as_ref() {
+        spawn_scouting_responder(
+            scout_socket,
+            WhatAmI::Peer,
+            &params.zid,
+            self_locators.clone(),
+        )
+        .await?;
+    }
 
     // §5.16 interceptor pipeline — assemble ONE InterceptorConfig from the
     // opt-in flags and install it via the single config seam (the wz mirror of

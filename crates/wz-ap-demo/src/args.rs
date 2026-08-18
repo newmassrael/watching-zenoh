@@ -479,11 +479,35 @@ pub(crate) fn expand_stock_zenoh_config(
             }
         }
     }
+    // R311y846 — whether the node is FINDABLE (`scouting/multicast/listen`).
+    // Decided BEFORE the socket keys below, because it is one of their
+    // preconditions: the group an operator names applies to answering as much as
+    // to asking, and a config carrying `listen: true` alongside `address:` must
+    // expand to both flags or to neither.
+    //
+    // Its own precondition is `--peer`, mirroring `--scout`'s: the responder is
+    // spawned from `run_peer`'s advertise seam, so the flag is read there and
+    // nowhere else, and emitting it into another mode would hand the binary an
+    // argument it exits(2) on. The `cfg!` guard is the R311y844 rule — a key
+    // whose sink is compiled out must not turn a valid stock config into a node
+    // that refuses to start.
+    let listen_expanded = cfg!(feature = "scouting-responder")
+        && named("scouting/multicast/listen")
+        && cfg.scout_multicast_listen == Some(true)
+        && rest.iter().any(|a| a == "--peer")
+        && !rest.iter().any(|a| a == "--scout-listen");
+    if listen_expanded {
+        added.push("--scout-listen".into());
+    }
     // R311y845 — WHERE the node looks for its peers. Same precondition as
     // `scouting/timeout` above (`--scout` on the command line), because the
     // three flags carry the same one: a scouting socket is an instruction to a
-    // node that is scouting, and the demo rejects it otherwise.
-    let scouting = rest.iter().any(|a| a == "--scout");
+    // node that is scouting, and the demo rejects it otherwise. R311y846 widened
+    // "is scouting" to include the answering direction, which joins the same
+    // socket.
+    let scouting = rest.iter().any(|a| a == "--scout")
+        || rest.iter().any(|a| a == "--scout-listen")
+        || listen_expanded;
     for (key, flag, value) in [
         (
             "scouting/multicast/address",
@@ -879,6 +903,12 @@ mod stock_config_tests {
         if !cfg!(feature = "transport-qos") {
             out.push("transport/multicast/qos/enabled");
         }
+        // R311y846 — the responder's flag exits(2) without its feature (the
+        // demo says so and names the build), so a build without it must DROP the
+        // key rather than expand into a refusal.
+        if !cfg!(feature = "scouting-responder") {
+            out.push("scouting/multicast/listen");
+        }
         out
     }
 
@@ -903,6 +933,11 @@ mod stock_config_tests {
             | "scouting/multicast/address"
             | "scouting/multicast/interface"
             | "scouting/multicast/ttl" => &["--config", "z.json5", "--scout"],
+            // R311y846 — the answering direction's precondition is `--peer`,
+            // not `--scout`: the responder is spawned from `run_peer`, and
+            // `--scout` is a one-shot Initiator that exits on its first
+            // discovery, which has nothing to answer with.
+            "scouting/multicast/listen" => &["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"],
             _ => &["--config", "z.json5"],
         }
     }
@@ -1084,6 +1119,17 @@ mod stock_config_tests {
                 "scouting/multicast/ttl",
                 SCOUT_ONLY,
                 r#"{ mode: "peer", scouting: { multicast: { ttl: 4 } } }"#,
+            ),
+            // R311y846 — whether the node ANSWERS. The control names `false`
+            // rather than omitting the key, so the delta is the VALUE and not
+            // the key's presence: an expansion that emitted the flag whenever
+            // the key was mentioned would pass a present/absent pair and fail
+            // this one. Upstream's default is `true`, so `false` is also the
+            // half a node would be surprised by.
+            (
+                "scouting/multicast/listen",
+                r#"{ mode: "peer", scouting: { multicast: { listen: false } } }"#,
+                r#"{ mode: "peer", scouting: { multicast: { listen: true } } }"#,
             ),
         ]
     }
@@ -1378,7 +1424,11 @@ impl ScoutSocketArgs {
     /// compiles) refused it as dead code, which is the gate working: every
     /// local run in that round had carried `--features ...,scouting-active`, so
     /// nothing before the hook had built the arm where this is unreachable.
-    #[cfg(any(feature = "scouting-active", all(test, feature = "zenoh-config")))]
+    #[cfg(any(
+        feature = "scouting-active",
+        feature = "scouting-responder",
+        all(test, feature = "zenoh-config")
+    ))]
     pub(crate) fn group_and_port(
         &self,
         default_group: std::net::Ipv4Addr,

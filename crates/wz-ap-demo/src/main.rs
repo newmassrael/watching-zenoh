@@ -492,6 +492,52 @@ fn main() -> ExitCode {
                 },
                 None => None,
             };
+            // R311y846 — `--scout-listen`: answer Scouts so foreign nodes find
+            // this peer. Parsed HERE rather than beside `--scout` further down,
+            // because that block is downstream of this mode's `return` — the
+            // scouting flags there belong to the one-shot Initiator, and the two
+            // directions do not share a code path even though they share a
+            // socket. The socket flags are the SAME three (`--scout-addr` /
+            // `--scout-iface` / `--scout-ttl`): a network that moved its
+            // scouting group moved it for asking and for answering alike.
+            #[cfg(feature = "scouting-responder")]
+            let scout_listen = if rest.iter().any(|a| a == "--scout-listen") {
+                match crate::args::parse_scout_socket(rest) {
+                    Ok(v) => Some(v),
+                    Err(msg) => {
+                        eprintln!("wz-ap-demo: {msg}");
+                        return ExitCode::from(2);
+                    }
+                }
+            } else {
+                // The socket flags without the direction that uses them: refused
+                // rather than ignored, the discipline `--scout-timeout-ms
+                // requires --scout` set. In peer mode `--scout` itself is not a
+                // role, so `--scout-listen` is the only thing they can qualify.
+                match crate::args::parse_scout_socket(rest) {
+                    Ok(v) if v != crate::args::ScoutSocketArgs::default() => {
+                        eprintln!(
+                            "wz-ap-demo: --scout-addr / --scout-iface / --scout-ttl \
+                             require --scout-listen in --peer mode"
+                        );
+                        return ExitCode::from(2);
+                    }
+                    Ok(_) => None,
+                    Err(msg) => {
+                        eprintln!("wz-ap-demo: {msg}");
+                        return ExitCode::from(2);
+                    }
+                }
+            };
+            #[cfg(not(feature = "scouting-responder"))]
+            if rest.iter().any(|a| a == "--scout-listen") {
+                eprintln!(
+                    "wz-ap-demo: --scout-listen requires the `scouting-responder` \
+                     build feature (build: cargo build -p wz-ap-demo --features \
+                     scouting-responder)"
+                );
+                return ExitCode::from(2);
+            }
             return run_peer_mode(
                 peer_listen,
                 dial_targets,
@@ -525,6 +571,8 @@ fn main() -> ExitCode {
                     quic_key: parse_pair(rest, "--quic-key"),
                     #[cfg(feature = "routing-interest-pending-gc")]
                     interest_timeout_ms,
+                    #[cfg(feature = "scouting-responder")]
+                    scout_listen,
                 },
                 InterceptorOpts {
                     acl_deny,

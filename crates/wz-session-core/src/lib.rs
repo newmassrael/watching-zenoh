@@ -506,6 +506,19 @@ pub mod join_decode;
 ))]
 pub mod scouting_message;
 
+/// R311y846 — the scouting RESPONDER decision: one datagram in, at most one
+/// Hello out. The half of multicast scouting that makes wz DISCOVERABLE, which
+/// no wz mode carried — active / passive / static (§1.4) are all initiator
+/// paths, so a stock zenoh peer running its default
+/// `scouting/multicast/listen: true` had to be told wz's endpoint instead of
+/// finding it.
+///
+/// Needs BOTH codecs, unlike [`scouting_message`], which decodes whichever it
+/// has: the responder reads a Scout and writes a Hello, so a build with one
+/// half has no responder to offer rather than a partial one.
+#[cfg(all(feature = "alloc", feature = "codec-scout", feature = "codec-hello"))]
+pub mod scout_responder;
+
 /// R311ky — deferred callback firing (the F-6 structural fix): the
 /// staging queue + per-listener take-call-restore cell that let
 /// decl/matching/data callbacks run OUTSIDE the session observer mutex.

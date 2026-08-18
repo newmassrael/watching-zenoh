@@ -627,6 +627,11 @@ runtime-zero-copy = ["wz-runtime-tokio?/runtime-zero-copy"]
 # why `scouting-multicast` (FOUNDATIONAL, "always-on under
 # scouting-active") needs no separate edge here.
 scouting-active = ["wz-runtime-tokio?/scouting-active"]
+# R311y846 — the ANSWERING half (`scouting_responder`), forwarded the same way
+# and kept SEPARATE from `scouting-active` for the reason its module comment
+# gives: discovering and being discoverable are opposite directions, and a deploy
+# routinely wants one alone.
+scouting-responder = ["wz-runtime-tokio?/scouting-responder"]
 scouting-autoconnect = []
 scouting-gossip = ["routing-router"]
 scouting-multicast = ["transport-link-udp"]

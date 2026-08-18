@@ -105,6 +105,13 @@ pub(crate) fn print_usage() {
     eprintln!("                             every interface the route picks (requires --scout)");
     eprintln!("    --scout-ttl <n>          multicast hop limit for Scout datagrams, default 1 =");
     eprintln!("                             one subnet (requires --scout)");
+    eprintln!("    --scout-listen           the OTHER direction: answer Scouts on the group so");
+    eprintln!("                             foreign nodes DISCOVER this one instead of being");
+    eprintln!("                             told its endpoint (zenoh scouting/multicast/listen).");
+    eprintln!("                             --peer mode; needs the `scouting-responder` feature.");
+    eprintln!("                             The Hello advertises the peer's own");
+    eprintln!("                             ADVERTISED SELF LOCATOR, and --scout-addr/-iface/-ttl");
+    eprintln!("                             select the group it answers on");
     eprintln!("    --router <addr>          multi-peer router mode: bind once, HOLD N concurrent");
     eprintln!(
         "                             peer faces (routing-router foundation, no forwarding)."
