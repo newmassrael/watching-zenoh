@@ -139,9 +139,9 @@ ONLY_CAPI = {
     "loss and health counters": (
         "wz_dissect_pcap_summary",
         "The CLI has no flag for these (capture drops, retransmits, sequence gaps, "
-        "checksums, framing desyncs). Measured across both surfaces in the SRS "
-        "audit: this is the ONE direction where the ABI is the richer surface, and "
-        "it is an OPEN DEBT on the CLI side rather than a decision.",
+        "checksums, framing desyncs). Measured by counting both surfaces: this is "
+        "the ONE direction where the ABI is the richer surface, and it is an OPEN "
+        "DEBT on the CLI side rather than a decision.",
     ),
     "a bounded read": (
         "wz_dissect_pcap_summary_bounded",
