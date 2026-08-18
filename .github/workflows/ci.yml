@@ -941,6 +941,14 @@ jobs:
         # only python3, and costs ~0s.
         run: bash scripts/run-ci.sh --layer C0e
 
+      - name: Layer C0f — layer Z restores the demo feature set it opened with
+        # R311y845. R311y843 registered this lane in run-ci.sh only, so it ran
+        # in a local full sweep and nowhere else — and Layer C0's own
+        # lane-parity gate reddened hosted CI for exactly that, one push later.
+        # Same reason C0i / C0b / C0d / C0e are lanes here: it reads run-ci.sh
+        # as text, needs only bash + awk, and costs ~0s.
+        run: bash scripts/run-ci.sh --layer C0f
+
       - name: Layer B — verify-codegen.sh per codec
         run: bash scripts/run-ci.sh --layer B
 
