@@ -502,7 +502,26 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
 {{
   mode: "client",
   connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
-  scouting: {{ multicast: {{ enabled: false }}, timeout: 2500 }},
+  // R311y846 — the four `multicast` leaves are named here BECAUSE they must
+  // reach nothing in this invocation, which is the half the unit tests cannot
+  // put in front of the binary. Each carries a command-line precondition this
+  // node does not meet (the socket three need `--scout` or `--scout-listen`;
+  // the answering one needs `--peer` and a feature this lane does not build),
+  // so an expansion that emitted any of them would hand a VALID operator config
+  // to a binary that exits(2) — the exact failure R311y844 measured and this
+  // fixture exists to keep measuring. Values are upstream's own defaults, and
+  // `listen: false` matches the `enabled: false` above: a client that dials an
+  // endpoint is not on the group in either direction.
+  scouting: {{
+    multicast: {{
+      enabled: false,
+      address: "224.0.0.224:7446",
+      interface: "auto",
+      ttl: 1,
+      listen: false,
+    }},
+    timeout: 2500,
+  }},
   transport: {{
     unicast: {{
       max_links: 2,
