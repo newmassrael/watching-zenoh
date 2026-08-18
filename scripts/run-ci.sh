@@ -2202,6 +2202,72 @@ layer_c0d_doclink_dependents() {
 # PREDICATES table -- the same objection C0b and C0d answer for their scripts:
 # a self-test the gate defines about itself cannot be told from one it silently
 # stopped running.
+# ─── Layer C0f — a lane that restores its own demo build must restore THE SAME one ─
+#
+# R311y843. Layer Z opens by building `wz-ap-demo` with a large feature set,
+# rebuilds it twice mid-lane for the `session-extqos` / `session-extshm` legs
+# (cargo uplifts every feature variant of one bin to ONE path, R311y269), and
+# then RESTATES the opening feature list verbatim to restore it. The two lists
+# are one fact written twice, and the restore line's own comment predicted the
+# hazard in prose: "a drift between the two lines would be silent."
+#
+# It drifted. R311y842 added `zenoh-config` to the opening line only, so every
+# leg after the restore ran a demo without it and the drop-in leg reddened
+# hosted CI — with the actionable message it was designed to print, which is the
+# only reason the cause was findable at all. One round of silence, and the
+# prediction had been sitting in the file for the whole time.
+#
+# The duplication cannot be removed: `feature_closure.py`'s A4-5 scraper reads
+# `cargo build -p wz-ap-demo[^\n|)]*?--features ([A-Za-z0-9_,-]+)` off the
+# LITERAL line, so a shell variable there would capture as nothing and drop the
+# whole set from the closure. What can be removed is the silence.
+#
+# The invariant, stated as the lane states it: the FIRST and LAST `--features`
+# sets in `layer_z_zenohd_interop` are the same SET (order-insensitive, since
+# only membership reaches cargo). Everything between them is a deliberate
+# one-leg rebuild and is not compared.
+layer_c0f_lane_demo_feature_restore() {
+    local script="scripts/run-ci.sh"
+    local sets
+    sets="$(awk '
+        /^layer_z_zenohd_interop\(\) \{/ { inside = 1 }
+        inside && /^\}/ { inside = 0 }
+        inside && /cargo build -p wz-ap-demo/ {
+            if (match($0, /--features [A-Za-z0-9_,-]+/)) {
+                print substr($0, RSTART + 11, RLENGTH - 11)
+            }
+        }
+    ' "$script")"
+
+    local count
+    count="$(printf '%s\n' "$sets" | grep -c . || true)"
+    # POPULATION, not exit status: an awk that matched nothing would print
+    # nothing and every comparison below would trivially hold. This lane exists
+    # because a silent zero is exactly how the class it gates went unnoticed.
+    if [[ "$count" -lt 2 ]]; then
+        echo "  Layer C0f FAIL: found $count wz-ap-demo build(s) with a feature list inside" \
+            "layer_z_zenohd_interop — expected the opening build and its restore, so either" \
+            "the lane was restructured or this reader stopped matching it" >&2
+        return 1
+    fi
+
+    local first last
+    first="$(printf '%s\n' "$sets" | head -n 1 | tr ',' '\n' | sort -u | paste -sd, -)"
+    last="$(printf '%s\n' "$sets" | tail -n 1 | tr ',' '\n' | sort -u | paste -sd, -)"
+    if [[ "$first" != "$last" ]]; then
+        echo "  Layer C0f FAIL: layer_z_zenohd_interop opens its wz-ap-demo build with one" \
+            "feature set and restores a DIFFERENT one, so every leg past the restore runs a" \
+            "binary the lane did not mean to build" >&2
+        echo "    opened:   $first" >&2
+        echo "    restored: $last" >&2
+        echo "    fix: make the restore line's --features identical to the opening line's" >&2
+        return 1
+    fi
+
+    echo "  C0f: layer Z opens and restores the same wz-ap-demo feature set ($count build(s) read)"
+    return 0
+}
+
 layer_c0e_inventory_tag_reader() {
     local script="scripts/lib/apfull_membership.py"
 
@@ -10381,9 +10447,19 @@ layer_z_zenohd_interop() {
     # Restore the lane's OWN demo build: the `session-extshm` build above wrote over
     # the same `--bin` path (R311y269 — cargo uplifts every feature variant of one
     # bin to one path), and every leg after this point expects the big feature set
-    # this lane opened with. Restated verbatim rather than referenced, because a
-    # drift between the two lines would be silent.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink --quiet) || return 1
+    # this lane opened with. Restated verbatim rather than referenced, because
+    # `feature_closure.py`'s A4-5 scraper reads the LITERAL list off this line
+    # and a shell variable would capture as nothing.
+    #
+    # R311y843 — that restatement DRIFTED, exactly the way the sentence here
+    # used to predict ("a drift between the two lines would be silent"), and it
+    # was silent for one round: R311y842 added `zenoh-config` to the opening
+    # build and not to this one, so every leg past this point ran a demo without
+    # the feature and `wz_reads_a_stock_zenohd_config`'s drop-in leg reddened
+    # hosted CI with its own "rebuild with --features zenoh-config" hint. A
+    # prediction in a comment is not a gate; Layer C0f now compares the two sets
+    # mechanically, which is what the prediction was asking for.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
     # R311y435 — wz COMPOSED lowlatency x compression cross-impl: the measurement
     # R311y434 explicitly did NOT claim ("no leg dials zenohd with both modes,
     # because the demo cannot stage both offers"). The offer-SET widening of
@@ -13015,6 +13091,7 @@ run_layer C0i layer_c0i_impact_ref_gate || overall=1
 run_layer C0b layer_c0b_job_budget_margin || overall=1
 run_layer C0d layer_c0d_doclink_dependents || overall=1
 run_layer C0e layer_c0e_inventory_tag_reader || overall=1
+run_layer C0f layer_c0f_lane_demo_feature_restore || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1
