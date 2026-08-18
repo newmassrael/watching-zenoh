@@ -742,29 +742,8 @@ impl<'a> CaptureReport<'a> {
         // MEANS. Structural like `gaps`: present with zeroes on a clean capture,
         // so a consumer's field lookup never depends on this particular file
         // having had that kind of trouble.
-        let sk = d.skip_census();
-        s.push_str(&format!(
-            ",\"skips\":{{\"unsupported_link_type\":{},\"truncated\":{},\
-             \"not_ip\":{},\"not_transport\":{},\"ipv4_fragment\":{},\
-             \"ip_fragment_pending\":{},\"vsock_non_payload\":{},\
-             \"ipv6_extension_chain\":{},\"ipv6_fragment\":{},\"link_types\":[",
-            sk.unsupported_link_type,
-            sk.truncated,
-            sk.not_ip,
-            sk.not_transport,
-            sk.ipv4_fragment,
-            sk.ip_fragment_pending,
-            sk.vsock_non_payload,
-            sk.ipv6_extension_chain,
-            sk.ipv6_fragment
-        ));
-        for (i, dlt) in sk.unsupported_link_types.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push_str(&format!("{dlt}"));
-        }
-        s.push_str("]}");
+        s.push_str(",\"skips\":");
+        skips_json(d.skip_census(), s);
         // R311y624 (§1.1m) — the FRAMING witnesses. Every figure below was
         // already computed by the dissection and none of it reached the
         // document, so a reader of the export could not see that a peer had
@@ -1174,24 +1153,33 @@ impl<'a> CaptureReport<'a> {
             }
         }
         // R311y643 (§1.1e) — the line that turns a skip COUNT into a
-        // diagnosis, and it leads with the link types because that is the one
-        // reason a reader can act on: every other skip is furniture in an
-        // otherwise-readable capture, while this one means the file was never
+        // diagnosis, and it leads with the link types because that is the
+        // reason with the loudest consequence: it means the file was never
         // read. Printed only when this build refused a link type at all.
+        //
+        // R311y859 CORRECTS what this comment used to assert — that "every
+        // other skip is furniture in an otherwise-readable capture". Three of
+        // the remaining eight are. The other five (`truncated`, both fragment
+        // counters, `ip_fragment_pending`, `ipv6_extension_chain`) each mean
+        // BYTES THE CAPTURE HOLDS ARE ABSENT from this dissection, and folding
+        // them into an unnamed total is how a reader concludes a short capture
+        // was whole. The breakdown below is printed whenever anything was
+        // skipped at all, which is the same qualifier every other line here
+        // uses; the belief that it was not needed is why it took this long.
         let sk = d.skip_census();
+        if !sk.is_empty() {
+            skips_text(sk, &mut s);
+        }
+        // The link types and their count are named by `skips_text` above; what
+        // stays here is the CONSEQUENCE, which is a judgement about this
+        // capture rather than a counter, and which the health document has no
+        // place for. Printing the identity a third time would be three
+        // spellings of one fact in one document.
         if !sk.unsupported_link_types.is_empty() {
-            let mut dlts = String::new();
-            for (i, dlt) in sk.unsupported_link_types.iter().enumerate() {
-                if i > 0 {
-                    dlts.push_str(", ");
-                }
-                dlts.push_str(&format!("{dlt}"));
-            }
-            s.push_str(&format!(
-                "  link type not read by this build: {} ({} packet(s)); \
-                 this capture was not dissected\n",
-                dlts, sk.unsupported_link_type
-            ));
+            s.push_str(
+                "  this capture was not dissected: its link type is not \
+                 decapsulated by this build\n",
+            );
         }
         // R311y648 (§1.2a) — the line that stops an encrypted capture reading
         // as an idle one. Printed only when there IS such a flow, like every
@@ -2188,6 +2176,93 @@ fn escape_into(value: &str, out: &mut String) {
     }
 }
 
+/// R311y859 — the skip census as JSON, written ONCE.
+///
+/// Two documents carry it — the capture report and [`health_json`] — and they
+/// carry the same object rather than two selections of one census, which is the
+/// distinction `debt-census-emit-two-renderings` is about. The alternative was
+/// on the table and is what this round refused: a second `format!` in
+/// `health_json` naming the fields it happened to think mattered, which is
+/// exactly how the health surface came to omit all nine in the first place.
+///
+/// `total` is emitted rather than left to the consumer to sum. A reader adding
+/// nine fields is a reader who will be short by one the next time a reason is
+/// added, and [`crate::SkipCensus::total`] is the figure the dissection already
+/// cross-checks against `packets_skipped`.
+fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
+    s.push_str(&format!(
+        "{{\"total\":{},\"unsupported_link_type\":{},\"truncated\":{},\
+         \"not_ip\":{},\"not_transport\":{},\"ipv4_fragment\":{},\
+         \"ip_fragment_pending\":{},\"vsock_non_payload\":{},\
+         \"ipv6_extension_chain\":{},\"ipv6_fragment\":{},\"link_types\":[",
+        sk.total(),
+        sk.unsupported_link_type,
+        sk.truncated,
+        sk.not_ip,
+        sk.not_transport,
+        sk.ipv4_fragment,
+        sk.ip_fragment_pending,
+        sk.vsock_non_payload,
+        sk.ipv6_extension_chain,
+        sk.ipv6_fragment
+    ));
+    for (i, dlt) in sk.unsupported_link_types.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!("{dlt}"));
+    }
+    s.push_str("]}");
+}
+
+/// R311y859 — the skip census for a person at a terminal, SPLIT BY WHAT IT
+/// COSTS the reader rather than printed as nine equal numbers.
+///
+/// The split is the finding, not the formatting. Six of the nine reasons mean
+/// BYTES THE CAPTURE HOLDS ARE ABSENT from this dissection — a snaplen cut the
+/// packet short, a fragment other than the first was walked past by a consumer
+/// that does not reassemble, a chain was still waiting for its rest, an IPv6
+/// header this build may not walk past (ESP among them) ended the chain, or the
+/// link type was never decapsulated at all. The other three are ordinary
+/// furniture in a readable capture: ARP and its neighbours, IP that is neither
+/// TCP nor UDP, and a vsock control op that carries no payload.
+///
+/// Until this round the text surface named ONE of the nine and a comment beside
+/// it called the other eight furniture. That is true of three of them. Reading
+/// it as true of `truncated` or of either fragment counter is how a reader
+/// concludes a short capture was whole.
+fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
+    s.push_str(&format!("  reader skipped: {} packet(s)\n", sk.total()));
+    s.push_str(&format!(
+        "    bytes this dissection does not hold: {} truncated, \
+         {} IPv4 fragment, {} IPv6 fragment, {} IP fragment pending, \
+         {} IPv6 extension chain, {} link type not read\n",
+        sk.truncated,
+        sk.ipv4_fragment,
+        sk.ipv6_fragment,
+        sk.ip_fragment_pending,
+        sk.ipv6_extension_chain,
+        sk.unsupported_link_type
+    ));
+    s.push_str(&format!(
+        "    not this protocol: {} not IP, {} not TCP or UDP, \
+         {} vsock control\n",
+        sk.not_ip, sk.not_transport, sk.vsock_non_payload
+    ));
+    if !sk.unsupported_link_types.is_empty() {
+        let mut dlts = String::new();
+        for (i, dlt) in sk.unsupported_link_types.iter().enumerate() {
+            if i > 0 {
+                dlts.push_str(", ");
+            }
+            dlts.push_str(&format!("{dlt}"));
+        }
+        s.push_str(&format!(
+            "    link type(s) not read by this build: {dlts}\n"
+        ));
+    }
+}
+
 /// R311y857 — WHAT THE DISSECTION LOST, AND WHO LOST IT, as one document.
 ///
 /// # Why this is here rather than in the C ABI, where it was written
@@ -2220,6 +2295,12 @@ fn escape_into(value: &str, out: &mut String) {
 /// - `fragments` / `streams` / `framing` / `sequence` — what the WIRE did:
 ///   reordering, retransmission, chains that never completed, framing this
 ///   reader had to resynchronise, sequence numbers that never arrived.
+/// - `skips` (R311y859) — THIS BUILD's own reach. A packet the decapsulator
+///   walked past is a packet the capture holds and no row does, and the owner
+///   of that loss is neither the tool, nor the caps, nor the wire: it is the
+///   reader. Its absence here is what this round repaired — a document titled
+///   "what the dissection lost" carried every loss except the one class whose
+///   remedy is to fix this program.
 ///
 /// `capture_reported_drops` is `null` and not `0` when the file made no
 /// statement, and the difference IS the field's value: a classic pcap has
@@ -2243,7 +2324,7 @@ pub fn health_json(d: &crate::Dissection) -> String {
         Some(n) => n.to_string(),
         None => String::from("null"),
     };
-    format!(
+    let mut out = format!(
         "{{\
          \"capture_reported_drops\":{reported},\
          \"dropped_by_limits\":{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\
@@ -2259,7 +2340,8 @@ pub fn health_json(d: &crate::Dissection) -> String {
          \"reserved_headers\":{},\
          \"ws_desyncs\":{},\"ws_recoveries\":{},\"ws_resync_skipped_bytes\":{}}},\
          \"sequence\":{{\"frames\":{},\"missing\":{},\"gaps\":{},\
-         \"duplicates\":{},\"out_of_window\":{},\"without_resolution\":{}}}}}",
+         \"duplicates\":{},\"out_of_window\":{},\"without_resolution\":{}}},\
+         \"skips\":",
         drops.frames,
         drops.stream_bytes,
         drops.skipped,
@@ -2295,7 +2377,10 @@ pub fn health_json(d: &crate::Dissection) -> String {
         fr.sn_duplicates,
         fr.sn_out_of_window,
         fr.sn_without_resolution,
-    )
+    );
+    skips_json(d.skip_census(), &mut out);
+    out.push('}');
+    out
 }
 
 /// R311y857 — the same counters for a person at a terminal.
@@ -2371,6 +2456,7 @@ pub fn health_text(d: &crate::Dissection) -> String {
         fr.sn_out_of_window,
         fr.sn_without_resolution
     ));
+    skips_text(d.skip_census(), &mut s);
     s
 }
 
@@ -3530,9 +3616,21 @@ mod tests {
         }
         let r = CaptureReport::of(&d);
         let text = r.to_text();
+        // R311y859 — the identity moved into the skip breakdown, which is where
+        // every other reason is named and where the health surface reads it
+        // from. The PIN follows it rather than being dropped: what it defends is
+        // that the text says WHICH link type, and that is as true after the move.
         assert!(
-            text.contains("link type not read by this build: 250"),
+            text.contains("link type(s) not read by this build: 250"),
             "the text must name what it refused: {text}"
+        );
+        // R311y859 — and the CONSEQUENCE is a second fact, pinned separately.
+        // A capture whose link type this build cannot read is not a quiet
+        // deployment, and that judgement is the one thing the counters cannot
+        // carry.
+        assert!(
+            text.contains("this capture was not dissected"),
+            "the text must say what the refusal cost: {text}"
         );
         let json = r.to_json();
         assert!(
@@ -4467,5 +4565,167 @@ mod tests {
                 "the export must carry {key} with ITS OWN value {value}: {json}"
             );
         }
+    }
+
+    /// Ethernet + IPv4 carrying an arbitrary protocol number.
+    fn eth_ipv4_proto(proto: u8, body: &[u8]) -> alloc::vec::Vec<u8> {
+        let mut ip = alloc::vec::Vec::new();
+        ip.push(0x45);
+        ip.push(0);
+        ip.extend_from_slice(&((20 + body.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&0u16.to_be_bytes());
+        ip.extend_from_slice(&0u16.to_be_bytes());
+        ip.push(64);
+        ip.push(proto);
+        ip.extend_from_slice(&0u16.to_be_bytes());
+        ip.extend_from_slice(&[10, 0, 0, 1]);
+        ip.extend_from_slice(&[10, 0, 0, 2]);
+        ip.extend_from_slice(body);
+
+        let mut eth = alloc::vec![0u8; 12];
+        eth.extend_from_slice(&0x0800u16.to_be_bytes());
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// Ethernet + IPv6 whose next header is the one asked for.
+    fn eth_ipv6_next(next_header: u8) -> alloc::vec::Vec<u8> {
+        let mut ip = alloc::vec::Vec::new();
+        ip.extend_from_slice(&0x6000_0000u32.to_be_bytes());
+        ip.extend_from_slice(&8u16.to_be_bytes());
+        ip.push(next_header);
+        ip.push(64);
+        ip.extend_from_slice(&[0u8; 16]);
+        ip.extend_from_slice(&[0u8; 16]);
+        ip.extend_from_slice(&[0u8; 8]);
+
+        let mut eth = alloc::vec![0x02u8; 12];
+        eth.extend_from_slice(&0x86ddu16.to_be_bytes());
+        eth.extend_from_slice(&ip);
+        eth
+    }
+
+    /// PROBE — every skip this reader COUNTS must reach the surface that claims
+    /// to hold every loss counter.
+    #[test]
+    fn every_skip_reason_the_reader_counts_reaches_the_health_surface() {
+        let mut d = crate::Dissection::new();
+        let mut arp = alloc::vec![0u8; 12];
+        arp.extend_from_slice(&[0x08, 0x06]);
+        arp.extend_from_slice(&[0u8; 46]);
+        d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &arp);
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            1,
+            &eth_ipv4_proto(1, &[0u8; 8]),
+        );
+        let mut short = alloc::vec![0u8; 12];
+        short.extend_from_slice(&[0x08, 0x00]);
+        short.extend_from_slice(&[0x45, 0, 0, 40, 0]);
+        d.push_packet(crate::link::LINKTYPE_ETHERNET, 2, &short);
+        d.push_packet(crate::link::LINKTYPE_ETHERNET, 3, &eth_ipv6_next(50));
+        d.finish();
+
+        let sk = d.skip_census();
+        assert_eq!(
+            (
+                sk.not_ip,
+                sk.not_transport,
+                sk.truncated,
+                sk.ipv6_extension_chain
+            ),
+            (1, 1, 1, 1),
+            "the fixture must reach four DIFFERENT reasons: {sk:?}"
+        );
+
+        // CONTROL: the counters exist and the capture document already carries
+        // them, so what the legs below measure is a RENDERING that omits what
+        // the reader already knows.
+        let json = CaptureReport::of(&d).to_json();
+        for key in [
+            "not_ip",
+            "not_transport",
+            "truncated",
+            "ipv6_extension_chain",
+        ] {
+            assert!(
+                json.contains(&alloc::format!("\"{key}\":1")),
+                "the capture document already carries {key}: {json}"
+            );
+        }
+
+        // The COUNT is asserted beside the NAME. A rendering that printed the
+        // nine labels with a total under them would satisfy a name-only leg
+        // while telling a reader nothing about which reason fired.
+        let health = health_text(&d);
+        for label in [
+            "1 not IP",
+            "1 not TCP or UDP",
+            "1 truncated",
+            "1 IPv6 extension chain",
+            "reader skipped: 4 packet(s)",
+        ] {
+            assert!(
+                health.contains(label),
+                "health text must name `{label}` rather than fold it into one total: {health}"
+            );
+        }
+
+        let hjson = health_json(&d);
+        for key in [
+            "\"total\":4",
+            "\"not_ip\":1",
+            "\"not_transport\":1",
+            "\"truncated\":1",
+            "\"ipv6_extension_chain\":1",
+        ] {
+            assert!(
+                hjson.contains(key),
+                "the health document must carry {key}: {hjson}"
+            );
+        }
+
+        // The capture SUMMARY names them too -- the surface an operator reads
+        // without asking for `--health`, and the one that used to print a bare
+        // total plus a line about link types.
+        let text = CaptureReport::of(&d).to_text();
+        assert!(
+            text.contains("1 truncated") && text.contains("1 not TCP or UDP"),
+            "the capture summary must name the reasons it skipped for: {text}"
+        );
+    }
+
+    /// The other half of the leg above: a capture that skipped NOTHING must not
+    /// grow a block about skipping, and the health document must carry the
+    /// group anyway.
+    ///
+    /// Without this, a rendering that printed the breakdown unconditionally
+    /// would pass every assertion above while making every clean capture report
+    /// look like it had trouble -- and a structural group that vanished on a
+    /// clean capture would make a consumer's field lookup depend on the file.
+    #[test]
+    fn a_capture_that_skipped_nothing_says_so_only_where_the_document_is_structural() {
+        let d = crate::Dissection::new();
+        assert!(d.skip_census().is_empty(), "the control must skip nothing");
+
+        let text = CaptureReport::of(&d).to_text();
+        assert!(
+            !text.contains("reader skipped"),
+            "a clean capture is not told about a hazard it does not have: {text}"
+        );
+
+        let health = health_text(&d);
+        assert!(
+            health.contains("reader skipped: 0 packet(s)"),
+            "the health document is structural, so the group is present with zeroes: {health}"
+        );
+        assert!(
+            health_json(&d).contains("\"skips\":{\"total\":0"),
+            "and so is its JSON: {}",
+            health_json(&d)
+        );
     }
 }

@@ -7300,6 +7300,14 @@ layer_c1bo_dissect_c_abi() {
 #      smaller — the shape R311y611 hit when three MID censuses had to be
 #      confirmed in the no-default `--list` one by one. The SET is pinned, not
 #      the count, so adding a test does not red the lane and losing one does.
+#
+# R311y859 adds the two SKIP-CENSUS witnesses to the set below, and the reason
+# is here rather than in a commit message. What they defend is a SILENCE: the
+# health document claims to hold every loss counter this reader keeps, and for
+# one round of its life it held none of the nine skip reasons. A witness for a
+# thing that is absent is exactly the witness a later round deletes as
+# redundant, because the rendering it guards looks obviously correct once it is
+# there. Both run in this arm, which is the leanest build that has them.
 layer_c1bt_capture_no_default_features() {
     local out listing missing name
     (cd crates && cargo clippy -p wz-capture --no-default-features --all-targets \
@@ -7331,6 +7339,8 @@ layer_c1bt_capture_no_default_features() {
         datagram_tests::a_frame_carries_the_capture_instant_in_every_feature_arm \
         report::tests::every_character_json_requires_escaping_is_escaped_as_the_rfc_names_it \
         report::tests::a_keyexpr_cannot_end_the_field_it_is_printed_in \
+        report::tests::every_skip_reason_the_reader_counts_reaches_the_health_surface \
+        report::tests::a_capture_that_skipped_nothing_says_so_only_where_the_document_is_structural \
         filter::tests::a_record_whose_keyexpr_never_resolved_is_undecided_rather_than_rejected \
         filter::tests::a_clockless_capture_cannot_decide_a_time_term \
         filter::tests::the_three_valued_connectives_follow_kleene_rather_than_infecting \
