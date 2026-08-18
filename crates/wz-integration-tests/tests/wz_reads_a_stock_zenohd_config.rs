@@ -502,22 +502,73 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
 {{
   mode: "client",
   connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
-  scouting: {{ multicast: {{ enabled: false }} }},
+  scouting: {{ multicast: {{ enabled: false }}, timeout: 2500 }},
   transport: {{
-    unicast: {{ compression: {{ enabled: true }} }},
-    link: {{ tx: {{ batch_size: 4096, lease: 3000 }} }},
+    unicast: {{
+      max_links: 2,
+      lowlatency: false,
+      qos: {{ enabled: true }},
+      compression: {{ enabled: true }},
+    }},
+    multicast: {{ qos: {{ enabled: true }} }},
+    shared_memory: {{ enabled: false }},
+    link: {{
+      tls: {{
+        root_ca_certificate: "/etc/wz/ca.pem",
+        listen_certificate: "/etc/wz/server.pem",
+        listen_private_key: "/etc/wz/server.key",
+      }},
+      tx: {{ batch_size: 4096, lease: 3000 }},
+    }},
   }},
-  // R311y844 — two of the ten promoted keys, here because the expansion
-  // produces a VALUE for each and only a running demo can say whether its own
-  // parser accepts the shape zenoh writes: `id` becomes `--zid <hex>` and
-  // `namespace` becomes `--namespace <keyexpr>`. A unit test on `added` sees
-  // the string and not the parse, and an argv the demo rejects exits 2 before
-  // any session, which this leg would catch as "never established".
+  // R311y844 — this file now names EVERY honoured key, which turns this leg
+  // into the gate for a class the unit tests are structurally blind to: they
+  // check the argv the expansion BUILDS, and the failure mode is an argv the
+  // demo REFUSES. Four of the flags exit(2) when a precondition is unmet
+  // (`--scout-timeout-ms requires --scout`, `--query-timeout-ms requires
+  // --query`, and two that need a cargo feature), and the round's first cut
+  // emitted them unconditionally — measured, by running this binary and
+  // getting `--scout-timeout-ms requires --scout` and rc=2 out of a VALID
+  // stock config. The expansion withholds them now, and this fixture is what
+  // notices if it stops.
+  //
+  // The unhonoured keys stay out on purpose: they are reported, and this leg
+  // is about the ones wz claims to apply.
   id: "a1b2c3d4",
   namespace: "demo/ns",
+  timestamping: {{ enabled: true }},
+  queries_default_timeout: 11000,
+  routing: {{ interests: {{ timeout: 9000 }} }},
+  adminspace: {{ enabled: true, permissions: {{ read: true, write: false }} }},
 }}
 "#
     );
+    // R311y844 — COVERAGE, so the gate above cannot silently narrow: a
+    // twenty-fifth honoured key that this fixture does not name would never be
+    // put in front of the binary, and the leg would go on passing while the
+    // class it now covers reopened.
+    let client_ingest = ZenohNodeConfig::from_json5(&client_source)
+        .unwrap_or_else(|e| panic!("the drop-in fixture is not readable: {e}\n{client_source}"));
+    let mut fixture_names = client_ingest.named.clone();
+    // `listen/endpoints` is the ONE honoured key this leg's role forbids, the
+    // mirror of the exception the oracle leg makes for `connect/endpoints`: a
+    // client that also listens expands to `--listen` instead of `--connect`,
+    // which is a different node from the one this leg is about. Named here
+    // rather than left as a silent shortfall.
+    let mut every_honoured: Vec<&str> = HONOURED_CONFIG_KEYS
+        .iter()
+        .copied()
+        .filter(|k| *k != "listen/endpoints")
+        .collect();
+    fixture_names.sort_unstable();
+    every_honoured.sort_unstable();
+    assert_eq!(
+        fixture_names, every_honoured,
+        "the drop-in fixture must name every honoured key a connecting client \
+         can carry, so every flag the expansion can emit is one this binary is \
+         asked to accept"
+    );
+
     let client_file = staged_config(&client_source);
     drop(reservation);
 

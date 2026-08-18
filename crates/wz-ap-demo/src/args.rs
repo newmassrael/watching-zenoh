@@ -401,51 +401,79 @@ pub(crate) fn expand_stock_zenoh_config(
     // timeout, so naming the key IS the instruction); the two booleans follow
     // the rule the rest of this function uses and act only on a named `true`,
     // because acting on a merged default would add a flag to every invocation.
-    for (key, flag, value) in [
-        ("id", "--zid", cfg.id.as_ref()),
-        ("namespace", "--namespace", cfg.namespace.as_ref()),
+    // The TLS material is gated on the ENDPOINT SCHEME, which is the third kind
+    // of precondition this round had to learn (after a cargo feature and a
+    // sibling flag). `--tls-ca` opens its file EAGERLY — measured, as
+    // `wz-ap-demo: No such file or directory (os error 2)` out of a `tcp/`
+    // connect whose config happened to carry a CA path — so expanding it for a
+    // node with no TLS link turns a valid config into a node that will not
+    // start. zenoh scopes these keys to TLS links; so does this.
+    let dials_tls = cfg.connect.iter().any(|e| e.starts_with("tls/"));
+    let listens_tls = cfg.listen.iter().any(|e| e.starts_with("tls/"));
+    for (key, flag, value, usable) in [
+        ("id", "--zid", cfg.id.as_ref(), true),
+        ("namespace", "--namespace", cfg.namespace.as_ref(), true),
         (
             "transport/link/tls/root_ca_certificate",
             "--tls-ca",
             cfg.tls_root_ca.as_ref(),
+            dials_tls,
         ),
         (
             "transport/link/tls/listen_certificate",
             "--tls-cert",
             cfg.tls_listen_certificate.as_ref(),
+            listens_tls,
         ),
         (
             "transport/link/tls/listen_private_key",
             "--tls-key",
             cfg.tls_listen_private_key.as_ref(),
+            listens_tls,
         ),
     ] {
         if let Some(value) = value {
-            if named(key) && !rest.iter().any(|a| a == flag) {
+            if usable && named(key) && !rest.iter().any(|a| a == flag) {
                 added.push(String::from(flag));
                 added.push(value.clone());
             }
         }
     }
-    for (key, flag, value) in [
+    // The millisecond keys, each gated on the PRECONDITION its flag carries.
+    //
+    // R311y844 measured this rather than assuming it, and the measurement
+    // changed the round: four of the ten flags exit(2) when their precondition
+    // is unmet — `--scout-timeout-ms requires --scout`, `--query-timeout-ms
+    // requires --query`, and the two feature ones — so a first cut that emitted
+    // them unconditionally turned an operator's VALID stock config into a node
+    // that refuses to start, which is strictly worse than the "reported and
+    // ignored" it replaced. Those rejections exist for a HAND-TYPED flag, where
+    // silence would lose an instruction the operator gave directly; a key that
+    // arrives inside a file full of keys wz cannot all act on is the opposite
+    // case, and the honest answer there is to leave the flag off.
+    let preconditioned: [(&str, &str, Option<u64>, bool); 3] = [
         (
             "queries_default_timeout",
             "--query-timeout-ms",
             cfg.queries_default_timeout_ms,
+            rest.iter().any(|a| a == "--query"),
         ),
         (
             "routing/interests/timeout",
             "--interest-timeout",
             cfg.interests_timeout_ms,
+            cfg!(feature = "routing-interest-pending-gc"),
         ),
         (
             "scouting/timeout",
             "--scout-timeout-ms",
             cfg.scouting_timeout_ms,
+            rest.iter().any(|a| a == "--scout"),
         ),
-    ] {
+    ];
+    for (key, flag, value, usable) in preconditioned {
         if let Some(value) = value {
-            if named(key) && !rest.iter().any(|a| a == flag) {
+            if usable && named(key) && !rest.iter().any(|a| a == flag) {
                 added.push(String::from(flag));
                 added.push(value.to_string());
             }
@@ -453,6 +481,7 @@ pub(crate) fn expand_stock_zenoh_config(
     }
     if named("transport/multicast/qos/enabled")
         && cfg.multicast_qos
+        && cfg!(feature = "transport-qos")
         && !rest.iter().any(|a| a == "--multicast-qos")
     {
         added.push("--multicast-qos".into());
@@ -718,7 +747,7 @@ mod stock_config_tests {
     /// difference is attributable to the ONE key that differs — a variant that
     /// merely gains an endpoint would otherwise credit the key for the
     /// endpoint's flag. A key that changes nothing must be NAMED in
-    /// `CONFIG_KEYS_THE_DEMO_DROPS`: the discipline
+    /// `config_keys_the_demo_drops()`: the discipline
     /// `UNHONOURED_UPSTREAM_CONFIG_KEYS` applies to zenoh's surface, applied
     /// one level down to wz's own.
     ///
@@ -727,24 +756,60 @@ mod stock_config_tests {
     /// the demo does with it.
     const LISTEN_ONLY: &str = r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#;
     const CONNECT_ONLY: &str = r#"{ connect: { endpoints: ["tcp/r:7447"] } }"#;
+    const LISTEN_TLS: &str = r#"{ listen: { endpoints: ["tls/0.0.0.0:7447"] } }"#;
+    const CONNECT_TLS: &str = r#"{ connect: { endpoints: ["tls/r:7447"] } }"#;
 
     /// Keys the reader ingests that reach NO behaviour in this binary.
     ///
     /// Empty is the goal and not the invariant — a key with no sink is a
     /// legitimate state, but it has to be written down here rather than hide
     /// behind a report that calls it honoured.
-    const CONFIG_KEYS_THE_DEMO_DROPS: &[&str] = &[
-        // Reachability, not a role: `scouting/multicast/enabled` says whether
-        // to LISTEN for a scout beacon, and the demo's `--scout` says to
-        // discover INSTEAD of dialling, which is a different sentence. Mapping
-        // one onto the other would rewrite the operator's topology.
-        "scouting/multicast/enabled",
-        // No sink in this binary: nothing on the demo's push path stamps a
-        // source timestamp — `Timestamp` does not occur anywhere under
-        // `wz-ap-demo/src/` — so there is no flag to expand into and honouring
-        // it would be a claim about a plane that does not exist yet.
-        "timestamping/enabled",
-    ];
+    /// R311y844 made this BUILD-DEPENDENT, and the two kinds inside it are
+    /// worth telling apart. The first two rows are keys with no sink at all in
+    /// this binary. The `cfg!` rows are keys whose sink exists but is compiled
+    /// out here: their flags exit(2) when the feature is absent, so expanding
+    /// into one would turn a valid stock config into a node that refuses to
+    /// start — which is what the round measured its own first cut doing.
+    fn config_keys_the_demo_drops() -> Vec<&'static str> {
+        let mut out = vec![
+            // Reachability, not a role: `scouting/multicast/enabled` says
+            // whether to LISTEN for a scout beacon, and the demo's `--scout`
+            // says to discover INSTEAD of dialling, which is a different
+            // sentence. Mapping one onto the other would rewrite the
+            // operator's topology.
+            "scouting/multicast/enabled",
+            // No sink in this binary: nothing on the demo's push path stamps a
+            // source timestamp — `Timestamp` does not occur anywhere under
+            // `wz-ap-demo/src/` — so there is no flag to expand into and
+            // honouring it would be a claim about a plane that does not exist
+            // yet.
+            "timestamping/enabled",
+        ];
+        if !cfg!(feature = "routing-interest-pending-gc") {
+            out.push("routing/interests/timeout");
+        }
+        if !cfg!(feature = "transport-qos") {
+            out.push("transport/multicast/qos/enabled");
+        }
+        out
+    }
+
+    /// The invocation a key is applicable IN.
+    ///
+    /// R311y844 — two of the flags this table drives carry a command-line
+    /// PRECONDITION and exit(2) without it (`--scout-timeout-ms requires
+    /// --scout`, `--query-timeout-ms requires --query`), so the expansion
+    /// withholds them there and a fixture that did not supply the precondition
+    /// would read the withholding as "the key reaches nothing". Both sides of a
+    /// pair get the same cli, so the delta stays attributable to the one key
+    /// that differs.
+    fn cli_for(key: &str) -> &'static [&'static str] {
+        match key {
+            "queries_default_timeout" => &["--config", "z.json5", "--query", "demo/**"],
+            "scouting/timeout" => &["--config", "z.json5", "--scout"],
+            _ => &["--config", "z.json5"],
+        }
+    }
 
     /// `(key, control, variant)` — the variant differs from the control in
     /// exactly the one key, and must NAME it.
@@ -883,22 +948,25 @@ mod stock_config_tests {
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { shared_memory: { enabled: true } } }"#,
             ),
+            // The TLS three need a TLS endpoint in the fixture: the expansion
+            // withholds the flags on a node with no TLS link, so a tcp control
+            // would read the withholding as "the key reaches nothing".
             (
                 "transport/link/tls/root_ca_certificate",
-                LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                CONNECT_TLS,
+                r#"{ connect: { endpoints: ["tls/r:7447"] },
                      transport: { link: { tls: { root_ca_certificate: "/etc/ca.pem" } } } }"#,
             ),
             (
                 "transport/link/tls/listen_certificate",
-                LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                LISTEN_TLS,
+                r#"{ listen: { endpoints: ["tls/0.0.0.0:7447"] },
                      transport: { link: { tls: { listen_certificate: "/etc/srv.pem" } } } }"#,
             ),
             (
                 "transport/link/tls/listen_private_key",
-                LISTEN_ONLY,
-                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                LISTEN_TLS,
+                r#"{ listen: { endpoints: ["tls/0.0.0.0:7447"] },
                      transport: { link: { tls: { listen_private_key: "/etc/srv.key" } } } }"#,
             ),
         ]
@@ -919,18 +987,19 @@ mod stock_config_tests {
             got, want,
             "the fixture table and HONOURED_CONFIG_KEYS have diverged"
         );
-        for dropped in CONFIG_KEYS_THE_DEMO_DROPS {
+        for dropped in config_keys_the_demo_drops() {
             assert!(
-                HONOURED_CONFIG_KEYS.contains(dropped),
+                HONOURED_CONFIG_KEYS.contains(&dropped),
                 "{dropped} is pinned as dropped but is not a honoured key"
             );
         }
 
         let mut reached_nothing: Vec<&str> = Vec::new();
         for (key, control, variant) in &fixtures {
-            let base = expand(&["--config", "z.json5"], control)
+            let cli = cli_for(key);
+            let base = expand(cli, control)
                 .unwrap_or_else(|e| panic!("{key}: the control config is not readable: {e}"));
-            let with = expand(&["--config", "z.json5"], variant)
+            let with = expand(cli, variant)
                 .unwrap_or_else(|e| panic!("{key}: the variant config is not readable: {e}"));
             // Vacuity guard: a fixture that does not actually name the key
             // would report "dropped" for a typo in this table.
@@ -945,12 +1014,12 @@ mod stock_config_tests {
         }
 
         reached_nothing.sort_unstable();
-        let mut pinned: Vec<&str> = CONFIG_KEYS_THE_DEMO_DROPS.to_vec();
+        let mut pinned: Vec<&str> = config_keys_the_demo_drops();
         pinned.sort_unstable();
         assert_eq!(
             reached_nothing, pinned,
             "a key the report calls honoured reaches no behaviour and is not \
-             named in CONFIG_KEYS_THE_DEMO_DROPS (or one named there now does \
+             named in config_keys_the_demo_drops() (or one named there now does \
              something and should be removed)"
         );
     }
