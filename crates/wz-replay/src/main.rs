@@ -369,6 +369,17 @@ fn run_alert(
         census: wz_analyze::Census::all(),
         per_field: false,
         select: None,
+        // R311y860 — `false`, and stated rather than defaulted, on the same
+        // rule as the two fields above: `health` is a RENDERING of counters
+        // this path does not render. The alert reads `outcome`, and the verdict
+        // in it is computed whatever this field says, so asking for the health
+        // document here would add bytes to a JSON string that is thrown away.
+        //
+        // The field arrived in R311y857 and this initializer was not updated,
+        // so `wz-replay` had not compiled since. Nothing local caught it: the
+        // pre-push hook tests the crates the push CHANGES, and the round that
+        // widened the struct changed `wz-analyze`, not this crate.
+        health: false,
     };
     let outcome = match wz_analyze::analyze_request(&request) {
         Ok((_rendered, outcome)) => outcome,

@@ -278,6 +278,32 @@ PREDICATES = [
             "scout_askers",
         )
     ],
+    # R311y860 -- `SkipCensus::bytes_absent`, six counters SUMMED. Same unit as
+    # `drops.any` above and for the same reason: each field is a different way
+    # for the capture to be short, and zeroing one asks "is there a capture that
+    # loses bytes exactly THIS way, and does anything notice".
+    #
+    # The sum has no threshold inside it, which is why the relaxation is per
+    # field rather than a `> 0` moved to `> 1`: the threshold lives at the
+    # guard, where `boundary` already mutates it. What is one level down here is
+    # the SET of reasons, not a number.
+    *[
+        (
+            f"SkipCensus.bytes_absent/{f}",
+            "crates/wz-capture/src/lib.rs",
+            "pub fn bytes_absent(&self) -> usize {",
+            f"self.{f}",
+            "0",
+        )
+        for f in (
+            "unsupported_link_type",
+            "truncated",
+            "ipv4_fragment",
+            "ip_fragment_pending",
+            "ipv6_extension_chain",
+            "ipv6_fragment",
+        )
+    ],
     # The two gap structs compare against `default()`, so there is no threshold
     # to move -- the relaxation has to be per FIELD, which is the right unit
     # anyway: each field is a different way for the plane to be short.
@@ -328,9 +354,35 @@ PREDICATES = [
 # be reduced to a single instance today (the exchange gap counters); these six
 # need a fixture built around the bound rather than a fixture adjusted.
 #
-# None of these is claimed to be IMPOSSIBLE. They are unbuilt, which is a
-# different sentence and the honest one.
+# R311y860 admits a SECOND class, because the first two entries are not of the
+# kind the paragraph above describes and filing them as "unbuilt" would be the
+# dishonest half of an honest register. `SkipReason::Ipv4Fragment` and
+# `SkipReason::Ipv6Fragment` are constructed NOWHERE in this tree: every IP
+# fragment `Dissection` sees goes to the reassembly table and is recorded as
+# `IpFragmentPending` or completes. The counters they feed are therefore
+# structurally zero, and no fixture can move them without a code change.
+#
+# So the register now carries two sentences, and each entry says which it is:
+# UNBUILT (a fixture nobody has written) or UNREACHABLE (a counter no path
+# sets). The difference matters to a reader deciding what to do about it — the
+# first is a test to write, the second is a decision about whether the counter
+# should exist at all, which is filed as a carry rather than taken here.
 UNWITNESSED = {
+    "SkipCensus.bytes_absent/ipv4_fragment": (
+        "UNREACHABLE: nothing in this tree constructs `SkipReason::Ipv4Fragment`. "
+        "`Dissection::push_packet` routes every IPv4 fragment to `push_fragment`, "
+        "which records `IpFragmentPending` or completes the datagram "
+        "(crates/wz-capture/src/lib.rs:4061). The variant exists for a consumer "
+        "of `link::strip_transport` that declines to reassemble, and this tree "
+        "has none, so the counter is structurally zero and a fixture cannot "
+        "move it."
+    ),
+    "SkipCensus.bytes_absent/ipv6_fragment": (
+        "UNREACHABLE: the v6 twin of the row above, and unreachable for the same "
+        "reason — the IPv6 fragment header reaches the same reassembly table. "
+        "Both are reported in the skip census and in both renderings as fields "
+        "that can never be non-zero, which is the part worth deciding about."
+    ),
 }
 
 
@@ -350,6 +402,7 @@ UNWITNESSED = {
 # what made R311y731 stop at names.
 COVERED_TYPES = {
     ("DissectionDrops", "any"),
+    ("SkipCensus", "bytes_absent"),
     ("ThroughputGaps", "is_clean"),
     ("ExchangeGaps", "is_clean"),
     ("Selection", "is_decisive"),
@@ -361,7 +414,15 @@ COVERED_TYPES = {
 CALL = re.compile(r"\.(\w+)\(\)")
 
 # An accessor's declared return type, and the `impl` a recipe sits in.
-RETURNS = re.compile(r"\bfn\s+{name}\s*\(\s*&self\s*\)\s*->\s*([\w:]+)")
+#
+# R311y860 — the return may be a REFERENCE, and until this round the pattern
+# stopped at the `&`. `Dissection::skip_census` returns `&SkipCensus`, so the
+# type came back as the empty set and the guard leaning on it was reported as
+# `<unknown:skip_census>`: an honest refusal, but one that named the accessor
+# rather than the type, so the reader could not tell "this predicate has no
+# recipe" from "this tool cannot see the type". A borrowed threshold is exactly
+# as mutable as an owned one; the borrow is a calling convention.
+RETURNS = re.compile(r"\bfn\s+{name}\s*\(\s*&self\s*\)\s*->\s*&?(?:'\w+\s+)?([\w:]+)")
 IMPL = re.compile(r"^impl(?:<[^>]*>)?\s+([A-Za-z_]\w*)", re.M)
 
 
@@ -967,8 +1028,13 @@ def main() -> int:
 
     if registered:
         print(
+            # R311y860 — no longer "each awaiting a fixture". Two of these are
+            # UNREACHABLE rather than unbuilt, and a summary that told a reader
+            # to go write a test for a counter no code path sets would be this
+            # tool's own prose outliving the register beneath it. Each entry
+            # states its own class; the heading stops asserting one for all.
             f"  {len(registered)} predicate threshold(s) REGISTERED as "
-            "unwitnessed, each awaiting a fixture at the bound:",
+            "unwitnessed, each with the class it is in:",
             flush=True,
         )
         for lbl, why in registered:

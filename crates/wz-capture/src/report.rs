@@ -344,7 +344,17 @@ impl<'a> CaptureReport<'a> {
     /// one worth telling, and the cost is a walk over counters already in hand.
     pub fn reasons(&self) -> alloc::vec::Vec<VerdictReason> {
         let mut out = alloc::vec::Vec::new();
-        if self.dissection.health().packets_skipped > 0 {
+        // R311y860 — the BYTES-ABSENT class and not every skip. An Ethernet
+        // segment carries ARP, so `packets_skipped > 0` was true of every
+        // capture ever taken on one, and a verdict true of everything is not a
+        // verdict: it took the exit code with it, since `wz-analyze` returns 1
+        // for an incomplete capture. What this leg means, and what the reason's
+        // name has always claimed, is that traffic the capture holds is in no
+        // row. ARP is not that; a truncated packet is.
+        //
+        // The furniture is still COUNTED and still RENDERED by
+        // `skips_text` / `skips_json` (R311y859). It is not judged.
+        if self.dissection.skip_census().bytes_absent() > 0 {
             out.push(VerdictReason::PacketsSkipped);
         }
         if self.dissection.drops().any() {
@@ -2191,11 +2201,14 @@ fn escape_into(value: &str, out: &mut String) {
 /// cross-checks against `packets_skipped`.
 fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
     s.push_str(&format!(
-        "{{\"total\":{},\"unsupported_link_type\":{},\"truncated\":{},\
+        "{{\"total\":{},\"bytes_absent\":{},\"not_this_protocol\":{},\
+         \"unsupported_link_type\":{},\"truncated\":{},\
          \"not_ip\":{},\"not_transport\":{},\"ipv4_fragment\":{},\
          \"ip_fragment_pending\":{},\"vsock_non_payload\":{},\
          \"ipv6_extension_chain\":{},\"ipv6_fragment\":{},\"link_types\":[",
         sk.total(),
+        sk.bytes_absent(),
+        sk.not_this_protocol(),
         sk.unsupported_link_type,
         sk.truncated,
         sk.not_ip,
@@ -2234,9 +2247,10 @@ fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
 fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
     s.push_str(&format!("  reader skipped: {} packet(s)\n", sk.total()));
     s.push_str(&format!(
-        "    bytes this dissection does not hold: {} truncated, \
+        "    bytes this dissection does not hold ({}): {} truncated, \
          {} IPv4 fragment, {} IPv6 fragment, {} IP fragment pending, \
          {} IPv6 extension chain, {} link type not read\n",
+        sk.bytes_absent(),
         sk.truncated,
         sk.ipv4_fragment,
         sk.ipv6_fragment,
@@ -2245,9 +2259,12 @@ fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
         sk.unsupported_link_type
     ));
     s.push_str(&format!(
-        "    not this protocol: {} not IP, {} not TCP or UDP, \
-         {} vsock control\n",
-        sk.not_ip, sk.not_transport, sk.vsock_non_payload
+        "    not this protocol ({}), counted and not judged: {} not IP, \
+         {} not TCP or UDP, {} vsock control\n",
+        sk.not_this_protocol(),
+        sk.not_ip,
+        sk.not_transport,
+        sk.vsock_non_payload
     ));
     if !sk.unsupported_link_types.is_empty() {
         let mut dlts = String::new();
@@ -3039,11 +3056,17 @@ mod tests {
     /// would send a reader looking for a fault the document declines to name.
     #[test]
     fn the_verdicts_reasons_reach_the_page_and_the_export_together() {
+        // R311y860 — the fixture MOVED from an ARP frame to a truncated one.
+        // What this test is about is that one judgement reaches two renderings,
+        // and it needs a fixture that trips the leg; ARP stopped tripping it
+        // when the verdict learned that furniture is not a shortfall. The
+        // fixture follows the leg rather than the leg being widened back to
+        // keep the fixture.
         let mut d = crate::Dissection::new();
-        let mut arp = alloc::vec![0u8; 12];
-        arp.extend_from_slice(&[0x08, 0x06]);
-        arp.extend_from_slice(&[0u8; 46]);
-        d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &arp);
+        let mut short = alloc::vec![0u8; 12];
+        short.extend_from_slice(&[0x08, 0x00]);
+        short.extend_from_slice(&[0x45, 0, 0, 40, 0]);
+        d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &short);
         d.finish();
 
         let report = CaptureReport::of(&d);
@@ -3300,21 +3323,34 @@ mod tests {
     /// The first line of `is_complete` and one of the nine that bound nothing.
     /// A skipped packet is traffic the capture holds and the rows do not, which
     /// is the definition every other leg answers to.
+    ///
+    /// R311y860 NARROWED which skip that is, and the fixture moved with it. The
+    /// original was an ARP frame, and ARP is on every Ethernet segment — so the
+    /// leg it bound was true of every capture ever taken, which is a leg that
+    /// distinguishes nothing. It now holds a TRUNCATED packet: bytes that were
+    /// on the wire, were captured short, and are in no row. The property this
+    /// test defends is unchanged and is now falsifiable.
     #[test]
     fn a_skipped_packet_makes_the_capture_a_floor() {
         let mut d = crate::Dissection::new();
-        // An ARP frame: ethernet this reader parses and IP it is not, so it is
-        // skipped rather than misread.
-        let mut arp = alloc::vec![0u8; 12];
-        arp.extend_from_slice(&[0x08, 0x06]);
-        arp.extend_from_slice(&[0u8; 46]);
-        d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &arp);
+        // An ethertype that promises IPv4 and five bytes of it: the header this
+        // frame declares is longer than the frame, so it is skipped rather than
+        // misread, and the bytes it declared are absent.
+        let mut short = alloc::vec![0u8; 12];
+        short.extend_from_slice(&[0x08, 0x00]);
+        short.extend_from_slice(&[0x45, 0, 0, 40, 0]);
+        d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &short);
         d.finish();
 
         assert_eq!(
             d.health().packets_skipped,
             1,
             "the fixture must skip exactly one packet"
+        );
+        assert_eq!(
+            d.skip_census().bytes_absent(),
+            1,
+            "and it must be the class the verdict reads"
         );
         assert_verdict_rests_on(&d, VerdictLeg::PacketsSkipped);
         assert!(
@@ -4695,6 +4731,170 @@ mod tests {
         assert!(
             text.contains("1 truncated") && text.contains("1 not TCP or UDP"),
             "the capture summary must name the reasons it skipped for: {text}"
+        );
+    }
+
+    /// PROBE — the two classes must reach the VERDICT differently, because they
+    /// answer different questions about the same capture.
+    ///
+    /// An Ethernet segment carries ARP. Every capture taken on one therefore
+    /// skips packets, and a verdict that fires on `packets_skipped > 0` calls
+    /// every real capture a floor — which is the same as having no verdict, and
+    /// it takes the exit code with it. A capture whose packets were TRUNCATED
+    /// is the case the verdict exists for: the bytes were on the wire, the
+    /// snaplen cut them, and no row holds them.
+    #[test]
+    fn furniture_and_missing_bytes_are_not_the_same_verdict() {
+        let mut arp_only = crate::Dissection::new();
+        let mut arp = alloc::vec![0u8; 12];
+        arp.extend_from_slice(&[0x08, 0x06]);
+        arp.extend_from_slice(&[0u8; 46]);
+        arp_only.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &arp);
+        arp_only.finish();
+        assert_eq!(
+            arp_only.skip_census().not_this_protocol(),
+            1,
+            "the fixture must skip for a furniture reason"
+        );
+        assert_eq!(arp_only.skip_census().bytes_absent(), 0, "and for no other");
+        assert!(
+            CaptureReport::of(&arp_only).is_complete(),
+            "ARP on a segment is not a shortfall in the rows: {:?}",
+            CaptureReport::of(&arp_only).reasons()
+        );
+
+        let mut cut = crate::Dissection::new();
+        let mut short = alloc::vec![0u8; 12];
+        short.extend_from_slice(&[0x08, 0x00]);
+        short.extend_from_slice(&[0x45, 0, 0, 40, 0]);
+        cut.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &short);
+        cut.finish();
+        assert_eq!(
+            cut.skip_census().bytes_absent(),
+            1,
+            "the fixture must skip for a bytes-absent reason"
+        );
+        assert!(
+            !CaptureReport::of(&cut).is_complete(),
+            "bytes the capture holds and no row does ARE a floor"
+        );
+        // The WHOLE list, not a containment claim. A `contains` leg holds while
+        // every other guard fires too, so it cannot see one that became too
+        // wide -- which is the direction this round moved in and therefore the
+        // direction the assertion has to watch.
+        assert_eq!(
+            CaptureReport::of(&cut).reasons(),
+            alloc::vec![VerdictReason::PacketsSkipped],
+            "the fixture must state exactly this reason: {}",
+            CaptureReport::of(&cut).to_text()
+        );
+    }
+
+    /// Ethernet + IPv4 carrying ONE PIECE of a fragmented UDP datagram.
+    fn eth_ipv4_piece(
+        ident: u16,
+        offset_bytes: u16,
+        more: bool,
+        body: &[u8],
+    ) -> alloc::vec::Vec<u8> {
+        let mut ip = alloc::vec::Vec::new();
+        ip.push(0x45);
+        ip.push(0);
+        ip.extend_from_slice(&((20 + body.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&ident.to_be_bytes());
+        let flags_and_offset = (offset_bytes / 8) | if more { 0x2000 } else { 0 };
+        ip.extend_from_slice(&flags_and_offset.to_be_bytes());
+        ip.push(64);
+        ip.push(17);
+        ip.extend_from_slice(&0u16.to_be_bytes());
+        ip.extend_from_slice(&[10, 0, 0, 1]);
+        ip.extend_from_slice(&[10, 0, 0, 2]);
+        ip.extend_from_slice(body);
+
+        let mut eth = alloc::vec![0u8; 12];
+        eth.extend_from_slice(&0x0800u16.to_be_bytes());
+        eth.extend_from_slice(&ip);
+        eth
+    }
+
+    /// R311y860 — a fragment chain that NEVER COMPLETES is bytes absent, and
+    /// the verdict says so.
+    ///
+    /// The counter had no fixture anywhere in this tree, which the mutation
+    /// gate found by forgiving it and watching every test pass. It is the
+    /// sharpest member of its class: the piece is not furniture and it is not
+    /// noise, it is the front of a datagram whose rest this capture does not
+    /// hold, and a reader summing the rows would otherwise be told the sum is
+    /// the whole capture.
+    #[test]
+    fn a_fragment_chain_that_never_completes_is_bytes_absent() {
+        let mut d = crate::Dissection::new();
+        let mut udp = alloc::vec::Vec::new();
+        udp.extend_from_slice(&7447u16.to_be_bytes());
+        udp.extend_from_slice(&7446u16.to_be_bytes());
+        udp.extend_from_slice(&64u16.to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(&[0u8; 16]);
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &eth_ipv4_piece(0x4242, 0, true, &udp),
+        );
+        d.finish();
+
+        let sk = d.skip_census();
+        assert_eq!(
+            sk.ip_fragment_pending, 1,
+            "the fixture must leave exactly one piece held: {sk:?}"
+        );
+        assert_eq!(
+            sk.bytes_absent(),
+            1,
+            "a held piece is bytes this dissection does not hold: {sk:?}"
+        );
+        assert_eq!(sk.not_this_protocol(), 0, "and it is not furniture: {sk:?}");
+        assert!(
+            !CaptureReport::of(&d).is_complete(),
+            "a datagram whose rest never arrived makes the totals a floor"
+        );
+    }
+
+    /// PROBE — the classification is EXHAUSTIVE, so a tenth reason cannot be
+    /// added to neither class.
+    ///
+    /// `total` is the sum of the two classes, and a separate test already pins
+    /// `total` against `DissectionHealth::packets_skipped`. Together those are
+    /// the gate: a field added at the door and placed in no class makes the two
+    /// figures disagree, which is a red rather than a silently unjudged reason.
+    #[test]
+    fn every_skip_reason_belongs_to_exactly_one_class() {
+        let mut d = crate::Dissection::new();
+        let mut arp = alloc::vec![0u8; 12];
+        arp.extend_from_slice(&[0x08, 0x06]);
+        arp.extend_from_slice(&[0u8; 46]);
+        d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &arp);
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            1,
+            &eth_ipv4_proto(1, &[0u8; 8]),
+        );
+        let mut short = alloc::vec![0u8; 12];
+        short.extend_from_slice(&[0x08, 0x00]);
+        short.extend_from_slice(&[0x45, 0, 0, 40, 0]);
+        d.push_packet(crate::link::LINKTYPE_ETHERNET, 2, &short);
+        d.push_packet(crate::link::LINKTYPE_ETHERNET, 3, &eth_ipv6_next(50));
+        d.finish();
+
+        let sk = d.skip_census();
+        assert_eq!(
+            sk.bytes_absent() + sk.not_this_protocol(),
+            sk.total(),
+            "the two classes must partition the census: {sk:?}"
+        );
+        assert_eq!(
+            sk.total(),
+            d.health().packets_skipped,
+            "and the census must still agree with the counter it shadows"
         );
     }
 

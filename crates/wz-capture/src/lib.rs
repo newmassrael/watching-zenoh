@@ -239,19 +239,50 @@ pub struct SkipCensus {
 }
 
 impl SkipCensus {
+    /// R311y860 — the skips that mean BYTES THE CAPTURE HOLDS ARE ABSENT from
+    /// this dissection.
+    ///
+    /// A snaplen cut the packet short, a fragment other than the first was
+    /// walked past by a consumer that does not reassemble, a chain was still
+    /// waiting for its rest, an IPv6 header this build may not walk past (ESP
+    /// among them) ended the chain, or the link type was never decapsulated at
+    /// all. Every one of them is traffic that was on the wire and is in no row,
+    /// which is the definition the completeness verdict answers to.
+    pub fn bytes_absent(&self) -> usize {
+        self.unsupported_link_type
+            + self.truncated
+            + self.ipv4_fragment
+            + self.ip_fragment_pending
+            + self.ipv6_extension_chain
+            + self.ipv6_fragment
+    }
+
+    /// R311y860 — the skips that are ordinary furniture on a real segment.
+    ///
+    /// ARP and its neighbours, IP that is neither TCP nor UDP, and a vsock
+    /// control op that carries no payload. None of them could have carried
+    /// zenoh: every link this workspace speaks arrives as TCP, UDP, or its own
+    /// link type, and raweth reaches its own arm rather than this counter
+    /// (`crates/wz-capture/src/link.rs:692`).
+    ///
+    /// Counted and reported, never judged. A capture is not a floor because the
+    /// segment it was taken on had ARP on it.
+    pub fn not_this_protocol(&self) -> usize {
+        self.not_ip + self.not_transport + self.vsock_non_payload
+    }
+
     /// Every skip, whatever the reason — equal to
     /// [`DissectionHealth::packets_skipped`] and computed independently of it, so
     /// the two disagreeing would mean one of them stopped seeing a path.
+    ///
+    /// R311y860 — defined as the SUM OF THE TWO CLASSES rather than as its own
+    /// list of nine fields, and that is the gate rather than a tidy-up. A tenth
+    /// reason added at the door and placed in neither class no longer merely
+    /// goes unjudged: it drops out of this total too, and the equality above
+    /// reds. The alternative — a third enumeration of the same fields — is how
+    /// the renderings came to disagree with the counters in the first place.
     pub fn total(&self) -> usize {
-        self.unsupported_link_type
-            + self.truncated
-            + self.not_ip
-            + self.not_transport
-            + self.ipv4_fragment
-            + self.ip_fragment_pending
-            + self.vsock_non_payload
-            + self.ipv6_extension_chain
-            + self.ipv6_fragment
+        self.bytes_absent() + self.not_this_protocol()
     }
 
     /// `true` when nothing was skipped at all.
