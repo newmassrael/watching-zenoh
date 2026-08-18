@@ -50,9 +50,12 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 4
+EXPECTED_VERSION = 5
 EXPECTED_SYMBOLS = {
     "wz_dissect_abi_version",
+    # R311y855 — the FIELD layer, which is the walk this header had described
+    # since R311y586 and could not perform.
+    "wz_dissect_pcap_fields",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",

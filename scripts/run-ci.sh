@@ -7542,6 +7542,36 @@ layer_c1bn_passive_dissection_features() {
             echo "  C1bn FAIL: $name is absent from the default build"; return 1; }
     done
 
+    # R311y855 — the `dissect` arm, which is DEFAULT-OFF and therefore compiled
+    # by no other `-p wz-capture` build in this file.
+    #
+    # The feature is off by default on purpose (an MCU consumer must not be
+    # charged for a walker only a desktop reader runs, R311y675), and the price
+    # of that is the "a lane nobody runs" hazard this workspace has paid for
+    # more than once. `wz-capi-dissect` turns it on through its dependency line,
+    # so Layer C1bo does compile it -- but a lane that reaches a module only
+    # through another crate cannot pin the module's OWN tests, and a name pin is
+    # what R311y636 showed to be a gate in its own right.
+    (cd crates && cargo clippy -p wz-capture --features dissect --all-targets \
+        --quiet -- -D warnings) || return 1
+    out="$(cd crates && cargo test -p wz-capture --features dissect fields_json \
+        --quiet 2>&1)" || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1bn FAIL: the dissect arm ran no fields_json tests"; echo "$out"
+        return 1; }
+    listing="$(cd crates && cargo test -p wz-capture --features dissect -- --list \
+        2>/dev/null)" \
+        || { echo "  C1bn FAIL: the dissect --list did not run"; return 1; }
+    for name in \
+        fields_json::tests::a_stream_message_carries_its_tree_and_the_offset_it_was_taken_at \
+        fields_json::tests::a_datagram_message_is_walked_and_its_number_is_a_packet_index \
+        fields_json::tests::a_row_the_stream_cannot_supply_is_declined_with_the_reason \
+        fields_json::tests::a_capture_that_cannot_be_reread_is_reported_rather_than_left_empty
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1bn FAIL: $name is absent from the dissect build"; return 1; }
+    done
+
     out="$(cd crates && cargo test -p wz-session-core --features dissect-serde dissect:: --quiet 2>&1)" \
         || { echo "$out"; return 1; }
     grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {

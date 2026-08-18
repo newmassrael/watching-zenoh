@@ -91,11 +91,13 @@ pub const WZ_DISSECT_ERR_SELECTOR: c_int = -4;
 /// R311y854 — 3 → 4, ADDING [`wz_dissect_pcap_census_where`] and
 /// [`wz_dissect_selector_diagnose`].
 ///
+/// R311y855 — 4 → 5, ADDING [`wz_dissect_pcap_fields`].
+///
 /// # Safety
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    4
+    5
 }
 
 /// Release a string this library returned. Passing null is a no-op, so a
@@ -305,6 +307,74 @@ pub unsafe extern "C" fn wz_dissect_pcap_census(
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
     write_string(wz_capture::census_json::census_json(&dissection), out)
+}
+
+/// R311y855 — THE FIELD LAYER: every message in a capture, dissected into the
+/// byte ranges it was decoded from.
+///
+/// # The walk this header described and could not perform
+///
+/// [`wz_dissect_pcap_summary`]'s doc has said since R311y586: "A consumer walks
+/// the flows here, then calls [`wz_dissect_transport_message`] per message it
+/// wants expanded." That walk was impossible. The summary reports per-flow
+/// frame COUNTS, so there is nothing to enumerate by — and a coordinate would
+/// not have been enough either: a stream message's bytes live in the
+/// REASSEMBLED per-direction stream, which exists only inside this library, so
+/// a caller holding the capture file cannot slice one out. The instruction
+/// named a two-step walk whose first step this ABI never provided.
+///
+/// So the walk happens here, where the reassembly is, and the trees cross whole.
+///
+/// # One coordinate space, and every row says which
+///
+/// Spans inside a tree are MESSAGE-RELATIVE. Where the message sits is on the
+/// row, because the two row producers put different kinds of number there: a
+/// stream row carries `message_at`, a byte offset into the direction's retained
+/// stream, so a span added to it is a capture coordinate; a datagram row
+/// carries `packet`, an INDEX, which must not be added to anything.
+/// `offset_space` names which — they are small numbers all round and cannot be
+/// told apart by inspection.
+///
+/// # A row is a tree OR a named refusal, never a silent omission
+///
+/// The walk is checked against the passive session that framed the message. A
+/// disagreement means the coordinate does not name the message the session
+/// framed, and the row comes back with `declined` and the reason instead of a
+/// confident tree about bytes nobody asked for. Bytes trimmed by a bounded read
+/// decline the same way.
+///
+/// # `max_messages_per_flow`
+///
+/// 0 means UNBOUNDED, matching the command line's default. That is the shape
+/// that works for a test and fails for a session — a capture holds an unbounded
+/// number of messages — so a caller with a screen to fill should pass a bound.
+/// Each flow reports `shown` and `omitted`, so a held-back listing is never
+/// mistaken for a capture that ended.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes and `out` must be a
+/// writable pointer to a `*mut c_char`. Neither may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_fields(
+    bytes: *const u8,
+    len: usize,
+    max_messages_per_flow: usize,
+    out: *mut *mut c_char,
+) -> c_int {
+    if bytes.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    let dissection = match Dissection::from_capture(input) {
+        Ok(d) => d,
+        Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
+    };
+    let cap = (max_messages_per_flow > 0).then_some(max_messages_per_flow);
+    write_string(
+        wz_capture::fields_json::fields_json(&dissection, input, cap),
+        out,
+    )
 }
 
 /// R311y854 — the census NARROWED by a selector, wz's own filter language.
@@ -1362,6 +1432,108 @@ mod tests {
         Ok(s)
     }
 
+    /// Drive the field layer the way C does.
+    fn call_fields(bytes: &[u8], cap: usize) -> Result<String, c_int> {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_pcap_fields(bytes.as_ptr(), bytes.len(), cap, &mut out) };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must not hand back a string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// R311y855 — THE FIELD LAYER CROSSES, AND THE WALK THIS HEADER DESCRIBED
+    /// BECOMES POSSIBLE.
+    ///
+    /// `wz_dissect_pcap_summary`'s doc has told a C consumer since R311y586 to
+    /// walk the flows and expand the messages it wants. It could not: the
+    /// summary reports frame COUNTS, and a stream message's bytes live in the
+    /// reassembled stream, which the caller does not have. The control arm here
+    /// is that same summary over the same bytes — it carries neither a span nor
+    /// a coordinate, so the trees are evidence about the new door.
+    #[test]
+    fn the_field_layer_crosses_the_boundary_and_the_summary_cannot_locate_a_message() {
+        let file = census_capture();
+
+        let fields = call_fields(&file, 0).expect("the capture reads");
+        assert!(
+            fields.contains("\"offset_space\":\"stream_byte\""),
+            "a row must say WHICH space its number is in: {fields}"
+        );
+        assert!(
+            fields.contains("\"message_at\":"),
+            "and carry the coordinate the message begins at: {fields}"
+        );
+        assert!(
+            fields.contains("\"fields\":{\"name\":"),
+            "the TREE crosses, which is what a byte range comes from: {fields}"
+        );
+        // A span is a range of the message, and the tree carries them: without
+        // `start`/`end` a consumer has a name and no bytes to highlight.
+        assert!(
+            fields.contains("\"start\":") && fields.contains("\"end\":"),
+            "the spans are the point of this door: {fields}"
+        );
+
+        // THE CONTROL: the door that already existed, over the same bytes.
+        let summary = call_summary(&file).expect("the capture reads");
+        for absent in ["\"message_at\"", "\"offset_space\"", "\"start\""] {
+            assert!(
+                !summary.contains(absent),
+                "{absent} is in the SUMMARY, so the field door is not what \
+                 carried it: {summary}"
+            );
+        }
+    }
+
+    /// R311y855 — the bound is reachable from C and reports what it held back.
+    #[test]
+    fn the_field_bound_crosses_and_says_how_many_it_held_back() {
+        let file = census_capture();
+        let all = call_fields(&file, 0).expect("reads");
+        assert!(
+            all.contains("\"omitted\":0"),
+            "0 means unbounded, matching the command line's default: {all}"
+        );
+        let bounded = call_fields(&file, 1).expect("reads");
+        assert!(
+            bounded.contains("\"shown\":1,\"omitted\":"),
+            "a bounded listing shows its bound: {bounded}"
+        );
+        assert!(
+            !bounded.contains("\"shown\":1,\"omitted\":0"),
+            "and the capture really was over the bound, or this proves \
+             nothing: {bounded}"
+        );
+    }
+
+    /// The field door keeps the ABI's memory contract like every other.
+    #[test]
+    fn the_field_door_refuses_what_every_other_door_refuses() {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let truncated = [0x0Au8, 0x0D, 0x0D, 0x0A, 0, 0, 0, 0];
+        assert_eq!(
+            unsafe { wz_dissect_pcap_fields(truncated.as_ptr(), truncated.len(), 0, &mut out) },
+            WZ_DISSECT_ERR_BAD_CAPTURE
+        );
+        assert!(out.is_null(), "an error must not hand back a string");
+        assert_eq!(
+            unsafe { wz_dissect_pcap_fields(core::ptr::null(), 0, 0, &mut out) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            unsafe { wz_dissect_pcap_fields([0u8].as_ptr(), 1, 0, core::ptr::null_mut()) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+    }
+
     /// R311y854 — A SELECTOR CROSSES THE BOUNDARY AND NARROWS THE CENSUS, and
     /// the unfiltered door over the same bytes is the control.
     ///
@@ -1607,10 +1779,9 @@ mod tests {
     /// NOT move when a walker adds fields.
     #[test]
     fn the_abi_version_is_readable() {
-        // R311y854 — 4 since `wz_dissect_pcap_census_where` and
-        // `wz_dissect_selector_diagnose` joined the symbol set. The header's
-        // contract is the symbol SET, not a symbol's signature; see
-        // `wz_dissect_abi_version`.
-        assert_eq!(wz_dissect_abi_version(), 4);
+        // R311y855 — 5 since `wz_dissect_pcap_fields` joined the symbol set.
+        // The header's contract is the symbol SET, not a symbol's signature;
+        // see `wz_dissect_abi_version`.
+        assert_eq!(wz_dissect_abi_version(), 5);
     }
 }

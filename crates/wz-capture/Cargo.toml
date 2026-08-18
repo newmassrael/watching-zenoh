@@ -35,6 +35,23 @@ workspace = true
 default = ["reassembly", "network-codecs", "filter-wildcards"]
 reassembly = ["wz-session-core/reassembly"]
 
+# R311y855 — the FIELD walker, and DEFAULT-OFF, which is the one place this
+# crate's default set says no.
+#
+# R311y675 made this call and its reason still holds: `wz-session-core/dissect`
+# pulls `alloc` and twelve `codec-*` arms, and this crate has to keep building
+# for the MCU profiles with no third-party dependency. Widening the default
+# would charge every embedded consumer for a walker only a desktop reader runs.
+# That round put the selection in `wz-analyze`, the composition root; R311y855
+# needs the same layer from a SECOND consumer (`wz-capi-dissect`), and a feature
+# here is what lets both select it without either owning the emit.
+#
+# The cost of default-off is that no `-p wz-capture` build compiles
+# `fields_json`, which is the "a lane nobody runs" hazard this workspace has
+# paid for. Two lanes close it: C1bn runs `--features dissect` by name, and
+# C1bo builds `wz-capi-dissect`, whose dependency line turns it on.
+dissect = ["wz-session-core/dissect"]
+
 # R311y616 (§1.1f) — the keyexpr WILDCARD arms the filter language's `key` term
 # needs, and a feature rather than three names on the dependency line for the
 # reason R311y614 measured: a feature named there is unified into every crate

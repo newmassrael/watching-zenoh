@@ -25,7 +25,12 @@ name = "wz_capi_dissect"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-wz-capture = { path = "../wz-capture" }
+# R311y855 — `dissect` selected HERE, because this crate is the second
+# consumption root for the field walker (`wz-analyze` is the first). The feature
+# is default-off on `wz-capture` so an MCU build is not charged for it; naming
+# it on this line is what makes `wz_capture::fields_json` exist for the ABI
+# without either consumer owning a second copy of the emit.
+wz-capture = { path = "../wz-capture", features = ["dissect"] }
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "alloc",
     "dissect",

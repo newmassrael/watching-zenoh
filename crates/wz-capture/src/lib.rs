@@ -68,6 +68,18 @@ pub mod exchange;
 /// beside each door. Private: its whole purpose is that nothing outside can add
 /// to the carried counters, and a `pub` module would hand that back.
 mod exit;
+/// R311y855 — the FIELD layer over a whole capture: every message dissected
+/// into the byte ranges it was decoded from, both halves.
+///
+/// Separate from [`census_json`] because it answers a different question and
+/// costs differently: a census FOLDS across messages and this one EXPANDS each
+/// of them, so it is bounded per flow and a census is not. It also needs the
+/// capture bytes a second time, which no plane does.
+///
+/// Gated on `dissect`, which is DEFAULT-OFF — see the manifest for why an MCU
+/// build must not be charged for a walker only a desktop reader runs.
+#[cfg(feature = "dissect")]
+pub mod fields_json;
 /// R311y714 (§1.1f) — the capture read as NODES: zids, their roles, and the
 /// links where both ends named themselves. The one plane whose unit is not a
 /// flow.

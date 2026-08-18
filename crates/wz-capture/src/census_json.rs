@@ -466,7 +466,10 @@ fn push_latency(l: &crate::exchange::LatencySamples, out: &mut String) {
     let _ = write!(out, ",\"total_ms\":{}}}", l.total_ms());
 }
 
-fn push_flow(flow: &crate::link::FlowKey, out: &mut String) {
+/// R311y855 — `pub(crate)` so [`crate::fields_json`] renders a flow key the
+/// SAME way this module does. Two renderings of one key is how the two
+/// consumption surfaces came to disagree in the first place, one level up.
+pub(crate) fn push_flow(flow: &crate::link::FlowKey, out: &mut String) {
     out.push_str("{\"low\":");
     push_endpoint(&flow.low, out);
     out.push_str(",\"high\":");
@@ -498,7 +501,7 @@ fn push_endpoint(e: &crate::link::Endpoint, out: &mut String) {
     let _ = write!(out, "\",\"port\":{}}}", e.port);
 }
 
-fn dir_name(d: Direction) -> &'static str {
+pub(crate) fn dir_name(d: Direction) -> &'static str {
     match d {
         Direction::A => "a",
         Direction::B => "b",

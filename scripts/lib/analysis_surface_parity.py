@@ -76,29 +76,19 @@ BOTH = {
     "selector over the planes": ("--select", "wz_dissect_pcap_census_where"),
     "flow listing": ("--flows", "wz_dissect_pcap_summary"),
     "a machine-readable document": ("--json", "wz_dissect_pcap_census"),
+    # R311y855 — moved here from ONLY_CLI. The ABI now walks the messages
+    # itself, which is the only shape that could work: a stream message's bytes
+    # live in the reassembled per-direction stream, so no caller holding the
+    # capture file can slice one out.
+    "field spans over a capture": ("--fields", "wz_dissect_pcap_fields"),
+    "message listing": ("--messages", "wz_dissect_pcap_fields"),
+    "bound on messages listed": ("--max-messages", "wz_dissect_pcap_fields"),
 }
 
 # Reachable ONLY from the command line, each with the reason it is not on the
 # ABI. A reason that reads as "not done yet" is an open debt, and saying so is
 # this table's job.
 ONLY_CLI = {
-    "field spans over a capture": (
-        "--fields",
-        "OPEN DEBT (debt-analysis-surface-parity). `wz_dissect_transport_message` "
-        "walks ONE message the caller already holds the bytes of, and no ABI call "
-        "hands back a message's bytes or its coordinate -- a stream message lives "
-        "in the reassembled per-direction stream, which only this library has. So "
-        "the walk `wz_dissect.h` describes cannot be performed from C today.",
-    ),
-    "message listing": (
-        "--messages",
-        "OPEN DEBT, the same one: the summary reports per-flow COUNTS, so a "
-        "consumer has nothing to enumerate messages by.",
-    ),
-    "bound on messages listed": (
-        "--max-messages",
-        "Follows the two rows above -- a bound on a listing the ABI does not have.",
-    ),
     "payload format decoding": (
         "--payload-format",
         "OPEN DEBT (debt-analysis-surface-parity). `payload::formats::FormatMap` "
@@ -138,10 +128,10 @@ ONLY_CLI = {
 ONLY_CAPI = {
     "loss and health counters": (
         "wz_dissect_pcap_summary",
-        "The CLI has no flag for these (capture drops, retransmits, sequence gaps, "
-        "checksums, framing desyncs). Measured by counting both surfaces: this is "
-        "the ONE direction where the ABI is the richer surface, and it is an OPEN "
-        "DEBT on the CLI side rather than a decision.",
+        "OPEN DEBT on the CLI side rather than a decision. The command line has no "
+        "flag for these (capture drops, retransmits, sequence gaps, checksums, "
+        "framing desyncs), and this is the ONE direction where the ABI is the "
+        "richer surface.",
     ),
     "a bounded read": (
         "wz_dissect_pcap_summary_bounded",
@@ -246,11 +236,32 @@ def main() -> int:
         )
         return 1
 
-    open_debt = sum(
-        1
-        for _, reason in list(ONLY_CLI.values()) + [(s, r) for s, r in ONLY_CAPI.values()]
-        if reason.startswith("OPEN DEBT")
-    )
+    # R311y855 — the TAG is the head of the reason, and a reason that argues an
+    # item is open without leading with the tag is a FAILURE rather than a
+    # silent zero.
+    #
+    # Measured, in this gate's own second round: R311y854's health-counter row
+    # said "... and it is an OPEN DEBT on the CLI side", which reads correctly
+    # and counted as nothing, so the banner reported one open item where there
+    # were two. A count that under-reports debt is worse than no count -- it is
+    # the confident zero this workspace keeps paying for -- and the fix cannot
+    # be "remember to put it first", which is what had just failed.
+    one_sided = list(ONLY_CLI.values()) + list(ONLY_CAPI.values())
+    mis_tagged = [
+        reason
+        for _, reason in one_sided
+        if "OPEN DEBT" in reason and not reason.startswith("OPEN DEBT")
+    ]
+    if mis_tagged:
+        print("analysis-surface-parity: FAIL", file=sys.stderr)
+        for reason in mis_tagged:
+            print(
+                f"  - a reason calls an item an OPEN DEBT without leading with "
+                f"the tag, so it counts as nothing: {reason[:80]}...",
+                file=sys.stderr,
+            )
+        return 1
+    open_debt = sum(1 for _, reason in one_sided if reason.startswith("OPEN DEBT"))
     print(
         f"  analysis-surface-parity: {len(BOTH)} capability(ies) on both surfaces, "
         f"{len(ONLY_CLI)} CLI-only, {len(ONLY_CAPI)} ABI-only, {open_debt} of those "

@@ -33,12 +33,11 @@
 int main(void) {
     /* The symbol/memory-contract revision. A consumer refuses a library whose
      * memory rules moved; this asserts the value the header was written for. */
-    /* R311y854 -- 4 since wz_dissect_pcap_census_where and
-     * wz_dissect_selector_diagnose joined the symbol set. This header's
-     * contract is the symbol SET, not a symbol's signature, so adding one moves
-     * the revision; the two statements of that contract had drifted and were
-     * reconciled in R311y748. */
-    CHECK(wz_dissect_abi_version() == 4, "abi version is %d, expected 4",
+    /* R311y855 -- 5 since wz_dissect_pcap_fields joined the symbol set. This
+     * header's contract is the symbol SET, not a symbol's signature, so adding
+     * one moves the revision; the two statements of that contract had drifted
+     * and were reconciled in R311y748. */
+    CHECK(wz_dissect_abi_version() == 5, "abi version is %d, expected 5",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
@@ -221,6 +220,34 @@ int main(void) {
     CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
     CHECK(strcmp(verdict, "{\"ok\":true}") == 0, "not a pass: %s", verdict);
     wz_dissect_string_free(verdict);
+
+    /* R311y855 -- the FIELD door is reachable from C, and its document has the
+     * shape a consumer indexes: both flow halves and the honesty valve on the
+     * second read. The Rust side owns the claim that a tree and its coordinate
+     * are correct, which needs a capture with zenoh messages in it; this file
+     * owns that the symbol survives into the cdylib and that the top-level keys
+     * are there for an idle capture too -- a consumer that indexes a key which
+     * is absent on quiet traffic crashes on the quietest network. */
+    char *fields = NULL;
+    rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &fields);
+    CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
+    CHECK(fields != NULL, "OK came back with no string");
+    CHECK(strstr(fields, "\"stream_flows\"") != NULL, "no stream half: %s",
+          fields);
+    CHECK(strstr(fields, "\"datagram_flows\"") != NULL, "no datagram half: %s",
+          fields);
+    CHECK(strstr(fields, "\"capture_reread\":true") != NULL,
+          "the datagram half must say whether it could read the file again: %s",
+          fields);
+    wz_dissect_string_free(fields);
+
+    /* Same memory rule, same refusals. */
+    fields = NULL;
+    rc = wz_dissect_pcap_fields(truncated, sizeof truncated, 0, &fields);
+    CHECK(rc == WZ_DISSECT_ERR_BAD_CAPTURE, "fields truncated rc=%d", rc);
+    CHECK(fields == NULL, "a bad capture handed back a string");
+    rc = wz_dissect_pcap_fields(NULL, 0, 0, &fields);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "fields null bytes rc=%d", rc);
 
     printf("  C1bo: C consumer linked the cdylib and read the tree\n");
     return 0;

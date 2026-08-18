@@ -129,6 +129,38 @@ int wz_dissect_pcap_census_where(const unsigned char *bytes, size_t len,
  * out. */
 int wz_dissect_selector_diagnose(const char *selector, char **out);
 
+/* R311y855 (ABI 5) — THE FIELD LAYER: every message in the capture,
+ * dissected into the byte ranges it was decoded from.
+ *
+ * The summary above tells you to "walk the flows, then expand the messages
+ * you want" with wz_dissect_transport_message. That walk was not possible:
+ * the summary reports per-flow frame COUNTS, and a stream message's bytes
+ * live in the REASSEMBLED per-direction stream, which exists only inside
+ * this library -- so a caller holding the capture file cannot slice one out.
+ * This call does the walk where the reassembly is and hands back the trees.
+ *
+ * Spans inside a tree are MESSAGE-RELATIVE. Where the message sits is on the
+ * row: a stream row carries `message_at`, a byte offset into that
+ * direction's retained stream, so a span added to it is a capture
+ * coordinate; a datagram row carries `packet`, an INDEX, which must not be
+ * added to anything. `offset_space` says which -- they are small numbers all
+ * round and cannot be told apart by looking.
+ *
+ * Every row is a tree OR a `declined` string with the reason. The walk is
+ * checked against the session that framed the message, so a coordinate that
+ * does not name the message the session framed yields a refusal rather than
+ * a confident tree about other bytes. Bytes a bounded read trimmed decline
+ * the same way.
+ *
+ * max_messages_per_flow: 0 is UNBOUNDED, matching the command line's
+ * default, and a capture holds an unbounded number of messages -- pass a
+ * bound if you have a screen to fill. Each flow reports `shown` and
+ * `omitted`, so a held-back listing is never mistaken for a capture that
+ * ended. `capture_reread` reports whether the datagram half could read the
+ * file a second time, which it must do to reach a datagram message's bytes. */
+int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
+                           size_t max_messages_per_flow, char **out);
+
 #ifdef __cplusplus
 }
 #endif
