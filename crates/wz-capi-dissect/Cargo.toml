@@ -35,3 +35,28 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     "codec-close",
     "codec-keep-alive",
 ] }
+
+# R311y851 — the CENSUS fixture's records, built by the codecs that own their
+# wire form rather than hand-laid.
+#
+# A dev-dependency and never a real one: this library's contract is a decode
+# out of a capture, and nothing in its shipped path constructs a zenoh message.
+# The fixture, though, has to CARRY one — a census over a capture of KeepAlives
+# answers zero on every plane, HONESTLY, and a boundary test pinned to those
+# zeros would pass just as well against four planes that were never handed a
+# frame. That is this workspace's measured confident-zero shape.
+#
+# The feature set is the one `wz-capture` already names for its own dependency
+# on this crate, so it widens nothing: features unify across the graph
+# (R311y614), and asking for a set that is already on cannot turn a subset build
+# into a different build.
+[dev-dependencies.wz-codecs]
+path = "../wz-codecs"
+default-features = false
+features = [
+    "alloc",
+    "codec-push",
+    "codec-request",
+    "codec-response",
+    "codec-response-final",
+]

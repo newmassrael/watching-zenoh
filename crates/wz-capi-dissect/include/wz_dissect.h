@@ -63,6 +63,29 @@ int wz_dissect_pcap_summary(const unsigned char *bytes, size_t len, char **out);
 int wz_dissect_pcap_summary_bounded(const unsigned char *bytes, size_t len,
                                     char **out);
 
+/* R311y851 (ABI 3) — the four ANALYSIS planes, which this ABI could not
+ * reach at all: the keyexpr plane (which keys carry the traffic, with
+ * subtree rollups and the declarations still unresolved), the node plane
+ * (the capture keyed by zid, and the links where both ends named
+ * themselves), the query plane (requests matched to their replies, with the
+ * first-reply delay and the ones never answered), and the payload plane
+ * (what the samples carry, judged against their own declaration).
+ *
+ * They were never missing from the library — wz-capture is this library's
+ * own dependency, so all four were compiled in and had no symbol. What was
+ * missing is the door, and a capability a consumer cannot call is one it
+ * does not have.
+ *
+ * The summary above answers the TRANSPORT question and does not carry any
+ * of this; ask for the one you want. Four walks of every frame is what this
+ * costs, which is why it is a call and not part of the summary.
+ *
+ * `exchanges` and `payloads` are `null` — not an empty table — in a build
+ * whose decoder cannot see the records they correlate. A plane that cannot
+ * be fed is absent rather than empty, and `{"rows":[]}` would tell you this
+ * capture had no queries in it. */
+int wz_dissect_pcap_census(const unsigned char *bytes, size_t len, char **out);
+
 #ifdef __cplusplus
 }
 #endif

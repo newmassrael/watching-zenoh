@@ -33,7 +33,8 @@
 //!
 //! ## What the ABI promises
 //!
-//! Five functions, and the memory rule is the whole of the contract: every
+//! Six functions since R311y851 added `wz_dissect_pcap_census`, and the memory
+//! rule is the whole of the contract: every
 //! string this library returns is owned by this library and must be released
 //! with [`wz_dissect_string_free`]. Nothing else is allocated across the
 //! boundary, no callbacks run, and no handle outlives the call that made it.
@@ -77,11 +78,15 @@ pub const WZ_DISSECT_ERR_DECODE: c_int = -3;
 /// unable to answer it. An existing consumer is unaffected either way, which is
 /// what makes this a widening rather than a break.
 ///
+/// R311y851 — 2 → 3, ADDING [`wz_dissect_pcap_census`]. Same rule, third
+/// application: a new symbol raises exactly one question for a consumer ("does
+/// this library have it?"), and a version that does not move cannot answer it.
+///
 /// # Safety
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    2
+    3
 }
 
 /// Release a string this library returned. Passing null is a no-op, so a
@@ -234,6 +239,63 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary_bounded(
             Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
         };
     write_string(summary_json(&dissection), out)
+}
+
+/// R311y851 — the four ANALYSIS PLANES, which this ABI could not reach at all.
+///
+/// # The gap, and it was a gap between SURFACES
+///
+/// wz exports its dissection through two consumption surfaces and they carried
+/// different halves of it. The keyexpr plane, the node plane, the query plane
+/// and the payload plane — which keys carry the traffic, who the participants
+/// are by zid, which queries were answered and how fast, and what the samples
+/// declare — were reachable ONLY from `wz-analyze`, the command line. Through
+/// this ABI, the surface a framework LINKS, a consumer got a per-flow frame
+/// count and the health counters, and nothing above the transport.
+///
+/// They were not missing. `wz-capture` is this crate's dependency, so all four
+/// were compiled into every build of this library and had no symbol — the same
+/// class as a capability compiled into a preset with no flag to reach it. What
+/// let it stand is that nothing compares the two surfaces to each other.
+///
+/// # Why one call and not four
+///
+/// A consumer that wanted three planes would otherwise read the capture three
+/// times, and the three answers would be about three walks rather than one. The
+/// planes are independent folds over the SAME frames and a reader compares
+/// them — "which node published the key that carries the traffic" is a question
+/// that spans two of them — so they cross together.
+///
+/// # What it costs, said plainly
+///
+/// Four walks of every frame, which is what the command line's `--census` pays
+/// and why that flag exists rather than the planes always being built. Call
+/// [`wz_dissect_pcap_summary`] when the transport-level answer is what is
+/// wanted; this is the analysis one.
+///
+/// UNBOUNDED, like [`wz_dissect_pcap_summary`]: a file ends, so keeping all of
+/// it is bounded. A bounded census door is a separate decision and is not
+/// improvised here — see the crate's own registered residual.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes and `out` must be a
+/// writable pointer to a `*mut c_char`. Neither may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_census(
+    bytes: *const u8,
+    len: usize,
+    out: *mut *mut c_char,
+) -> c_int {
+    if bytes.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    let dissection = match Dissection::from_capture(input) {
+        Ok(d) => d,
+        Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
+    };
+    write_string(wz_capture::census_json::census_json(&dissection), out)
 }
 
 /// The summary shape. Hand-rolled rather than via serde for the same reason
@@ -957,6 +1019,218 @@ mod tests {
         );
     }
 
+    /// Drive the census the way C does.
+    fn call_census(bytes: &[u8]) -> Result<String, c_int> {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_pcap_census(bytes.as_ptr(), bytes.len(), &mut out) };
+        if rc != WZ_DISSECT_OK {
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    const ZID_A: [u8; 4] = [0xA1; 4];
+    const ZID_B: [u8; 4] = [0xB2; 4];
+
+    /// `[T_MID_INIT, flags, cbyte, zid…]`, length-prefixed for a stream link.
+    ///
+    /// Hand-laid HERE rather than shared with `wz-capture`'s fixture, for the
+    /// reason `isb_with_drops` above is: a fixture the reader and the writer
+    /// share proves only that they hold one belief between them, and this
+    /// file's claim is that a node the WIRE named crosses the C boundary.
+    fn framed_init(zid: &[u8]) -> Vec<u8> {
+        let mut wire = vec![
+            wz_session_core::wire_const::T_MID_INIT,
+            0x09,
+            (((zid.len() as u8) - 1) << 4) | 0x02,
+        ];
+        wire.extend_from_slice(zid);
+        let mut out = (wire.len() as u16).to_le_bytes().to_vec();
+        out.extend_from_slice(&wire);
+        out
+    }
+
+    /// A literal keyexpr: `id 0` in the SENDER's space plus the suffix, which
+    /// resolves without a Declare having gone past before the tap started.
+    fn literal(keyexpr: &'static str) -> wz_codecs::wireexpr::Wireexpr<'static> {
+        wz_codecs::wireexpr::Wireexpr {
+            body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
+                wz_codecs::wireexpr_local::WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(keyexpr.len() as u64),
+                    suffix: Some(keyexpr),
+                },
+            ),
+        }
+    }
+
+    /// One `T_MID_FRAME` at `sn` carrying `records`, length-prefixed.
+    fn framed_frame(sn: u8, records: &[u8]) -> Vec<u8> {
+        let mut wire = vec![
+            wz_session_core::wire_const::T_MID_FRAME | wz_session_core::wire_const::FLAG_T_FRAME_R,
+            sn,
+        ];
+        wire.extend_from_slice(records);
+        let mut out = (wire.len() as u16).to_le_bytes().to_vec();
+        out.extend_from_slice(&wire);
+        out
+    }
+
+    /// A capture in which every analysis plane has something to say: two nodes
+    /// that named themselves, a Put on a literal key, and a query answered and
+    /// closed.
+    ///
+    /// One packet per direction so the whole of each stream is contiguous: a
+    /// reassembly gap here would look exactly like a decode that failed.
+    fn census_capture() -> Vec<u8> {
+        let put = framed_frame(
+            0,
+            &wz_codecs::push::Push {
+                header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+                keyexpr: literal("demo/temp"),
+                body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                    payload_len: 5,
+                    payload: b"hello",
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        let query = framed_frame(
+            1,
+            &wz_codecs::request::Request {
+                header: wz_codecs::request::Request::default().header
+                    | wz_codecs::wire_const::FLAG_N_N,
+                rid: 7,
+                keyexpr: literal("demo/q"),
+                body: wz_codecs::request::RequestVariant::CodecZenohQuery(
+                    wz_codecs::query::Query::default(),
+                ),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        let mut answer_records = wz_codecs::response::Response {
+            header: wz_codecs::response::Response::default().header
+                | wz_codecs::wire_const::FLAG_N_N,
+            request_id: 7,
+            keyexpr: literal("demo/q"),
+            body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
+                body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(
+                    wz_codecs::msg_put::MsgPut {
+                        payload_len: 6,
+                        payload: b"answer",
+                        ..Default::default()
+                    },
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        answer_records.extend_from_slice(
+            &wz_codecs::response_final::ResponseFinal {
+                request_id: 7,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+
+        let mut low_to_high = framed_init(&ZID_A);
+        low_to_high.extend_from_slice(&put);
+        low_to_high.extend_from_slice(&query);
+        let mut high_to_low = framed_init(&ZID_B);
+        high_to_low.extend_from_slice(&framed_frame(0, &answer_records));
+
+        let a = tcp_packet(1000, &low_to_high);
+        let b = tcp_packet_reverse(2000, &high_to_low);
+        // Distinct capture timestamps, or the exchange correlates and reports
+        // `unstamped` — a row that exists and measures nothing.
+        wz_capture::pcap::write(1, &[(0, 0, a.as_slice()), (0, 9_000, b.as_slice())])
+    }
+
+    /// R311y851 — THE FOUR ANALYSIS PLANES CROSS THIS BOUNDARY, AND THE SUMMARY
+    /// DOOR DOES NOT CARRY THEM.
+    ///
+    /// The pair is the point, and both arms are driven off ONE capture for that
+    /// reason. Before this round every plane `wz-capture` computes was
+    /// compiled into this library and reachable only by writing Rust: a C
+    /// consumer could learn how many frames a flow held and could not learn
+    /// which key they carried, who sent them, or whether a query was answered.
+    /// A single-sided assertion here would be satisfied by a library that had
+    /// merely started emitting a bigger document.
+    #[test]
+    fn the_census_planes_cross_the_boundary_and_the_summary_does_not_carry_them() {
+        let file = census_capture();
+
+        let census = call_census(&file).expect("the capture reads");
+        assert!(
+            census.contains("\"keyexpr\":\"demo/temp\""),
+            "the key the Put travelled under must cross: {census}"
+        );
+        assert!(
+            census.contains("\"zid\":\"a1a1a1a1\"") && census.contains("\"zid\":\"b2b2b2b2\""),
+            "both zids the handshake named must cross: {census}"
+        );
+        assert!(
+            census.contains("\"requests\":1,\"completed\":1"),
+            "the query and the reply that closed it must cross: {census}"
+        );
+        assert!(
+            census.contains("\"contradictions\":[]"),
+            "the payload plane must have judged rather than been skipped: {census}"
+        );
+
+        // THE CONTROL: the same bytes through the door that already existed.
+        let summary = call_summary(&file).expect("the capture reads");
+        for absent in [
+            "demo/temp",
+            "a1a1a1a1",
+            "\"requests\"",
+            "\"contradictions\"",
+        ] {
+            assert!(
+                !summary.contains(absent),
+                "{absent} is in the SUMMARY, so the census door is not what \
+                 carried it: {summary}"
+            );
+        }
+        // And the summary is not empty — it answers its own question, which is
+        // what makes its silence about these four a scope and not a failure.
+        assert!(
+            summary.contains("\"health\""),
+            "the summary must still be the summary: {summary}"
+        );
+    }
+
+    /// The census door keeps the ABI's memory contract: a bad capture is a
+    /// CODE, nulls are refused, and neither hands back a string.
+    #[test]
+    fn the_census_door_refuses_what_every_other_door_refuses() {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let truncated = [0x0Au8, 0x0D, 0x0D, 0x0A, 0, 0, 0, 0];
+        assert_eq!(
+            unsafe { wz_dissect_pcap_census(truncated.as_ptr(), truncated.len(), &mut out) },
+            WZ_DISSECT_ERR_BAD_CAPTURE
+        );
+        assert!(out.is_null(), "an error must not hand back a string");
+        assert_eq!(
+            unsafe { wz_dissect_pcap_census(core::ptr::null(), 0, &mut out) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            unsafe { wz_dissect_pcap_census([0u8].as_ptr(), 1, core::ptr::null_mut()) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+    }
+
     /// Ethernet + IPv4 + TCP carrying `payload` at `seq`.
     fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
         let mut tcp = Vec::new();
@@ -976,6 +1250,38 @@ mod tests {
         ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
         ip.extend_from_slice(&[10, 0, 0, 1]);
         ip.extend_from_slice(&[10, 0, 0, 2]);
+        ip.extend_from_slice(&tcp);
+
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// The same packet the other way: addresses swapped as well as ports,
+    /// which is what keeps it the SAME 5-tuple travelling in the other
+    /// direction rather than a second flow.
+    fn tcp_packet_reverse(seq: u32, payload: &[u8]) -> Vec<u8> {
+        let mut tcp = Vec::new();
+        tcp.extend_from_slice(&7447u16.to_be_bytes());
+        tcp.extend_from_slice(&1111u16.to_be_bytes());
+        tcp.extend_from_slice(&seq.to_be_bytes());
+        tcp.extend_from_slice(&0u32.to_be_bytes());
+        tcp.push(5 << 4);
+        tcp.push(0x10); // ACK
+        tcp.extend_from_slice(&64u16.to_be_bytes());
+        tcp.extend_from_slice(&0u16.to_be_bytes());
+        tcp.extend_from_slice(&0u16.to_be_bytes());
+        tcp.extend_from_slice(payload);
+
+        let mut ip = vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
+        ip.extend_from_slice(&[10, 0, 0, 2]);
+        ip.extend_from_slice(&[10, 0, 0, 1]);
         ip.extend_from_slice(&tcp);
 
         let mut eth = vec![0u8; 12];
@@ -1017,9 +1323,9 @@ mod tests {
     /// NOT move when a walker adds fields.
     #[test]
     fn the_abi_version_is_readable() {
-        // R311y748 — 2 since `wz_dissect_pcap_summary_bounded` joined the
-        // symbol set. The header's contract is the symbol SET, not a symbol's
-        // signature; see `wz_dissect_abi_version`.
-        assert_eq!(wz_dissect_abi_version(), 2);
+        // R311y851 — 3 since `wz_dissect_pcap_census` joined the symbol set.
+        // The header's contract is the symbol SET, not a symbol's signature;
+        // see `wz_dissect_abi_version`.
+        assert_eq!(wz_dissect_abi_version(), 3);
     }
 }

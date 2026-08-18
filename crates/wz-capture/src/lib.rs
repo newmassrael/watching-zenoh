@@ -43,6 +43,16 @@ extern crate std;
 /// ACROSS messages rather than decoding one, and because keyexpr resolution
 /// needs both id spaces — something only an observer of both directions has.
 pub mod agg;
+/// R311y851 (§1.1f) — every analysis plane above as ONE self-describing
+/// document, beside the types that build them rather than inside a consumer.
+///
+/// The measured reason it is here: wz's two consumption surfaces — the
+/// `wz-analyze` command line and the `wz-capi-dissect` C ABI — carried
+/// different halves of the dissection, and the C ABI, which is the surface a
+/// framework LINKS, could reach none of these planes at all. They were in its
+/// dependency graph the whole time and had no symbol. One emit beside the
+/// types is what stops a third consumer from inventing a fourth rendering.
+pub mod census_json;
 /// R311y615 (§1.1f) — the second ANALYSIS plane: Query/Reply exchanges and
 /// their latency at the tap.
 ///

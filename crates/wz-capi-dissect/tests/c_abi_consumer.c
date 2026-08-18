@@ -33,11 +33,11 @@
 int main(void) {
     /* The symbol/memory-contract revision. A consumer refuses a library whose
      * memory rules moved; this asserts the value the header was written for. */
-    /* R311y748 -- 2 since wz_dissect_pcap_summary_bounded joined the symbol
-     * set. This header's contract is the symbol SET, not a symbol's signature,
-     * so adding one moves the revision; the two statements of that contract had
-     * drifted and were reconciled in the same round. */
-    CHECK(wz_dissect_abi_version() == 2, "abi version is %d, expected 2",
+    /* R311y851 -- 3 since wz_dissect_pcap_census joined the symbol set. This
+     * header's contract is the symbol SET, not a symbol's signature, so adding
+     * one moves the revision; the two statements of that contract had drifted
+     * and were reconciled in R311y748. */
+    CHECK(wz_dissect_abi_version() == 3, "abi version is %d, expected 3",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
@@ -136,6 +136,50 @@ int main(void) {
     CHECK(bounded == NULL, "a bad capture handed back a string");
     rc = wz_dissect_pcap_summary_bounded(NULL, 0, &bounded);
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "bounded null bytes rc=%d", rc);
+
+    /* R311y851 -- and the CENSUS door is reachable from C at all, with the
+     * four plane keys a consumer indexes.
+     *
+     * What this file owns is the symbol surviving into the cdylib and the
+     * document's top-level shape; the Rust side owns the claim that each plane
+     * carries what the wire named, which needs a capture with zenoh records in
+     * it. Both claims are needed and neither implies the other -- before this
+     * round all four planes were compiled into this library and had no symbol,
+     * which is precisely the state a Rust-only test cannot detect.
+     *
+     * The same hand-laid pcap: its single packet decodes to nothing, so every
+     * plane is EMPTY here, and that is right for this claim. An empty plane is
+     * still a plane -- the assertion is that the keys exist, because a consumer
+     * that indexes a key which is absent for an idle capture crashes on the
+     * quietest network rather than on the busiest. */
+    char *census = NULL;
+    rc = wz_dissect_pcap_census(pcap, sizeof pcap, &census);
+    CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
+    CHECK(census != NULL, "OK came back with no string");
+    CHECK(strstr(census, "\"keyexprs\"") != NULL, "no keyexpr plane: %s",
+          census);
+    CHECK(strstr(census, "\"nodes\"") != NULL, "no node plane: %s", census);
+    CHECK(strstr(census, "\"exchanges\"") != NULL, "no query plane: %s", census);
+    CHECK(strstr(census, "\"payloads\"") != NULL, "no payload plane: %s",
+          census);
+    /* The control for the four above: the SUMMARY door must not carry them, or
+     * they would not be evidence that this door is what added them. */
+    rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &summary);
+    CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);
+    CHECK(strstr(summary, "\"keyexprs\"") == NULL,
+          "the summary carries the keyexpr plane, so the census door is not "
+          "what added it: %s",
+          summary);
+    wz_dissect_string_free(summary);
+    wz_dissect_string_free(census);
+
+    /* Same memory rule, same refusals. */
+    census = NULL;
+    rc = wz_dissect_pcap_census(truncated, sizeof truncated, &census);
+    CHECK(rc == WZ_DISSECT_ERR_BAD_CAPTURE, "census truncated rc=%d", rc);
+    CHECK(census == NULL, "a bad capture handed back a string");
+    rc = wz_dissect_pcap_census(NULL, 0, &census);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "census null bytes rc=%d", rc);
 
     printf("  C1bo: C consumer linked the cdylib and read the tree\n");
     return 0;

@@ -702,7 +702,14 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
 /// dial is the observable, and providing a listener would remove it.
 #[test]
 #[ignore = "binary-dep e2e: needs wz-ap-demo[+zenoh-config,+routing-peer]; runs via --ignored"]
-fn the_retry_schedule_a_stock_config_carries_is_the_one_the_node_runs() {
+// R311y851 — the fn carries `zenohd` because Layer C0's naming obligation is
+// about the FILE's family, not about which binaries this one leg happens to
+// need. libtest's `--skip` matches the function name, so a leg in a
+// zenohd-family file whose name lacks the token is a leg Layer E's default
+// sweep RUNS, against whatever binaries that lane built -- and Layer Z, which
+// owns this file and expects five, would still be the lane that meant to run
+// it. Hosted C0 has been red on this since the leg landed.
+fn the_retry_schedule_a_stock_zenohd_config_carries_is_the_one_the_node_runs() {
     let demo = wz_ap_demo_binary();
     // A demo predating this round has no peer-arm parse for the schedule at
     // all, so a stale one reproduces the exact failure this leg detects.

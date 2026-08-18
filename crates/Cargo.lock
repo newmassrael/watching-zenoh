@@ -2458,6 +2458,7 @@ name = "wz-capi-dissect"
 version = "0.1.0"
 dependencies = [
  "wz-capture",
+ "wz-codecs",
  "wz-session-core",
 ]
 

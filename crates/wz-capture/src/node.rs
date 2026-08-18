@@ -453,8 +453,15 @@ pub fn nodes(dissection: &crate::Dissection) -> NodeCensus {
     census
 }
 
+// R311y851 — `pub(crate)`, on the precedent `exchange::tests` set and with the
+// same trade named: the census EXPORT's end-to-end test needs a capture in
+// which two nodes named themselves, and the INIT builder for one lives here.
+// The alternative is a second hand-laid INIT layout in `census_json::tests`,
+// which is the copy that drifts — and this one is already pinned against the
+// real decoder by the tests below it. The cost is that `cfg(test)` visibility
+// widens to the crate -> [[feedback_cfg_test_is_a_widener_not_a_gate]].
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::datagram_tests::{
         init_message, raweth_packet, scout_message, tcp_packet, udp_packet, SCOUT_GROUP,
@@ -906,7 +913,7 @@ mod tests {
     }
 
     /// One length-prefixed INIT naming `zid`.
-    fn framed_init(zid: &[u8]) -> Vec<u8> {
+    pub(crate) fn framed_init(zid: &[u8]) -> Vec<u8> {
         let wire = init_wire(zid);
         let mut out = (wire.len() as u16).to_le_bytes().to_vec();
         out.extend_from_slice(&wire);
