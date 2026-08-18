@@ -253,6 +253,20 @@ pub struct SkipCensus {
     /// `is_encapsulation`'s list is furniture by omission, and printing the
     /// numbers is the difference between that being visible and being silent.
     pub not_transport_protos: BTreeSet<u8>,
+    /// R311y864 — GRE headers this reader PARSED whose payload it does not
+    /// walk.
+    ///
+    /// Its own counter and not part of [`Self::unwalked_encapsulation`],
+    /// because the two send a reader to different work: that one says "this
+    /// build has no parser for tunnel N", this one says "GRE was opened and
+    /// what came out is something else". Folding them would print `47` for a
+    /// capture whose GRE this build reads perfectly well, which is the
+    /// misdirection R311y863 measured on protocol 4.
+    pub gre_payload: usize,
+    /// The ETHERTYPES behind that count, on [`Self::unwalked_encapsulations`]'s
+    /// reasoning: `0x6558` is Transparent Ethernet Bridging and names the next
+    /// thing to build, where a bare count names nothing.
+    pub gre_payloads: BTreeSet<u16>,
 }
 
 impl SkipCensus {
@@ -280,6 +294,7 @@ impl SkipCensus {
             + self.ipv6_extension_chain
             + self.ipv6_fragment
             + self.unwalked_encapsulation
+            + self.gre_payload
     }
 
     /// R311y861 — the skips whose FATE IS NOT THIS CENSUS'S TO KNOW.
@@ -368,6 +383,10 @@ impl SkipCensus {
             SkipReason::Encapsulation(proto) => {
                 self.unwalked_encapsulation += 1;
                 self.unwalked_encapsulations.insert(proto);
+            }
+            SkipReason::GrePayload(ethertype) => {
+                self.gre_payload += 1;
+                self.gre_payloads.insert(ethertype);
             }
             SkipReason::Ipv4Fragment => self.ipv4_fragment += 1,
             SkipReason::IpFragmentPending => self.ip_fragment_pending += 1,

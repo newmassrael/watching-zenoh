@@ -62,6 +62,16 @@ const IP_PROTO_UDP: u8 = 17;
 const IP_PROTO_IPV4_IN_IP: u8 = 4;
 const IP_PROTO_IPV6_IN_IP: u8 = 41;
 
+/// R311y864 — GRE (RFC 2784, with RFC 2890's Key and Sequence Number).
+///
+/// The third carrier this reader walks, and the first whose header is not
+/// simply another IP header. R311y862 named it and R311y863's carry called it
+/// the largest unread class left, on a measured ground rather than a guess: a
+/// capture taken off a VPN concentrator carries GRE, and until this it produced
+/// `tunnel IP protocol(s) not opened: 47` — honest, and useless to anyone
+/// holding such a capture.
+const IP_PROTO_GRE: u8 = 47;
+
 /// R311y862 — how many nested IP headers this reader will walk.
 ///
 /// A BOUND and not a recursion, for the reason every other limit in this crate
@@ -84,17 +94,23 @@ pub(crate) const MAX_ENCAPSULATION_DEPTH: usize = 4;
 /// carrying a complete zenoh session reported `capture: complete` with zero
 /// flows read.
 ///
-/// The two walked numbers are here as well, so that a REASSEMBLED datagram —
-/// which reaches [`transport_from_ip`] without passing the walk in
-/// [`decapsulate`] — is judged rather than filed as furniture. That is the
-/// honest half answer for a fragmented tunnel: the bytes are named as absent,
-/// and reading them would need the walk to run over reassembled payloads too.
+/// The WALKED numbers are here as well, so that a REASSEMBLED datagram — which
+/// reaches [`transport_from_ip`] without passing the walk in [`decapsulate`] —
+/// is judged rather than filed as furniture.
+///
+/// R311y863 amended what that judgement is. This paragraph used to end "the
+/// bytes are named as absent, and reading them would need the walk to run over
+/// reassembled payloads too", which described a state of affairs that stopped
+/// being true the moment the walk moved: `transport_from_ip` runs it, so a
+/// reassembled carrier is READ. The sentence is corrected rather than deleted
+/// because a comment stating a settled half-answer is what stops the next
+/// reader looking (R311y838).
 fn is_encapsulation(proto: u8) -> bool {
     matches!(
         proto,
         IP_PROTO_IPV4_IN_IP
             | IP_PROTO_IPV6_IN_IP
-            | 47   // GRE
+            | IP_PROTO_GRE
             | 50   // ESP -- the remainder is encrypted, as at the v6 chain
             | 51   // AH
             | 94   // IPIP, the obsolete duplicate of 4
@@ -380,6 +396,22 @@ pub enum SkipReason {
     /// this covers both causes — a protocol this build has no parser for (GRE,
     /// ESP, L2TP), and a chain longer than `MAX_ENCAPSULATION_DEPTH`.
     Encapsulation(u8),
+    /// R311y864 — a GRE header this reader PARSED whose payload ethertype it
+    /// does not walk, carrying that ethertype.
+    ///
+    /// Distinct from [`Self::Encapsulation`]`(47)` and the distinction is the
+    /// point. That variant means the tunnel itself could not be opened, and
+    /// tells a reader to add GRE. This one means GRE was opened and what came
+    /// out is something else — Transparent Ethernet Bridging (0x6558) above
+    /// all, which is a whole Ethernet frame and therefore a link strip rather
+    /// than another turn of the IP walk. Reporting 47 for it would send a
+    /// reader to write a parser that already exists, which is the misdirection
+    /// R311y863 measured on protocol 4 and this variant exists to avoid
+    /// repeating one carrier later.
+    ///
+    /// Bytes absent, not furniture: whatever GRE was carrying could have been a
+    /// zenoh session, exactly as for the tunnel around it.
+    GrePayload(u16),
 }
 
 /// One UDP datagram lifted out of a captured packet.
@@ -602,6 +634,68 @@ pub fn decapsulate(
     )
 }
 
+/// One GRE header: its payload and the ethertype that names what the payload
+/// is.
+///
+/// R311y864. RFC 2784 §2.1 gives four fixed bytes — a flags-and-version word
+/// and a Protocol Type — and makes every other field OPTIONAL and keyed by a
+/// flag bit, which is why this cannot be a constant offset. RFC 2890 defines
+/// the two that are actually deployed (Key and Sequence Number); the Checksum
+/// is RFC 2784's own.
+///
+/// WHAT IS REFUSED IS REFUSED BY NAME, and the three cases are not the same
+/// question:
+///
+/// - **Routing Present (`R`)** — RFC 2784 §2.1 requires it be zero, and its
+///   field is a variable-length list this reader would have to walk to find the
+///   payload at all. A header carrying it cannot be SIZED, so nothing after it
+///   can be read.
+/// - **Version other than 0** — version 1 is PPTP's Enhanced GRE (RFC 2637),
+///   whose word at the same offset is a payload length rather than a flag set.
+///   Parsing it as version 0 would find a plausible ethertype at the wrong
+///   offset, which is the failure this crate refuses everywhere else.
+/// - **Reserved0 non-zero** — RFC 2784 §2.1: "MUST be discarded". A reader that
+///   guessed here would be inventing a variant.
+///
+/// All three answer `Encapsulation(47)` rather than the payload-typed reason
+/// below, and the distinction is real: in these cases the payload type cannot
+/// be READ, so "protocol 47, not opened" is the whole of what is known. Where
+/// the header parses and only its payload is unwalkable, the ethertype IS
+/// known, and reporting 47 there would tell a reader to add GRE support that
+/// is already present.
+fn strip_gre(bytes: &[u8]) -> Result<(&[u8], u16), SkipReason> {
+    if bytes.len() < 4 {
+        return Err(SkipReason::Truncated);
+    }
+    let flags = u16::from_be_bytes([bytes[0], bytes[1]]);
+    let checksum_present = flags & 0x8000 != 0;
+    let routing_present = flags & 0x4000 != 0;
+    let key_present = flags & 0x2000 != 0;
+    let sequence_present = flags & 0x1000 != 0;
+    let reserved0 = flags & 0x0FF8;
+    let version = flags & 0x0007;
+    if routing_present || version != 0 || reserved0 != 0 {
+        return Err(SkipReason::Encapsulation(IP_PROTO_GRE));
+    }
+    let protocol_type = u16::from_be_bytes([bytes[2], bytes[3]]);
+    // The Checksum and Reserved1 share one optional four-byte word: RFC 2784
+    // §2.1 says Reserved1 is present if and only if the Checksum is.
+    let mut len = 4;
+    if checksum_present {
+        len += 4;
+    }
+    if key_present {
+        len += 4;
+    }
+    if sequence_present {
+        len += 4;
+    }
+    if bytes.len() < len {
+        return Err(SkipReason::Truncated);
+    }
+    Ok((&bytes[len..], protocol_type))
+}
+
 /// Walk an IP-in-IP chain down to the header whose body is NOT another packet.
 ///
 /// R311y862 wrote this loop inside [`decapsulate`]; R311y863 lifted it out
@@ -661,6 +755,29 @@ fn walk_ip_chain<'a>(
             cursor = d.payload;
             continue;
         }
+        // R311y864 — GRE is a carrier like the two above and is counted as one,
+        // but its body is named by an ETHERTYPE rather than by an IP version,
+        // so the step is a header parse and then the same loop.
+        if d.proto == IP_PROTO_GRE {
+            depth += 1;
+            if depth > MAX_ENCAPSULATION_DEPTH {
+                return Err(SkipReason::Encapsulation(IP_PROTO_GRE));
+            }
+            let (body, protocol_type) = strip_gre(d.payload)?;
+            match protocol_type {
+                ETHERTYPE_IPV4 => v6 = false,
+                ETHERTYPE_IPV6 => v6 = true,
+                // A payload this reader cannot walk, named BY ITS ETHERTYPE.
+                // Transparent Ethernet Bridging (0x6558) is the one that
+                // matters and it is a whole frame, so it needs the link strip
+                // rather than the IP strip — a different step, and naming the
+                // number is what says so instead of leaving a reader to guess
+                // that "GRE" was the missing piece.
+                other => return Err(SkipReason::GrePayload(other)),
+            }
+            cursor = body;
+            continue;
+        }
         return Ok((d, ip_checksum));
     }
 }
@@ -696,9 +813,24 @@ pub fn transport_from_ip(
         //
         // `start_depth` is 1 because the header that declared this body is the
         // one the reassembler already consumed.
-        IP_PROTO_IPV4_IN_IP | IP_PROTO_IPV6_IN_IP => {
-            let (ip, ip_checksum) =
-                walk_ip_chain(payload, proto == IP_PROTO_IPV6_IN_IP, 1, checksums.ip)?;
+        //
+        // R311y864 — GRE joined, because a fragmented GRE carrier is as ordinary
+        // as a fragmented IPIP one and R311y863 would otherwise have left the
+        // new walk reachable through only one of the two doors again.
+        IP_PROTO_IPV4_IN_IP | IP_PROTO_IPV6_IN_IP | IP_PROTO_GRE => {
+            let (ip, ip_checksum) = if proto == IP_PROTO_GRE {
+                // The reassembled body IS the GRE header, so the step the walk
+                // takes for protocol 47 has to happen before re-entering it.
+                let (body, protocol_type) = strip_gre(payload)?;
+                let v6 = match protocol_type {
+                    ETHERTYPE_IPV4 => false,
+                    ETHERTYPE_IPV6 => true,
+                    other => return Err(SkipReason::GrePayload(other)),
+                };
+                walk_ip_chain(body, v6, 1, checksums.ip)?
+            } else {
+                walk_ip_chain(payload, proto == IP_PROTO_IPV6_IN_IP, 1, checksums.ip)?
+            };
             if let Some(info) = ip.fragment {
                 // A FRAGMENT INSIDE A REASSEMBLED CARRIER, which is a real
                 // shape: a tunnel ingress fragments a packet that was itself a
@@ -728,14 +860,17 @@ pub fn transport_from_ip(
                 transport: transport_checksum(&ip.src, &ip.dst, ip.proto, ip.payload),
             };
             // Recursion of depth exactly ONE: `walk_ip_chain` returns either a
-            // fragment (handled above) or a header whose proto is not 4 or 41,
-            // so this call cannot reach this arm again.
+            // fragment (handled above) or a header whose proto is none of 4, 41
+            // and 47, so this call cannot reach this arm again.
             transport_from_ip(ip.src, ip.dst, ip.proto, ip.payload, packet_index, inner)
         }
         // R311y862 — an encapsulation is NOT furniture, and this arm is what
         // stops it being filed as such. What lands here is a tunnel this build
-        // has no parser for (GRE, ESP, L2TP): bytes the capture holds and no
-        // row does.
+        // has no parser for: ESP, whose remainder is encrypted, AH, L2TP,
+        // MPLS-in-IP and the Ethernet-in-IP pair. Bytes the capture holds and
+        // no row does. (R311y864 removed GRE from that list, in the text as
+        // well as in the behaviour — the arms above walk it now, and a comment
+        // naming it here would send the next reader to build it twice.)
         p if is_encapsulation(p) => Err(SkipReason::Encapsulation(p)),
         other => Err(SkipReason::NotTransport(other)),
     }

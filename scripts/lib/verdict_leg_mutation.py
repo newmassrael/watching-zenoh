@@ -302,6 +302,12 @@ PREDICATES = [
             "ipv6_extension_chain",
             "ipv6_fragment",
             "unwalked_encapsulation",
+            # R311y864 -- GRE opened, payload ethertype not walked. A seventh
+            # way to be short, and it is here because `unswept_summands`
+            # DEMANDED it: the sweep named `self.gre_payload` on the first run
+            # after the field landed, which is the first time that check has
+            # fired on a round that was not the one that wrote it.
+            "gre_payload",
         )
     ],
     # R311y861 -- `Dissection::unfinished_fragment_chains`, three ENDS summed.

@@ -2260,7 +2260,7 @@ fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
          \"not_ip\":{},\"not_transport\":{},\"ipv4_fragment\":{},\
          \"ip_fragment_pending\":{},\"vsock_non_payload\":{},\
          \"ipv6_extension_chain\":{},\"ipv6_fragment\":{},\
-         \"unwalked_encapsulation\":{},\"link_types\":[",
+         \"unwalked_encapsulation\":{},\"gre_payload\":{},\"link_types\":[",
         sk.total(),
         sk.bytes_absent(),
         sk.not_this_protocol(),
@@ -2274,7 +2274,8 @@ fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
         sk.vsock_non_payload,
         sk.ipv6_extension_chain,
         sk.ipv6_fragment,
-        sk.unwalked_encapsulation
+        sk.unwalked_encapsulation,
+        sk.gre_payload
     ));
     for (i, dlt) in sk.unsupported_link_types.iter().enumerate() {
         if i > 0 {
@@ -2301,6 +2302,16 @@ fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
         }
         s.push_str(&format!("{p}"));
     }
+    // R311y864 — the GRE payload ethertypes, on the same reasoning as the two
+    // sets above and for a reader who needs to tell "no GRE support" from "GRE
+    // read, and it was carrying Ethernet".
+    s.push_str("],\"gre_payloads\":[");
+    for (i, e) in sk.gre_payloads.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!("{e}"));
+    }
     s.push_str("]}");
 }
 
@@ -2326,15 +2337,28 @@ fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
         "    bytes this dissection does not hold ({}): {} truncated, \
          {} IPv4 fragment, {} IPv6 fragment, \
          {} IPv6 extension chain, {} link type not read, \
-         {} tunnel not opened\n",
+         {} tunnel not opened, {} GRE payload not walked\n",
         sk.bytes_absent(),
         sk.truncated,
         sk.ipv4_fragment,
         sk.ipv6_fragment,
         sk.ipv6_extension_chain,
         sk.unsupported_link_type,
-        sk.unwalked_encapsulation
+        sk.unwalked_encapsulation,
+        sk.gre_payload
     ));
+    if !sk.gre_payloads.is_empty() {
+        let mut types = String::new();
+        for (i, e) in sk.gre_payloads.iter().enumerate() {
+            if i > 0 {
+                types.push_str(", ");
+            }
+            types.push_str(&format!("0x{e:04x}"));
+        }
+        s.push_str(&format!(
+            "      GRE payload ethertype(s) not walked: {types}\n"
+        ));
+    }
     if !sk.unwalked_encapsulations.is_empty() {
         let mut protos = String::new();
         for (i, p) in sk.unwalked_encapsulations.iter().enumerate() {
@@ -4796,10 +4820,21 @@ mod tests {
         // R311y862 — the fixture grows with the census it is measuring. A
         // rendering leg that only ever sees the reasons that existed when it
         // was written is the shape this test exists to refuse.
+        //
+        // R311y864 MOVED this leg rather than dropping it, which is the point
+        // of a pin: 47 used to be a tunnel with no parser and is now walked, so
+        // the packet that stands for "no parser" had to become one that still
+        // is — 50, ESP, whose remainder is encrypted. GRE gets its own packet
+        // below, under the counter it now reaches.
         d.push_packet(
             crate::link::LINKTYPE_ETHERNET,
             4,
-            &eth_ipv4_proto(47, &[0u8; 8]),
+            &eth_ipv4_proto(50, &[0u8; 8]),
+        );
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            5,
+            &eth_ipv4_proto(47, &gre(0x0000, 0x6558, &[], &[0u8; 8])),
         );
         d.finish();
 
@@ -4810,10 +4845,11 @@ mod tests {
                 sk.not_transport,
                 sk.truncated,
                 sk.ipv6_extension_chain,
-                sk.unwalked_encapsulation
+                sk.unwalked_encapsulation,
+                sk.gre_payload
             ),
-            (1, 1, 1, 1, 1),
-            "the fixture must reach five DIFFERENT reasons: {sk:?}"
+            (1, 1, 1, 1, 1, 1),
+            "the fixture must reach six DIFFERENT reasons: {sk:?}"
         );
 
         // CONTROL: the counters exist and the capture document already carries
@@ -4826,6 +4862,7 @@ mod tests {
             "truncated",
             "ipv6_extension_chain",
             "unwalked_encapsulation",
+            "gre_payload",
         ] {
             assert!(
                 json.contains(&alloc::format!("\"{key}\":1")),
@@ -4843,9 +4880,11 @@ mod tests {
             "1 truncated",
             "1 IPv6 extension chain",
             "1 tunnel not opened",
-            "tunnel IP protocol(s) not opened: 47",
+            "tunnel IP protocol(s) not opened: 50",
+            "1 GRE payload not walked",
+            "GRE payload ethertype(s) not walked: 0x6558",
             "terminate at the host: 1",
-            "reader skipped: 5 packet(s)",
+            "reader skipped: 6 packet(s)",
         ] {
             assert!(
                 health.contains(label),
@@ -4855,14 +4894,16 @@ mod tests {
 
         let hjson = health_json(&d);
         for key in [
-            "\"total\":5",
+            "\"total\":6",
             "\"not_ip\":1",
             "\"not_transport\":1",
             "\"truncated\":1",
             "\"ipv6_extension_chain\":1",
             "\"unwalked_encapsulation\":1",
-            "\"encapsulations\":[47]",
+            "\"gre_payload\":1",
+            "\"encapsulations\":[50]",
             "\"not_transport_protos\":[1]",
+            "\"gre_payloads\":[25944]",
         ] {
             assert!(
                 hjson.contains(key),
@@ -5356,6 +5397,192 @@ mod tests {
         );
     }
 
+    /// A GRE header with the flags asked for, wrapping `body`.
+    fn gre(flags: u16, protocol_type: u16, optional: &[u8], body: &[u8]) -> alloc::vec::Vec<u8> {
+        let mut out = alloc::vec::Vec::new();
+        out.extend_from_slice(&flags.to_be_bytes());
+        out.extend_from_slice(&protocol_type.to_be_bytes());
+        out.extend_from_slice(optional);
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// R311y864 — zenoh inside a GRE tunnel is READ, at every optional-field
+    /// combination.
+    ///
+    /// THE DEFECT THIS REPLACES: `capture: INCOMPLETE`, `messages decoded: 0`,
+    /// `tunnel IP protocol(s) not opened: 47`. Honest, and useless to the person
+    /// holding a capture off a VPN concentrator — which is where GRE comes from,
+    /// and why R311y863's carry called this the largest unread class left.
+    ///
+    /// THE TABLE IS THE TEST. GRE's header has no fixed length: RFC 2784 gives
+    /// four bytes and makes everything after them optional and keyed by a flag
+    /// bit. A reader that summed the flags wrongly would find the inner IP
+    /// header at the wrong offset, and the failure is not a refusal — it is a
+    /// plausible-looking parse of the wrong bytes. Driving all three deployed
+    /// combinations is what makes a wrong length visible rather than lucky.
+    #[test]
+    fn zenoh_inside_a_gre_tunnel_is_read() {
+        let inner = ipv4_packet(17, [192, 168, 0, 1], [192, 168, 0, 2], &zenoh_udp(48));
+        for (name, flags, optional) in [
+            ("no optional fields", 0x0000u16, &[][..]),
+            ("key + sequence (RFC 2890)", 0x3000u16, &[0u8; 8][..]),
+            ("checksum + reserved1", 0x8000u16, &[0u8; 4][..]),
+        ] {
+            let mut d = crate::Dissection::new();
+            d.push_packet(
+                crate::link::LINKTYPE_ETHERNET,
+                0,
+                &eth_ipv4_proto(47, &gre(flags, 0x0800, optional, &inner)),
+            );
+            d.finish();
+
+            let sk = d.skip_census();
+            assert_eq!(
+                d.datagram_flows().len(),
+                1,
+                "GRE with {name}: the session must reach a row: {sk:?}"
+            );
+            assert_eq!(
+                d.datagram_flows()[0].frames.len(),
+                48,
+                "GRE with {name}: and every message must decode"
+            );
+            let flow = &d.datagram_flows()[0].flow;
+            assert_eq!(
+                (flow.low.addr(), flow.high.addr()),
+                (&[192, 168, 0, 1][..], &[192, 168, 0, 2][..]),
+                "GRE with {name}: keyed by the inner header, not the carrier's"
+            );
+            assert!(sk.is_empty(), "GRE with {name}: nothing skipped: {sk:?}");
+        }
+    }
+
+    /// R311y864 — a GRE payload this reader does not walk is named BY ITS
+    /// ETHERTYPE, not as protocol 47.
+    ///
+    /// The distinction is the whole reason `GrePayload` is its own variant.
+    /// `tunnel IP protocol(s) not opened: 47` would tell a reader to add GRE
+    /// support that is now present — the misdirection R311y863 measured on
+    /// protocol 4, one carrier later. Transparent Ethernet Bridging is a whole
+    /// Ethernet frame, so what is actually missing is a link strip, and the
+    /// number on the page is what says so.
+    #[test]
+    fn a_gre_payload_this_reader_does_not_walk_is_named_by_its_ethertype() {
+        let mut d = crate::Dissection::new();
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &eth_ipv4_proto(47, &gre(0x0000, 0x6558, &[], &[0u8; 32])),
+        );
+        d.finish();
+
+        let sk = d.skip_census();
+        assert_eq!(sk.gre_payload, 1, "counted under its own reason: {sk:?}");
+        assert!(
+            sk.gre_payloads.contains(&0x6558),
+            "and by the ethertype, which is what names the next thing to \
+             build: {sk:?}"
+        );
+        assert_eq!(
+            sk.unwalked_encapsulation, 0,
+            "NOT as a tunnel this build cannot open — it opened it: {sk:?}"
+        );
+        assert_eq!(sk.not_transport, 0, "and not as furniture: {sk:?}");
+        assert_eq!(sk.bytes_absent(), 1, "which is bytes absent: {sk:?}");
+        let text = CaptureReport::of(&d).to_text();
+        assert!(
+            text.contains("GRE payload ethertype(s) not walked: 0x6558"),
+            "the page names the ethertype: {text}"
+        );
+        assert!(
+            !text.contains("tunnel IP protocol(s) not opened"),
+            "and does not also blame protocol 47: {text}"
+        );
+    }
+
+    /// R311y864 — CONTROL. A GRE header this reader cannot SIZE is still a
+    /// tunnel not opened.
+    ///
+    /// The other side of the same split, and the leg that keeps `GrePayload`
+    /// from swallowing everything: version 1 is PPTP's Enhanced GRE, whose word
+    /// at the Protocol Type offset is not a protocol type at all. The payload
+    /// cannot be named, so "protocol 47, not opened" is the whole of what is
+    /// known — and reporting an ethertype read out of that header would be
+    /// inventing one.
+    #[test]
+    fn a_gre_header_this_reader_cannot_size_is_a_tunnel_not_opened() {
+        for (name, flags) in [
+            ("version 1 (PPTP Enhanced GRE)", 0x3001u16),
+            ("routing present, whose field is variable-length", 0x4000u16),
+            (
+                "a non-zero Reserved0, which RFC 2784 says to discard",
+                0x0008u16,
+            ),
+        ] {
+            let mut d = crate::Dissection::new();
+            d.push_packet(
+                crate::link::LINKTYPE_ETHERNET,
+                0,
+                &eth_ipv4_proto(47, &gre(flags, 0x0800, &[0u8; 8], &[0u8; 32])),
+            );
+            d.finish();
+
+            let sk = d.skip_census();
+            assert_eq!(
+                sk.unwalked_encapsulation, 1,
+                "GRE with {name}: a tunnel not opened: {sk:?}"
+            );
+            assert!(
+                sk.unwalked_encapsulations.contains(&47),
+                "GRE with {name}: and 47 is the honest number here, because \
+                 the payload type could not be read: {sk:?}"
+            );
+            assert_eq!(
+                sk.gre_payload, 0,
+                "GRE with {name}: no ethertype is invented: {sk:?}"
+            );
+        }
+    }
+
+    /// R311y864 — a FRAGMENTED GRE carrier is read, which is R311y863's door
+    /// asked about the carrier this round added.
+    ///
+    /// The two rounds compose or they do not, and "or they do not" is the
+    /// default: R311y863 fixed the reassembly door for protocols 4 and 41 by
+    /// naming them, so a new carrier reaches it only if it is added there too.
+    /// This is the leg that would have caught leaving it out — and the capture
+    /// it stands for is ordinary, because a GRE header is what pushes a
+    /// full-MTU packet over the path MTU in the first place.
+    #[test]
+    fn a_fragmented_gre_carrier_is_read() {
+        let inner = ipv4_packet(17, [192, 168, 0, 1], [192, 168, 0, 2], &zenoh_udp(48));
+        let carrier = gre(0x0000, 0x0800, &[], &inner);
+
+        let mut d = crate::Dissection::new();
+        push_fragmented_carrier(&mut d, 47, 0x7777, 0, &carrier);
+        d.finish();
+
+        let sk = d.skip_census();
+        assert_eq!(
+            d.datagram_flows().len(),
+            1,
+            "the session inside the fragmented GRE carrier must read: {sk:?}"
+        );
+        assert_eq!(d.datagram_flows()[0].frames.len(), 48);
+        assert_eq!(
+            sk.unwalked_encapsulation, 0,
+            "and 47 is not reported as unopened: {sk:?}"
+        );
+        assert_eq!(sk.bytes_absent(), 0, "no bytes absent: {sk:?}");
+        assert_eq!(
+            CaptureReport::of(&d).reasons(),
+            alloc::vec![],
+            "so the capture is complete: {}",
+            CaptureReport::of(&d).to_text()
+        );
+    }
+
     /// R311y863 — a carrier the sender FRAGMENTED is walked like one that
     /// arrived whole.
     ///
@@ -5500,23 +5727,28 @@ mod tests {
     /// every reassembled carrier walkable.
     ///
     /// Without this leg the round reads as "make the verdict fire less often",
-    /// which is the regression in the other direction: a capture whose GRE
-    /// tunnel this build cannot open must still say so, whether the tunnel
-    /// arrived in one packet or in two.
+    /// which is the regression in the other direction: a capture whose tunnel
+    /// this build cannot open must still say so, whether the tunnel arrived in
+    /// one packet or in two.
+    ///
+    /// R311y864 moved the fixture from 47 to 50 for the same reason its
+    /// unfragmented twin moved: GRE stopped being an instance of the thing this
+    /// leg is about. `a_fragmented_gre_carrier_is_read` is where 47 went.
     #[test]
     fn a_reassembled_carrier_this_build_cannot_open_is_still_a_shortfall() {
         let mut d = crate::Dissection::new();
-        // 47 = GRE. The body is never walked, so its contents do not matter.
-        push_fragmented_carrier(&mut d, 47, 0x2222, 0, &[0u8; 64]);
+        // 50 = ESP. The body is never walked, so its contents do not matter.
+        push_fragmented_carrier(&mut d, 50, 0x2222, 0, &[0u8; 64]);
         d.finish();
 
         let sk = d.skip_census();
         assert_eq!(sk.unwalked_encapsulation, 1, "counted as a tunnel: {sk:?}");
         assert!(
-            sk.unwalked_encapsulations.contains(&47),
+            sk.unwalked_encapsulations.contains(&50),
             "and by its number: {sk:?}"
         );
         assert_eq!(sk.not_transport, 0, "not as furniture: {sk:?}");
+        assert_eq!(sk.gre_payload, 0, "and not under GRE's counter: {sk:?}");
         assert_eq!(
             CaptureReport::of(&d).reasons(),
             alloc::vec![VerdictReason::PacketsSkipped],
@@ -5670,11 +5902,15 @@ mod tests {
     #[test]
     fn a_tunnel_this_build_cannot_open_is_a_shortfall() {
         let mut d = crate::Dissection::new();
-        // 47 = GRE. The body is not walked, so its contents do not matter.
+        // R311y864 MOVED this fixture from 47 to 50, and moving it is the
+        // correct response rather than deleting the leg: GRE is walked now, so
+        // it is no longer an instance of "a tunnel with no parser", and the
+        // claim this test makes still needs one. 50 = ESP, whose remainder is
+        // encrypted — the case that cannot become walkable by writing a parser.
         d.push_packet(
             crate::link::LINKTYPE_ETHERNET,
             0,
-            &eth_ipv4_proto(47, &[0u8; 32]),
+            &eth_ipv4_proto(50, &[0u8; 32]),
         );
         d.finish();
 
@@ -5684,10 +5920,14 @@ mod tests {
             sk.not_transport, 0,
             "and NOT as a protocol that terminates at the host: {sk:?}"
         );
+        assert_eq!(
+            sk.gre_payload, 0,
+            "nor under the counter for a GRE that WAS opened: {sk:?}"
+        );
         assert!(
-            sk.unwalked_encapsulations.contains(&47),
+            sk.unwalked_encapsulations.contains(&50),
             "the number is kept, because 'a tunnel' is not actionable and \
-             'GRE' is: {sk:?}"
+             'ESP' is: {sk:?}"
         );
         assert_eq!(sk.bytes_absent(), 1, "which is bytes absent: {sk:?}");
         assert_eq!(sk.not_this_protocol(), 0, "and is not furniture: {sk:?}");
