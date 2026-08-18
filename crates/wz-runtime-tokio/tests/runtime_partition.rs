@@ -27,9 +27,27 @@ use wz_runtime_tokio::runtime_pool::{
     PartitionedRuntime, RuntimeConfigError, RuntimeParam, RuntimeParams, RuntimePool, WzRuntime,
 };
 
-/// How long a saturating task holds its worker. Long enough that the
-/// observation window below closes first.
-const SATURATE_MS: u64 = 2_000;
+/// BACKSTOP on how long a saturating task may hold its worker. It is not the
+/// hold — the test RELEASES its holders (see [`Holders`]) — it is what stops a
+/// panicking test from leaving workers occupied and hanging runtime shutdown.
+///
+/// R311y866 replaced a 2 000 ms hold with this. The old constant was the hold
+/// itself, and its comment claimed it was "long enough that the observation
+/// window below closes first". Measured, it was not: a holder's clock starts
+/// when THAT holder reaches a worker, and `saturate` allows each of them
+/// [`REACH_WORKER_MS`] to get there, so the relation that had to hold was
+/// `hold > REACH_WORKER_MS + OBSERVE_MS` = 5 750 ms against 2 000 ms. A probe
+/// that staggered the second holder by 1 500 ms — well inside the budget the
+/// helper itself grants — printed `holder A on a worker at 48µs`, `holder B at
+/// 1.500s`, and `at 2.250s the TX task had run = true` where the assertion
+/// demands false. Raising the number to 6 000 would have made every run of this
+/// file six seconds long and still been a guess about someone else's scheduler.
+const HOLD_CEILING_MS: u64 = 30_000;
+/// How often a holder checks whether the test has released it. The thread is
+/// occupied either way — a sleeping thread is one tokio cannot poll on, which
+/// is the whole property these tests need — so this only bounds how long a
+/// release takes to be noticed.
+const HOLD_POLL_MS: u64 = 5;
 /// How long a test waits for the other subsystem to report progress.
 const OBSERVE_MS: u64 = 750;
 /// Ceiling on how long a saturating task may take to reach a worker. Exceeding
@@ -63,10 +81,53 @@ fn saturate(spawn: impl Fn(std::sync::mpsc::Sender<()>), count: usize) {
     }
 }
 
-/// The body of a saturating task: report the worker, then hold it.
-async fn hold_a_worker(started: std::sync::mpsc::Sender<()>) {
+/// A set of held workers, released when the test says so.
+///
+/// R311y866. The release is a HANDLE rather than a duration because the thing
+/// being measured is "does the other subsystem get a worker WHILE these are
+/// held", and a duration cannot express "while": it can only be a guess that
+/// outlasts a wait whose own ceiling is five seconds. Holding until told keeps
+/// the window a fact.
+///
+/// [`Self::release`] is called BEFORE the assertion in every test here, so a
+/// failing assertion unwinds with the workers already free.
+#[derive(Clone)]
+struct Holders(Arc<AtomicBool>);
+
+impl Holders {
+    fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    fn release(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Drop for Holders {
+    /// The backstop for a test that panics before its own release — every clone
+    /// shares the flag, so one drop frees them all.
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// The body of a saturating task: report the worker, then hold it until the
+/// test releases it.
+///
+/// It holds by SLEEPING IN SLICES rather than by yielding: a `std::thread::sleep`
+/// inside an async task occupies the worker outright, which is the shape a
+/// saturated RX path has, and the slices only bound how quickly a release is
+/// noticed. [`HOLD_CEILING_MS`] is the last-resort exit, not the design.
+async fn hold_a_worker(started: std::sync::mpsc::Sender<()>, holders: Holders) {
     let _ = started.send(());
-    std::thread::sleep(Duration::from_millis(SATURATE_MS));
+    let deadline = std::time::Instant::now() + Duration::from_millis(HOLD_CEILING_MS);
+    while !holders.0.load(Ordering::SeqCst) {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(HOLD_POLL_MS));
+    }
 }
 
 /// Name of the thread a task ran on, recorded into a shared slot.
@@ -82,6 +143,92 @@ async fn record_thread_name(slot: Arc<std::sync::Mutex<Option<String>>>) {
 // The clause, executable
 // ---------------------------------------------------------------------------
 
+/// R311y866 — holders that reach their workers far apart still hold TOGETHER.
+///
+/// THE DEFECT THIS PINS, measured on the previous build as a probe that printed
+/// rather than asserted. `saturate` grants each holder [`REACH_WORKER_MS`] =
+/// 5 000 ms to reach a worker, and each holder's hold began when IT arrived, so
+/// the relation the old 2 000 ms constant needed was
+/// `hold > REACH_WORKER_MS + OBSERVE_MS` = 5 750 ms. Staggering the second
+/// holder by 1 500 ms — well inside the budget the helper itself grants —
+/// printed `holder A on a worker at 48µs`, `holder B at 1.500s`, and
+/// `at 2.250s the TX task had run = true`, which is the negative assertion in
+/// [`saturated_rx_starves_tx_on_one_shared_runtime`] failing. It is what took
+/// Layer C1j red on hosted run 32193989329 with nothing in the tree to blame.
+///
+/// THE STAGGER IS THE TEST. A held-until-released holder makes this case
+/// uninteresting by construction, which is exactly the claim: the window is a
+/// fact about the test's control flow and not about how evenly a loaded runner
+/// happened to schedule two spawns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn holders_that_arrive_far_apart_still_hold_together() {
+    let rt = TokioRuntime;
+    let holders = Holders::new();
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+
+    rt.spawn(hold_a_worker(started_tx.clone(), holders.clone()));
+    started_rx
+        .recv_timeout(Duration::from_millis(REACH_WORKER_MS))
+        .expect("the first holder reaches a worker");
+
+    // Longer than the old hold's remaining life would have been, so a build
+    // with a duration-based hold fails here rather than sometimes.
+    std::thread::sleep(Duration::from_millis(1_500));
+    rt.spawn(hold_a_worker(started_tx, holders.clone()));
+    started_rx
+        .recv_timeout(Duration::from_millis(REACH_WORKER_MS))
+        .expect("the second holder reaches a worker");
+
+    let (tx_ran, observer) = progress_flag();
+    rt.spawn(async move {
+        tx_ran.store(true, Ordering::SeqCst);
+    });
+    std::thread::sleep(Duration::from_millis(OBSERVE_MS));
+    let ran = observer.load(Ordering::SeqCst);
+    holders.release();
+    assert!(
+        !ran,
+        "the first holder arrived 1.5s before the second, which is inside the \
+         {REACH_WORKER_MS}ms budget `saturate` grants each of them. Both must \
+         still be holding when the window closes — a hold that expires on its \
+         own clock frees a worker mid-window and this reads TX progress that \
+         the runtime was never supposed to allow"
+    );
+}
+
+/// R311y866 — CONTROL. A released holder DOES free its worker.
+///
+/// Without this leg the fix above could be "hold forever", which passes every
+/// negative assertion in this file and measures nothing. It also pins the
+/// release path the other tests depend on for not hanging runtime shutdown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_holder_gives_its_worker_back() {
+    let rt = TokioRuntime;
+    let holders = Holders::new();
+    saturate(
+        |started| {
+            rt.spawn(hold_a_worker(started, holders.clone()));
+        },
+        2,
+    );
+
+    let (tx_ran, observer) = progress_flag();
+    rt.spawn(async move {
+        tx_ran.store(true, Ordering::SeqCst);
+    });
+    holders.release();
+
+    // Generous against HOLD_POLL_MS, and far under HOLD_CEILING_MS — so a pass
+    // here means the RELEASE freed the workers, not the backstop.
+    std::thread::sleep(Duration::from_millis(OBSERVE_MS));
+    assert!(
+        observer.load(Ordering::SeqCst),
+        "a holder that has been released must let a TX task onto its worker \
+         within {OBSERVE_MS}ms; if it does not, the negative legs in this file \
+         are passing because nothing ever runs"
+    );
+}
+
 /// One shared runtime, both workers taken by the RX side, and the TX side gets
 /// no worker within its window.
 ///
@@ -91,9 +238,10 @@ async fn record_thread_name(slot: Arc<std::sync::Mutex<Option<String>>>) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn saturated_rx_starves_tx_on_one_shared_runtime() {
     let rt = TokioRuntime;
+    let holders = Holders::new();
     saturate(
         |started| {
-            rt.spawn(hold_a_worker(started));
+            rt.spawn(hold_a_worker(started, holders.clone()));
         },
         2,
     );
@@ -104,8 +252,13 @@ async fn saturated_rx_starves_tx_on_one_shared_runtime() {
     });
 
     std::thread::sleep(Duration::from_millis(OBSERVE_MS));
+    // READ, then RELEASE, then assert. Reading first is what makes the window
+    // the held one; releasing before the assertion is what keeps a failure from
+    // unwinding with two workers still occupied.
+    let ran = observer.load(Ordering::SeqCst);
+    holders.release();
     assert!(
-        !observer.load(Ordering::SeqCst),
+        !ran,
         "sharing one runtime is what the clause says wz does: a TX task must \
          NOT get a worker while the RX side holds every one of them"
     );
@@ -153,9 +306,10 @@ fn saturated_rx_does_not_starve_tx_when_partitioned() {
     let pool = RuntimePool::new(RuntimeParams::defaults()).expect("defaults are a valid partition");
     let rx_workers = RuntimeParam::defaults_for(WzRuntime::Rx).worker_threads;
 
+    let holders = Holders::new();
     saturate(
         |started| {
-            pool.spawn(WzRuntime::Rx, hold_a_worker(started));
+            pool.spawn(WzRuntime::Rx, hold_a_worker(started, holders.clone()));
         },
         rx_workers,
     );
@@ -166,8 +320,15 @@ fn saturated_rx_does_not_starve_tx_when_partitioned() {
     });
 
     std::thread::sleep(Duration::from_millis(OBSERVE_MS));
+    // R311y866 — this leg had the MIRROR of the other one's flake and it was
+    // the worse kind. A holder whose clock expired mid-window freed an RX worker,
+    // and TX running then proved nothing about the partition; the test went
+    // GREEN for the wrong reason. Holding until released is what makes "RX is
+    // saturated" true for the whole window this reads.
+    let ran = observer.load(Ordering::SeqCst);
+    holders.release();
     assert!(
-        observer.load(Ordering::SeqCst),
+        ran,
         "TX has its own runtime, so RX saturating all {rx_workers} of its workers \
          must not delay it"
     );
