@@ -501,7 +501,17 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
 /// handed to a zenoh client.
 {{
   mode: "client",
-  connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+  // R311y849 — `retry` sits beside the endpoints it paces, and like the four
+  // multicast leaves below it is named here BECAUSE it must reach nothing in
+  // this invocation. Its precondition is a run mode that owns a connect LIST
+  // (`--peer` / `--router-hat`); a client dials one endpoint through `--connect`
+  // and its reconnect supervisor is a different substrate with a different
+  // declared parity target, so an expansion that emitted `--connect-retry` here
+  // would hand a valid stock config to a binary with no parse for it.
+  connect: {{
+    endpoints: ["tcp/127.0.0.1:{port}"],
+    retry: {{ period_init_ms: 1000, period_max_ms: 4000, period_increase_factor: 2 }},
+  }},
   // R311y846 — the four `multicast` leaves are named here BECAUSE they must
   // reach nothing in this invocation, which is the half the unit tests cannot
   // put in front of the binary. Each carries a command-line precondition this
@@ -666,4 +676,140 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
 
     drop(demo_guard);
     drop(router);
+}
+
+/// R311y849 — LEG 5: the schedule the file carried is the schedule the node
+/// RUNS.
+///
+/// The four legs above stop at the boundary: they show that wz reads the same
+/// values zenohd does, that every upstream leaf is accounted for, and that a
+/// node started from the file alone reaches a real zenohd. None of them shows a
+/// honoured value CHANGING what the process does — and `connect/retry` is
+/// exactly the key where that gap matters, because a schedule the reader
+/// ingests and nothing consumes looks identical, from the config report, to one
+/// in force. Measured before the fix: the `--peer` arm accepted
+/// `--connect-retry` and dropped it, malformed values included, so the key
+/// could have been declared honoured while pacing nothing.
+///
+/// The witness is the ATTEMPT COUNT in a fixed window, and the control is the
+/// same file with the retry block deleted. Two runs of one binary differing in
+/// one block: if the count does not move, the file reached nothing, whatever
+/// the config report says. Counts rather than inter-arrival gaps, because the
+/// gap between two log lines is a scheduler artefact under load while a count
+/// over seconds is not.
+///
+/// No zenohd here, deliberately: the target port has NOTHING on it. A refused
+/// dial is the observable, and providing a listener would remove it.
+#[test]
+#[ignore = "binary-dep e2e: needs wz-ap-demo[+zenoh-config,+routing-peer]; runs via --ignored"]
+fn the_retry_schedule_a_stock_config_carries_is_the_one_the_node_runs() {
+    let demo = wz_ap_demo_binary();
+    // A demo predating this round has no peer-arm parse for the schedule at
+    // all, so a stale one reproduces the exact failure this leg detects.
+    assert_demo_binary_newer_than_sources(&demo);
+
+    // Both runs dial THIS, and nothing ever listens on it.
+    let dead = PortReservation::pick();
+    let dead_port = dead.port();
+    drop(dead);
+
+    // `period_max_ms` equals `period_init_ms` and the factor is 1, so the
+    // schedule is a flat 300ms and the growth arithmetic cannot muddy the
+    // comparison.
+    let tight = attempts_in_window(
+        &demo,
+        &format!(
+            r#"{{
+  mode: "peer",
+  listen: {{ endpoints: ["tcp/127.0.0.1:0"] }},
+  connect: {{
+    endpoints: ["tcp/127.0.0.1:{dead_port}"],
+    retry: {{ period_init_ms: 300, period_max_ms: 300, period_increase_factor: 1 }},
+  }},
+  scouting: {{ multicast: {{ enabled: false }} }},
+}}
+"#
+        ),
+    );
+
+    // THE CONTROL — the same file, one block removed. Its cadence is zenoh's
+    // own default (1s, then 2s, then 4s), which is what wz ran for every
+    // invocation before this round.
+    let default_paced = attempts_in_window(
+        &demo,
+        &format!(
+            r#"{{
+  mode: "peer",
+  listen: {{ endpoints: ["tcp/127.0.0.1:0"] }},
+  connect: {{ endpoints: ["tcp/127.0.0.1:{dead_port}"] }},
+  scouting: {{ multicast: {{ enabled: false }} }},
+}}
+"#
+        ),
+    );
+
+    // Vacuity guard: a run that never dialled at all would satisfy any
+    // "fewer than" comparison. Both arms must have actually tried.
+    assert!(
+        default_paced >= 2,
+        "the control never re-dialled ({default_paced} attempt(s)); the leg is \
+         measuring a node that did not run, not a schedule"
+    );
+    // The bound is deliberately loose. Over a 6s window a flat 300ms schedule
+    // is ~20 attempts and zenoh's default is 3, so a 3x margin separates them
+    // by more than any plausible scheduling jitter while asserting nothing
+    // about a number this test does not own.
+    assert!(
+        tight >= default_paced * 3,
+        "the file's 300ms schedule produced {tight} attempt(s) against the \
+         control's {default_paced}: the config reached the report and not the \
+         re-dial loop"
+    );
+}
+
+/// Start `wz-ap-demo --config <file>` — the DROP-IN invocation, with no role
+/// and no schedule typed — and count the dial attempts it logs in a fixed
+/// window.
+///
+/// The argv is the point. Everything this leg varies arrives through the file,
+/// which is what an operator replacing a zenoh node actually has.
+fn attempts_in_window(demo: &std::path::Path, source: &str) -> usize {
+    const WINDOW: Duration = Duration::from_secs(6);
+    const FAILED_DIAL: &str = "FAILED (peer";
+
+    let file = staged_config(source);
+    let capture = tempfile::tempfile().expect("tempfile for demo output");
+    let out = capture.try_clone().expect("dup demo stdout handle");
+    let err = capture.try_clone().expect("dup demo stderr handle");
+    let mut command = Command::new(demo);
+    command
+        .arg("--config")
+        .arg(file.path())
+        .env("RUST_LOG", "info")
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err));
+    let guard = ChildGuard::wrap(
+        "wz-ap-demo (--config, re-dial cadence)",
+        command.spawn().expect("spawn wz-ap-demo"),
+    );
+
+    std::thread::sleep(WINDOW);
+    drop(guard);
+
+    let mut capture = capture;
+    let logged = wz_integration_tests::common::read_captured(&mut capture);
+    // PANIC rather than return 0: a build without either feature would
+    // otherwise read as "this schedule never re-dialled", which is the same
+    // number a broken schedule produces.
+    assert!(
+        !logged.contains("--config requires the `zenoh-config` feature"),
+        "this lane's wz-ap-demo was built without the feature under test; \
+         rebuild with `cargo build -p wz-ap-demo --features zenoh-config`"
+    );
+    assert!(
+        !logged.contains("--peer requires the `routing-peer` feature"),
+        "this lane's wz-ap-demo cannot run the peer arm; rebuild with \
+         `cargo build -p wz-ap-demo --features routing-peer`"
+    );
+    logged.matches(FAILED_DIAL).count()
 }

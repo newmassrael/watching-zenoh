@@ -2934,6 +2934,18 @@ pub(crate) struct PeerOpts {
     /// configuration — wz's behaviour before this round.
     #[cfg(feature = "scouting-responder")]
     pub scout_listen: Option<crate::args::ScoutSocketArgs>,
+    /// R311y849 — `--connect-retry <init_ms>,<max_ms>,<factor>` (zenoh's
+    /// `connect.retry`): the schedule this peer paces its outbound re-dials by.
+    ///
+    /// NOT `Option`, and not cfg-gated: the peer mesh always re-dials, so there
+    /// is always a schedule; absent flag means
+    /// [`RetryPolicy::ZENOH_DEFAULT`](wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT),
+    /// which is what stock zenoh resolves for a config omitting the section. The
+    /// caller resolves the default rather than this struct so a malformed value
+    /// can still ABORT — a schedule silently replaced by the default is the
+    /// failure mode that looks healthy, which is the whole argument for
+    /// `parse_connect_retry` returning `Result`.
+    pub connect_retry: wz::runtime_tokio::retry_period::RetryPolicy,
 }
 
 #[cfg(feature = "routing-peer")]
@@ -3367,7 +3379,14 @@ async fn run_peer_until(
     // property, not a wire-observable one. Live-reconfigure-over-wire visibility
     // (interceptor config in the JSON) is a deferred §5.23 layer.
     let cfg = wz::runtime_tokio::config::WzConfig::from_init_params(&params)
-        .with_interceptors(interceptor_config);
+        .with_interceptors(interceptor_config)
+        // R311y849 — the SAME schedule the accept loop below is handed. Applied
+        // here rather than left at the `WzConfig` default because this instance
+        // is what the `--config-queryable` admin GET renders: before this round a
+        // peer could be told a cadence, run it, and REPORT zenoh's default, which
+        // is worse than not honouring the flag at all -- the operator's own
+        // introspection would confirm the wrong answer.
+        .with_connect_retry(opts.connect_retry);
     // R311y213 — route --max-links through the shared WzConfig (the config SSOT) so
     // the ONE instance handed to BOTH the aggregation loop (below, via
     // FaceSources.max_links) AND the --config-queryable admin handler is the single
@@ -3765,10 +3784,20 @@ async fn run_peer_until(
             },
             // R311y786 — the re-dial schedule, off the SAME shared WzConfig the
             // admin GET renders, so the peer mesh mode reports the cadence it
-            // runs. A peer node parses no `--connect-retry` (the flag belongs to
+            // runs.
+            //
+            // R311y849 CORRECTS what this comment used to assert. It said "a peer
+            // node parses no `--connect-retry` (the flag belongs to
             // `--router-hat`, the run-mode that owns a connect list), so this is
-            // the `WzConfig` default: zenoh's 1s/4s/x2.
-            retry: wz_config.borrow().connect_retry,
+            // the `WzConfig` default" — a divergence written down as a decision,
+            // which is the shape R311y838 paid for: the next reader takes it as
+            // settled and stops. Its premise was false. `--peer` binds AND dials
+            // every `--connect`, and this very field is what paces its re-dials;
+            // measured, the flag was accepted and dropped, malformed values
+            // included. The value now arrives through `opts`, and the `WzConfig`
+            // below carries the same one so the admin GET still renders the
+            // cadence actually in force.
+            retry: opts.connect_retry,
         },
         params,
         TokioTime::new(),
@@ -6298,6 +6327,7 @@ mod peer_quic_cert_tests {
             interest_timeout_ms: None,
             #[cfg(feature = "scouting-responder")]
             scout_listen: None,
+            connect_retry: wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT,
         };
         let interceptors = InterceptorOpts {
             acl_deny: None,
@@ -6391,6 +6421,7 @@ mod peer_failfast_tests {
             interest_timeout_ms: None,
             #[cfg(feature = "scouting-responder")]
             scout_listen: None,
+            connect_retry: wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT,
         };
         let interceptors = InterceptorOpts {
             acl_deny: None,

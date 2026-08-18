@@ -191,7 +191,17 @@ pub struct AdminspaceConfig {
 /// Every field maps to exactly one zenoh config key (named in its doc), so a
 /// reader can move between this struct and `DEFAULT_CONFIG.json5` without a
 /// translation table — the same rule the `dissect` field names follow.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// R311y849 dropped `Eq` from the derive and kept `PartialEq`. `connect/retry`
+/// carries upstream's `period_increase_factor`, which is an `f64`
+/// (`connection_retry.rs:36`), and `Eq` is a promise of reflexivity that no
+/// float type can make. [`RetryPolicy`](crate::retry_period::RetryPolicy) is
+/// `PartialEq`-only for exactly this reason, so the bound was going to be lost
+/// at whichever key first carried a real number. Nothing keyed a map or a set on
+/// this struct (checked, not assumed), so the removal costs no caller anything —
+/// and the honest alternative, an `Eq` impl written by hand over a field that
+/// can be NaN, is a lie the compiler would then trust.
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ZenohNodeConfig {
     /// `mode`.
@@ -299,6 +309,32 @@ pub struct ZenohNodeConfig {
     /// this key to `null`, so defaulting it here would make an unmentioned key
     /// indistinguishable from a stated one at the expansion boundary.
     pub scout_multicast_listen: Option<bool>,
+    /// R311y849 — `connect/retry`: how long a refused dial waits before the next
+    /// attempt, and how that wait grows
+    /// (`period_init_ms` / `period_max_ms` / `period_increase_factor`).
+    ///
+    /// The R311y844 class again — wz has run this schedule since R311y786, with
+    /// zenoh's own defaults, and the file could not state it. What makes this one
+    /// worth a round rather than a line is that the divergence is SILENT and
+    /// operational: an operator whose router boots slowly widens the ceiling in
+    /// their config, drops wz in, and gets 1s/2s/4s with nothing logged to
+    /// contradict them. Discovery has to work for a drop-in; so does the pacing
+    /// of a reconnect, because that is what a deployment does after every
+    /// restart.
+    ///
+    /// One `Option` for the whole subtree rather than three, because that is how
+    /// upstream resolves it: a running zenohd renders `connect` as
+    /// `{"endpoints":[],"exit_on_failure":null,"retry":null,"timeout_ms":null}`
+    /// (measured), so `retry` is a single opaque leaf and `None` here is exactly
+    /// its `null`. Reading it as three keys would invent a surface the census
+    /// denominator does not have.
+    ///
+    /// [`RetryPolicy`](crate::retry_period::RetryPolicy) rather than a local
+    /// triple: it is the type the consumer already takes, and the round that
+    /// added it made the point that one transcription of the arithmetic is what
+    /// keeps the two re-dial substrates from drifting. A second shape here would
+    /// be a third.
+    pub connect_retry: Option<crate::retry_period::RetryPolicy>,
 }
 
 impl Default for ZenohNodeConfig {
@@ -342,6 +378,14 @@ impl Default for ZenohNodeConfig {
             scout_multicast_interface: None,
             scout_multicast_ttl: None,
             scout_multicast_listen: None,
+            // R311y849 — `None` and NOT `RetryPolicy::ZENOH_DEFAULT`, even though
+            // that is the schedule an unset key produces. The two are the same
+            // BEHAVIOUR and different FACTS: `None` is "the file said nothing",
+            // which `to_json5` must leave out and the argv expansion must not
+            // spell. Seeding the default here would emit a `connect.retry` block
+            // zenoh never resolved and hand the demo a flag the operator never
+            // typed -- the exact asymmetry the five R311y844 Options exist for.
+            connect_retry: None,
         }
     }
 }
@@ -473,6 +517,20 @@ impl ZenohNodeConfig {
         escape_into(self.mode.to_str(), &mut out);
         out.push_str(",\n  \"connect\": { \"endpoints\": ");
         push_endpoints(&self.connect, &mut out);
+        // R311y849 — `connect.retry`, inside the block already open, and written
+        // in FULL when it is written at all. The ingest side merges a partial
+        // block against zenoh's defaults, so by the time a policy exists here all
+        // three numbers are decided; emitting only the stated ones would hand the
+        // reader a document whose meaning depends on which fields the ORIGINAL
+        // file happened to name.
+        if let Some(retry) = self.connect_retry {
+            let _ = write!(
+                out,
+                ", \"retry\": {{ \"period_init_ms\": {}, \"period_max_ms\": {}, \
+                 \"period_increase_factor\": {} }}",
+                retry.period_init_ms, retry.period_max_ms, retry.period_increase_factor
+            );
+        }
         out.push_str(" },\n  \"listen\": { \"endpoints\": ");
         push_endpoints(&self.listen, &mut out);
         out.push_str(" }");
@@ -645,6 +703,40 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // `scouting_responder` exists. Surface total below unchanged: it is a
     // resolved leaf of a real zenohd either way.
     "scouting/multicast/listen",
+    // R311y849 — the PACING of a reconnect, where the four above are its
+    // addressing. Back in the y844 class: wz has run this schedule since
+    // R311y786 and the file could not state it. What the round had to fix first
+    // is that the CLI could not state it either for the mode that dials -- the
+    // `--peer` arm took `--connect-retry`, dropped it, and dropped its
+    // validation with it, so a key routed there before this round would have
+    // been honoured on paper and inert in fact.
+    "connect/retry",
+];
+
+/// R311y849 — the leaves that live INSIDE a honoured key which is a subtree
+/// rather than a scalar.
+///
+/// Deliberately NOT part of [`HONOURED_CONFIG_KEYS`], which is one half of the
+/// CENSUS partition and must carry exactly the leaves a real zenohd resolves. A
+/// zenohd whose file never mentions `connect.retry` renders it as a single
+/// `null` (measured), so the surface has one leaf there and adding three would
+/// inflate the denominator with keys upstream does not show.
+///
+/// What this list is for is the `ignored` report, which walks the OPERATOR's
+/// document rather than the upstream surface — and an operator who writes the
+/// block writes its three fields. Without this they would each be reported as
+/// "wz did not apply this" while wz had just applied them.
+///
+/// It is an exact-match list and not a `starts_with` rule on purpose. Measured:
+/// a real zenohd handed `connect: { retry: { period_init_mss: 250 } }` starts
+/// anyway and drops the field with no complaint at all — so a prefix rule would
+/// make wz silently swallow the same typo. wz does not REFUSE it either (that
+/// would be stricter than the acceptance boundary the census pins), it REPORTS
+/// it, which is the one thing upstream does not do for the operator.
+const HONOURED_SUBTREE_LEAVES: &[&str] = &[
+    "connect/retry/period_init_ms",
+    "connect/retry/period_max_ms",
+    "connect/retry/period_increase_factor",
 ];
 
 /// Every leaf key a real zenoh 1.5.0 resolves that wz does NOT honour.
@@ -670,7 +762,14 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "aggregation/publishers",
     "aggregation/subscribers",
     "connect/exit_on_failure",
-    "connect/retry",
+    // R311y849 removed `connect/retry` from here -- it moved to
+    // `HONOURED_CONFIG_KEYS`. Its two siblings STAY, and not for want of
+    // attention: for a peer, upstream resolves `timeout_ms` to -1 (retry
+    // forever) and `exit_on_failure` to false, which is precisely what wz does,
+    // so wz already matches the DEFAULT and what remains unhonoured is a
+    // non-default value -- a bounded give-up and a process that exits on it.
+    // Those are lifecycle behaviours wz has no substrate for, which is a
+    // different kind of debt from a reader that was never taught a key.
     "connect/timeout_ms",
     "downsampling",
     "listen/exit_on_failure",
@@ -780,7 +879,11 @@ fn upstream_knows(path: &str) -> bool {
 /// leaf the document carried that wz does not honour is named here, so the
 /// caller can print it, and so a census can compare the partition against the
 /// upstream surface.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// R311y849 dropped `Eq` here for the reason it dropped it from
+/// [`ZenohNodeConfig`], which this wraps: the float in `connect/retry` reaches
+/// this type through that field, so the bound could not survive on the wrapper
+/// once it had left the wrapped.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ZenohConfigIngest {
     /// The subset wz models, with an absent or `null` key left at its zenoh
     /// default.
@@ -905,6 +1008,34 @@ fn want_u64(doc: &Json5Value, path: &'static str) -> Result<Option<u64>, ConfigI
     }
 }
 
+/// R311y849 — a honoured key whose value is a REAL number. The only one is
+/// `connect/retry/period_increase_factor`, which upstream types `f64`
+/// (`connection_retry.rs:36`), so `2` and `1.5` are both configurations a stock
+/// file can carry and [`want_u64`] would refuse the second.
+///
+/// Finiteness is checked HERE and the range is not, and the split is deliberate.
+/// A NaN or an infinity is not a number this key can mean under any policy, so
+/// it is a type error; whether a factor below 1.0 is allowed is a POLICY, and
+/// this crate has exactly one place that decides it — `--connect-retry`'s
+/// parser, which every route into the schedule goes through, config included.
+/// Deciding it twice is how the two answers start to differ.
+fn want_f64(doc: &Json5Value, path: &'static str) -> Result<Option<f64>, ConfigIngestError> {
+    match honoured(doc, path) {
+        None => Ok(None),
+        Some(Json5Value::Number(text)) => match text.parse::<f64>() {
+            Ok(v) if v.is_finite() => Ok(Some(v)),
+            _ => Err(ConfigIngestError::OutOfRange {
+                path,
+                value: text.clone(),
+            }),
+        },
+        Some(_) => Err(ConfigIngestError::WrongType {
+            path,
+            expected: "a number",
+        }),
+    }
+}
+
 /// R311y844 — a honoured key whose value is a string (a path, a keyexpr, a hex
 /// zid). An EMPTY string is refused rather than carried: every consumer of one
 /// is a path or an identifier, and "" reaches them as a filename nothing opens
@@ -999,6 +1130,29 @@ impl ZenohNodeConfig {
         if let Some(v) = want_endpoints(&doc, "connect/endpoints")? {
             out.connect = v;
             named.push("connect/endpoints");
+        }
+        // R311y849 — `connect/retry`, read next to the endpoints it paces.
+        //
+        // The subtree is ONE census leaf, so it is named ONCE in `named` no
+        // matter how many of its three fields the file states. Any one of them
+        // present means the file HAS an instruction here, and the two it did not
+        // state fall back to zenoh's own resolved values -- which is what
+        // upstream does with a partial block, and is why the fallbacks are read
+        // off `RetryPolicy::ZENOH_DEFAULT` rather than off this struct's
+        // `Default` (that one is `None`, an absence, and has no numbers to give).
+        {
+            let init = want_u64(&doc, "connect/retry/period_init_ms")?;
+            let max = want_u64(&doc, "connect/retry/period_max_ms")?;
+            let factor = want_f64(&doc, "connect/retry/period_increase_factor")?;
+            if init.is_some() || max.is_some() || factor.is_some() {
+                let base = crate::retry_period::RetryPolicy::ZENOH_DEFAULT;
+                out.connect_retry = Some(crate::retry_period::RetryPolicy {
+                    period_init_ms: init.unwrap_or(base.period_init_ms),
+                    period_max_ms: max.unwrap_or(base.period_max_ms),
+                    period_increase_factor: factor.unwrap_or(base.period_increase_factor),
+                });
+                named.push("connect/retry");
+            }
         }
         if let Some(v) = want_endpoints(&doc, "listen/endpoints")? {
             out.listen = v;
@@ -1154,7 +1308,10 @@ impl ZenohNodeConfig {
 
         let mut ignored: Vec<String> = leaves
             .into_iter()
-            .filter(|p| !HONOURED_CONFIG_KEYS.contains(&p.as_str()))
+            .filter(|p| {
+                !HONOURED_CONFIG_KEYS.contains(&p.as_str())
+                    && !HONOURED_SUBTREE_LEAVES.contains(&p.as_str())
+            })
             .collect();
         ignored.dedup();
         Ok(ZenohConfigIngest {
@@ -1539,6 +1696,17 @@ mod tests {
                 "scouting/multicast/listen",
                 r#"{ "scouting": { "multicast": { "listen": false } } }"#,
             ),
+            // R311y849 — the re-dial PACING. All three fields driven off
+            // zenoh's own `1000 / 4000 / 2`, and the factor given as `1.5` so it
+            // is a value `want_u64` could not have carried: a reader that read
+            // the factor as an integer would fail here rather than report the
+            // key honoured while rounding what the file said.
+            (
+                "connect/retry",
+                r#"{ "connect": { "retry": { "period_init_ms": 250,
+                                            "period_max_ms": 9000,
+                                            "period_increase_factor": 1.5 } } }"#,
+            ),
         ];
         // The case list IS the table, so a key added to one and not the other
         // fails here rather than going unmeasured.
@@ -1645,6 +1813,134 @@ mod tests {
         );
     }
 
+    /// R311y849 — `connect/retry` is ONE census leaf holding THREE numbers, so
+    /// a file may state any subset of them. What a partial block must not do is
+    /// leave the unstated fields at zero: that is not a slower retry, it is a
+    /// re-dial hot loop, and it is the value `RetryPolicy`'s hand-written
+    /// `Default` exists to refuse.
+    ///
+    /// The three cases below are the three arms that can produce a policy, and
+    /// the fourth — a block naming nothing — has to stay `None`, because that is
+    /// the difference between "the file said nothing" and "the file asked for
+    /// zenoh's defaults", which `to_json5` and the argv expansion both act on.
+    #[test]
+    fn a_partial_connect_retry_block_fills_the_rest_from_zenoh_defaults() {
+        let base = crate::retry_period::RetryPolicy::ZENOH_DEFAULT;
+
+        let only_init =
+            ZenohNodeConfig::from_json5(r#"{ "connect": { "retry": { "period_init_ms": 25 } } }"#)
+                .expect("a lone period_init_ms is a valid block");
+        assert_eq!(
+            only_init.config.connect_retry,
+            Some(crate::retry_period::RetryPolicy {
+                period_init_ms: 25,
+                period_max_ms: base.period_max_ms,
+                period_increase_factor: base.period_increase_factor,
+            }),
+            "an unstated ceiling must fall back to zenoh's, never to 0"
+        );
+        assert!(
+            only_init.named.contains(&"connect/retry"),
+            "any stated field means the file HAS an instruction here"
+        );
+
+        let only_factor = ZenohNodeConfig::from_json5(
+            r#"{ "connect": { "retry": { "period_increase_factor": 1 } } }"#,
+        )
+        .expect("a lone factor is a valid block");
+        assert_eq!(
+            only_factor.config.connect_retry,
+            Some(crate::retry_period::RetryPolicy {
+                period_init_ms: base.period_init_ms,
+                period_max_ms: base.period_max_ms,
+                // `1` arrives as an integer token and must still read as a float.
+                period_increase_factor: 1.0,
+            })
+        );
+
+        // The subtree is named ONCE however many of its fields the file states —
+        // the census denominator has one leaf here, not three.
+        let all_three = ZenohNodeConfig::from_json5(
+            r#"{ "connect": { "retry": { "period_init_ms": 1, "period_max_ms": 2,
+                                        "period_increase_factor": 3 } } }"#,
+        )
+        .expect("a full block is valid");
+        assert_eq!(
+            all_three
+                .named
+                .iter()
+                .filter(|k| **k == "connect/retry")
+                .count(),
+            1
+        );
+
+        // And the absence case: no `connect` block at all leaves `None`, which
+        // is a different fact from zenoh's defaults even though it BEHAVES as
+        // them.
+        let silent = ZenohNodeConfig::from_json5(r#"{ "mode": "peer" }"#).expect("valid");
+        assert_eq!(silent.config.connect_retry, None);
+        assert!(!silent.named.contains(&"connect/retry"));
+    }
+
+    /// R311y849 — a typo INSIDE the honoured `connect/retry` subtree must be
+    /// reported, not swallowed by the rule that lets the subtree's real fields
+    /// through.
+    ///
+    /// The upstream behaviour this sits against was measured, not assumed: a
+    /// real zenohd given `connect: { retry: { period_init_mss: 250 } }` STARTS,
+    /// resolves `retry` to three nulls, and says nothing. So wz does not refuse
+    /// it either -- the acceptance boundary stays upstream's -- and the whole
+    /// value wz adds here is the sentence upstream never prints.
+    #[test]
+    fn a_typo_inside_the_retry_block_is_reported_rather_than_absorbed() {
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ "connect": { "retry": { "period_init_ms": 25, "period_init_mss": 250 } } }"#,
+        )
+        .expect("upstream starts on this, so wz must not refuse it");
+        assert_eq!(
+            ingest.ignored,
+            vec![String::from("connect/retry/period_init_mss")],
+            "the misspelling did nothing and the operator has to be told"
+        );
+        assert_eq!(
+            ingest
+                .config
+                .connect_retry
+                .expect("the correctly spelled field still applies")
+                .period_init_ms,
+            25
+        );
+    }
+
+    /// R311y849 — a factor that cannot be a number is a TYPE error here, while a
+    /// factor that is a number but not a policy anyone means (below 1.0) is left
+    /// to `--connect-retry`'s parser. Two boundaries, one owner each; this pins
+    /// which one this layer keeps.
+    #[test]
+    fn a_non_finite_retry_factor_is_refused_but_a_shrinking_one_is_passed_on() {
+        assert!(
+            ZenohNodeConfig::from_json5(
+                r#"{ "connect": { "retry": { "period_increase_factor": "fast" } } }"#
+            )
+            .is_err(),
+            "a string is not a number"
+        );
+        let shrinking = ZenohNodeConfig::from_json5(
+            r#"{ "connect": { "retry": { "period_increase_factor": 0.5 } } }"#,
+        )
+        .expect("0.5 is a number, so this layer carries it");
+        assert_eq!(
+            shrinking
+                .config
+                .connect_retry
+                .expect("a policy")
+                .period_increase_factor,
+            0.5,
+            "the refusal belongs to the flag parser, which every route goes \
+             through -- deciding it twice is how the two answers drift"
+        );
+    }
+
     /// wz's ACCEPTANCE BOUNDARY is zenoh's: a key zenoh knows and wz does not
     /// honour is reported, a key NEITHER knows is refused.
     ///
@@ -1681,6 +1977,15 @@ mod tests {
         // opaque SUBTREE, and a config filling it in carries leaves below the
         // path the resolved tree shows. Refusing those would refuse valid
         // configs.
+        //
+        // R311y849 — `connect/retry/period_init_ms` LEFT this expectation, and
+        // the departure is the round's result rather than a fixture repair: the
+        // subtree is honoured now, so its fields are applied and reporting them
+        // as ignored would be the false statement. The two that remain are still
+        // filled-in subtrees of keys wz does not honour, which is what this
+        // assertion is actually for -- a honoured subtree and an unhonoured one
+        // must partition the same document differently, and this now shows both
+        // in one call.
         let filled = ZenohNodeConfig::from_json5(
             r#"{ "connect": { "retry": { "period_init_ms": 1000 } },
                  "metadata": { "name": "strawberry" },
@@ -1689,11 +1994,15 @@ mod tests {
         .expect("a filled-in upstream subtree is a valid config");
         assert_eq!(
             filled.ignored,
-            vec![
-                "connect/retry/period_init_ms",
-                "metadata/name",
-                "plugins/rest/http_port"
-            ]
+            vec!["metadata/name", "plugins/rest/http_port"]
+        );
+        assert_eq!(
+            filled
+                .config
+                .connect_retry
+                .expect("the honoured subtree applied")
+                .period_init_ms,
+            1000
         );
     }
 

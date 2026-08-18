@@ -18,7 +18,10 @@
 //     state from `main` into `run_demo` without inflating the
 //     latter's argument list past clippy::too_many_arguments.
 
-#[cfg(feature = "router-hat-router")]
+// R311y849 — the UNION of `parse_connect_retry`'s consumers, kept in step with
+// the function's own gate below. Widening one and not the other is the same
+// mistake in a smaller place: the arm compiles in and its type does not.
+#[cfg(any(feature = "router-hat-router", feature = "routing-peer"))]
 use wz::runtime_tokio::retry_period::RetryPolicy;
 use wz::runtime_tokio::session_glue::{OsEntropy, SessionInitParams, SigningKey, WhatAmI};
 
@@ -491,10 +494,22 @@ pub(crate) fn expand_stock_zenoh_config(
     // argument it exits(2) on. The `cfg!` guard is the R311y844 rule — a key
     // whose sink is compiled out must not turn a valid stock config into a node
     // that refuses to start.
+    //
+    // R311y849 — the `--peer` precondition is met by the command line OR by
+    // `added`, and the fix is not cosmetic. `--peer` is what the ROLE expansion
+    // above emits for a `mode: "peer"` file, so before this round the key was
+    // honoured only when the operator ALSO typed the role — and the invocation a
+    // drop-in actually performs is `wz-ap-demo --config their.json5` and nothing
+    // else. Measured by a test written against the old code: that invocation
+    // expanded to `["--peer", …, "--connect", …]` with no `--scout-listen`, so
+    // the node R311y846 made findable came up invisible on precisely the path
+    // R311y846 exists to serve. `--scout` needs no such treatment: it is a role
+    // the expansion never emits, so only a typed one can exist.
+    let role_dials_as_peer = rest.iter().chain(added.iter()).any(|a| a == "--peer");
     let listen_expanded = cfg!(feature = "scouting-responder")
         && named("scouting/multicast/listen")
         && cfg.scout_multicast_listen == Some(true)
-        && rest.iter().any(|a| a == "--peer")
+        && role_dials_as_peer
         && !rest.iter().any(|a| a == "--scout-listen");
     if listen_expanded {
         added.push("--scout-listen".into());
@@ -530,6 +545,48 @@ pub(crate) fn expand_stock_zenoh_config(
                 added.push(String::from(flag));
                 added.push(value);
             }
+        }
+    }
+    // R311y849 — `connect/retry` -> `--connect-retry <init>,<max>,<factor>`.
+    //
+    // The precondition is a run mode that DIALS, which is `--peer` or
+    // `--router-hat`: those two own a connect list, and they are the only arms
+    // that read the flag. A node with neither exits(2) on an argument it has no
+    // parse for, so a stock config carrying `connect.retry` alongside a
+    // `--listen` invocation must expand to nothing rather than to a refusal.
+    //
+    // The `cfg!` guard is the R311y844 rule and it is the UNION of the two arms'
+    // features, matching the parser's own gate: a build with neither compiled in
+    // has no sink, and expanding into it would turn a valid stock config into a
+    // node that will not start.
+    // The precondition is checked against the command line AND `added`, and the
+    // second half is the whole drop-in case: when the operator names no role the
+    // FILE supplies one, and that `--peer` is pushed into `added` above — it
+    // never appears in `rest`. A test that looked only at what was typed would
+    // withhold the flag from `wz-ap-demo --config their.json5` and nothing else,
+    // which is the single invocation this path exists for. Measured, by a test
+    // written before the fix: the config-only expansion came out
+    // `["--peer", …, "--connect", …]` with no schedule at all.
+    let dials = rest
+        .iter()
+        .chain(added.iter())
+        .any(|a| a == "--peer" || a == "--router-hat");
+    if named("connect/retry")
+        && cfg!(any(feature = "routing-peer", feature = "router-hat-router"))
+        && dials
+        && !rest.iter().any(|a| a == "--connect-retry")
+    {
+        if let Some(retry) = cfg.connect_retry {
+            added.push("--connect-retry".into());
+            // Rendered in the flag's own three-comma-separated spelling, and
+            // re-parsed by `parse_connect_retry` downstream on purpose: that
+            // parser is the single place the acceptance POLICY lives (a factor
+            // below 1.0 is refused there and nowhere else), so a config file
+            // reaches the same boundary a command line does.
+            added.push(format!(
+                "{},{},{}",
+                retry.period_init_ms, retry.period_max_ms, retry.period_increase_factor
+            ));
         }
     }
     if named("transport/multicast/qos/enabled")
@@ -909,6 +966,12 @@ mod stock_config_tests {
         if !cfg!(feature = "scouting-responder") {
             out.push("scouting/multicast/listen");
         }
+        // R311y849 — `--connect-retry` is parsed by the `--peer` and
+        // `--router-hat` arms only, and neither exists without its feature, so a
+        // build with neither has no sink to expand into.
+        if !cfg!(any(feature = "routing-peer", feature = "router-hat-router")) {
+            out.push("connect/retry");
+        }
         out
     }
 
@@ -938,6 +1001,13 @@ mod stock_config_tests {
             // `--scout` is a one-shot Initiator that exits on its first
             // discovery, which has nothing to answer with.
             "scouting/multicast/listen" => &["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"],
+            // R311y849 — the re-dial schedule's precondition is a run mode that
+            // owns a connect LIST. `--peer` is used here rather than
+            // `--router-hat` because it is the arm this round WIRED: the
+            // `--router-hat` arm had read the flag since R311y786 and the peer
+            // arm accepted and dropped it, so a fixture pointed at the router
+            // would have passed against the defect.
+            "connect/retry" => &["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"],
             _ => &["--config", "z.json5"],
         }
     }
@@ -1131,6 +1201,19 @@ mod stock_config_tests {
                 r#"{ mode: "peer", scouting: { multicast: { listen: false } } }"#,
                 r#"{ mode: "peer", scouting: { multicast: { listen: true } } }"#,
             ),
+            // R311y849 — the control states NO retry block, so the delta is the
+            // whole flag rather than a changed number. That is the honest
+            // control here: `None` and zenoh's defaults BEHAVE alike, so a
+            // control carrying `1000,4000,2` would differ from the variant only
+            // in digits and would pass against an expansion that emitted the
+            // flag unconditionally.
+            (
+                "connect/retry",
+                r#"{ mode: "peer", connect: { endpoints: ["tcp/r:7447"] } }"#,
+                r#"{ mode: "peer", connect: { endpoints: ["tcp/r:7447"],
+                     retry: { period_init_ms: 250, period_max_ms: 9000,
+                              period_increase_factor: 1.5 } } }"#,
+            ),
         ]
     }
 
@@ -1183,6 +1266,140 @@ mod stock_config_tests {
             "a key the report calls honoured reaches no behaviour and is not \
              named in config_keys_the_demo_drops() (or one named there now does \
              something and should be removed)"
+        );
+    }
+
+    /// R311y849 — `connect/retry` reaches the flag in the modes that dial and
+    /// is WITHHELD everywhere else, spelled out rather than left to the census
+    /// gate above (which only shows that the argv changed).
+    ///
+    /// The withholding half is the one worth a test. A `--listen`-only node has
+    /// no parse for `--connect-retry` and exits(2) on it, so an expansion that
+    /// emitted it would turn a valid operator config -- one that legitimately
+    /// carries a retry block for the OTHER nodes in the deployment -- into a
+    /// node that will not start. That is the failure R311y844 measured for four
+    /// other flags and this file exists to keep measuring.
+    #[test]
+    #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+    fn the_retry_schedule_reaches_only_the_modes_that_own_a_connect_list() {
+        // A peer BINDS and dials, so the file carries both endpoint lists: the
+        // role expansion produces `--peer` only from the pair, and a
+        // connect-only file is a client dial however its `mode` reads.
+        let file = r#"{ mode: "peer",
+             listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+             connect: { endpoints: ["tcp/r:7447"],
+                        retry: { period_init_ms: 250, period_max_ms: 9000,
+                                 period_increase_factor: 1.5 } } }"#;
+
+        // The dialing modes: the flag is emitted, in the parser's own spelling.
+        for mode in [
+            vec!["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"],
+            vec!["--config", "z.json5", "--router-hat", "tcp/127.0.0.1:0"],
+        ] {
+            let out = expand(&mode, file).unwrap();
+            let at = out
+                .added
+                .iter()
+                .position(|a| a == "--connect-retry")
+                .unwrap_or_else(|| panic!("{mode:?}: no --connect-retry in {:?}", out.added));
+            assert_eq!(out.added[at + 1], "250,9000,1.5");
+            // And the value the flag's own parser makes of it is the schedule
+            // the file asked for -- the two halves are joined here rather than
+            // asserted to look alike, because the string is the only thing the
+            // expansion controls and the policy is the parser's.
+            let policy = parse_connect_retry(&out.argv)
+                .expect("the expansion must emit something its own parser accepts")
+                .expect("the flag is present");
+            assert_eq!(policy.period_init_ms, 250);
+            assert_eq!(policy.period_max_ms, 9000);
+            assert_eq!(policy.period_increase_factor, 1.5);
+        }
+
+        // Every other mode: nothing, because the flag would be a refusal.
+        for mode in [
+            vec!["--config", "z.json5", "--listen", "tcp/127.0.0.1:0"],
+            vec!["--config", "z.json5", "--connect", "tcp/r:7447"],
+        ] {
+            let out = expand(&mode, file).unwrap();
+            assert!(
+                !out.added.iter().any(|a| a == "--connect-retry"),
+                "{mode:?} has no parse for the flag, so emitting it would \
+                 exit(2) on a valid stock config: {:?}",
+                out.added
+            );
+        }
+
+        // THE DROP-IN CASE, and the one this round nearly shipped broken. When
+        // the operator names no role, the file supplies one -- and the `--peer`
+        // it supplies goes into `added`, never into the command line. A
+        // precondition test that looked only at what was TYPED would withhold
+        // the flag from the single invocation the whole config path exists for:
+        // `wz-ap-demo --config their.json5` and nothing else.
+        let drop_in = expand(&["--config", "z.json5"], file).unwrap();
+        assert!(
+            drop_in.added.iter().any(|a| a == "--peer"),
+            "the file's `mode: peer` must supply the role: {:?}",
+            drop_in.added
+        );
+        let at = drop_in
+            .added
+            .iter()
+            .position(|a| a == "--connect-retry")
+            .unwrap_or_else(|| {
+                panic!(
+                    "the config-only invocation dropped the schedule: {:?}",
+                    drop_in.added
+                )
+            });
+        assert_eq!(drop_in.added[at + 1], "250,9000,1.5");
+
+        // An operator who typed the flag keeps it: the file supplies defaults,
+        // it does not overrule the person at the machine (the same rule the
+        // role flags follow).
+        let typed = expand(
+            &[
+                "--config",
+                "z.json5",
+                "--peer",
+                "tcp/127.0.0.1:0",
+                "--connect-retry",
+                "10,10,1",
+            ],
+            file,
+        )
+        .unwrap();
+        assert!(!typed.added.iter().any(|a| a == "--connect-retry"));
+    }
+
+    /// R311y849 — the same drop-in question asked of R311y846's key, because
+    /// the two share a shape: a precondition on a role the FILE can supply.
+    ///
+    /// This one matters more than the schedule it was found beside.
+    /// `scouting/multicast/listen` is what makes a wz node FINDABLE by a stock
+    /// zenoh network, and the invocation an operator performs when replacing a
+    /// zenoh node is `wz-ap-demo --config their.json5` with no role typed. If
+    /// the flag is withheld there, the capability R311y846 built is reachable
+    /// only by someone who already knows to type `--peer --scout-listen` — which
+    /// is not a drop-in, it is a rewrite of the deployment.
+    #[test]
+    #[cfg(all(feature = "scouting-responder", feature = "routing-peer"))]
+    fn being_findable_survives_a_config_that_supplies_the_role_itself() {
+        let file = r#"{ mode: "peer",
+             listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+             connect: { endpoints: ["tcp/r:7447"] },
+             scouting: { multicast: { enabled: true, listen: true } } }"#;
+
+        let drop_in = expand(&["--config", "z.json5"], file).unwrap();
+        assert!(
+            drop_in.added.iter().any(|a| a == "--peer"),
+            "the file supplies the role: {:?}",
+            drop_in.added
+        );
+        assert!(
+            drop_in.added.iter().any(|a| a == "--scout-listen"),
+            "a config-only drop-in must still answer Scouts, or the node stays \
+             invisible to the network it is replacing a member of: {:?}",
+            drop_in.added
         );
     }
 
@@ -1330,11 +1547,23 @@ pub(crate) fn parse_pairs(args: &[String], flag: &str) -> Vec<String> {
 /// a shrinking retry period is not a configuration anyone means, and at this
 /// layer — the one taking human input — the honest answer is a refusal rather
 /// than a busy-loop the operator has to diagnose from behaviour.
-/// Gated `router-hat-router` — like [`parse_qos_link`]'s `session-extqos` gate —
-/// because its only caller is the `--router-hat` arm, the run-mode that owns a
-/// connect list. Consequence for CI: a lane that does not name that feature
-/// selects ZERO of the tests below and still exits 0, so the C1ay step names it.
-#[cfg(feature = "router-hat-router")]
+/// R311y849 WIDENS the gate to the UNION of this parser's consumers, which is
+/// now `--router-hat` AND `--peer`. It read `router-hat-router` alone on the
+/// premise that `--router-hat` is "the run-mode that owns a connect list" — and
+/// that premise was never true: `--peer <addr>` binds AND dials every
+/// `--connect`, takes a comma-separated list, and re-dials a refused target on
+/// this very schedule. Measured before the fix: a peer given
+/// `--connect-retry 300,300,1` retried at 1s then 2s (zenoh's default), and a
+/// peer given `--connect-retry banana` did not refuse — the arm never reached
+/// the parser, so neither the value nor its VALIDATION applied.
+///
+/// The union spelling is deliberate and is the R311y845 rule: cfg on the set of
+/// consumers rather than `allow(dead_code)`, so the arm that is off does not
+/// hide a caller that is on.
+///
+/// Consequence for CI: a lane that names NEITHER feature selects ZERO of the
+/// tests below and still exits 0, so the C1ay step names one.
+#[cfg(any(feature = "router-hat-router", feature = "routing-peer"))]
 pub(crate) fn parse_connect_retry(args: &[String]) -> Result<Option<RetryPolicy>, String> {
     let Some(spec) = parse_pair(args, "--connect-retry") else {
         return Ok(None);
@@ -2333,7 +2562,7 @@ pub(crate) struct LivelinessGetSpec {
     pub(crate) after_ms: Option<u64>,
 }
 
-#[cfg(all(test, feature = "router-hat-router"))]
+#[cfg(all(test, any(feature = "router-hat-router", feature = "routing-peer")))]
 mod connect_retry_tests {
     use super::*;
 

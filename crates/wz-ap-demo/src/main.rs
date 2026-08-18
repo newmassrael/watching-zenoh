@@ -538,6 +538,22 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::from(2);
             }
+            // R311y849 — `--connect-retry <init_ms>,<max_ms>,<factor>`, the same
+            // parse the `--router-hat` arm below runs and for the same reason: a
+            // peer mesh dials every `--connect` and re-dials a refused one on
+            // this schedule. A malformed value ABORTS here too; until this round
+            // the peer arm never called the parser, so `--connect-retry banana`
+            // started a node that paced itself by a cadence nobody asked for and
+            // said nothing about it.
+            let peer_connect_retry = match crate::args::parse_connect_retry(rest) {
+                Ok(parsed) => {
+                    parsed.unwrap_or(wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT)
+                }
+                Err(msg) => {
+                    eprintln!("wz-ap-demo: {msg}");
+                    return ExitCode::from(2);
+                }
+            };
             return run_peer_mode(
                 peer_listen,
                 dial_targets,
@@ -573,6 +589,7 @@ fn main() -> ExitCode {
                     interest_timeout_ms,
                     #[cfg(feature = "scouting-responder")]
                     scout_listen,
+                    connect_retry: peer_connect_retry,
                 },
                 InterceptorOpts {
                     acl_deny,

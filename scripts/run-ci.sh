@@ -10604,7 +10604,14 @@ layer_z_zenohd_interop() {
     # acceptance boundary (a key zenohd refuses is one wz refuses), and the
     # drop-in itself (`wz-ap-demo --config` and nothing else, dialling a port that
     # exists only inside the file).
-    _runci_guarded_test Z 4 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    # R311y849 raises the count 4 -> 5 for LEG 5, which is the one that shows a
+    # honoured value CHANGING what the process does rather than only being read:
+    # two runs of the demo from stock config files differing in one `connect.retry`
+    # block, compared by how often each re-dials a dead port. It needs no zenohd of
+    # its own and is registered here anyway, because this is the file that owns
+    # "wz reads a stock zenohd config" and the guard is an EXACT count -- a leg
+    # added without moving the number reds the lane, which is the drift catch.
+    _runci_guarded_test Z 5 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_reads_a_stock_zenohd_config -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked
