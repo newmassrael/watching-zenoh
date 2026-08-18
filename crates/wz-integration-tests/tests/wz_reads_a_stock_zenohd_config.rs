@@ -700,6 +700,15 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
 ///
 /// No zenohd here, deliberately: the target port has NOTHING on it. A refused
 /// dial is the observable, and providing a listener would remove it.
+// wz-proves: none -- and for a DIFFERENT reason from the four legs above,
+// which is why it is stated rather than pointed at them. Those adjudicate wz
+// against a real zenohd and lack only a registered atom name. This leg has no
+// foreign adjudicator at all: what it compares is two runs of wz's OWN binary
+// differing in one config block, over a port nothing listens on. That is a
+// self-differential and a foreign-witness count must not absorb it. Layer A4
+// reded on this leg's silence (2026-08-18) rather than on a wrong claim, which
+// is the gate working -- an interop corpus test that declares nothing makes the
+// proof number quietly optimistic.
 #[test]
 #[ignore = "binary-dep e2e: needs wz-ap-demo[+zenoh-config,+routing-peer,\
             +router-connect-reconcile]; runs via --ignored"]
