@@ -257,6 +257,34 @@ pub struct ZenohNodeConfig {
     pub tls_listen_certificate: Option<String>,
     /// `transport/link/tls/listen_private_key`. wz's `--tls-key`.
     pub tls_listen_private_key: Option<String>,
+    /// R311y845 — the three below say WHERE a node listens for its peers, and
+    /// until this round wz's answer was a constant. `wz-ap-demo`'s `SCOUT_GROUP`
+    /// was `224.0.0.224` compiled in, with a doc that named this very key as
+    /// the upstream override and reasoned "not a CLI knob: zenoh exposes the
+    /// override in its config, not its scouting API" — which was right about
+    /// where the knob belongs and left the config unable to reach it.
+    ///
+    /// This is the sharpest shape of the R311y844 class rather than another
+    /// instance of it: the socket layer has taken the group, the interface and
+    /// the TTL as PARAMETERS since R311y454
+    /// ([`McastSocketConfig`](crate::McastSocketConfig)), so wz could always
+    /// have joined another group. A node that cannot be told where to look
+    /// discovers nothing on a network that moved its group — and discovery is
+    /// the first thing that has to work for a drop-in.
+    ///
+    /// `scouting/multicast/address` — the scouting socket, `<ip>:<port>`.
+    /// A `SocketAddr` upstream, not a locator string (measured off
+    /// `ScoutingMulticastConf::address`, `zenoh-config/src/lib.rs:500`), so
+    /// `udp/224.0.0.224:7446` is NOT what this key carries.
+    pub scout_multicast_address: Option<String>,
+    /// `scouting/multicast/interface` — which interface's membership is
+    /// installed and which one the beacon leaves by. `"auto"` is upstream's
+    /// spelling of "pick one", and is carried through as given rather than
+    /// resolved here: the socket layer already reads `None` as auto.
+    pub scout_multicast_interface: Option<String>,
+    /// `scouting/multicast/ttl` — the multicast hop limit. Upstream's default
+    /// is `1` (one subnet); `None` leaves the OS default, which is also 1.
+    pub scout_multicast_ttl: Option<u32>,
 }
 
 impl Default for ZenohNodeConfig {
@@ -290,6 +318,15 @@ impl Default for ZenohNodeConfig {
             tls_root_ca: None,
             tls_listen_certificate: None,
             tls_listen_private_key: None,
+            // R311y845 — all three resolve to `null` on a running zenohd (no
+            // instruction), NOT to the values `DEFAULT_CONFIG.json5` documents
+            // in its comments. Defaulting them to `224.0.0.224:7446` / `auto` /
+            // `1` here would make an unmentioned key look like a stated one at
+            // the expansion boundary, which is the distinction `named` exists
+            // to keep.
+            scout_multicast_address: None,
+            scout_multicast_interface: None,
+            scout_multicast_ttl: None,
         }
     }
 }
@@ -446,11 +483,25 @@ impl ZenohNodeConfig {
                 ",\n  \"routing\": {{ \"interests\": {{ \"timeout\": {ms} }} }}"
             );
         }
-        // `scouting` carries TWO honoured keys, so they share one object: a
-        // second top-level `"scouting"` would be a duplicate key, and zenoh's
-        // serde takes the last one and drops the first.
+        // `scouting` carries FIVE honoured keys now (R311y845 added the three
+        // `multicast` socket keys), so they share one object: a second
+        // top-level `"scouting"` would be a duplicate key, and zenoh's serde
+        // takes the last one and drops the first. The same rule applies one
+        // level down — `multicast` is opened ONCE and every one of its keys
+        // written inside it.
         out.push_str(",\n  \"scouting\": { \"multicast\": { \"enabled\": ");
         let _ = write!(out, "{}", self.multicast_scouting);
+        if let Some(addr) = &self.scout_multicast_address {
+            out.push_str(", \"address\": ");
+            escape_into(addr, &mut out);
+        }
+        if let Some(iface) = &self.scout_multicast_interface {
+            out.push_str(", \"interface\": ");
+            escape_into(iface, &mut out);
+        }
+        if let Some(ttl) = self.scout_multicast_ttl {
+            let _ = write!(out, ", \"ttl\": {ttl}");
+        }
         out.push_str(" }");
         if let Some(ms) = self.scouting_timeout_ms {
             let _ = write!(out, ", \"timeout\": {ms}");
@@ -562,6 +613,13 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "transport/link/tls/root_ca_certificate",
     "transport/link/tls/listen_certificate",
     "transport/link/tls/listen_private_key",
+    // R311y845 — WHERE the node looks for its peers. These three MOVED from
+    // `UNHONOURED_UPSTREAM_CONFIG_KEYS`, so the surface total below is
+    // unchanged: they are resolved leaves of a real zenohd either way, and all
+    // that changed is which half of the partition they sit in.
+    "scouting/multicast/address",
+    "scouting/multicast/interface",
+    "scouting/multicast/ttl",
 ];
 
 /// Every leaf key a real zenoh 1.5.0 resolves that wz does NOT honour.
@@ -612,12 +670,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "scouting/gossip/enabled",
     "scouting/gossip/multihop",
     "scouting/gossip/target",
-    "scouting/multicast/address",
     "scouting/multicast/autoconnect",
     "scouting/multicast/autoconnect_strategy",
-    "scouting/multicast/interface",
     "scouting/multicast/listen",
-    "scouting/multicast/ttl",
     "timestamping/drop_future_timestamp",
     "transport/auth/pubkey/key_size",
     "transport/auth/pubkey/known_keys_file",
@@ -928,6 +983,37 @@ impl ZenohNodeConfig {
         if let Some(v) = want_bool(&doc, "scouting/multicast/enabled")? {
             out.multicast_scouting = v;
             named.push("scouting/multicast/enabled");
+        }
+        // R311y845 — the scouting SOCKET. Upstream types `address` as a
+        // `SocketAddr` and so refuses a malformed one at deserialization; the
+        // parse here is what keeps that refusal, and it is worth keeping: the
+        // failure mode of accepting `"224.0.0.224"` (no port) is a node that
+        // starts, reports the key honoured, and joins nothing.
+        if let Some(v) = want_string(&doc, "scouting/multicast/address", "an <ip>:<port> socket")? {
+            if v.parse::<std::net::SocketAddrV4>().is_err() {
+                return Err(ConfigIngestError::WrongType {
+                    path: "scouting/multicast/address",
+                    expected: "an <ip>:<port> socket",
+                });
+            }
+            out.scout_multicast_address = Some(v);
+            named.push("scouting/multicast/address");
+        }
+        if let Some(v) = want_string(
+            &doc,
+            "scouting/multicast/interface",
+            "an interface name or address",
+        )? {
+            out.scout_multicast_interface = Some(v);
+            named.push("scouting/multicast/interface");
+        }
+        if let Some(v) = want_u64(&doc, "scouting/multicast/ttl")? {
+            out.scout_multicast_ttl =
+                Some(u32::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                    path: "scouting/multicast/ttl",
+                    value: v.to_string(),
+                })?);
+            named.push("scouting/multicast/ttl");
         }
         if let Some(v) = want_bool(&doc, "timestamping/enabled")? {
             out.timestamping = v;
@@ -1241,6 +1327,15 @@ mod tests {
                 timestamping: true,
                 ..ZenohNodeConfig::default()
             },
+            // R311y845 — a node told to look somewhere else entirely, which is
+            // the whole point of the three keys: emit it, read it back, and the
+            // group has to survive the round trip.
+            ZenohNodeConfig {
+                scout_multicast_address: Some(String::from("224.0.0.99:7999")),
+                scout_multicast_interface: Some(String::from("eth0")),
+                scout_multicast_ttl: Some(4),
+                ..ZenohNodeConfig::default()
+            },
         ] {
             let ingest = ZenohNodeConfig::from_json5(&original.to_json5())
                 .unwrap_or_else(|e| panic!("{e} for {original:?}"));
@@ -1248,6 +1343,50 @@ mod tests {
             // Nothing wz emits may be a key wz cannot read back.
             assert!(ingest.ignored.is_empty(), "{:?}", ingest.ignored);
         }
+    }
+
+    /// R311y845 — a scouting address that is not `<ip>:<port>` is REFUSED, not
+    /// carried.
+    ///
+    /// Upstream types the key as a `SocketAddr` and so refuses the same
+    /// documents at deserialization; keeping that refusal is what stops the
+    /// worst outcome this key has, which is not a crash but a node that starts,
+    /// prints `scouting/multicast/address` among its honoured keys, and is
+    /// alone on the network because the value never resolved to a group.
+    ///
+    /// The PORT case is the one worth naming: `"224.0.0.99"` is a perfectly
+    /// good address and a useless scouting socket, and it is exactly what an
+    /// operator abbreviating the key would write.
+    #[test]
+    fn a_scouting_address_that_is_not_a_socket_is_refused_rather_than_carried() {
+        for bad in [
+            r#"{ "scouting": { "multicast": { "address": "224.0.0.99" } } }"#,
+            r#"{ "scouting": { "multicast": { "address": "not-an-address" } } }"#,
+            r#"{ "scouting": { "multicast": { "address": "" } } }"#,
+        ] {
+            let err = ZenohNodeConfig::from_json5(bad).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigIngestError::WrongType {
+                        path: "scouting/multicast/address",
+                        ..
+                    }
+                ),
+                "{bad} -> {err:?}"
+            );
+        }
+        // The CONTROL: the same key with a port parses, so the refusals above
+        // are attributable to the malformed value and not to the key itself
+        // being unreadable.
+        let ok = ZenohNodeConfig::from_json5(
+            r#"{ "scouting": { "multicast": { "address": "224.0.0.99:7999" } } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ok.config.scout_multicast_address.as_deref(),
+            Some("224.0.0.99:7999")
+        );
     }
 
     /// Every entry of [`HONOURED_CONFIG_KEYS`] is genuinely READ.
@@ -1344,6 +1483,22 @@ mod tests {
             (
                 "transport/link/tls/listen_private_key",
                 r#"{ "transport": { "link": { "tls": { "listen_private_key": "/etc/srv.key" } } } }"#,
+            ),
+            // R311y845 — WHERE the node looks. Each is driven to a value that
+            // is NOT the upstream default (`224.0.0.224:7446` / `auto` / `1`),
+            // so a reader that quietly kept the compiled-in group would fail
+            // here instead of reporting the key honoured.
+            (
+                "scouting/multicast/address",
+                r#"{ "scouting": { "multicast": { "address": "224.0.0.99:7999" } } }"#,
+            ),
+            (
+                "scouting/multicast/interface",
+                r#"{ "scouting": { "multicast": { "interface": "eth0" } } }"#,
+            ),
+            (
+                "scouting/multicast/ttl",
+                r#"{ "scouting": { "multicast": { "ttl": 4 } } }"#,
             ),
         ];
         // The case list IS the table, so a key added to one and not the other

@@ -427,9 +427,18 @@ fn apply_quic_ca(cfg: DialConfig, _quic_ca: &Option<String>) -> io::Result<DialC
 /// (`include/zenoh-pico/config.h.in`) and the `scouting/multicast/address`
 /// default in zenoh (DEFAULT_CONFIG.json5), so a `--scout` demo reaches BOTH
 /// foreign implementations without being told where to look — which is the
-/// point of a discovery mode. Not a CLI knob: an address the peers do not share
-/// discovers nothing, and zenoh exposes the override in its config, not its
-/// scouting API.
+/// point of a discovery mode.
+///
+/// R311y845 — this is the DEFAULT now, not the only value. The doc here used to
+/// end "Not a CLI knob: an address the peers do not share discovers nothing,
+/// and zenoh exposes the override in its config, not its scouting API." That
+/// was right about where the knob belongs and wrong about the consequence: wz's
+/// config reader could not reach it either, so a network that had moved its
+/// scouting group was one a wz node could not join at all — while
+/// `McastSocketConfig` had taken the group, the interface and the TTL as
+/// PARAMETERS since R311y454. The override now arrives the way zenoh's does,
+/// from `scouting/multicast/address`, with `--scout-addr` as the argv that
+/// config expands into.
 #[cfg(feature = "scouting-active")]
 const SCOUT_GROUP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 0, 224);
 #[cfg(feature = "scouting-active")]
@@ -486,34 +495,46 @@ const SCOUT_TICK_MS: u64 = 50;
 /// `Idle` and the trace counters accumulate across cycles (the log below
 /// reports them, so a multi-cycle discovery is visible as such).
 #[cfg(feature = "scouting-active")]
-pub(crate) async fn scout_for_peer_locator(zid: Vec<u8>, budget_ms: u64) -> io::Result<String> {
+pub(crate) async fn scout_for_peer_locator(
+    zid: Vec<u8>,
+    budget_ms: u64,
+    socket: &crate::args::ScoutSocketArgs,
+) -> io::Result<String> {
     use wz::runtime_tokio::scouting_glue::{
         drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutParams,
         ScoutingActions,
     };
     use wz::runtime_tokio::UdpDriver;
 
-    // R311y454 — `None`: the SCOUT group is deliberately not interface-narrowed. A
-    // discovery beacon must reach every interface a peer could answer on, and
-    // zenoh scopes `UDP_MULTICAST_IFACE` to a group locator rather than to the
-    // scouting default too. `--multicast-locator` narrows the DATA-plane group.
-    // The SCOUTING group stays unconfigured on purpose: a discovery beacon
-    // should reach every interface a peer might answer on, and zenoh likewise
-    // scopes its UDP multicast config keys to a group locator, not to the scout
-    // default (see the `--multicast-locator` block below).
+    // R311y845 — the group and port the operator asked for, or zenoh's own
+    // defaults when they asked for nothing. The address was already checked to
+    // parse as a v4 socket at the argv boundary (and at the config boundary
+    // before that), so the `expect` here cannot fire on operator input; it is a
+    // restatement of that invariant, not a second validation.
+    let (group, port) = socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
+    // R311y454 / R311y845 — the interface is `None` unless the operator named
+    // one. Until y845 it was UNCONDITIONALLY `None`, reasoned as "a discovery
+    // beacon must reach every interface a peer could answer on". That default
+    // is kept for exactly that reason; what changed is that zenoh's
+    // `scouting/multicast/interface` can now override it, which is the case the
+    // old reasoning did not cover — a multi-homed node whose peers are on one
+    // segment was beaconing wherever the routing table chose, with no way to
+    // say otherwise. `--multicast-locator` still narrows the DATA-plane group;
+    // this narrows the DISCOVERY one.
     let mut driver = UdpDriver::bind_multicast_v4(
-        SCOUT_GROUP,
-        SCOUT_PORT,
-        wz::runtime_tokio::McastSocketConfig::default(),
+        group,
+        port,
+        wz::runtime_tokio::McastSocketConfig {
+            iface: socket.interface.as_deref(),
+            ttl: socket.ttl,
+            extra_joins: &[],
+        },
     )
     .await
     .map_err(|e| {
         io::Error::new(
             e.kind(),
-            format!(
-                "wz-ap-demo: --scout could not join the scouting group \
-                     {SCOUT_GROUP}:{SCOUT_PORT}: {e}"
-            ),
+            format!("wz-ap-demo: --scout could not join the scouting group {group}:{port}: {e}"),
         )
     })?;
     // The Scout announces the identity this node will open its session with, so
@@ -534,7 +555,11 @@ pub(crate) async fn scout_for_peer_locator(zid: Vec<u8>, budget_ms: u64) -> io::
     let started_ms = clock.now_monotonic_ms();
 
     log::info!(
-        "wz-ap-demo: active multicast scouting on {SCOUT_GROUP}:{SCOUT_PORT} \
+        // R311y845 — the socket ACTUALLY joined, not the compiled-in default.
+        // A banner naming a group the node is not on is the same defect this
+        // round exists to remove, one level down: the operator checks this line
+        // to see where their config landed.
+        "wz-ap-demo: active multicast scouting on {group}:{port} \
          (what=0x{SCOUT_WHAT:02x}, {SCOUT_CYCLE_MS}ms window, {budget_ms}ms budget)"
     );
     loop {
@@ -591,7 +616,7 @@ pub(crate) async fn scout_for_peer_locator(zid: Vec<u8>, budget_ms: u64) -> io::
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         format!(
-                            "wz-ap-demo: --scout found no peer on {SCOUT_GROUP}:{SCOUT_PORT} \
+                            "wz-ap-demo: --scout found no peer on {group}:{port} \
                              within {budget_ms}ms ({} Scout(s) emitted, {} Hello(s) recorded)",
                             trace.scout_emit, trace.record_hello
                         ),

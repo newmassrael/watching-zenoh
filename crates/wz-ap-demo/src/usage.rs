@@ -99,6 +99,12 @@ pub(crate) fn print_usage() {
     eprintln!("                             `scouting-active` build feature");
     eprintln!("    --scout-timeout-ms <ms>  total --scout discovery budget, spent across repeated");
     eprintln!("                             Scout cycles (default 10000; requires --scout)");
+    eprintln!("    --scout-addr <ip:port>   scouting socket to join instead of 224.0.0.224:7446");
+    eprintln!("                             (zenoh scouting/multicast/address; requires --scout)");
+    eprintln!("    --scout-iface <name>     interface the Scout joins and leaves by; default is");
+    eprintln!("                             every interface the route picks (requires --scout)");
+    eprintln!("    --scout-ttl <n>          multicast hop limit for Scout datagrams, default 1 =");
+    eprintln!("                             one subnet (requires --scout)");
     eprintln!("    --router <addr>          multi-peer router mode: bind once, HOLD N concurrent");
     eprintln!(
         "                             peer faces (routing-router foundation, no forwarding)."

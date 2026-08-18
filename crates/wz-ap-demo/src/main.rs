@@ -788,6 +788,22 @@ fn main() -> ExitCode {
         eprintln!("wz-ap-demo: --scout-timeout-ms requires --scout");
         return ExitCode::from(2);
     }
+    // R311y845 — WHERE to look, the argv form of zenoh's
+    // `scouting/multicast/{address,interface,ttl}`. Same precondition as
+    // `--scout-timeout-ms` above and for the same reason: a scouting socket
+    // named by a node that is not scouting is an instruction that reaches
+    // nothing, and silence there loses a setting the operator typed.
+    let scout_socket = match crate::args::parse_scout_socket(rest) {
+        Ok(v) => v,
+        Err(msg) => {
+            eprintln!("wz-ap-demo: {msg}");
+            return ExitCode::from(2);
+        }
+    };
+    if scout_socket != crate::args::ScoutSocketArgs::default() && !scout_requested {
+        eprintln!("wz-ap-demo: --scout-addr / --scout-iface / --scout-ttl require --scout");
+        return ExitCode::from(2);
+    }
     if scout_requested && (listen_opt.is_some() || connect_opt.is_some()) {
         eprintln!(
             "wz-ap-demo: --scout is mutually exclusive with --listen / --connect \
@@ -861,7 +877,7 @@ fn main() -> ExitCode {
     // an argv one).
     let connect_opt = if scout_requested {
         let budget_ms = scout_budget_ms.unwrap_or(DEFAULT_SCOUT_BUDGET_MS);
-        match resolve_scouted_locator(&runtime, zid_override.clone(), budget_ms) {
+        match resolve_scouted_locator(&runtime, zid_override.clone(), budget_ms, &scout_socket) {
             Ok(locator) => Some(locator),
             Err(code) => return code,
         }
@@ -1973,10 +1989,13 @@ fn resolve_scouted_locator(
     runtime: &tokio::runtime::Runtime,
     zid: Option<Vec<u8>>,
     budget_ms: u64,
+    socket: &crate::args::ScoutSocketArgs,
 ) -> Result<String, ExitCode> {
     let zid = zid.unwrap_or_else(|| DEMO_ZID.to_vec());
     runtime
-        .block_on(crate::runner::scout_for_peer_locator(zid, budget_ms))
+        .block_on(crate::runner::scout_for_peer_locator(
+            zid, budget_ms, socket,
+        ))
         .map_err(|e| {
             eprintln!("{e}");
             ExitCode::from(1)
@@ -1993,6 +2012,7 @@ fn resolve_scouted_locator(
     _runtime: &tokio::runtime::Runtime,
     _zid: Option<Vec<u8>>,
     _budget_ms: u64,
+    _socket: &crate::args::ScoutSocketArgs,
 ) -> Result<String, ExitCode> {
     eprintln!(
         "wz-ap-demo: --scout requires the `scouting-active` feature \

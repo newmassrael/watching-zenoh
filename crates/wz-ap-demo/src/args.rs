@@ -479,6 +479,35 @@ pub(crate) fn expand_stock_zenoh_config(
             }
         }
     }
+    // R311y845 — WHERE the node looks for its peers. Same precondition as
+    // `scouting/timeout` above (`--scout` on the command line), because the
+    // three flags carry the same one: a scouting socket is an instruction to a
+    // node that is scouting, and the demo rejects it otherwise.
+    let scouting = rest.iter().any(|a| a == "--scout");
+    for (key, flag, value) in [
+        (
+            "scouting/multicast/address",
+            "--scout-addr",
+            cfg.scout_multicast_address.clone(),
+        ),
+        (
+            "scouting/multicast/interface",
+            "--scout-iface",
+            cfg.scout_multicast_interface.clone(),
+        ),
+        (
+            "scouting/multicast/ttl",
+            "--scout-ttl",
+            cfg.scout_multicast_ttl.map(|t| t.to_string()),
+        ),
+    ] {
+        if let Some(value) = value {
+            if scouting && named(key) && !rest.iter().any(|a| a == flag) {
+                added.push(String::from(flag));
+                added.push(value);
+            }
+        }
+    }
     if named("transport/multicast/qos/enabled")
         && cfg.multicast_qos
         && cfg!(feature = "transport-qos")
@@ -758,6 +787,65 @@ mod stock_config_tests {
     const CONNECT_ONLY: &str = r#"{ connect: { endpoints: ["tcp/r:7447"] } }"#;
     const LISTEN_TLS: &str = r#"{ listen: { endpoints: ["tls/0.0.0.0:7447"] } }"#;
     const CONNECT_TLS: &str = r#"{ connect: { endpoints: ["tls/r:7447"] } }"#;
+    /// R311y845 — the argv half of the scouting socket: what `--scout-*`
+    /// parses, and what an unset flag resolves to.
+    ///
+    /// The FALLBACK case is the one that needs a test of its own. Every other
+    /// witness in this round — the reader's, the expansion's, Layer M's — is
+    /// driven by a config that NAMES the address, so a resolver that ignored
+    /// the defaults (or one that ignored the address) can still pass some of
+    /// them. Both directions are pinned here.
+    #[test]
+    fn the_scouting_socket_resolves_to_what_was_named_or_to_zenohs_own_default() {
+        const DEFAULT_GROUP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 0, 224);
+        const DEFAULT_PORT: u16 = 7446;
+
+        // Nothing named -> zenoh's default socket, untouched.
+        let bare = parse_scout_socket(&argv(&["--scout"])).unwrap();
+        assert_eq!(bare, ScoutSocketArgs::default());
+        assert_eq!(
+            bare.group_and_port(DEFAULT_GROUP, DEFAULT_PORT),
+            (DEFAULT_GROUP, DEFAULT_PORT)
+        );
+
+        // Named -> BOTH halves move. A resolver that took the group and kept
+        // the default port would pass a group-only assertion.
+        let moved = parse_scout_socket(&argv(&[
+            "--scout",
+            "--scout-addr",
+            "224.0.0.99:7999",
+            "--scout-iface",
+            "eth0",
+            "--scout-ttl",
+            "4",
+        ]))
+        .unwrap();
+        assert_eq!(
+            moved.group_and_port(DEFAULT_GROUP, DEFAULT_PORT),
+            (std::net::Ipv4Addr::new(224, 0, 0, 99), 7999)
+        );
+        assert_eq!(moved.interface.as_deref(), Some("eth0"));
+        assert_eq!(moved.ttl, Some(4));
+
+        // A malformed socket is REFUSED at the argv boundary, so the resolver
+        // is never handed one — the same refusal the config reader makes, in
+        // the same words, because the failure it prevents is the same node that
+        // starts and joins nothing.
+        for bad in ["224.0.0.99", "not-an-address"] {
+            let err = parse_scout_socket(&argv(&["--scout", "--scout-addr", bad])).unwrap_err();
+            assert!(err.contains("--scout-addr"), "{err}");
+        }
+        assert!(parse_scout_socket(&argv(&["--scout", "--scout-ttl", "x"]))
+            .unwrap_err()
+            .contains("--scout-ttl"));
+    }
+
+    /// R311y845 — the control for the three scouting-socket keys. A peer with
+    /// no endpoints is a workable topology precisely BECAUSE multicast scouting
+    /// is on by default: it has something to discover, which is what
+    /// `validate()` checks for. Paired with a `--scout` command line (see
+    /// `cli_for`), so no role flag expands and the argv delta is the one key.
+    const SCOUT_ONLY: &str = r#"{ mode: "peer" }"#;
 
     /// Keys the reader ingests that reach NO behaviour in this binary.
     ///
@@ -806,7 +894,15 @@ mod stock_config_tests {
     fn cli_for(key: &str) -> &'static [&'static str] {
         match key {
             "queries_default_timeout" => &["--config", "z.json5", "--query", "demo/**"],
-            "scouting/timeout" => &["--config", "z.json5", "--scout"],
+            // R311y845 — the three scouting-socket keys carry the same
+            // `--scout` precondition as the budget above, and for the same
+            // reason the round had to measure rather than assume: without it
+            // the demo exits(2), so an expansion that emitted them anyway would
+            // turn a valid stock config into a node that refuses to start.
+            "scouting/timeout"
+            | "scouting/multicast/address"
+            | "scouting/multicast/interface"
+            | "scouting/multicast/ttl" => &["--config", "z.json5", "--scout"],
             _ => &["--config", "z.json5"],
         }
     }
@@ -968,6 +1064,26 @@ mod stock_config_tests {
                 LISTEN_TLS,
                 r#"{ listen: { endpoints: ["tls/0.0.0.0:7447"] },
                      transport: { link: { tls: { listen_private_key: "/etc/srv.key" } } } }"#,
+            ),
+            // R311y845 — the scouting SOCKET. Both sides of each pair are a
+            // `--scout` invocation (see `cli_for`), so the control expands to
+            // nothing and the delta is the one key. Each value is deliberately
+            // NOT the upstream default, so a demo that kept its compiled-in
+            // group would show no argv difference and fail here.
+            (
+                "scouting/multicast/address",
+                SCOUT_ONLY,
+                r#"{ mode: "peer", scouting: { multicast: { address: "224.0.0.99:7999" } } }"#,
+            ),
+            (
+                "scouting/multicast/interface",
+                SCOUT_ONLY,
+                r#"{ mode: "peer", scouting: { multicast: { interface: "eth0" } } }"#,
+            ),
+            (
+                "scouting/multicast/ttl",
+                SCOUT_ONLY,
+                r#"{ mode: "peer", scouting: { multicast: { ttl: 4 } } }"#,
             ),
         ]
     }
@@ -1214,6 +1330,106 @@ pub(crate) fn parse_connect_retry(args: &[String]) -> Result<Option<RetryPolicy>
         period_max_ms,
         period_increase_factor,
     }))
+}
+
+/// R311y845 — WHERE `--scout` looks for its peers: zenoh's
+/// `scouting/multicast/{address,interface,ttl}`, carried from argv to the
+/// scouting socket.
+///
+/// Ungated on purpose, like every other flag in this file: the demo's rule is
+/// that a flag's PARSE is identical in every build and only its EXECUTION is
+/// feature-gated, so `--scout-addr` on a `scouting-active`-less binary reports
+/// the same diagnostic as `--scout` itself rather than a parse error that
+/// depends on the build.
+///
+/// `None` throughout means "no instruction", which is not the same as the
+/// default: it is what lets the caller keep the compiled-in group without this
+/// struct having to know what that group is.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ScoutSocketArgs {
+    /// `--scout-addr <ip>:<port>`, already known to parse as a v4 socket.
+    pub(crate) address: Option<String>,
+    /// `--scout-iface <name-or-ip>`.
+    pub(crate) interface: Option<String>,
+    /// `--scout-ttl <n>`.
+    pub(crate) ttl: Option<u32>,
+}
+
+impl ScoutSocketArgs {
+    /// The group and port to join: what the operator named, or the caller's
+    /// defaults when they named nothing.
+    ///
+    /// Extracted from the scouting path rather than left inline so the FALLBACK
+    /// is testable. That half is the one with no other witness: a resolver that
+    /// ignored `address` entirely would still bind a working socket and still
+    /// discover peers on a default-configured network, so every test that does
+    /// not pin the fallback passes in a world where the key does nothing.
+    ///
+    /// `address` was validated as a v4 socket at the argv boundary (and at the
+    /// config boundary before it), so the parse below cannot fail on operator
+    /// input; keeping the fallible form and defaulting on `Err` means a future
+    /// caller that skips the check degrades to the default group rather than
+    /// panicking in a discovery path.
+    pub(crate) fn group_and_port(
+        &self,
+        default_group: std::net::Ipv4Addr,
+        default_port: u16,
+    ) -> (std::net::Ipv4Addr, u16) {
+        match self.address.as_deref().and_then(|a| a.parse().ok()) {
+            Some(sock) => {
+                let sock: std::net::SocketAddrV4 = sock;
+                (*sock.ip(), sock.port())
+            }
+            None => (default_group, default_port),
+        }
+    }
+}
+
+/// Parse the three `--scout-*` socket flags.
+///
+/// A malformed value ABORTS rather than degrading to the default group, for the
+/// reason `--connect-retry` aborts: a node that silently keeps looking at
+/// `224.0.0.224` after being told to look elsewhere discovers nothing and says
+/// nothing about why, and there is no downstream symptom that names the cause.
+pub(crate) fn parse_scout_socket(args: &[String]) -> Result<ScoutSocketArgs, String> {
+    let address = match parse_pair(args, "--scout-addr") {
+        None => None,
+        Some(raw) => {
+            // The same check the config reader applies, and for the same
+            // reason: zenoh types this key as a `SocketAddr`, so an address
+            // without a port is a value neither implementation accepts.
+            if raw.parse::<std::net::SocketAddrV4>().is_err() {
+                return Err(format!(
+                    "--scout-addr: `{raw}` is not an <ip>:<port> socket \
+                     (e.g. 224.0.0.224:7446)"
+                ));
+            }
+            Some(raw)
+        }
+    };
+    let interface = match parse_pair(args, "--scout-iface") {
+        Some(v) if v.is_empty() => {
+            return Err(String::from(
+                "--scout-iface: an empty name selects no interface; omit the \
+                 flag for zenoh's `auto`",
+            ))
+        }
+        other => other,
+    };
+    let ttl = match parse_pair(args, "--scout-ttl") {
+        None => None,
+        Some(raw) => match raw.parse::<u32>() {
+            Ok(v) => Some(v),
+            Err(e) => {
+                return Err(format!("--scout-ttl: `{raw}` is not a hop count ({e})"));
+            }
+        },
+    };
+    Ok(ScoutSocketArgs {
+        address,
+        interface,
+        ttl,
+    })
 }
 
 /// R311y506 (session-extqos) — parse `--qos-band START-END` and `--qos-rel 0|1`

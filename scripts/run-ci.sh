@@ -3294,7 +3294,7 @@ layer_c1ay_cargo_test_router_hat() {
     # be. Its own lane because the feature is not in the demo's default preset,
     # so a default-features run compiles the module out and would report a
     # cheerful `0 passed`.
-    _runci_guarded_test "C1AY stock_config_tests 7" 7 \
+    _runci_guarded_test "C1AY stock_config_tests 12" 12 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \

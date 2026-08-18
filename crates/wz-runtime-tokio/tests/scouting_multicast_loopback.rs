@@ -121,6 +121,102 @@ async fn scout_discovers_peer_locator_over_multicast() {
     assert_eq!(trace.tx_failed, 0, "multicast send succeeded");
 }
 
+/// R311y845 — a node told to look somewhere ELSE actually looks there, on the
+/// wire.
+///
+/// This is the last mile of the `scouting/multicast/address` work, and the only
+/// one a socket can witness. The config reader's tests prove the key parses and
+/// survives a round trip; the demo's tests prove it reaches `--scout-addr`.
+/// Neither can tell a node that JOINED the moved group from one that read the
+/// key, reported it honoured, and stayed on `224.0.0.224` — which is exactly the
+/// state wz was in before this round, and exactly what the operator cannot see.
+///
+/// Both arms use the SAME scouter, differing only in the group its responder
+/// answers on:
+///
+///   POSITIVE — responder on the MOVED group -> discovered.
+///   CONTROL  — responder on the DEFAULT group -> NOT discovered.
+///
+/// The control is what makes this a measurement rather than an observation. A
+/// scouter that ignored the configured group and stayed on `224.0.0.224` would
+/// pass the positive arm too, because the loopback host carries both groups —
+/// so a positive-only test would report success for the very defect it is
+/// supposed to catch. The control fails in that world, and only in that world.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+async fn a_scouter_told_to_use_another_group_joins_that_group_and_only_that_group() {
+    /// Deliberately NOT `224.0.0.224`, and a port that is not `7446`: a network
+    /// that has moved its scouting socket has moved both, and pinning only the
+    /// group would leave the port half untested.
+    const MOVED_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 99);
+    const MOVED_PORT: u16 = 7999;
+    const MOVED_LOCATOR: &str = "udp/127.0.0.1:7448";
+
+    // One scouting run against a responder that answers on `answer_on`. The
+    // scouter ALWAYS joins the moved socket — that is the fact under test.
+    async fn scout_with_responder_on(answer_on: (Ipv4Addr, u16)) -> ScoutOutcome {
+        let mut driver =
+            UdpDriver::bind_multicast_v4(MOVED_GROUP, MOVED_PORT, McastSocketConfig::default())
+                .await
+                .expect("bind the MOVED multicast scouting link");
+        let actions = ScoutingActions::new(ScoutParams {
+            version: 0x09,
+            what: 0x03,
+            zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            timeout_ms: 500,
+            exit_on_first: true,
+        });
+        let mut engine = new_scouting_engine(&actions);
+
+        let responder = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .await
+            .expect("bind ephemeral responder");
+        let hello = craft_hello_datagram(MOVED_LOCATOR);
+        let responder_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            // A send to a group nobody joined is NOT an error — the datagram
+            // leaves and is dropped — so the control arm's evidence is the
+            // scout's silence, not a failed send.
+            responder
+                .send_to(&hello, answer_on)
+                .await
+                .expect("responder send Hello");
+        });
+
+        let clock = TokioTime::new();
+        let outcome = drive_scouting_until_resolved(
+            &mut driver,
+            &actions,
+            &mut engine,
+            &clock,
+            Some(10_000),
+            50,
+        )
+        .await;
+        responder_task.await.expect("responder task");
+        outcome
+    }
+
+    // POSITIVE: the responder answers where the node was told to listen.
+    assert_eq!(
+        scout_with_responder_on((MOVED_GROUP, MOVED_PORT)).await,
+        ScoutOutcome::Discovered(MOVED_LOCATOR.to_string()),
+        "a scouter configured onto {MOVED_GROUP}:{MOVED_PORT} did not hear a Hello \
+         sent to that group, so the configured socket never reached the join"
+    );
+
+    // CONTROL: the responder answers on zenoh's DEFAULT socket instead. A node
+    // that honoured the configuration is not on that group and must hear
+    // nothing.
+    assert_eq!(
+        scout_with_responder_on((GROUP, PORT)).await,
+        ScoutOutcome::TimedOut,
+        "a scouter configured onto {MOVED_GROUP}:{MOVED_PORT} still heard a Hello \
+         sent to the DEFAULT {GROUP}:{PORT}, so it stayed on the compiled-in group \
+         and the configured address changed nothing"
+    );
+}
+
 /// R311ex — Layer M round 2: the full active path. A multicast SCOUT/HELLO
 /// discovers a peer's *session* locator (a `tcp/...` endpoint), then
 /// `open_session_at` dials that locator and drives the Initiator handshake to
