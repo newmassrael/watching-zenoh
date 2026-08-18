@@ -21,7 +21,15 @@
 //! * **emit** — `ZenohNodeConfig::to_json5` renders the config zenoh's own
 //!   `-c` flag reads, with the key paths taken from the reference's
 //!   `DEFAULT_CONFIG.json5` rather than from memory.
-//! * **validate** — [`ZenohNodeConfig::validate`] answers "can this topology
+//! R311y844 — the three names below are CODE SPANS, not intra-doc links. This
+//! module is `#[cfg(feature = "zenoh-config-emit")]`, and a module doc's link
+//! to an item of its own module does not resolve in a gated module (the same
+//! link in an ITEM doc does). Layer C1bz runs on default features, so it
+//! cannot see this file at all: the count is a hand measurement, and it was
+//! 190-with-the-feature against a 189 budget until this line stopped being a
+//! link.
+//!
+//! * **validate** — `ZenohNodeConfig::validate` answers "can this topology
 //!   work" WITHOUT starting a node: an unknown link protocol, a client that
 //!   can reach nothing, the QoS-with-lowlatency pair zenoh's own config
 //!   documents as incompatible.
@@ -213,6 +221,42 @@ pub struct ZenohNodeConfig {
     /// default, and saying so explicitly is a decision the caller should have
     /// to make rather than inherit.
     pub adminspace: Option<AdminspaceConfig>,
+    /// R311y844 — the ten below are keys wz ALREADY acts on, which the reader
+    /// could not be told until this round. `Option` where a real zenohd
+    /// resolves the key to `null` when unset (measured by execution, not read
+    /// off a document): a `None` here is "the file gave no instruction", which
+    /// is a different fact from any value this struct could invent, and
+    /// [`ZenohNodeConfig::to_json5`] leaves those keys out rather than
+    /// asserting a default zenoh did not state.
+    ///
+    /// `id` — the zid, hex. wz's `--zid`.
+    pub id: Option<String>,
+    /// `namespace` — the keyexpr prefix. wz's `--namespace`.
+    pub namespace: Option<String>,
+    /// `queries_default_timeout`, milliseconds. wz's `--query-timeout-ms`.
+    pub queries_default_timeout_ms: Option<u64>,
+    /// `routing/interests/timeout`, milliseconds. wz's `--interest-timeout`,
+    /// which names this key in its own parse site.
+    pub interests_timeout_ms: Option<u64>,
+    /// `scouting/timeout`, milliseconds. wz's `--scout-timeout-ms`.
+    pub scouting_timeout_ms: Option<u64>,
+    /// `transport/multicast/qos/enabled`. wz's `--multicast-qos`. A real
+    /// zenohd resolves this to `false`, so the default below is zenoh's.
+    pub multicast_qos: bool,
+    /// `transport/shared_memory/enabled`. wz's `--shm`.
+    ///
+    /// A real zenohd resolves this to **`true`** — measured — while the demo's
+    /// `--shm` is opt-in, so the two implementations disagree on the DEFAULT.
+    /// The field carries zenoh's, because that is what an absent key means to
+    /// the operator's file; the expansion still acts only on a value the
+    /// document NAMED, so an unmentioned key changes no invocation.
+    pub shared_memory: bool,
+    /// `transport/link/tls/root_ca_certificate`. wz's `--tls-ca`.
+    pub tls_root_ca: Option<String>,
+    /// `transport/link/tls/listen_certificate`. wz's `--tls-cert`.
+    pub tls_listen_certificate: Option<String>,
+    /// `transport/link/tls/listen_private_key`. wz's `--tls-key`.
+    pub tls_listen_private_key: Option<String>,
 }
 
 impl Default for ZenohNodeConfig {
@@ -232,6 +276,20 @@ impl Default for ZenohNodeConfig {
             compression: false,
             timestamping: false,
             adminspace: None,
+            // R311y844 — every one of these is zenoh's own resolved value for
+            // an unset key, taken from a running zenohd rather than from
+            // `DEFAULT_CONFIG.json5`: five resolve to `null` (no instruction),
+            // multicast qos to `false`, and shared memory to `true`.
+            id: None,
+            namespace: None,
+            queries_default_timeout_ms: None,
+            interests_timeout_ms: None,
+            scouting_timeout_ms: None,
+            multicast_qos: false,
+            shared_memory: true,
+            tls_root_ca: None,
+            tls_listen_certificate: None,
+            tls_listen_private_key: None,
         }
     }
 }
@@ -365,9 +423,39 @@ impl ZenohNodeConfig {
         push_endpoints(&self.connect, &mut out);
         out.push_str(" },\n  \"listen\": { \"endpoints\": ");
         push_endpoints(&self.listen, &mut out);
-        out.push_str(" },\n  \"scouting\": { \"multicast\": { \"enabled\": ");
+        out.push_str(" }");
+        // R311y844 — the top-level scalars wz now carries, each emitted only
+        // when the config HOLDS one. A real zenohd resolves every one of them
+        // to `null` when unset (measured off a running node, not read off
+        // `DEFAULT_CONFIG.json5`), so writing a value where the caller has none
+        // would be wz asserting a default zenoh does not have.
+        if let Some(id) = &self.id {
+            out.push_str(",\n  \"id\": ");
+            escape_into(id, &mut out);
+        }
+        if let Some(ns) = &self.namespace {
+            out.push_str(",\n  \"namespace\": ");
+            escape_into(ns, &mut out);
+        }
+        if let Some(ms) = self.queries_default_timeout_ms {
+            let _ = write!(out, ",\n  \"queries_default_timeout\": {ms}");
+        }
+        if let Some(ms) = self.interests_timeout_ms {
+            let _ = write!(
+                out,
+                ",\n  \"routing\": {{ \"interests\": {{ \"timeout\": {ms} }} }}"
+            );
+        }
+        // `scouting` carries TWO honoured keys, so they share one object: a
+        // second top-level `"scouting"` would be a duplicate key, and zenoh's
+        // serde takes the last one and drops the first.
+        out.push_str(",\n  \"scouting\": { \"multicast\": { \"enabled\": ");
         let _ = write!(out, "{}", self.multicast_scouting);
-        out.push_str(" } },\n  \"timestamping\": { \"enabled\": ");
+        out.push_str(" }");
+        if let Some(ms) = self.scouting_timeout_ms {
+            let _ = write!(out, ", \"timeout\": {ms}");
+        }
+        out.push_str(" },\n  \"timestamping\": { \"enabled\": ");
         let _ = write!(out, "{}", self.timestamping);
         out.push_str(" },\n  \"transport\": {\n    \"unicast\": {\n");
         let _ = writeln!(out, "      \"max_links\": {},", self.max_links);
@@ -378,10 +466,47 @@ impl ZenohNodeConfig {
             "      \"compression\": {{ \"enabled\": {} }}",
             self.compression
         );
-        out.push_str("    },\n    \"link\": {\n      \"tx\": {\n");
+        // R311y844 — `multicast` and `shared_memory` are siblings of `unicast`
+        // INSIDE `transport`, not second top-level `"transport"` objects: a
+        // duplicate key is not a merge, and zenoh's serde takes the last one
+        // and silently drops everything the first carried.
+        let _ = writeln!(
+            out,
+            "    }},\n    \"multicast\": {{ \"qos\": {{ \"enabled\": {} }} }},",
+            self.multicast_qos
+        );
+        let _ = writeln!(
+            out,
+            "    \"shared_memory\": {{ \"enabled\": {} }},",
+            self.shared_memory
+        );
+        out.push_str("    \"link\": {\n      \"tx\": {\n");
         let _ = writeln!(out, "        \"batch_size\": {},", self.batch_size);
         let _ = writeln!(out, "        \"lease\": {}", self.lease_ms);
-        out.push_str("      }\n    }\n  }");
+        out.push_str("      }");
+        // The TLS block, likewise inside `link` and likewise only for the paths
+        // the caller holds: an empty string here is a filename nothing opens,
+        // and a `null` is what zenoh itself resolves an unset one to.
+        let tls: Vec<(&str, &String)> = [
+            ("root_ca_certificate", self.tls_root_ca.as_ref()),
+            ("listen_certificate", self.tls_listen_certificate.as_ref()),
+            ("listen_private_key", self.tls_listen_private_key.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(k, v)| v.map(|v| (k, v)))
+        .collect();
+        if !tls.is_empty() {
+            out.push_str(",\n      \"tls\": {");
+            for (i, (key, value)) in tls.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let _ = write!(out, "\n        \"{key}\": ");
+                escape_into(value, &mut out);
+            }
+            out.push_str("\n      }");
+        }
+        out.push_str("\n    }\n  }");
         if let Some(admin) = self.adminspace {
             out.push_str(",\n  \"adminspace\": { \"enabled\": true, \"permissions\": ");
             let _ = write!(
@@ -420,6 +545,23 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "adminspace/enabled",
     "adminspace/permissions/read",
     "adminspace/permissions/write",
+    // R311y844 — ten keys wz ALREADY acts on, which the reader could not be
+    // told. Each was in `UNHONOURED_UPSTREAM_CONFIG_KEYS` under a list whose
+    // doc says "wz models the topology-and-transport subset it can act on" —
+    // and that list conflated two different sentences: "wz cannot do this" and
+    // "the reader does not read this". Every key below is the second: the demo
+    // has carried a flag for it for rounds, so an operator could get the
+    // behaviour by hand and not from the file they already have.
+    "id",
+    "namespace",
+    "queries_default_timeout",
+    "routing/interests/timeout",
+    "scouting/timeout",
+    "transport/multicast/qos/enabled",
+    "transport/shared_memory/enabled",
+    "transport/link/tls/root_ca_certificate",
+    "transport/link/tls/listen_certificate",
+    "transport/link/tls/listen_private_key",
 ];
 
 /// Every leaf key a real zenoh 1.5.0 resolves that wz does NOT honour.
@@ -448,13 +590,11 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "connect/retry",
     "connect/timeout_ms",
     "downsampling",
-    "id",
     "listen/exit_on_failure",
     "listen/retry",
     "listen/timeout_ms",
     "low_pass_filter",
     "metadata",
-    "namespace",
     "open/return_conditions/connect_scouted",
     "open/return_conditions/declares",
     "plugins",
@@ -462,8 +602,6 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "plugins_loading/search_dirs",
     "qos/network",
     "qos/publication",
-    "queries_default_timeout",
-    "routing/interests/timeout",
     "routing/peer/linkstate/transport_weights",
     "routing/peer/mode",
     "routing/router/linkstate/transport_weights",
@@ -480,7 +618,6 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "scouting/multicast/interface",
     "scouting/multicast/listen",
     "scouting/multicast/ttl",
-    "scouting/timeout",
     "timestamping/drop_future_timestamp",
     "transport/auth/pubkey/key_size",
     "transport/auth/pubkey/known_keys_file",
@@ -500,9 +637,6 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/link/tls/connect_certificate",
     "transport/link/tls/connect_private_key",
     "transport/link/tls/enable_mtls",
-    "transport/link/tls/listen_certificate",
-    "transport/link/tls/listen_private_key",
-    "transport/link/tls/root_ca_certificate",
     "transport/link/tls/so_rcvbuf",
     "transport/link/tls/so_sndbuf",
     "transport/link/tls/verify_name_on_connect",
@@ -527,8 +661,6 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/multicast/compression/enabled",
     "transport/multicast/join_interval",
     "transport/multicast/max_sessions",
-    "transport/multicast/qos/enabled",
-    "transport/shared_memory/enabled",
     "transport/shared_memory/mode",
     "transport/unicast/accept_pending",
     "transport/unicast/accept_timeout",
@@ -694,6 +826,24 @@ fn want_u64(doc: &Json5Value, path: &'static str) -> Result<Option<u64>, ConfigI
     }
 }
 
+/// R311y844 — a honoured key whose value is a string (a path, a keyexpr, a hex
+/// zid). An EMPTY string is refused rather than carried: every consumer of one
+/// is a path or an identifier, and "" reaches them as a filename nothing opens
+/// or a prefix that matches everything, which is a mistake the file should be
+/// told about here rather than at bind time.
+fn want_string(
+    doc: &Json5Value,
+    path: &'static str,
+    expected: &'static str,
+) -> Result<Option<String>, ConfigIngestError> {
+    match honoured(doc, path) {
+        None => Ok(None),
+        Some(Json5Value::String(s)) if !s.is_empty() => Ok(Some(s.clone())),
+        Some(Json5Value::String(_)) => Err(ConfigIngestError::WrongType { path, expected }),
+        Some(_) => Err(ConfigIngestError::WrongType { path, expected }),
+    }
+}
+
 fn want_endpoints(
     doc: &Json5Value,
     path: &'static str,
@@ -812,6 +962,49 @@ impl ZenohNodeConfig {
         if let Some(v) = want_u64(&doc, "transport/link/tx/lease")? {
             out.lease_ms = v;
             named.push("transport/link/tx/lease");
+        }
+        // R311y844 — the ten keys wz already acts on. Read in
+        // HONOURED_CONFIG_KEYS order so `named` reports them the way the table
+        // lists them.
+        if let Some(v) = want_string(&doc, "id", "a hex zenoh id")? {
+            out.id = Some(v);
+            named.push("id");
+        }
+        if let Some(v) = want_string(&doc, "namespace", "a keyexpr")? {
+            out.namespace = Some(v);
+            named.push("namespace");
+        }
+        if let Some(v) = want_u64(&doc, "queries_default_timeout")? {
+            out.queries_default_timeout_ms = Some(v);
+            named.push("queries_default_timeout");
+        }
+        if let Some(v) = want_u64(&doc, "routing/interests/timeout")? {
+            out.interests_timeout_ms = Some(v);
+            named.push("routing/interests/timeout");
+        }
+        if let Some(v) = want_u64(&doc, "scouting/timeout")? {
+            out.scouting_timeout_ms = Some(v);
+            named.push("scouting/timeout");
+        }
+        if let Some(v) = want_bool(&doc, "transport/multicast/qos/enabled")? {
+            out.multicast_qos = v;
+            named.push("transport/multicast/qos/enabled");
+        }
+        if let Some(v) = want_bool(&doc, "transport/shared_memory/enabled")? {
+            out.shared_memory = v;
+            named.push("transport/shared_memory/enabled");
+        }
+        if let Some(v) = want_string(&doc, "transport/link/tls/root_ca_certificate", "a path")? {
+            out.tls_root_ca = Some(v);
+            named.push("transport/link/tls/root_ca_certificate");
+        }
+        if let Some(v) = want_string(&doc, "transport/link/tls/listen_certificate", "a path")? {
+            out.tls_listen_certificate = Some(v);
+            named.push("transport/link/tls/listen_certificate");
+        }
+        if let Some(v) = want_string(&doc, "transport/link/tls/listen_private_key", "a path")? {
+            out.tls_listen_private_key = Some(v);
+            named.push("transport/link/tls/listen_private_key");
         }
         // `adminspace` is a block rather than a field: an absent block is not
         // `enabled: false`, which is why the struct models it as an Option and
@@ -1120,6 +1313,38 @@ mod tests {
                 "adminspace/permissions/write",
                 r#"{ "adminspace": { "enabled": true, "permissions": { "write": true } } }"#,
             ),
+            // R311y844 — the ten wz already acted on and could not be told.
+            ("id", r#"{ "id": "0102030405060708" }"#),
+            ("namespace", r#"{ "namespace": "demo/ns" }"#),
+            (
+                "queries_default_timeout",
+                r#"{ "queries_default_timeout": 12000 }"#,
+            ),
+            (
+                "routing/interests/timeout",
+                r#"{ "routing": { "interests": { "timeout": 9000 } } }"#,
+            ),
+            ("scouting/timeout", r#"{ "scouting": { "timeout": 2500 } }"#),
+            (
+                "transport/multicast/qos/enabled",
+                r#"{ "transport": { "multicast": { "qos": { "enabled": true } } } }"#,
+            ),
+            (
+                "transport/shared_memory/enabled",
+                r#"{ "transport": { "shared_memory": { "enabled": false } } }"#,
+            ),
+            (
+                "transport/link/tls/root_ca_certificate",
+                r#"{ "transport": { "link": { "tls": { "root_ca_certificate": "/etc/ca.pem" } } } }"#,
+            ),
+            (
+                "transport/link/tls/listen_certificate",
+                r#"{ "transport": { "link": { "tls": { "listen_certificate": "/etc/srv.pem" } } } }"#,
+            ),
+            (
+                "transport/link/tls/listen_private_key",
+                r#"{ "transport": { "link": { "tls": { "listen_private_key": "/etc/srv.key" } } } }"#,
+            ),
         ];
         // The case list IS the table, so a key added to one and not the other
         // fails here rather than going unmeasured.
@@ -1212,15 +1437,17 @@ mod tests {
         .unwrap();
         // Refusing would make the reader useless against a real config.
         assert_eq!(ingest.config.batch_size, 4096);
-        // Swallowing would let an operator believe the CA path took effect.
+        // Swallowing would let an operator believe a key took effect.
+        //
+        // R311y844 — the FIXTURE is unchanged and two of its four reported keys
+        // left this list, which is the whole of that round: `queries_default_timeout`
+        // and the TLS root CA were never keys wz could not act on, only keys
+        // the reader had not been taught, so they are honoured now and the
+        // document's remaining two (`plugins`, `transport/link/tx/threads`)
+        // carry the property this test is about.
         assert_eq!(
             ingest.ignored,
-            vec![
-                "plugins",
-                "queries_default_timeout",
-                "transport/link/tls/root_ca_certificate",
-                "transport/link/tx/threads",
-            ]
+            vec!["plugins", "transport/link/tx/threads",]
         );
     }
 

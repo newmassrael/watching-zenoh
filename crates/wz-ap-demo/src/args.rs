@@ -394,6 +394,75 @@ pub(crate) fn expand_stock_zenoh_config(
         added.push("--lease-ms".into());
         added.push(cfg.lease_ms.to_string());
     }
+    // R311y844 — the ten keys wz already acted on. Each row is a flag that has
+    // been in this binary for rounds, so what changed is not the capability but
+    // the ability to ask for it from the file an operator already has. The
+    // value-carrying ones honour ANY value (there is no "off" for a path or a
+    // timeout, so naming the key IS the instruction); the two booleans follow
+    // the rule the rest of this function uses and act only on a named `true`,
+    // because acting on a merged default would add a flag to every invocation.
+    for (key, flag, value) in [
+        ("id", "--zid", cfg.id.as_ref()),
+        ("namespace", "--namespace", cfg.namespace.as_ref()),
+        (
+            "transport/link/tls/root_ca_certificate",
+            "--tls-ca",
+            cfg.tls_root_ca.as_ref(),
+        ),
+        (
+            "transport/link/tls/listen_certificate",
+            "--tls-cert",
+            cfg.tls_listen_certificate.as_ref(),
+        ),
+        (
+            "transport/link/tls/listen_private_key",
+            "--tls-key",
+            cfg.tls_listen_private_key.as_ref(),
+        ),
+    ] {
+        if let Some(value) = value {
+            if named(key) && !rest.iter().any(|a| a == flag) {
+                added.push(String::from(flag));
+                added.push(value.clone());
+            }
+        }
+    }
+    for (key, flag, value) in [
+        (
+            "queries_default_timeout",
+            "--query-timeout-ms",
+            cfg.queries_default_timeout_ms,
+        ),
+        (
+            "routing/interests/timeout",
+            "--interest-timeout",
+            cfg.interests_timeout_ms,
+        ),
+        (
+            "scouting/timeout",
+            "--scout-timeout-ms",
+            cfg.scouting_timeout_ms,
+        ),
+    ] {
+        if let Some(value) = value {
+            if named(key) && !rest.iter().any(|a| a == flag) {
+                added.push(String::from(flag));
+                added.push(value.to_string());
+            }
+        }
+    }
+    if named("transport/multicast/qos/enabled")
+        && cfg.multicast_qos
+        && !rest.iter().any(|a| a == "--multicast-qos")
+    {
+        added.push("--multicast-qos".into());
+    }
+    if named("transport/shared_memory/enabled")
+        && cfg.shared_memory
+        && !rest.iter().any(|a| a == "--shm")
+    {
+        added.push("--shm".into());
+    }
     // The adminspace block, whose three upstream keys expand to four wz flags.
     // Keyed on the BLOCK rather than on `adminspace/enabled`, because a
     // document that names only a permission still describes an admin space —
@@ -612,23 +681,25 @@ mod stock_config_tests {
 
     /// The keys wz does not honour reach the caller so they can be printed —
     /// the operator has to be able to see what their file did NOT do.
+    ///
+    /// R311y844 replaced this document's two examples. They were the TLS root
+    /// CA and `queries_default_timeout`, and both are honoured now — which is
+    /// that round in one sentence: the unhonoured list had been carrying keys
+    /// wz could act on and simply had not been told about, alongside the ones
+    /// it genuinely cannot. `plugins` and `transport/link/tx/threads` are the
+    /// second kind (a plugin host; a TX thread pool wz does not have), so they
+    /// are what this test is about now.
     #[test]
     fn the_keys_wz_does_not_honour_are_carried_out_to_be_reported() {
         let out = expand(
             &["--config", "z.json5"],
             r#"{ mode: "client",
                  connect: { endpoints: ["tcp/r:7447"] },
-                 transport: { link: { tls: { root_ca_certificate: "/etc/ca.pem" } } },
-                 queries_default_timeout: 10000 }"#,
+                 transport: { link: { tx: { threads: 8 } } },
+                 plugins: {} }"#,
         )
         .unwrap();
-        assert_eq!(
-            out.ignored,
-            vec![
-                "queries_default_timeout",
-                "transport/link/tls/root_ca_certificate"
-            ]
-        );
+        assert_eq!(out.ignored, vec!["plugins", "transport/link/tx/threads"]);
         assert_eq!(out.named, vec!["mode", "connect/endpoints"]);
     }
 
@@ -767,6 +838,68 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      adminspace: { enabled: true, permissions: { write: true } } }"#,
+            ),
+            // R311y844 — the ten keys wz already acted on, each paired with the
+            // flag that has carried it since long before the reader existed.
+            (
+                "id",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     id: "0102030405060708" }"#,
+            ),
+            (
+                "namespace",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     namespace: "demo/ns" }"#,
+            ),
+            (
+                "queries_default_timeout",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     queries_default_timeout: 12000 }"#,
+            ),
+            (
+                "routing/interests/timeout",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     routing: { interests: { timeout: 9000 } } }"#,
+            ),
+            (
+                "scouting/timeout",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     scouting: { timeout: 2500 } }"#,
+            ),
+            (
+                "transport/multicast/qos/enabled",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { multicast: { qos: { enabled: true } } } }"#,
+            ),
+            (
+                "transport/shared_memory/enabled",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { shared_memory: { enabled: true } } }"#,
+            ),
+            (
+                "transport/link/tls/root_ca_certificate",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tls: { root_ca_certificate: "/etc/ca.pem" } } } }"#,
+            ),
+            (
+                "transport/link/tls/listen_certificate",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tls: { listen_certificate: "/etc/srv.pem" } } } }"#,
+            ),
+            (
+                "transport/link/tls/listen_private_key",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tls: { listen_private_key: "/etc/srv.key" } } } }"#,
             ),
         ]
     }

@@ -131,6 +131,22 @@ fn zenohd_reports_back_every_value_the_emitted_config_carried() {
     config.qos = false;
     config.compression = true;
     config.timestamping = true;
+    // R311y844 — the ten keys that round promoted, set here so the EMIT half of
+    // the shared key table is adjudicated by the same zenohd that adjudicates
+    // the read half. Without these rows `to_json5` could grow a branch nothing
+    // upstream ever parses, which is the drift the one-table design exists to
+    // prevent. Each value is away from zenoh's own resolved default (measured:
+    // five resolve to null, multicast qos to false, shared memory to true).
+    config.id = Some(String::from("a1b2c3d4"));
+    config.namespace = Some(String::from("demo/ns"));
+    config.queries_default_timeout_ms = Some(11_000);
+    config.interests_timeout_ms = Some(9_000);
+    config.scouting_timeout_ms = Some(2_500);
+    config.multicast_qos = true;
+    config.shared_memory = false;
+    config.tls_root_ca = Some(String::from("/etc/wz/ca.pem"));
+    config.tls_listen_certificate = Some(String::from("/etc/wz/server.pem"));
+    config.tls_listen_private_key = Some(String::from("/etc/wz/server.key"));
 
     assert!(
         config.validate().is_empty(),
@@ -159,6 +175,15 @@ fn zenohd_reports_back_every_value_the_emitted_config_carried() {
         r#""compression":{"enabled":true}"#,
         r#""adminspace":{"enabled":true,"permissions":{"read":true,"write":true}}"#,
         r#""timestamping":{"drop_future_timestamp":null,"enabled":true}"#,
+        // R311y844 — the promoted ten, read back out of the same resolved line.
+        r#""id":"a1b2c3d4""#,
+        r#""namespace":"demo/ns""#,
+        r#""queries_default_timeout":11000"#,
+        r#""interests":{"timeout":9000}"#,
+        r#""root_ca_certificate":"/etc/wz/ca.pem""#,
+        r#""listen_certificate":"/etc/wz/server.pem""#,
+        r#""listen_private_key":"/etc/wz/server.key""#,
+        r#""shared_memory":{"enabled":false"#,
     ] {
         assert!(
             captured.contains(expected),

@@ -98,10 +98,14 @@ fn operator_config(port: u16) -> String {
         r#"/// The deployment's own zenoh config, as it sits on disk.
 {{
   mode: 'router',                       // single-quoted, JSON5
+  id: "a1b2c3d4",
+  namespace: "demo/ns",
+  queries_default_timeout: 11000,
+  routing: {{ interests: {{ timeout: 9000 }} }},
   listen: {{
     endpoints: ["tcp/127.0.0.1:{port}",],   /* trailing comma */
   }},
-  scouting: {{ multicast: {{ enabled: false }} }},
+  scouting: {{ multicast: {{ enabled: false }}, timeout: 2500 }},
   timestamping: {{ enabled: true }},
   adminspace: {{ enabled: true, permissions: {{ read: true, write: true }} }},
   transport: {{
@@ -111,12 +115,23 @@ fn operator_config(port: u16) -> String {
       qos: {{ enabled: false }},
       compression: {{ enabled: true }},
     }},
-    link: {{ tx: {{ batch_size: 4096, lease: 8000, threads: 8 }} }},
+    multicast: {{ qos: {{ enabled: true }} }},
+    shared_memory: {{ enabled: false }},
+    link: {{
+      tls: {{
+        root_ca_certificate: "/etc/wz/ca.pem",
+        listen_certificate: "/etc/wz/server.pem",
+        listen_private_key: "/etc/wz/server.key",
+      }},
+      tx: {{ batch_size: 4096, lease: 8000, threads: 8 }},
+    }},
   }},
   // Keys zenoh knows and wz does not honour, present the way they are in a
   // real file: the ingest must REPORT these, not refuse them and not swallow
-  // them.
-  queries_default_timeout: 10000,
+  // them. R311y844 removed `queries_default_timeout` from HERE rather than
+  // from the top of the file: it is honoured now, and a real zenohd refuses a
+  // DUPLICATE field as flatly as an unknown one ("duplicate field
+  // `queries_default_timeout`"), which is how the doubled key was found.
   metadata: {{ name: 'strawberry' }},
 }}
 "#
@@ -255,6 +270,59 @@ fn wz_reads_the_same_values_out_of_a_config_that_zenohd_does() {
         ("adminspace/enabled", String::from("true")),
         ("adminspace/permissions/read", admin.read.to_string()),
         ("adminspace/permissions/write", admin.write.to_string()),
+        // R311y844 — the ten keys wz already acted on and could not be told.
+        // These are the rows that make the promotion a MEASUREMENT: a key wz
+        // reads at the wrong path reads zenoh's default here rather than going
+        // missing, which is the silent failure this leg exists to catch.
+        ("id", format!("\"{}\"", wz.id.clone().unwrap_or_default())),
+        (
+            "namespace",
+            format!("\"{}\"", wz.namespace.clone().unwrap_or_default()),
+        ),
+        (
+            "queries_default_timeout",
+            wz.queries_default_timeout_ms
+                .expect("the fixture names it")
+                .to_string(),
+        ),
+        (
+            "routing/interests/timeout",
+            wz.interests_timeout_ms
+                .expect("the fixture names it")
+                .to_string(),
+        ),
+        (
+            "scouting/timeout",
+            wz.scouting_timeout_ms
+                .expect("the fixture names it")
+                .to_string(),
+        ),
+        (
+            "transport/multicast/qos/enabled",
+            wz.multicast_qos.to_string(),
+        ),
+        (
+            "transport/shared_memory/enabled",
+            wz.shared_memory.to_string(),
+        ),
+        (
+            "transport/link/tls/root_ca_certificate",
+            format!("\"{}\"", wz.tls_root_ca.clone().unwrap_or_default()),
+        ),
+        (
+            "transport/link/tls/listen_certificate",
+            format!(
+                "\"{}\"",
+                wz.tls_listen_certificate.clone().unwrap_or_default()
+            ),
+        ),
+        (
+            "transport/link/tls/listen_private_key",
+            format!(
+                "\"{}\"",
+                wz.tls_listen_private_key.clone().unwrap_or_default()
+            ),
+        ),
     ];
 
     for (path, wz_says) in &expected {
@@ -295,13 +363,12 @@ fn wz_reads_the_same_values_out_of_a_config_that_zenohd_does() {
     // The keys the file carries that wz has no opinion about must have been
     // REPORTED, not silently dropped — and zenohd must have honoured them,
     // which is what makes them wz's gap rather than a bad fixture.
+    // R311y844 — `queries_default_timeout` left this list because wz honours it
+    // now; it was never a key wz could not act on (`--query-timeout-ms` has
+    // carried it for rounds), only one the reader had not been taught.
     assert_eq!(
         ingest.ignored,
-        vec![
-            "metadata/name",
-            "queries_default_timeout",
-            "transport/link/tx/threads"
-        ]
+        vec!["metadata/name", "transport/link/tx/threads"]
     );
     assert_eq!(
         resolved.get("transport/link/tx/threads"),
@@ -440,6 +507,14 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     unicast: {{ compression: {{ enabled: true }} }},
     link: {{ tx: {{ batch_size: 4096, lease: 3000 }} }},
   }},
+  // R311y844 — two of the ten promoted keys, here because the expansion
+  // produces a VALUE for each and only a running demo can say whether its own
+  // parser accepts the shape zenoh writes: `id` becomes `--zid <hex>` and
+  // `namespace` becomes `--namespace <keyexpr>`. A unit test on `added` sees
+  // the string and not the parse, and an argv the demo rejects exits 2 before
+  // any session, which this leg would catch as "never established".
+  id: "a1b2c3d4",
+  namespace: "demo/ns",
 }}
 "#
     );
