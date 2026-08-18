@@ -52,6 +52,59 @@ const ETHERTYPE_QINQ: u16 = 0x88A8;
 const IP_PROTO_TCP: u8 = 6;
 const IP_PROTO_UDP: u8 = 17;
 
+/// R311y862 — the two encapsulations this reader WALKS: an IP packet whose
+/// payload is another IP packet.
+///
+/// Both numbers mean "the body is a datagram", and which one says only which
+/// family the inner header belongs to. They are walked rather than reported
+/// because the walk is the existing one — no new parser, only a second turn
+/// around the loop.
+const IP_PROTO_IPV4_IN_IP: u8 = 4;
+const IP_PROTO_IPV6_IN_IP: u8 = 41;
+
+/// R311y862 — how many nested IP headers this reader will walk.
+///
+/// A BOUND and not a recursion, for the reason every other limit in this crate
+/// exists: the depth is read out of the packet, so a crafted chain of headers
+/// would otherwise decide how much work this function does. Four is far past
+/// any real deployment — one tunnel is ordinary, two is a tunnel inside a VPN,
+/// and nothing this workspace has seen goes further — and a chain beyond it is
+/// reported as an encapsulation this reader did not walk, which is the same
+/// answer as for GRE and is honest for the same reason.
+const MAX_ENCAPSULATION_DEPTH: usize = 4;
+
+/// R311y862 — IP protocol numbers whose body is ANOTHER packet.
+///
+/// This list is what makes the furniture class defensible instead of merely
+/// asserted. [`SkipCensus::not_this_protocol`](crate::SkipCensus::not_this_protocol)
+/// calls a non-TCP, non-UDP protocol incapable of carrying zenoh; that argument
+/// holds for ICMP and IGMP, which terminate at the host and carry no session,
+/// and it does NOT hold for an encapsulation, which is transparent to whatever
+/// is inside it. Measured before it was believed: a capture of one IPIP packet
+/// carrying a complete zenoh session reported `capture: complete` with zero
+/// flows read.
+///
+/// The two walked numbers are here as well, so that a REASSEMBLED datagram —
+/// which reaches [`transport_from_ip`] without passing the walk in
+/// [`decapsulate`] — is judged rather than filed as furniture. That is the
+/// honest half answer for a fragmented tunnel: the bytes are named as absent,
+/// and reading them would need the walk to run over reassembled payloads too.
+fn is_encapsulation(proto: u8) -> bool {
+    matches!(
+        proto,
+        IP_PROTO_IPV4_IN_IP
+            | IP_PROTO_IPV6_IN_IP
+            | 47   // GRE
+            | 50   // ESP -- the remainder is encrypted, as at the v6 chain
+            | 51   // AH
+            | 94   // IPIP, the obsolete duplicate of 4
+            | 97   // ETHERIP
+            | 115  // L2TP
+            | 137  // MPLS-in-IP
+            | 143 // Ethernet (RFC 8986)
+    )
+}
+
 /// One end of a flow: address bytes plus a port.
 ///
 /// The address is a fixed 16-byte buffer with a length, not an enum: the
@@ -315,6 +368,18 @@ pub enum SkipReason {
     /// would leave a reader unable to tell a quiet link from a link whose
     /// records this build could not read.
     VsockNonPayload(u16),
+    /// R311y862 — an IP packet whose body is another packet this reader did not
+    /// open, carrying the protocol number that stopped it.
+    ///
+    /// Split out of [`Self::NotTransport`], which counts protocols that
+    /// TERMINATE at the host — ICMP, IGMP — and is furniture for that reason.
+    /// An encapsulation terminates nothing: whatever is inside it could be a
+    /// zenoh session, and filing it as furniture is how a capture of one IPIP
+    /// packet carrying a complete session reported itself complete with zero
+    /// flows read. The v4 sibling of [`Self::Ipv6ExtensionChain`], and like it
+    /// this covers both causes — a protocol this build has no parser for (GRE,
+    /// ESP, L2TP), and a chain longer than `MAX_ENCAPSULATION_DEPTH`.
+    Encapsulation(u8),
 }
 
 /// One UDP datagram lifted out of a captured packet.
@@ -499,15 +564,48 @@ pub fn decapsulate(
         }
     }
     let (ip_bytes, is_v6) = strip_link(link_type, bytes)?;
-    let ip = if is_v6 {
-        strip_ipv6(ip_bytes)?
-    } else {
-        strip_ipv4(ip_bytes)?
-    };
-    let ip_checksum = if is_v6 {
-        None
-    } else {
-        Some(ipv4_header_ok(&ip_bytes[..ipv4_header_len(ip_bytes)]))
+    // R311y862 — a LOOP where this was one strip, because an IP packet's body
+    // can be another IP packet and the walk for it is the walk already here.
+    //
+    // The checksum verdict is folded across every v4 header the chain carries
+    // rather than read off the outermost one. Three states and each is a real
+    // answer: `Some(false)` if any header that HAS a checksum failed,
+    // `Some(true)` if at least one had one and all passed, `None` if none did
+    // (an all-v6 chain). Reporting only the outer header would let a tunnel
+    // whose inner header is corrupt read as verified, and reporting only the
+    // inner would drop the outer's verdict on the floor.
+    let mut cursor = ip_bytes;
+    let mut v6 = is_v6;
+    let mut ip_checksum: Option<bool> = None;
+    let mut depth = 0usize;
+    let ip = loop {
+        let d = if v6 {
+            strip_ipv6(cursor)?
+        } else {
+            strip_ipv4(cursor)?
+        };
+        if !v6 {
+            let ok = ipv4_header_ok(&cursor[..ipv4_header_len(cursor)]);
+            ip_checksum = Some(ip_checksum.unwrap_or(true) && ok);
+        }
+        // A FRAGMENT ENDS THE WALK, and it must: the body behind this header is
+        // a prefix of the inner packet, so stepping into it would read a
+        // truncated header as a whole one — the same mistake R311y606 fixed one
+        // layer down. The piece is reported and the reassembled datagram meets
+        // the encapsulation arm of `transport_from_ip` instead.
+        if d.fragment.is_some() {
+            break d;
+        }
+        if d.proto == IP_PROTO_IPV4_IN_IP || d.proto == IP_PROTO_IPV6_IN_IP {
+            depth += 1;
+            if depth > MAX_ENCAPSULATION_DEPTH {
+                return Err(SkipReason::Encapsulation(d.proto));
+            }
+            v6 = d.proto == IP_PROTO_IPV6_IN_IP;
+            cursor = d.payload;
+            continue;
+        }
+        break d;
     };
     // R311y606 — a fragment leaves here before the transport strip, because
     // there is no transport to strip. Even the FIRST fragment must: its header
@@ -563,6 +661,12 @@ pub fn transport_from_ip(
     match proto {
         IP_PROTO_TCP => strip_tcp(src, dst, payload, packet_index, checksums).map(Transport::Tcp),
         IP_PROTO_UDP => strip_udp(src, dst, payload, packet_index, checksums).map(Transport::Udp),
+        // R311y862 — an encapsulation is NOT furniture, and this arm is what
+        // stops it being filed as such. `decapsulate` walks the two IP-in-IP
+        // numbers before reaching here, so what lands on this arm is either a
+        // tunnel this build does not open (GRE, ESP, L2TP) or a reassembled
+        // datagram that was one — both bytes the capture holds and no row does.
+        p if is_encapsulation(p) => Err(SkipReason::Encapsulation(p)),
         other => Err(SkipReason::NotTransport(other)),
     }
 }

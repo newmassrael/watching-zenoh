@@ -236,6 +236,23 @@ pub struct SkipCensus {
     pub ipv6_extension_chain: usize,
     /// An IPv6 fragment other than the first.
     pub ipv6_fragment: usize,
+    /// R311y862 — an IP packet whose body is another packet this reader did not
+    /// open.
+    pub unwalked_encapsulation: usize,
+    /// The PROTOCOL NUMBERS behind that count — a SET, on
+    /// [`Self::unsupported_link_types`]'s reasoning: the actionable fact is
+    /// WHICH tunnel, and a reader holding it can say "GRE" rather than "some
+    /// packets were skipped". A count alone cannot name what to add.
+    pub unwalked_encapsulations: BTreeSet<u8>,
+    /// R311y862 — the protocol numbers counted in [`Self::not_transport`].
+    ///
+    /// The furniture class rests on a POSITIVE argument — a protocol that
+    /// terminates at the host carries no session, so nothing was lost — and
+    /// that argument is made by this crate about a capture taken anywhere. The
+    /// set is what lets a reader check it: an encapsulation missing from
+    /// `is_encapsulation`'s list is furniture by omission, and printing the
+    /// numbers is the difference between that being visible and being silent.
+    pub not_transport_protos: BTreeSet<u8>,
 }
 
 impl SkipCensus {
@@ -252,12 +269,17 @@ impl SkipCensus {
     /// R311y861 — `ip_fragment_pending` LEFT this class, and that was measured
     /// rather than argued. A held piece is not absent; it is undecided, and the
     /// decision belongs to [`Self::held`] below.
+    /// R311y862 — `unwalked_encapsulation` joined, and it is the sharpest
+    /// member: the packet was not short, not malformed and not furniture, it
+    /// was a tunnel whose contents this build cannot open. Measured before it
+    /// was believed — see [`Self::not_this_protocol`].
     pub fn bytes_absent(&self) -> usize {
         self.unsupported_link_type
             + self.truncated
             + self.ipv4_fragment
             + self.ipv6_extension_chain
             + self.ipv6_fragment
+            + self.unwalked_encapsulation
     }
 
     /// R311y861 — the skips whose FATE IS NOT THIS CENSUS'S TO KNOW.
@@ -282,7 +304,7 @@ impl SkipCensus {
 
     /// R311y860 — the skips that are ordinary furniture on a real segment.
     ///
-    /// ARP and its neighbours, IP that is neither TCP nor UDP, and a vsock
+    /// ARP and its neighbours, IP that TERMINATES at the host, and a vsock
     /// control op that carries no payload. None of them could have carried
     /// zenoh: every link this workspace speaks arrives as TCP, UDP, or its own
     /// link type, and raweth reaches its own arm rather than this counter
@@ -290,6 +312,21 @@ impl SkipCensus {
     ///
     /// Counted and reported, never judged. A capture is not a floor because the
     /// segment it was taken on had ARP on it.
+    ///
+    /// R311y862 — THE ARGUMENT ABOVE WAS TOO WIDE AND THE CORRECTION IS THE
+    /// POINT OF THE CLASS. It reasons about what wz SENDS, and `not_transport`
+    /// is a fact about what a capture CONTAINS, which is a capture taken
+    /// anywhere. An encapsulation contains another packet and rules nothing
+    /// out: an IPIP frame carrying a whole zenoh session was counted here and
+    /// the capture reported itself complete with no flows read. Those protocols
+    /// now leave for `unwalked_encapsulation`, and what stays is the set for
+    /// which the positive argument actually holds — a protocol that terminates
+    /// at the host carries no session to lose.
+    ///
+    /// The residue is stated rather than hidden: an encapsulation absent from
+    /// `is_encapsulation`'s list is still furniture by omission. That is why
+    /// [`Self::not_transport_protos`] carries the numbers — the claim is
+    /// checkable from the page instead of taken on trust.
     pub fn not_this_protocol(&self) -> usize {
         self.not_ip + self.not_transport + self.vsock_non_payload
     }
@@ -324,7 +361,14 @@ impl SkipCensus {
             }
             SkipReason::Truncated => self.truncated += 1,
             SkipReason::NotIp => self.not_ip += 1,
-            SkipReason::NotTransport(_) => self.not_transport += 1,
+            SkipReason::NotTransport(proto) => {
+                self.not_transport += 1;
+                self.not_transport_protos.insert(proto);
+            }
+            SkipReason::Encapsulation(proto) => {
+                self.unwalked_encapsulation += 1;
+                self.unwalked_encapsulations.insert(proto);
+            }
             SkipReason::Ipv4Fragment => self.ipv4_fragment += 1,
             SkipReason::IpFragmentPending => self.ip_fragment_pending += 1,
             SkipReason::VsockNonPayload(_) => self.vsock_non_payload += 1,

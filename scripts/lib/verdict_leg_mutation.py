@@ -301,6 +301,7 @@ PREDICATES = [
             "ipv4_fragment",
             "ipv6_extension_chain",
             "ipv6_fragment",
+            "unwalked_encapsulation",
         )
     ],
     # R311y861 -- `Dissection::unfinished_fragment_chains`, three ENDS summed.
@@ -453,6 +454,10 @@ CALL = re.compile(r"\.(\w+)\(\)")
 RETURNS = re.compile(r"\bfn\s+{name}\s*\(\s*&self\s*\)\s*->\s*&?(?:'\w+\s+)?([\w:]+)")
 IMPL = re.compile(r"^impl(?:<[^>]*>)?\s+([A-Za-z_]\w*)", re.M)
 
+# R311y862 — one term of a summing predicate: a bare `self.field` read and
+# nothing else. See `unswept_summands` for why the test has to be this tight.
+SUMMAND = re.compile(r"self\.\w+")
+
 
 def _last_segment(path: str) -> str:
     return path.rsplit("::", 1)[-1]
@@ -523,6 +528,45 @@ def uncovered_calls(pristine: str) -> list[tuple[str, str, str, str]]:
         for ty in accessor_types(accessor) or {f"<unknown:{accessor}>"}:
             if (ty, predicate) not in COVERED_TYPES:
                 out.append((g.group("variant"), accessor, ty, predicate))
+    return out
+
+
+def unswept_summands() -> list[tuple[str, str]]:
+    """`(anchor, term)` for every `self.X` a summing predicate adds that no
+    recipe zeroes.
+
+    R311y862 — THE RECIPE LISTS ARE HAND-WRITTEN AND THE ACCESSORS THEY DESCRIBE
+    ARE NOT. `SkipCensus::bytes_absent` grew a sixth field this round; the loop
+    above names five, and nothing would have said so — the new counter would
+    have been swept by no mutant while the gate reported OK, which is coverage
+    claimed rather than measured. Exactly the shape this file exists to refuse,
+    on the file itself.
+
+    Read from the function body rather than from a second list, because a second
+    list is the thing that just went stale. A summing predicate is one whose
+    body is `self.a + self.b + ...`; anything else (a comparison, a call) is not
+    this check's business and is left to `uncovered_calls`.
+    """
+    out: list[tuple[str, str]] = []
+    covered: dict[tuple[str, str], set[str]] = {}
+    for _label, rel, anchor, old, _new in PREDICATES:
+        covered.setdefault((rel, anchor), set()).add(old.strip())
+    for (rel, anchor), terms in covered.items():
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        if anchor not in text:
+            continue
+        at, end = _function_span(text, anchor)
+        body = text[text.index("{", at) + 1 : end - 1]
+        summands = {t.strip() for t in body.split("+")}
+        # EVERY term must be a bare field read, not merely start with `self.`.
+        # `drops.any` is `self.frames > 0 || ...` -- one chunk, beginning with
+        # `self.`, and a looser test would report that whole expression as an
+        # unswept summand. A predicate that is not a plain sum is not this
+        # check's business.
+        if not all(SUMMAND.fullmatch(s) for s in summands):
+            continue
+        for s in sorted(summands - terms):
+            out.append((anchor, s))
     return out
 
 
@@ -803,6 +847,29 @@ def main() -> int:
                 "recipe mutates it",
                 file=sys.stderr,
             )
+        return 1
+
+    # R311y862 — and a recipe LIST cannot outrun the accessor it describes,
+    # which is the same failure one level in: the pairs above are declared by
+    # hand and so are the fields, and a summing predicate that grows a term
+    # nobody zeroes is a counter this sweep silently stops asking about.
+    unswept = unswept_summands()
+    if unswept:
+        print("verdict-leg mutation: FAIL", file=sys.stderr)
+        for anchor, term in unswept:
+            print(
+                f"  `{anchor.strip()}` sums `{term}`, and no recipe zeroes it "
+                "-- the sweep would report OK while that counter is measured "
+                "by nothing",
+                file=sys.stderr,
+            )
+        print(
+            "\nAdd it to that predicate's recipe loop in PREDICATES. A field "
+            "added to a\nsumming accessor is a new way for the capture to be "
+            "short, and the question\nthis gate asks is whether anything "
+            "notices.",
+            file=sys.stderr,
+        )
         return 1
 
     uncovered = uncovered_calls(pristine)

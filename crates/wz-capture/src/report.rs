@@ -2259,7 +2259,8 @@ fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
          \"unsupported_link_type\":{},\"truncated\":{},\
          \"not_ip\":{},\"not_transport\":{},\"ipv4_fragment\":{},\
          \"ip_fragment_pending\":{},\"vsock_non_payload\":{},\
-         \"ipv6_extension_chain\":{},\"ipv6_fragment\":{},\"link_types\":[",
+         \"ipv6_extension_chain\":{},\"ipv6_fragment\":{},\
+         \"unwalked_encapsulation\":{},\"link_types\":[",
         sk.total(),
         sk.bytes_absent(),
         sk.not_this_protocol(),
@@ -2272,13 +2273,33 @@ fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
         sk.ip_fragment_pending,
         sk.vsock_non_payload,
         sk.ipv6_extension_chain,
-        sk.ipv6_fragment
+        sk.ipv6_fragment,
+        sk.unwalked_encapsulation
     ));
     for (i, dlt) in sk.unsupported_link_types.iter().enumerate() {
         if i > 0 {
             s.push(',');
         }
         s.push_str(&format!("{dlt}"));
+    }
+    // R311y862 — the two protocol SETS beside the link-type one, on the same
+    // reasoning: the actionable fact is WHICH number, and `not_transport_protos`
+    // in particular is how a reader checks the furniture claim rather than
+    // taking it. A tunnel absent from `is_encapsulation`'s list shows up here as
+    // a number nobody expected.
+    s.push_str("],\"encapsulations\":[");
+    for (i, p) in sk.unwalked_encapsulations.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!("{p}"));
+    }
+    s.push_str("],\"not_transport_protos\":[");
+    for (i, p) in sk.not_transport_protos.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!("{p}"));
     }
     s.push_str("]}");
 }
@@ -2304,22 +2325,52 @@ fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
     s.push_str(&format!(
         "    bytes this dissection does not hold ({}): {} truncated, \
          {} IPv4 fragment, {} IPv6 fragment, \
-         {} IPv6 extension chain, {} link type not read\n",
+         {} IPv6 extension chain, {} link type not read, \
+         {} tunnel not opened\n",
         sk.bytes_absent(),
         sk.truncated,
         sk.ipv4_fragment,
         sk.ipv6_fragment,
         sk.ipv6_extension_chain,
-        sk.unsupported_link_type
+        sk.unsupported_link_type,
+        sk.unwalked_encapsulation
     ));
+    if !sk.unwalked_encapsulations.is_empty() {
+        let mut protos = String::new();
+        for (i, p) in sk.unwalked_encapsulations.iter().enumerate() {
+            if i > 0 {
+                protos.push_str(", ");
+            }
+            protos.push_str(&format!("{p}"));
+        }
+        s.push_str(&format!(
+            "      tunnel IP protocol(s) not opened: {protos}\n"
+        ));
+    }
     s.push_str(&format!(
         "    not this protocol ({}), counted and not judged: {} not IP, \
-         {} not TCP or UDP, {} vsock control\n",
+         {} terminate at the host, {} vsock control\n",
         sk.not_this_protocol(),
         sk.not_ip,
         sk.not_transport,
         sk.vsock_non_payload
     ));
+    // R311y862 — the numbers behind the furniture count, so the claim "none of
+    // these could have carried zenoh" is one a reader can check. An
+    // encapsulation missing from `is_encapsulation`'s list appears here rather
+    // than nowhere.
+    if !sk.not_transport_protos.is_empty() {
+        let mut protos = String::new();
+        for (i, p) in sk.not_transport_protos.iter().enumerate() {
+            if i > 0 {
+                protos.push_str(", ");
+            }
+            protos.push_str(&format!("{p}"));
+        }
+        s.push_str(&format!(
+            "      IP protocol(s) held to terminate at the host: {protos}\n"
+        ));
+    }
     // R311y861 — the third line, and it names WHERE its verdict comes from.
     // A reader who saw `IP fragment pending` on the bytes-absent line above
     // read a completed reassembly as a loss, which is the misreading this
@@ -4742,6 +4793,14 @@ mod tests {
         short.extend_from_slice(&[0x45, 0, 0, 40, 0]);
         d.push_packet(crate::link::LINKTYPE_ETHERNET, 2, &short);
         d.push_packet(crate::link::LINKTYPE_ETHERNET, 3, &eth_ipv6_next(50));
+        // R311y862 — the fixture grows with the census it is measuring. A
+        // rendering leg that only ever sees the reasons that existed when it
+        // was written is the shape this test exists to refuse.
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            4,
+            &eth_ipv4_proto(47, &[0u8; 8]),
+        );
         d.finish();
 
         let sk = d.skip_census();
@@ -4750,10 +4809,11 @@ mod tests {
                 sk.not_ip,
                 sk.not_transport,
                 sk.truncated,
-                sk.ipv6_extension_chain
+                sk.ipv6_extension_chain,
+                sk.unwalked_encapsulation
             ),
-            (1, 1, 1, 1),
-            "the fixture must reach four DIFFERENT reasons: {sk:?}"
+            (1, 1, 1, 1, 1),
+            "the fixture must reach five DIFFERENT reasons: {sk:?}"
         );
 
         // CONTROL: the counters exist and the capture document already carries
@@ -4765,6 +4825,7 @@ mod tests {
             "not_transport",
             "truncated",
             "ipv6_extension_chain",
+            "unwalked_encapsulation",
         ] {
             assert!(
                 json.contains(&alloc::format!("\"{key}\":1")),
@@ -4778,10 +4839,13 @@ mod tests {
         let health = health_text(&d);
         for label in [
             "1 not IP",
-            "1 not TCP or UDP",
+            "1 terminate at the host",
             "1 truncated",
             "1 IPv6 extension chain",
-            "reader skipped: 4 packet(s)",
+            "1 tunnel not opened",
+            "tunnel IP protocol(s) not opened: 47",
+            "terminate at the host: 1",
+            "reader skipped: 5 packet(s)",
         ] {
             assert!(
                 health.contains(label),
@@ -4791,11 +4855,14 @@ mod tests {
 
         let hjson = health_json(&d);
         for key in [
-            "\"total\":4",
+            "\"total\":5",
             "\"not_ip\":1",
             "\"not_transport\":1",
             "\"truncated\":1",
             "\"ipv6_extension_chain\":1",
+            "\"unwalked_encapsulation\":1",
+            "\"encapsulations\":[47]",
+            "\"not_transport_protos\":[1]",
         ] {
             assert!(
                 hjson.contains(key),
@@ -4808,7 +4875,9 @@ mod tests {
         // total plus a line about link types.
         let text = CaptureReport::of(&d).to_text();
         assert!(
-            text.contains("1 truncated") && text.contains("1 not TCP or UDP"),
+            text.contains("1 truncated")
+                && text.contains("1 terminate at the host")
+                && text.contains("1 tunnel not opened"),
             "the capture summary must name the reasons it skipped for: {text}"
         );
     }
@@ -5168,6 +5237,228 @@ mod tests {
             !text.contains("reassembly_window_ms"),
             "an eviction is not a deadline, and a page that names both sends \
              the operator to the wrong one: {text}"
+        );
+    }
+
+    /// A bare IPv4 packet (no link header) carrying `body` under `proto`.
+    fn ipv4_packet(proto: u8, src: [u8; 4], dst: [u8; 4], body: &[u8]) -> alloc::vec::Vec<u8> {
+        let mut ip = alloc::vec::Vec::new();
+        ip.push(0x45);
+        ip.push(0);
+        ip.extend_from_slice(&((20 + body.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&0u16.to_be_bytes());
+        ip.extend_from_slice(&0u16.to_be_bytes());
+        ip.push(64);
+        ip.push(proto);
+        ip.extend_from_slice(&0u16.to_be_bytes());
+        ip.extend_from_slice(&src);
+        ip.extend_from_slice(&dst);
+        ip.extend_from_slice(body);
+        ip
+    }
+
+    /// A UDP datagram of whole zenoh KeepAlives, `n` of them.
+    fn zenoh_udp(n: usize) -> alloc::vec::Vec<u8> {
+        let msg = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE; n];
+        let mut udp = alloc::vec::Vec::new();
+        udp.extend_from_slice(&7447u16.to_be_bytes());
+        udp.extend_from_slice(&7446u16.to_be_bytes());
+        udp.extend_from_slice(&((8 + msg.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(&msg);
+        udp
+    }
+
+    /// R311y862 — zenoh inside an IPIP tunnel is READ, not called furniture.
+    ///
+    /// THE DEFECT THIS REPLACES, measured on the previous build: one packet,
+    /// `IPv4(proto 4) / IPv4 / UDP:7447 / 48 KeepAlives`, produced
+    /// `complete=true reasons=[] datagram_flows=0` with `not_transport: 1`. A
+    /// capture holding a whole zenoh session reported itself WHOLE having read
+    /// none of it — the worst shape available to a tool whose job is to say
+    /// what a capture contains, and it came from the furniture class being
+    /// argued from what wz SENDS rather than from what a capture may CONTAIN.
+    #[test]
+    fn zenoh_inside_a_tunnel_is_read_rather_than_filed_as_furniture() {
+        let inner = ipv4_packet(17, [192, 168, 0, 1], [192, 168, 0, 2], &zenoh_udp(48));
+        let mut d = crate::Dissection::new();
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &eth_ipv4_proto(4, &inner),
+        );
+        d.finish();
+
+        assert_eq!(
+            d.datagram_flows().len(),
+            1,
+            "the inner datagram must reach the datagram path: {:?}",
+            d.skip_census()
+        );
+        assert_eq!(
+            d.datagram_flows()[0].frames.len(),
+            48,
+            "and every message inside the tunnel must decode"
+        );
+        // THE ADDRESSES ARE THE INNER ONES, which is not a detail: a flow keyed
+        // by the tunnel endpoints would merge every session riding that tunnel
+        // into a single flow, and the report would name the carrier's addresses
+        // for traffic that never used them.
+        let flow = &d.datagram_flows()[0].flow;
+        assert_eq!(
+            (flow.low.addr(), flow.high.addr()),
+            (&[192, 168, 0, 1][..], &[192, 168, 0, 2][..]),
+            "the flow is keyed by the inner header, not by the carrier's \
+             10.0.0.x endpoints"
+        );
+        let sk = d.skip_census();
+        assert!(sk.is_empty(), "nothing was skipped at all: {sk:?}");
+        let r = CaptureReport::of(&d);
+        assert_eq!(
+            r.reasons(),
+            alloc::vec![],
+            "and the capture is complete because it was READ: {}",
+            r.to_text()
+        );
+    }
+
+    /// R311y862 — a tunnel this build cannot open is a SHORTFALL, not furniture.
+    ///
+    /// The other half of the pair, and the half that has to be got right for
+    /// the first one to mean anything: walking IPIP does not make GRE readable,
+    /// and the honest report for a tunnel with no parser is that bytes the
+    /// capture holds are in no row. Filing it beside ARP is what let the case
+    /// above go unnoticed.
+    #[test]
+    fn a_tunnel_this_build_cannot_open_is_a_shortfall() {
+        let mut d = crate::Dissection::new();
+        // 47 = GRE. The body is not walked, so its contents do not matter.
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &eth_ipv4_proto(47, &[0u8; 32]),
+        );
+        d.finish();
+
+        let sk = d.skip_census();
+        assert_eq!(sk.unwalked_encapsulation, 1, "counted as a tunnel: {sk:?}");
+        assert_eq!(
+            sk.not_transport, 0,
+            "and NOT as a protocol that terminates at the host: {sk:?}"
+        );
+        assert!(
+            sk.unwalked_encapsulations.contains(&47),
+            "the number is kept, because 'a tunnel' is not actionable and \
+             'GRE' is: {sk:?}"
+        );
+        assert_eq!(sk.bytes_absent(), 1, "which is bytes absent: {sk:?}");
+        assert_eq!(sk.not_this_protocol(), 0, "and is not furniture: {sk:?}");
+        assert_eq!(
+            CaptureReport::of(&d).reasons(),
+            alloc::vec![VerdictReason::PacketsSkipped],
+            "so the capture is a floor and says so: {}",
+            CaptureReport::of(&d).to_text()
+        );
+        assert!(
+            CaptureReport::of(&d)
+                .to_text()
+                .contains("tunnel not opened"),
+            "and the page names the class: {}",
+            CaptureReport::of(&d).to_text()
+        );
+    }
+
+    /// R311y862 — a protocol that TERMINATES at the host is still furniture.
+    ///
+    /// The control arm of the pair above. Splitting the encapsulations out
+    /// would be worthless if it had also dragged ICMP with them: a capture is
+    /// not a floor because the segment it was taken on had pings on it, and
+    /// that is exactly the regression R311y860 paid for with ARP.
+    #[test]
+    fn a_protocol_that_terminates_at_the_host_is_still_furniture() {
+        let mut d = crate::Dissection::new();
+        // 1 = ICMP, 132 = SCTP. Neither carries a zenoh session: zenoh has no
+        // SCTP link, and ICMP terminates.
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &eth_ipv4_proto(1, &[0u8; 8]),
+        );
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            1,
+            &eth_ipv4_proto(132, &[0u8; 8]),
+        );
+        d.finish();
+
+        let sk = d.skip_census();
+        assert_eq!(sk.not_transport, 2, "both are furniture: {sk:?}");
+        assert_eq!(sk.unwalked_encapsulation, 0, "and neither is a tunnel");
+        assert_eq!(sk.bytes_absent(), 0, "so nothing is absent: {sk:?}");
+        assert!(
+            CaptureReport::of(&d).is_complete(),
+            "a segment with pings on it is not a floor: {:?}",
+            CaptureReport::of(&d).reasons()
+        );
+        // The NUMBERS are on the page, which is what makes the furniture claim
+        // checkable instead of asserted -- a tunnel missing from the list would
+        // show up here as a number a reader did not expect.
+        let text = CaptureReport::of(&d).to_text();
+        assert!(
+            text.contains("terminate at the host: 1, 132"),
+            "the page must name which protocols it held to terminate: {text}"
+        );
+    }
+
+    /// R311y862 — the nesting bound is a bound, and beyond it the answer is the
+    /// same one GRE gets.
+    ///
+    /// The depth comes out of the packet, so without this a crafted chain
+    /// decides how much work the walk does. Reported rather than dropped: the
+    /// bytes are as absent as any other unopened tunnel's.
+    #[test]
+    fn a_tunnel_chain_past_the_bound_is_reported_not_walked() {
+        // Six nested IPv4 headers around the datagram; the bound is four.
+        let mut pkt = ipv4_packet(17, [192, 168, 0, 1], [192, 168, 0, 2], &zenoh_udp(4));
+        for _ in 0..6 {
+            pkt = ipv4_packet(4, [10, 0, 0, 1], [10, 0, 0, 2], &pkt);
+        }
+        let mut eth = alloc::vec![0u8; 12];
+        eth.extend_from_slice(&0x0800u16.to_be_bytes());
+        eth.extend_from_slice(&pkt);
+
+        let mut d = crate::Dissection::new();
+        d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &eth);
+        d.finish();
+
+        let sk = d.skip_census();
+        assert_eq!(
+            sk.unwalked_encapsulation, 1,
+            "a chain past the bound is an unopened tunnel: {sk:?}"
+        );
+        assert_eq!(sk.bytes_absent(), 1, "and is bytes absent: {sk:?}");
+        assert_eq!(
+            d.datagram_flows().len(),
+            0,
+            "the walk must stop rather than recurse"
+        );
+        // AND THE BOUND IS NOT ZERO: four levels are walked, so this is a bound
+        // rather than a refusal to walk at all.
+        let mut ok = ipv4_packet(17, [192, 168, 0, 1], [192, 168, 0, 2], &zenoh_udp(4));
+        for _ in 0..4 {
+            ok = ipv4_packet(4, [10, 0, 0, 1], [10, 0, 0, 2], &ok);
+        }
+        let mut eth_ok = alloc::vec![0u8; 12];
+        eth_ok.extend_from_slice(&0x0800u16.to_be_bytes());
+        eth_ok.extend_from_slice(&ok);
+        let mut d2 = crate::Dissection::new();
+        d2.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &eth_ok);
+        d2.finish();
+        assert_eq!(
+            d2.datagram_flows().len(),
+            1,
+            "four levels are inside the bound: {:?}",
+            d2.skip_census()
         );
     }
 
