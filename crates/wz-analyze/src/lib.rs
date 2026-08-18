@@ -377,13 +377,20 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
                 let raw = args
                     .get(at)
                     .ok_or(UsageError::MissingValue("--payload-format"))?;
-                let (pattern, name) = raw
-                    .split_once('=')
-                    .ok_or_else(|| UsageError::BadValue("--payload-format", raw.clone()))?;
-                if payload_formats::builtin(name).is_none() {
-                    return Err(UsageError::BadValue("--payload-format", raw.clone()));
+                let bad = || UsageError::BadValue("--payload-format", raw.clone());
+                // R311y856 — ONE parser for both consumption surfaces. The
+                // flag says which KIND it accepts and the C ABI takes both in
+                // one text; the dialect itself is written down once, in
+                // `wz-capture`, so a rule a person tried here and then moved
+                // into a config file is not re-spelled by a second reader.
+                let declaration = payload_formats::parse_declaration(raw).map_err(|_| bad())?;
+                let payload_formats::DeclarationText::Rule { pattern, format } = declaration else {
+                    return Err(bad());
+                };
+                if payload_formats::builtin(format).is_none() {
+                    return Err(bad());
                 }
-                payload_formats.push((pattern.to_string(), name.to_string()));
+                payload_formats.push((pattern.to_string(), format.to_string()));
             }
             // R311y720 (PF4) — `<keyexpr>:<path>=<name>`. Refused at parse
             // time when any of the three is empty, for the reason
@@ -396,11 +403,17 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
                     .get(at)
                     .ok_or(UsageError::MissingValue("--payload-name"))?;
                 let bad = || UsageError::BadValue("--payload-name", raw.clone());
-                let (scope, name) = raw.rsplit_once('=').ok_or_else(bad)?;
-                let (pattern, path) = scope.rsplit_once(':').ok_or_else(bad)?;
-                if pattern.is_empty() || path.is_empty() || name.is_empty() {
+                // R311y856 — the same shared parser the sibling flag uses; see
+                // there for why the dialect is written down once.
+                let declaration = payload_formats::parse_declaration(raw).map_err(|_| bad())?;
+                let payload_formats::DeclarationText::Name {
+                    pattern,
+                    path,
+                    name,
+                } = declaration
+                else {
                     return Err(bad());
-                }
+                };
                 payload_field_names.push((pattern.to_string(), path.to_string(), name.to_string()));
             }
             // R311y720 (§D M3) — the link type a serial capture was written
@@ -1966,74 +1979,12 @@ enum FieldNote {
 
 /// R311y726 — THE DECLARATIONS IN FORCE FOR ONE RUN, and which of them applied.
 ///
-/// # Why this is not on the map
-///
-/// R311y725 answered "which declarations bound nothing" by putting a
-/// `Cell<bool>` beside every rule inside `FormatMap`. It worked and it put the
-/// wrong fact in the wrong place: a `FormatMap` is what the reader DECLARED,
-/// which does not change while a capture is walked, and "was this rule ever
-/// selected" is a fact about ONE walk. Merged, the two mean a map cannot be
-/// consulted twice as if it were fresh, and two analyses sharing declarations
-/// would read each other's marks.
-///
-/// So the map went back to being configuration and this type owns the run. It
-/// borrows the map, forwards the two questions the field layer asks, and
-/// remembers the handle each answer came back with. `RefCell` and not `&mut`
-/// because the field layer's rendering path is threaded with shared borrows
-/// several calls deep — a `&mut` would have to be carried through every row
-/// renderer, and the row renderers have nothing to do with this.
-struct Declarations<'a> {
-    map: &'a wz_capture::payload::formats::FormatMap<'a>,
-    used: core::cell::RefCell<
-        std::collections::BTreeSet<wz_capture::payload::formats::DeclarationId>,
-    >,
-}
-
-impl<'a> Declarations<'a> {
-    fn new(map: &'a wz_capture::payload::formats::FormatMap<'a>) -> Self {
-        Self {
-            map,
-            used: core::cell::RefCell::new(std::collections::BTreeSet::new()),
-        }
-    }
-
-    /// Whether any rule was installed — the map's own question, forwarded so a
-    /// caller holding this type does not have to reach past it.
-    fn is_empty(&self) -> bool {
-        self.map.is_empty()
-    }
-
-    /// The format for this keyexpr, RECORDING that the rule applied.
-    fn for_keyexpr(
-        &self,
-        keyexpr: &str,
-    ) -> Option<&'a dyn wz_capture::payload::formats::PayloadFormat> {
-        let (id, format) = self.map.for_keyexpr(keyexpr)?;
-        self.used.borrow_mut().insert(id);
-        Some(format)
-    }
-
-    /// The declared name for this path, RECORDING that the declaration applied.
-    fn field_name(&self, keyexpr: &str, path: &str) -> Option<String> {
-        let (id, name) = self.map.field_name(keyexpr, path)?;
-        self.used.borrow_mut().insert(id);
-        Some(name.to_string())
-    }
-
-    /// The declarations this run never applied.
-    ///
-    /// Answerable only after a walk, and that is a property of the question
-    /// rather than a caveat: before one, nothing has applied and the honest
-    /// answer is "all of them".
-    fn unused(&self) -> Vec<wz_capture::payload::formats::Declaration> {
-        let used = self.used.borrow();
-        self.map
-            .declarations()
-            .into_iter()
-            .filter(|d| !used.contains(&d.id))
-            .collect()
-    }
-}
+/// R311y856 moved the type itself into `wz-capture`, beside the map it borrows,
+/// so the C ABI can hold one too — the whole of that round. Everything R311y726
+/// decided about it is unchanged and now lives on
+/// [`wz_capture::payload_decode::Declarations`]; what stays here is the alias
+/// this file reads by.
+use wz_capture::payload_decode::Declarations;
 
 /// R311y725 (N8) — the CLI's half of a declaration kind: the flag it was typed
 /// as, the note kind a consumer branches on, and where the remedy lies.
@@ -3411,45 +3362,15 @@ fn walk_plaintext(message: &[u8], frame: &wz_session_core::passive::PassiveFrame
     }
 }
 
-/// R311y699 ([REDACTED-REQ]) — what a payload-format rule did to ONE message.
+/// R311y699 — what a payload-format rule did to ONE message.
 ///
-/// # Why every non-decode is a named answer rather than silence
-///
-/// A rule that did not fire and a rule that fired and found nothing look
-/// identical in an empty listing, and they send a reader to opposite places:
-/// one is a mapping to fix, the other is traffic to look at. The keyexpr that
-/// was TESTED is carried for the same reason — a reader whose rule covers
-/// `demo/**` needs to see that this message's keyexpr was `other/thing` before
-/// they start doubting the decoder.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PayloadDecoding {
-    /// No rules at all. Renders nothing: a reader who passed no
-    /// `--payload-format` is not told about payloads they did not ask about.
-    NoRules,
-    /// This message carries no payload field. Not every zenoh message does.
-    NoPayload,
-    /// The keyexpr is a numeric id with no suffix on the wire, so no rule can
-    /// be tested against it at all.
-    ///
-    /// Said rather than skipped: this is the ordinary shape of a capture that
-    /// began after the declarations, and a reader whose rules silently cover
-    /// nothing would blame the rules.
-    KeyexprUnresolved,
-    /// A keyexpr, and no rule covers it.
-    NoRule(String),
-    /// Decoded, and the fields with spans in the MESSAGE's coordinates.
-    Decoded {
-        keyexpr: String,
-        format: String,
-        fields: Vec<wz_capture::payload::formats::PayloadField>,
-    },
-    /// The format was applied and refused.
-    Refused {
-        keyexpr: String,
-        format: String,
-        why: String,
-    },
-}
+/// R311y856 moved the type into `wz-capture`, beside the decode that produces
+/// it and where the C ABI can name it too; every reason R311y699 gave for
+/// answering each non-decode BY NAME rather than with silence is stated on
+/// [`wz_capture::payload_decode::PayloadDecoding`], unchanged. What stays on
+/// this side is the RENDERING — how a person reading a terminal is told which
+/// flag to go fix is a property of this surface and of no other.
+use wz_capture::payload_decode::PayloadDecoding;
 
 /// R311y700 ([REDACTED-REQ]) — one application SAMPLE a capture carried: the key
 /// expression it was published under and the bytes that went with it.
@@ -3686,7 +3607,7 @@ fn push_sample(
     out: &mut Samples,
 ) {
     use wz_session_core::dissect::FieldValue;
-    let at = KeyexprAt { direction, spaces };
+    let at = KeyexprAt::new(direction, spaces);
     match keyexpr_and_payload(field, at) {
         Some((keyexpr, payload)) => {
             let FieldValue::Bytes(bytes) = &payload.value else {
@@ -3711,49 +3632,15 @@ fn push_sample(
     }
 }
 
-/// R311y699 ([REDACTED-REQ]) — the keyexpr and the payload OF ONE MESSAGE.
-///
-/// # Why this is not two `find` calls
-///
-/// [`Field::find`] is first-match-by-name over the whole tree, and its own doc
-/// warns that a group sharing a leaf's name SHADOWS it. Both names collide here:
-/// a `Frame`'s body is a group called `payload`, so `find("payload")` returns
-/// the whole batch rather than the `MsgPut`'s bytes. MEASURED — the first
-/// version of this function decoded a Frame's payload group and the rule never
-/// fired.
-///
-/// Worse than the shadowing is what two independent lookups would MEAN. A
-/// batch carries several messages; taking the first keyexpr and the first
-/// payload bytes anywhere under it would pair a keyexpr with a payload the
-/// sender never put under it, and the rule would decode the wrong bytes while
-/// naming the right topic. So the pair is found INNERMOST-FIRST inside one
-/// subtree: the node returned is the smallest one holding both.
-fn keyexpr_and_payload<'a>(
-    field: &'a wz_session_core::dissect::Field,
-    at: KeyexprAt<'_>,
-) -> Option<(String, &'a wz_session_core::dissect::Field)> {
-    use wz_session_core::dissect::FieldValue;
-    if let FieldValue::Nested(children) = &field.value {
-        for child in children {
-            if let Some(found) = keyexpr_and_payload(child, at) {
-                return Some(found);
-            }
-        }
-    }
-    let keyexpr = subtree_keyexpr(field, at)?;
-    let payload = subtree_payload_bytes(field)?;
-    Some((keyexpr, payload))
-}
-
-/// R311y701 (PF2) — what a keyexpr id is resolved AGAINST.
-///
-/// The two halves a `WireExpr` needs and a field tree alone does not carry:
-/// which side sent this message, and what that flow has declared so far.
-#[derive(Clone, Copy)]
-struct KeyexprAt<'a> {
-    direction: wz_session_core::passive::Direction,
-    spaces: &'a wz_capture::agg::KeyexprSpaces,
-}
+// R311y856 — the pair-finder, the id-resolution anchor, the payload-bytes
+// finder and the decode itself all moved into `wz-capture::payload_decode`,
+// beside the map they consult. Every rule R311y699 / R311y701 settled about
+// them -- the innermost-first pairing, why the suffix alone was not the answer,
+// why a `payload` group must not shadow a `payload` leaf -- is stated there,
+// unchanged. They moved because the C ABI could not reach a single one of them
+// and the parity gate said so.
+use wz_capture::payload_decode::subtree_payload_bytes;
+use wz_capture::payload_decode::{decode_payload, keyexpr_and_payload, KeyexprAt};
 
 /// R311y701 — everything a ROW needs to decode the payload under it.
 ///
@@ -3772,143 +3659,7 @@ struct PayloadLens<'a> {
 impl<'a> PayloadLens<'a> {
     /// This lens, pointed at a row travelling `direction`.
     fn at(self, direction: wz_session_core::passive::Direction) -> KeyexprAt<'a> {
-        KeyexprAt {
-            direction,
-            spaces: self.spaces,
-        }
-    }
-}
-
-/// The keyexpr of the `WireExpr` under `field`, RESOLVED.
-///
-/// # R311y701 (PF2) — why the suffix alone was not the answer
-///
-/// This read the `suffix` text and stopped, on the note that the id-to-path
-/// table lived in another plane. Two things were wrong with that.
-///
-/// The first is a silence: a capture that began AFTER the declarations names
-/// every keyexpr by id alone, which is the ordinary shape of a capture taken
-/// from a running system. Every `--payload-format` rule then matched nothing
-/// and the listing said `keyexpr_unresolved` for each message — honest, and
-/// useless.
-///
-/// The second is worse and was not noticed when that note was written: a
-/// message carrying BOTH an id and a suffix has the id's base PREPENDED to the
-/// suffix, so reading the suffix alone reported `/temp` for a record published
-/// under `demo/sensor/temp`. That is a wrong keyexpr rather than a missing one,
-/// and a rule keyed on `demo/**` silently did not fire on traffic it covers.
-///
-/// The resolution itself is [`wz_capture::agg::KeyexprSpaces::resolve_parts`],
-/// never a second copy of the rule.
-fn subtree_keyexpr(field: &wz_session_core::dissect::Field, at: KeyexprAt<'_>) -> Option<String> {
-    use wz_session_core::dissect::FieldValue;
-    if field.name == "keyexpr" {
-        if let FieldValue::Nested(parts) = &field.value {
-            let mut id = 0u64;
-            let mut mapping = 0u64;
-            let mut suffix: Option<&str> = None;
-            for part in parts {
-                match (part.name.as_ref(), &part.value) {
-                    ("id", FieldValue::Uint(v)) => id = *v,
-                    ("mapping", FieldValue::Bits(v)) => mapping = *v,
-                    ("suffix", FieldValue::Text(text)) => suffix = Some(text),
-                    _ => {}
-                }
-            }
-            // The `M` bit names the table: 1 is the SENDER's space, which for a
-            // message travelling this way is this direction's own, and 0 is the
-            // receiver's. `KeyexprSpaces::resolve` derives the same choice from
-            // the codec variant; this derives it from the bit the walk records,
-            // and both hand the same question to one resolver.
-            let space = if mapping == 1 {
-                at.direction
-            } else {
-                at.direction.peer()
-            };
-            return at
-                .spaces
-                .resolve_parts(space, id, suffix)
-                .ok()
-                .filter(|k| !k.is_empty());
-        }
-    }
-    if let FieldValue::Nested(children) = &field.value {
-        return children.iter().find_map(|c| subtree_keyexpr(c, at));
-    }
-    None
-}
-
-/// The payload BYTES anywhere under `field`.
-///
-/// Bytes and not a group: a `Frame`'s `payload` is a walked sub-structure and a
-/// message's is the application's own bytes, and only the second is something a
-/// format decodes.
-fn subtree_payload_bytes(
-    field: &wz_session_core::dissect::Field,
-) -> Option<&wz_session_core::dissect::Field> {
-    use wz_session_core::dissect::FieldValue;
-    if field.name == "payload" && matches!(field.value, FieldValue::Bytes(_)) {
-        return Some(field);
-    }
-    if let FieldValue::Nested(children) = &field.value {
-        return children.iter().find_map(subtree_payload_bytes);
-    }
-    None
-}
-
-/// Apply the mapping to one walked message.
-fn decode_payload(
-    field: &wz_session_core::dissect::Field,
-    map: &Declarations<'_>,
-    at: KeyexprAt<'_>,
-) -> PayloadDecoding {
-    use wz_session_core::dissect::FieldValue;
-    if map.is_empty() {
-        return PayloadDecoding::NoRules;
-    }
-    let Some((keyexpr, payload)) = keyexpr_and_payload(field, at) else {
-        // Either there is no payload under any keyexpr, or the only keyexpr is
-        // a numeric id. The two are told apart by asking again for each half.
-        return if subtree_payload_bytes(field).is_none() {
-            PayloadDecoding::NoPayload
-        } else {
-            PayloadDecoding::KeyexprUnresolved
-        };
-    };
-    let FieldValue::Bytes(bytes) = &payload.value else {
-        return PayloadDecoding::NoPayload;
-    };
-    let Some(format) = map.for_keyexpr(&keyexpr) else {
-        return PayloadDecoding::NoRule(keyexpr);
-    };
-    match format.decode(bytes) {
-        Ok(mut fields) => {
-            // The spans arrive PAYLOAD-relative and every other span in this
-            // listing is MESSAGE-relative (R311y677). Rebasing here is the only
-            // place that knows the payload's own offset, and leaving the two
-            // spaces mixed in one listing is the defect R311y677 measured.
-            let base = payload.span.start;
-            for f in &mut fields {
-                f.start += base;
-                f.end += base;
-                // R311y720 (PF4) — and the DECLARED name, where the deployment
-                // gave one for this path under this keyexpr. Attached here
-                // because this is the one place that holds both the resolved
-                // keyexpr and the decoded paths; the decoder has the paths and
-                // no keyexpr, and the map has neither until now.
-                f.name = map.field_name(&keyexpr, &f.path);
-            }
-            PayloadDecoding::Decoded {
-                keyexpr,
-                format: format.name().to_string(),
-                fields,
-            }
-        }
-        Err(why) => PayloadDecoding::Refused {
-            keyexpr,
-            format: format.name().to_string(),
-            why: why.to_string(),
-        },
+        KeyexprAt::new(direction, self.spaces)
     }
 }
 
@@ -3924,63 +3675,16 @@ fn payload_block(
         return String::new();
     }
     if format == Format::Json {
-        let body = match &decoding {
-            PayloadDecoding::NoRules => unreachable!("returned above"),
-            PayloadDecoding::NoPayload => String::from("{\"state\":\"no_payload\"}"),
-            PayloadDecoding::KeyexprUnresolved => {
-                String::from("{\"state\":\"keyexpr_unresolved\"}")
-            }
-            PayloadDecoding::NoRule(keyexpr) => format!(
-                "{{\"state\":\"no_rule\",\"keyexpr\":\"{}\"}}",
-                escape(keyexpr)
-            ),
-            PayloadDecoding::Refused {
-                keyexpr,
-                format: name,
-                why,
-            } => format!(
-                "{{\"state\":\"refused\",\"keyexpr\":\"{}\",\"format\":\"{}\",\"why\":\"{}\"}}",
-                escape(keyexpr),
-                escape(name),
-                escape(why)
-            ),
-            PayloadDecoding::Decoded {
-                keyexpr,
-                format: name,
-                fields,
-            } => {
-                let rows: Vec<String> = fields
-                    .iter()
-                    .map(|f| {
-                        // R311y720 (PF4) — `name` is present with a `null`
-                        // rather than absent when no declaration covers the
-                        // path, on the structural rule the rest of this JSON
-                        // follows: a consumer must never have to test for a
-                        // key to learn that a fact is unknown.
-                        format!(
-                            "{{\"path\":\"{}\",\"name\":{},\"value\":\"{}\",\
-                             \"start\":{},\"end\":{}}}",
-                            escape(&f.path),
-                            match &f.name {
-                                Some(name) => format!("\"{}\"", escape(name)),
-                                None => String::from("null"),
-                            },
-                            escape(&f.value),
-                            f.start,
-                            f.end
-                        )
-                    })
-                    .collect();
-                format!(
-                    "{{\"state\":\"decoded\",\"keyexpr\":\"{}\",\"format\":\"{}\",\
-                     \"fields\":[{}]}}",
-                    escape(keyexpr),
-                    escape(name),
-                    rows.join(",")
-                )
-            }
-        };
-        return format!(",\"payload_decode\":{body}");
+        // R311y856 — the SHARED emit. This arm used to spell the five states
+        // into JSON here, and the C ABI had no payload block at all; the moment
+        // it grew one there would have been two renderings of one value, which
+        // is the standing `debt-census-emit-two-renderings` and the reason
+        // R311y851 refused to add a third case of it. The state vocabulary is a
+        // contract a consumer branches on, and a second copy is a second
+        // contract that drifts. Only the TEXT arm below stays here.
+        let mut body = String::from(",\"payload_decode\":");
+        wz_capture::payload_decode::push_decoding(&decoding, &mut body);
+        return body;
     }
     match &decoding {
         PayloadDecoding::NoRules => unreachable!("returned above"),
@@ -6062,431 +5766,17 @@ mod packet_and_note_tests {
     }
 }
 
-/// R311y699 ([REDACTED-REQ]) — the payload FORMATS this binary carries, and why they
-/// live here rather than in `wz-capture`.
-///
-/// `wz-capture` owns the MAP (which keyexpr gets which format) and never a
-/// format: it has zero third-party dependencies because its decode path builds
-/// for the MCU profiles, and a format decoder is exactly what grows one. This
-/// crate is the composition root, so the built-ins are here — and the seam is
-/// public, so a consumer with a proprietary format implements
-/// `PayloadFormat` and never patches this binary.
-pub mod payload_formats {
-    use wz_capture::payload::formats::{PayloadField, PayloadFormat, PayloadFormatError};
-
-    /// The protobuf WIRE FORMAT, walked without a schema.
-    ///
-    /// # Why this one is the built-in, and what it can honestly claim
-    ///
-    /// nanopb emits protobuf's wire format, and that format is
-    /// self-describing enough to walk with no `.proto` at all: every field
-    /// carries its number and one of four wire types, and each wire type
-    /// determines its own length. So a reader gets field numbers, wire types,
-    /// values and BYTE SPANS — the structure — without anyone shipping a
-    /// schema.
-    ///
-    /// What it cannot give is NAMES: field 3 is field 3, not `temperature`.
-    /// Said plainly rather than papered over, because a decoder that invented
-    /// names would be the worst kind of wrong on a plane whose whole output is
-    /// findings.
-    ///
-    /// # Why not an `e2e` built-in beside it
-    ///
-    /// An AUTOSAR E2E profile is a CRC, a counter and a data id at offsets the
-    /// PROFILE fixes, and this machine's sources carry neither the profile
-    /// table nor the CRC polynomial — a grep for `0x1021` / `crc16` across
-    /// every crate returns nothing. This workspace's own rule (R311y695) is
-    /// that a constant a module cannot check is one it must not carry, so `e2e`
-    /// is a format a deployment supplies through the seam rather than one
-    /// invented here from memory.
-    pub struct Protobuf;
-
-    /// The four wire types of protobuf, and what each one's length is.
-    fn wire_type_name(ty: u64) -> Option<&'static str> {
-        match ty {
-            0 => Some("varint"),
-            1 => Some("i64"),
-            2 => Some("len"),
-            5 => Some("i32"),
-            _ => None,
-        }
-    }
-
-    /// One base-128 varint, advancing `at`.
-    fn varint(bytes: &[u8], at: &mut usize) -> Result<u64, PayloadFormatError> {
-        let mut value = 0u64;
-        let mut shift = 0u32;
-        let start = *at;
-        loop {
-            let byte = *bytes.get(*at).ok_or(PayloadFormatError::Truncated(start))?;
-            *at += 1;
-            // Ten groups of seven bits is 70, so the tenth byte may only carry
-            // the one bit left of a u64. A longer run is malformed rather than
-            // silently truncated -- the shift would panic in debug and wrap the
-            // value in release, which is the pair of behaviours a decoder over
-            // adversarial bytes must not have.
-            if shift >= 64 {
-                return Err(PayloadFormatError::Malformed {
-                    at: start,
-                    why: String::from("a varint longer than ten bytes"),
-                });
-            }
-            value |= u64::from(byte & 0x7f) << shift;
-            if byte & 0x80 == 0 {
-                return Ok(value);
-            }
-            shift += 7;
-        }
-    }
-
-    /// R311y701 (PF3) — how deep a nested walk goes before it stops walking.
-    ///
-    /// A payload is attacker-influenced bytes and a length-delimited field can
-    /// name another one forever, so the recursion is bounded like every other
-    /// walk in this workspace. Eight is past any hand-written schema this
-    /// analyzer is pointed at, and what sits below it is not silently dropped —
-    /// the field says the nesting went further than this reader walks.
-    const MAX_NESTING: usize = 8;
-
-    /// Is this run of bytes TEXT rather than a nested message?
-    ///
-    /// # Why the question is asked this way, and what it cannot settle
-    ///
-    /// Protobuf's wire format does not distinguish a string, a nested message
-    /// and a blob: all three are wire type 2, and the ambiguity is IN THE
-    /// FORMAT rather than in this reader. So there is no rule that is right
-    /// every time and the choice is which mistake to make.
-    ///
-    /// Valid UTF-8 with no control characters is a strong signal for a string
-    /// and a weak one for a message: a nested message begins with a tag byte,
-    /// and the overwhelming majority of tags (any field with a varint under a
-    /// small number, any 64-bit or 32-bit field) put a control byte or a
-    /// non-UTF-8 byte in the first two positions. "Parses as protobuf" is by
-    /// contrast very permissive — two bytes like `"Px"` parse cleanly as field
-    /// 10 varint 120 — so trying the parse first would rename short strings as
-    /// messages far more often than this rule hides a message.
-    fn text_like(raw: &[u8]) -> Option<&str> {
-        let text = core::str::from_utf8(raw).ok()?;
-        if text.is_empty() {
-            return None;
-        }
-        text.chars()
-            .all(|c| !c.is_control() || c == '\n' || c == '\t' || c == '\r')
-            .then_some(text)
-    }
-
-    /// Walk `payload`, whose first byte sits at `base` in the message this
-    /// decoding will be rendered against, appending to `out` under `prefix`.
-    ///
-    /// R311y701 — `base` and `prefix` are what make the recursion honest. A
-    /// nested field's span must be in the SAME coordinate space as its parent's
-    /// or a reader cannot line the two up, and its path must name the route to
-    /// it (`2.1`) rather than restart at `1` — a listing with two fields called
-    /// `1` says nothing about where either lives.
-    fn walk(
-        payload: &[u8],
-        base: usize,
-        depth: usize,
-        prefix: &str,
-        out: &mut Vec<PayloadField>,
-    ) -> Result<(), PayloadFormatError> {
-        let mut at = 0usize;
-        while at < payload.len() {
-            let start = at;
-            let tag = varint(payload, &mut at).map_err(|e| rebase(e, base))?;
-            let number = tag >> 3;
-            let wire = tag & 0x07;
-            let Some(kind) = wire_type_name(wire) else {
-                // Wire types 3 and 4 are the deprecated group markers and 6
-                // and 7 are unassigned. A reader that stepped over one
-                // would not know where it ends, so this stops -- the same
-                // rule the QUIC frame walk follows for an unknown type.
-                return Err(PayloadFormatError::Malformed {
-                    at: base + start,
-                    why: format!("wire type {wire} has no length rule"),
-                });
-            };
-            if number == 0 {
-                // Field number zero is invalid in every protobuf version,
-                // and it is what a run of zero bytes decodes to -- which is
-                // the single most likely thing to be under a WRONG mapping.
-                return Err(PayloadFormatError::NotThisFormat);
-            }
-            let path = if prefix.is_empty() {
-                format!("{number}")
-            } else {
-                format!("{prefix}.{number}")
-            };
-            // The children of a nested field are collected into their own
-            // vector so the PARENT row can be pushed before them: a listing
-            // reads top-down, and a walk that pushed as it went would put
-            // `2.1` above `2`.
-            let mut children = Vec::new();
-            let value = match wire {
-                0 => {
-                    let v = varint(payload, &mut at).map_err(|e| rebase(e, base))?;
-                    format!("{v}")
-                }
-                1 | 5 => {
-                    let width = if wire == 1 { 8 } else { 4 };
-                    let end = at
-                        .checked_add(width)
-                        .ok_or(PayloadFormatError::Truncated(base + at))?;
-                    let raw = payload
-                        .get(at..end)
-                        .ok_or(PayloadFormatError::Truncated(base + at))?;
-                    at = end;
-                    format!(
-                        "0x{}",
-                        raw.iter()
-                            .rev()
-                            .map(|b| format!("{b:02x}"))
-                            .collect::<String>()
-                    )
-                }
-                _ => {
-                    let len = varint(payload, &mut at).map_err(|e| rebase(e, base))? as usize;
-                    let body = at;
-                    let end = at
-                        .checked_add(len)
-                        .ok_or(PayloadFormatError::Truncated(base + at))?;
-                    let raw = payload
-                        .get(at..end)
-                        .ok_or(PayloadFormatError::Truncated(base + at))?;
-                    at = end;
-                    // Rendered as text when it IS text, because a
-                    // length-delimited field is a string as often as it is
-                    // a nested message and a reader should not have to
-                    // decode hex to find out.
-                    match text_like(raw) {
-                        Some(text) => format!("{text:?}"),
-                        // R311y701 (PF3) — otherwise it may be a NESTED
-                        // MESSAGE, which nesting is common enough in real
-                        // schemas that stopping here showed a reader one
-                        // layer of their own data.
-                        None if depth >= MAX_NESTING => {
-                            format!("{len} byte(s), nested deeper than this reader walks")
-                        }
-                        None => {
-                            // A TRY, and a failure falls back rather than
-                            // rejecting the message: these bytes may simply be
-                            // a blob, and a blob is not a malformed message.
-                            // The whole sub-buffer must be consumed and yield
-                            // at least one field, or "it parsed" would be a
-                            // statement about a prefix.
-                            match walk(raw, base + body, depth + 1, &path, &mut children) {
-                                Ok(()) if !children.is_empty() => {
-                                    format!("{} field(s)", children.len())
-                                }
-                                _ => {
-                                    children.clear();
-                                    format!("{len} byte(s)")
-                                }
-                            }
-                        }
-                    }
-                }
-            };
-            out.push(PayloadField {
-                path,
-                // R311y720 (PF4) — ALWAYS `None` here, and it is a statement
-                // rather than a placeholder: protobuf's wire format carries no
-                // names, so this decoder has none to give. The declaration
-                // fills it in, in `decode_payload`.
-                name: None,
-                value: format!("{kind} {value}"),
-                start: base + start,
-                end: base + at,
-            });
-            out.append(&mut children);
-        }
-        Ok(())
-    }
-
-    /// Move an error's offset into the outer payload's coordinates.
-    fn rebase(err: PayloadFormatError, base: usize) -> PayloadFormatError {
-        match err {
-            PayloadFormatError::Truncated(at) => PayloadFormatError::Truncated(base + at),
-            other => other,
-        }
-    }
-
-    impl PayloadFormat for Protobuf {
-        fn name(&self) -> &str {
-            "protobuf"
-        }
-
-        fn decode(&self, payload: &[u8]) -> Result<Vec<PayloadField>, PayloadFormatError> {
-            if payload.is_empty() {
-                // An empty payload is not a protobuf message this reader can
-                // vouch for; it is also not malformed. Saying NotThisFormat
-                // sends the reader to their mapping, which is where an empty
-                // payload under a protobuf rule usually comes from.
-                return Err(PayloadFormatError::NotThisFormat);
-            }
-            let mut out = Vec::new();
-            walk(payload, 0, 0, "", &mut out)?;
-            Ok(out)
-        }
-    }
-
-    /// The format a name selects, or `None` for a name this build has no
-    /// decoder for.
-    ///
-    /// A refusal rather than a fallback: a reader who typed `--payload-format
-    /// 'demo/**=protobufff'` and got the bytes rendered as hex would think
-    /// their rule was live.
-    pub fn builtin(name: &str) -> Option<&'static dyn PayloadFormat> {
-        match name {
-            "protobuf" => Some(&Protobuf),
-            _ => None,
-        }
-    }
-
-    /// Every built-in name, for the usage text and for a refusal that can say
-    /// what IS available.
-    pub const BUILTIN_NAMES: &[&str] = &["protobuf"];
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        /// R311y701 (PF3) — A NESTED MESSAGE IS WALKED, and its fields carry
-        /// the ROUTE to them and spans in the OUTER payload's coordinates.
-        ///
-        /// Before this round wire type 2 was rendered as text or as a byte
-        /// count, so a reader whose schema nests — which real schemas do — saw
-        /// exactly one layer of their own data and no sign there was more.
-        #[test]
-        fn a_nested_message_is_walked_and_its_paths_name_the_route() {
-            // { 1: 150, 2: { 1: 7, 2: "in" } }
-            let inner = [0x08u8, 0x07, 0x12, 0x02, b'i', b'n'];
-            let mut outer = vec![0x08u8, 0x96, 0x01, 0x12, inner.len() as u8];
-            outer.extend_from_slice(&inner);
-
-            let fields = Protobuf.decode(&outer).expect("a protobuf message");
-            let seen: Vec<(&str, &str, usize, usize)> = fields
-                .iter()
-                .map(|f| (f.path.as_str(), f.value.as_str(), f.start, f.end))
-                .collect();
-            assert_eq!(
-                seen,
-                vec![
-                    ("1", "varint 150", 0, 3),
-                    // The parent is rendered as a COUNT of what is under it and
-                    // stands ABOVE its children, so the listing reads top-down.
-                    ("2", "len 2 field(s)", 3, 11),
-                    // R311y677's rule, one layer in: the inner spans are in the
-                    // outer payload's space, so a reader can line them up
-                    // against the bytes. `5` is where the nested body begins.
-                    ("2.1", "varint 7", 5, 7),
-                    ("2.2", "len \"in\"", 7, 11),
-                ],
-                "the walk must reach the nested fields and name the route to them"
-            );
-        }
-
-        /// R311y701 (PF3) — TWO layers, because one does not test the rebase.
-        ///
-        /// MEASURED: dropping the accumulated `base` from the recursive call
-        /// left the one-layer test above GREEN, and it has to — at the top
-        /// level `base` is zero, so `base + body` and `body` are the same
-        /// number. The offset only diverges from the second layer down, which
-        /// is where a probe put it and where this witness now sits.
-        #[test]
-        fn a_span_two_layers_in_is_still_in_the_outer_payloads_coordinates() {
-            // { 1: { 1: { 1: 7 } } }
-            let innermost = [0x08u8, 0x07];
-            let mid = [0x0Au8, innermost.len() as u8, innermost[0], innermost[1]];
-            let mut outer = vec![0x0Au8, mid.len() as u8];
-            outer.extend_from_slice(&mid);
-
-            let fields = Protobuf.decode(&outer).expect("a protobuf message");
-            let seen: Vec<(&str, usize, usize)> = fields
-                .iter()
-                .map(|f| (f.path.as_str(), f.start, f.end))
-                .collect();
-            assert_eq!(
-                seen,
-                vec![("1", 0, 6), ("1.1", 2, 6), ("1.1.1", 4, 6)],
-                "each layer's body begins two bytes past its parent's, and the \
-                 offsets ACCUMULATE"
-            );
-        }
-
-        /// R311y701 (PF3) — bytes that are NOT a message fall back rather than
-        /// rejecting the whole payload.
-        ///
-        /// A length-delimited field is a string, a message OR a blob, and the
-        /// wire format does not say which. A recursion that treated "does not
-        /// parse" as malformed would refuse every payload carrying a JPEG.
-        #[test]
-        fn a_length_field_that_is_not_a_message_falls_back_to_its_byte_count() {
-            // Field 1, four bytes that start with a valid-looking tag and then
-            // run out: `0x08` says field 1 varint and nothing follows it.
-            let blob = [0xFFu8, 0xD8, 0xFF, 0x08];
-            let mut outer = vec![0x0Au8, blob.len() as u8];
-            outer.extend_from_slice(&blob);
-
-            let fields = Protobuf.decode(&outer).expect("still a protobuf message");
-            assert_eq!(
-                fields.len(),
-                1,
-                "the blob contributes no children: {fields:?}"
-            );
-            assert_eq!(fields[0].value, "len 4 byte(s)");
-        }
-
-        /// R311y701 (PF3) — text still wins over a nested parse, and the rule
-        /// that makes that safe is stated on [`text_like`].
-        ///
-        /// `"Px"` parses cleanly as field 10 varint 120. It is a string, and a
-        /// walker that tried the parse first would rename it.
-        #[test]
-        fn printable_bytes_are_text_even_when_they_would_parse_as_a_message() {
-            let mut outer = vec![0x0Au8, 2];
-            outer.extend_from_slice(b"Px");
-            let fields = Protobuf.decode(&outer).expect("a protobuf message");
-            assert_eq!(fields[0].value, "len \"Px\"");
-            assert_eq!(fields.len(), 1, "and nothing was walked into it");
-
-            // The control-character half of the rule, which is what lets a
-            // nested message through: the same two bytes with a control byte in
-            // front are not text.
-            assert!(text_like(b"Px").is_some());
-            assert!(text_like(&[0x08, 0x07]).is_none());
-        }
-
-        /// R311y701 (PF3) — the depth bound is REPORTED rather than silently
-        /// stopping, the rule every bound in this workspace answers to.
-        #[test]
-        fn nesting_past_the_bound_says_so_rather_than_going_quiet() {
-            // MAX_NESTING + 1 layers, each one field 1 wrapping the next, with
-            // a two-byte non-text leaf so no layer is mistaken for a string.
-            let mut body = vec![0x08u8, 0x07];
-            for _ in 0..=MAX_NESTING {
-                let mut wrapped = vec![0x0Au8, body.len() as u8];
-                wrapped.extend_from_slice(&body);
-                body = wrapped;
-            }
-            let fields = Protobuf.decode(&body).expect("a protobuf message");
-            let deepest = fields.last().expect("at least one field");
-            assert!(
-                deepest
-                    .value
-                    .contains("nested deeper than this reader walks"),
-                "the bottom of the walk says the bound bit: {fields:?}"
-            );
-            // And the bound is the one declared, counted by path depth.
-            assert_eq!(
-                deepest.path.matches('.').count(),
-                MAX_NESTING,
-                "the walk went exactly as deep as it says it does: {fields:?}"
-            );
-        }
-    }
-}
-
+// R311y856 — the built-in decoders and the declaration DIALECT moved to
+// `wz_capture::payload::formats`. R311y699 put them here on the rule that a
+// format decoder grows a third-party dependency an MCU profile cannot carry;
+// that rule is right and it did not describe `Protobuf`, which is a
+// hand-written varint walk and takes none. What the misplacement cost was
+// measured by `analysis_surface_parity.py`: the C ABI could not decode a
+// payload, because the registry lived in a binary it must not depend on
+// (this one carries `wz-tls-record`, and through it `ring`).
+//
+// The alias keeps this file's own call sites reading as they did.
+use wz_capture::payload::formats as payload_formats;
 #[cfg(test)]
 mod quic_pass_tests {
     use super::*;

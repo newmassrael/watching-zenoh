@@ -33,11 +33,12 @@
 int main(void) {
     /* The symbol/memory-contract revision. A consumer refuses a library whose
      * memory rules moved; this asserts the value the header was written for. */
-    /* R311y855 -- 5 since wz_dissect_pcap_fields joined the symbol set. This
+    /* R311y856 -- 6 since wz_dissect_pcap_fields_with_payloads and
+     * wz_dissect_declarations_diagnose joined the symbol set. This
      * header's contract is the symbol SET, not a symbol's signature, so adding
      * one moves the revision; the two statements of that contract had drifted
      * and were reconciled in R311y748. */
-    CHECK(wz_dissect_abi_version() == 5, "abi version is %d, expected 5",
+    CHECK(wz_dissect_abi_version() == 6, "abi version is %d, expected 6",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
@@ -248,6 +249,47 @@ int main(void) {
     CHECK(fields == NULL, "a bad capture handed back a string");
     rc = wz_dissect_pcap_fields(NULL, 0, 0, &fields);
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "fields null bytes rc=%d", rc);
+
+    /* R311y856 -- the payload seam a product LINKS. The Rust side owns the
+     * claim that a declared rule decodes real bytes, which needs a capture
+     * with a payload in it; this file owns that both symbols survive into the
+     * cdylib, that the declaration dialect is accepted here, and that an
+     * uninstallable declaration is REFUSED rather than silently dropped --
+     * the silence that would leave a reader blaming the traffic for their own
+     * rule. */
+    char *decoded = NULL;
+    rc = wz_dissect_pcap_fields_with_payloads(pcap, sizeof pcap, 0,
+                                              "demo/temp=protobuf", &decoded);
+    CHECK(rc == WZ_DISSECT_OK, "fields_with_payloads rc=%d", rc);
+    CHECK(decoded != NULL, "OK came back with no string");
+    CHECK(strstr(decoded, "\"stream_flows\"") != NULL,
+          "the declared door must still be the field layer: %s", decoded);
+    wz_dissect_string_free(decoded);
+
+    decoded = NULL;
+    rc = wz_dissect_pcap_fields_with_payloads(pcap, sizeof pcap, 0,
+                                              "demo/temp=nosuchformat",
+                                              &decoded);
+    CHECK(rc == WZ_DISSECT_ERR_DECLARATION,
+          "an unknown format must be its own refusal, got rc=%d", rc);
+    CHECK(decoded == NULL, "a refused declaration handed back a string");
+
+    /* And the diagnostic answers with no capture at all, which is the whole
+     * point of it: a UI asks while the text is being typed. */
+    char *declared = NULL;
+    rc = wz_dissect_declarations_diagnose("demo/temp=protobuf", &declared);
+    CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
+    CHECK(strcmp(declared, "{\"ok\":true,\"installed\":1}") == 0,
+          "a good declaration text must verify: %s", declared);
+    wz_dissect_string_free(declared);
+
+    declared = NULL;
+    rc = wz_dissect_declarations_diagnose("nonsense", &declared);
+    CHECK(rc == WZ_DISSECT_OK, "a refusal is a successful diagnosis, rc=%d", rc);
+    CHECK(strstr(declared, "\"ok\":false") != NULL, "verdict: %s", declared);
+    CHECK(strstr(declared, "\"line\":0") != NULL,
+          "the verdict must name the line: %s", declared);
+    wz_dissect_string_free(declared);
 
     printf("  C1bo: C consumer linked the cdylib and read the tree\n");
     return 0;

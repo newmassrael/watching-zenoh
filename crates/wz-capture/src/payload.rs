@@ -1127,10 +1127,31 @@ pub(crate) mod tests_support {
 /// thing that makes a schema-less decoder safe to apply at all. A decoder run
 /// over the wrong topic does not fail — it produces fields.
 ///
-/// So this crate owns the MAP and never a format. The seam points the same way
-/// `tls::RecordOpener` does: this crate has zero third-party dependencies
-/// because its decode path builds for the MCU profiles, and a format decoder is
-/// exactly the kind of thing that grows one.
+/// So this crate owns the MAP, and the seam stays open: a consumer with a
+/// proprietary format implements [`formats::PayloadFormat`] and never patches
+/// a binary here.
+///
+/// # R311y856 — and the BUILT-IN moved here, which reverses half of a rule
+///
+/// This doc used to end "so this crate owns the map and never a format",
+/// arguing that a decoder is exactly the kind of thing that grows a third-party
+/// dependency an MCU profile cannot carry. The rule is right and it did not
+/// cover the decoder it was excluding: `formats::Protobuf` is a schemaless walk
+/// over base-128 varints written by hand, and it takes NO dependency at all.
+///
+/// What the misplacement cost was measured by `analysis_surface_parity.py`. The
+/// built-ins sat in `wz-analyze`, the command line, so the C ABI -- the surface
+/// a product LINKS -- could not decode a payload at all, and the seam it was
+/// told to reach (`FormatMap`) was public with nothing on that side able to
+/// take one. Moving the decoder beside the map is what R311y851 did for the
+/// census emit, for the same reason and in the same words: one implementation
+/// beside the type, and neither consumer owning it.
+///
+/// It is UNGATED, deliberately. A `dissect`-gated built-in would be the tidier
+/// dependency story and would move these tests into a lane that `cargo test -p
+/// wz-capture` does not run, which is this workspace's most-paid-for failure
+/// shape -- and it would buy nothing an MCU build does not already get from the
+/// linker dropping a decoder no call site names.
 pub mod formats {
     use alloc::borrow::ToOwned;
     use alloc::string::String;
@@ -1195,9 +1216,10 @@ pub mod formats {
 
     /// A decoder for one payload format.
     ///
-    /// Implemented OUTSIDE this crate. `wz-analyze` is the composition root and
-    /// carries the built-in ones; a consumer with a proprietary format
-    /// implements this and never patches the analyzer.
+    /// R311y856 — the built-in ones are [`Protobuf`] and live here, beside the
+    /// map, so both consumption surfaces reach them (see the module doc). The
+    /// trait stays public for the reason it always was: a consumer with a
+    /// proprietary format implements this and never patches a binary here.
     pub trait PayloadFormat {
         /// The name a reader types on the command line.
         fn name(&self) -> &str;
@@ -1227,6 +1249,20 @@ pub mod formats {
         /// a field the empty string, would render as a blank beside a field
         /// number and read as "this reader knows the name and it is nothing".
         EmptyFieldName(String),
+        /// R311y856 — the line is not a declaration in either spelling.
+        ///
+        /// Carried as a variant of its own rather than reported as an empty
+        /// pattern, because the two send a reader to different places: an empty
+        /// pattern is a declaration with a hole in it, and this is text that is
+        /// not a declaration at all.
+        NotADeclaration(String),
+        /// R311y856 — a format name this build carries no decoder for.
+        ///
+        /// The refusal `--payload-format` has made since R311y699, moved onto
+        /// the map so that EVERY surface makes it. A fallback to "render the
+        /// bytes" would leave a reader who typed `protobufff` believing their
+        /// rule was live.
+        NoSuchFormat(String),
     }
 
     impl core::fmt::Display for FormatMapError {
@@ -1243,6 +1279,16 @@ pub mod formats {
                      pattern `{p}` cannot be answered (feature `filter-wildcards`)"
                 ),
                 Self::NotAKeyexpr(p) => write!(f, "`{p}` is not a key expression"),
+                Self::NotADeclaration(line) => write!(
+                    f,
+                    "`{line}` is not a declaration -- expected \
+                     `<keyexpr>=<format>` or `<keyexpr>:<path>=<name>`"
+                ),
+                Self::NoSuchFormat(name) => write!(
+                    f,
+                    "this build has no decoder named `{name}` (it has: {})",
+                    BUILTIN_NAMES.join(", ")
+                ),
             }
         }
     }
@@ -1464,6 +1510,173 @@ pub mod formats {
         /// names can be declared for a format the built-ins already cover.
         pub fn has_names(&self) -> bool {
             !self.names.is_empty()
+        }
+    }
+
+    // R311y856 — the SHIPPED decoders, re-exported from the file that holds
+    // them so a caller reads one module. See `crate::payload_builtin` for why
+    // they moved out of `wz-analyze`.
+    pub use crate::payload_builtin::{builtin, Protobuf, BUILTIN_NAMES};
+
+    /// R311y856 — ONE SPELLING for a declaration, read here rather than by each
+    /// surface that accepts one.
+    ///
+    /// # The failure this ends
+    ///
+    /// The two declarations a reader writes -- `demo/**=protobuf` and
+    /// `demo/**:1=temperature` -- were parsed by `wz-analyze`'s argument reader
+    /// and by nothing else. A SECOND consumption surface could therefore reach
+    /// the format seam only by inventing a second dialect, and two dialects for
+    /// one declaration disagree exactly where a deployment moves a rule out of
+    /// a terminal and into a config file. [`FormatMap::declarations`] already
+    /// RENDERS a name declaration as `{pattern}:{path}={name}`, so the
+    /// canonical spelling existed and nothing could read it back.
+    ///
+    /// # How the two kinds are told apart
+    ///
+    /// A name declaration carries a `:` ahead of its `=`. That is the rule the
+    /// command line committed to when it accepted
+    /// `--payload-name demo/**:1=temperature`: a key expression is a `/`-joined
+    /// run of chunks, and one carrying a `:` is not a key expression this
+    /// workspace resolves. Stated because it is the whole of the
+    /// discrimination, and a reader must not have to rediscover it from the
+    /// parser.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum DeclarationText<'a> {
+        /// `<keyexpr>=<format>` -- which decoder reads a topic's payload.
+        Rule {
+            /// The key expression pattern the rule covers.
+            pattern: &'a str,
+            /// The format name, which still has to name a decoder this build
+            /// carries.
+            format: &'a str,
+        },
+        /// `<keyexpr>:<path>=<name>` -- what one path inside it is called.
+        Name {
+            /// The key expression pattern the declaration covers.
+            pattern: &'a str,
+            /// The field path, e.g. `1` or `3.2`.
+            path: &'a str,
+            /// The name to render for that path.
+            name: &'a str,
+        },
+    }
+
+    impl DeclarationText<'_> {
+        /// Which kind this is, in the vocabulary [`Declaration`] reports.
+        pub fn kind(&self) -> DeclarationKind {
+            match self {
+                Self::Rule { .. } => DeclarationKind::FormatRule,
+                Self::Name { .. } => DeclarationKind::FieldName,
+            }
+        }
+    }
+
+    /// Read one declaration line.
+    ///
+    /// The line is taken WHOLE and never trimmed: a pattern with a trailing
+    /// space matches nothing, and silently trimming it would hide that from the
+    /// reader who typed it.
+    pub fn parse_declaration(line: &str) -> Result<DeclarationText<'_>, FormatMapError> {
+        let bad = || FormatMapError::NotADeclaration(line.to_owned());
+        let (scope, value) = line.rsplit_once('=').ok_or_else(bad)?;
+        match scope.rsplit_once(':') {
+            Some((pattern, path)) => {
+                if pattern.is_empty() || path.is_empty() || value.is_empty() {
+                    return Err(bad());
+                }
+                Ok(DeclarationText::Name {
+                    pattern,
+                    path,
+                    name: value,
+                })
+            }
+            None => {
+                if scope.is_empty() || value.is_empty() {
+                    return Err(bad());
+                }
+                Ok(DeclarationText::Rule {
+                    pattern: scope,
+                    format: value,
+                })
+            }
+        }
+    }
+
+    /// R311y856 — one declaration that could not be installed, and WHERE.
+    ///
+    /// The line index rides along because a caller that hands over a whole
+    /// declaration TEXT has no other way to point at the offending line, and
+    /// making it bisect its own configuration is the failure R311y854 named
+    /// when it gave the selector a diagnostic of its own.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct DeclarationError {
+        /// Which line, counting every line of the text from 0 -- blank ones
+        /// included, so the number indexes what the caller sent.
+        pub line: usize,
+        /// The line itself, quoted back.
+        pub text: String,
+        /// Why it was refused.
+        pub error: FormatMapError,
+    }
+
+    impl core::fmt::Display for DeclarationError {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "line {}: {}", self.line, self.error)
+        }
+    }
+
+    impl<'a> FormatMap<'a> {
+        /// R311y856 — install ONE declaration written in the canonical
+        /// spelling.
+        ///
+        /// The format name is resolved against this build's [`builtin`]
+        /// registry, and an unknown one is REFUSED rather than skipped: a rule
+        /// silently dropped leaves the reader believing their decoder is live
+        /// while every payload still renders as bytes. That is the refusal
+        /// `--payload-format` has made since R311y699, moved here so both
+        /// surfaces make it.
+        pub fn declare(&mut self, line: &str) -> Result<DeclarationKind, FormatMapError> {
+            match parse_declaration(line)? {
+                DeclarationText::Rule { pattern, format } => {
+                    let decoder = builtin(format)
+                        .ok_or_else(|| FormatMapError::NoSuchFormat(format.to_owned()))?;
+                    self.insert(pattern, decoder)?;
+                    Ok(DeclarationKind::FormatRule)
+                }
+                DeclarationText::Name {
+                    pattern,
+                    path,
+                    name,
+                } => {
+                    self.name_field(pattern, path, name)?;
+                    Ok(DeclarationKind::FieldName)
+                }
+            }
+        }
+
+        /// R311y856 — install a whole declaration TEXT, one per line, and
+        /// answer how many were installed.
+        ///
+        /// Blank lines are skipped and nothing else is: a line this reader does
+        /// not understand STOPS the install and names itself, because the
+        /// alternative is a map quietly smaller than the text that built it --
+        /// which is the same silence [`FormatMap::declare`] refuses one
+        /// declaration at a time.
+        pub fn declare_all(&mut self, text: &str) -> Result<usize, DeclarationError> {
+            let mut installed = 0usize;
+            for (at, line) in text.lines().enumerate() {
+                if line.is_empty() {
+                    continue;
+                }
+                self.declare(line).map_err(|error| DeclarationError {
+                    line: at,
+                    text: line.to_owned(),
+                    error,
+                })?;
+                installed += 1;
+            }
+            Ok(installed)
         }
     }
 }

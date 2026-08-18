@@ -60,6 +60,7 @@ use wz_session_core::json::escape_into;
 use wz_session_core::passive::{Direction, PassiveFrame};
 
 use crate::census_json::{dir_name, push_flow};
+use crate::payload_decode::{decode_payload, push_decoding, Declarations, KeyexprAt};
 
 /// Every message in `capture`, dissected into fields.
 ///
@@ -67,17 +68,28 @@ use crate::census_json::{dir_name, push_flow};
 /// again (see the module doc). `max_messages_per_flow` bounds each flow's
 /// listing — `None` is unbounded, which is the shape that works for a test and
 /// fails for a session, so a caller with a screen to fill should pass a bound.
+///
+/// R311y856 — `declarations` is the payload format mapping in force, or `None`
+/// for a caller that declared nothing. A row gets a `payload_decode` object
+/// only when a mapping exists, which is the rule the command line has followed
+/// since R311y699: a reader who declared no format is not told about payloads
+/// they did not ask about.
 pub fn fields_json(
     d: &crate::Dissection,
     capture: &[u8],
     max_messages_per_flow: Option<usize>,
+    declarations: Option<&Declarations<'_>>,
 ) -> String {
+    // A map with no rules answers `NoRules` for every message, so it renders
+    // nothing either way -- folded here so the row renderers ask one question
+    // rather than two.
+    let declarations = declarations.filter(|d| !d.is_empty());
     let mut out = String::from("{\"stream_flows\":[");
     for (i, flow) in d.flows().iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
-        push_stream_flow(flow, max_messages_per_flow, &mut out);
+        push_stream_flow(flow, max_messages_per_flow, declarations, &mut out);
     }
     out.push_str("],\"datagram_flows\":[");
     let reread = Reread::of(capture);
@@ -85,7 +97,13 @@ pub fn fields_json(
         if i > 0 {
             out.push(',');
         }
-        push_datagram_flow(flow, reread.as_ref(), max_messages_per_flow, &mut out);
+        push_datagram_flow(
+            flow,
+            reread.as_ref(),
+            max_messages_per_flow,
+            declarations,
+            &mut out,
+        );
     }
     // Said rather than left to be inferred from empty datagram listings: a
     // capture this reader cannot parse a second time yields no datagram rows
@@ -94,12 +112,24 @@ pub fn fields_json(
     out
 }
 
-fn push_stream_flow(flow: &crate::FlowDissection, cap: Option<usize>, out: &mut String) {
+fn push_stream_flow(
+    flow: &crate::FlowDissection,
+    cap: Option<usize>,
+    declarations: Option<&Declarations<'_>>,
+    out: &mut String,
+) {
     out.push_str("{\"flow\":");
     push_flow(&flow.flow, out);
     out.push_str(",\"messages\":[");
     let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
+    // R311y856 — folded in FRAME ORDER and before the cap bites, which is the
+    // rule R311y701 settled for the same table: a keyexpr id resolves through
+    // the bindings that were live when the message travelled, and a listing
+    // that stopped absorbing where it stopped PRINTING would resolve later ids
+    // against a table missing the declarations a held-back row carried.
+    let mut spaces = crate::agg::KeyexprSpaces::new();
     for frame in &flow.frames {
+        spaces.absorb_frame(frame);
         if cap.is_some_and(|c| shown >= c) {
             omitted += 1;
             continue;
@@ -118,7 +148,7 @@ fn push_stream_flow(flow: &crate::FlowDissection, cap: Option<usize>, out: &mut 
         );
         match message_bytes(assembler.stream(), assembler.retained_from(), frame) {
             Err(why) => push_declined(&why, out),
-            Ok(bytes) => push_walk(bytes, frame, out),
+            Ok(bytes) => push_walk(bytes, frame, declarations.map(|d| (d, &spaces)), out),
         }
         out.push('}');
     }
@@ -129,6 +159,7 @@ fn push_datagram_flow(
     flow: &crate::DatagramDissection,
     reread: Option<&Reread>,
     cap: Option<usize>,
+    declarations: Option<&Declarations<'_>>,
     out: &mut String,
 ) {
     out.push_str("{\"flow\":");
@@ -137,7 +168,11 @@ fn push_datagram_flow(
     let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
     let mut disagreed = 0usize;
     let mut named: Vec<(usize, &'static str)> = Vec::new();
+    // The stream half's rule, unchanged: absorbed for every frame, ahead of
+    // every reason this loop has for skipping one.
+    let mut spaces = crate::agg::KeyexprSpaces::new();
     for frame in &flow.frames {
+        spaces.absorb_frame(frame);
         // `stream_offset` names the PACKET here: a datagram link has no stream
         // for an offset to be into, so the field carries the only anchor there
         // is.
@@ -193,7 +228,7 @@ fn push_datagram_flow(
             "{{\"direction\":\"{}\",\"offset_space\":\"packet\",\"packet\":{index},",
             dir_name(frame.direction)
         );
-        push_walk(message, frame, out);
+        push_walk(message, frame, declarations.map(|d| (d, &spaces)), out);
         out.push('}');
     }
     let _ = write!(
@@ -214,7 +249,22 @@ fn push_datagram_flow(
 ///
 /// The walk is driven at base 0 so every span is message-relative; the row's
 /// own coordinate says where the message sits (see the module doc).
-fn push_walk(bytes: &[u8], frame: &PassiveFrame, out: &mut String) {
+///
+/// R311y856 — `lens` is the payload mapping and the id table it resolves keyexprs
+/// through, or `None` for a caller that declared no format. It rides ONE
+/// argument because the two are one fact: a mapping with nothing to resolve
+/// against would silently miss every message a running capture names by id.
+///
+/// The payload block hangs off a WALKED tree and never off a declined row: a
+/// decline means the bytes are not the message the session framed, and decoding
+/// a payload out of them would be a confident statement about bytes nobody
+/// asked for -- the failure the decline itself exists to avoid.
+fn push_walk(
+    bytes: &[u8],
+    frame: &PassiveFrame,
+    lens: Option<(&Declarations<'_>, &crate::agg::KeyexprSpaces)>,
+    out: &mut String,
+) {
     match wz_session_core::dissect::dissect_transport_message(bytes, 0) {
         // The error type is `sce_forge_runtime`'s and is not re-exported here,
         // so it is rendered rather than named — a dependency this crate has no
@@ -231,6 +281,11 @@ fn push_walk(bytes: &[u8], frame: &PassiveFrame, out: &mut String) {
                 escape_into(&field.name, out);
                 out.push_str(",\"fields\":");
                 out.push_str(&to_json(&field));
+                if let Some((declarations, spaces)) = lens {
+                    let at = KeyexprAt::new(frame.direction, spaces);
+                    out.push_str(",\"payload_decode\":");
+                    push_decoding(&decode_payload(&field, declarations, at), out);
+                }
             } else {
                 let mut why = String::from("the session read these bytes as ");
                 why.push_str(&framed);
@@ -412,7 +467,7 @@ mod tests {
             1,
             &[(0, 0, tcp_packet(1000, &framed_keepalive()).as_slice())],
         );
-        let json = fields_json(&d, &file, None);
+        let json = fields_json(&d, &file, None, None);
 
         assert!(
             json.contains("\"offset_space\":\"stream_byte\""),
@@ -458,14 +513,14 @@ mod tests {
         d.finish();
         let file = crate::pcap::write(1, &[(0, 0, packet.as_slice())]);
 
-        let all = fields_json(&d, &file, None);
+        let all = fields_json(&d, &file, None, None);
         assert!(
             all.contains("\"shown\":5,\"omitted\":0"),
             "the unbounded arm must show every message, or the bound below \
              proves nothing: {all}"
         );
 
-        let bounded = fields_json(&d, &file, Some(2));
+        let bounded = fields_json(&d, &file, Some(2), None);
         assert!(
             bounded.contains("\"shown\":2,\"omitted\":3"),
             "the bound must hold rows back AND count them: {bounded}"
@@ -493,7 +548,7 @@ mod tests {
         d.finish();
         let file = crate::pcap::write(1, &[(0, 0, packet.as_slice())]);
 
-        let json = fields_json(&d, &file, None);
+        let json = fields_json(&d, &file, None, None);
         assert!(
             json.contains("\"capture_reread\":true"),
             "the second read is what the datagram half runs on: {json}"
@@ -534,7 +589,7 @@ mod tests {
 
         // The dissection is real and the BYTES handed to the walker are not a
         // capture at all, which is the only way to reach this arm.
-        let json = fields_json(&d, b"not a capture file", None);
+        let json = fields_json(&d, b"not a capture file", None, None);
         assert!(
             json.contains("\"capture_reread\":false"),
             "the reader must admit it could not re-read the file: {json}"
@@ -580,7 +635,7 @@ mod tests {
         };
         let d = crate::Dissection::from_capture_bounded(&file, limits).expect("the capture reads");
 
-        let json = fields_json(&d, &file, None);
+        let json = fields_json(&d, &file, None, None);
         assert!(
             json.contains("\"declined\":\"bytes discarded to stay inside the retained stream"),
             "a message whose bytes were trimmed must be DECLINED with the \
@@ -594,6 +649,118 @@ mod tests {
         assert!(
             json.contains("\"fields\":{\"name\":\"KeepAlive\""),
             "the messages still inside the retained window must still walk: {json}"
+        );
+    }
+
+    /// R311y856 — A DECLARED FORMAT DECODES THE PAYLOAD IN *THIS* EMIT, which
+    /// is what the C ABI links and could not do.
+    ///
+    /// # What makes this a discriminator rather than an observation
+    ///
+    /// Three arms over ONE capture, and the assertion is the DIFFERENCE between
+    /// them, not that any single one printed something:
+    ///
+    /// - no declarations -> no `payload_decode` key at all. Without this arm a
+    ///   renderer that always emitted a block would pass;
+    /// - a rule that does not cover this topic -> `no_rule`, carrying the
+    ///   keyexpr that WAS tested. Without this arm a renderer that decoded
+    ///   every payload regardless of the mapping would pass, which is the
+    ///   failure a schemaless decoder makes silently: run over the wrong topic
+    ///   it does not fail, it produces fields;
+    /// - the covering rule -> `decoded`, with the DECLARED name and spans in
+    ///   the MESSAGE's coordinates.
+    ///
+    /// The span is the sharpest of the four claims. `Protobuf` hands back
+    /// payload-relative offsets, so a walker that forgot to rebase would report
+    /// `start: 0` -- a number that is in range, looks plausible beside every
+    /// other span in the row, and points at the message header.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_declared_format_decodes_the_payload_and_the_spans_are_the_messages() {
+        use crate::payload::formats::FormatMap;
+        use crate::payload_decode::Declarations;
+
+        // `{ 1: 150 }`, which the walker reads as one varint field spanning
+        // three bytes of the PAYLOAD.
+        let payload = [0x08u8, 0x96, 0x01];
+        // A `Push` is a NETWORK message and rides inside a transport `Frame`;
+        // the length prefix is the stream link's framing on top of that.
+        let push = crate::datagram_tests::frame_carrying(
+            &crate::payload::tests_support::push_declaring("demo/sensor", 0, &payload),
+        );
+        let mut framed = vec![push.len() as u8, 0];
+        framed.extend_from_slice(&push);
+
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1000, &framed));
+        d.finish();
+        let file = crate::pcap::write(1, &[(0, 0, tcp_packet(1000, &framed).as_slice())]);
+
+        let undeclared = fields_json(&d, &file, None, None);
+        assert!(
+            !undeclared.contains("payload_decode"),
+            "a caller that declared nothing is told nothing about payloads: \
+             {undeclared}"
+        );
+
+        let miss = FormatMap::new();
+        let mut miss = miss;
+        miss.declare("other/topic=protobuf")
+            .expect("a literal pattern and a built-in format");
+        let missed = fields_json(&d, &file, None, Some(&Declarations::new(&miss)));
+        assert!(
+            missed.contains(
+                "\"payload_decode\":{\"state\":\"no_rule\",\
+                             \"keyexpr\":\"demo/sensor\"}"
+            ),
+            "a rule that covers no topic here must say so AND name the keyexpr \
+             it was tested against: {missed}"
+        );
+
+        let mut map = FormatMap::new();
+        map.declare("demo/sensor=protobuf")
+            .expect("a literal pattern and a built-in format");
+        map.declare("demo/sensor:1=temperature")
+            .expect("a field-name declaration");
+        let declarations = Declarations::new(&map);
+        let decoded = fields_json(&d, &file, None, Some(&declarations));
+
+        let at = decoded
+            .find("\"payload_decode\":")
+            .unwrap_or_else(|| panic!("the row must carry a payload block: {decoded}"));
+        let block = &decoded[at..];
+        assert!(
+            block.starts_with(
+                "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
+                 \"format\":\"protobuf\",\"fields\":["
+            ),
+            "the covering rule must DECODE, naming the topic and the decoder: {block}"
+        );
+        assert!(
+            block.contains("\"path\":\"1\",\"name\":\"temperature\",\"value\":\"varint 150\""),
+            "the DECLARED name must be attached -- protobuf's wire format \
+             carries none, so this is the only place one can come from: {block}"
+        );
+
+        // The rebase. The payload's three bytes are the LAST three of the
+        // message, so a message-relative span ends where the message does and
+        // begins three bytes earlier; `start: 0` is what a missing rebase
+        // prints and it is in range.
+        let end = push.len();
+        let start = end - payload.len();
+        assert!(
+            block.contains(&alloc::format!("\"start\":{start},\"end\":{end}")),
+            "the span must be in the MESSAGE's coordinates ({start}..{end}), \
+             not the payload's (0..{}): {block}",
+            payload.len()
+        );
+
+        // And the ledger saw both declarations apply, which is the half a
+        // reader acts on when a rule binds nothing.
+        assert!(
+            declarations.unused().is_empty(),
+            "both declarations applied: {:?}",
+            declarations.unused()
         );
     }
 }

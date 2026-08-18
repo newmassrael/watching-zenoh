@@ -33,7 +33,8 @@
 //!
 //! ## What the ABI promises
 //!
-//! Six functions since R311y851 added `wz_dissect_pcap_census`, and the memory
+//! Eleven functions since R311y856 added `wz_dissect_pcap_fields_with_payloads`
+//! and `wz_dissect_declarations_diagnose`, and the memory
 //! rule is the whole of the contract: every
 //! string this library returns is owned by this library and must be released
 //! with [`wz_dissect_string_free`]. Nothing else is allocated across the
@@ -68,6 +69,13 @@ pub const WZ_DISSECT_ERR_DECODE: c_int = -3;
 /// operator typed into a box. Call [`wz_dissect_selector_diagnose`] to learn
 /// where.
 pub const WZ_DISSECT_ERR_SELECTOR: c_int = -4;
+/// R311y856 — a payload declaration did not install. Its own code and not
+/// [`WZ_DISSECT_ERR_SELECTOR`] for the reason that code is not
+/// [`WZ_DISSECT_ERR_INVALID_ARG`]: a selector and a format declaration are two
+/// different texts a person writes, and a UI that could not tell which one it
+/// must send them back to would be answering neither. Call
+/// [`wz_dissect_declarations_diagnose`] to learn which line and why.
+pub const WZ_DISSECT_ERR_DECLARATION: c_int = -5;
 
 /// The ABI revision. Bumped when the SYMBOL SET or the memory contract changes
 /// — NOT when the JSON gains fields, which is the whole point of handing back
@@ -93,11 +101,14 @@ pub const WZ_DISSECT_ERR_SELECTOR: c_int = -4;
 ///
 /// R311y855 — 4 → 5, ADDING [`wz_dissect_pcap_fields`].
 ///
+/// R311y856 — 5 → 6, ADDING [`wz_dissect_pcap_fields_with_payloads`] and
+/// [`wz_dissect_declarations_diagnose`].
+///
 /// # Safety
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    5
+    6
 }
 
 /// Release a string this library returned. Passing null is a no-op, so a
@@ -372,9 +383,157 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields(
     };
     let cap = (max_messages_per_flow > 0).then_some(max_messages_per_flow);
     write_string(
-        wz_capture::fields_json::fields_json(&dissection, input, cap),
+        wz_capture::fields_json::fields_json(&dissection, input, cap, None),
         out,
     )
+}
+
+/// R311y856 — the field layer WITH the application payloads decoded, by a
+/// mapping the caller declares.
+///
+/// # The half of the analysis surface a linked consumer could not reach
+///
+/// `wz-analyze --payload-format demo/**=protobuf` has decoded payloads since
+/// R311y699 and this ABI could not, which `analysis_surface_parity.py` reported
+/// as an OPEN DEBT: [`wz_capture::payload::formats::FormatMap`] was public, the
+/// C surface had it in its dependency graph, and the decoders lived in the
+/// COMMAND LINE — a binary this library must not depend on (it carries
+/// `wz-tls-record`, and through it `ring`). The decoders moved beside the map
+/// (`wz_capture::payload::formats::builtin`); this is the door.
+///
+/// # `declarations`
+///
+/// One declaration per line, in the spelling
+/// [`wz_capture::payload::formats::parse_declaration`] defines and the command
+/// line's two flags already write:
+///
+/// ```text
+/// demo/**=protobuf            a format rule: which decoder reads this topic
+/// demo/**:1=temperature       a field name: protobuf carries none, so a
+///                             deployment that has a schema declares it
+/// ```
+///
+/// ONE dialect for both surfaces, deliberately: a rule that a person tried in a
+/// terminal and then moved into a config file must not have to be re-spelled,
+/// and two parsers for one syntax disagree exactly there. An EMPTY text
+/// declares nothing, which makes this call equivalent to
+/// [`wz_dissect_pcap_fields`] rather than a way to get an error.
+///
+/// # A declaration this library cannot install is REFUSED
+///
+/// Not skipped. An unknown format name, a wildcard this build's matcher has no
+/// arm for, a line that is not a declaration — each returns
+/// [`WZ_DISSECT_ERR_DECLARATION`] and no document. The alternative is a map
+/// quietly smaller than the text that built it, and a reader who then sees
+/// undecoded bytes concludes the traffic is wrong rather than their rule. Call
+/// [`wz_dissect_declarations_diagnose`] for WHICH line and why — a separate
+/// call so the memory rule stays "OK means a string, an error means none".
+///
+/// # Reading the result
+///
+/// Every walked row gains `payload_decode`, an object whose `state` is one of
+/// `decoded`, `refused`, `no_rule`, `keyexpr_unresolved` or `no_payload`. The
+/// last three are ANSWERS and not omissions: a rule that never fired and a rule
+/// that fired and found nothing send a reader to opposite places, and
+/// `keyexpr_unresolved` is the ordinary shape of a capture that began after the
+/// declarations went past. A `decoded` field's `start` / `end` are in the
+/// MESSAGE's coordinate space, like every other span on the row.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes, `declarations` must be
+/// a NUL-terminated C string, and `out` must be a writable pointer to a
+/// `*mut c_char`. None may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_fields_with_payloads(
+    bytes: *const u8,
+    len: usize,
+    max_messages_per_flow: usize,
+    declarations: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if bytes.is_null() || declarations.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let text = match unsafe { std::ffi::CStr::from_ptr(declarations) }.to_str() {
+        Ok(s) => s,
+        // Not a declaration error: the bytes are not text at all, so there is
+        // no line for the diagnostic call to point at either.
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let mut map = wz_capture::payload::formats::FormatMap::new();
+    if map.declare_all(text).is_err() {
+        return WZ_DISSECT_ERR_DECLARATION;
+    }
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    let dissection = match Dissection::from_capture(input) {
+        Ok(d) => d,
+        Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
+    };
+    let cap = (max_messages_per_flow > 0).then_some(max_messages_per_flow);
+    let declared = wz_capture::payload_decode::Declarations::new(&map);
+    write_string(
+        wz_capture::fields_json::fields_json(&dissection, input, cap, Some(&declared)),
+        out,
+    )
+}
+
+/// R311y856 — read a declaration text and say what is wrong with it, WITHOUT a
+/// capture.
+///
+/// Always returns [`WZ_DISSECT_OK`] for readable text and writes a JSON
+/// verdict: `{"ok":true,"installed":N}`, or
+/// `{"ok":false,"line":N,"text":"…","message":"…"}` where `line` counts every
+/// line of the text from 0 — blank ones included, so the number indexes what
+/// the caller sent.
+///
+/// # Why this is a symbol rather than a richer error code
+///
+/// The argument [`wz_dissect_selector_diagnose`] makes, arriving for the second
+/// text a person types. A declaration is written into a settings box, and a
+/// consumer told only "one of these is bad" makes the operator bisect their own
+/// configuration — the failure R311y854 named. Paying four walks of a capture
+/// file to find out is worse still, and this needs none.
+///
+/// A verdict is not an error, which is why the OK/no-string rule is untouched:
+/// a refused declaration is a successful DIAGNOSIS, and the string it hands
+/// back is owned and freed like every other.
+///
+/// # Safety
+/// `declarations` must be a NUL-terminated C string and `out` a writable
+/// pointer to a `*mut c_char`. Neither may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_declarations_diagnose(
+    declarations: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if declarations.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let text = match unsafe { std::ffi::CStr::from_ptr(declarations) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let mut map = wz_capture::payload::formats::FormatMap::new();
+    let verdict = match map.declare_all(text) {
+        Ok(installed) => format!("{{\"ok\":true,\"installed\":{installed}}}"),
+        Err(bad) => {
+            let mut s = String::from("{\"ok\":false,\"line\":");
+            s.push_str(&bad.line.to_string());
+            s.push_str(",\"text\":");
+            // The SAME escaper the rest of this ABI's documents use: the line
+            // is the operator's own text, quoted back so a UI can point at it
+            // without holding the input a second time.
+            wz_session_core::json::escape_into(&bad.text, &mut s);
+            s.push_str(",\"message\":");
+            wz_session_core::json::escape_into(&bad.error.to_string(), &mut s);
+            s.push('}');
+            s
+        }
+    };
+    write_string(verdict, out)
 }
 
 /// R311y854 — the census NARROWED by a selector, wz's own filter language.
@@ -1779,9 +1938,206 @@ mod tests {
     /// NOT move when a walker adds fields.
     #[test]
     fn the_abi_version_is_readable() {
-        // R311y855 — 5 since `wz_dissect_pcap_fields` joined the symbol set.
-        // The header's contract is the symbol SET, not a symbol's signature;
-        // see `wz_dissect_abi_version`.
-        assert_eq!(wz_dissect_abi_version(), 5);
+        // R311y856 — 6 since `wz_dissect_pcap_fields_with_payloads` and
+        // `wz_dissect_declarations_diagnose` joined the symbol set. The
+        // header's contract is the symbol SET, not a symbol's signature; see
+        // `wz_dissect_abi_version`.
+        assert_eq!(wz_dissect_abi_version(), 6);
+    }
+
+    /// R311y856 — a capture carrying ONE `Put` on `demo/sensor` whose payload
+    /// is the protobuf message `{ 1: 150 }`.
+    ///
+    /// Its own fixture rather than a widening of [`census_capture`]: that one's
+    /// payloads are `b"hello"` and `b"answer"`, which are text and not any
+    /// format's bytes, and a decoder run over them would be measuring the
+    /// fixture rather than the door.
+    fn protobuf_capture() -> Vec<u8> {
+        let put = framed_frame(
+            0,
+            &wz_codecs::push::Push {
+                header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+                keyexpr: literal("demo/sensor"),
+                body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                    payload_len: 3,
+                    payload: &[0x08, 0x96, 0x01],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        let mut low_to_high = framed_init(&ZID_A);
+        low_to_high.extend_from_slice(&put);
+        let packet = tcp_packet(1000, &low_to_high);
+        wz_capture::pcap::write(1, &[(0, 0, packet.as_slice())])
+    }
+
+    /// Drive the field layer WITH declarations, the way C does.
+    fn call_fields_with_payloads(
+        bytes: &[u8],
+        cap: usize,
+        declarations: &str,
+    ) -> Result<String, c_int> {
+        let text = CString::new(declarations).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_pcap_fields_with_payloads(
+                bytes.as_ptr(),
+                bytes.len(),
+                cap,
+                text.as_ptr(),
+                &mut out,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must not hand back a string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// Drive the declaration diagnostic the way C does.
+    fn call_declarations_diagnose(declarations: &str) -> String {
+        let text = CString::new(declarations).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_declarations_diagnose(text.as_ptr(), &mut out) };
+        assert_eq!(
+            rc, WZ_DISSECT_OK,
+            "a refused declaration is a successful DIAGNOSIS, not an error"
+        );
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        s
+    }
+
+    /// R311y856 — THE PAYLOAD DECODES THROUGH THE ABI, under the declaration
+    /// text a person types at the command line.
+    ///
+    /// # The discriminator
+    ///
+    /// One capture, two doors. [`wz_dissect_pcap_fields`] must carry no payload
+    /// block at all and [`wz_dissect_pcap_fields_with_payloads`] must carry a
+    /// decoded one, so the evidence is the DIFFERENCE: a build that decoded
+    /// unconditionally passes the second half alone, and a build whose new
+    /// symbol quietly ignored its declarations passes the first.
+    ///
+    /// The third arm is the one that matters most for a schemaless decoder. Run
+    /// over a topic its rule does not cover, `Protobuf` does not fail — it
+    /// produces fields. So a rule naming another topic must come back
+    /// `no_rule`, carrying the keyexpr that WAS tested.
+    #[test]
+    fn a_declaration_reaches_the_abi_and_decodes_the_payload() {
+        let file = protobuf_capture();
+
+        let plain = call_fields(&file, 0).expect("the capture reads");
+        assert!(
+            !plain.contains("payload_decode"),
+            "the door that declares nothing must report nothing about payloads: \
+             {plain}"
+        );
+
+        let missed =
+            call_fields_with_payloads(&file, 0, "other/topic=protobuf").expect("the capture reads");
+        assert!(
+            missed
+                .contains("\"payload_decode\":{\"state\":\"no_rule\",\"keyexpr\":\"demo/sensor\"}"),
+            "a rule covering no topic here must say so AND name the keyexpr it \
+             was tested against: {missed}"
+        );
+
+        let decoded =
+            call_fields_with_payloads(&file, 0, "demo/sensor=protobuf\ndemo/sensor:1=temperature")
+                .expect("the capture reads");
+        assert!(
+            decoded.contains(
+                "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
+                 \"format\":\"protobuf\""
+            ),
+            "the covering rule must fire: {decoded}"
+        );
+        assert!(
+            decoded.contains("\"path\":\"1\",\"name\":\"temperature\",\"value\":\"varint 150\""),
+            "and the DECLARED name must ride the decoded field -- protobuf's \
+             wire format carries none, so this is the only place one can come \
+             from: {decoded}"
+        );
+    }
+
+    /// R311y856 — A DECLARATION THIS BUILD CANNOT INSTALL IS REFUSED, with a
+    /// code of its own and no document.
+    ///
+    /// The silent drop this refuses is the expensive one: a reader whose rule
+    /// was discarded sees undecoded bytes and concludes the TRAFFIC is wrong.
+    /// The code is separate from [`WZ_DISSECT_ERR_SELECTOR`] because a UI has
+    /// two different boxes to send the operator back to.
+    #[test]
+    fn an_uninstallable_declaration_is_refused_rather_than_dropped() {
+        let file = protobuf_capture();
+        assert_eq!(
+            call_fields_with_payloads(&file, 0, "demo/sensor=protobufff"),
+            Err(WZ_DISSECT_ERR_DECLARATION),
+            "an unknown format name is its own refusal, not an invalid argument"
+        );
+        assert_eq!(
+            call_fields_with_payloads(&file, 0, "not a declaration"),
+            Err(WZ_DISSECT_ERR_DECLARATION),
+            "and so is a line that is not a declaration at all"
+        );
+        // An EMPTY text declares nothing and is not an error -- it is the same
+        // question `wz_dissect_pcap_fields` answers, which is what makes the
+        // new door a widening rather than a second mode.
+        let empty =
+            call_fields_with_payloads(&file, 0, "").expect("an empty text declares nothing");
+        assert!(
+            !empty.contains("payload_decode"),
+            "an empty declaration text must behave as no declarations: {empty}"
+        );
+    }
+
+    /// R311y856 — THE DIAGNOSTIC ANSWERS WITHOUT A CAPTURE, and names the LINE.
+    ///
+    /// The half a UI needs while the text is being typed. A consumer told only
+    /// "one of these is bad" makes the operator bisect their own configuration,
+    /// which is the failure R311y854 named for the selector.
+    #[test]
+    fn the_declaration_diagnostic_names_the_line_and_needs_no_capture() {
+        assert_eq!(
+            call_declarations_diagnose("demo/**=protobuf\ndemo/**:1=temperature"),
+            "{\"ok\":true,\"installed\":2}"
+        );
+
+        // The SECOND line is the bad one, and the verdict must say so: an index
+        // that always reported 0 would look right on every single-line text,
+        // which is the shape a count in this workspace has been caught by
+        // before.
+        let verdict = call_declarations_diagnose("demo/**=protobuf\nnot a declaration");
+        assert!(
+            verdict.starts_with("{\"ok\":false,\"line\":1,\"text\":\"not a declaration\""),
+            "the verdict must point at the offending line and quote it: {verdict}"
+        );
+        assert!(
+            verdict.contains("is not a declaration -- expected"),
+            "and say what a declaration looks like: {verdict}"
+        );
+
+        // The other refusal a reader meets, and it is a DIFFERENT message: the
+        // line parsed and named a decoder this build does not carry.
+        let unknown = call_declarations_diagnose("demo/**=protobufff");
+        assert!(
+            unknown.contains("this build has no decoder named `protobufff`")
+                && unknown.contains("protobuf"),
+            "an unknown format must be told apart from a malformed line, and \
+             say what IS available: {unknown}"
+        );
     }
 }

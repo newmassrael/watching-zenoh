@@ -7566,7 +7566,9 @@ layer_c1bn_passive_dissection_features() {
         fields_json::tests::a_stream_message_carries_its_tree_and_the_offset_it_was_taken_at \
         fields_json::tests::a_datagram_message_is_walked_and_its_number_is_a_packet_index \
         fields_json::tests::a_row_the_stream_cannot_supply_is_declined_with_the_reason \
-        fields_json::tests::a_capture_that_cannot_be_reread_is_reported_rather_than_left_empty
+        fields_json::tests::a_capture_that_cannot_be_reread_is_reported_rather_than_left_empty \
+        fields_json::tests::a_declared_format_decodes_the_payload_and_the_spans_are_the_messages \
+        payload_decode::tests::a_declaration_that_binds_nothing_is_still_reported
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bn FAIL: $name is absent from the dissect build"; return 1; }

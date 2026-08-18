@@ -83,22 +83,22 @@ BOTH = {
     "field spans over a capture": ("--fields", "wz_dissect_pcap_fields"),
     "message listing": ("--messages", "wz_dissect_pcap_fields"),
     "bound on messages listed": ("--max-messages", "wz_dissect_pcap_fields"),
+    # R311y856 — moved here from ONLY_CLI, where the reason was an OPEN DEBT.
+    # The built-in decoders and the declaration dialect lived in `wz-analyze`,
+    # which the cdylib must not depend on (it carries `wz-tls-record`, and
+    # through it `ring`), so the seam this table named as public had nothing on
+    # the ABI side able to build one. Both moved beside the map.
+    "payload format decoding": ("--payload-format", "wz_dissect_pcap_fields_with_payloads"),
+    "naming a decoded payload field": (
+        "--payload-name",
+        "wz_dissect_pcap_fields_with_payloads",
+    ),
 }
 
 # Reachable ONLY from the command line, each with the reason it is not on the
 # ABI. A reason that reads as "not done yet" is an open debt, and saying so is
 # this table's job.
 ONLY_CLI = {
-    "payload format decoding": (
-        "--payload-format",
-        "OPEN DEBT (debt-analysis-surface-parity). `payload::formats::FormatMap` "
-        "is public and nothing on the ABI takes one.",
-    ),
-    "naming a decoded payload field": (
-        "--payload-name",
-        "Rides the row above: a schemaless walk recovers a field NUMBER and never "
-        "a name, so this is meaningless without the format rule that precedes it.",
-    ),
     "TLS decryption from a key log": (
         "--keylog",
         "DELIBERATE. A key log is a file path a person supplies, and the ABI takes "
@@ -148,6 +148,13 @@ ONLY_CAPI = {
         "wz_dissect_selector_diagnose",
         "DELIBERATE. It answers 'is this expression valid, and if not where' while "
         "it is being TYPED. A command line finds that out by running.",
+    ),
+    "diagnosing a declaration text without a capture": (
+        "wz_dissect_declarations_diagnose",
+        "DELIBERATE, on exactly the argument the row above makes, arriving for the "
+        "second text a person types. The command line refuses a bad declaration at "
+        "parse time and names the flag, which is the same answer delivered by "
+        "running; a UI needs it before there is anything to run.",
     ),
     "the ABI revision": (
         "wz_dissect_abi_version",

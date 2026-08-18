@@ -32,6 +32,12 @@ extern "C" {
  * INVALID_ARG, because the two are answered by different people: an invalid
  * argument is the caller's bug, a selector is text an operator typed. */
 #define WZ_DISSECT_ERR_SELECTOR (-4)
+/* R311y856 -- a payload declaration did not install. Its own code for the
+ * reason SELECTOR is not INVALID_ARG: a selector and a format declaration
+ * are two different texts a person writes, and a UI that could not tell
+ * which box to send them back to would be answering neither. Call
+ * wz_dissect_declarations_diagnose to learn which line and why. */
+#define WZ_DISSECT_ERR_DECLARATION (-5)
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. */
 int wz_dissect_abi_version(void);
@@ -160,6 +166,60 @@ int wz_dissect_selector_diagnose(const char *selector, char **out);
  * file a second time, which it must do to reach a datagram message's bytes. */
 int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
                            size_t max_messages_per_flow, char **out);
+
+/* R311y856 (ABI 6) — THE FIELD LAYER WITH THE APPLICATION PAYLOADS DECODED,
+ * under a mapping you declare.
+ *
+ * The command line has decoded payloads since R311y699 and this ABI could
+ * not: the decoders lived in that binary, which this library must not depend
+ * on. They moved beside the map; this is the door.
+ *
+ * declarations: one per line, NUL-terminated, in the spelling the command
+ * line's two flags already write --
+ *
+ *     demo/temp=protobuf         a format rule: which decoder reads this
+ *                                topic's payload
+ *     demo/temp:1=temperature    a field name: protobuf's wire format
+ *                                carries none, so a deployment that has a
+ *                                schema declares it
+ *
+ * Patterns are zenoh's own keyexpr dialect, so a wildcard chunk covers a
+ * subtree -- deliberately not spelled here, because that token cannot be
+ * written inside a C block comment. ONE dialect for both surfaces, so a rule
+ * tried in a terminal and then moved into a config file is not re-spelled.
+ * An EMPTY text declares nothing, which makes this the same question
+ * wz_dissect_pcap_fields answers.
+ *
+ * A declaration this build cannot install -- an unknown format name, a
+ * pattern this build's matcher has no arm for, a line that is not a
+ * declaration -- returns WZ_DISSECT_ERR_DECLARATION and no document. Not
+ * skipped: a map quietly smaller than the text that built it leaves a reader
+ * blaming the traffic for their own rule.
+ *
+ * Every walked row gains `payload_decode`, an object whose `state` is
+ * `decoded`, `refused`, `no_rule`, `keyexpr_unresolved` or `no_payload`. The
+ * last three are ANSWERS, not omissions: a rule that never fired and a rule
+ * that fired and found nothing send you to opposite places, and
+ * `keyexpr_unresolved` is the ordinary shape of a capture that began after
+ * the declarations went past. A decoded field's start/end are in the
+ * MESSAGE's coordinate space, like every other span on the row. */
+int wz_dissect_pcap_fields_with_payloads(const unsigned char *bytes, size_t len,
+                                         size_t max_messages_per_flow,
+                                         const char *declarations, char **out);
+
+/* R311y856 (ABI 6) — compile a declaration text and say what is wrong with
+ * it, WITHOUT a capture.
+ *
+ * Always returns WZ_DISSECT_OK for readable text and writes a verdict:
+ * {"ok":true,"installed":N}, or
+ * {"ok":false,"line":N,"text":"...","message":"..."} where `line` counts
+ * every line of the text from 0 -- blank ones included, so the number
+ * indexes what you sent.
+ *
+ * The argument wz_dissect_selector_diagnose makes, arriving for the second
+ * text a person types. A consumer told only "one of these is bad" makes the
+ * operator bisect their own configuration. */
+int wz_dissect_declarations_diagnose(const char *declarations, char **out);
 
 #ifdef __cplusplus
 }

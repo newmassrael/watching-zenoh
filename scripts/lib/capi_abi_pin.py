@@ -50,12 +50,19 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 5
+EXPECTED_VERSION = 6
 EXPECTED_SYMBOLS = {
     "wz_dissect_abi_version",
     # R311y855 — the FIELD layer, which is the walk this header had described
     # since R311y586 and could not perform.
     "wz_dissect_pcap_fields",
+    # R311y856 — the payload seam. The decoders lived in the command line, so
+    # the surface a product LINKS could not decode a payload at all; the
+    # diagnostic beside it answers "is this declaration text valid, and if not
+    # which line" with no capture, which is the question a UI asks while it is
+    # being typed.
+    "wz_dissect_pcap_fields_with_payloads",
+    "wz_dissect_declarations_diagnose",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",

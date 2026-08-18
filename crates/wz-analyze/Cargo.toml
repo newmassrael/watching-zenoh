@@ -25,7 +25,12 @@ name = "wz-analyze"
 path = "src/main.rs"
 
 [dependencies]
-wz-capture = { path = "../wz-capture" }
+# R311y856 — `dissect` selected here too, because the payload DECODE core moved
+# into `wz-capture` beside the map it consults (`payload_decode`), and that
+# module reads a walked field tree. Naming the feature is what lets this crate
+# and `wz-capi-dissect` share ONE implementation instead of the command line
+# owning it and the C ABI having none.
+wz-capture = { path = "../wz-capture", features = ["dissect"] }
 wz-tls-record = { path = "../wz-tls-record" }
 # R311y667 — for `PassiveFrame`, which is the type `wz-capture` hands the
 # decoded messages back in. Naming one in a listing means naming its type.

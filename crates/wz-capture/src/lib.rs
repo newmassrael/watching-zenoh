@@ -132,6 +132,21 @@ pub use wz_session_core::passive_messages as messages;
 /// no codec); the census plane over a whole capture is gated on
 /// `network-codecs`, which is where `Push` / `Request` / `Response` come from.
 pub mod payload;
+/// R311y856 — the payload format decoders this workspace SHIPS, re-exported
+/// through [`payload::formats`] where the trait and the map are.
+///
+/// Private on purpose: the file boundary is an authoring convenience and must
+/// not become a second place a caller looks for a decoder.
+mod payload_builtin;
+/// R311y856 — APPLYING a declaration to one walked message: resolve the key
+/// expression, pick the rule, decode, rebase the spans.
+///
+/// Gated on `dissect` because it reads a walked [`wz_session_core::dissect`]
+/// tree, which is what that feature builds. The DECODERS
+/// ([`payload::formats::builtin`]) are not gated -- they take bytes and no
+/// walker.
+#[cfg(feature = "dissect")]
+pub mod payload_decode;
 pub mod pcap;
 pub mod pcapng;
 /// R311y615 (§1.1f) — the EXPORT plane: the analysis tables rendered for
