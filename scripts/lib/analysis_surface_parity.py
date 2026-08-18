@@ -93,6 +93,18 @@ BOTH = {
         "--payload-name",
         "wz_dissect_pcap_fields_with_payloads",
     ),
+    # R311y857 — moved here from ONLY_CAPI, where it was the last OPEN DEBT.
+    #
+    # The reason there was OVERSTATED and this is where the correction lives:
+    # it said the command line "has no flag for these (capture drops,
+    # retransmits, sequence gaps, checksums, framing desyncs)", and measured by
+    # running it, the report's `capture` object had carried all of those
+    # unconditionally. What this surface genuinely could not reach was exactly
+    # two things -- the fragment CHAIN statistics, and the checksums that
+    # VERIFIED or were ABSENT (a failure count with no denominator). `--health`
+    # reaches both and renders `wz-capture`'s own grouping, byte for byte the
+    # document the ABI embeds.
+    "loss and health counters": ("--health", "wz_dissect_pcap_summary"),
 }
 
 # Reachable ONLY from the command line, each with the reason it is not on the
@@ -126,13 +138,6 @@ ONLY_CLI = {
 
 # Reachable ONLY from the C ABI.
 ONLY_CAPI = {
-    "loss and health counters": (
-        "wz_dissect_pcap_summary",
-        "OPEN DEBT on the CLI side rather than a decision. The command line has no "
-        "flag for these (capture drops, retransmits, sequence gaps, checksums, "
-        "framing desyncs), and this is the ONE direction where the ABI is the "
-        "richer surface.",
-    ),
     "a bounded read": (
         "wz_dissect_pcap_summary_bounded",
         "DELIBERATE. A cap is a statement about the CALLER's memory, and the "

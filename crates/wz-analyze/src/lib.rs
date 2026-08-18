@@ -96,6 +96,14 @@ pub struct Options {
     /// R311y675 (§1.1n) — dissect each message into its FIELDS, with the bytes
     /// each was decoded from.
     pub per_field: bool,
+    /// R311y857 — the LOSS AND HEALTH counters, grouped by who lost the packet.
+    ///
+    /// A flag rather than always-on: the report already carries the five
+    /// figures a reader needs to judge whether the capture is usable
+    /// (`packets_skipped`, the three stream-health counts, the two invalid
+    /// checksum counts), and the full group is thirty-six numbers a reader asks
+    /// for when one of those five is non-zero.
+    pub health: bool,
     /// R311y674 (§1.2a) — the SELECTOR narrowing what the planes count.
     ///
     /// Compiled at parse time rather than carried as text, so a selector that
@@ -320,6 +328,17 @@ OPTIONS:
                       went past before the tap started cannot be judged, and
                       counting it as a non-match would make a short total look
                       whole
+    --health          every loss counter this reader keeps, GROUPED BY WHO LOST
+                      the packet, because that is the only part a reader can
+                      act on: the capture tool's own admission (re-capture with
+                      a bigger buffer), this dissection's caps biting (raise
+                      them and the data comes back), and what the wire did --
+                      fragment chains, retransmits, checksums, framing
+                      desyncs, sequence gaps. The capture tool's figure is
+                      `not reported` and never 0 on a format with nowhere to
+                      record it, since a zero would read as a clean bill of
+                      health. The report's own header already carries the five
+                      figures that say whether this capture is usable at all
     -h, --help        print this and exit
 ";
 
@@ -339,6 +358,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut census = Census::default();
     let mut select: Option<wz_capture::filter::Filter> = None;
     let mut per_field = false;
+    let mut health = false;
     let mut at = 0usize;
     while at < args.len() {
         let arg = &args[at];
@@ -351,6 +371,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
             "--nodes" => census.nodes = true,
             "--census" => census = Census::all(),
             "--fields" => per_field = true,
+            "--health" => health = true,
             "--select" => {
                 at += 1;
                 let raw = args.get(at).ok_or(UsageError::MissingValue("--select"))?;
@@ -513,6 +534,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
         max_messages,
         census,
         per_field,
+        health,
         select: match select {
             // A selector with nothing to narrow is a flag that does nothing.
             Some(_) if !census.any() => return Err(UsageError::SelectWithoutPlane),
@@ -641,6 +663,7 @@ pub fn analyze_declaring_quic(
         serial_linktypes: &[],
         census: Census::default(),
         per_field: false,
+        health: false,
         select: None,
     })
 }
@@ -693,6 +716,8 @@ pub struct Request<'a> {
     pub census: Census,
     /// R311y675 — dissect each message into its fields.
     pub per_field: bool,
+    /// R311y857 — the loss and health counters, grouped by who lost the packet.
+    pub health: bool,
     /// R311y674 — the selector narrowing what those planes count. `None`
     /// selects everything, which is what the planes' unfiltered entry points
     /// already pass.
@@ -715,6 +740,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
         serial_linktypes,
         census,
         per_field,
+        health,
         select,
     } = request;
     // R311y699 ([REDACTED-REQ]) — the rules become a MAP here, in the composition
@@ -944,6 +970,13 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
                     &payload_refusals,
                 ));
             }
+            if health {
+                // R311y857 — `wz-capture`'s own rendering, not a second
+                // selection of the counters. Both surfaces read the same four
+                // accessors in the same order, so neither can report a figure
+                // the other omits.
+                rendered.push_str(&wz_capture::report::health_text(&dissection));
+            }
             if per_flow {
                 rendered.push_str(&flow_lines(
                     &dissection,
@@ -976,6 +1009,13 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
                     &payload_declarations,
                     &payload_refusals,
                 ));
+            }
+            if health {
+                // The SAME document `wz_dissect_pcap_summary` embeds, under the
+                // same key. A second spelling here is what R311y857 moved the
+                // emit into `wz-capture` to prevent.
+                rendered.push_str(",\"health\":");
+                rendered.push_str(&wz_capture::report::health_json(&dissection));
             }
             if per_flow {
                 rendered.push(',');
@@ -4298,6 +4338,7 @@ mod tests {
                 max_messages: None,
                 census: Census::default(),
                 per_field: false,
+                health: false,
                 select: None,
             })
         );
@@ -4329,6 +4370,7 @@ mod tests {
                 max_messages: None,
                 census: Census::default(),
                 per_field: false,
+                health: false,
                 select: None,
             })
         );
@@ -4418,6 +4460,189 @@ mod tests {
         assert_eq!(
             parse(&args(&["cap.pcapng", "--max-messages"])),
             Err(UsageError::MissingValue("--max-messages"))
+        );
+    }
+
+    /// R311y857 — an Interface Statistics Block whose `opt_isb_ifdrop` says the
+    /// capture tool lost `dropped` packets.
+    ///
+    /// Appended to a pcapng after the packets, which is where a capture tool
+    /// writes it. A classic pcap has no such block, and that ABSENCE is what
+    /// the control arm below rests on.
+    fn isb_with_drops(interface_id: u32, dropped: u64) -> Vec<u8> {
+        let mut opts = Vec::new();
+        opts.extend_from_slice(&5u16.to_le_bytes()); // opt_isb_ifdrop
+        opts.extend_from_slice(&8u16.to_le_bytes());
+        opts.extend_from_slice(&dropped.to_le_bytes());
+        opts.extend_from_slice(&0u16.to_le_bytes()); // opt_endofopt
+        opts.extend_from_slice(&0u16.to_le_bytes());
+
+        let total = (24 + opts.len()) as u32;
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x0000_0005u32.to_le_bytes()); // BT_ISB
+        out.extend_from_slice(&total.to_le_bytes());
+        out.extend_from_slice(&interface_id.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // ts_high
+        out.extend_from_slice(&0u32.to_le_bytes()); // ts_low
+        out.extend_from_slice(&opts);
+        out.extend_from_slice(&total.to_le_bytes());
+        out
+    }
+
+    /// One analysis of `file`, with `--health` on or off and nothing else
+    /// changed.
+    fn health_run(file: &[u8], health: bool, format: Format) -> String {
+        analyze_request(&Request {
+            capture: file,
+            keylog: None,
+            format,
+            per_flow: false,
+            per_message: false,
+            messages_per_flow: None,
+            quic_ports: &[],
+            quic_cid_len: None,
+            payload_rules: &[],
+            payload_field_names: &[],
+            serial_linktypes: &[],
+            census: Census::default(),
+            per_field: false,
+            health,
+            select: None,
+        })
+        .expect("the capture reads")
+        .0
+    }
+
+    /// R311y857 — THE TWO LOSS GROUPS THIS SURFACE COULD NOT SEE, and the
+    /// grouped view of the rest.
+    ///
+    /// # What was MEASURED, because the debt row was overstated
+    ///
+    /// `debt-analysis-surface-parity` said the command line "has no flag for
+    /// these (capture drops, retransmits, sequence gaps, checksums, framing
+    /// desyncs)". Run rather than read, that is mostly false: the report's own
+    /// `capture` object has carried `capture_reported_drops`, `retransmits`,
+    /// `out_of_order`, `partial_overlaps`, the whole `framing` group, the whole
+    /// `sequence` group and `drops` all along, unconditionally. The registry
+    /// reason had outlived the code, which is this workspace's debt-47 shape,
+    /// and it is recorded here rather than quietly corrected.
+    ///
+    /// What this surface genuinely could NOT reach is exactly two things, and
+    /// they are what the first two arms below pin:
+    ///
+    /// - `fragment_stats()` — the fragment CHAINS: pieces, completed, expired,
+    ///   evicted, malformed, overlapping. No key of the report named any of it.
+    /// - the checksums that VERIFIED or were ABSENT. The report carries
+    ///   `ip_checksum_invalid` and `transport_checksum_invalid` and nothing
+    ///   else, so a reader could see how many checksums were wrong and never
+    ///   how many were CHECKED — a count of failures with no denominator.
+    ///
+    /// # The discriminator
+    ///
+    /// One capture, two runs, and the evidence is the DIFFERENCE on those two
+    /// axes. A build whose flag did nothing fails the second arm; one that
+    /// printed the group unconditionally fails the first.
+    ///
+    /// # The control that makes the number mean something
+    ///
+    /// A classic pcap has nowhere in the FORMAT to record a drop count, so the
+    /// honest answer there is "the file said nothing" and never `0`. That arm
+    /// separates a reader that reads the ISB from one that reports a hard-wired
+    /// zero and looks right on the pcapng.
+    #[test]
+    fn the_two_unreachable_loss_groups_reach_the_command_line() {
+        let mut pcapng = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000_000, &[0u8; 4])],
+        );
+        pcapng.extend_from_slice(&isb_with_drops(0, 17));
+
+        let quiet = health_run(&pcapng, false, Format::Json);
+        assert!(
+            !quiet.contains("\"health\":"),
+            "without the flag the grouped document must not be printed: {quiet}"
+        );
+        // The two axes, measured on the CURRENT report rather than assumed.
+        assert!(
+            !quiet.contains("ip_checksum_valid"),
+            "the report carried only the INVALID counts, and this arm is what \
+             makes the flag's second half a fix rather than a repeat: {quiet}"
+        );
+        assert!(
+            !quiet.contains("\"pieces\":"),
+            "and the fragment chains were reachable from no key at all: {quiet}"
+        );
+
+        let asked = health_run(&pcapng, true, Format::Json);
+        assert!(
+            asked.contains("\"health\":{\"capture_reported_drops\":17"),
+            "the grouped document must carry the capture tool's admission: {asked}"
+        );
+        assert!(
+            asked.contains("\"ip_checksum_valid\":") && asked.contains("\"pieces\":"),
+            "and the two groups this surface could not reach: {asked}"
+        );
+        // Grouped by WHO lost the packet, which is the whole reason the flag
+        // renders a document of its own rather than five more report keys.
+        for group in [
+            "dropped_by_limits",
+            "fragments",
+            "streams",
+            "framing",
+            "sequence",
+        ] {
+            assert!(
+                asked.contains(&format!("\"{group}\":")),
+                "the {group} group is missing: {asked}"
+            );
+        }
+
+        let text = health_run(&pcapng, true, Format::Text);
+        assert!(
+            text.contains("17 packet(s) dropped by the capture tool"),
+            "a person at a terminal is told the same fact: {text}"
+        );
+
+        // THE CONTROL. A classic pcap cannot answer, and silence is not zero.
+        let pcap = wz_capture::pcap::write(1, &[(0, 0, &[0u8; 4])]);
+        let json = health_run(&pcap, true, Format::Json);
+        assert!(
+            json.contains("\"health\":{\"capture_reported_drops\":null"),
+            "silence must not be reported as a clean bill of health: {json}"
+        );
+        assert!(
+            !json.contains("\"health\":{\"capture_reported_drops\":0"),
+            "0 is a claim this format cannot support: {json}"
+        );
+        let text = health_run(&pcap, true, Format::Text);
+        assert!(
+            text.contains("not reported (this capture format has nowhere to say)"),
+            "and the terminal rendering must not print a zero either: {text}"
+        );
+    }
+
+    /// R311y857 — the flag is in the USAGE, which is what the parity gate reads.
+    ///
+    /// Its own assertion because the gate reads a CONSTANT: a flag the parser
+    /// accepts and the usage text does not name is reachable and undiscoverable,
+    /// and the gate would report the capability as ABI-only while it is not.
+    #[test]
+    fn the_health_flag_is_parsed_and_documented() {
+        assert!(
+            parse(&args(&["cap.pcapng", "--health"]))
+                .expect("a capture and a flag")
+                .health,
+            "the parser must accept it"
+        );
+        assert!(
+            !parse(&args(&["cap.pcapng"]))
+                .expect("a capture alone")
+                .health,
+            "and it must be off by default"
+        );
+        assert!(
+            USAGE.contains("    --health"),
+            "the usage text names every flag this tool takes"
         );
     }
 
@@ -5997,6 +6222,7 @@ mod quic_pass_tests {
                 serial_linktypes: &[],
                 census: Census::default(),
                 per_field: false,
+                health: false,
                 select: None,
             })
             .expect("the capture reads")
@@ -6069,6 +6295,7 @@ mod quic_pass_tests {
                 serial_linktypes: &[],
                 census: Census::default(),
                 per_field: false,
+                health: false,
                 select: None,
             })
             .expect("the capture reads")
@@ -6312,6 +6539,7 @@ mod quic_pass_tests {
             serial_linktypes: &[],
             census: Census::default(),
             per_field: false,
+            health: false,
             select: None,
         })
         .expect("the capture reads")
@@ -6404,6 +6632,7 @@ mod quic_pass_tests {
                 ..Census::default()
             },
             per_field: false,
+            health: false,
             select: None,
         })
         .expect("the capture reads")
@@ -6442,6 +6671,7 @@ mod quic_pass_tests {
             serial_linktypes: &[],
             census: Census::default(),
             per_field: true,
+            health: false,
             select: None,
         })
         .expect("the capture reads")
@@ -6538,6 +6768,7 @@ mod quic_pass_tests {
                 serial_linktypes: &[],
                 census,
                 per_field,
+                health: false,
                 select: None,
             })
             .expect("the capture reads")
@@ -6630,6 +6861,7 @@ mod quic_pass_tests {
             serial_linktypes: &[],
             census: Census::default(),
             per_field: false,
+            health: false,
             select,
         };
 

@@ -2188,6 +2188,192 @@ fn escape_into(value: &str, out: &mut String) {
     }
 }
 
+/// R311y857 — WHAT THE DISSECTION LOST, AND WHO LOST IT, as one document.
+///
+/// # Why this is here rather than in the C ABI, where it was written
+///
+/// R311y608 built this inside `wz-capi-dissect` because that was the surface
+/// asking, and the counters then had exactly one consumer. `wz-analyze` grew
+/// its own smaller selection — `CaptureReport::capture_json` reports
+/// `packets_skipped`, the three stream-health figures and the two INVALID
+/// checksum counts, and nothing else — so the command line could not see the
+/// capture tool's own admission, the caps that bit, the fragment chains, the
+/// framing desyncs or the sequence gaps at all. That asymmetry is the last
+/// `debt-analysis-surface-parity` row, and it is the one direction where the
+/// ABI was the richer surface.
+///
+/// The order of operations matters and is the same one R311y856 used: the emit
+/// moves here FIRST, so a `--health` flag on the command line is a second
+/// consumer of one rendering rather than a second rendering
+/// (`debt-census-emit-two-renderings`).
+///
+/// # Grouped by WHO lost the packet
+///
+/// Because that is the only thing a consumer can act on, and the answers are
+/// genuinely different:
+///
+/// - `capture_reported_drops` — the CAPTURE TOOL's own admission. Its ring
+///   overflowed and the file has a hole. Nothing wz does recovers it; the
+///   correct response is to re-capture with a bigger buffer.
+/// - `dropped_by_limits` — THIS DISSECTION's caps biting. The data was present;
+///   raise [`crate::DissectionLimits`] and it comes back.
+/// - `fragments` / `streams` / `framing` / `sequence` — what the WIRE did:
+///   reordering, retransmission, chains that never completed, framing this
+///   reader had to resynchronise, sequence numbers that never arrived.
+///
+/// `capture_reported_drops` is `null` and not `0` when the file made no
+/// statement, and the difference IS the field's value: a classic pcap has
+/// nowhere to record the figure, so "no ISB" is silence and not a clean bill of
+/// health. A reader shown `0` for both cannot tell a quiet capture from a
+/// format that cannot answer.
+///
+/// # One honest limitation, stated rather than left to be discovered
+///
+/// `dropped_by_limits` is all zeros for any dissection built without caps, and
+/// STRUCTURALLY so — no cap exists to bite. The zeros are true and they are not
+/// evidence that a bounded dissection would report none. The group is reported
+/// anyway, because the alternative is a consumer unable to tell "no caps" from
+/// "caps that did not bite".
+pub fn health_json(d: &crate::Dissection) -> String {
+    let h = d.health();
+    let f = d.fragment_stats();
+    let fr = d.framing_health();
+    let drops = h.drops;
+    let reported = match d.capture_reported_drops() {
+        Some(n) => n.to_string(),
+        None => String::from("null"),
+    };
+    format!(
+        "{{\
+         \"capture_reported_drops\":{reported},\
+         \"dropped_by_limits\":{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\
+         \"flows\":{},\"scout_askers\":{}}},\
+         \"fragments\":{{\"pieces\":{},\"completed\":{},\"expired\":{},\"evicted\":{},\
+         \"malformed\":{},\"overlapping\":{}}},\
+         \"streams\":{{\"retransmits\":{},\"out_of_order\":{},\"partial_overlaps\":{},\
+         \"ip_checksum_valid\":{},\"ip_checksum_invalid\":{},\"ip_checksum_absent\":{},\
+         \"transport_checksum_valid\":{},\"transport_checksum_invalid\":{},\
+         \"transport_checksum_absent\":{}}},\
+         \"framing\":{{\"gaps_forced\":{},\"gap_bytes_missing\":{},\
+         \"desyncs\":{},\"recoveries\":{},\"resync_skipped_bytes\":{},\
+         \"reserved_headers\":{},\
+         \"ws_desyncs\":{},\"ws_recoveries\":{},\"ws_resync_skipped_bytes\":{}}},\
+         \"sequence\":{{\"frames\":{},\"missing\":{},\"gaps\":{},\
+         \"duplicates\":{},\"out_of_window\":{},\"without_resolution\":{}}}}}",
+        drops.frames,
+        drops.stream_bytes,
+        drops.skipped,
+        drops.flows,
+        drops.scout_askers,
+        f.pieces,
+        f.completed,
+        f.expired,
+        f.evicted,
+        f.malformed,
+        f.overlapping,
+        h.retransmits,
+        h.out_of_order,
+        h.partial_overlaps,
+        h.ip_checksum_valid,
+        h.ip_checksum_invalid,
+        h.ip_checksum_absent,
+        h.transport_checksum_valid,
+        h.transport_checksum_invalid,
+        h.transport_checksum_absent,
+        fr.gaps_forced,
+        fr.gap_bytes_missing,
+        fr.desyncs,
+        fr.recoveries,
+        fr.resync_skipped_bytes,
+        fr.reserved_headers,
+        fr.ws_desyncs,
+        fr.ws_recoveries,
+        fr.ws_resync_skipped_bytes,
+        fr.sn_frames,
+        fr.sn_missing,
+        fr.sn_gaps,
+        fr.sn_duplicates,
+        fr.sn_out_of_window,
+        fr.sn_without_resolution,
+    )
+}
+
+/// R311y857 — the same counters for a person at a terminal.
+///
+/// A SECOND rendering of one value and not a second selection of the counters,
+/// which is the distinction this workspace's two-renderings debt is about: both
+/// this and [`health_json`] read the same four accessors in the same order, and
+/// neither is free to report a figure the other omits. What differs is only
+/// what a terminal needs — a heading per owner, and `not reported` where the
+/// document says `null`.
+pub fn health_text(d: &crate::Dissection) -> String {
+    let h = d.health();
+    let f = d.fragment_stats();
+    let fr = d.framing_health();
+    let drops = h.drops;
+    let mut s = String::from("health:\n");
+    s.push_str(&format!(
+        "  capture tool: {}\n",
+        match d.capture_reported_drops() {
+            // Never "0": a classic pcap cannot record the figure, and a reader
+            // shown a zero would read silence as a clean bill of health.
+            None => String::from("not reported (this capture format has nowhere to say)"),
+            Some(n) => format!("{n} packet(s) dropped by the capture tool"),
+        }
+    ));
+    s.push_str(&format!(
+        "  dissection caps: {} frame(s), {} stream byte(s), {} skipped, \
+         {} flow(s), {} scout asker(s)\n",
+        drops.frames, drops.stream_bytes, drops.skipped, drops.flows, drops.scout_askers
+    ));
+    s.push_str(&format!(
+        "  fragments: {} piece(s), {} completed, {} expired, {} evicted, \
+         {} malformed, {} overlapping\n",
+        f.pieces, f.completed, f.expired, f.evicted, f.malformed, f.overlapping
+    ));
+    s.push_str(&format!(
+        "  streams: {} retransmit(s), {} out of order, {} partial overlap(s)\n",
+        h.retransmits, h.out_of_order, h.partial_overlaps
+    ));
+    s.push_str(&format!(
+        "  checksums: ip {} valid / {} invalid / {} absent, \
+         transport {} valid / {} invalid / {} absent\n",
+        h.ip_checksum_valid,
+        h.ip_checksum_invalid,
+        h.ip_checksum_absent,
+        h.transport_checksum_valid,
+        h.transport_checksum_invalid,
+        h.transport_checksum_absent
+    ));
+    s.push_str(&format!(
+        "  framing: {} gap(s) forced, {} byte(s) missing, {} desync(s), \
+         {} recovery(ies), {} byte(s) skipped resynchronising, \
+         {} reserved header(s)\n",
+        fr.gaps_forced,
+        fr.gap_bytes_missing,
+        fr.desyncs,
+        fr.recoveries,
+        fr.resync_skipped_bytes,
+        fr.reserved_headers
+    ));
+    s.push_str(&format!(
+        "  websocket framing: {} desync(s), {} recovery(ies), \
+         {} byte(s) skipped resynchronising\n",
+        fr.ws_desyncs, fr.ws_recoveries, fr.ws_resync_skipped_bytes
+    ));
+    s.push_str(&format!(
+        "  sequence: {} frame(s), {} missing, {} gap(s), {} duplicate(s), \
+         {} out of window, {} without resolution\n",
+        fr.sn_frames,
+        fr.sn_missing,
+        fr.sn_gaps,
+        fr.sn_duplicates,
+        fr.sn_out_of_window,
+        fr.sn_without_resolution
+    ));
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

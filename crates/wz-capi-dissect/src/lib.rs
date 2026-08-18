@@ -688,110 +688,27 @@ fn summary_json(d: &Dissection) -> String {
     // cannot see them reads a dissection with holes as a dissection that was
     // complete.
     s.push_str(&format!("],\"skipped\":{},", d.skipped().len()));
-    s.push_str(&health_json(d));
+    s.push_str("\"health\":");
+    s.push_str(&wz_capture::report::health_json(d));
     s.push('}');
     s
 }
 
-/// R311y608 — what the dissection LOST, and who lost it.
-///
-/// The three counters this reports had, between them, ZERO consumers outside
-/// `wz-capture`'s own tests: `health()` (R311y605), `fragment_stats()`
-/// (R311y606) and `capture_reported_drops()` (R311y607) were each built, each
-/// tested, and each read by nothing that ships. A measurement nobody reads is
-/// indistinguishable from one that is wrong, so they are closed together here
-/// rather than each growing a fourth test.
-///
-/// They are grouped by WHO lost the packet, because that is the only thing a
-/// consumer can act on, and the three answers are genuinely different:
-///
-/// - `capture_reported_drops` — the CAPTURE TOOL's own admission. Its ring
-///   overflowed and the file has a hole. Nothing wz does can recover it, and
-///   the correct response is to re-capture with a bigger buffer.
-/// - `dropped_by_limits` — THIS DISSECTION's caps biting. The data was
-///   present; raise [`wz_capture::DissectionLimits`] and it comes back.
-/// - `fragments` / `streams` — what the WIRE did: reordering, retransmission,
-///   fragment chains that never completed.
-///
-/// `capture_reported_drops` is `null` and not `0` when the file made no
-/// statement, and the difference is the whole value of the field: a classic
-/// pcap has nowhere to record the figure, so "no ISB" is silence and not a
-/// clean bill of health.
-///
-/// # One honest limitation, stated rather than left to be discovered
-///
-/// `dropped_by_limits` is all zeros through [`wz_dissect_pcap_summary`], and
-/// STRUCTURALLY so: that entry point builds an UNBOUNDED dissection
-/// (`Dissection::from_capture` takes no [`wz_capture::DissectionLimits`]), so
-/// no cap exists to bite. The zeros are true, and they are not evidence that a
-/// bounded dissection would report none. Making them reachable means letting a
-/// C caller state its caps, which is a second entry point and an ABI decision
-/// of its own — registered rather than improvised here. The group is reported
-/// anyway because the alternative is a consumer that cannot tell "no caps" from
-/// "caps that did not bite" at all.
-fn health_json(d: &Dissection) -> String {
-    let h = d.health();
-    let f = d.fragment_stats();
-    let fr = d.framing_health();
-    let drops = h.drops;
-    let reported = match d.capture_reported_drops() {
-        Some(n) => n.to_string(),
-        None => String::from("null"),
-    };
-    format!(
-        "\"health\":{{\
-         \"capture_reported_drops\":{reported},\
-         \"dropped_by_limits\":{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\
-         \"flows\":{},\"scout_askers\":{}}},\
-         \"fragments\":{{\"pieces\":{},\"completed\":{},\"expired\":{},\"evicted\":{},\
-         \"malformed\":{},\"overlapping\":{}}},\
-         \"streams\":{{\"retransmits\":{},\"out_of_order\":{},\"partial_overlaps\":{},\
-         \"ip_checksum_valid\":{},\"ip_checksum_invalid\":{},\"ip_checksum_absent\":{},\
-         \"transport_checksum_valid\":{},\"transport_checksum_invalid\":{},\
-         \"transport_checksum_absent\":{}}},\
-         \"framing\":{{\"gaps_forced\":{},\"gap_bytes_missing\":{},\
-         \"desyncs\":{},\"recoveries\":{},\"resync_skipped_bytes\":{},\
-         \"reserved_headers\":{},\
-         \"ws_desyncs\":{},\"ws_recoveries\":{},\"ws_resync_skipped_bytes\":{}}},\
-         \"sequence\":{{\"frames\":{},\"missing\":{},\"gaps\":{},\
-         \"duplicates\":{},\"out_of_window\":{},\"without_resolution\":{}}}}}",
-        drops.frames,
-        drops.stream_bytes,
-        drops.skipped,
-        drops.flows,
-        drops.scout_askers,
-        f.pieces,
-        f.completed,
-        f.expired,
-        f.evicted,
-        f.malformed,
-        f.overlapping,
-        h.retransmits,
-        h.out_of_order,
-        h.partial_overlaps,
-        h.ip_checksum_valid,
-        h.ip_checksum_invalid,
-        h.ip_checksum_absent,
-        h.transport_checksum_valid,
-        h.transport_checksum_invalid,
-        h.transport_checksum_absent,
-        fr.gaps_forced,
-        fr.gap_bytes_missing,
-        fr.desyncs,
-        fr.recoveries,
-        fr.resync_skipped_bytes,
-        fr.reserved_headers,
-        fr.ws_desyncs,
-        fr.ws_recoveries,
-        fr.ws_resync_skipped_bytes,
-        fr.sn_frames,
-        fr.sn_missing,
-        fr.sn_gaps,
-        fr.sn_duplicates,
-        fr.sn_out_of_window,
-        fr.sn_without_resolution,
-    )
-}
+// R311y608's `health_json` MOVED to `wz_capture::report::health_json` in
+// R311y857, beside the counters, and the whole of its reasoning went with it --
+// including the one honest limitation this entry point still owns:
+// `dropped_by_limits` is all zeros through `wz_dissect_pcap_summary` and
+// STRUCTURALLY so, because that door builds an UNBOUNDED dissection
+// (`Dissection::from_capture` takes no `DissectionLimits`), so no cap exists to
+// bite. The zeros are true and are not evidence that a bounded dissection would
+// report none.
+//
+// It moved for the reason R311y856 moved the payload decoder: the command line
+// carried a strictly SMALLER selection of these figures (`packets_skipped`, the
+// three stream-health counts and the two INVALID checksum counts) and could not
+// reach the rest at all -- the last `debt-analysis-surface-parity` row, and the
+// one direction where this ABI was the richer surface. Giving the CLI its flag
+// before moving the emit would have shipped a second rendering of one value.
 
 /// Hand an owned string across the boundary.
 ///
