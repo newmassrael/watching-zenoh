@@ -2092,6 +2092,124 @@ layer_c0b_job_budget_margin() {
     return 0
 }
 
+# ─── Layer C0g — the apt ceiling discriminates BOTH ways ──────────────────
+#
+# R311y865 (unregistered debt 259). `scripts/lib/apt-install.sh` exists so that a
+# package-mirror outage fails in half a minute with a sentence instead of eating
+# a job's whole time budget and being reported as `cancelled`. Its whole value is
+# the REFUSAL, so a version whose ceiling never fired would be indistinguishable
+# from a working one on every green run -- which is every run, since the mirror
+# is usually up. Same objection C0b and C0i answer for their own scripts, and the
+# same answer: the bounded core is a function, `WZ_APT_CMD` replaces the command,
+# and both arms are driven here.
+#
+# It installs NOTHING. `WZ_APT_CMD` points the script at `true` for the positive
+# arm and at `sleep` for the negative one, so this lane runs anywhere and costs
+# about a second.
+layer_c0g_apt_ceiling() {
+    local script="scripts/lib/apt-install.sh"
+
+    if [[ ! -r "$script" ]]; then
+        echo "  Layer C0g FAIL: $script is not there, so the ceiling every apt step in" \
+            "ci.yml routes through is absent -- and absent is not green" >&2
+        return 1
+    fi
+
+    # POSITIVE — a mirror that answers is not interfered with. `true` accepts and
+    # ignores apt's argv, which is all this arm needs: the script must not refuse
+    # a command that returns promptly.
+    if ! WZ_APT_CMD=true WZ_APT_DEADLINE=5 bash "$script" cmake >/dev/null 2>&1; then
+        echo "  Layer C0g FAIL: a command that returned IMMEDIATELY was refused -- the" \
+            "ceiling now reds every job whose mirror is healthy" >&2
+        return 1
+    fi
+
+    # NEGATIVE — the shape that actually happened. A command that never returns
+    # must be KILLED by the deadline, and the elapsed time is what says so.
+    #
+    # THE STAND-IN HAS TO IGNORE ITS ARGV, and the first draft of this lane did
+    # not: `WZ_APT_CMD="sleep 30 --"` receives apt's `-o Acquire::...` options,
+    # rejects them and exits NON-ZERO IN ZERO SECONDS. The arm passed, the gate
+    # printed OK, and the ceiling it claims to measure had not run at all. It was
+    # caught only because the elapsed line printed `0s` — which is why the bound
+    # below is now two-sided. A script is used rather than `true`-with-a-sleep
+    # because a stand-in that argv can break is a stand-in that can pass for the
+    # wrong reason again.
+    local hang
+    hang="$(mktemp)"
+    # shellcheck disable=SC2064
+    trap "rm -f '$hang'" RETURN
+    printf '#!/usr/bin/env bash\nsleep 30\n' >"$hang"
+    chmod +x "$hang"
+
+    local began ended elapsed
+    began="$(date +%s)"
+    if WZ_APT_CMD="$hang" WZ_APT_DEADLINE=2 bash "$script" cmake >/dev/null 2>&1; then
+        echo "  Layer C0g FAIL: a command that HUNG was accepted -- this is the run" \
+            "32160845314 shape, where apt retried an unreachable mirror for 29 minutes" \
+            "and three jobs were reported cancelled" >&2
+        return 1
+    fi
+    ended="$(date +%s)"
+    elapsed=$(( ended - began ))
+    # TWO-SIDED, and each side refuses a different lie. Too LONG means the
+    # command was refused but not bounded, which is the outage this file exists
+    # for. Too SHORT means it never hung -- the stand-in broke, or the script
+    # rejected the call before reaching `timeout`, and either way the ceiling was
+    # not exercised. The deadline is 2s and only the first invocation runs (the
+    # function returns on the first failure), so the honest band is [2, 10].
+    if [[ "${elapsed}" -gt 10 ]]; then
+        echo "  Layer C0g FAIL: the hung command was refused only after ${elapsed}s." \
+            "It was REFUSED but it was not BOUNDED, and the bound is the gate" >&2
+        return 1
+    fi
+    if [[ "${elapsed}" -lt 2 ]]; then
+        echo "  Layer C0g FAIL: the hung command came back in ${elapsed}s, faster than" \
+            "the 2s deadline it was supposed to hit. Nothing hung, so nothing was" \
+            "bounded -- the arm passed for the wrong reason" >&2
+        return 1
+    fi
+
+    # NEGATIVE — called with no packages is a caller error, not an install of
+    # nothing. Exit 2, distinct from the exit 1 the ceiling answers with.
+    local rc=0
+    bash "$script" >/dev/null 2>&1 || rc=$?
+    if [[ "${rc}" -ne 2 ]]; then
+        echo "  Layer C0g FAIL: an empty package list answered ${rc}, not 2 -- a step" \
+            "that named nothing would install nothing and report success" >&2
+        return 1
+    fi
+
+    # AND THE CEILING MUST BE THE ONLY ROAD. A bounded script that half the
+    # workflow routes around bounds half the workflow, and the next apt step
+    # anyone adds will be written the way the thirteen that were here already
+    # were. This is the arm that keeps the file from becoming a convention.
+    local raw
+    raw="$(grep -n 'apt-get' .github/workflows/ci.yml || true)"
+    if [[ -n "${raw}" ]]; then
+        echo "  Layer C0g FAIL: ci.yml calls apt-get directly, so these steps are" \
+            "OUTSIDE the ceiling and a mirror outage still spends their job's whole" \
+            "budget:" >&2
+        echo "${raw}" >&2
+        echo "  Route them through scripts/lib/apt-install.sh." >&2
+        return 1
+    fi
+    local routed
+    routed="$(grep -c 'apt-install.sh' .github/workflows/ci.yml || true)"
+    if [[ "${routed}" -lt 1 ]]; then
+        echo "  Layer C0g FAIL: no step in ci.yml routes through the ceiling at all." \
+            "The arm above passes trivially when the population is zero, which is" \
+            "the green this workspace has been burned by" >&2
+        return 1
+    fi
+
+    echo "  apt ceiling gate: OK (passes a prompt command, kills a hung one in" \
+        "${elapsed}s against a 2s deadline -- bounded on BOTH sides, so an arm that" \
+        "never hung fails too -- refuses an empty package list, and ${routed} ci.yml" \
+        "step(s) route through it with 0 calling apt-get directly)"
+    return 0
+}
+
 # ─── Layer C0d — the doc-link dependent expansion discriminates BOTH ways ──
 #
 # R311y793. `scripts/lib/doclink-dependents.sh` is what widens pre-push gate 4
@@ -8809,10 +8927,17 @@ layer_e_ap_demo_round_trip() {
     # ABI that file holds depends on the last lane that built it: Layer C1cc picks
     # the arm by reading `Z_FEATURE_UNSTABLE_API` out of the installed header, and
     # Layer C4's preset matrix later rebuilds the same path with DEFAULT features.
-    # C4 sits between C1cc and this sweep in ci.yml, so without this token Layer E
+    # C4 sat between C1cc and this sweep in ci.yml, so without this token Layer E
     # would compile upstream's examples against a header whose `z_owned_bytes_t` is
     # 32 bytes and link them to a cdylib built for 40 — a stack-layout mismatch,
-    # reported as whatever it happened to corrupt. C1cc owns these four legs and
+    # reported as whatever it happened to corrupt.
+    # R311y865 — PAST TENSE NOW, and the token stays anyway. C1cc moved to the
+    # `capi-c-arms` job and this sweep to `e2e-demo`, so producer and consumer are
+    # in different jobs and C4 is in neither's way: the clobber this token was
+    # written against cannot happen any more. What has NOT changed is ownership —
+    # C1cc runs these four legs, and a sweep that adopted them would run them a
+    # second time, which is the R311y838 double-run. Layer C0's naming gate lists
+    # the token, so removing it here would red there. C1cc owns these four legs and
     # owns the arm selection with them. The token is the same NAMING OBLIGATION the
     # families above carry, and R311y500 renamed both fixtures and one test fn so
     # every fn in the family contains `capi_c`; Layer C0's naming gate lists the
@@ -13214,6 +13339,7 @@ run_layer C0b layer_c0b_job_budget_margin || overall=1
 run_layer C0d layer_c0d_doclink_dependents || overall=1
 run_layer C0e layer_c0e_inventory_tag_reader || overall=1
 run_layer C0f layer_c0f_lane_demo_feature_restore || overall=1
+run_layer C0g layer_c0g_apt_ceiling || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1

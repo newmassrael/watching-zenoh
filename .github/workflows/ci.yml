@@ -207,14 +207,14 @@ jobs:
         # repo-local prefix instead (build-zenoh-pico-cli.sh calls it), which is
         # the same treatment zenoh-c and shellcheck already get here. What apt
         # owes is only the TOOL that reads the `.pc` it installs.
+        #
+        # R311y865 — `pkg-config` is KEPT although the pico build that wanted it
+        # moved to `e2e-demo`. Dropping it would be a guess about which of the
+        # ~20 remaining lanes' build scripts read a `.pc`, and nothing here has
+        # measured that; the package costs about a second. Recorded so the next
+        # reader knows the reason above is now historical rather than current.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake \
-            libclang-dev \
-            clang \
-            perl \
-            pkg-config
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
 
       - name: Install shellcheck (pinned + checksum-verified)
         # Same contract as the actionlint step below, and for the same reason:
@@ -411,66 +411,10 @@ jobs:
       - name: Layer C1 — cargo test --workspace
         run: bash scripts/run-ci.sh --layer C1
 
-      - name: Build zenoh-pico CLI binaries (Layers C1cc + E dep)
-        # R121c yml sync — Layer E spawns target/zenoh-pico-cli/z_put
-        # against the wz-ap-demo binary's TCP --listen endpoint. The
-        # CLI binaries are built from the vendored zenoh-pico
-        # submodule via scripts/build-zenoh-pico-cli.sh; local
-        # developers run this on demand, CI builds them every run
-        # since the Swatinem cache covers `crates -> target` +
-        # `vendor/sce -> target` only.
-        #
-        # R311y500 MOVED IT UP, from just above Layer E to here. C1cc gained two
-        # legs that put a REAL pico CLI opposite the zenoh-c ABI, and it runs ~170
-        # lines before this step used to. Provisioning a lane's oracle AFTER the
-        # lane is not a slow oracle, it is an absent one: `zenoh_pico_cli_binary`
-        # panics, and C1cc runs under WZ_C1CC_REQUIRE=1, so it would have redded
-        # hosted CI on the first push. Nothing between here and the old position
-        # ordered against it — every step in between is an independent lane
-        # invocation and this one is pure provisioning.
-        run: bash scripts/build-zenoh-pico-cli.sh
-
-      - name: Cache the zenoh-c oracle (pinned 1.5.0)
-        # zenoh-c 1.5.0 is a FIXED upstream release, so headers + libzenohc.so +
-        # the example clone are a pure function of the version — cache the
-        # artifacts rather than re-fetching every run. Keyed on the SCRIPT's
-        # content too: a cache once populated by a recipe that installed the wrong
-        # feature set would otherwise strand the layout gate behind it for as long
-        # as the key lives.
-        id: zenoh-c-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.local/include
-            ~/.local/lib/libzenohc.so
-            ~/zenoh-c-ref
-          key: zenoh-c-1.5.0-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c.sh') }}
-
-      - name: Provision the zenoh-c oracle (cache miss only)
-        if: steps.zenoh-c-cache.outputs.cache-hit != 'true'
-        run: bash scripts/install-zenoh-c.sh
-
-      - name: Layer C1cc — §5.27 api-compat-c, the zenoh-c drop-in
-        # R311y498. Wired in the SAME commit that adds the lane.
-        #
-        # WZ_C1CC_REQUIRE=1 because this job PROVISIONS the oracle above: without
-        # it an absent oracle is a SKIP, and a skip is green — the R311y265
-        # masked-skip burn that R311y495 caught C1bp committing for two rounds. If
-        # the provisioning step ever silently yields nothing, this lane reds
-        # instead of passing.
-        #
-        # Three bound properties, each shown by its own damage: the LAYOUT gate
-        # compares wz's type footprints against what a C compiler measures from
-        # the INSTALLED header (the crate's own const assertions cannot see the
-        # header move — they only check that file against itself); the DROP-IN leg
-        # compiles upstream's own z_put.c against upstream's own header and links
-        # it BOTH ways, requiring one wz subscriber to observe both arms; and the
-        # COVERAGE report prints how many upstream examples link, so a slice stays
-        # a measured fraction rather than a declared milestone.
-        env:
-          WZ_C1CC_REQUIRE: "1"
-        run: bash scripts/run-ci.sh --layer C1cc
-
+      # ─── R311y865: Layer C1cc, the zenoh-c oracle and the pico CLI build all
+      # LEFT this job for `capi-c-arms`, and Layers E / E3 / E4 / E4i / E5 /
+      # E5u / E7u / E6u left for the new `e2e-demo` job. See the budget note at
+      # the `Budget margin` step below for the measurement that forced it.
       - name: Layer C1bv — §5.24 dynamic storage-volume loading (unit + ABI + wire)
         # R311y497. Wired in the SAME commit that adds the lane.
         #
@@ -645,7 +589,7 @@ jobs:
         # Layer D's run-ci.sh path no-ops gracefully when python3-yaml
         # is missing; on CI we install it explicitly so the lane
         # runs the real check rather than the local-developer skip.
-        run: sudo apt-get install -y --no-install-recommends python3-yaml
+        run: bash scripts/lib/apt-install.sh python3-yaml
 
       - name: Layer D — deploy/*.yaml schema validate
         run: bash scripts/run-ci.sh --layer D
@@ -664,71 +608,11 @@ jobs:
         # a lane that conflates the two is one that gets disabled.
         run: bash scripts/run-ci.sh --layer L
 
-      - name: Build wz-ap-demo binary (Layer E dep)
-        run: (cd crates && cargo build -p wz-ap-demo)
-
-      - name: Layer E — wz-ap-demo round-trip vs zenoh-pico z_put
-        run: bash scripts/run-ci.sh --layer E
-
-      - name: Layer E3 — multi-peer router e2e (routing-router foundation)
-        # R311qa — builds wz-ap-demo with --features routing-router (additive)
-        # and runs the self-contained wz<->wz router e2e (one router + two
-        # initiators); host-only, no external binary, so it gates on the primary
-        # runner like Layer E / F.
-        run: bash scripts/run-ci.sh --layer E3
-
-      - name: Layer E4 — routing-router reject gate (default build rejects --router)
-        # R311qa — the negative catalog-truthfulness gate: builds the DEFAULT
-        # wz-ap-demo and asserts it rejects --router with exit 2. Rebuilds the
-        # default binary after E3's --features routing-router build, so the
-        # binary at the shared path matches the variant each lane asserts.
-        run: bash scripts/run-ci.sh --layer E4
-
-      - name: Layer E4i — INERT-reporting gate (default build reports advanced/group flags inert)
-        # R311y448 — E4's opposite contract on the same DEFAULT binary: the
-        # advanced/group CLI is feature-uniform, so instead of rejecting these
-        # flags the demo drops the capability and reports it naming the missing
-        # feature. Until this lane the `#[cfg(not(feature = ...))]` arms compiled
-        # everywhere and ran nowhere. Self-contained wz<->wz, no external runner.
-        run: bash scripts/run-ci.sh --layer E4i
-
-      - name: Layer E5 — router data-plane forwarding e2e (routing-routes)
-        # R311qc — the data-plane counterpart to E3: builds wz-ap-demo with
-        # --features routing-routes and asserts the router forwards a Put across
-        # faces (producer -> router -> matching subscriber). Self-contained
-        # wz<->wz, no external runner like E3/E4.
-        run: bash scripts/run-ci.sh --layer E5
-
-      - name: Layer E5u — router forwarding e2e OVER UNIXPIPE (routing-routes)
-        # R311y395 — the acceptor-concurrency counterpart of the Layer Z
-        # dialer-concurrency leg: builds wz-ap-demo with --features
-        # routing-routes,transport-link-unixpipe and asserts a wz --router
-        # unixpipe/<base> forwards a Put between TWO concurrent --connect
-        # unixpipe clients (wz is the multi-client routing listener over IPC).
-        # Self-contained wz<->wz, no external oracle; unixpipe is Linux-only and
-        # this runner is ubuntu, so the lane's Linux guard never SKIPs here.
-        run: bash scripts/run-ci.sh --layer E5u
-
-      - name: Layer E7u — router-hat (true Router) forwarding OVER UNIXPIPE
-        # R311y396 — the product-code counterpart of E5u (beside it in the fast
-        # `ci` job, NOT the interop job: self-contained wz<->wz, no oracle).
-        # run_router_hat's addressing seam is made non-IP safe (a non-IP listen
-        # requires an explicit --zid), so a wz --router-hat (a true WhatAmI::Router)
-        # binds a unixpipe listener and forwards a Put between two distinct-zid
-        # --connect unixpipe clients. unixpipe is Linux-only and this runner is
-        # ubuntu, so the lane's Linux guard never SKIPs here.
-        run: bash scripts/run-ci.sh --layer E7u
-
-      - name: Layer E6u — peer (WhatAmI::Peer) forwarding OVER UNIXPIPE
-        # R311y397 — the peer run-mode counterpart of E5u/E7u (beside them in the
-        # fast `ci` job, NOT the interop job: self-contained wz<->wz, no oracle).
-        # run_peer gains a --zid override and a non-IP-safe addressing seam (a non-IP
-        # listen requires an explicit --zid), so a wz --peer binds a unixpipe listener
-        # and forwards a Put between two distinct-zid --connect unixpipe clients.
-        # unixpipe is Linux-only and this runner is ubuntu, so the lane's Linux guard
-        # never SKIPs here.
-        run: bash scripts/run-ci.sh --layer E6u
-
+      # ─── R311y865: everything from `Build wz-ap-demo` through Layer E6u moved
+      # to the `e2e-demo` job below. What they share is not a subsystem — it is
+      # that each one SPAWNS A BINARY and waits on it, so each needs a demo build
+      # (and, for Layer E, a zenoh-pico CLI) that no cargo-test lane in this job
+      # needs. They were 231s of a job at 91% of its ceiling.
       - name: Budget margin — this job may not approach its timeout in silence
         # R311y791 — THE GATE THIS FILE HAS TWICE WISHED FOR AND TWICE NOT
         # BUILT. y296 recorded that "both ceilings were being approached at
@@ -767,6 +651,29 @@ jobs:
         # siblings took, because this job's own spread is narrow (1639s median
         # / 1730s max pre-split) and 59% sits twice as far above 30 as the
         # variance.
+        #
+        # R311y865 — AND THE SPREAD IS NOT NARROW, WHICH IS WHY THAT SPLIT DID
+        # NOT HOLD. This gate then fired on two consecutive runs at 91%
+        # (32155180723, 32160845314), every lane above it green. Per-step times
+        # off run 32155180723's job log say where 1650s went, and the largest
+        # single entry is not a lane:
+        #
+        #     actions/checkout@v4      258s   (77s on an earlier run; 461s on y861's)
+        #     Layer C1cc               202s   -> capi-c-arms
+        #     Layer C1                 176s
+        #     Layer C1cf               166s
+        #     Layer E + E3..E6u        210s   -> e2e-demo
+        #     apt-get update            88s   (now bounded; see apt-install.sh)
+        #     Layer C4                  88s
+        #     ...every other lane      <70s each
+        #
+        # Setup alone — prune, checkout, apt, rustup, cache — is 418s, 25% of the
+        # budget before a lane runs, and CHECKOUT'S OWN VARIANCE IS 384s. That is
+        # the number the y795 note missed: a margin smaller than the variance of
+        # one step is not a margin. So this round peels 433s (C1cc + its two
+        # oracle steps + the pico CLI build to capi-c-arms; the eight demo lanes
+        # and their build to e2e-demo), which lands this job near 68% and leaves
+        # room the checkout can move inside.
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 30
 
@@ -804,12 +711,7 @@ jobs:
         # cmake + libclang-dev for the sce-codegen / xtask (Layer B/B2)
         # toolchain; perl for verify-codegen.sh Layer 2 include sort.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake \
-            libclang-dev \
-            clang \
-            perl
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
@@ -826,7 +728,7 @@ jobs:
           key: validate-codegen
 
       - name: Install protoc (mnemosyne-server build-script dep)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+        run: bash scripts/lib/apt-install.sh protobuf-compiler
 
       - name: Install mnemosyne-cli (pinned)
         # R311y417 — the `|| { ::warning; MNEMOSYNE_SKIP=1 }` fallback that used
@@ -924,6 +826,19 @@ jobs:
         # that job. It needs only bash, and costs ~0s.
         run: bash scripts/run-ci.sh --layer C0b
 
+      - name: Layer C0g — the apt ceiling discriminates both ways
+        # R311y865. `scripts/lib/apt-install.sh` is what every apt step in this
+        # file routes through, and its whole value is a REFUSAL that fires only
+        # when a package mirror is down — i.e. almost never, so on almost every
+        # run a ceiling that did nothing and a ceiling that is broken look
+        # identical. Same reason C0b and C0i are lanes.
+        #
+        # It runs HERE rather than on `ci` for C0b's reason: a lane that exists
+        # because of another job's budget must not be charged to that job. It
+        # installs nothing, needs only bash + grep, and costs ~2s (the deadline
+        # it drives).
+        run: bash scripts/run-ci.sh --layer C0g
+
       - name: Layer C0d — the doc-link dependent expansion discriminates both ways
         # R311y793. pre-push gate 4 widens its crate set through
         # scripts/lib/doclink-dependents.sh; an expander that returned its input
@@ -1015,12 +930,7 @@ jobs:
         # read suggests: the resolved tree pulls bindgen (libclang) and the
         # vendor/sce crates.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake \
-            libclang-dev \
-            clang \
-            perl
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
@@ -1137,12 +1047,7 @@ jobs:
         # and is wrong. The prep is cheap and parallel; guessing it down is how
         # the fix-and-repush series starts.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake \
-            libclang-dev \
-            clang \
-            perl
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         # The pin is the SSOT for channel + components + targets — see the
@@ -1220,11 +1125,7 @@ jobs:
         # cmake + libclang-dev: zenoh-pico-sys (cmake crate + bindgen), which the
         # wz-integration-tests dev-dep pulls in even for the spawn-class lanes.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake \
-            libclang-dev \
-            clang
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml, for wz)
         # See the `ci` job's step of the same name — the pin is the SSOT for
@@ -1839,14 +1740,8 @@ jobs:
         # `fatal error: string.h: No such file or directory` (Layer G.6 /
         # G.11). qemu-system-arm boots the mps2 / microbit ELFs (Q.2 / Q.4).
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake \
-            libclang-dev \
-            clang \
-            gcc-arm-none-eabi \
-            libnewlib-arm-none-eabi \
-            qemu-system-arm
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi qemu-system-arm
 
       - name: Install Rust toolchain + embedded targets (pinned by rust-toolchain.toml)
         # THE job this pin exists for: Layer Q's footprint gate lives here. The
@@ -1918,8 +1813,7 @@ jobs:
         # cmake/ninja/dtc are the Zephyr build system; libclang/clang for the
         # wz *-sys build scripts; xz-utils extracts the SDK tarballs.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/lib/apt-install.sh \
             cmake ninja-build device-tree-compiler \
             libclang-dev clang \
             gcc-arm-none-eabi libnewlib-arm-none-eabi \
@@ -2124,8 +2018,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake libclang-dev clang perl
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         # Same reasoning as the ci job: `rustup show` materialises the PINNED
@@ -2555,8 +2448,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake libclang-dev clang perl
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
@@ -2743,8 +2635,7 @@ jobs:
         # cmake + clang/libclang are for those two C builds (bindgen included);
         # perl matches the sibling job's set.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake libclang-dev clang perl
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
@@ -2892,8 +2783,7 @@ jobs:
         # few seconds of apt for a first-run red on a dependency this job has
         # never been observed to need or not need.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake libclang-dev clang perl
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
@@ -3005,16 +2895,18 @@ jobs:
 
       - name: Install system dependencies
         # cmake + pkg-config are what `build-zenoh-pico-cli.sh` and the pinned
-        # Mbed TLS it provisions need. Deliberately the same NARROW list the
-        # `ci` job installs, and deliberately NOT `libmbedtls-dev` — pico's
-        # `Z_FEATURE_LINK_TLS` arm resolves Mbed TLS through pkg-config and
-        # Ubuntu's package ships no `.pc` at all, so the distro package would
-        # satisfy the compiler and still fail pico's configure step.
+        # Mbed TLS it provisions need. Deliberately NOT `libmbedtls-dev` —
+        # pico's `Z_FEATURE_LINK_TLS` arm resolves Mbed TLS through pkg-config
+        # and Ubuntu's package ships no `.pc` at all, so the distro package
+        # would satisfy the compiler and still fail pico's configure step.
+        #
+        # R311y865 WIDENED the list to the `ci` job's, and the reason is Layer
+        # C1cc moving here: it builds `wz-capi-c` through cargo, whose graph
+        # reaches zenoh-pico-sys (cmake crate + bindgen). A narrow list was right
+        # while this job only ran C1ce and the arms gate; it stopped being right
+        # the moment a cargo lane arrived.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake \
-            pkg-config
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
@@ -3099,12 +2991,57 @@ jobs:
         # needs: without it an absent checkout is a SKIP, and a skip is green —
         # the masked-skip burn this tree has taken twice.
         #
-        # Run directly rather than through `run-ci.sh --layer C1cc`: C1cc's other
-        # legs need the pico CLIs, which this job deliberately does not build.
-        # The WZ_C1CC_OPAQUE_ARMS flag inside that lane stays for local runs.
+        # Run directly rather than through `run-ci.sh --layer C1cc`, which is now
+        # a step of its own below. The WZ_C1CC_OPAQUE_ARMS flag inside that lane
+        # stays for local runs.
+        #
+        # R311y865 CORRECTED this note rather than deleting it. It used to end
+        # "C1cc's other legs need the pico CLIs, which this job deliberately does
+        # not build" — false since R311y543 added the pico CLI build four steps
+        # above, and false in the direction that matters: it is the sentence that
+        # says C1cc cannot live here, sitting in the job C1cc belongs in. The
+        # same class as the two comments R311y864 fixed in `link.rs`, and the
+        # reason this move looked impossible until the step list was read.
         env:
           WZ_CAPI_C_ARMS_REQUIRE: "1"
         run: bash scripts/check-capi-c-opaque-arms.sh
+
+      - name: Layer C1cc — §5.27 api-compat-c, the zenoh-c drop-in
+        # R311y498, and R311y865 MOVED IT HERE from the `ci` job. It cost 202s of
+        # a job that was running at 91% of its 1800s ceiling, and every
+        # provisioning step it needs — the pico CLIs, the zenoh-c oracle on the
+        # SAME cache key — was already being paid for in this job. So the move
+        # is 202s off the job that could not afford it and ~0s onto the one that
+        # can, which is the cheapest form the y791 split ever takes: not a new
+        # job, but a lane going to the job it was always named after.
+        #
+        # IT ALSO DISSOLVES AN ORDERING HAZARD rather than carrying it along.
+        # `run-ci.sh`'s Layer E sweep excludes the `capi_c` family because C1cc
+        # picks the `libwz_capi_c.so` ABI arm and Layer C4 later rebuilt that
+        # same path with DEFAULT features, with C4 sitting between them in the
+        # `ci` job. C1cc and Layer E are now in different jobs and C4 is in
+        # neither's way, so the artifact cannot be clobbered between producer and
+        # consumer at all. The `--skip capi_c` token STAYS — Layer C0's naming
+        # gate lists it, and C1cc still owns those four legs, so running them
+        # twice would be the R311y838 double-run.
+        #
+        # WZ_C1CC_REQUIRE=1 because this job PROVISIONS the oracle above: without
+        # it an absent oracle is a SKIP, and a skip is green — the R311y265
+        # masked-skip burn that R311y495 caught C1bp committing for two rounds. If
+        # the provisioning step ever silently yields nothing, this lane reds
+        # instead of passing.
+        #
+        # Three bound properties, each shown by its own damage: the LAYOUT gate
+        # compares wz's type footprints against what a C compiler measures from
+        # the INSTALLED header (the crate's own const assertions cannot see the
+        # header move — they only check that file against itself); the DROP-IN leg
+        # compiles upstream's own z_put.c against upstream's own header and links
+        # it BOTH ways, requiring one wz subscriber to observe both arms; and the
+        # COVERAGE report prints how many upstream examples link, so a slice stays
+        # a measured fraction rather than a declared milestone.
+        env:
+          WZ_C1CC_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer C1cc
 
       - name: Layer C1ce — api-compat-c against the SHARED-MEMORY oracle
         # WZ_C1CE_REQUIRE=1 for the same reason, and the number this prints is
@@ -3114,6 +3051,150 @@ jobs:
         env:
           WZ_C1CE_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C1ce
+
+  # ─────────────────────────────────────────────────────────────────
+  # R311y865 (unregistered debt 249) — the lanes that SPAWN A BINARY.
+  #
+  # WHY SPLIT AT ALL. `job-budget-margin.sh` fired on the `ci` job at 91% of its
+  # 1800s budget on two consecutive runs with every lane above it green, and its
+  # own message names the remedy and forbids the easy one: split a lane out, do
+  # not raise `timeout-minutes`, because the cost grows monotonically in atom
+  # count and a bigger number re-arms the same failure one atom later. This is
+  # the third such peel — Layer C0mut left in y791 and the routing/adminspace
+  # lanes in y793 — and the shape is by now the workflow's normal answer.
+  #
+  # WHY THESE EIGHT AND NOT THE EIGHT SLOWEST. The cut is by what a lane NEEDS,
+  # not by what it costs. Every lane here spawns `wz-ap-demo` (Layer E also
+  # spawns a zenoh-pico CLI) and waits on a real process, so each needs a demo
+  # BUILD that no cargo-test lane in the `ci` job needs, and each pays a
+  # process-lifecycle cost that no cargo-test lane pays. Splitting on the
+  # dependency means the remaining `ci` job is one thing — `cargo test` and its
+  # feature matrices — and this job is the other. A split by wall-clock alone
+  # would have taken Layer C1 and left the demo build behind for one lane.
+  #
+  # WHY NOT THE INTEROP JOB, which also spawns binaries: these lanes are
+  # self-contained wz<->wz (bar Layer E), and `interop`'s whole subject is a
+  # FOREIGN counterparty. Its 120-minute budget exists for provisioning zenohd
+  # and pico that these lanes do not need, and folding them in would put lanes
+  # that finish in seconds behind a job that legitimately runs for twenty
+  # minutes.
+  #
+  # BUDGET. The moved lanes measured 231s in run 32155180723 (E 122, E3 26,
+  # E4 4, E4i 3, E5 9, E5u 7, E7u 30, E6u 9, plus the demo build). Setup here is
+  # the same ~420s the `ci` job pays, so ~11 minutes cold. 20 minutes with a
+  # floor of 30% — the floor is the y794 rule and it is a claim: if this job
+  # ever drops under 6 minutes its budget should come back down, and if it grows
+  # past 18 it should split again rather than be topped up.
+  e2e-demo:
+    name: demo-spawning e2e lanes (Layers E + E3..E6u)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Budget stamp — start this job's own clock
+        # Same reason the `ci` job stamps: `timeout-minutes` measures from when
+        # the job starts, and the margin gate has to measure the same interval
+        # or it is grading something else.
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        # Its OWN key, on the same reasoning validate-codegen and interop carry
+        # theirs: this job's build set is the demo binary under four different
+        # feature combinations, which is not the `ci` job's set, and a shared key
+        # across differing sets thrashes.
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates -> target
+          key: e2e-demo
+
+      - name: Build zenoh-pico CLI binaries (Layer E dep)
+        # Layer E spawns target/zenoh-pico-cli/z_put against the wz-ap-demo
+        # binary's TCP --listen endpoint. Built from the vendored submodule;
+        # the Swatinem cache covers `crates -> target` only, so this is every run.
+        run: bash scripts/build-zenoh-pico-cli.sh
+
+      - name: Build wz-ap-demo binary (Layer E dep)
+        run: (cd crates && cargo build -p wz-ap-demo)
+
+      - name: Layer E — wz-ap-demo round-trip vs zenoh-pico z_put
+        run: bash scripts/run-ci.sh --layer E
+
+      - name: Layer E3 — multi-peer router e2e (routing-router foundation)
+        # R311qa — builds wz-ap-demo with --features routing-router (additive)
+        # and runs the self-contained wz<->wz router e2e (one router + two
+        # initiators); host-only, no external binary.
+        run: bash scripts/run-ci.sh --layer E3
+
+      - name: Layer E4 — routing-router reject gate (default build rejects --router)
+        # R311qa — the negative catalog-truthfulness gate: builds the DEFAULT
+        # wz-ap-demo and asserts it rejects --router with exit 2. Rebuilds the
+        # default binary after E3's --features routing-router build, so the
+        # binary at the shared path matches the variant each lane asserts. THE
+        # ORDER E3 -> E4 IS LOAD-BEARING and moved with them.
+        run: bash scripts/run-ci.sh --layer E4
+
+      - name: Layer E4i — INERT-reporting gate (default build reports advanced/group flags inert)
+        # R311y448 — E4's opposite contract on the same DEFAULT binary: the
+        # advanced/group CLI is feature-uniform, so instead of rejecting these
+        # flags the demo drops the capability and reports it naming the missing
+        # feature. Until this lane the `#[cfg(not(feature = ...))]` arms compiled
+        # everywhere and ran nowhere. Self-contained wz<->wz, no external runner.
+        run: bash scripts/run-ci.sh --layer E4i
+
+      - name: Layer E5 — router data-plane forwarding e2e (routing-routes)
+        # R311qc — the data-plane counterpart to E3: builds wz-ap-demo with
+        # --features routing-routes and asserts the router forwards a Put across
+        # faces (producer -> router -> matching subscriber). Self-contained
+        # wz<->wz, no external runner like E3/E4.
+        run: bash scripts/run-ci.sh --layer E5
+
+      - name: Layer E5u — router forwarding e2e OVER UNIXPIPE (routing-routes)
+        # R311y395 — the acceptor-concurrency counterpart of the Layer Z
+        # dialer-concurrency leg: builds wz-ap-demo with --features
+        # routing-routes,transport-link-unixpipe and asserts a wz --router
+        # unixpipe/<base> forwards a Put between TWO concurrent --connect
+        # unixpipe clients (wz is the multi-client routing listener over IPC).
+        # Self-contained wz<->wz, no external oracle; unixpipe is Linux-only and
+        # this runner is ubuntu, so the lane's Linux guard never SKIPs here.
+        run: bash scripts/run-ci.sh --layer E5u
+
+      - name: Layer E7u — router-hat (true Router) forwarding OVER UNIXPIPE
+        # R311y396 — the product-code counterpart of E5u. run_router_hat's
+        # addressing seam is made non-IP safe (a non-IP listen requires an
+        # explicit --zid), so a wz --router-hat (a true WhatAmI::Router) binds a
+        # unixpipe listener and forwards a Put between two distinct-zid
+        # --connect unixpipe clients. unixpipe is Linux-only and this runner is
+        # ubuntu, so the lane's Linux guard never SKIPs here.
+        run: bash scripts/run-ci.sh --layer E7u
+
+      - name: Layer E6u — peer (WhatAmI::Peer) forwarding OVER UNIXPIPE
+        # R311y397 — the peer run-mode counterpart of E5u/E7u. run_peer gains a
+        # --zid override and a non-IP-safe addressing seam, so a wz --peer binds
+        # a unixpipe listener and forwards a Put between two distinct-zid
+        # --connect unixpipe clients. unixpipe is Linux-only and this runner is
+        # ubuntu, so the lane's Linux guard never SKIPs here.
+        run: bash scripts/run-ci.sh --layer E6u
+
+      - name: Budget margin — this job may not approach its timeout in silence
+        # Instrumented from birth rather than after its first cancel, which is
+        # the whole lesson of the two rounds that produced this job. 1200s to
+        # match `timeout-minutes: 20`; the two numbers are one fact, so move that
+        # and move this. The floor is 30%: a job that peels down below its own
+        # budget should be told to give the budget back (R311y794).
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1200 90 30
 
   portability:
     name: portability (${{ matrix.os }})
