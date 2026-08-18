@@ -701,7 +701,8 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
 /// No zenohd here, deliberately: the target port has NOTHING on it. A refused
 /// dial is the observable, and providing a listener would remove it.
 #[test]
-#[ignore = "binary-dep e2e: needs wz-ap-demo[+zenoh-config,+routing-peer]; runs via --ignored"]
+#[ignore = "binary-dep e2e: needs wz-ap-demo[+zenoh-config,+routing-peer,\
+            +router-connect-reconcile]; runs via --ignored"]
 // R311y851 — the fn carries `zenohd` because Layer C0's naming obligation is
 // about the FILE's family, not about which binaries this one leg happens to
 // need. libtest's `--skip` matches the function name, so a leg in a
@@ -782,6 +783,15 @@ fn the_retry_schedule_a_stock_zenohd_config_carries_is_the_one_the_node_runs() {
 /// which is what an operator replacing a zenoh node actually has.
 fn attempts_in_window(demo: &std::path::Path, source: &str) -> usize {
     const WINDOW: Duration = Duration::from_secs(6);
+    // R311y851 — a node has to have STARTED before its cadence exists. Startup
+    // on a loaded CI runner is seconds, and a window timed from `spawn` spends
+    // them: the control arm came back with ONE attempt on hosted (2026-08-18)
+    // against three on the dev box, and the leg's own vacuity guard called that
+    // "a node that did not run" — which was exactly right and named the wrong
+    // subject. Generous, because this bound is not what the leg measures; it
+    // only has to be longer than any plausible start.
+    const STARTUP: Duration = Duration::from_secs(30);
+    const POLL: Duration = Duration::from_millis(50);
     const FAILED_DIAL: &str = "FAILED (peer";
 
     let file = staged_config(source);
@@ -800,10 +810,72 @@ fn attempts_in_window(demo: &std::path::Path, source: &str) -> usize {
         command.spawn().expect("spawn wz-ap-demo"),
     );
 
+    // The window opens on the FIRST dial, so both arms are measured over the
+    // same six seconds OF CADENCE rather than over six seconds that begin with
+    // however long this host took to link and boot a binary.
+    // `read_captured` reads by `pread`, so polling it does not move the offset
+    // the child is appending at — the same property the shared-offset test in
+    // `common` pins.
+    let mut capture = capture;
+
+    // R311y851 — THE THIRD FEATURE GUARD, and it is the one this leg was
+    // missing. The demo prints its own feature set at startup, so the build is
+    // readable rather than assumed.
+    //
+    // Measured on 2026-08-18, at this lane's exact feature set: the peer arm
+    // dials each configured address ONCE and never again, whatever schedule the
+    // file carries, because the loop that re-dials a desired peer lives behind
+    // `router-connect-reconcile` (`accept_loop.rs:1645-1659` — with neither that
+    // feature nor `transport-multilink` the policy is discarded, and
+    // `transport-multilink` alone paces link RE-ADDS rather than a peer that
+    // never connected). The admin config still renders zenoh's 1s/4s/2.0, so the
+    // node reports a cadence it does not run. Without this guard the leg reads
+    // that as one attempt and the vacuity assertion blames "a node that did not
+    // run", which is the right complaint about the wrong subject and cost a
+    // hosted red to attribute.
+    let deadline = std::time::Instant::now() + STARTUP;
+    loop {
+        let logged = wz_integration_tests::common::read_captured(&mut capture);
+        if let Some(line) = logged.lines().find(|l| l.contains("BUILD FEATURES")) {
+            assert!(
+                line.contains("router-connect-reconcile"),
+                "this lane's wz-ap-demo cannot RE-dial at all -- the peer arm's \
+                 re-dial loop is behind `router-connect-reconcile` and this build \
+                 has: {line}\nRebuild with that feature; a cadence cannot be \
+                 measured on a node that dials once."
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the demo printed no BUILD FEATURES line in {}s",
+            STARTUP.as_secs()
+        );
+        std::thread::sleep(POLL);
+    }
+
+    let deadline = std::time::Instant::now() + STARTUP;
+    let mut waited = Duration::ZERO;
+    loop {
+        if wz_integration_tests::common::read_captured(&mut capture).contains(FAILED_DIAL) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no dial attempt in {}s; the node never reached its connect list, \
+             so there is no cadence here to measure",
+            STARTUP.as_secs()
+        );
+        std::thread::sleep(POLL);
+        waited += POLL;
+    }
+    // Recorded rather than discarded: if this is ever large it is the fact that
+    // explains a surprising count, and a number nobody printed cannot do that.
+    eprintln!("first dial after ~{}ms of startup", waited.as_millis());
+
     std::thread::sleep(WINDOW);
     drop(guard);
 
-    let mut capture = capture;
     let logged = wz_integration_tests::common::read_captured(&mut capture);
     // PANIC rather than return 0: a build without either feature would
     // otherwise read as "this schedule never re-dialled", which is the same

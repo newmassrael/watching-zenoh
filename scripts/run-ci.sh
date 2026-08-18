@@ -10399,7 +10399,15 @@ layer_z_zenohd_interop() {
     # would fail the leg rather than skip it. Additive like the rest: the flag is
     # absent from every other leg's argv, so they all dial through the unchanged
     # binary.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
+    # R311y851 adds `router-connect-reconcile`. LEG 5 of
+    # `wz_reads_a_stock_zenohd_config` measures a re-dial CADENCE, and the loop
+    # that re-dials a desired peer is behind that feature
+    # (`accept_loop.rs:1645-1659`); `transport-multilink`, which this set already
+    # had, paces link RE-ADDS and does not reconcile a peer that never connected.
+    # Measured at this exact set on 2026-08-18: the control arm dialled ONCE in
+    # six seconds while the admin config rendered zenoh's 1s/4s/2.0, which is how
+    # that leg reded on hosted. Both restatements of this line carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -10492,7 +10500,15 @@ layer_z_zenohd_interop() {
     # hosted CI with its own "rebuild with --features zenoh-config" hint. A
     # prediction in a comment is not a gate; Layer C0f now compares the two sets
     # mechanically, which is what the prediction was asking for.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
+    # R311y851 adds `router-connect-reconcile`. LEG 5 of
+    # `wz_reads_a_stock_zenohd_config` measures a re-dial CADENCE, and the loop
+    # that re-dials a desired peer is behind that feature
+    # (`accept_loop.rs:1645-1659`); `transport-multilink`, which this set already
+    # had, paces link RE-ADDS and does not reconcile a peer that never connected.
+    # Measured at this exact set on 2026-08-18: the control arm dialled ONCE in
+    # six seconds while the admin config rendered zenoh's 1s/4s/2.0, which is how
+    # that leg reded on hosted. Both restatements of this line carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
     # R311y435 — wz COMPOSED lowlatency x compression cross-impl: the measurement
     # R311y434 explicitly did NOT claim ("no leg dials zenohd with both modes,
     # because the demo cannot stage both offers"). The offer-SET widening of
