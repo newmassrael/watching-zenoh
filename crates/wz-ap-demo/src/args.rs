@@ -269,6 +269,24 @@ pub(crate) fn parse_pair(args: &[String], flag: &str) -> Option<String> {
 /// | `transport/unicast/max_links` | `--max-links <n>` |
 /// | `transport/unicast/qos/enabled: true` | `--qos` |
 /// | `transport/unicast/lowlatency: true` | `--lowlatency` |
+/// | `transport/unicast/compression/enabled: true` | `--compression` |
+/// | `transport/link/tx/batch_size` | `--batch-size <n>` |
+/// | `transport/link/tx/lease` | `--lease-ms <n>` |
+/// | an `adminspace` block at all | `--config-queryable` |
+/// | `adminspace/permissions/read: false` | `--no-admin-read` |
+/// | `adminspace/permissions/write: true` | `--config-writable` `--config-write-permit` |
+///
+/// R311y843 added the lower nine rows. R311y842 shipped the reader with only
+/// the upper five wired, so eight of the fourteen keys it reports as
+/// "honoured" reached nothing — a report that is true about the reader and
+/// false about the node, which is a worse position than not reading them at
+/// all. `every_key_the_reader_calls_honoured_reaches_the_demo_or_is_named_as_dropped`
+/// is the gate that keeps the two halves together.
+///
+/// zenoh states the admin space as ONE `permissions.write`; wz splits it into
+/// hosting the write subscriber (`--config-writable`) and permitting the write
+/// (`--config-write-permit`), so the single upstream key expands to both —
+/// either alone yields a node that does not do what the operator's file says.
 ///
 /// A role the command line ALREADY named is left alone: the file supplies
 /// defaults, the command line overrides them, which is the precedence zenohd
@@ -357,6 +375,45 @@ pub(crate) fn expand_stock_zenoh_config(
     {
         added.push("--lowlatency".into());
     }
+    if named("transport/unicast/compression/enabled")
+        && cfg.compression
+        && !rest.iter().any(|a| a == "--compression")
+    {
+        added.push("--compression".into());
+    }
+    // The two that reach the WIRE rather than a local policy: `batch_size` and
+    // `lease` are InitSyn / OpenSyn fields, so a dropped one is not a setting
+    // that failed to apply but a value the peer is told and the operator was
+    // not. Unlike the booleans above these are honoured at ANY value, because
+    // there is no "off" for them — the file naming the key is the instruction.
+    if named("transport/link/tx/batch_size") && !rest.iter().any(|a| a == "--batch-size") {
+        added.push("--batch-size".into());
+        added.push(cfg.batch_size.to_string());
+    }
+    if named("transport/link/tx/lease") && !rest.iter().any(|a| a == "--lease-ms") {
+        added.push("--lease-ms".into());
+        added.push(cfg.lease_ms.to_string());
+    }
+    // The adminspace block, whose three upstream keys expand to four wz flags.
+    // Keyed on the BLOCK rather than on `adminspace/enabled`, because a
+    // document that names only a permission still describes an admin space —
+    // that is the same reading `from_json5` takes when it builds the Option.
+    if let Some(admin) = &cfg.adminspace {
+        if !rest.iter().any(|a| a == "--config-queryable") {
+            added.push("--config-queryable".into());
+        }
+        if !admin.read && !rest.iter().any(|a| a == "--no-admin-read") {
+            added.push("--no-admin-read".into());
+        }
+        if admin.write {
+            if !rest.iter().any(|a| a == "--config-writable") {
+                added.push("--config-writable".into());
+            }
+            if !rest.iter().any(|a| a == "--config-write-permit") {
+                added.push("--config-write-permit".into());
+            }
+        }
+    }
 
     let mut argv: Vec<String> = rest.to_vec();
     argv.extend(added.iter().cloned());
@@ -391,6 +448,8 @@ pub(crate) struct StockConfigExpansion {
 #[cfg(all(test, feature = "zenoh-config"))]
 mod stock_config_tests {
     use super::*;
+
+    use wz::runtime_tokio::zenoh_config::HONOURED_CONFIG_KEYS;
 
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| String::from(*s)).collect()
@@ -571,6 +630,298 @@ mod stock_config_tests {
             ]
         );
         assert_eq!(out.named, vec!["mode", "connect/endpoints"]);
+    }
+
+    /// R311y843 — every key wz REPORTS as honoured, paired with whether the
+    /// demo does anything at all with it.
+    ///
+    /// R311y842 built the reader and its own report calls all fourteen keys
+    /// "honoured", but only six reached a flag. The other eight were ingested
+    /// and DROPPED at this boundary, which is worse than never reading them:
+    /// the report is the surface an operator checks, and
+    /// `--config z.json5: honoured [..., "transport/link/tx/lease"]` printed by
+    /// a node that goes on to announce its own hard-coded ten-second lease is a
+    /// truthful statement about the reader and a false one about the node.
+    ///
+    /// Each row is a CONTROL / VARIANT pair over the same expansion so the argv
+    /// difference is attributable to the ONE key that differs — a variant that
+    /// merely gains an endpoint would otherwise credit the key for the
+    /// endpoint's flag. A key that changes nothing must be NAMED in
+    /// `CONFIG_KEYS_THE_DEMO_DROPS`: the discipline
+    /// `UNHONOURED_UPSTREAM_CONFIG_KEYS` applies to zenoh's surface, applied
+    /// one level down to wz's own.
+    ///
+    /// The table is also checked for COVERAGE against `HONOURED_CONFIG_KEYS`,
+    /// so a fifteenth honoured key cannot be added without stating here what
+    /// the demo does with it.
+    const LISTEN_ONLY: &str = r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#;
+    const CONNECT_ONLY: &str = r#"{ connect: { endpoints: ["tcp/r:7447"] } }"#;
+
+    /// Keys the reader ingests that reach NO behaviour in this binary.
+    ///
+    /// Empty is the goal and not the invariant — a key with no sink is a
+    /// legitimate state, but it has to be written down here rather than hide
+    /// behind a report that calls it honoured.
+    const CONFIG_KEYS_THE_DEMO_DROPS: &[&str] = &[
+        // Reachability, not a role: `scouting/multicast/enabled` says whether
+        // to LISTEN for a scout beacon, and the demo's `--scout` says to
+        // discover INSTEAD of dialling, which is a different sentence. Mapping
+        // one onto the other would rewrite the operator's topology.
+        "scouting/multicast/enabled",
+        // No sink in this binary: nothing on the demo's push path stamps a
+        // source timestamp — `Timestamp` does not occur anywhere under
+        // `wz-ap-demo/src/` — so there is no flag to expand into and honouring
+        // it would be a claim about a plane that does not exist yet.
+        "timestamping/enabled",
+    ];
+
+    /// `(key, control, variant)` — the variant differs from the control in
+    /// exactly the one key, and must NAME it.
+    fn honoured_key_fixtures() -> Vec<(&'static str, &'static str, &'static str)> {
+        vec![
+            (
+                "mode",
+                LISTEN_ONLY,
+                r#"{ mode: "router", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
+            ),
+            (
+                "listen/endpoints",
+                CONNECT_ONLY,
+                r#"{ connect: { endpoints: ["tcp/r:7447"] },
+                     listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
+            ),
+            (
+                "connect/endpoints",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     connect: { endpoints: ["tcp/r:7447"] } }"#,
+            ),
+            (
+                "scouting/multicast/enabled",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     scouting: { multicast: { enabled: false } } }"#,
+            ),
+            (
+                "timestamping/enabled",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     timestamping: { enabled: true } }"#,
+            ),
+            (
+                "transport/unicast/max_links",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { unicast: { max_links: 9 } } }"#,
+            ),
+            // `qos` RESOLVES to true in stock zenoh, so a document that names
+            // only `lowlatency` describes a node that cannot start. Both sides
+            // of this pair name `qos: false` — which adds nothing, since the
+            // expansion acts on a named `true` — so the delta stays the one key.
+            (
+                "transport/unicast/lowlatency",
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { unicast: { qos: { enabled: false } } } }"#,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { unicast: { qos: { enabled: false },
+                                             lowlatency: true } } }"#,
+            ),
+            (
+                "transport/unicast/qos/enabled",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { unicast: { qos: { enabled: true } } } }"#,
+            ),
+            (
+                "transport/unicast/compression/enabled",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { unicast: { compression: { enabled: true } } } }"#,
+            ),
+            (
+                "transport/link/tx/batch_size",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { batch_size: 4096 } } } }"#,
+            ),
+            (
+                "transport/link/tx/lease",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { lease: 3000 } } } }"#,
+            ),
+            (
+                "adminspace/enabled",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     adminspace: { enabled: true } }"#,
+            ),
+            (
+                "adminspace/permissions/read",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     adminspace: { enabled: true, permissions: { read: false } } }"#,
+            ),
+            (
+                "adminspace/permissions/write",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     adminspace: { enabled: true, permissions: { write: true } } }"#,
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_key_the_reader_calls_honoured_reaches_the_demo_or_is_named_as_dropped() {
+        let fixtures = honoured_key_fixtures();
+
+        // COVERAGE, both directions: a new honoured key with no row here would
+        // otherwise be silently untested, and a row for a key the reader no
+        // longer honours would be testing nothing.
+        let mut want: Vec<&str> = HONOURED_CONFIG_KEYS.to_vec();
+        let mut got: Vec<&str> = fixtures.iter().map(|(k, _, _)| *k).collect();
+        want.sort_unstable();
+        got.sort_unstable();
+        assert_eq!(
+            got, want,
+            "the fixture table and HONOURED_CONFIG_KEYS have diverged"
+        );
+        for dropped in CONFIG_KEYS_THE_DEMO_DROPS {
+            assert!(
+                HONOURED_CONFIG_KEYS.contains(dropped),
+                "{dropped} is pinned as dropped but is not a honoured key"
+            );
+        }
+
+        let mut reached_nothing: Vec<&str> = Vec::new();
+        for (key, control, variant) in &fixtures {
+            let base = expand(&["--config", "z.json5"], control)
+                .unwrap_or_else(|e| panic!("{key}: the control config is not readable: {e}"));
+            let with = expand(&["--config", "z.json5"], variant)
+                .unwrap_or_else(|e| panic!("{key}: the variant config is not readable: {e}"));
+            // Vacuity guard: a fixture that does not actually name the key
+            // would report "dropped" for a typo in this table.
+            assert!(
+                with.named.contains(key),
+                "{key}: the variant does not name it (named = {:?})",
+                with.named
+            );
+            if with.added == base.added {
+                reached_nothing.push(key);
+            }
+        }
+
+        reached_nothing.sort_unstable();
+        let mut pinned: Vec<&str> = CONFIG_KEYS_THE_DEMO_DROPS.to_vec();
+        pinned.sort_unstable();
+        assert_eq!(
+            reached_nothing, pinned,
+            "a key the report calls honoured reaches no behaviour and is not \
+             named in CONFIG_KEYS_THE_DEMO_DROPS (or one named there now does \
+             something and should be removed)"
+        );
+    }
+
+    /// R311y843 — the config's two WIRE values, followed from the file all the
+    /// way to the parameters the node announces.
+    ///
+    /// The census gate above only shows that the argv CHANGED, and a flag this
+    /// binary does not parse would satisfy it while the wire stayed exactly
+    /// where it was — a green that measures the expansion talking to itself.
+    /// This is the other half: the expanded argv is read back through
+    /// [`TransportTuning::from_argv`], which is the same call `main` makes, and
+    /// the params [`demo_session_init_params`] builds from it carry the
+    /// operator's numbers rather than the demo's.
+    ///
+    /// `effective_batch_size()` rather than the field: that accessor is what
+    /// `handshake_encode::encode_init` writes into the InitSyn
+    /// (`crates/wz-session-core/src/handshake_encode.rs:106`), so it is the
+    /// value the PEER is told. The last hop from these params to the bytes is
+    /// wz-session-core's own gate; the hop this round added is the one here.
+    #[test]
+    fn the_batch_size_and_lease_a_config_names_reach_the_params_the_node_announces() {
+        let exp = expand(
+            &["--config", "z.json5"],
+            r#"{ mode: "client",
+                 connect: { endpoints: ["tcp/r:7447"] },
+                 transport: { link: { tx: { batch_size: 4096, lease: 3000 } } } }"#,
+        )
+        .unwrap();
+        assert!(
+            exp.added.contains(&String::from("--batch-size"))
+                && exp.added.contains(&String::from("--lease-ms")),
+            "added = {:?}",
+            exp.added
+        );
+
+        let tuned = TransportTuning::from_argv(&exp.argv).expect("the expansion is parseable");
+        let params = demo_session_init_params(NodeKind::Initiator, tuned)
+            .expect("OS entropy for the cookie signing key");
+        assert_eq!(params.effective_batch_size(), 4096);
+        assert_eq!(params.lease_ms, 3000);
+
+        // CONTROL, in the same test: a node started WITHOUT the file announces
+        // the demo's own pair, so the two assertions above cannot be passing on
+        // a coincidence between the fixture and the default.
+        let bare = demo_session_init_params(
+            NodeKind::Initiator,
+            TransportTuning::from_argv(&argv(&["--connect", "tcp/r:7447"])).unwrap(),
+        )
+        .expect("OS entropy for the cookie signing key");
+        assert_eq!(bare.effective_batch_size(), 65535);
+        assert_eq!(bare.lease_ms, 10_000);
+    }
+
+    /// The exact argv the adminspace block and the compression flag produce.
+    ///
+    /// The census gate is a DIFFERENCE test and would accept any change at all;
+    /// this pins which flags, because zenoh's one `permissions.write` has to
+    /// become both of wz's — hosting the write subscriber and permitting the
+    /// write — and either alone is a node that does not do what the file says.
+    #[test]
+    fn the_adminspace_block_and_compression_expand_to_the_flags_that_carry_them() {
+        let out = expand(
+            &["--config", "z.json5"],
+            r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                 transport: { unicast: { compression: { enabled: true } } },
+                 adminspace: { enabled: true,
+                               permissions: { read: false, write: true } } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            out.added,
+            argv(&[
+                "--listen",
+                "tcp/0.0.0.0:7447",
+                "--compression",
+                "--config-queryable",
+                "--no-admin-read",
+                "--config-writable",
+                "--config-write-permit",
+            ])
+        );
+    }
+
+    /// A value the operator mistyped is refused rather than rounded down to the
+    /// demo's own — announcing a lease nobody asked for is the failure this
+    /// round removes, and doing it after a parse error would be the same
+    /// failure wearing a diagnostic.
+    #[test]
+    fn an_unreadable_wire_value_is_an_error_rather_than_a_silent_default() {
+        for (cli, needle) in [
+            (vec!["--batch-size", "70000"], "--batch-size expects"),
+            (vec!["--batch-size", "0"], "zero-byte TX batch"),
+            (vec!["--lease-ms", "3s"], "--lease-ms expects"),
+            (vec!["--lease-ms", "0"], "already expired"),
+        ] {
+            let err = TransportTuning::from_argv(&argv(&cli))
+                .expect_err("a value outside the type is not a tuning");
+            assert!(err.contains(needle), "{cli:?} -> {err}");
+        }
+        assert_eq!(
+            TransportTuning::from_argv(&argv(&["--listen", "tcp/a:1"])).unwrap(),
+            TransportTuning::default()
+        );
     }
 }
 
@@ -842,6 +1193,77 @@ pub(crate) const DEMO_ZID: [u8; 4] = [0x01, 0x02, 0x03, 0x04];
 /// feature message rather than a parse error.
 pub(crate) const DEFAULT_SCOUT_BUDGET_MS: u64 = 10_000;
 
+/// R311y843 — the handshake values an operator can move, carried as ONE value
+/// so that a further transport knob does not become a further parameter on
+/// five run-mode signatures.
+///
+/// Both fields go on the WIRE: `batch_size` is the InitSyn's advertised TX
+/// batch (the peer sizes its own buffer from it and the session negotiates the
+/// min), `lease_ms` is the OpenSyn's lease (the peer's keepalive deadline for
+/// this session). That is why they are settings the demo cannot keep to
+/// itself: a node that ignores them is not merely locally misconfigured, it
+/// tells the other end something the operator did not say.
+///
+/// [`Default`] is the pair the demo announced as literals before this type
+/// existed, so a build with neither flag is byte-identical on the wire to the
+/// one that came before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TransportTuning {
+    /// InitSyn `batch_size`. The `0`-unset sentinel is `SessionInitParams`'
+    /// own; this type never produces it, since a `0` from a config file is
+    /// refused by `ZenohNodeConfig::validate` before it reaches here.
+    pub(crate) batch_size: u16,
+    /// OpenSyn lease, in milliseconds.
+    pub(crate) lease_ms: u64,
+}
+
+impl Default for TransportTuning {
+    fn default() -> Self {
+        Self {
+            batch_size: 65535,
+            lease_ms: 10_000,
+        }
+    }
+}
+
+impl TransportTuning {
+    /// Read `--batch-size <n>` / `--lease-ms <n>` off the command line.
+    ///
+    /// Both are the argv shape a stock zenoh config expands into, and both are
+    /// equally usable by hand — that is the point of the expansion, and the
+    /// reason the config does not reach past the command line into this
+    /// struct.
+    ///
+    /// A malformed value is an ERROR rather than a silent fallback to the
+    /// default: the operator asked for a specific wire announcement, and
+    /// announcing a different one because their digits were unparseable is the
+    /// failure this whole round exists to remove.
+    pub(crate) fn from_argv(rest: &[String]) -> Result<Self, String> {
+        let mut out = Self::default();
+        if let Some(v) = parse_pair(rest, "--batch-size") {
+            out.batch_size = v
+                .parse::<u16>()
+                .map_err(|_| format!("--batch-size expects 1..=65535 (a u16), got '{v}'"))?;
+            if out.batch_size == 0 {
+                return Err(String::from(
+                    "--batch-size 0 would advertise a zero-byte TX batch",
+                ));
+            }
+        }
+        if let Some(v) = parse_pair(rest, "--lease-ms") {
+            out.lease_ms = v
+                .parse::<u64>()
+                .map_err(|_| format!("--lease-ms expects milliseconds, got '{v}'"))?;
+            if out.lease_ms == 0 {
+                return Err(String::from(
+                    "--lease-ms 0 would announce a lease that is already expired",
+                ));
+            }
+        }
+        Ok(out)
+    }
+}
+
 /// R311y820 — FALLIBLE, because the cookie signing key is now drawn from OS
 /// entropy rather than written as a literal, and there is no honest way to
 /// absorb an entropy failure into a key. A host that cannot obtain entropy at
@@ -853,7 +1275,10 @@ pub(crate) const DEFAULT_SCOUT_BUDGET_MS: u64 = 10_000;
 /// once here beats five `map_err`s, and a binary that cannot reach the OS
 /// entropy pool is reporting an environment fault, which is what `io::Error`
 /// names.
-pub(crate) fn demo_session_init_params(kind: NodeKind) -> std::io::Result<SessionInitParams> {
+pub(crate) fn demo_session_init_params(
+    kind: NodeKind,
+    tuning: TransportTuning,
+) -> std::io::Result<SessionInitParams> {
     let whatami = match kind {
         NodeKind::Acceptor => WhatAmI::Peer, // R121b/c/d/e baseline
         // The router accepts via the same well-tested Client->Peer direction as
@@ -882,8 +1307,13 @@ pub(crate) fn demo_session_init_params(kind: NodeKind) -> std::io::Result<Sessio
         zid: DEMO_ZID.to_vec(),
         seq_num_res: 2,
         req_id_res: 2,
-        batch_size: 65535,
-        lease_ms: 10_000,
+        // R311y843 — the two handshake fields an operator's stock zenoh config
+        // can move. They were literals here until the config reader had a way
+        // to reach them, which meant `--config` reported
+        // `transport/link/tx/lease` as honoured and the node then announced
+        // this ten-second one.
+        batch_size: tuning.batch_size,
+        lease_ms: tuning.lease_ms,
         initial_sn: 0,
         cookie: Vec::new(),
         // R311y820 — DRAWN, not a literal. This site carried a 32-byte `0xAB`

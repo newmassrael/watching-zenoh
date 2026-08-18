@@ -170,6 +170,20 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
+    // R311y843 — the two handshake values an operator can move, read ONCE from
+    // the already-expanded command line so every run mode announces the same
+    // pair. Read here rather than inside each mode because the failure is a
+    // parse failure: a node that started with a default lease because the
+    // digits were unreadable is the silent misconfiguration `--config` exists
+    // to end.
+    let tuning = match crate::args::TransportTuning::from_argv(rest) {
+        Ok(t) => t,
+        Err(message) => {
+            eprintln!("wz-ap-demo: {message}");
+            return ExitCode::from(2);
+        }
+    };
+
     // R311qa — `--router <addr>` selects the multi-peer router mode (bind once,
     // HOLD N concurrent peer faces — the routing-router foundation), handled
     // before the single-session role parse below (which requires exactly one of
@@ -188,6 +202,7 @@ fn main() -> ExitCode {
             parse_pair(rest, "--tls-key"),
             parse_pair(rest, "--quic-cert"),
             parse_pair(rest, "--quic-key"),
+            tuning,
         );
         #[cfg(not(feature = "routing-router"))]
         {
@@ -519,6 +534,7 @@ fn main() -> ExitCode {
                     downsample_interface,
                     max_payload,
                 },
+                tuning,
             );
         }
         #[cfg(not(feature = "routing-peer"))]
@@ -647,6 +663,7 @@ fn main() -> ExitCode {
                     // one spelling means one thing across run-modes.
                     no_admin_read: rest.iter().any(|a| a == "--no-admin-read"),
                     connect_retry,
+                    tuning,
                 },
             );
         }
@@ -722,6 +739,7 @@ fn main() -> ExitCode {
                 // `--peer` and `--router-hat` parse, so one spelling means one thing
                 // across every run-mode that hosts an adminspace.
                 rest.iter().any(|a| a == "--no-admin-read"),
+                tuning,
             )
         };
         #[cfg(not(feature = "adminspace-config-hotreload"))]
@@ -1876,6 +1894,7 @@ fn main() -> ExitCode {
             remote_log_spec,
             reply_log_spec,
             zid_override,
+            tuning,
         )
         .await
     });
@@ -1993,6 +2012,7 @@ fn run_router_mode(
     tls_key: Option<String>,
     quic_cert: Option<String>,
     quic_key: Option<String>,
+    tuning: crate::args::TransportTuning,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -2003,7 +2023,7 @@ fn run_router_mode(
         }
     };
     match runtime.block_on(crate::runner::run_router(
-        &addr, &tls_cert, &tls_key, &quic_cert, &quic_key,
+        &addr, &tls_cert, &tls_key, &quic_cert, &quic_key, tuning,
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -2043,6 +2063,7 @@ fn run_peer_mode(
     dial_targets: Vec<String>,
     opts: crate::runner::PeerOpts,
     interceptors: InterceptorOpts,
+    tuning: crate::args::TransportTuning,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -2057,6 +2078,7 @@ fn run_peer_mode(
         &dial_targets,
         &opts,
         &interceptors,
+        tuning,
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -2081,6 +2103,7 @@ fn run_storage_host_mode(
     dynamic_volume: Option<crate::args::DynamicVolumeArgs>,
     storage_gc: crate::args::StorageGcArgs,
     no_admin_read: bool,
+    tuning: crate::args::TransportTuning,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -2097,6 +2120,7 @@ fn run_storage_host_mode(
         dynamic_volume.as_ref(),
         storage_gc,
         no_admin_read,
+        tuning,
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

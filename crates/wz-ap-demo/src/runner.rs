@@ -96,6 +96,7 @@ use crate::args::DEMO_PROTO_VERSION;
 use crate::args::{
     demo_session_init_params, DeclareEmitSpec, LivelinessGetSpec, PublisherSpec, QueryEmitSpec,
     QueryRoleSpec, QueryableReply, QueryableSpec, RemoteLogSpec, ReplyConsumerSpec, Role,
+    TransportTuning,
 };
 use crate::shutdown::shutdown_signal;
 use crate::tasks::{liveliness_get_task, publisher_task, query_task, QUERY_RID};
@@ -1709,6 +1710,7 @@ pub(crate) async fn run_demo(
     remote_log_spec: RemoteLogSpec,
     reply_log_spec: ReplyConsumerSpec,
     zid_override: Option<Vec<u8>>,
+    tuning: TransportTuning,
 ) -> io::Result<()> {
     let QueryRoleSpec {
         queryable: queryable_spec,
@@ -1735,7 +1737,7 @@ pub(crate) async fn run_demo(
     // into the open helper, install_observer_callbacks, Session::new, the drive
     // loop, and sweep_task (TokioTime is Copy, so every copy is the same epoch).
     let session_clock = TokioTime::new();
-    let mut params = demo_session_init_params(role.node_kind())?;
+    let mut params = demo_session_init_params(role.node_kind(), tuning)?;
     // `--zid <hex>` override: give this session node a DISTINCT identity so it can
     // coexist with another session node inside a router mesh (the mesh graph keys
     // on zid; the hardcoded demo zid would collide). No override -> the default.
@@ -2442,6 +2444,7 @@ pub(crate) async fn run_router(
     tls_key: &Option<String>,
     quic_cert: &Option<String>,
     quic_key: &Option<String>,
+    tuning: TransportTuning,
 ) -> io::Result<()> {
     run_router_until(
         listen,
@@ -2449,6 +2452,7 @@ pub(crate) async fn run_router(
         tls_key,
         quic_cert,
         quic_key,
+        tuning,
         shutdown_signal(),
     )
     .await
@@ -2466,6 +2470,7 @@ async fn run_router_until(
     tls_key: &Option<String>,
     quic_cert: &Option<String>,
     quic_key: &Option<String>,
+    tuning: TransportTuning,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> io::Result<()> {
     use crate::args::NodeKind;
@@ -2512,7 +2517,7 @@ async fn run_router_until(
          faces (routing-router foundation, no forwarding)"
     );
 
-    let params = demo_session_init_params(NodeKind::Router)?;
+    let params = demo_session_init_params(NodeKind::Router, tuning)?;
 
     // The forwarding seam: with `routing-routes` the router routes Puts between
     // faces ([`RoutingForwarder`]); without it the accept-and-hold foundation
@@ -2784,8 +2789,17 @@ pub(crate) async fn run_peer(
     dial_targets: &[String],
     opts: &PeerOpts,
     interceptors: &crate::InterceptorOpts,
+    tuning: TransportTuning,
 ) -> io::Result<()> {
-    run_peer_until(listen, dial_targets, opts, interceptors, shutdown_signal()).await
+    run_peer_until(
+        listen,
+        dial_targets,
+        opts,
+        interceptors,
+        tuning,
+        shutdown_signal(),
+    )
+    .await
 }
 
 /// The testable inner of [`run_peer`] (R311y406) — takes the shutdown as a parameter
@@ -2799,6 +2813,7 @@ async fn run_peer_until(
     dial_targets: &[String],
     opts: &PeerOpts,
     interceptors: &crate::InterceptorOpts,
+    tuning: TransportTuning,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> io::Result<()> {
     // Destructure into the same local names + types the body uses (the Options as
@@ -2924,7 +2939,7 @@ async fn run_peer_until(
         }
     );
 
-    let mut params = demo_session_init_params(NodeKind::Peer)?;
+    let mut params = demo_session_init_params(NodeKind::Peer, tuning)?;
     // R311rc (c3d-4) — a DISTINCT zid per peer (the mesh routing graph keys on it,
     // so two peers MUST NOT share one; the demo's single hardcoded 0x01020304 would
     // collide — a node would ingest a remote link-state under its OWN zid).
@@ -4101,6 +4116,12 @@ pub(crate) struct RouterHatOpts {
     /// shipping wz ROUTER applied it; the permit now rides the same live
     /// `WzConfig::admin_permissions` slice the peer host reads, re-resolved per GET.
     pub no_admin_read: bool,
+    /// R311y843 — `--batch-size` / `--lease-ms`, the two handshake values a stock
+    /// zenoh config can move. The other four run modes take these as a parameter;
+    /// this one carries them in the bundle for the reason the bundle exists —
+    /// `run_router_hat_until` is at `clippy::too_many_arguments` and this struct's
+    /// whole purpose is to absorb a knob rather than widen an allow.
+    pub tuning: TransportTuning,
     /// R311y786 — `--connect-retry <init_ms>,<max_ms>,<factor>`: the schedule this
     /// router paces its outbound re-dials by (zenoh's `connect.retry`). Defaults to
     /// [`RetryPolicy::ZENOH_DEFAULT`], so the SHIPPED router runs the growth without
@@ -4279,7 +4300,7 @@ async fn run_router_hat_until(
         dials.len()
     );
 
-    let mut params = demo_session_init_params(NodeKind::RouterHat)?;
+    let mut params = demo_session_init_params(NodeKind::RouterHat, opts.tuning)?;
     params.zid = node_zid;
 
     // The dual-mesh router forwarder. Self is a WhatAmI::Router in BOTH meshes
@@ -5104,6 +5125,7 @@ pub(crate) async fn run_storage_host(
     dynamic_volume: Option<&crate::args::DynamicVolumeArgs>,
     storage_gc: crate::args::StorageGcArgs,
     no_admin_read: bool,
+    tuning: TransportTuning,
 ) -> io::Result<()> {
     use std::sync::atomic::Ordering::Relaxed;
 
@@ -5177,7 +5199,7 @@ pub(crate) async fn run_storage_host(
     use crate::args::NodeKind;
 
     let session_clock = TokioTime::new();
-    let params = demo_session_init_params(NodeKind::StorageHost)?;
+    let params = demo_session_init_params(NodeKind::StorageHost, tuning)?;
     // The pico witness scrapes ONE zid across all four sequential client sessions,
     // so the host zid must be STABLE across accept-loop iterations. The demo's fixed
     // Peer zid is that stable identity; there is exactly one storage host, so the
@@ -5756,7 +5778,7 @@ mod storage_host_volume_tests {
     target_os = "linux"
 ))]
 mod caller_failfast_tests {
-    use super::run_router_until;
+    use super::{run_router_until, TransportTuning};
 
     /// R311y392 — the once-`reject` discriminator flipped to ACCEPT: `run_router`
     /// (via its testable inner `run_router_until`) now ADMITS a `--listen
@@ -5787,9 +5809,17 @@ mod caller_failfast_tests {
         let listen = format!("unixpipe/{base}");
         // R311y405 — a cert-free unixpipe listen: all four cert slots are `&None`
         // (the run_router_until signature grew a tls/quic cert-path quartet).
-        run_router_until(&listen, &None, &None, &None, &None, std::future::ready(()))
-            .await
-            .expect("the mesh router admits a multi-client unixpipe --listen (R311y392)");
+        run_router_until(
+            &listen,
+            &None,
+            &None,
+            &None,
+            &None,
+            TransportTuning::default(),
+            std::future::ready(()),
+        )
+        .await
+        .expect("the mesh router admits a multi-client unixpipe --listen (R311y392)");
 
         // The acceptor's teardown unlinks the base request node; best-effort here.
         let _ = std::fs::remove_file(format!("{base}_uplink"));
@@ -5863,7 +5893,7 @@ mod mesh_dial_target_tests {
 
 #[cfg(all(test, feature = "routing-router", feature = "quic"))]
 mod router_quic_cert_tests {
-    use super::run_router_until;
+    use super::{run_router_until, TransportTuning};
 
     /// R311y405 — the `--router quic/` cert-threading discriminator: the mesh router
     /// now ADMITS a `quic/...` --listen WHEN its `--quic-cert` / `--quic-key` are
@@ -5908,6 +5938,7 @@ mod router_quic_cert_tests {
             &None,
             &Some(cert_path.clone()),
             &Some(key_path.clone()),
+            TransportTuning::default(),
             std::future::ready(()),
         )
         .await;
@@ -6036,7 +6067,7 @@ mod router_hat_failfast_tests {
 
 #[cfg(all(test, feature = "routing-peer", feature = "quic"))]
 mod peer_quic_cert_tests {
-    use super::{run_peer_until, PeerOpts};
+    use super::{run_peer_until, PeerOpts, TransportTuning};
     use crate::InterceptorOpts;
 
     /// R311y406 — the `--peer quic/` cert-threading discriminator: run_peer (via its
@@ -6111,6 +6142,7 @@ mod peer_quic_cert_tests {
             &[],
             &opts,
             &interceptors,
+            TransportTuning::default(),
             std::future::ready(()),
         )
         .await;
@@ -6197,9 +6229,15 @@ mod peer_failfast_tests {
         };
 
         let listen = format!("unixpipe/{base}");
-        let err = run_peer(&listen, &[], &opts, &interceptors)
-            .await
-            .expect_err("a non-IP unixpipe --peer without --zid must fail fast");
+        let err = run_peer(
+            &listen,
+            &[],
+            &opts,
+            &interceptors,
+            super::TransportTuning::default(),
+        )
+        .await
+        .expect_err("a non-IP unixpipe --peer without --zid must fail fast");
         assert!(
             err.to_string().contains("--zid"),
             "the fail-fast must name --zid (the R311y397 fix), got: {err}"

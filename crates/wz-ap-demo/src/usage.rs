@@ -88,6 +88,10 @@ pub(crate) fn print_usage() {
     eprintln!("                             (Z_EXT_COMPRESSION 0x6; combinable with");
     eprintln!("                             --lowlatency, where the negotiated wrap");
     eprintln!("                             is inert on the lean wire, as upstream)");
+    eprintln!("    --batch-size <n>         InitSyn TX batch advertised to the peer (1..=65535,");
+    eprintln!("                             default 65535). zenoh transport/link/tx/batch_size");
+    eprintln!("    --lease-ms <ms>          OpenSyn session lease announced to the peer");
+    eprintln!("                             (default 10000). zenoh transport/link/tx/lease");
     eprintln!("    --scout                  initiator mode with a DISCOVERED locator: emit a");
     eprintln!("                             multicast Scout on 224.0.0.224:7446 and dial the");
     eprintln!("                             locator the first peer Hello advertises. Mutually");

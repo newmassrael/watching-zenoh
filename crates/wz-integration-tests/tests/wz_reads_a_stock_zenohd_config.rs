@@ -422,6 +422,13 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     // something it already knew.
     let router_source = operator_config(port);
     let router_file = staged_config(&router_source);
+    // R311y843 — the wz node's file carries the two HANDSHAKE values as well as
+    // the endpoint, both moved away from the demo's own (4096 vs 65535, 3000 vs
+    // 10000), plus the compression offer. Until this round the file's endpoint
+    // was the only thing that reached the node, so this leg adjudicated the
+    // topology half of a drop-in and nothing about the wire; these three now
+    // reach the InitSyn/OpenSyn a REAL zenohd reads, and a value zenoh will not
+    // open on reds here rather than in an operator's deployment.
     let client_source = format!(
         r#"/// The wz node's own config -- the same file an operator would have
 /// handed to a zenoh client.
@@ -429,6 +436,10 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
   mode: "client",
   connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
   scouting: {{ multicast: {{ enabled: false }} }},
+  transport: {{
+    unicast: {{ compression: {{ enabled: true }} }},
+    link: {{ tx: {{ batch_size: 4096, lease: 3000 }} }},
+  }},
 }}
 "#
     );
@@ -487,6 +498,26 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         seen.contains("honoured"),
         "the demo did not report what it took from the file\n{seen}"
     );
+    // R311y843 — the SHIPPING binary's own account of what the file became.
+    // A key the reader ingests and the demo then drops still prints under
+    // `honoured`, which is the defect this round removed; the `argv +=` line is
+    // where a dropped key is visibly absent. Asserted here rather than only in
+    // the unit test because that test calls the expansion directly, and this is
+    // the binary an operator runs, in a process a real zenohd opened a session
+    // with.
+    for expected in [
+        "--batch-size",
+        "4096",
+        "--lease-ms",
+        "3000",
+        "--compression",
+    ] {
+        assert!(
+            seen.contains(expected),
+            "the demo's expansion report does not carry {expected}, so the \
+             file's transport values reached the report and not the argv\n{seen}"
+        );
+    }
 
     drop(demo_guard);
     drop(router);
