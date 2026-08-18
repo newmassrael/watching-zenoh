@@ -112,7 +112,17 @@ import inventory_kinds
 # possible. Citing only one of them would make the other unfindable by `--emit`,
 # which is the join the register's open/closed column is supposed to be
 # mechanical through. A one-item citation parses exactly as before.
-_ITEM = r"(?:§[^,)]{1,24}|N\d{1,2}|CENSUS|no register item)"
+# R311y854 — the item half admits a `debt-<name>` id, not only the carry-N
+# subset. The register moved into the store under a `debt-` PREFIX (R311y743),
+# and `debt-carry-N<nn>` is one namespace inside it; the others
+# (`debt-analysis-surface-parity`, `debt-doc-budget`, `debt-pf-5`, …) had no
+# spelling here at all, so a gate closing one of them could only cite
+# `(no register item)` — which is false — or invent a duplicate carry number,
+# which is the collision this project has already paid for once. Measured: the
+# first gate to close a non-carry debt item hit exactly that wall. Resolution
+# below checks these against the store the same way, so widening the grammar
+# does not widen what can go unresolved.
+_ITEM = r"(?:§[^,)]{1,24}|N\d{1,2}|debt-[a-z0-9][a-z0-9-]{1,60}|CENSUS|no register item)"
 PROVENANCE = re.compile(
     rf"R\d+[a-z]{{0,3}}(?:-\d+)?\d*\s*\(\s*{_ITEM}(?:\s*,\s*{_ITEM})*\s*\)"
 )
@@ -273,13 +283,20 @@ def main() -> int:
         # and CENSUS stay shape-only until the base list migrates.
         if registered is not None and item:
             for one in items(item):
-                if not (one.startswith("N") and one[1:].isdigit()):
+                # R311y854 — two spellings, ONE resolution: a carry number names
+                # `debt-carry-N<nn>` and a `debt-<name>` id names itself. Both
+                # must be in the store, which is the property this check is for.
+                if one.startswith("N") and one[1:].isdigit():
+                    expect = f"debt-carry-{one}"
+                elif one.startswith("debt-"):
+                    expect = one
+                else:
                     continue
-                if f"debt-carry-{one}" not in registered:
+                if expect not in registered:
                     failures.append(
                         f"{path.name}: cites `{one}`, which the store's debt "
                         f"inventory does not hold. Register it "
-                        f"(`add-inventory-entry --id debt-carry-{one}`) or correct "
+                        f"(`add-inventory-entry --id {expect}`) or correct "
                         f"the citation -- a citation nothing can resolve is the "
                         f"shape R311y741 could not catch"
                     )

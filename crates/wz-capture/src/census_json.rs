@@ -71,19 +71,42 @@ use crate::node::NodeCensus;
 /// line's `--census` pays and for the same reason: the planes are independent
 /// folds and none of them is cheap enough to build unasked.
 pub fn census_json(d: &crate::Dissection) -> String {
+    census_json_where(d, &crate::filter::Filter::any())
+}
+
+/// R311y854 — the same census, narrowed to the records `filter` matches.
+///
+/// # The node plane is NOT narrowed, and the document says so
+///
+/// Three of the four planes take a selector; [`crate::node`] has no `_where`
+/// entry point, so it is built whole here. That is not an omission this
+/// function could quietly fix — a node is not a record the selector's terms
+/// (`key`, `kind`, `bytes`, `delay`, …) describe — and it is the same choice
+/// the command line makes. What would be a defect is leaving a consumer to
+/// infer it: each plane carries `narrowed_by_selector`, so "this table was
+/// filtered" is read off the document rather than assumed from the call.
+///
+/// Each narrowed plane also carries its `selection` — matched / rejected /
+/// UNDECIDED. The third is the one that matters and the reason it is emitted
+/// beside the rows rather than derived: a keyexpr whose declaration went past
+/// before the tap started cannot be judged against `key == demo/**`, and
+/// counting it as a non-match would make a short total look whole.
+pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) -> String {
     let mut out = String::from("{\"keyexprs\":");
-    out.push_str(&keyexprs_json(&crate::agg::aggregate(d)));
+    out.push_str(&keyexprs_json(&crate::agg::aggregate_where(d, filter)));
     out.push_str(",\"nodes\":");
     out.push_str(&nodes_json(&crate::node::nodes(d)));
     out.push_str(",\"exchanges\":");
     #[cfg(feature = "network-codecs")]
-    out.push_str(&exchanges_json(&crate::exchange::exchanges(d)));
+    out.push_str(&exchanges_json(&crate::exchange::exchanges_where(
+        d, filter,
+    )));
     // A plane that cannot be fed is absent, not empty — see the module doc.
     #[cfg(not(feature = "network-codecs"))]
     out.push_str("null");
     out.push_str(",\"payloads\":");
     #[cfg(feature = "network-codecs")]
-    out.push_str(&payloads_json(&crate::payload::payloads(d)));
+    out.push_str(&payloads_json(&crate::payload::payloads_where(d, filter)));
     #[cfg(not(feature = "network-codecs"))]
     out.push_str("null");
     out.push('}');
@@ -131,6 +154,8 @@ pub fn keyexprs_json(t: &ThroughputTable) -> String {
         t.unlocatable_records(),
     );
     push_unmeasured(&t.unmeasured_payloads(), &mut out);
+    out.push(',');
+    push_selection(&t.selection(), true, &mut out);
     out.push(',');
     push_gaps(&t.gaps(), &mut out);
     out.push('}');
@@ -207,10 +232,15 @@ pub fn nodes_json(c: &NodeCensus) -> String {
     }
     let _ = write!(
         out,
-        "],\"attributed_bytes\":{},\"unattributed_bytes\":{}}}",
+        "],\"attributed_bytes\":{},\"unattributed_bytes\":{},",
         c.attributed_bytes(),
         c.unattributed_bytes()
     );
+    // The one plane a selector does not reach. Stated rather than left to be
+    // inferred from an absent `selection`, which would read as "nothing was
+    // rejected" — the opposite of the truth on a narrowed census.
+    push_selection(&crate::filter::Selection::default(), false, &mut out);
+    out.push('}');
     out
 }
 
@@ -259,6 +289,8 @@ pub fn exchanges_json(t: &crate::exchange::ExchangeTable) -> String {
          \"unattributed_requests\":{}}},",
         g.orphan_responses, g.unstamped, g.non_monotonic, g.unattributed_requests,
     );
+    push_selection(&t.selection(), true, &mut out);
+    out.push(',');
     push_gaps_named(&t.unread(), "unread", &mut out);
     out.push('}');
     out
@@ -314,6 +346,8 @@ pub fn payloads_json(c: &crate::payload::PayloadCensus) -> String {
         c.unknown_ids(),
         c.descriptors(),
     );
+    push_selection(&c.selection(), true, &mut out);
+    out.push(',');
     push_gaps(&c.gaps(), &mut out);
     out.push('}');
     out
@@ -372,6 +406,21 @@ fn push_subtree(node: &KeyexprSubtree, out: &mut String) {
         push_subtree(child, out);
     }
     out.push_str("]}");
+}
+
+/// What the selector did to the records this plane was shown, and whether it
+/// reached this plane at all.
+///
+/// `undecided` is the field the other two exist to be read against: a record
+/// the capture did not carry enough to judge is neither matched nor rejected,
+/// and folding it into `rejected` would let a short total read as a whole one.
+fn push_selection(s: &crate::filter::Selection, narrowed: bool, out: &mut String) {
+    let _ = write!(
+        out,
+        "\"narrowed_by_selector\":{narrowed},\"selection\":{{\"matched\":{},\
+         \"rejected\":{},\"undecided\":{}}}",
+        s.matched, s.rejected, s.undecided
+    );
 }
 
 fn push_unmeasured(u: &UnmeasuredPayloads, out: &mut String) {
@@ -735,6 +784,68 @@ mod fed_tests {
         assert!(
             !json.contains("\"keyexpr\":\"demo/a\"b\""),
             "an unescaped copy would still break the parse: {json}"
+        );
+    }
+
+    /// R311y854 — A SELECTOR NARROWS THREE PLANES AND LEAVES THE NODE PLANE
+    /// WHOLE, and the document says which is which.
+    ///
+    /// The asymmetry is the finding a consumer would otherwise get wrong. Three
+    /// planes take the selector; the node plane has no `_where` entry point,
+    /// because a node is not a record the selector's terms describe. A reader
+    /// who assumed otherwise would read "both zids are still here" as a filter
+    /// that did nothing.
+    ///
+    /// Driven against the UNFILTERED census of the same capture, so what is
+    /// asserted is a DIFFERENCE. Without that arm an emitter that had simply
+    /// stopped reporting `demo/q` would pass.
+    #[test]
+    fn a_selector_narrows_three_planes_and_leaves_the_node_plane_whole() {
+        let d = four_plane_capture("demo/temp");
+        let whole = census_json(&d);
+        assert!(
+            plane(&whole, "{\"keyexprs\":").contains("\"keyexpr\":\"demo/q\""),
+            "the CONTROL must carry the key the selector will reject: {whole}"
+        );
+
+        let filter = crate::filter::Filter::parse("key == demo/temp").expect("compiles");
+        let narrowed = census_json_where(&d, &filter);
+
+        let keyexprs = plane(&narrowed, "{\"keyexprs\":");
+        assert!(
+            keyexprs.contains("\"keyexpr\":\"demo/temp\""),
+            "the matching key must survive: {keyexprs}"
+        );
+        assert!(
+            !keyexprs.contains("\"keyexpr\":\"demo/q\""),
+            "the rejected key must be gone: {keyexprs}"
+        );
+        assert!(
+            keyexprs.contains("\"narrowed_by_selector\":true"),
+            "and the plane must say it was narrowed: {keyexprs}"
+        );
+        assert!(
+            keyexprs.contains("\"selection\":{\"matched\":1,\"rejected\":2,\"undecided\":0}"),
+            "the rejected records are COUNTED, not merely absent -- a plane \
+             that dropped rows silently is a short total that looks whole: \
+             {keyexprs}"
+        );
+
+        let exchanges = plane(&narrowed, ",\"exchanges\":");
+        assert!(
+            !exchanges.contains("\"keyexpr\":\"demo/q\""),
+            "the query plane takes the selector too: {exchanges}"
+        );
+
+        let nodes = plane(&narrowed, ",\"nodes\":");
+        assert!(
+            nodes.contains("\"zid\":\"a1a1a1a1\"") && nodes.contains("\"zid\":\"b2b2b2b2\""),
+            "the node plane is NOT narrowed and must still hold both: {nodes}"
+        );
+        assert!(
+            nodes.contains("\"narrowed_by_selector\":false"),
+            "and it must say so, or a reader reads the surviving nodes as a \
+             filter that did nothing: {nodes}"
         );
     }
 

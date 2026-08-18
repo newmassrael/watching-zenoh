@@ -62,6 +62,12 @@ pub const WZ_DISSECT_ERR_INVALID_ARG: c_int = -1;
 pub const WZ_DISSECT_ERR_BAD_CAPTURE: c_int = -2;
 /// The bytes were not a decodable transport message.
 pub const WZ_DISSECT_ERR_DECODE: c_int = -3;
+/// R311y854 — the selector did not compile. Its own code and not
+/// [`WZ_DISSECT_ERR_INVALID_ARG`], because the two are answered by different
+/// people: an invalid argument is the CALLER's bug, and a selector is text an
+/// operator typed into a box. Call [`wz_dissect_selector_diagnose`] to learn
+/// where.
+pub const WZ_DISSECT_ERR_SELECTOR: c_int = -4;
 
 /// The ABI revision. Bumped when the SYMBOL SET or the memory contract changes
 /// — NOT when the JSON gains fields, which is the whole point of handing back
@@ -82,11 +88,14 @@ pub const WZ_DISSECT_ERR_DECODE: c_int = -3;
 /// application: a new symbol raises exactly one question for a consumer ("does
 /// this library have it?"), and a version that does not move cannot answer it.
 ///
+/// R311y854 — 3 → 4, ADDING [`wz_dissect_pcap_census_where`] and
+/// [`wz_dissect_selector_diagnose`].
+///
 /// # Safety
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    3
+    4
 }
 
 /// Release a string this library returned. Passing null is a no-op, so a
@@ -296,6 +305,129 @@ pub unsafe extern "C" fn wz_dissect_pcap_census(
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
     write_string(wz_capture::census_json::census_json(&dissection), out)
+}
+
+/// R311y854 — the census NARROWED by a selector, wz's own filter language.
+///
+/// `selector` is a NUL-terminated expression in the dialect
+/// `wz-analyze --select` takes: terms are `field op value` (`key == demo/**`,
+/// `kind == query`, `bytes > 100`, `delay >= 10`, …) joined with
+/// `and` / `or` / `not` and parentheses. An EMPTY selector selects everything,
+/// which makes this call equivalent to [`wz_dissect_pcap_census`] rather than
+/// a way to get nothing.
+///
+/// # Three planes narrow and one does not
+///
+/// The keyexpr, query and payload planes take the selector. The NODE plane is
+/// built whole, because a node is not a record the selector's terms describe —
+/// the same choice the command line makes. Every plane carries
+/// `narrowed_by_selector` so a consumer reads that off the document instead of
+/// inferring it from surviving rows, which is the one way to get this wrong.
+///
+/// Each narrowed plane also carries `selection`: matched, rejected, and
+/// UNDECIDED. The third is why this returns counts rather than only rows — a
+/// keyexpr whose declaration went past before the tap started cannot be judged,
+/// and a consumer that could not see it would read a short total as a whole
+/// one.
+///
+/// # A bad selector is its OWN error code
+///
+/// [`WZ_DISSECT_ERR_SELECTOR`], not [`WZ_DISSECT_ERR_INVALID_ARG`]: a caller
+/// passing a null pointer has a bug, and a selector is text a person typed. The
+/// two want different treatment in a UI, and a single code cannot ask for it.
+/// No string is handed back on any error, so the position comes from
+/// [`wz_dissect_selector_diagnose`] — a separate call precisely so the memory
+/// rule stays "OK means a string, an error means none" without an exception a
+/// consumer has to remember.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes, `selector` must be a
+/// NUL-terminated C string, and `out` must be a writable pointer to a
+/// `*mut c_char`. None may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_census_where(
+    bytes: *const u8,
+    len: usize,
+    selector: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if bytes.is_null() || selector.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let expr = match unsafe { std::ffi::CStr::from_ptr(selector) }.to_str() {
+        Ok(s) => s,
+        // Not a selector error: the bytes are not text at all, so there is
+        // nothing for the diagnostic call to point at either.
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let filter = match wz_capture::filter::Filter::parse(expr) {
+        Ok(f) => f,
+        Err(_) => return WZ_DISSECT_ERR_SELECTOR,
+    };
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    let dissection = match Dissection::from_capture(input) {
+        Ok(d) => d,
+        Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
+    };
+    write_string(
+        wz_capture::census_json::census_json_where(&dissection, &filter),
+        out,
+    )
+}
+
+/// R311y854 — compile a selector and say what is wrong with it, WITHOUT a
+/// capture.
+///
+/// Always returns [`WZ_DISSECT_OK`] for readable text and writes a JSON verdict:
+/// `{"ok":true}`, or `{"ok":false,"at":N,"message":"…"}` where `at` is a BYTE
+/// offset into the selector.
+///
+/// # Why this is a symbol rather than a richer error code
+///
+/// A selector is typed, character by character, into a box. The useful moment
+/// to answer "is this valid, and if not where" is while it is being typed —
+/// before there is a capture to run it against, and certainly before a
+/// consumer would want to pay four walks of a file to find out. A UI that can
+/// only say "invalid" is one that makes the operator bisect their own
+/// expression by hand.
+///
+/// A verdict is not an error, which is why the OK/no-string rule is untouched:
+/// a refused selector is a successful DIAGNOSIS, and the string it hands back
+/// is owned and freed like every other.
+///
+/// # Safety
+/// `selector` must be a NUL-terminated C string and `out` a writable pointer to
+/// a `*mut c_char`. Neither may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_selector_diagnose(
+    selector: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if selector.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let expr = match unsafe { std::ffi::CStr::from_ptr(selector) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let verdict = match wz_capture::filter::Filter::parse(expr) {
+        Ok(_) => String::from("{\"ok\":true}"),
+        Err(e) => {
+            let mut s = String::from("{\"ok\":false,\"at\":");
+            s.push_str(&e.at.to_string());
+            s.push_str(",\"message\":");
+            // The SAME escaper the census document uses: a message quotes the
+            // operator's own text back (an unknown field name, a bad value), so
+            // it carries whatever they typed.
+            wz_session_core::json::escape_into(&e.to_string(), &mut s);
+            s.push('}');
+            s
+        }
+    };
+    write_string(verdict, out)
 }
 
 /// The summary shape. Hand-rolled rather than via serde for the same reason
@@ -1210,6 +1342,131 @@ mod tests {
         );
     }
 
+    /// Drive the narrowed census the way C does.
+    fn call_census_where(bytes: &[u8], selector: &str) -> Result<String, c_int> {
+        let sel = std::ffi::CString::new(selector).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_pcap_census_where(bytes.as_ptr(), bytes.len(), sel.as_ptr(), &mut out)
+        };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must not hand back a string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// R311y854 — A SELECTOR CROSSES THE BOUNDARY AND NARROWS THE CENSUS, and
+    /// the unfiltered door over the same bytes is the control.
+    ///
+    /// Before this round the only census a C consumer could ask for was the
+    /// whole capture. `wz-analyze --select` has narrowed these planes since
+    /// R311y616 and the linked surface had no way to say so, which is the
+    /// surface delta this round is paying down.
+    #[test]
+    fn a_selector_crosses_the_boundary_and_narrows_what_the_census_reports() {
+        let file = census_capture();
+
+        let whole = call_census(&file).expect("the capture reads");
+        assert!(
+            whole.contains("\"keyexpr\":\"demo/q\""),
+            "the CONTROL must carry the key the selector will reject: {whole}"
+        );
+
+        let narrowed = call_census_where(&file, "key == demo/temp").expect("the capture reads");
+        assert!(
+            narrowed.contains("\"keyexpr\":\"demo/temp\""),
+            "the matching key must survive: {narrowed}"
+        );
+        assert!(
+            !narrowed.contains("\"keyexpr\":\"demo/q\""),
+            "the rejected key must be gone: {narrowed}"
+        );
+        assert!(
+            narrowed.contains("\"narrowed_by_selector\":true")
+                && narrowed.contains("\"narrowed_by_selector\":false"),
+            "both answers must appear -- three planes narrow and the node plane \
+             does not, and a consumer reads that off the document: {narrowed}"
+        );
+        // The node plane really is whole, which is what the `false` above is
+        // about. Asserted rather than inferred from the flag.
+        assert!(
+            narrowed.contains("\"zid\":\"a1a1a1a1\"") && narrowed.contains("\"zid\":\"b2b2b2b2\""),
+            "the node plane takes no selector: {narrowed}"
+        );
+
+        // An EMPTY selector selects everything rather than nothing.
+        let empty = call_census_where(&file, "").expect("the capture reads");
+        assert_eq!(
+            empty, whole,
+            "an empty selector must be the identity, or a caller with no filter \
+             typed gets a different census from the unfiltered door"
+        );
+    }
+
+    /// R311y854 — A BAD SELECTOR IS ITS OWN CODE, AND THE DIAGNOSIS SAYS WHERE.
+    ///
+    /// The pair is the point. The census door refuses and hands back nothing,
+    /// which keeps the memory rule uniform; the diagnostic door SUCCEEDS and
+    /// hands back a position, which is what a box an operator types into needs.
+    /// One code with no position would make them bisect their own expression.
+    #[test]
+    fn a_selector_that_does_not_compile_is_refused_and_then_explained() {
+        let file = census_capture();
+        assert_eq!(
+            call_census_where(&file, "key === demo/**"),
+            Err(WZ_DISSECT_ERR_SELECTOR),
+            "a malformed selector is not INVALID_ARG: the caller is fine and \
+             the operator's text is not"
+        );
+
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let good = std::ffi::CString::new("key == demo/**").expect("no NUL");
+        assert_eq!(
+            unsafe { wz_dissect_selector_diagnose(good.as_ptr(), &mut out) },
+            WZ_DISSECT_OK
+        );
+        let verdict = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        assert_eq!(verdict, "{\"ok\":true}");
+
+        out = core::ptr::null_mut();
+        let bad = std::ffi::CString::new("kind == frobnicate").expect("no NUL");
+        assert_eq!(
+            unsafe { wz_dissect_selector_diagnose(bad.as_ptr(), &mut out) },
+            WZ_DISSECT_OK,
+            "a refused selector is a successful DIAGNOSIS, not an error"
+        );
+        let verdict = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        assert!(
+            verdict.starts_with("{\"ok\":false,\"at\":"),
+            "the verdict must carry a position: {verdict}"
+        );
+        assert!(
+            verdict.contains("frobnicate"),
+            "and quote back what the operator typed: {verdict}"
+        );
+        // The position is a real offset into THEIR text, not a constant.
+        assert!(
+            !verdict.contains("\"at\":0"),
+            "`kind ==` parses, so the fault is not at byte 0 -- an `at` that is \
+             always 0 would point every UI at the first character: {verdict}"
+        );
+    }
+
     /// The census door keeps the ABI's memory contract: a bad capture is a
     /// CODE, nulls are refused, and neither hands back a string.
     #[test]
@@ -1227,6 +1484,33 @@ mod tests {
         );
         assert_eq!(
             unsafe { wz_dissect_pcap_census([0u8].as_ptr(), 1, core::ptr::null_mut()) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+
+        // R311y854 — and so do the two doors this round added, including the
+        // null SELECTOR, which is the argument neither of the others has.
+        let sel = std::ffi::CString::new("").expect("no NUL");
+        assert_eq!(
+            unsafe { wz_dissect_pcap_census_where([0u8].as_ptr(), 1, core::ptr::null(), &mut out) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            unsafe {
+                wz_dissect_pcap_census_where(
+                    core::ptr::null(),
+                    0,
+                    sel.as_ptr(),
+                    core::ptr::null_mut(),
+                )
+            },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            unsafe { wz_dissect_selector_diagnose(core::ptr::null(), &mut out) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            unsafe { wz_dissect_selector_diagnose(sel.as_ptr(), core::ptr::null_mut()) },
             WZ_DISSECT_ERR_INVALID_ARG
         );
     }
@@ -1323,9 +1607,10 @@ mod tests {
     /// NOT move when a walker adds fields.
     #[test]
     fn the_abi_version_is_readable() {
-        // R311y851 — 3 since `wz_dissect_pcap_census` joined the symbol set.
-        // The header's contract is the symbol SET, not a symbol's signature;
-        // see `wz_dissect_abi_version`.
-        assert_eq!(wz_dissect_abi_version(), 3);
+        // R311y854 — 4 since `wz_dissect_pcap_census_where` and
+        // `wz_dissect_selector_diagnose` joined the symbol set. The header's
+        // contract is the symbol SET, not a symbol's signature; see
+        // `wz_dissect_abi_version`.
+        assert_eq!(wz_dissect_abi_version(), 4);
     }
 }

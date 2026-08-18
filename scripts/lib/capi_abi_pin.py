@@ -50,14 +50,18 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 3
+EXPECTED_VERSION = 4
 EXPECTED_SYMBOLS = {
     "wz_dissect_abi_version",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",
+    # R311y854 — the selector: one door that narrows the census, one that
+    # diagnoses the expression without a capture.
+    "wz_dissect_pcap_census_where",
     "wz_dissect_pcap_summary",
     "wz_dissect_pcap_summary_bounded",
+    "wz_dissect_selector_diagnose",
     "wz_dissect_string_free",
     "wz_dissect_transport_message",
 }

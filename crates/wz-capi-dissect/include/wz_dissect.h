@@ -28,6 +28,10 @@ extern "C" {
 #define WZ_DISSECT_ERR_INVALID_ARG (-1)
 #define WZ_DISSECT_ERR_BAD_CAPTURE (-2)
 #define WZ_DISSECT_ERR_DECODE (-3)
+/* R311y854 -- the selector did not compile. Its own code and not
+ * INVALID_ARG, because the two are answered by different people: an invalid
+ * argument is the caller's bug, a selector is text an operator typed. */
+#define WZ_DISSECT_ERR_SELECTOR (-4)
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. */
 int wz_dissect_abi_version(void);
@@ -85,6 +89,45 @@ int wz_dissect_pcap_summary_bounded(const unsigned char *bytes, size_t len,
  * be fed is absent rather than empty, and `{"rows":[]}` would tell you this
  * capture had no queries in it. */
 int wz_dissect_pcap_census(const unsigned char *bytes, size_t len, char **out);
+
+/* R311y854 (ABI 4) — the same census, NARROWED by a selector in wz's own
+ * filter language: `field op value` terms (key == robot/pose, kind == query,
+ * bytes > 100, delay >= 10, ...) joined with and / or / not and parentheses.
+ * The key term takes zenoh's own keyexpr wildcards; they are not spelled out
+ * here because a slash followed by a star ends a C comment.
+ * An EMPTY selector selects everything, so this is the identity of the call
+ * above rather than a way to get nothing.
+ *
+ * THREE planes narrow and the NODE plane does not -- a node is not a record
+ * the selector's terms describe, which is the same choice `wz-analyze
+ * --select` makes. Read `narrowed_by_selector` off each plane rather than
+ * inferring it from surviving rows; that inference is the one way to get
+ * this wrong.
+ *
+ * Each narrowed plane carries `selection`: matched, rejected and UNDECIDED.
+ * The third is why counts are reported beside the rows -- a keyexpr whose
+ * declaration went past before the tap started cannot be judged, and without
+ * it a short total reads as a whole one.
+ *
+ * A selector that does not compile returns WZ_DISSECT_ERR_SELECTOR and no
+ * string. For the position, call wz_dissect_selector_diagnose. */
+int wz_dissect_pcap_census_where(const unsigned char *bytes, size_t len,
+                                 const char *selector, char **out);
+
+/* R311y854 (ABI 4) — compile a selector and say what is wrong with it,
+ * without a capture.
+ *
+ * Returns WZ_DISSECT_OK for any readable text and writes a JSON verdict:
+ * {"ok":true}, or {"ok":false,"at":N,"message":"..."} where `at` is a BYTE
+ * offset into the selector. A refused selector is a successful DIAGNOSIS,
+ * not an error, which is why the memory rule is untouched: OK means a string
+ * you own, an error means none.
+ *
+ * The useful moment to ask "is this valid, and if not where" is while the
+ * expression is being typed -- before there is a capture to run it against,
+ * and long before a caller would want to pay four walks of a file to find
+ * out. */
+int wz_dissect_selector_diagnose(const char *selector, char **out);
 
 #ifdef __cplusplus
 }

@@ -33,11 +33,12 @@
 int main(void) {
     /* The symbol/memory-contract revision. A consumer refuses a library whose
      * memory rules moved; this asserts the value the header was written for. */
-    /* R311y851 -- 3 since wz_dissect_pcap_census joined the symbol set. This
-     * header's contract is the symbol SET, not a symbol's signature, so adding
-     * one moves the revision; the two statements of that contract had drifted
-     * and were reconciled in R311y748. */
-    CHECK(wz_dissect_abi_version() == 3, "abi version is %d, expected 3",
+    /* R311y854 -- 4 since wz_dissect_pcap_census_where and
+     * wz_dissect_selector_diagnose joined the symbol set. This header's
+     * contract is the symbol SET, not a symbol's signature, so adding one moves
+     * the revision; the two statements of that contract had drifted and were
+     * reconciled in R311y748. */
+    CHECK(wz_dissect_abi_version() == 4, "abi version is %d, expected 4",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
@@ -180,6 +181,46 @@ int main(void) {
     CHECK(census == NULL, "a bad capture handed back a string");
     rc = wz_dissect_pcap_census(NULL, 0, &census);
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "census null bytes rc=%d", rc);
+
+    /* R311y854 -- the SELECTOR doors are reachable from C, and the two halves
+     * of their contract hold across the boundary.
+     *
+     * The Rust side owns the claim that a selector narrows what the census
+     * reports, which needs a capture with two keyexprs in it. This file owns
+     * the two claims that are only true at the boundary: that both symbols
+     * survive into the cdylib, and that a malformed selector comes back as
+     * WZ_DISSECT_ERR_SELECTOR -- its OWN code -- with no string to free, while
+     * the diagnostic call SUCCEEDS on the same text and hands one back. A
+     * consumer that could not tell those two apart would either leak or free a
+     * pointer it never received. */
+    char *narrowed = NULL;
+    rc = wz_dissect_pcap_census_where(pcap, sizeof pcap, "", &narrowed);
+    CHECK(rc == WZ_DISSECT_OK, "empty selector rc=%d", rc);
+    CHECK(narrowed != NULL, "OK came back with no string");
+    CHECK(strstr(narrowed, "\"narrowed_by_selector\":false") != NULL,
+          "the node plane must say it takes no selector: %s", narrowed);
+    wz_dissect_string_free(narrowed);
+
+    narrowed = NULL;
+    rc = wz_dissect_pcap_census_where(pcap, sizeof pcap, "key === x", &narrowed);
+    CHECK(rc == WZ_DISSECT_ERR_SELECTOR, "bad selector rc=%d, expected %d", rc,
+          WZ_DISSECT_ERR_SELECTOR);
+    CHECK(narrowed == NULL, "a refused selector handed back a string");
+
+    char *verdict = NULL;
+    rc = wz_dissect_selector_diagnose("key === x", &verdict);
+    CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d -- a refused selector is a "
+                               "successful diagnosis, not an error", rc);
+    CHECK(verdict != NULL, "OK came back with no string");
+    CHECK(strstr(verdict, "\"ok\":false") != NULL, "not a refusal: %s", verdict);
+    CHECK(strstr(verdict, "\"at\":") != NULL, "no position: %s", verdict);
+    wz_dissect_string_free(verdict);
+
+    verdict = NULL;
+    rc = wz_dissect_selector_diagnose("key == demo/**", &verdict);
+    CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
+    CHECK(strcmp(verdict, "{\"ok\":true}") == 0, "not a pass: %s", verdict);
+    wz_dissect_string_free(verdict);
 
     printf("  C1bo: C consumer linked the cdylib and read the tree\n");
     return 0;

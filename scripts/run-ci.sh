@@ -1832,6 +1832,22 @@ PY
     # place every carrier appears exactly once, so that is where the gate goes.
     # Enforcement MEASURED by removing `codec-join` from the feature list.
     python3 scripts/lib/dissect_feature_census.py || return 1
+    # R311y854 — WHICH SURFACE reaches each analysis capability, pinned.
+    #
+    # The two censuses above ask whether the DECODE covers the wire. This asks
+    # whether a CONSUMER can reach the decode, which is a different question and
+    # had no gate: `wz-analyze` (the command line) and `wz-capi-dissect` (the C
+    # ABI a framework links) carried different halves of the dissection for
+    # months, and the half a product links was the thinner one. Four census
+    # planes were compiled into the cdylib and had no symbol until R311y851 --
+    # found by reading two files side by side, which is exactly what a gate is
+    # for.
+    #
+    # Same shape as `apfull_membership.py`, deliberately: a table nobody can
+    # leave un-updated, failing in BOTH directions, with a REASON on every row
+    # that only one surface reaches. Enforcement MEASURED both ways this round
+    # (a stale symbol row, and a flag the table did not name).
+    python3 scripts/lib/analysis_surface_parity.py || return 1
     # R311y569 — the COUNT-GUARD-to-binary gate. `run-ci.sh` carries 53 bare
     # `| grep -qE '^test result: ok\. N passed'` guards, and NOTHING tied N to
     # the binary it guards: rename a test, delete one, or add one, and the guard
