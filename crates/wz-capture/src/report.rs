@@ -219,6 +219,8 @@ pub enum VerdictReason {
     PayloadGaps,
     /// Payloads a selector could not judge either way.
     PayloadUndecided,
+    /// IP fragment chains that never became a datagram.
+    UnfinishedFragmentChains,
 }
 
 impl VerdictReason {
@@ -252,6 +254,7 @@ impl VerdictReason {
             Self::ExchangeUndecided => "exchange_undecided",
             Self::PayloadGaps => "payload_gaps",
             Self::PayloadUndecided => "payload_undecided",
+            Self::UnfinishedFragmentChains => "unfinished_fragment_chains",
         }
     }
 }
@@ -356,6 +359,21 @@ impl<'a> CaptureReport<'a> {
         // `skips_text` / `skips_json` (R311y859). It is not judged.
         if self.dissection.skip_census().bytes_absent() > 0 {
             out.push(VerdictReason::PacketsSkipped);
+        }
+        // R311y861 — the HELD class is judged HERE and not by the census, and
+        // the split is what makes either half honest. R311y860 put
+        // `ip_fragment_pending` in `bytes_absent`, which made this verdict fire
+        // on ordinary fragmentation: a datagram split in two and reassembled
+        // perfectly leaves one held piece behind at the door, every byte of it
+        // in a row, and the capture was called a floor for it. The other
+        // direction was carried unverified in that round's own carry 3 — a
+        // chain that expired out of the table reached no leg at all.
+        //
+        // One number answers both, because the question is about CHAINS and the
+        // census counts PIECES: a chain that completed is not here, and a chain
+        // that expired, was evicted, or was still open when the file ended is.
+        if self.dissection.unfinished_fragment_chains() > 0 {
+            out.push(VerdictReason::UnfinishedFragmentChains);
         }
         if self.dissection.drops().any() {
             out.push(VerdictReason::BoundsDiscarded);
@@ -1296,6 +1314,42 @@ impl<'a> CaptureReport<'a> {
                 d.expired_chains()
             ));
         }
+        // R311y861 — the IP-FRAGMENT chains, which the three lines above are
+        // NOT about: those count zenoh's own fragmentation inside a session,
+        // and these count datagrams IP split on the way. The verdict fires on
+        // this family, and until this round no line of this document carried
+        // the number it fires on — a reader told `unfinished_fragment_chains`
+        // had nowhere to go and look at it.
+        //
+        // ONE LINE PER END, printed only when non-zero, because the three are
+        // three different things for an operator to do: widen the window, raise
+        // the cap, or capture for longer. The verdict sums them; this is where
+        // the sum is taken apart.
+        let frag = d.fragment_stats();
+        if frag.expired > 0 {
+            s.push_str(&format!(
+                "  {} IP datagram(s) ABANDONED on this reader's reassembly \
+                 deadline; raising reassembly_window_ms is what would have \
+                 kept them\n",
+                frag.expired
+            ));
+        }
+        if frag.evicted > 0 {
+            s.push_str(&format!(
+                "  {} IP datagram(s) dropped to stay inside \
+                 max_pending_fragments; raising it is what would have kept \
+                 them\n",
+                frag.evicted
+            ));
+        }
+        if d.open_fragment_chains() > 0 {
+            s.push_str(&format!(
+                "  {} IP datagram(s) still half-assembled when the capture \
+                 ended; the rest of their pieces is not in this file and no \
+                 bound of this reader's would have changed that\n",
+                d.open_fragment_chains()
+            ));
+        }
         // R311y624 (§1.1m) — printed ONLY when non-zero, unlike the JSON object
         // beside it. The two formats answer different readers: a consumer
         // parses fields and needs them present unconditionally, a person reads
@@ -2201,7 +2255,7 @@ fn escape_into(value: &str, out: &mut String) {
 /// cross-checks against `packets_skipped`.
 fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
     s.push_str(&format!(
-        "{{\"total\":{},\"bytes_absent\":{},\"not_this_protocol\":{},\
+        "{{\"total\":{},\"bytes_absent\":{},\"not_this_protocol\":{},\"held\":{},\
          \"unsupported_link_type\":{},\"truncated\":{},\
          \"not_ip\":{},\"not_transport\":{},\"ipv4_fragment\":{},\
          \"ip_fragment_pending\":{},\"vsock_non_payload\":{},\
@@ -2209,6 +2263,7 @@ fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
         sk.total(),
         sk.bytes_absent(),
         sk.not_this_protocol(),
+        sk.held(),
         sk.unsupported_link_type,
         sk.truncated,
         sk.not_ip,
@@ -2248,13 +2303,12 @@ fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
     s.push_str(&format!("  reader skipped: {} packet(s)\n", sk.total()));
     s.push_str(&format!(
         "    bytes this dissection does not hold ({}): {} truncated, \
-         {} IPv4 fragment, {} IPv6 fragment, {} IP fragment pending, \
+         {} IPv4 fragment, {} IPv6 fragment, \
          {} IPv6 extension chain, {} link type not read\n",
         sk.bytes_absent(),
         sk.truncated,
         sk.ipv4_fragment,
         sk.ipv6_fragment,
-        sk.ip_fragment_pending,
         sk.ipv6_extension_chain,
         sk.unsupported_link_type
     ));
@@ -2265,6 +2319,16 @@ fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
         sk.not_ip,
         sk.not_transport,
         sk.vsock_non_payload
+    ));
+    // R311y861 — the third line, and it names WHERE its verdict comes from.
+    // A reader who saw `IP fragment pending` on the bytes-absent line above
+    // read a completed reassembly as a loss, which is the misreading this
+    // split exists to stop. Pieces here; chains in `fragments:`.
+    s.push_str(&format!(
+        "    held for reassembly ({}): {} IP fragment piece(s), \
+         judged as CHAINS and not as pieces\n",
+        sk.held(),
+        sk.ip_fragment_pending
     ));
     if !sk.unsupported_link_types.is_empty() {
         let mut dlts = String::new();
@@ -2347,6 +2411,7 @@ pub fn health_json(d: &crate::Dissection) -> String {
          \"dropped_by_limits\":{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\
          \"flows\":{},\"scout_askers\":{}}},\
          \"fragments\":{{\"pieces\":{},\"completed\":{},\"expired\":{},\"evicted\":{},\
+         \"open\":{},\"unfinished\":{},\
          \"malformed\":{},\"overlapping\":{}}},\
          \"streams\":{{\"retransmits\":{},\"out_of_order\":{},\"partial_overlaps\":{},\
          \"ip_checksum_valid\":{},\"ip_checksum_invalid\":{},\"ip_checksum_absent\":{},\
@@ -2368,6 +2433,13 @@ pub fn health_json(d: &crate::Dissection) -> String {
         f.completed,
         f.expired,
         f.evicted,
+        // R311y861 — the two figures the completeness verdict actually reads.
+        // Neither appeared in either document before this round, so a consumer
+        // could not reproduce `unfinished_fragment_chains` from the health
+        // surface at all: `expired` and `evicted` were here, the residue was
+        // nowhere, and the sum was a number only the verdict knew.
+        d.open_fragment_chains(),
+        d.unfinished_fragment_chains(),
         f.malformed,
         f.overlapping,
         h.retransmits,
@@ -2430,8 +2502,15 @@ pub fn health_text(d: &crate::Dissection) -> String {
     ));
     s.push_str(&format!(
         "  fragments: {} piece(s), {} completed, {} expired, {} evicted, \
-         {} malformed, {} overlapping\n",
-        f.pieces, f.completed, f.expired, f.evicted, f.malformed, f.overlapping
+         {} still open, {} unfinished, {} malformed, {} overlapping\n",
+        f.pieces,
+        f.completed,
+        f.expired,
+        f.evicted,
+        d.open_fragment_chains(),
+        d.unfinished_fragment_chains(),
+        f.malformed,
+        f.overlapping
     ));
     s.push_str(&format!(
         "  streams: {} retransmit(s), {} out of order, {} partial overlap(s)\n",
@@ -4817,7 +4896,7 @@ mod tests {
         eth
     }
 
-    /// R311y860 — a fragment chain that NEVER COMPLETES is bytes absent, and
+    /// R311y860 — a fragment chain that NEVER COMPLETES is a shortfall, and
     /// the verdict says so.
     ///
     /// The counter had no fixture anywhere in this tree, which the mutation
@@ -4826,8 +4905,17 @@ mod tests {
     /// noise, it is the front of a datagram whose rest this capture does not
     /// hold, and a reader summing the rows would otherwise be told the sum is
     /// the whole capture.
+    ///
+    /// R311y861 — THE PIN MOVED WITH ITS SUBJECT rather than being deleted.
+    /// What this fixture demonstrates is unchanged and is still true; where the
+    /// tree answers it moved, from the door's census to the reassembly table,
+    /// because the census cannot tell this chain from one that completed a
+    /// packet later. The assertion follows it: `held` at the door,
+    /// `unfinished_fragment_chains` at the verdict, and `bytes_absent` now
+    /// explicitly ZERO — which is the leg that used to carry this case and must
+    /// not still be carrying it, or the sibling witness below proves nothing.
     #[test]
-    fn a_fragment_chain_that_never_completes_is_bytes_absent() {
+    fn a_fragment_chain_that_never_completes_is_a_shortfall() {
         let mut d = crate::Dissection::new();
         let mut udp = alloc::vec::Vec::new();
         udp.extend_from_slice(&7447u16.to_be_bytes());
@@ -4847,15 +4935,239 @@ mod tests {
             sk.ip_fragment_pending, 1,
             "the fixture must leave exactly one piece held: {sk:?}"
         );
+        assert_eq!(sk.held(), 1, "a held piece is held, at the door: {sk:?}");
         assert_eq!(
             sk.bytes_absent(),
-            1,
-            "a held piece is bytes this dissection does not hold: {sk:?}"
+            0,
+            "and the door does not get to call it absent -- it cannot yet know: {sk:?}"
         );
-        assert_eq!(sk.not_this_protocol(), 0, "and it is not furniture: {sk:?}");
+        assert_eq!(sk.not_this_protocol(), 0, "nor is it furniture: {sk:?}");
+        assert_eq!(
+            d.open_fragment_chains(),
+            1,
+            "the chain is still half-assembled when the file ends"
+        );
+        assert_eq!(
+            d.unfinished_fragment_chains(),
+            1,
+            "which is one datagram this capture carried pieces of and no row holds"
+        );
+        assert_eq!(
+            CaptureReport::of(&d).reasons(),
+            alloc::vec![VerdictReason::UnfinishedFragmentChains],
+            "a datagram whose rest never arrived makes the totals a floor, \
+             and says which floor: {}",
+            CaptureReport::of(&d).to_text()
+        );
+        // R311y861 — and the DOCUMENT carries the number the verdict fired on.
+        // A reader told `unfinished_fragment_chains` and shown no such figure
+        // anywhere is the y859 shape: a verdict naming a fact the page omits.
+        let text = CaptureReport::of(&d).to_text();
+        assert!(
+            text.contains("1 IP datagram(s) still half-assembled"),
+            "the page must name the chain, not only the verdict: {text}"
+        );
+    }
+
+    /// R311y861 — THE SIBLING, and the one that was wrong before this round: a
+    /// chain that DID complete is not a shortfall.
+    ///
+    /// The discriminator is a pair, not a single capture. R311y860 placed
+    /// `ip_fragment_pending` in `bytes_absent`, and a piece is counted there the
+    /// moment it is held — before anything can know whether the rest arrives.
+    /// So a datagram split in two and reassembled perfectly left one held piece
+    /// at the door, every byte of it decoded into a row, and the verdict called
+    /// the capture a floor for it. Measured, not argued: this test failed with
+    /// `reasons=[PacketsSkipped]` against the previous build.
+    ///
+    /// It is the same shape as the ARP finding that round fixed — a leg firing
+    /// on traffic that is not missing — in the one place that round introduced
+    /// it, which is why the two witnesses sit together.
+    #[test]
+    fn a_reassembled_datagram_is_not_a_shortfall() {
+        // Whole zenoh messages and no padding: a padded datagram leaves bytes
+        // no message claims, which is `unaccounted_batch_bytes` -- a real and
+        // different shortfall, and one that would make this fixture prove the
+        // wrong thing. Measured on the first draft, which used padding.
+        let msg = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE; 48];
+        let mut udp = alloc::vec::Vec::new();
+        udp.extend_from_slice(&7447u16.to_be_bytes());
+        udp.extend_from_slice(&7446u16.to_be_bytes());
+        udp.extend_from_slice(&((8 + msg.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(&msg);
+
+        // A multiple of 8, as IP requires, and past the UDP header so the first
+        // piece cannot be read as a whole datagram on its own.
+        let cut = 24usize;
+        let mut d = crate::Dissection::new();
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &eth_ipv4_piece(0x4242, 0, true, &udp[..cut]),
+        );
+        // THE HALF-WAY STATE IS ASSERTED, so the fixture cannot silently stop
+        // fragmenting: with one piece in, the capture IS a floor.
+        assert_eq!(d.skip_census().held(), 1, "the first piece must be held");
         assert!(
             !CaptureReport::of(&d).is_complete(),
-            "a datagram whose rest never arrived makes the totals a floor"
+            "and a capture holding it is short until the rest arrives"
+        );
+
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            1,
+            &eth_ipv4_piece(0x4242, cut as u16, false, &udp[cut..]),
+        );
+        d.finish();
+
+        assert_eq!(d.fragment_stats().completed, 1, "the chain must close");
+        assert_eq!(
+            d.skip_census().held(),
+            1,
+            "the piece stays counted at the door -- the census is a tally of \
+             what happened, not a running state"
+        );
+        assert_eq!(
+            d.datagram_flows()[0].frames.len(),
+            msg.len(),
+            "and every byte must reach a row"
+        );
+        assert_eq!(
+            d.unfinished_fragment_chains(),
+            0,
+            "no chain is unfinished once the rest arrives"
+        );
+        let r = CaptureReport::of(&d);
+        assert!(
+            r.is_complete(),
+            "a datagram that was reassembled is in the rows: reasons={:?} {}",
+            r.reasons(),
+            r.to_text()
+        );
+    }
+
+    /// A datagram of whole zenoh messages, split at `cut`, as two pieces.
+    ///
+    /// Whole messages and no padding, for the reason
+    /// `a_reassembled_datagram_is_not_a_shortfall` states at its own fixture.
+    fn two_piece_datagram(ident: u16) -> (alloc::vec::Vec<u8>, alloc::vec::Vec<u8>) {
+        let msg = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE; 48];
+        let mut udp = alloc::vec::Vec::new();
+        udp.extend_from_slice(&7447u16.to_be_bytes());
+        udp.extend_from_slice(&7446u16.to_be_bytes());
+        udp.extend_from_slice(&((8 + msg.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(&msg);
+        let cut = 24usize;
+        (
+            eth_ipv4_piece(ident, 0, true, &udp[..cut]),
+            eth_ipv4_piece(ident, cut as u16, false, &udp[cut..]),
+        )
+    }
+
+    /// R311y861 — a chain the DEADLINE took reaches the verdict.
+    ///
+    /// This is R311y860's carry 3, and it was carried as unverified rather than
+    /// as absent. It is the sharpest of the three ends because the pieces leave
+    /// no trace where a reader would look: the chain is gone from the table, so
+    /// `open` is zero, and the census counts it under `held` beside pieces that
+    /// completed perfectly. `expired` is the only witness there is, and until
+    /// this round nothing read it.
+    #[test]
+    fn a_chain_the_deadline_took_reaches_the_verdict() {
+        let mut d = crate::Dissection::with_limits(crate::DissectionLimits {
+            reassembly_window_ms: Some(1_000),
+            ..crate::DissectionLimits::default()
+        });
+        let (lost_head, _lost_tail) = two_piece_datagram(0x4242);
+        let (head, tail) = two_piece_datagram(0x5151);
+
+        d.push_packet_at(crate::link::LINKTYPE_ETHERNET, 0, Some(0), &lost_head);
+        // The sweep runs on the next PUSH into the table, so the second chain
+        // is what advances the clock past the first one's deadline. A packet
+        // that is not a fragment would not reach it at all.
+        d.push_packet_at(crate::link::LINKTYPE_ETHERNET, 1, Some(5_000), &head);
+        d.push_packet_at(crate::link::LINKTYPE_ETHERNET, 2, Some(5_000), &tail);
+        d.finish();
+
+        let f = d.fragment_stats();
+        assert_eq!(
+            f.expired, 1,
+            "the first chain must miss its deadline: {f:?}"
+        );
+        assert_eq!(f.completed, 1, "and the second must complete: {f:?}");
+        assert_eq!(
+            d.open_fragment_chains(),
+            0,
+            "nothing is left half-assembled, which is what makes this the \
+             end no other counter can see"
+        );
+        assert_eq!(
+            d.unfinished_fragment_chains(),
+            1,
+            "one datagram was carried and is in no row: {f:?}"
+        );
+        assert_eq!(
+            CaptureReport::of(&d).reasons(),
+            alloc::vec![VerdictReason::UnfinishedFragmentChains],
+            "and the verdict says exactly that: {}",
+            CaptureReport::of(&d).to_text()
+        );
+        // The page names the END, which is the actionable half: this one is
+        // fixed by widening the window and the eviction below is not.
+        let text = CaptureReport::of(&d).to_text();
+        assert!(
+            text.contains("reassembly_window_ms"),
+            "the page must name the knob that would have kept it: {text}"
+        );
+    }
+
+    /// R311y861 — a chain the CAP dropped reaches the verdict.
+    ///
+    /// The third end, and the one an operator acts on differently: the deadline
+    /// says widen the window, this says raise `max_pending_fragments`. It is
+    /// one number at the verdict and three at [`crate::Dissection::fragment_stats`]
+    /// for exactly that reason.
+    #[test]
+    fn a_chain_the_cap_dropped_reaches_the_verdict() {
+        let mut d = crate::Dissection::with_limits(crate::DissectionLimits {
+            max_pending_fragments: Some(1),
+            ..crate::DissectionLimits::default()
+        });
+        let (evicted_head, _evicted_tail) = two_piece_datagram(0x4242);
+        let (head, tail) = two_piece_datagram(0x5151);
+
+        d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &evicted_head);
+        d.push_packet(crate::link::LINKTYPE_ETHERNET, 1, &head);
+        d.push_packet(crate::link::LINKTYPE_ETHERNET, 2, &tail);
+        d.finish();
+
+        let f = d.fragment_stats();
+        assert_eq!(f.evicted, 1, "the cap must bite exactly once: {f:?}");
+        assert_eq!(f.completed, 1, "and the survivor must complete: {f:?}");
+        assert_eq!(d.open_fragment_chains(), 0, "with nothing left open");
+        assert_eq!(
+            d.unfinished_fragment_chains(),
+            1,
+            "the evicted chain is a datagram in no row: {f:?}"
+        );
+        assert_eq!(
+            CaptureReport::of(&d).reasons(),
+            alloc::vec![VerdictReason::UnfinishedFragmentChains],
+            "and the verdict says exactly that -- the WHOLE list, because a \
+             containment claim holds while every other leg fires too: {}",
+            CaptureReport::of(&d).to_text()
+        );
+        let text = CaptureReport::of(&d).to_text();
+        assert!(
+            text.contains("max_pending_fragments"),
+            "and the page names THIS knob rather than the deadline's: {text}"
+        );
+        assert!(
+            !text.contains("reassembly_window_ms"),
+            "an eviction is not a deadline, and a page that names both sends \
+             the operator to the wrong one: {text}"
         );
     }
 
@@ -4883,13 +5195,32 @@ mod tests {
         short.extend_from_slice(&[0x45, 0, 0, 40, 0]);
         d.push_packet(crate::link::LINKTYPE_ETHERNET, 2, &short);
         d.push_packet(crate::link::LINKTYPE_ETHERNET, 3, &eth_ipv6_next(50));
+        // R311y861 — a HELD packet too, so the third class is non-zero in the
+        // fixture. A partition assertion whose third term is 0 holds just as
+        // well with that term dropped from `total`, which is the mistake this
+        // test exists to catch.
+        let mut udp = alloc::vec::Vec::new();
+        udp.extend_from_slice(&7447u16.to_be_bytes());
+        udp.extend_from_slice(&7446u16.to_be_bytes());
+        udp.extend_from_slice(&64u16.to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(&[0u8; 16]);
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            4,
+            &eth_ipv4_piece(0x5151, 0, true, &udp),
+        );
         d.finish();
 
         let sk = d.skip_census();
+        assert!(
+            sk.bytes_absent() > 0 && sk.not_this_protocol() > 0 && sk.held() > 0,
+            "every class must be non-zero or the partition proves nothing: {sk:?}"
+        );
         assert_eq!(
-            sk.bytes_absent() + sk.not_this_protocol(),
+            sk.bytes_absent() + sk.not_this_protocol() + sk.held(),
             sk.total(),
-            "the two classes must partition the census: {sk:?}"
+            "the three classes must partition the census: {sk:?}"
         );
         assert_eq!(
             sk.total(),

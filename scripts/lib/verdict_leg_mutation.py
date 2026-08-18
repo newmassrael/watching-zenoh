@@ -299,9 +299,36 @@ PREDICATES = [
             "unsupported_link_type",
             "truncated",
             "ipv4_fragment",
-            "ip_fragment_pending",
             "ipv6_extension_chain",
             "ipv6_fragment",
+        )
+    ],
+    # R311y861 -- `Dissection::unfinished_fragment_chains`, three ENDS summed.
+    #
+    # `ip_fragment_pending` left the list above because a piece held at the door
+    # is not absent: the datagram it belongs to may complete a packet later, and
+    # counting it as a loss made the verdict fire on ordinary fragmentation. The
+    # question moved one level out, from pieces to CHAINS, and this is where it
+    # is asked now.
+    #
+    # Registered per end rather than as one guard even though `uncovered_calls`
+    # does not demand it -- the guard holds a single call, so the check that
+    # forced the six recipes above never reaches this one. Declared anyway: the
+    # three ends are three different fixtures and three different things for an
+    # operator to do about them, and a sweep that only moved the sum would pass
+    # with two of them witnessed by nothing.
+    *[
+        (
+            f"Dissection.unfinished_fragment_chains/{expr}",
+            "crates/wz-capture/src/lib.rs",
+            "pub fn unfinished_fragment_chains(&self) -> usize {",
+            expr,
+            "0",
+        )
+        for expr in (
+            "s.expired",
+            "s.evicted",
+            "self.open_fragment_chains()",
         )
     ],
     # The two gap structs compare against `default()`, so there is no threshold
@@ -372,7 +399,7 @@ UNWITNESSED = {
         "UNREACHABLE: nothing in this tree constructs `SkipReason::Ipv4Fragment`. "
         "`Dissection::push_packet` routes every IPv4 fragment to `push_fragment`, "
         "which records `IpFragmentPending` or completes the datagram "
-        "(crates/wz-capture/src/lib.rs:4061). The variant exists for a consumer "
+        "(crates/wz-capture/src/lib.rs:4125). The variant exists for a consumer "
         "of `link::strip_transport` that declines to reassemble, and this tree "
         "has none, so the counter is structurally zero and a fixture cannot "
         "move it."
@@ -403,6 +430,7 @@ UNWITNESSED = {
 COVERED_TYPES = {
     ("DissectionDrops", "any"),
     ("SkipCensus", "bytes_absent"),
+    ("Dissection", "unfinished_fragment_chains"),
     ("ThroughputGaps", "is_clean"),
     ("ExchangeGaps", "is_clean"),
     ("Selection", "is_decisive"),

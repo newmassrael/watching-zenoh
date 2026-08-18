@@ -243,18 +243,41 @@ impl SkipCensus {
     /// this dissection.
     ///
     /// A snaplen cut the packet short, a fragment other than the first was
-    /// walked past by a consumer that does not reassemble, a chain was still
-    /// waiting for its rest, an IPv6 header this build may not walk past (ESP
-    /// among them) ended the chain, or the link type was never decapsulated at
-    /// all. Every one of them is traffic that was on the wire and is in no row,
-    /// which is the definition the completeness verdict answers to.
+    /// walked past by a consumer that does not reassemble, an IPv6 header this
+    /// build may not walk past (ESP among them) ended the chain, or the link
+    /// type was never decapsulated at all. Every one of them is traffic that
+    /// was on the wire and is in no row, which is the definition the
+    /// completeness verdict answers to.
+    ///
+    /// R311y861 — `ip_fragment_pending` LEFT this class, and that was measured
+    /// rather than argued. A held piece is not absent; it is undecided, and the
+    /// decision belongs to [`Self::held`] below.
     pub fn bytes_absent(&self) -> usize {
         self.unsupported_link_type
             + self.truncated
             + self.ipv4_fragment
-            + self.ip_fragment_pending
             + self.ipv6_extension_chain
             + self.ipv6_fragment
+    }
+
+    /// R311y861 — the skips whose FATE IS NOT THIS CENSUS'S TO KNOW.
+    ///
+    /// A piece of a fragmented datagram is counted here at the door, at the one
+    /// moment nothing can yet say whether the rest of it arrives. If it does,
+    /// the whole datagram is dissected and every byte of that piece is in a row
+    /// — the capture is not short by it, and calling it absent makes the
+    /// verdict fire on ordinary fragmentation. If it does not, the bytes ARE
+    /// absent, and the number that says so is
+    /// [`Dissection::unfinished_fragment_chains`], because only the reassembly
+    /// table knows how a chain ENDED.
+    ///
+    /// So this class is counted, rendered, and judged ELSEWHERE — which is a
+    /// third thing from `not_this_protocol`, whose members are not judged at
+    /// all. The unit differs too, and deliberately: this counts PIECES, the
+    /// verdict counts CHAINS. One chain of nine pieces is one missing datagram,
+    /// not nine.
+    pub fn held(&self) -> usize {
+        self.ip_fragment_pending
     }
 
     /// R311y860 — the skips that are ordinary furniture on a real segment.
@@ -275,14 +298,17 @@ impl SkipCensus {
     /// [`DissectionHealth::packets_skipped`] and computed independently of it, so
     /// the two disagreeing would mean one of them stopped seeing a path.
     ///
-    /// R311y860 — defined as the SUM OF THE TWO CLASSES rather than as its own
+    /// R311y860 — defined as the SUM OF THE CLASSES rather than as its own
     /// list of nine fields, and that is the gate rather than a tidy-up. A tenth
-    /// reason added at the door and placed in neither class no longer merely
+    /// reason added at the door and placed in no class no longer merely
     /// goes unjudged: it drops out of this total too, and the equality above
-    /// reds. The alternative — a third enumeration of the same fields — is how
+    /// reds. The alternative — a second enumeration of the same fields — is how
     /// the renderings came to disagree with the counters in the first place.
+    ///
+    /// R311y861 — THREE classes now, on the same rule. The gate is unchanged by
+    /// the arity: a field in none of them still falls out of this sum.
     pub fn total(&self) -> usize {
-        self.bytes_absent() + self.not_this_protocol()
+        self.bytes_absent() + self.not_this_protocol() + self.held()
     }
 
     /// `true` when nothing was skipped at all.
@@ -2958,6 +2984,43 @@ impl Dissection {
     /// What IP fragment reassembly has cost and seen.
     pub fn fragment_stats(&self) -> frag::FragmentStats {
         self.fragments.stats()
+    }
+
+    /// R311y861 — IP fragment chains that never became a datagram.
+    ///
+    /// THREE ENDS, ONE NUMBER, because the reader's question here is "are bytes
+    /// missing" and not "which knob would have saved them": a chain whose
+    /// deadline passed (`expired`), one the concurrency cap dropped to make
+    /// room (`evicted`), and one still half-assembled when the capture ended
+    /// (the table's residue). Each is a datagram this capture carried pieces of
+    /// and no row holds. Which knob is [`Self::fragment_stats`]'s answer, and it
+    /// keeps the three apart for exactly that reader.
+    ///
+    /// THE RESIDUE IS COUNTED WITHOUT A SWEEP, and that is deliberate.
+    /// [`Self::finish`] retires the flows; it does not expire this table,
+    /// because a chain open at the end is not late — the capture stopped, which
+    /// is a fact about the file and not about the sender's deadline. Booking it
+    /// as `expired` would tell an operator to widen a window that was never
+    /// missed. It is missing either way, so it reaches this number and not that
+    /// counter.
+    ///
+    /// The counterpart at the door is [`SkipCensus::held`], which counts the
+    /// PIECES. A piece that completed its datagram is in a row; this counts the
+    /// chains that never got there, which is what the verdict must read.
+    pub fn unfinished_fragment_chains(&self) -> usize {
+        let s = self.fragments.stats();
+        s.expired + s.evicted + self.open_fragment_chains()
+    }
+
+    /// R311y861 — chains still half-assembled, right now.
+    ///
+    /// Reported beside the two counters it is summed with rather than folded
+    /// into them, because it is the only one of the three that is a STATE and
+    /// not an event: it can still go down, by the rest of a datagram arriving.
+    /// A live tap reads it to size the table; a finished capture reads it as
+    /// the datagrams whose rest the file does not contain.
+    pub fn open_fragment_chains(&self) -> usize {
+        self.fragments.pending()
     }
 
     /// R311y607 — packets the CAPTURE TOOL said it lost, or `None` if the file
