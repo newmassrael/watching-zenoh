@@ -1768,6 +1768,13 @@ preset-ap-full = [
     "scouting-gossip",
     "scouting-autoconnect",
     "scouting-passive",
+    # R311y849 — the ANSWERING half, absent from this preset since R311y846
+    # added the atom. Layer A5 could not say so until now: it runs after A3 in
+    # the same job, and A3's own red aborted the job before A5 was reached, so
+    # the omission was masked by an unrelated failure for two rounds. The
+    # capability is the one this preset most obviously implies -- a node built
+    # from "everything" that cannot be discovered is not everything.
+    "scouting-responder",
     "storage-backend",
     "storage-aligner",
     "storage-history",

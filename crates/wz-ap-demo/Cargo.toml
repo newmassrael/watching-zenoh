@@ -236,6 +236,14 @@ preset-ap-full = [
     "locator-iface",
     "query-attachment",
     "scouting-active",
+    # R311y849 — the demo-side key for the same atom. Layer A5's second rule is
+    # about the BINARY reaching the capability from argv: with the key declared
+    # in this manifest and absent from this preset, the AP-full build compiled
+    # the responder in and had no `--scout-listen` to turn it on. Named beside
+    # `scouting-active` because they are the two directions of one subsystem,
+    # and deliberately as its own key: the atom is not implied by the asking
+    # half, so inheriting it would contradict the feature's own contract.
+    "scouting-responder",
     "transport-lowlatency",
     "session-extcompression",
     "time-hlc",
