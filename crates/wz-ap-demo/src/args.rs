@@ -1370,6 +1370,15 @@ impl ScoutSocketArgs {
     /// input; keeping the fallible form and defaulting on `Err` means a future
     /// caller that skips the check degrades to the default group rather than
     /// panicking in a discovery path.
+    ///
+    /// Gated on the UNION of its two consumers — the `scouting-active` bind in
+    /// `runner.rs` and this file's own `zenoh-config` test — rather than
+    /// silenced with `allow(dead_code)`. R311y845 shipped it ungated and the
+    /// pre-push changed-crate run (DEFAULT features, where neither consumer
+    /// compiles) refused it as dead code, which is the gate working: every
+    /// local run in that round had carried `--features ...,scouting-active`, so
+    /// nothing before the hook had built the arm where this is unreachable.
+    #[cfg(any(feature = "scouting-active", all(test, feature = "zenoh-config")))]
     pub(crate) fn group_and_port(
         &self,
         default_group: std::net::Ipv4Addr,
