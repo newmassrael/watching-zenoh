@@ -6646,6 +6646,12 @@ layer_c1bw_analyze_cli() {
     # stayed green.
     listing="$(cd crates && cargo test -p wz-analyze --lib -- --list 2>/dev/null)" \
         || { echo "  C1bw FAIL: the library tests did not list"; return 1; }
+    # R311y857 — the five `payload_formats::tests::*` protobuf witnesses were
+    # pinned here until R311y856 moved the decoder into `wz-capture`, beside the
+    # map, so BOTH consumption surfaces could reach it. This lane caught that on
+    # hosted CI, which is exactly its job, and the names moved to Layer C1bn WITH
+    # the code rather than being deleted: a pin dropped when its subject moves is
+    # a pin that stops gating. The two `--health` witnesses join in their place.
     for name in \
         tests::a_repeated_keylog_keeps_every_file_in_the_order_given \
         tests::a_quic_capture_reports_quic_and_decodes_no_zenoh_from_it \
@@ -6665,11 +6671,8 @@ layer_c1bw_analyze_cli() {
         quic_pass_tests::the_quic_listing_takes_the_bound_and_says_the_selector_did_not_reach_it \
         quic_pass_tests::a_mid_connection_quic_capture_opens_only_once_the_length_is_declared \
         quic_pass_tests::an_assumed_identity_is_never_reported_as_a_clienthello \
-        payload_formats::tests::a_nested_message_is_walked_and_its_paths_name_the_route \
-        payload_formats::tests::a_span_two_layers_in_is_still_in_the_outer_payloads_coordinates \
-        payload_formats::tests::a_length_field_that_is_not_a_message_falls_back_to_its_byte_count \
-        payload_formats::tests::printable_bytes_are_text_even_when_they_would_parse_as_a_message \
-        payload_formats::tests::nesting_past_the_bound_says_so_rather_than_going_quiet
+        tests::the_two_unreachable_loss_groups_reach_the_command_line \
+        tests::the_health_flag_is_parsed_and_documented
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bw FAIL: $name is absent from the wz-analyze lib target"
@@ -7568,7 +7571,12 @@ layer_c1bn_passive_dissection_features() {
         fields_json::tests::a_row_the_stream_cannot_supply_is_declined_with_the_reason \
         fields_json::tests::a_capture_that_cannot_be_reread_is_reported_rather_than_left_empty \
         fields_json::tests::a_declared_format_decodes_the_payload_and_the_spans_are_the_messages \
-        payload_decode::tests::a_declaration_that_binds_nothing_is_still_reported
+        payload_decode::tests::a_declaration_that_binds_nothing_is_still_reported \
+        payload_builtin::tests::a_nested_message_is_walked_and_its_paths_name_the_route \
+        payload_builtin::tests::a_span_two_layers_in_is_still_in_the_outer_payloads_coordinates \
+        payload_builtin::tests::a_length_field_that_is_not_a_message_falls_back_to_its_byte_count \
+        payload_builtin::tests::printable_bytes_are_text_even_when_they_would_parse_as_a_message \
+        payload_builtin::tests::nesting_past_the_bound_says_so_rather_than_going_quiet
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bn FAIL: $name is absent from the dissect build"; return 1; }
