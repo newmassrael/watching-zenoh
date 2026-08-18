@@ -6296,6 +6296,8 @@ mod peer_quic_cert_tests {
             quic_key: Some(key_path.clone()),
             #[cfg(feature = "routing-interest-pending-gc")]
             interest_timeout_ms: None,
+            #[cfg(feature = "scouting-responder")]
+            scout_listen: None,
         };
         let interceptors = InterceptorOpts {
             acl_deny: None,
@@ -6387,6 +6389,8 @@ mod peer_failfast_tests {
             quic_key: None,
             #[cfg(feature = "routing-interest-pending-gc")]
             interest_timeout_ms: None,
+            #[cfg(feature = "scouting-responder")]
+            scout_listen: None,
         };
         let interceptors = InterceptorOpts {
             acl_deny: None,

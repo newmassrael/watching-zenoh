@@ -45,7 +45,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    spawn_zenohd_multicast_scouting_with_args, wait_for_substring, wz_ap_demo_binary, ChildGuard,
+    assert_demo_binary_newer_than_sources, spawn_zenohd_multicast_scouting_with_args,
+    wait_for_substring, wz_ap_demo_binary, ChildGuard,
 };
 
 const RESPONDER_NEEDLE: &str = "SCOUT RESPONDER listening on ";
@@ -67,6 +68,11 @@ const ADVERTISED_NEEDLE: &str = "ADVERTISED SELF LOCATOR ";
 #[ignore = "binary-dep e2e: needs zenohd (stock) + wz-ap-demo[+scouting-responder]; runs via --ignored"]
 fn a_stock_zenohd_discovers_wz_by_scouting_and_dials_what_its_hello_advertised() {
     let demo = wz_ap_demo_binary();
+    // A demo built before this round has no `--scout-listen` at all, so a stale
+    // one does not merely weaken this proof — it reproduces the exact red the
+    // test is written to detect ("a stock zenohd cannot find wz"), and the
+    // diagnosis goes hunting in the responder for a defect that is in the build.
+    assert_demo_binary_newer_than_sources(&demo);
     // Elapsed at each barrier, printed rather than reasoned about. libtest
     // captures this and shows it only on failure, which is exactly when the
     // question "did that step actually happen, or did it return instantly?" is
