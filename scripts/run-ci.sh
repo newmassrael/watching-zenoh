@@ -2394,6 +2394,115 @@ EOF
         return 1
     fi
 
+    # R311y882 — THE CACHEABLE ARCHIVE DIRECTORY, both directions.
+    #
+    # `WZ_APT_ARCHIVES` is what takes the mirror off the critical path: apt
+    # downloads into a HOME-relative directory `actions/cache` can carry to the
+    # next run, instead of root-owned `/var/cache/apt/archives` which nothing
+    # can. The two arms are the two ways that can be wrong — the option never
+    # reaching apt, and the option reaching apt when nobody asked for it.
+    local archives argv_log
+    archives="$(mktemp -d)"
+    argv_log="$(mktemp)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$archives'; rm -f '$argv_log' '$stub' '$marker'" RETURN
+    cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >>"$WZ_ARGV_LOG"
+exit 0
+EOF
+    chmod +x "$stub"
+    rm -rf "$archives"
+    if ! WZ_ARGV_LOG="$argv_log" WZ_APT_ARCHIVES="$archives" \
+        WZ_APT_CMD="$stub" WZ_APT_DEADLINE=5 bash "$script" cmake >/dev/null 2>&1; then
+        echo "  Layer C0g FAIL: the install refused when WZ_APT_ARCHIVES was set." \
+            "A cache is an optimisation and an optimisation that can break the" \
+            "build is a defect" >&2
+        return 1
+    fi
+    if ! grep -qF -- "Dir::Cache::archives=${archives}" "$argv_log"; then
+        echo "  Layer C0g FAIL: WZ_APT_ARCHIVES was set and apt was never told" \
+            "about it. The .debs would land in /var/cache/apt/archives, which" \
+            "actions/cache cannot carry, and every run would pay the mirror again" >&2
+        return 1
+    fi
+    if [[ ! -d "${archives}/partial" ]]; then
+        echo "  Layer C0g FAIL: the archive directory's \`partial/\` was not created." \
+            "apt refuses an archive directory without it, so the option would have" \
+            "turned a slow install into a broken one" >&2
+        return 1
+    fi
+    # THE OTHER DIRECTION. Off a runner, unset means apt's own default,
+    # untouched — the arm that keeps this from becoming a mandatory environment
+    # variable a developer's machine has to know about.
+    #
+    # `GITHUB_ACTIONS` is cleared EXPLICITLY, and that is not defensive noise:
+    # this lane runs on a runner, where it is `true`, so an arm that relied on
+    # the ambient environment would pass on a laptop and red hosted. That
+    # asymmetry is the one this repository keeps paying for.
+    : >"$argv_log"
+    if ! GITHUB_ACTIONS='' WZ_ARGV_LOG="$argv_log" WZ_APT_CMD="$stub" \
+        WZ_APT_DEADLINE=5 bash "$script" cmake >/dev/null 2>&1; then
+        echo "  Layer C0g FAIL: the install refused with WZ_APT_ARCHIVES unset" >&2
+        return 1
+    fi
+    if grep -q 'Dir::Cache::archives' "$argv_log"; then
+        echo "  Layer C0g FAIL: apt was pointed at an archive directory nobody" \
+            "asked for. Off a runner, unset must mean apt's own default" >&2
+        return 1
+    fi
+
+    # AND THE RUNNER DEFAULT. `WZ_APT_ARCHIVES` unset ON a runner must resolve
+    # to `$HOME/.cache/wz-apt`, because that is the only path ci.yml's cache
+    # steps name — if the script and the workflow disagree about it, the cache
+    # saves an empty directory every run and nothing ever says so.
+    : >"$argv_log"
+    local fake_home
+    fake_home="$(mktemp -d)"
+    if ! GITHUB_ACTIONS=true HOME="$fake_home" WZ_ARGV_LOG="$argv_log" \
+        WZ_APT_CMD="$stub" WZ_APT_DEADLINE=5 bash "$script" cmake >/dev/null 2>&1; then
+        rm -rf "$fake_home"
+        echo "  Layer C0g FAIL: the install refused on a runner with no explicit" \
+            "WZ_APT_ARCHIVES" >&2
+        return 1
+    fi
+    if ! grep -qF -- "Dir::Cache::archives=${fake_home}/.cache/wz-apt" "$argv_log"; then
+        rm -rf "$fake_home"
+        echo "  Layer C0g FAIL: on a runner the archive directory must default to" \
+            "\$HOME/.cache/wz-apt -- the path ci.yml's \`actions/cache\` steps" \
+            "carry. They disagree, so the cache would be saved empty" >&2
+        return 1
+    fi
+    rm -rf "$fake_home"
+
+    # AND THE FALLBACK, which is the arm that matters on the bad day. A cache is
+    # an optimisation; an optimisation that can break the build is a defect. An
+    # archive directory that cannot be created must warn and install anyway.
+    #
+    # The fixture points it at a path under a REGULAR FILE, so `mkdir -p` cannot
+    # succeed. The first draft of that branch named `${WZ_APT_ARCHIVES}` in its
+    # warning while the path had been DERIVED from `$HOME` — under `set -u` that
+    # aborts, inside the branch whose whole job is not to.
+    : >"$argv_log"
+    local blocker
+    blocker="$(mktemp)"
+    if ! WZ_ARGV_LOG="$argv_log" WZ_APT_ARCHIVES="${blocker}/nope" \
+        WZ_APT_CMD="$stub" WZ_APT_DEADLINE=5 bash "$script" cmake >/dev/null 2>&1; then
+        rm -f "$blocker"
+        echo "  Layer C0g FAIL: an archive directory that could not be created" \
+            "took the install down with it. The cache is an optimisation and" \
+            "must degrade, not fail" >&2
+        return 1
+    fi
+    if grep -q 'Dir::Cache::archives' "$argv_log"; then
+        rm -f "$blocker"
+        echo "  Layer C0g FAIL: apt was pointed at an archive directory that does" \
+            "not exist, which apt refuses outright -- the fallback must drop the" \
+            "option, not pass a broken one" >&2
+        return 1
+    fi
+    rm -f "$blocker"
+
     # AND THE CEILING MUST BE THE ONLY ROAD. A bounded script that half the
     # workflow routes around bounds half the workflow, and the next apt step
     # anyone adds will be written the way the thirteen that were here already

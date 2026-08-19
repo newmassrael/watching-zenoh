@@ -186,6 +186,30 @@ jobs:
           submodules: recursive
           fetch-depth: 0  # full history for git-log-based commit↔ledger drift check
 
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # R311y881 MEASURED azure.archive.ubuntu.com at ~27 kB/s sustained on
+        # run 32266212482, at which this repo's 25-142 MB per job cannot be made
+        # to fit by any ceiling — the 142 MB job needs ~88 minutes, past its own
+        # `timeout-minutes`. The throughput is not ours to fix. Paying it once
+        # instead of every run is.
+        #
+        # `apt-install.sh` points apt's `Dir::Cache::archives` here, so a cold
+        # run downloads the .debs and every run after it finds them already
+        # present. The path is decided in ONE place (that script) and named here;
+        # Layer C0g asserts the two agree, because a disagreement would save an
+        # empty directory every run and nothing would say so.
+        #
+        # Keyed per JOB because the package lists differ per job, and on ci.yml's
+        # hash so a changed list gets a new key rather than a stale hit. The
+        # restore-keys prefix means a changed list still starts from the last
+        # good archive instead of from nothing.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
       - name: Install system dependencies
         # cmake + libclang-dev are needed by zenoh-pico-sys (cmake
         # crate + bindgen). perl is GA on Ubuntu but listed for
@@ -707,6 +731,30 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # R311y881 MEASURED azure.archive.ubuntu.com at ~27 kB/s sustained on
+        # run 32266212482, at which this repo's 25-142 MB per job cannot be made
+        # to fit by any ceiling — the 142 MB job needs ~88 minutes, past its own
+        # `timeout-minutes`. The throughput is not ours to fix. Paying it once
+        # instead of every run is.
+        #
+        # `apt-install.sh` points apt's `Dir::Cache::archives` here, so a cold
+        # run downloads the .debs and every run after it finds them already
+        # present. The path is decided in ONE place (that script) and named here;
+        # Layer C0g asserts the two agree, because a disagreement would save an
+        # empty directory every run and nothing would say so.
+        #
+        # Keyed per JOB because the package lists differ per job, and on ci.yml's
+        # hash so a changed list gets a new key rather than a stale hit. The
+        # restore-keys prefix means a changed list still starts from the last
+        # good archive instead of from nothing.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
       - name: Install system dependencies
         # cmake + libclang-dev for the sce-codegen / xtask (Layer B/B2)
         # toolchain; perl for verify-codegen.sh Layer 2 include sort.
@@ -925,6 +973,30 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # R311y881 MEASURED azure.archive.ubuntu.com at ~27 kB/s sustained on
+        # run 32266212482, at which this repo's 25-142 MB per job cannot be made
+        # to fit by any ceiling — the 142 MB job needs ~88 minutes, past its own
+        # `timeout-minutes`. The throughput is not ours to fix. Paying it once
+        # instead of every run is.
+        #
+        # `apt-install.sh` points apt's `Dir::Cache::archives` here, so a cold
+        # run downloads the .debs and every run after it finds them already
+        # present. The path is decided in ONE place (that script) and named here;
+        # Layer C0g asserts the two agree, because a disagreement would save an
+        # empty directory every run and nothing would say so.
+        #
+        # Keyed per JOB because the package lists differ per job, and on ci.yml's
+        # hash so a changed list gets a new key rather than a stale hit. The
+        # restore-keys prefix means a changed list still starts from the last
+        # good archive instead of from nothing.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
       - name: Install system dependencies
         # NOT `ci`'s list: R311y881 measured the difference. The resolved tree
         # does pull bindgen (libclang) and the vendor/sce crates, which is why
@@ -1044,6 +1116,30 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # R311y881 MEASURED azure.archive.ubuntu.com at ~27 kB/s sustained on
+        # run 32266212482, at which this repo's 25-142 MB per job cannot be made
+        # to fit by any ceiling — the 142 MB job needs ~88 minutes, past its own
+        # `timeout-minutes`. The throughput is not ours to fix. Paying it once
+        # instead of every run is.
+        #
+        # `apt-install.sh` points apt's `Dir::Cache::archives` here, so a cold
+        # run downloads the .debs and every run after it finds them already
+        # present. The path is decided in ONE place (that script) and named here;
+        # Layer C0g asserts the two agree, because a disagreement would save an
+        # empty directory every run and nothing would say so.
+        #
+        # Keyed per JOB because the package lists differ per job, and on ci.yml's
+        # hash so a changed list gets a new key rather than a stale hit. The
+        # restore-keys prefix means a changed list still starts from the last
+        # good archive instead of from nothing.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
       - name: Install system dependencies
         # perl included, and libclang for the reason the old comment here gave
         # and R311y881 confirmed: `wz-ap-demo`'s manifest lists only the `wz`
@@ -1131,6 +1227,30 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # R311y881 MEASURED azure.archive.ubuntu.com at ~27 kB/s sustained on
+        # run 32266212482, at which this repo's 25-142 MB per job cannot be made
+        # to fit by any ceiling — the 142 MB job needs ~88 minutes, past its own
+        # `timeout-minutes`. The throughput is not ours to fix. Paying it once
+        # instead of every run is.
+        #
+        # `apt-install.sh` points apt's `Dir::Cache::archives` here, so a cold
+        # run downloads the .debs and every run after it finds them already
+        # present. The path is decided in ONE place (that script) and named here;
+        # Layer C0g asserts the two agree, because a disagreement would save an
+        # empty directory every run and nothing would say so.
+        #
+        # Keyed per JOB because the package lists differ per job, and on ci.yml's
+        # hash so a changed list gets a new key rather than a stale hit. The
+        # restore-keys prefix means a changed list still starts from the last
+        # good archive instead of from nothing.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
 
       - name: Install system dependencies
         # cmake + libclang-dev: zenoh-pico-sys (cmake crate + bindgen), which the
@@ -1741,6 +1861,30 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # R311y881 MEASURED azure.archive.ubuntu.com at ~27 kB/s sustained on
+        # run 32266212482, at which this repo's 25-142 MB per job cannot be made
+        # to fit by any ceiling — the 142 MB job needs ~88 minutes, past its own
+        # `timeout-minutes`. The throughput is not ours to fix. Paying it once
+        # instead of every run is.
+        #
+        # `apt-install.sh` points apt's `Dir::Cache::archives` here, so a cold
+        # run downloads the .debs and every run after it finds them already
+        # present. The path is decided in ONE place (that script) and named here;
+        # Layer C0g asserts the two agree, because a disagreement would save an
+        # empty directory every run and nothing would say so.
+        #
+        # Keyed per JOB because the package lists differ per job, and on ci.yml's
+        # hash so a changed list gets a new key rather than a stale hit. The
+        # restore-keys prefix means a changed list still starts from the last
+        # good archive instead of from nothing.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
       - name: Install system dependencies
         # libclang for the sce-codegen / *-sys build scripts. `cmake` used to
         # be on this line under the same clause, and R311y881 measured the
@@ -1823,6 +1967,30 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # R311y881 MEASURED azure.archive.ubuntu.com at ~27 kB/s sustained on
+        # run 32266212482, at which this repo's 25-142 MB per job cannot be made
+        # to fit by any ceiling — the 142 MB job needs ~88 minutes, past its own
+        # `timeout-minutes`. The throughput is not ours to fix. Paying it once
+        # instead of every run is.
+        #
+        # `apt-install.sh` points apt's `Dir::Cache::archives` here, so a cold
+        # run downloads the .debs and every run after it finds them already
+        # present. The path is decided in ONE place (that script) and named here;
+        # Layer C0g asserts the two agree, because a disagreement would save an
+        # empty directory every run and nothing would say so.
+        #
+        # Keyed per JOB because the package lists differ per job, and on ci.yml's
+        # hash so a changed list gets a new key rather than a stale hit. The
+        # restore-keys prefix means a changed list still starts from the last
+        # good archive instead of from nothing.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
 
       - name: Install system dependencies
         # arm-none-eabi-gcc = the lwip-sys cross cc (CC_thumbv7m_none_eabi) +
@@ -2032,6 +2200,30 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # R311y881 MEASURED azure.archive.ubuntu.com at ~27 kB/s sustained on
+        # run 32266212482, at which this repo's 25-142 MB per job cannot be made
+        # to fit by any ceiling — the 142 MB job needs ~88 minutes, past its own
+        # `timeout-minutes`. The throughput is not ours to fix. Paying it once
+        # instead of every run is.
+        #
+        # `apt-install.sh` points apt's `Dir::Cache::archives` here, so a cold
+        # run downloads the .debs and every run after it finds them already
+        # present. The path is decided in ONE place (that script) and named here;
+        # Layer C0g asserts the two agree, because a disagreement would save an
+        # empty directory every run and nothing would say so.
+        #
+        # Keyed per JOB because the package lists differ per job, and on ci.yml's
+        # hash so a changed list gets a new key rather than a stale hit. The
+        # restore-keys prefix means a changed list still starts from the last
+        # good archive instead of from nothing.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
 
       - name: Install system dependencies
         run: |
@@ -2483,6 +2675,30 @@ jobs:
           ls -1 /usr/lib/llvm-*/lib/libclang.so* 2>/dev/null || true
           dpkg -l 'libclang*' 'clang*' 2>/dev/null | grep '^ii' || true
 
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # R311y881 MEASURED azure.archive.ubuntu.com at ~27 kB/s sustained on
+        # run 32266212482, at which this repo's 25-142 MB per job cannot be made
+        # to fit by any ceiling — the 142 MB job needs ~88 minutes, past its own
+        # `timeout-minutes`. The throughput is not ours to fix. Paying it once
+        # instead of every run is.
+        #
+        # `apt-install.sh` points apt's `Dir::Cache::archives` here, so a cold
+        # run downloads the .debs and every run after it finds them already
+        # present. The path is decided in ONE place (that script) and named here;
+        # Layer C0g asserts the two agree, because a disagreement would save an
+        # empty directory every run and nothing would say so.
+        #
+        # Keyed per JOB because the package lists differ per job, and on ci.yml's
+        # hash so a changed list gets a new key rather than a stale hit. The
+        # restore-keys prefix means a changed list still starts from the last
+        # good archive instead of from nothing.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
       - name: Install system dependencies
         # No `cmake`: this job's lanes reach neither `zenoh-pico-sys` nor
         # `wz-integration-tests`, and those are the only routes to the `cmake`
@@ -2673,6 +2889,30 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # R311y881 MEASURED azure.archive.ubuntu.com at ~27 kB/s sustained on
+        # run 32266212482, at which this repo's 25-142 MB per job cannot be made
+        # to fit by any ceiling — the 142 MB job needs ~88 minutes, past its own
+        # `timeout-minutes`. The throughput is not ours to fix. Paying it once
+        # instead of every run is.
+        #
+        # `apt-install.sh` points apt's `Dir::Cache::archives` here, so a cold
+        # run downloads the .debs and every run after it finds them already
+        # present. The path is decided in ONE place (that script) and named here;
+        # Layer C0g asserts the two agree, because a disagreement would save an
+        # empty directory every run and nothing would say so.
+        #
+        # Keyed per JOB because the package lists differ per job, and on ci.yml's
+        # hash so a changed list gets a new key rather than a stale hit. The
+        # restore-keys prefix means a changed list still starts from the last
+        # good archive instead of from nothing.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
       - name: Install system dependencies
         # cmake + clang/libclang are for those two C builds (bindgen included);
         # perl matches the sibling job's set.
@@ -2817,6 +3057,30 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # R311y881 MEASURED azure.archive.ubuntu.com at ~27 kB/s sustained on
+        # run 32266212482, at which this repo's 25-142 MB per job cannot be made
+        # to fit by any ceiling — the 142 MB job needs ~88 minutes, past its own
+        # `timeout-minutes`. The throughput is not ours to fix. Paying it once
+        # instead of every run is.
+        #
+        # `apt-install.sh` points apt's `Dir::Cache::archives` here, so a cold
+        # run downloads the .debs and every run after it finds them already
+        # present. The path is decided in ONE place (that script) and named here;
+        # Layer C0g asserts the two agree, because a disagreement would save an
+        # empty directory every run and nothing would say so.
+        #
+        # Keyed per JOB because the package lists differ per job, and on ci.yml's
+        # hash so a changed list gets a new key rather than a stale hit. The
+        # restore-keys prefix means a changed list still starts from the last
+        # good archive instead of from nothing.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
       - name: Install system dependencies
         # The sibling genre jobs' set, carried over verbatim rather than
         # minimised. Only the clang half is KNOWN to be load-bearing here —
@@ -2934,6 +3198,30 @@ jobs:
       # their agreement an agreement on the wire rather than on a library. The
       # earlier form of this note said "NO pico CLIs"; that is why the build step
       # below now exists.
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # R311y881 MEASURED azure.archive.ubuntu.com at ~27 kB/s sustained on
+        # run 32266212482, at which this repo's 25-142 MB per job cannot be made
+        # to fit by any ceiling — the 142 MB job needs ~88 minutes, past its own
+        # `timeout-minutes`. The throughput is not ours to fix. Paying it once
+        # instead of every run is.
+        #
+        # `apt-install.sh` points apt's `Dir::Cache::archives` here, so a cold
+        # run downloads the .debs and every run after it finds them already
+        # present. The path is decided in ONE place (that script) and named here;
+        # Layer C0g asserts the two agree, because a disagreement would save an
+        # empty directory every run and nothing would say so.
+        #
+        # Keyed per JOB because the package lists differ per job, and on ci.yml's
+        # hash so a changed list gets a new key rather than a stale hit. The
+        # restore-keys prefix means a changed list still starts from the last
+        # good archive instead of from nothing.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
 
       - name: Install system dependencies
         # cmake + pkg-config are what `build-zenoh-pico-cli.sh` and the pinned
@@ -3142,6 +3430,30 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # R311y881 MEASURED azure.archive.ubuntu.com at ~27 kB/s sustained on
+        # run 32266212482, at which this repo's 25-142 MB per job cannot be made
+        # to fit by any ceiling — the 142 MB job needs ~88 minutes, past its own
+        # `timeout-minutes`. The throughput is not ours to fix. Paying it once
+        # instead of every run is.
+        #
+        # `apt-install.sh` points apt's `Dir::Cache::archives` here, so a cold
+        # run downloads the .debs and every run after it finds them already
+        # present. The path is decided in ONE place (that script) and named here;
+        # Layer C0g asserts the two agree, because a disagreement would save an
+        # empty directory every run and nothing would say so.
+        #
+        # Keyed per JOB because the package lists differ per job, and on ci.yml's
+        # hash so a changed list gets a new key rather than a stale hit. The
+        # restore-keys prefix means a changed list still starts from the last
+        # good archive instead of from nothing.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
 
       - name: Install system dependencies
         run: |

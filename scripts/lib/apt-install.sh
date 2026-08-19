@@ -137,6 +137,12 @@
 #   WZ_APT_RETRIES            apt's own per-source retry count (default 2)
 #   WZ_APT_CMD                the command to run instead of apt-get; the test
 #                             lane's only entry point. Never set in CI.
+#   WZ_APT_ARCHIVES           where apt downloads its .debs. Unset = apt's own
+#                             `/var/cache/apt/archives`, i.e. today's behaviour.
+#                             Set to a HOME-relative directory in ci.yml so
+#                             `actions/cache` can carry it between runs; a
+#                             directory that cannot be created degrades to the
+#                             default with a warning, never a failure.
 #
 # Exit 0 = installed, whether or not `update` succeeded first.
 # Exit 1 = the INSTALL failed or ran past its deadline, named.
@@ -231,6 +237,49 @@ wz_apt_install() {
         -o "Acquire::http::Timeout=15"
         -o "Acquire::https::Timeout=15"
     )
+    # R311y882 — DOWNLOAD INTO A CACHEABLE DIRECTORY.
+    #
+    # This is the lever R311y881's measurement pointed at and did not pull. The
+    # mirror was measured at ~27 kB/s sustained on run 32266212482, at which
+    # this repo's 25-142 MB per job cannot be made to fit by ANY ceiling: the
+    # 142 MB job needs ~88 minutes, past its own `timeout-minutes`. The
+    # throughput is not ours to fix; whether we pay it twice is.
+    #
+    # apt's default archive directory is `/var/cache/apt/archives`, which is
+    # root-owned and outside anything `actions/cache` can carry between runs.
+    # Pointed at a directory under the runner user's HOME instead, the .debs a
+    # cold run downloads are restored by the next run and `apt-get install`
+    # finds every file already present — no mirror on the critical path at all.
+    # `apt-get` (unlike `apt`) does not auto-clean the archive after installing,
+    # so keeping them needs no extra option.
+    #
+    # The FALLBACK is the point of the guard: if the directory cannot be made,
+    # this must degrade to today's behaviour rather than fail. A cache is an
+    # optimisation, and an optimisation that can break the build is a defect.
+    #
+    # WHERE the directory is decided: HERE, once. An explicit `WZ_APT_ARCHIVES`
+    # wins; otherwise a GitHub-Actions runner gets `$HOME/.cache/wz-apt` and a
+    # developer's machine gets apt's own default, untouched. The alternative was
+    # an `env:` on all fifteen call sites, and fifteen copies of one fact is the
+    # disease this round is treating — R311y881 found `cmake` on four jobs that
+    # cannot use it for exactly that reason.
+    local archives="${WZ_APT_ARCHIVES:-}"
+    if [[ -z "${archives}" && "${GITHUB_ACTIONS:-}" == "true" && -n "${HOME:-}" ]]; then
+        archives="${HOME}/.cache/wz-apt"
+    fi
+    if [[ -n "${archives}" ]]; then
+        if mkdir -p "${archives}/partial" 2>/dev/null; then
+            opts+=(-o "Dir::Cache::archives=${archives}")
+        else
+            # `${archives}`, not `${WZ_APT_ARCHIVES}`: on a runner the path is
+            # DERIVED and the variable is unset, so naming it here would abort
+            # on `set -u` — inside the branch that exists to keep a cache
+            # failure from being fatal.
+            echo "::warning::apt: could not create ${archives}/partial," \
+                "so this install uses apt's default archive directory and will" \
+                "not be cached. Not fatal; the packages still install." >&2
+        fi
+    fi
     # Two ceilings, not one. `update` fetches indices and makes no progress at
     # all against a mirror that will not answer, which is the shape R311y865
     # bounded; `install` fetches this repo's 32.4 MB and was MEASURED at 454s on
