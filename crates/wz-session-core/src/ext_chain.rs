@@ -91,25 +91,13 @@ pub(crate) fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
 /// Decode the Z-flag-gated ext chain into the lifetime-free owned mirror,
 /// bounded by [`MAX_EXT_CHAIN_DEPTH`](crate::parse_error::MAX_EXT_CHAIN_DEPTH)
 /// so a malformed peer cannot pin the decoder into an unbounded loop.
-#[cfg(any(
-    feature = "codec-init-body",
-    feature = "codec-open-body",
-    feature = "codec-close",
-    feature = "codec-keep-alive",
-    feature = "codec-frame",
-    feature = "session-extauth",
-    // R311y605 — `parse_inbound`'s JOIN arm decodes the Z-gated chain trailing
-    // the base body (the QoS-SN advertisement zenoh and pico both send). A
-    // helper's cfg must contain the gate of every module that CALLS it, which
-    // only an `--features alloc,codec-join` subset build can show.
-    feature = "codec-join",
-    // R311y607 — `parse_scouting` calls it for both SCOUT and HELLO: the
-    // scouting envelope is Z-gated exactly as the transport one is, and pico
-    // skips a non-mandatory chain after both (message.c:756). Same rule, found
-    // the same way — `--features alloc,codec-scout` alone.
-    feature = "codec-scout",
-    feature = "codec-hello"
-))]
+///
+/// UNCONDITIONAL within this `alloc`-gated module since transport OAM joined
+/// `parse_inbound`: that arm carries no `codec-*` gate, so every build that
+/// compiles this module calls this function. The `any(codec-*)` union it used
+/// to carry had to be grown twice by feature-SUBSET builds (R311y605,
+/// R311y607) and each growth was a defect until it was found; there is no
+/// longer a list to be short of.
 pub(crate) fn decode_ext_chain(
     cursor: &mut sce_forge_runtime::codec::SceCursor<'_>,
 ) -> Result<Vec<ExtEntryOwned>, crate::parse_error::InboundParseError> {

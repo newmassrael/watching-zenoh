@@ -204,6 +204,7 @@ pub struct DroppedFrameCensus {
     frame: usize,
     fragment: usize,
     join: usize,
+    oam: usize,
     unknown: usize,
     undecodable: usize,
 }
@@ -239,6 +240,10 @@ impl DroppedFrameCensus {
             Ok(crate::inbound::InboundFrame::Fragment { .. }) => self.fragment += 1,
             #[cfg(feature = "codec-join")]
             Ok(crate::inbound::InboundFrame::Join { .. }) => self.join += 1,
+            // UNGATED, alone among these arms, because the variant is: transport
+            // OAM needs no generated body codec, so no feature can take it away
+            // and no build counts it as `unknown`.
+            Ok(crate::inbound::InboundFrame::Oam { .. }) => self.oam += 1,
             Ok(crate::inbound::InboundFrame::Unknown { .. }) => self.unknown += 1,
             Err(_) => self.undecodable += 1,
         }
@@ -282,6 +287,14 @@ impl DroppedFrameCensus {
         self.join
     }
 
+    /// Transport OAM — operations and maintenance. Its loss matters for the
+    /// same reason a JOIN's does: it is a message a peer sends ABOUT the
+    /// session rather than through it, so a bound that drops one drops the
+    /// explanation for what the next messages do.
+    pub fn oam(&self) -> usize {
+        self.oam
+    }
+
     /// Messages whose MID this reader does not know. Not an error: an unknown
     /// message is a fact about the wire, and a bound discarding one is worth
     /// telling apart from a bound discarding a keepalive.
@@ -307,6 +320,7 @@ impl DroppedFrameCensus {
             + self.frame
             + self.fragment
             + self.join
+            + self.oam
             + self.unknown
             + self.undecodable
     }

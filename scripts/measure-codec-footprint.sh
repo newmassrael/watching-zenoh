@@ -412,7 +412,28 @@ declare -A CODEC_DELTA_FLOOR=(
     # absorbs work the arm used to own. That is the "a refactor consolidated
     # the paths it used to own" case named above, measured rather than assumed.
     # A bodyless message's arm being 96 B is still real elision.
-    [codec-keep-alive]=64      # measured 96 (R311y580, was 208 -> floor 128)
+    # R311y878 — RE-PINNED 64 -> -1024, the THIRD deliberate re-pin the block
+    # above prescribes and the second whose cause is the MEASUREMENT rather
+    # than the code. It arrives with a witness in the same commit, which is
+    # what that block requires and what makes it a re-pin instead of a
+    # silencing: `CODEC_ELISION_WITNESS[codec-keep-alive]` below.
+    #
+    # Four builds of the same tree, one host, one toolchain, differing only in
+    # how `parse_inbound_consuming` is shaped around an UNRELATED arm:
+    #
+    #   | transport-OAM arm                       | minus codec-keep-alive |
+    #   |-----------------------------------------|------------------------|
+    #   | absent (`T_MID_OAM if false`)           |                +240 B  |
+    #   | present, inline in the match            |                -192 B  |
+    #   | present, behind `#[inline(never)]`      |                 -96 B  |
+    #   | present + keep-alive's own arm extracted|                 +64 B  |
+    #
+    # A 432 B spread on a lane whose pin was 64 B, driven by a message this
+    # codec has nothing to do with. What the number tracks at that magnitude is
+    # the CALLER's inline boundary, not the codec — the same finding the
+    # [codec-close] re-pin above records, reached here by a different road.
+    # Old: 64 (R311y580, was 208 -> 128; measured 96 then).
+    [codec-keep-alive]=-1024
     [codec-init-body]=12000    # measured 14608
     [codec-open-body]=8000     # measured 10192
     # R311y822 — RE-PINNED 500 -> -1024, and the catalog-truthfulness claim for
@@ -488,6 +509,16 @@ declare -A CODEC_DELTA_FLOOR=(
 # the same commit — that is what keeps the re-pin from being a silencing.
 declare -A CODEC_ELISION_WITNESS=(
     [codec-close]="wz_session_core::handshake_encode::encode_close"
+    # R311y878 — the second witness, and it had to be MADE rather than found.
+    # A name-set diff of `.baseline.syms` against `.minus-codec-keep-alive.syms`
+    # returned ZERO symbols present in one and absent from the other: a
+    # bodyless message's arm inlines away completely, so this codec had no name
+    # to pin and its byte lane was measuring the caller's inline boundary
+    # instead (208 -> 128 -> 96 -> 64, one re-pin per round that grew
+    # `parse_inbound_consuming`). `decode_keep_alive` is that arm behind an
+    # `#[inline(never)]` boundary, so the claim the catalog makes is now
+    # checkable by name here rather than only by a delta that cannot resolve it.
+    [codec-keep-alive]="wz_session_core::inbound::decode_keep_alive"
 )
 
 SKIP_THRESHOLD=${WZ_FOOTPRINT_NO_THRESHOLD:-0}

@@ -32,6 +32,16 @@ pub enum InboundParseError {
     /// `ext_envelope.scxml::on-overflow="reject"` so a malformed
     /// peer cannot pin the decoder into an unbounded loop.
     ExtChainOverflow,
+    /// The header selected a body encoding the wire spec RESERVES, so the
+    /// message has no shape to read and no length to skip.
+    ///
+    /// Raised by `parse_inbound`'s transport-OAM arm for `iext::ENC_MASK ==
+    /// 0b11`, which zenoh's own decoder answers with `DidntRead`
+    /// (`zenoh-codec/src/transport/oam.rs`). Distinct from [`Self::Codec`]
+    /// because nothing about the wire is TRUNCATED or malformed at the byte
+    /// level — the bytes are well-formed and the SPEC declines to say what
+    /// they mean, which is a different thing for a reader to report.
+    ReservedEncoding,
     /// transport-compression — a compression-negotiated batch could not be
     /// lz4-decompressed (empty wire, a corrupt lz4 block, or a blob that would
     /// expand past the negotiated mtu bound — the decompression-bomb guard).
@@ -50,6 +60,9 @@ impl fmt::Display for InboundParseError {
                 "inbound ext chain exceeded MAX_EXT_CHAIN_DEPTH={} without terminator",
                 MAX_EXT_CHAIN_DEPTH
             ),
+            Self::ReservedEncoding => {
+                write!(f, "inbound header selected a reserved body encoding")
+            }
             #[cfg(feature = "transport-compression")]
             Self::CompressionFailed => {
                 write!(f, "inbound compressed batch failed lz4 decompression")

@@ -443,32 +443,16 @@ pub mod ext_admit;
 
 /// SSOT for the transport-message extension CHAIN codec (the Z-flag-gated
 /// `ExtEntry` list). Shared by `handshake_encode` (outbound), `inbound`
-/// (inbound), and `auth_dispatch` (the Z_EXT_AUTH inner method chain). Gated on
-/// the union of those consumers' features.
-#[cfg(all(
-    feature = "alloc",
-    any(
-        feature = "codec-init-body",
-        feature = "codec-open-body",
-        feature = "codec-close",
-        feature = "codec-keep-alive",
-        feature = "codec-frame",
-        feature = "session-extauth",
-        // R311y605 — `parse_inbound`'s JOIN arm decodes the Z-gated chain that
-        // trails the base body (the QoS-SN advertisement zenoh and pico both
-        // send), so `codec-join` alone must bring this module in. Found by a
-        // FEATURE SUBSET build, not by the workspace build: `--features
-        // alloc,codec-join` is the only shape where no sibling codec pulls it.
-        feature = "codec-join",
-        // R311y607 — the SCOUTING envelope is Z-gated too: pico skips a
-        // non-mandatory chain after both SCOUT and HELLO
-        // (`_z_scouting_message_decode_na`, message.c:756). Same subset
-        // reasoning as codec-join above — `--features alloc,codec-scout` has
-        // no sibling to pull this in.
-        feature = "codec-scout",
-        feature = "codec-hello"
-    )
-))]
+/// (inbound), and `auth_dispatch` (the Z_EXT_AUTH inner method chain).
+///
+/// The union of `codec-*` gates this once carried — grown twice (R311y605
+/// JOIN, R311y607 SCOUT and HELLO, each found only by a feature-SUBSET build)
+/// — collapsed when `parse_inbound` gained its UNCONDITIONAL arm:
+/// transport OAM (`T_MID_OAM`) needs no generated body codec, only this chain
+/// decoder and a VLE read, so every `alloc` build now has a consumer and there
+/// is no longer a list to grow. `alloc` is the real dependency and always was:
+/// the decoder returns an owned `Vec` of entries.
+#[cfg(feature = "alloc")]
 mod ext_chain;
 
 /// Lease-deadline check outcome (R77 helper surface). no_std +

@@ -6762,7 +6762,7 @@ mod datagram_tests {
     /// but that gate refuses does not merely go unnamed here: the reader calls
     /// it loss of framing and skips forward. The two lists are pinned against
     /// each other in `wz-session-core`
-    /// (`the_header_gate_and_the_decoder_disagree_only_on_reserved_bits`);
+    /// (`the_header_gate_and_the_decoder_disagree_on_reserved_bits_and_on_oam`);
     /// this drives the wiring that consults them.
     ///
     /// `desyncs == 0` is therefore the assertion that is new here. A census
@@ -6992,10 +6992,16 @@ mod datagram_tests {
     /// wired but not witnessed.
     ///
     /// The offender is the smallest batch whose tail cannot be measured — a
-    /// KeepAlive, then a byte no MID names. `0x00` is not a transport MID
-    /// (`wz-codecs`'s space starts at `T_MID_INIT` = `0x01`), so nothing can
-    /// say where that candidate ends and the two bytes behind the KeepAlive are
+    /// KeepAlive, then a byte no MID names. `0x08` is outside the transport
+    /// MID space (`id::OAM` 0x00 .. `id::JOIN` 0x07), so nothing can say where
+    /// that candidate ends and the two bytes behind the KeepAlive are
     /// unreadable rather than merely unread.
+    ///
+    /// It was `0x00` until transport OAM gained a decode arm, under a claim
+    /// written right here that the space "starts at `T_MID_INIT` = `0x01`".
+    /// That claim was never true of the wire — zenoh's `id::OAM` IS `0x00` —
+    /// it was true only of what this build could name, and the fixture rested
+    /// on the gap rather than on the protocol.
     ///
     /// Both link kinds, because the two ingestion paths reach the walk by
     /// different routes and a counter proved on one is a counter proved on
@@ -7004,7 +7010,7 @@ mod datagram_tests {
     /// message.
     #[test]
     fn an_unwalkable_batch_tail_reaches_the_capture_layer_on_both_links() {
-        let offender = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE, 0x00, 0x11];
+        let offender = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE, 0x08, 0x11];
         // The same KeepAlive with a MEASURABLE message behind it — the control,
         // and the arm that would stay at zero if the walk simply gave up.
         let clean = alloc::vec![
@@ -7017,7 +7023,7 @@ mod datagram_tests {
         // call this capture whole and every test would agree with it: the
         // boundary sweep measured exactly that and this arm is what kills it.
         // One trailing byte is the least a batch can be short by.
-        let smallest = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE, 0x00];
+        let smallest = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE, 0x08];
 
         for (name, wire, expected, frames) in [
             ("offender", &offender, 2u64, 1usize),
@@ -7314,9 +7320,14 @@ mod datagram_tests {
     #[test]
     fn a_fragmented_zenoh_datagram_decodes_only_after_reassembly() {
         // A KeepAlive followed by padding the UDP length covers, so the
-        // datagram is genuinely larger than one piece.
+        // datagram is genuinely larger than one piece. The filler is `0x08` —
+        // outside the transport MID space — and NOT the `0u8` it used to be:
+        // `0x00` is `id::OAM`, so a run of zeroes is a chain of valid two-byte
+        // OAM messages and this test read twenty-four of them where it wanted
+        // one. The subject here is IP reassembly; the filler must not be
+        // decodable, or the assertion moves whenever the decoder learns a MID.
         let mut msg = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
-        msg.extend_from_slice(&[0u8; 47]);
+        msg.extend_from_slice(&[0x08u8; 47]);
 
         let mut udp = Vec::new();
         udp.extend_from_slice(&7447u16.to_be_bytes());
@@ -11859,7 +11870,14 @@ mod tls_flow_tests {
         // LE length 0x0317 = 791, so as TLS this is one `application_data`
         // record whose BE length 0x0314 = 788 lands the run EXACTLY on the
         // record boundary -- consistent, one record deep, and therefore held.
-        let mut unit = alloc::vec![0x00u8; 791];
+        //
+        // The filler is `0x08` and not `0x00`: the TLS reading is indifferent
+        // to it, but the ZENOH reading is not, and `0x00` is `id::OAM` — a run
+        // of zeroes walks as a chain of two-byte OAM messages, which accounts
+        // for the very bytes this test needs to go unaccounted for. `0x08` is
+        // outside the transport MID space, so the tail stays unwalkable and
+        // the 788 held bytes are still the finding.
+        let mut unit = alloc::vec![0x08u8; 791];
         unit[0] = wz_session_core::wire_const::T_MID_KEEP_ALIVE;
         unit[1] = 0x03;
         unit[2] = 0x14;

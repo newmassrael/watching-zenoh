@@ -634,6 +634,12 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                 InboundFrame::Join { .. } => {
                     unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
                 }
+                // Transport OAM projects to `Some(FramingError)` for the same
+                // reason a JOIN does — wz's unicast FSM has no operations
+                // transition — so the outer Some arm took it.
+                InboundFrame::Oam { .. } => {
+                    unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
+                }
                 InboundFrame::Unknown { .. } => {
                     // inbound_to_fsm_event projects these to Some(event),
                     // so the outer Some arm handled them — this branch

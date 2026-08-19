@@ -504,6 +504,34 @@ codec_group!(
 pub mod encoding_ids;
 
 pub mod wire_const {
+    /// Transport-message OAM (`zenoh-protocol/src/transport/mod.rs:54`
+    /// `id::OAM`). Ungated with `T_MID_INIT` below and for the same reason:
+    /// the bare MID is wire-spec ground truth, and a reader that does not
+    /// know 0x00 is a MID cannot tell an operations-and-maintenance message
+    /// from an unrecognised one.
+    ///
+    /// Its body is NOT shaped like the other transport MIDs': header bits
+    /// 5..6 carry the body's ENCODING (`common/extension.rs:64-67`
+    /// `iext::ENC_*`) where the others carry flags, and the ext chain is
+    /// written BEFORE the body rather than after it
+    /// (`zenoh-codec/src/transport/oam.rs`, header -> id -> extensions ->
+    /// payload).
+    pub const T_MID_OAM: u8 = 0x00;
+    /// Transport OAM's ENCODING field in its transport-header position:
+    /// `iext::ENC_MASK` (`common/extension.rs:67`), bits 5..6, selecting the
+    /// body's shape (Unit / Z64 / ZBuf, with 0b11 reserved) where every other
+    /// transport MID spends those two bits on flags.
+    ///
+    /// Ungated with [`T_MID_OAM`] above and for the same reason. Unlike the
+    /// `FLAG_T_*` consts below it has no GATED sibling to be checked against,
+    /// because no `codec-*` feature decodes an OAM body — the arm that reads
+    /// it in `wz_session_core::inbound` carries no feature at all.
+    ///
+    /// NOT in [`transport_flag_mask`]: that table answers where a lost stream
+    /// may RESUME, and `oam_is_a_transport_mid_this_gate_still_refuses` is
+    /// where the measured reason 0x00 is kept out of it lives. A decoder that
+    /// already knows it is looking at an OAM reads the field with this mask.
+    pub const FLAG_T_OAM_ENC: u8 = 0x60;
     /// Transport-message INIT (transport.h:20).
     ///
     /// R311y630 — UNGATED, on R311kx's reasoning for `T_MID_KEEP_ALIVE` below
@@ -825,6 +853,12 @@ pub mod wire_const {
     pub const fn transport_flag_mask(mid: u8) -> Option<u8> {
         // The ext-chain bit rides every transport header (`FLAG_T_Z`).
         const Z: u8 = 0x80;
+        // OAM (`0x00`) is DELIBERATELY ABSENT, and it is the one MID in the
+        // transport space that is. See
+        // `oam_is_a_transport_mid_this_gate_still_refuses` below: this
+        // predicate answers "may a stream reader RESUME here", not "is this a
+        // transport MID", and admitting 0x00 was measured to cost the resync
+        // scan a third of what it recovers.
         match mid {
             0x01 => Some(Z | 0x20 | 0x40), // INIT: A | S
             0x02 => Some(Z | 0x20 | 0x40), // OPEN: A | T
@@ -842,8 +876,13 @@ pub mod wire_const {
     /// True for 42 of the 256 byte values (`transport_header_space_is_42_of_256`
     /// counts them), which is what makes a chain of these a usable
     /// resynchronisation signal: the MID must be one of seven, AND every flag
-    /// bit it sets must be one that MID defines. A byte failing either test
-    /// cannot have been written by a conforming sender.
+    /// bit it sets must be one that MID defines.
+    ///
+    /// A byte failing either test is one a stream reader will not RESUME on.
+    /// That is a NARROWER claim than "no conforming sender wrote it", and the
+    /// difference has a name: `T_MID_OAM` (0x00) is a conforming header this
+    /// predicate refuses anyway. See
+    /// `oam_is_a_transport_mid_this_gate_still_refuses`.
     ///
     /// Says nothing about the BODY — a credible header with a corrupt body is
     /// still a decode error, reported as one.
@@ -921,8 +960,11 @@ mod transport_header_space {
                 "MID {mid:#04x}: the ungated table and the gated consts disagree"
             );
         }
-        // ...and nothing ELSE is a transport MID. The 5-bit field holds 32
-        // values; the seven above are the whole space.
+        // ...and nothing ELSE the gate admits. The 5-bit field holds 32
+        // values; the seven above are what a stream reader may RESUME on.
+        // `T_MID_OAM` (0x00) is a transport MID this table deliberately omits
+        // — `oam_is_a_transport_mid_this_gate_still_refuses` states the price
+        // that bought the omission.
         for mid in 0u8..32 {
             let named = expect.iter().any(|(m, _)| *m == mid);
             assert_eq!(
@@ -959,11 +1001,72 @@ mod transport_header_space {
         assert!(is_credible_transport_header(0x84));
         assert!(!is_credible_transport_header(0x24));
         assert!(!is_credible_transport_header(0x44));
-        // 0x00 and 0x08..=0x1F are not transport MIDs.
+        // 0x00 and 0x08..=0x1F are refused. 0x00 IS a transport MID and is
+        // refused deliberately — `oam_is_a_transport_mid_this_gate_still_refuses`
+        // is where that decision and its measured price live.
         assert!(!is_credible_transport_header(0x00));
         for mid in 0x08u8..=0x1F {
             assert!(!is_credible_transport_header(mid), "MID {mid:#04x}");
         }
+    }
+
+    /// OAM (`id::OAM = 0x00`, `zenoh-protocol/src/transport/mod.rs:54`) IS a
+    /// transport MID — `parse_inbound` decodes it and
+    /// `zenoh-codec/src/transport/mod.rs:131` dispatches it — and this gate
+    /// refuses it anyway. The refusal is a DECISION with a measured price, not
+    /// the omission it looks like, and this test is where the price is written
+    /// down.
+    ///
+    /// # What the gate is actually asked
+    ///
+    /// Not "is this a transport MID" but "may a stream reader RESUME a message
+    /// here". `0x00` is the weakest possible evidence for that: it is the most
+    /// common byte in padding, in zeroed buffers and in every truncated
+    /// length field, and its two encoding bits admit all four settings (they
+    /// are `iext::ENC_*`, `common/extension.rs:64-67`, not flags), so
+    /// admitting the MID admits EIGHT byte values including `0x00` itself.
+    ///
+    /// # The price, measured
+    ///
+    /// Admitting it was tried and run through
+    /// `passive::tests::the_resync_scan_lands_on_the_true_boundary_across_noise`,
+    /// whose corpus is seeded and therefore comparable run to run. At the
+    /// default resync depth the worst trial's recovered fraction fell from
+    /// 55% to 39% at 512 bytes of noise and from 42% to 0% at 8192, and the
+    /// lead-in — frames reported before the framing rejoins the truth — grew
+    /// from 5 to 14 at 65536. A reader that recovers nothing is worse at
+    /// reading OAMs than one that will not resume on their header.
+    ///
+    /// # What is NOT given up
+    ///
+    /// The decoder's reach. `parse_inbound` names an OAM and reports its
+    /// LENGTH, so a batch walk steps over one and reaches what follows it;
+    /// this gate only declines to restart a LOST stream on one. That
+    /// asymmetry is the same one
+    /// `the_header_gate_and_the_decoder_disagree_on_reserved_bits_and_on_oam`
+    /// already documents for reserved bits, with a second reason.
+    #[test]
+    fn oam_is_a_transport_mid_this_gate_still_refuses() {
+        assert_eq!(
+            transport_flag_mask(T_MID_OAM),
+            None,
+            "the omission is deliberate; read this test's doc before closing it"
+        );
+        // The Z bit spelled as the ungated table spells it: `FLAG_T_Z` is
+        // itself gated, and this test states a property a feature-poor build
+        // must still hold.
+        const Z: u8 = 0x80;
+        for enc in 0u8..4 {
+            let header = T_MID_OAM | (enc << 5);
+            assert!(!is_credible_transport_header(header), "{header:#04x}");
+            assert!(!is_credible_transport_header(header | Z), "{header:#04x}");
+        }
+        // And the bits a conforming OAM sets are exactly the ones
+        // `FLAG_T_OAM_ENC` names, which is what a reader that DOES know the
+        // MID uses to read the body — kept here so the constant has a witness
+        // even though the gate above refuses the header.
+        assert_eq!(FLAG_T_OAM_ENC, 0x60);
+        assert_eq!(reserved_transport_flags(T_MID_OAM), None);
     }
 }
 

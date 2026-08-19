@@ -112,21 +112,16 @@ const DIALER_PORT: u16 = 40_000;
 const LISTENER_PORT: u16 = 7447;
 
 /// A short name for a parsed transport message, for the assertion messages.
+///
+/// Delegates to [`InboundFrame::kind_name`] (R311y668) rather than carrying its
+/// own exhaustive match. The copy this replaces was exhaustive ON PURPOSE — a
+/// catch-all would file a brand-new message type as "something" — and the
+/// delegate keeps that property while removing the second place to remember:
+/// `kind_name`'s arms sit beside the variants under the same `#[cfg]`s, so a
+/// new variant fails to compile THERE, once, instead of in every reader that
+/// spelled the list out.
 fn frame_name(frame: &InboundFrame) -> &'static str {
-    match frame {
-        InboundFrame::Init { .. } => "Init",
-        InboundFrame::Open { .. } => "Open",
-        InboundFrame::Close { .. } => "Close",
-        InboundFrame::KeepAlive { .. } => "KeepAlive",
-        InboundFrame::Frame { .. } => "Frame",
-        InboundFrame::Fragment { .. } => "Fragment",
-        InboundFrame::Join { .. } => "Join",
-        // EXHAUSTIVE on purpose (no `_ =>`): a new transport message added to
-        // the enum must be named here, because this witness reports what a
-        // foreign encoder actually emitted and a catch-all would quietly file a
-        // brand-new message type as "something".
-        InboundFrame::Unknown { .. } => "Unknown",
-    }
+    frame.kind_name()
 }
 
 /// THE WITNESS: a real zenoh-pico session, relayed and dissected.

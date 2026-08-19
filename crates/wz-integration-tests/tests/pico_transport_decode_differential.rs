@@ -498,6 +498,34 @@ const KNOWN_DIVERGENCES: &[(u8, usize)] = &[
     (0xE3, 4),
     (0xE3, 9),
     (0xE3, 32),
+    // T_MID_OAM (0x00), Unit and Z64 encodings: wz names it, pico refuses it.
+    //
+    // R311y878 — THE TWO UPSTREAMS DISAGREE, and this row records which one wz
+    // follows rather than which one is right. zenoh's decoder dispatches
+    // `id::OAM` (`zenoh-codec/src/transport/mod.rs:131` ->
+    // `TransportBody::OAM`); zenoh-pico DEFINES the same id
+    // (`include/zenoh-pico/protocol/definitions/transport.h:32`
+    // `_Z_MID_T_OAM 0x00`) and then has no `case` for it in
+    // `_z_transport_message_decode` (`src/protocol/codec/transport.c:571`), so
+    // it falls to `default:` and returns `_Z_ERR_MESSAGE_TRANSPORT_UNKNOWN`.
+    // Read directly in both trees, not inferred: pico's own header names the
+    // message its own decoder refuses.
+    //
+    // wz follows zenoh here because the omission is pico's, and because the
+    // cost of the other choice is measured: a MID with no length stops a batch
+    // walk dead and drops the messages behind it.
+    //
+    // Lengths 1 (both) and 2 (0x20) are absent on purpose — they are NOT
+    // agreements, they are truncations wz refuses too, so both sides say no.
+    // If the corpus ever reaches them this list must grow, and the gate will
+    // say so rather than this comment.
+    (0x00, 2),
+    (0x00, 4),
+    (0x00, 9),
+    (0x00, 32),
+    (0x20, 4),
+    (0x20, 9),
+    (0x20, 32),
 ];
 
 /// ANTI-VACUITY, and it comes first because every other assertion in this file

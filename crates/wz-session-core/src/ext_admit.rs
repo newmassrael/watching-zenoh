@@ -116,6 +116,8 @@ pub enum ExtCarrier {
 /// - CLOSE (`transport/close.rs`) and KEEP_ALIVE (`transport/keepalive.rs`)
 ///   declare no `mod ext` at all: their spaces are empty, so ANY mandatory
 ///   extension on one is unknown.
+/// - OAM (`transport/oam.rs`) — `QoS = zextz64!(0x1, true)`, the SAME identity
+///   byte the data plane's is, which is why it shares the row below.
 /// - FRAME (`transport/frame.rs`) — `QoS = zextz64!(0x1, true)`, the one
 ///   mandatory transport extension in the data plane.
 /// - FRAGMENT (`transport/fragment.rs`) — the same mandatory `QoS`, plus
@@ -129,7 +131,9 @@ pub enum ExtCarrier {
 ///   (`src/protocol/codec/message.c:756`) ends in
 ///   `_z_msg_ext_skip_non_mandatories`, which refuses every mandatory entry.
 pub fn mandatory_ext_space(carrier: ExtCarrier) -> Option<&'static [u8]> {
-    /// `zextz64!(0x1, true)` = id 1 | `FLAG_M` | `ENC_Z64`.
+    /// `zextz64!(0x1, true)` = id 1 | `FLAG_M` | `ENC_Z64`. Transport OAM
+    /// declares the identical identity (`transport/oam.rs`), so the two
+    /// carriers below share this constant rather than each getting a name.
     const FRAME_QOS: u8 = 0x01 | EXT_FLAG_M | crate::ext_header::EXT_ENC_Z64;
     /// `zextzbuf!(0x1, true)` = id 1 | `FLAG_M` | `ENC_ZBUF`. Also
     /// zenoh-pico's `_Z_MSG_EXT_ID_JOIN_QOS`
@@ -145,9 +149,9 @@ pub fn mandatory_ext_space(carrier: ExtCarrier) -> Option<&'static [u8]> {
             | wire_const::T_MID_CLOSE
             | wire_const::T_MID_KEEP_ALIVE,
         ) => Some(&[]),
-        ExtCarrier::Transport(wire_const::T_MID_FRAME | wire_const::T_MID_FRAGMENT) => {
-            Some(&[FRAME_QOS])
-        }
+        ExtCarrier::Transport(
+            wire_const::T_MID_OAM | wire_const::T_MID_FRAME | wire_const::T_MID_FRAGMENT,
+        ) => Some(&[FRAME_QOS]),
         ExtCarrier::Transport(wire_const::T_MID_JOIN) => Some(&[JOIN_QOS, JOIN_SHM]),
         ExtCarrier::Scouting(wire_const::S_MID_SCOUT | wire_const::S_MID_HELLO) => Some(&[]),
         _ => None,
@@ -234,6 +238,29 @@ mod tests {
         assert_eq!(
             judge_ext_chain(ExtCarrier::Transport(wire_const::T_MID_FRAME), [0x11]),
             ExtAdmission::UnknownMandatory { eid: 0x11 }
+        );
+    }
+
+    /// Transport OAM (MID 0x00) declares exactly one mandatory extension
+    /// upstream — `ext::QoS = zextz64!(0x1, true)`
+    /// (`zenoh-protocol/src/transport/oam.rs`), the same identity byte the
+    /// data plane's is — so its chain is JUDGEABLE. A carrier missing from the
+    /// table answers `Unjudged`, and this message's whole purpose is to carry
+    /// operations traffic a participant is expected to act on: an observer
+    /// that cannot judge its chain reports a reach limit where a verdict
+    /// exists.
+    #[test]
+    fn transport_oam_declares_a_judgeable_mandatory_extension_space() {
+        assert_eq!(
+            judge_ext_chain(ExtCarrier::Transport(wire_const::T_MID_OAM), [0x31]),
+            ExtAdmission::Admissible
+        );
+        // The discriminating leg: while the carrier is absent from the table
+        // BOTH of these answer `Unjudged`, so only a refusal separates a
+        // judged space from an unreached one.
+        assert_eq!(
+            judge_ext_chain(ExtCarrier::Transport(wire_const::T_MID_OAM), [0x14]),
+            ExtAdmission::UnknownMandatory { eid: 0x14 }
         );
     }
 

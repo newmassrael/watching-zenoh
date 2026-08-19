@@ -120,19 +120,13 @@ const LISTENER_PORT: u16 = 7447;
 
 /// A short name for a parsed transport message.
 ///
-/// EXHAUSTIVE (no `_ =>`): this witness reports what a foreign encoder actually
-/// emitted, and a catch-all would file a brand-new message type as "something".
+/// Still EXHAUSTIVE (no `_ =>`) — this witness reports what a foreign encoder
+/// actually emitted, and a catch-all would file a brand-new message type as
+/// "something" — but exhaustive ONCE, in [`InboundFrame::kind_name`], whose
+/// arms sit beside the variants under the same `#[cfg]`s. The copy that used
+/// to live here was a second list to keep in step, and it fell behind.
 fn frame_name(frame: &InboundFrame) -> &'static str {
-    match frame {
-        InboundFrame::Init { .. } => "Init",
-        InboundFrame::Open { .. } => "Open",
-        InboundFrame::Close { .. } => "Close",
-        InboundFrame::KeepAlive { .. } => "KeepAlive",
-        InboundFrame::Frame { .. } => "Frame",
-        InboundFrame::Fragment { .. } => "Fragment",
-        InboundFrame::Join { .. } => "Join",
-        InboundFrame::Unknown { .. } => "Unknown",
-    }
+    frame.kind_name()
 }
 
 /// A short name for a decoded RECORD — the layer inside a `Frame`.

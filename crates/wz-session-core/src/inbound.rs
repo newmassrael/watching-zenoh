@@ -22,61 +22,20 @@
 //! feature subset (incl. `--no-default-features --features alloc`) stays
 //! unused-import clean under `deny(warnings)`.
 
-// `Vec`, the cursor, the wire constants, and the ext-entry types are all
-// consumed only by the codec-gated decode arms + `InboundFrame` variants +
-// `decode_ext_chain`, so they fold under the union predicate.
-#[cfg(any(
-    feature = "codec-init-body",
-    feature = "codec-open-body",
-    feature = "codec-close",
-    feature = "codec-keep-alive",
-    feature = "codec-frame",
-    // R311y605 — the JOIN arm reads an ext chain and returns a Vec of entries
-    // like every other arm, so it joins this union. It does NOT join the three
-    // inside `parse_inbound`: it binds its own cursor after the base body,
-    // because the JOIN codec has no ext awareness and the chain's start is
-    // whatever the body consumed.
-    feature = "codec-join"
-))]
+// `Vec`, the cursor, the wire constants, and the ext-entry types used to fold
+// under a `cfg(any(codec-*))` union: every consumer was a gated decode arm, so
+// an arbitrary feature subset had to stay unused-import clean under
+// `deny(warnings)`. The union is gone because `parse_inbound`'s transport-OAM
+// arm is UNCONDITIONAL — it needs no generated body codec, so every build of
+// this (already `alloc`-gated) module reads a z16, an ext chain and a body
+// with these four.
 use alloc::vec::Vec;
 
 use crate::parse_error::InboundParseError;
 
-#[cfg(any(
-    feature = "codec-init-body",
-    feature = "codec-open-body",
-    feature = "codec-close",
-    feature = "codec-keep-alive",
-    feature = "codec-frame",
-    feature = "codec-join"
-))]
 use crate::ext_chain::decode_ext_chain;
-#[cfg(any(
-    feature = "codec-init-body",
-    feature = "codec-open-body",
-    feature = "codec-close",
-    feature = "codec-keep-alive",
-    feature = "codec-frame",
-    feature = "codec-join"
-))]
 use sce_forge_runtime::codec::SceCursor;
-#[cfg(any(
-    feature = "codec-init-body",
-    feature = "codec-open-body",
-    feature = "codec-close",
-    feature = "codec-keep-alive",
-    feature = "codec-frame",
-    feature = "codec-join"
-))]
 use wz_codecs::ext_entry::ExtEntryOwned;
-#[cfg(any(
-    feature = "codec-init-body",
-    feature = "codec-open-body",
-    feature = "codec-close",
-    feature = "codec-keep-alive",
-    feature = "codec-frame",
-    feature = "codec-join"
-))]
 use wz_codecs::wire_const;
 
 #[cfg(feature = "codec-close")]
@@ -268,6 +227,36 @@ pub enum InboundFrame {
         body: JoinOwned,
         extensions: Vec<ExtEntryOwned>,
     },
+    /// `id::OAM` (0x00) — operations and maintenance, the one transport MID
+    /// whose body shape is chosen by the HEADER: bits 5..6 are the encoding
+    /// (`iext::ENC_*`), and the ext chain is written BEFORE the body rather
+    /// than after it (`zenoh-codec/src/transport/oam.rs`).
+    ///
+    /// UNGATED, alone among the arms, because it needs no generated body
+    /// codec: `id` is a `z16`, the chain is the shared decoder, and the body
+    /// is either absent, one VLE, or a length-prefixed run of bytes this
+    /// decoder does not interpret. There is no `codec-oam` feature to select
+    /// because there is nothing behind it to select.
+    ///
+    /// Decoded here for R311y605's reason, one MID over: the PASSIVE observer
+    /// reads a capture through this function, and an OAM arrived as
+    /// `Unknown { mid: 0x00 }` — which consumes ZERO bytes, so the batch walk
+    /// stopped there and reported everything behind it as unaccounted for. A
+    /// message that cannot be measured cannot be stepped over.
+    ///
+    /// `body` is the ZBuf run verbatim and is empty for the Unit and Z64
+    /// encodings; `value` carries the Z64 and is `0` otherwise. `encoding` is
+    /// kept rather than projected away because it is what says WHICH of the
+    /// two is meaningful — and because upstream reserves 0b11, which never
+    /// reaches this variant (the arm refuses it, as zenoh's decoder does).
+    Oam {
+        id: u16,
+        encoding: u8,
+        value: u64,
+        body: Vec<u8>,
+        has_ext: bool,
+        extensions: Vec<ExtEntryOwned>,
+    },
     /// MID outside the handshake/close/keepalive set.
     Unknown { mid: u8 },
 }
@@ -329,6 +318,14 @@ impl InboundFrame {
             }
             #[cfg(feature = "codec-join")]
             InboundFrame::Join { extensions, .. } => judge(wire_const::T_MID_JOIN, extensions),
+            // Its own `judge_ext_chain` call rather than the local `judge`
+            // helper: that helper folds under the `codec-*` union above and
+            // this arm carries no gate, so it would vanish in a build that
+            // still has this variant.
+            InboundFrame::Oam { extensions, .. } => crate::ext_admit::judge_ext_chain(
+                crate::ext_admit::ExtCarrier::Transport(wire_const::T_MID_OAM),
+                extensions.iter().map(|e| e.header),
+            ),
             InboundFrame::Unknown { .. } => ExtAdmission::Unjudged,
         }
     }
@@ -371,6 +368,7 @@ impl InboundFrame {
             InboundFrame::Fragment { .. } => "Fragment",
             #[cfg(feature = "codec-join")]
             InboundFrame::Join { .. } => "Join",
+            InboundFrame::Oam { .. } => "Oam",
             // NOT "Unknown message" and not the MID in hex: this is the
             // variant's name like every other arm, and the MID a reader needs is
             // on the variant for whoever wants it. A name that folded the byte
@@ -619,25 +617,7 @@ pub fn parse_inbound_consuming(bytes: &[u8]) -> Result<(InboundFrame, usize), In
             ))
         }
         #[cfg(feature = "codec-keep-alive")]
-        wire_const::T_MID_KEEP_ALIVE => {
-            // KeepAlive body is empty (zero-byte payload); the
-            // decode call is a no-op but kept for symmetry with the
-            // other MIDs and to preserve the "every wire-mapped
-            // codec routes through its generated decoder" invariant.
-            let _body = KeepAlive::decode(&mut cursor)?;
-            let extensions = if has_ext {
-                decode_ext_chain(&mut cursor)?
-            } else {
-                Vec::new()
-            };
-            Ok((
-                InboundFrame::KeepAlive {
-                    has_ext,
-                    extensions,
-                },
-                bytes.len() - cursor.remaining(),
-            ))
-        }
+        wire_const::T_MID_KEEP_ALIVE => decode_keep_alive(has_ext, bytes),
         // R311y605 — the MULTICAST peer announcement. Self-contained rather
         // than riding the shared `cursor`: the generated `Join` codec has no
         // ext awareness, so the chain starts wherever the base body stopped
@@ -670,6 +650,9 @@ pub fn parse_inbound_consuming(bytes: &[u8]) -> Result<(InboundFrame, usize), In
                 bytes.len() - ext_cursor.remaining(),
             ))
         }
+        // Transport OAM, DELEGATED like the JOIN arm above rather than spelled
+        // out here — see [`decode_oam`] for the second, measured reason.
+        wire_const::T_MID_OAM => decode_oam(header, bytes),
         // Zero: see the `# What `0` means` section on this function.
         other => Ok((InboundFrame::Unknown { mid: other }, 0)),
     }
@@ -747,8 +730,134 @@ pub fn inbound_to_fsm_event(
         // message must not change what the session FSM does with it.
         #[cfg(feature = "codec-join")]
         InboundFrame::Join { .. } => Some(E::FramingError),
+        // Transport OAM, on the same rule the JOIN arm above states: gaining
+        // the ability to DECODE a message must not change what the session FSM
+        // does with it. wz's unicast FSM has no operations-and-maintenance
+        // transition, so a peer that sends one is sending a message this side
+        // cannot act on — byte-for-byte the outcome it had while it fell
+        // through to `Unknown`. What changed is the OBSERVER's reach, which is
+        // where the defect was.
+        InboundFrame::Oam { .. } => Some(E::FramingError),
         InboundFrame::Unknown { .. } => Some(E::FramingError),
     }
+}
+
+/// The KEEP_ALIVE body (`T_MID_KEEP_ALIVE`, 0x04): empty, so the only thing to
+/// read is the Z-gated ext chain behind it. The generated decoder is still
+/// called — a no-op that keeps the "every wire-mapped codec routes through its
+/// generated decoder" invariant.
+///
+/// # Why this one is a function, and `#[inline(never)]`
+///
+/// R311y878 — TO GIVE `codec-keep-alive` A NAME THE ELISION GATE CAN SEE.
+/// `measure-codec-footprint.sh` judges a codec two ways: a byte delta between
+/// two 2.7MB binaries, and a by-name witness. This codec had neither that held
+/// — its byte lane has degraded every time `parse_inbound_consuming` grew
+/// (208 -> 128 -> 96 -> floor 64, each re-pin recorded there), because what it
+/// really measures at that magnitude is the CALLER's inline boundary; and a
+/// name-set diff of the two binaries returned ZERO symbols present in the
+/// baseline and absent without the feature, so there was nothing to pin as a
+/// witness either. A bodyless message that is entirely inlined is invisible to
+/// both halves of the gate.
+///
+/// Behind this boundary it is one symbol that exists in the baseline and does
+/// not exist without the feature, which is the claim the catalog actually
+/// makes. `CODEC_ELISION_WITNESS[codec-keep-alive]` names it.
+#[cfg(feature = "codec-keep-alive")]
+#[inline(never)]
+fn decode_keep_alive(
+    has_ext: bool,
+    bytes: &[u8],
+) -> Result<(InboundFrame, usize), InboundParseError> {
+    let mut cursor = SceCursor::new(&bytes[1..]);
+    let _body = KeepAlive::decode(&mut cursor)?;
+    let extensions = if has_ext {
+        decode_ext_chain(&mut cursor)?
+    } else {
+        Vec::new()
+    };
+    Ok((
+        InboundFrame::KeepAlive {
+            has_ext,
+            extensions,
+        },
+        bytes.len() - cursor.remaining(),
+    ))
+}
+
+/// The transport-OAM body (`T_MID_OAM`, 0x00), decoded off its own cursor.
+///
+/// # Why it is a function and not a match arm
+///
+/// The shape reason: it reads the wire in an order no other transport MID uses
+/// — `id:z16`, then the ext chain, then a body whose ENCODING came from header
+/// bits 5..6 — and it binds its own cursor because the shared one is bound
+/// only under the `codec-*` union, which this arm does not join. That is the
+/// same separation the JOIN arm's `decode_join_body` delegate already has.
+///
+/// # Why `#[inline(never)]`, which is the MEASURED half
+///
+/// Layer F judges each `codec-*` feature by the byte delta between two 2.7MB
+/// binaries, so an arm that grows `parse_inbound_consuming` moves the CALLER's
+/// inline boundary and surfaces as a NEIGHBOURING codec's elision changing.
+/// Measured, not feared: with this body inline, `minus codec-keep-alive` read
+/// -192 B against its 64 B floor and failed the gate; behind this boundary it
+/// reads +240 B, which is what that codec elided before this arm existed. The
+/// alternative was re-pinning that floor into the noise band, and the same
+/// script says a re-pin there must arrive with a by-name elision witness —
+/// which `codec-keep-alive` cannot supply, because a name-set diff of the two
+/// binaries shows ZERO symbols present in the baseline and absent without it.
+/// Keeping the boundary is therefore the honest fix and lowering the floor
+/// would have been the silencing.
+#[inline(never)]
+fn decode_oam(header: u8, bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> {
+    let mut cursor = SceCursor::new(&bytes[1..]);
+    let id = cursor.read_vle_u16().map_err(InboundParseError::Codec)?;
+    // `0x80` spelled out: `wire_const::FLAG_T_Z` is itself gated on the
+    // `codec-*` union this function deliberately stays out of, and the ungated
+    // `transport_flag_mask` table spells the same bit the same way.
+    let has_ext = (header & 0x80) != 0;
+    let extensions = if has_ext {
+        decode_ext_chain(&mut cursor)?
+    } else {
+        Vec::new()
+    };
+    // The body LAST, and only after the chain: reversing the two would read
+    // the first extension's header byte as a Z64 body.
+    let encoding = (header & wire_const::FLAG_T_OAM_ENC) >> 5;
+    let mut value = 0u64;
+    let mut body = Vec::new();
+    match encoding {
+        0 => {}
+        1 => {
+            value = cursor.read_vle_u64().map_err(InboundParseError::Codec)?;
+        }
+        2 => {
+            let n = cursor.read_vle_u64().map_err(InboundParseError::Codec)? as usize;
+            body = cursor
+                .peek_slice(n)
+                .map_err(InboundParseError::Codec)?
+                .to_vec();
+            cursor.advance(n).map_err(InboundParseError::Codec)?;
+        }
+        // 0b11 is RESERVED and zenoh's own decoder returns `DidntRead` for it
+        // (`transport/oam.rs`). Refused here for the same reason a corrupt body
+        // is: a sender that wrote it wrote a message no conforming peer
+        // retrieves, and reporting a length for it would step the batch walk
+        // onto invented bytes.
+        _ => return Err(InboundParseError::ReservedEncoding),
+    }
+    Ok((
+        InboundFrame::Oam {
+            id,
+            encoding,
+            value,
+            body,
+            has_ext,
+            extensions,
+        },
+        bytes.len() - cursor.remaining(),
+    ))
 }
 
 // R2 (R311ww) — `decode_ext_chain` moved to the shared `crate::ext_chain` SSOT

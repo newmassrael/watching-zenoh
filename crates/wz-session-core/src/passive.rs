@@ -3025,6 +3025,15 @@ mod tests {
     /// other half. Relaxing the gate to close the gap was TRIED and measured:
     /// it costs recoveries on the unannounced path, because acceptance goes
     /// from 42 of 256 to 56.
+    ///
+    /// A SECOND class of disagreement joined when `parse_inbound` learned
+    /// transport OAM: eight more values, named by the decoder and refused by
+    /// the gate, and refused for a different reason — `0x00` is the weakest
+    /// byte in the space to resume a lost stream on, and admitting it was
+    /// measured to take the resync scan's worst trial from 42% recovered to 0%
+    /// at 8192 bytes of noise. The assertion below PARTITIONS the two classes
+    /// rather than widening the count, because a single number would let
+    /// either reason drift into the other's slot.
     #[test]
     // R311y631 (§7.10) — `reassembly` joined the list because the ASSERTION
     // reads it. `is_credible_transport_header` accepts `T_MID_FRAGMENT`
@@ -3042,7 +3051,7 @@ mod tests {
         feature = "codec-join",
         feature = "reassembly"
     ))]
-    fn the_header_gate_and_the_decoder_disagree_only_on_reserved_bits() {
+    fn the_header_gate_and_the_decoder_disagree_on_reserved_bits_and_on_oam() {
         use crate::inbound::InboundFrame;
         use wz_codecs::wire_const::{is_credible_transport_header, reserved_transport_flags};
 
@@ -3064,13 +3073,19 @@ mod tests {
             "with every codec compiled, a byte the gate calls credible must be \
              a byte this build can name: {accepted_but_unnamed:02X?}"
         );
+        // The refusals split into TWO classes with two different reasons, and
+        // partitioning them here is what keeps the second from being read as a
+        // wider version of the first.
+        let (oam, reserved_bits): (Vec<u8>, Vec<u8>) = refused_but_named
+            .into_iter()
+            .partition(|h| h & 0x1F == wz_codecs::wire_const::T_MID_OAM);
         assert_eq!(
-            refused_but_named.len(),
+            reserved_bits.len(),
             14,
             "4 CLOSE + 6 KEEP_ALIVE + 4 FRAME, each with a bit its MID does \
-             not define: {refused_but_named:02X?}"
+             not define: {reserved_bits:02X?}"
         );
-        for header in refused_but_named {
+        for header in reserved_bits {
             let reserved = reserved_transport_flags(header)
                 .expect("a named MID is a known MID, so the mask exists");
             assert_ne!(
@@ -3078,6 +3093,33 @@ mod tests {
                 "{header:#04x} is refused for a reason other than a reserved \
                  bit — the gate and the decoder have drifted on something this \
                  test does not describe"
+            );
+        }
+        // The SECOND class: transport OAM. All eight of its header bytes are
+        // named by the decoder and refused by the gate, and unlike the
+        // fourteen above the reason is not a reserved bit — the MID is absent
+        // from `transport_flag_mask` on purpose, because `0x00` is the weakest
+        // byte in the space to RESUME a lost stream on. The price of admitting
+        // it was measured (`wz_codecs::wire_const`'s
+        // `oam_is_a_transport_mid_this_gate_still_refuses`): the worst trial of
+        // the resync scan below fell from 42% recovered to 0% at 8192 bytes of
+        // noise.
+        //
+        // Eight, not six: the reserved 0b11 encoding is named too, because the
+        // decoder REFUSES it and a refusal is a recognition — see
+        // `InboundParseError::ReservedEncoding`.
+        assert_eq!(
+            oam.len(),
+            8,
+            "every OAM header must be named and refused, not some of them: \
+             {oam:02X?}"
+        );
+        for header in oam {
+            assert_eq!(
+                reserved_transport_flags(header),
+                None,
+                "{header:#04x} has a flag mask, so it is in the gate's table \
+                 after all and this partition is describing the wrong thing"
             );
         }
     }
@@ -3722,6 +3764,95 @@ mod tests {
         }
     }
 
+    /// Transport OAM (MID 0x00), MEASURED BY LANDING ON THE SENTINEL — the
+    /// same discipline as the sweep above, and the reason this MID needed an
+    /// arm in `parse_inbound` at all.
+    ///
+    /// As `Unknown { mid: 0x00 }` it consumed ZERO bytes, so a batch carrying
+    /// one reported everything behind it as unaccounted for and the walk
+    /// stopped: the analyzer lost the rest of the unit to a message it merely
+    /// could not name. That is R311y605's JOIN defect one MID over, and the
+    /// assertion that separates the two states is `frames.len()`, not the
+    /// naming.
+    ///
+    /// The fixture is hand-built from UPSTREAM's writer (`zenoh-codec/src/
+    /// transport/oam.rs` writes header, `id:z16`, extensions, payload — the
+    /// chain BEFORE the body, which no other transport MID does), because wz
+    /// has no OAM encoder to build it from. The ext entry is the mandatory
+    /// `qos` upstream declares for this carrier, so the admissibility leg is
+    /// judged rather than `Unjudged`.
+    #[test]
+    #[cfg(feature = "codec-keep-alive")]
+    fn a_transport_oam_is_measured_so_the_batch_walk_reaches_what_follows_it() {
+        let sentinel = crate::wire_const::T_MID_KEEP_ALIVE;
+        let body = [0xDEu8, 0xAD, 0xBE, 0xEF];
+
+        let mut oam = alloc::vec![wz_codecs::wire_const::T_MID_OAM | 0x40 | 0x80];
+        crate::vle::encode_vle_u64_into(&mut oam, 300); // id:z16
+        oam.push(0x01 | 0x10 | 0x20); // ext qos: id 1, MANDATORY, z64, chain end
+        crate::vle::encode_vle_u64_into(&mut oam, 7);
+        crate::vle::encode_vle_u64_into(&mut oam, body.len() as u64);
+        oam.extend_from_slice(&body);
+        let oam_len = oam.len();
+
+        let mut unit = oam.clone();
+        unit.push(sentinel);
+
+        let (frame, consumed) =
+            crate::inbound::parse_inbound_consuming(&unit).expect("the OAM decodes");
+        assert_eq!(
+            consumed, oam_len,
+            "the decoder claims to have eaten {consumed} of the {oam_len} \
+             bytes upstream's writer would have written"
+        );
+        match &frame {
+            InboundFrame::Oam {
+                id,
+                encoding,
+                body: decoded,
+                extensions,
+                ..
+            } => {
+                assert_eq!(*id, 300);
+                assert_eq!(*encoding, 2, "ENC_ZBUF");
+                assert_eq!(decoded.as_slice(), &body);
+                assert_eq!(extensions.len(), 1);
+            }
+            other => panic!("not an Oam: {other:?}"),
+        }
+        // The chain is JUDGED, not merely carried: `qos` is the one mandatory
+        // extension this carrier declares, so a reader can say the message is
+        // admissible instead of reporting a reach limit.
+        assert_eq!(
+            frame.ext_admission(),
+            crate::ext_admit::ExtAdmission::Admissible
+        );
+
+        let mut s = PassiveSession::new();
+        let frames = s.next_datagram(Direction::A, &unit, 0);
+        assert_eq!(
+            frames.len(),
+            2,
+            "the walk must reach the sentinel behind the OAM, got {:?}",
+            frames.iter().map(|f| &f.frame).collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            frames[1].frame,
+            Ok(InboundFrame::KeepAlive { .. })
+        ));
+        assert_eq!(s.unaccounted_batch_bytes(Direction::A), 0);
+
+        // The RESERVED encoding (0b11) is refused rather than measured, which
+        // is upstream's own answer (`_ => return Err(DidntRead)`). A length
+        // reported for it would step the walk onto bytes whose meaning the
+        // spec declines to define.
+        let reserved = alloc::vec![wz_codecs::wire_const::T_MID_OAM | 0x60, 0x01, sentinel];
+        assert!(matches!(
+            crate::inbound::parse_inbound_consuming(&reserved),
+            Err(crate::parse_error::InboundParseError::ReservedEncoding)
+        ));
+    }
+
     /// R311y631 (§1.2b) — and the COUNTER-CASE that says why a batch ends with
     /// a data frame: a `Frame` eats the remainder, sentinel and all.
     ///
@@ -3803,15 +3934,22 @@ mod tests {
     /// R311y631 (§1.2b) — a tail the walk cannot MEASURE is counted, and is not
     /// reported as a message.
     ///
-    /// `0x00` is no MID zenoh defines, so nothing can say where that candidate
-    /// ends. Emitting a record for it would place a message at an offset this
-    /// reader guessed; the bytes are counted instead. That is the difference
-    /// between this round and the silence §1.2b named: the loss now has a
-    /// number, and the number is in the direction it arrived on.
+    /// `0x08` is no MID zenoh defines (the space is `0x00..=0x07`), so nothing
+    /// can say where that candidate ends. Emitting a record for it would place
+    /// a message at an offset this reader guessed; the bytes are counted
+    /// instead. That is the difference between this round and the silence
+    /// §1.2b named: the loss now has a number, and the number is in the
+    /// direction it arrived on.
+    ///
+    /// The fixture was `0x00` until transport OAM gained a decode arm, and the
+    /// premise written beside it — "no MID zenoh defines" — was FALSE the
+    /// whole time: `0x00` is `id::OAM`. It passed because this reader could
+    /// not name it, which is the fixture agreeing with the defect rather than
+    /// with the wire.
     #[test]
     fn a_batch_tail_that_cannot_be_measured_is_counted_rather_than_silent() {
         let mut unit = vec![crate::wire_const::T_MID_KEEP_ALIVE];
-        unit.extend_from_slice(&[0x00, 0x11, 0x22]);
+        unit.extend_from_slice(&[0x08, 0x11, 0x22]);
 
         let mut s = PassiveSession::new();
         let frames = s.next_datagram(Direction::A, &unit, 0);
@@ -3841,13 +3979,18 @@ mod tests {
     /// and a record read from a guessed offset is manufactured. At offset zero
     /// the caller handed these bytes over as one unit, so an undecodable
     /// datagram still says what it could not read instead of vanishing.
+    ///
+    /// `0x08` for the reason given on the sibling above: the `0x00` this used
+    /// to use is `id::OAM`, and a fixture that needs an UNNAMEABLE MID must
+    /// pick one outside the space rather than one this reader had not yet
+    /// learned.
     #[test]
     fn an_unmeasurable_message_at_the_front_of_a_unit_still_reports_itself() {
         let mut s = PassiveSession::new();
-        let frames = s.next_datagram(Direction::A, &[0x00, 0x11], 0);
+        let frames = s.next_datagram(Direction::A, &[0x08, 0x11], 0);
         assert_eq!(frames.len(), 1);
         assert!(
-            matches!(frames[0].frame, Ok(InboundFrame::Unknown { mid: 0 })),
+            matches!(frames[0].frame, Ok(InboundFrame::Unknown { mid: 8 })),
             "{:?}",
             frames[0].frame
         );

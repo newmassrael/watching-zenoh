@@ -414,8 +414,31 @@ declare -A BASELINE_MC_TEXT=(
     # first time on this artifact (28 B), so they are no longer one number.
     # This host reads 53096 / 53092 under the remap: -4 / -36, the same shape
     # the row above records. Old: 52588/52588 (R311y605).
-    ["thumbv7m-none-eabi"]=53100
-    ["thumbv7em-none-eabihf"]=53128
+    # R311y878 — GREW when `parse_inbound` learned transport OAM (MID 0x00),
+    # and the bytes are NAMED rather than absorbed. Same host, same run, one
+    # thing changed: the arm was made unreachable (`T_MID_OAM if false`) and
+    # re-measured at 53284 / 53344, so the arm's own body is +480 (M3) / +452
+    # (M4F). The rest — ~184 / ~216 against the hosted figures above — is the
+    # `InboundFrame::Oam` variant and its plumbing (`kind_name`,
+    # `ext_admission`, the `ReservedEncoding` error and its `Display`, the
+    # drop-census bucket) plus this host's path jitter, which the row above
+    # records as a -4 / -36 spread on identical code.
+    #
+    # WHY AN MCU PARTICIPANT PAYS IT, since this profile is not an analyzer:
+    # `Unknown { mid }` reports a consumed length of ZERO, and the multicast rx
+    # path walks a BATCH (`multicast_rx.rs` -> `parse_inbound_consuming`). An
+    # OAM it cannot measure therefore stops the walk and drops every message
+    # BEHIND it in the same datagram — not just the OAM. The 480 bytes buy the
+    # ability to step over one, which is a property of the participant and not
+    # of the reader. Measured on the build machine under the Layer Q remap.
+    #
+    # The figures below are the DELEGATED shape (`decode_oam` and
+    # `decode_keep_alive` behind `#[inline(never)]`), which Layer F's codec
+    # elision lane required; against the inline shape those attribution
+    # readings came from, thumbv7m is -68 and thumbv7em-hf is +0.
+    # Old: 53100/53128 (R311y636).
+    ["thumbv7m-none-eabi"]=53696
+    ["thumbv7em-none-eabihf"]=53796
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck

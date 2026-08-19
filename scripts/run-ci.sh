@@ -3702,8 +3702,13 @@ layer_c1af_cargo_test_shm() {
     # R311y507 — 5 -> 16. The filter `shm` now also selects the challenge-response
     # wire tests + the four-step FSM driven both ways (the forged-challenge,
     # unmappable-segment and malformed-InitSyn arms among them). Measured, not
-    # inferred: `cargo test .. --lib shm` reports 16.
-    _runci_guarded_test C1af 16 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
+    # inferred.
+    # R311y878 — 16 -> 17. R311y877's `ext_name` module added
+    # `dels_attachment_is_not_puts_shm_marker`, whose NAME the substring filter
+    # `shm` selects even though the module is not the SHM one. The guard fired
+    # on hosted CI one push later, which is what it is for; the count is the
+    # measured 17.
+    _runci_guarded_test C1af 17 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
         || return 1
     _runci_guarded_test C1af 3 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1

@@ -968,26 +968,15 @@ mod tests {
                 // InboundFrame intentionally omits Debug derive
                 // (sce-codegen wz-codecs structs only derive
                 // Default, so a wrapping `#[derive(Debug)]` here
-                // would not compile). Fall back to a variant-name
-                // string for the panic.
+                // would not compile). The variant's own name stands
+                // in — through `kind_name`, which lives beside the
+                // variants under the same `#[cfg]`s, so a new one
+                // cannot arrive here as a stale spelling. The
+                // hand-rolled copy this replaces was a second place
+                // to remember, and it was already one variant short.
                 other => panic!(
                     "encode_frame_with_push must produce an InboundFrame::Frame; got {}",
-                    match other {
-                        #[cfg(feature = "codec-init-body")]
-                        InboundFrame::Init { .. } => "Init",
-                        #[cfg(feature = "codec-open-body")]
-                        InboundFrame::Open { .. } => "Open",
-                        #[cfg(feature = "codec-close")]
-                        InboundFrame::Close { .. } => "Close",
-                        #[cfg(feature = "codec-keep-alive")]
-                        InboundFrame::KeepAlive { .. } => "KeepAlive",
-                        #[cfg(feature = "reassembly")]
-                        InboundFrame::Fragment { .. } => "Fragment",
-                        #[cfg(feature = "codec-join")]
-                        InboundFrame::Join { .. } => "Join",
-                        InboundFrame::Unknown { .. } => "Unknown",
-                        InboundFrame::Frame { .. } => unreachable!(),
-                    }
+                    other.kind_name()
                 ),
             }
         }

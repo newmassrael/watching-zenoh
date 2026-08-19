@@ -1773,7 +1773,59 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
         bits("mid", carrier, mid as u64),
         flag("z", carrier, has_ext),
     ];
+    // WHERE the ext chain sits is a per-MID property of the wire, and the arms
+    // below disagree about it: FRAME, FRAGMENT and OAM write theirs BEFORE the
+    // body, every other MID after it. Each arm that reads its own chain says so
+    // HERE, rather than the trailing walk carrying a list of MIDs to skip — a
+    // list is a second place to remember, and the arm that forgets to join it
+    // walks its chain twice.
+    let mut chain_walked = false;
     let name = match mid {
+        wire_const::T_MID_OAM => {
+            // The body's encoding lives in header bits 5..6, exactly as an
+            // ExtEntry's does: upstream reads `header & iext::ENC_MASK`
+            // (`zenoh-codec/src/transport/oam.rs`), the same two bits every
+            // other transport MID spends on flags.
+            let enc = (header & wire_const::FLAG_T_OAM_ENC) >> 5;
+            out.push(bits("encoding", carrier, enc as u64));
+            // `OamId` is a `u16` upstream, so a varint that does not fit one is
+            // a message stock zenoh REJECTS. Reading it at its declared width
+            // makes this walker refuse it too, instead of rendering an id no
+            // peer would have accepted.
+            let (_, id) = c.vle_u16("id")?;
+            out.push(id);
+            if has_ext {
+                out.push(c.nested("extensions", |c| {
+                    walk_ext_chain_z(
+                        c,
+                        crate::parse_error::MAX_EXT_CHAIN_DEPTH,
+                        transport_carrier(mid),
+                    )
+                })?);
+                chain_walked = true;
+            }
+            match enc {
+                // Unit — no body bytes at all.
+                0 => {}
+                1 => {
+                    let (_, f) = c.vle_u64("value")?;
+                    out.push(f);
+                }
+                2 => {
+                    let (n, len) = c.vle_u64("value_len")?;
+                    out.push(len);
+                    out.push(c.bytes("value", n as usize)?);
+                }
+                // The reserved 0b11, which upstream refuses outright. The
+                // remainder becomes an opaque `body` rather than being left
+                // unread — the same answer the `_` MID arm below gives, and
+                // for the same reason: no capture byte may go unaccounted
+                // for, and the encoding bits are already on the tree so a
+                // reader can see WHY it is opaque.
+                _ => out.push(c.tail("body")?),
+            }
+            "Oam"
+        }
         wire_const::T_MID_INIT => {
             out.push(flag("a", carrier, (header & 0x20) != 0));
             out.push(flag("s", carrier, (header & 0x40) != 0));
@@ -1867,6 +1919,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
                         transport_carrier(mid),
                     )
                 })?);
+                chain_walked = true;
             }
             if mid == wire_const::T_MID_FRAME {
                 let payload_start = c.offset();
@@ -1906,9 +1959,9 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             "Unknown"
         }
     };
-    // The transport ext chain trails every non-Frame body; Frame / Fragment
-    // read theirs before the payload, above.
-    if has_ext && mid != wire_const::T_MID_FRAME && mid != wire_const::T_MID_FRAGMENT {
+    // The transport ext chain trails the body of every MID whose arm did not
+    // already read it — see `chain_walked` above.
+    if has_ext && !chain_walked {
         out.push(c.nested("extensions", |c| {
             walk_ext_chain_z(
                 c,
@@ -4098,5 +4151,84 @@ mod tests {
     #[test]
     fn a_non_scouting_mid_is_reported_as_absence() {
         assert_eq!(dissect_scouting_message(&[0x1F, 0x00], 0), Ok(None));
+    }
+
+    /// Transport OAM (MID 0x00) is a transport message like any other, and
+    /// stock zenoh's decoder dispatches it (`zenoh-codec/src/transport/mod.rs`
+    /// `id::OAM => TransportBody::OAM`). Its wire shape is NOT the shape the
+    /// other transport MIDs have: the encoding of its body lives in header
+    /// bits 5..6 rather than in flags, and its ext chain is written BEFORE the
+    /// body (`zenoh-codec/src/transport/oam.rs` writes header, id, extensions,
+    /// payload in that order) — the opposite of every trailing-chain arm the
+    /// transport walker already has.
+    #[test]
+    fn transport_oam_walks_its_id_extensions_and_encoded_body() {
+        // ENC_ZBUF (0b10 << 5) with Z set, an id that needs two VLE bytes so a
+        // fixed-width read cannot pass by accident, the MANDATORY `qos`
+        // extension upstream declares for this carrier, then the ZBuf body.
+        let body = alloc::vec![0xDEu8, 0xAD, 0xBE, 0xEF];
+        let wire = concat(&[
+            alloc::vec![0x40u8 | 0x80],
+            vle(300),
+            ext_zint(0x1 | 0x10, false, 7),
+            vle(body.len() as u64),
+            body.clone(),
+        ]);
+        let f = dissect_transport_message(&wire, 0).expect("oam did not dissect");
+        assert_eq!(f.name, "Oam");
+        assert_tiles(&f, 0, wire.len());
+        assert_eq!(uint(&f, "id"), 300);
+        assert_eq!(bits_of(&f, "encoding"), 2);
+        assert_eq!(
+            f.find("ext_name").map(|x| x.value.clone()),
+            Some(FieldValue::Label(Cow::Borrowed("qos"))),
+            "the OAM ext chain must be walked against its own carrier",
+        );
+        // The BODY's `value`, reached as a direct child: an ext entry names its
+        // own body `value` too, and it sits earlier in the tree, so a
+        // depth-first `find` would answer with the extension's 7 and call that
+        // a pass. The distinction is the whole point of walking the chain
+        // before the body.
+        let body_value = match &f.value {
+            FieldValue::Nested(kids) => kids
+                .iter()
+                .find(|k| k.name == "value")
+                .map(|k| k.value.clone()),
+            other => panic!("the Oam group is not nested: {other:?}"),
+        };
+        assert_eq!(body_value, Some(FieldValue::Bytes(body.clone())));
+
+        // ENC_UNIT: no body bytes at all, so the message ends at the id.
+        let unit = concat(&[alloc::vec![0x00u8], vle(1)]);
+        let f = dissect_transport_message(&unit, 0).expect("unit oam did not dissect");
+        assert_eq!(f.name, "Oam");
+        assert_eq!(bits_of(&f, "encoding"), 0);
+        assert!(f.find("value").is_none(), "a Unit body carries no value");
+        assert_tiles(&f, 0, unit.len());
+
+        // ENC_Z64: a single VLE body, read as a number and not as bytes.
+        let z64 = concat(&[alloc::vec![0x20u8], vle(2), vle(1_000)]);
+        let f = dissect_transport_message(&z64, 0).expect("z64 oam did not dissect");
+        assert_eq!(f.name, "Oam");
+        assert_eq!(bits_of(&f, "encoding"), 1);
+        assert_eq!(uint(&f, "value"), 1_000);
+        assert_tiles(&f, 0, z64.len());
+
+        // The RESERVED 0b11 encoding: upstream refuses it, and the DECODER
+        // agrees (`InboundParseError::ReservedEncoding`). The dissector does
+        // not — a reader holding a capture is owed the bytes and the reason,
+        // so the remainder becomes an opaque `body` and the tiling still
+        // covers every byte. That difference between the two readers is the
+        // point: a participant must refuse what an observer must still show.
+        let reserved = concat(&[alloc::vec![0x60u8], vle(3), alloc::vec![0xAAu8, 0xBB]]);
+        let f = dissect_transport_message(&reserved, 0).expect("reserved oam did not dissect");
+        assert_eq!(f.name, "Oam");
+        assert_eq!(bits_of(&f, "encoding"), 3);
+        assert_eq!(raw(&f, "body"), alloc::vec![0xAAu8, 0xBB]);
+        assert_tiles(&f, 0, reserved.len());
+        assert!(matches!(
+            crate::inbound::parse_inbound(&reserved),
+            Err(crate::parse_error::InboundParseError::ReservedEncoding)
+        ));
     }
 }
