@@ -264,6 +264,18 @@ pub fn interests_json(c: &crate::interest::InterestCensus, t: &ThroughputTable) 
             // for none of the four; it asked for nothing, being a cancellation.
             None => out.push_str("null"),
         }
+        // R311y871 — WHICH answers were not answers to THIS question, as the
+        // declaration indices themselves rather than a count: the consumer's
+        // next question is always which declaration, and a bare number would
+        // send it back to re-deriving the join.
+        out.push_str(",\"mismatched\":");
+        push_indices(&r.mismatched, &mut out);
+        let _ = write!(
+            out,
+            ",\"unjudged_answers\":{},\"answers_in_scope\":{}",
+            r.unjudged_answers,
+            r.answers_in_scope(),
+        );
         out.push_str(",\"flow\":");
         push_flow(&r.flow, &mut out);
         out.push('}');
@@ -272,16 +284,22 @@ pub fn interests_json(c: &crate::interest::InterestCensus, t: &ThroughputTable) 
     push_indices(&c.unanswered(), &mut out);
     out.push_str(",\"unclosed\":");
     push_indices(&c.unclosed(), &mut out);
+    // Beside the other two findings and not folded into either: a peer that
+    // answered wrongly is neither one that stayed silent nor one whose dump was
+    // truncated.
+    out.push_str(",\"mismatched\":");
+    push_indices(&c.mismatched(), &mut out);
     let by = c.by_kind();
     let _ = write!(
         out,
         ",\"unclaimed_exact\":{},\"judged\":{},\"orphan_withdrawals\":{},\
-         \"orphan_answers\":{},\
+         \"orphan_answers\":{},\"unjudged_answers\":{},\
          \"by_kind\":{{\"subscriber\":{},\"queryable\":{},\"liveliness_token\":{}}},",
         coverage.unclaimed_exact,
         coverage.judged(),
         c.orphan_withdrawals(),
         c.orphan_answers(),
+        c.unjudged_answers(),
         by[0],
         by[1],
         by[2],

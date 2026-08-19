@@ -1165,6 +1165,8 @@ impl<'a> CaptureReport<'a> {
                 }
                 s.push_str(&alloc::format!(
                     "{{\"asker\":\"{}\",\"id\":{},\"mode\":\"{}\",\"answers\":{},\
+                     \"mismatched\":{},\"unjudged_answers\":{},\
+                     \"answers_in_scope\":{},\
                      \"closed\":{},\"cancelled\":{},\"keyexpr\":{},\
                      \"asks\":{{\"keyexprs\":{},\"subscribers\":{},\
                      \"queryables\":{},\"tokens\":{},\"restricted\":{},\
@@ -1176,6 +1178,9 @@ impl<'a> CaptureReport<'a> {
                     r.id,
                     r.mode.name(),
                     r.answers,
+                    r.mismatched.len(),
+                    r.unjudged_answers,
+                    r.answers_in_scope(),
                     r.closed_at.is_some(),
                     r.cancelled_at.is_some(),
                     match &r.keyexpr {
@@ -1192,9 +1197,12 @@ impl<'a> CaptureReport<'a> {
             }
             s.push_str(&alloc::format!(
                 "],\"interest_exchange\":{{\"unanswered\":{},\"unclosed\":{},\
+                 \"mismatched\":{},\"unjudged_answers\":{},\
                  \"orphan_answers\":{}}}",
                 census.unanswered().len(),
                 census.unclosed().len(),
+                census.mismatched().len(),
+                census.unjudged_answers(),
                 census.orphan_answers(),
             ));
         }
@@ -1446,6 +1454,36 @@ impl<'a> CaptureReport<'a> {
                         "    FINDING: interest {}'s current dump never closed -- \
                          its {} answer(s) are a floor\n",
                         r.id, r.answers,
+                    ));
+                }
+                // R311y871 — the answer that was not an answer. Upstream sends
+                // neither an out-of-scope keyexpr nor an unasked kind, so this
+                // line is about the PEER and not about this reader's limits --
+                // which is why the unjudged floor below is a separate sentence
+                // rather than a qualifier on this one.
+                for at in census.mismatched() {
+                    let r = &census.requests()[at];
+                    s.push_str(&format!(
+                        "    FINDING: interest {} for {} was answered with {} \
+                         declaration(s) it did not ask for\n",
+                        r.id,
+                        interest_scope_words(r),
+                        r.mismatched.len(),
+                    ));
+                    for d in &r.mismatched {
+                        let i = &census.interests()[*d];
+                        s.push_str(&format!(
+                            "      {} {}\n",
+                            i.kind.name(),
+                            i.keyexpr.as_deref().unwrap_or("<unresolved>"),
+                        ));
+                    }
+                }
+                if census.unjudged_answers() > 0 {
+                    s.push_str(&format!(
+                        "    {} answer(s) could not be judged against what was \
+                         asked -- the findings above are a floor\n",
+                        census.unjudged_answers()
                     ));
                 }
                 if census.orphan_answers() > 0 {
@@ -4736,18 +4774,160 @@ mod tests {
         assert!(
             json.contains(
                 "\"asker\":\"a\",\"id\":4,\"mode\":\"current\",\"answers\":0,\
+                 \"mismatched\":0,\"unjudged_answers\":0,\"answers_in_scope\":0,\
                  \"closed\":false,\"cancelled\":false,\"keyexpr\":\"svc/**\""
             ),
             "the export carries the same request: {json}"
         );
         assert!(
-            json.contains("\"unanswered\":1,\"unclosed\":0,\"orphan_answers\":0"),
+            json.contains(
+                "\"unanswered\":1,\"unclosed\":0,\"mismatched\":0,\
+                 \"unjudged_answers\":0,\"orphan_answers\":0"
+            ),
             "and the same verdict: {json}"
         );
         assert!(
             json.contains("\"solicited_by\":null"),
             "the declaration here was spontaneous, and null says so rather than \
              the field being absent: {json}"
+        );
+    }
+
+    /// R311y871 (§1.1f) — THE ANSWER THAT WAS NOT AN ANSWER, ON A PAGE BY
+    /// ITSELF.
+    ///
+    /// A peer answers interest 4 -- restricted to `svc/**` -- with a
+    /// subscriber for `other/thing`, then closes the dump. Every count on the
+    /// page agrees the exchange completed: one answer, dump closed, nothing
+    /// unanswered. The finding is that the answer was to a different question,
+    /// and before this round no rendering said so.
+    ///
+    /// BOTH renderings, on this file's own rule, and the same page pins the
+    /// CONTROL: `answers` stays 1 while `answers_in_scope` is 0, so a change
+    /// that "fixed" this by not counting the reply would fail here rather than
+    /// quietly turning a divergence into a silence.
+    ///
+    /// `with_interests` is the only attachment, per `solo_plane_page_lint`.
+    #[cfg(all(feature = "network-codecs", feature = "filter-wildcards"))]
+    #[test]
+    fn an_answer_to_a_different_question_is_named_in_both_renderings() {
+        let framed = |body: alloc::vec::Vec<u8>| {
+            let mut w = alloc::vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
+            w.extend_from_slice(&body);
+            w
+        };
+        let mut d = crate::Dissection::new();
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &crate::datagram_tests::udp_packet(
+                [10, 0, 0, 1],
+                50000,
+                [10, 0, 0, 2],
+                7447,
+                &framed(
+                    wz_session_core::interest_build::build_interest_subscribers(
+                        4,
+                        true,
+                        false,
+                        0,
+                        Some("svc/**"),
+                    )
+                    .expect("the production interest builder")
+                    .try_as_borrowed()
+                    .expect("re-borrow")
+                    .encode_to_vec(),
+                ),
+            ),
+        );
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            1,
+            &crate::datagram_tests::udp_packet(
+                [10, 0, 0, 2],
+                7447,
+                [10, 0, 0, 1],
+                50000,
+                &framed(
+                    wz_session_core::declare_build::build_declare_subscriber_reply(
+                        4,
+                        "other/thing",
+                    )
+                    .expect("the production reply builder")
+                    .try_as_borrowed()
+                    .expect("re-borrow")
+                    .encode_to_vec(),
+                ),
+            ),
+        );
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            2,
+            &crate::datagram_tests::udp_packet(
+                [10, 0, 0, 2],
+                7447,
+                [10, 0, 0, 1],
+                50000,
+                &framed(
+                    wz_session_core::declare_build::build_declare_final_reply(4)
+                        .try_as_borrowed()
+                        .expect("re-borrow")
+                        .encode_to_vec(),
+                ),
+            ),
+        );
+
+        // THE POPULATION FIRST: one question, one answer, and the answer read.
+        // Without this the assertions below could all be satisfied by a page
+        // built over a capture that carried nothing.
+        let census = crate::interest::interests(&d);
+        assert_eq!(census.requests().len(), 1);
+        assert_eq!(census.interests().len(), 1);
+        assert_eq!(census.requests()[0].answers, 1);
+        let table = crate::agg::aggregate(&d);
+        let coverage = census.coverage(&table);
+
+        let page = CaptureReport::of(&d).with_interests(&census, &coverage);
+        let text = page.to_text();
+        assert!(
+            text.contains(
+                "FINDING: interest 4 for keyexprs+subscribers under svc/** was \
+                 answered with 1 declaration(s) it did not ask for"
+            ),
+            "the finding is missing: {text}"
+        );
+        assert!(
+            text.contains("      subscriber other/thing"),
+            "and WHICH declaration it was: {text}"
+        );
+        // THE CONTROL, on the same page: the exchange otherwise looks served,
+        // which is precisely why the finding had to be its own line.
+        assert!(
+            !text.contains("got NO answer at all"),
+            "this peer answered; it answered the wrong question: {text}"
+        );
+        assert!(
+            !text.contains("never closed"),
+            "and the dump WAS terminated: {text}"
+        );
+        assert!(
+            !text.contains("could not be judged"),
+            "the pattern was decidable, so nothing here is a floor: {text}"
+        );
+
+        let json = page.to_json();
+        assert!(
+            json.contains(
+                "\"answers\":1,\"mismatched\":1,\"unjudged_answers\":0,\"answers_in_scope\":0"
+            ),
+            "the export carries the split rather than the raw count alone: {json}"
+        );
+        assert!(
+            json.contains(
+                "\"unanswered\":0,\"unclosed\":0,\"mismatched\":1,\
+                 \"unjudged_answers\":0,\"orphan_answers\":0"
+            ),
+            "and the verdict names the finding beside the two it is not: {json}"
         );
     }
 

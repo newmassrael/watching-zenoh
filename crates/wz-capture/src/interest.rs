@@ -101,6 +101,33 @@
 //! `interest_id` answers the request `direction.peer()` asked. Getting that
 //! backwards would attribute every answer to the wrong side and still produce a
 //! plausible-looking table.
+//!
+//! # An answer that names the question is not yet an answer TO it
+//!
+//! Counting the declarations that carry an `interest_id` says how many replies
+//! came back; it does not say whether any of them was what was asked for. Both
+//! restrictions an `Interest` carries can be missed:
+//!
+//! * the KIND bits — a router serves `S`, `Q` and `T` from three separate
+//!   branches (`zenoh/src/net/routing/hat/router/interests.rs:60,71,82`), so a
+//!   `DeclareQueryable` answering a subscribers-only ask is not one of them;
+//! * the KEYEXPR — a current dump is filtered by `sub.matches(res)`
+//!   (`hat/router/pubsub.rs:986`), so a declaration whose keyexpr cannot
+//!   intersect the restriction is not one either.
+//!
+//! Upstream sends neither, which is what makes each a FINDING about the peer
+//! rather than a shape to tolerate — and until it was checked, an interest
+//! answered entirely with the wrong declarations read as an interest that had
+//! been served. [`crate::interest::InterestRequest::mismatched`] is where they
+//! land.
+//!
+//! The test is INTERSECTION, not the pattern-covers-a-literal matcher the
+//! coverage join uses, because here BOTH sides are patterns: `demo/*/pose` is a
+//! correct answer to a `demo/**` ask. And it inherits the undecidability rule
+//! above — an answer this build cannot evaluate becomes
+//! [`crate::interest::InterestRequest::unjudged_answers`] and never a
+//! divergence, because "cannot tell" reported as "the peer is wrong" is the
+//! worse of the two errors.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -268,11 +295,44 @@ pub struct InterestRequest {
     /// Capture anchor of the `Interest`.
     pub asked_at: usize,
     /// Declarations seen carrying this id.
+    ///
+    /// The RAW count, deliberately: it is how many declarations claimed to
+    /// answer this question, which is a different number from how many of them
+    /// actually did. [`Self::mismatched`] and [`Self::unjudged_answers`] are
+    /// the split, and keeping this one raw is what lets a reader see that the
+    /// three disagree.
     pub answers: usize,
+    /// Indices into [`InterestCensus::interests`] of answers this reader
+    /// JUDGED to be outside what this request asked for.
+    ///
+    /// Upstream does not send these — the router answers an interest from the
+    /// declarations that `matches` its restriction
+    /// (`zenoh/src/net/routing/hat/router/pubsub.rs:986`) and only for the
+    /// kinds its option bits named (`hat/router/interests.rs:60,71,82`) — so
+    /// each one is a finding about the peer rather than furniture.
+    pub mismatched: Vec<usize>,
+    /// Answers this build could not judge either way.
+    ///
+    /// The same rule the coverage join runs under: an undecidable pattern, an
+    /// alias that never resolved, or an interest carrying no body at all are
+    /// "cannot tell", and folding them into [`Self::mismatched`] would report
+    /// a confident divergence this reader did not observe.
+    pub unjudged_answers: usize,
     /// Anchor of the `DeclFinal` that terminated the current dump.
     pub closed_at: Option<usize>,
     /// Anchor of the asker's own `Interest(Final)` for this id.
     pub cancelled_at: Option<usize>,
+}
+
+impl InterestRequest {
+    /// Answers this reader judged to be within what was asked.
+    ///
+    /// The denominator [`Self::mismatched`] is a numerator over, and the
+    /// number a reader handed `answers = 3` needs before concluding the peer
+    /// served the question.
+    pub fn answers_in_scope(&self) -> usize {
+        self.answers - self.mismatched.len() - self.unjudged_answers
+    }
 }
 
 /// One declaration this capture saw, and what became of it.
@@ -464,6 +524,36 @@ impl InterestCensus {
             .collect()
     }
 
+    /// Requests answered with declarations they did not ask for.
+    ///
+    /// THE FINDING a count of answers cannot reach: a peer that replies to a
+    /// `demo/**` ask with an `other/thing` subscriber, or to a subscribers-only
+    /// ask with a queryable, has answered the id and not the QUESTION — and
+    /// every plane that counted the reply reported the exchange as served.
+    /// Upstream sends neither (`hat/router/pubsub.rs:986`,
+    /// `hat/router/interests.rs:60`), so each one is a divergence rather than
+    /// a shape this reader must tolerate.
+    ///
+    /// Held apart from [`Self::unanswered`] on purpose: silence and a wrong
+    /// answer are different facts about the peer, and a reader acts on them
+    /// differently.
+    pub fn mismatched(&self) -> Vec<usize> {
+        self.requests
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| !r.mismatched.is_empty())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// How many answers, over every request, this build could not judge.
+    ///
+    /// The floor under [`Self::mismatched`]: while this is non-zero, "no
+    /// divergence was found" is not "the peer answered in scope".
+    pub fn unjudged_answers(&self) -> usize {
+        self.requests.iter().map(|r| r.unjudged_answers).sum()
+    }
+
     /// How many of each kind were declared, `[subscriber, queryable, token]`.
     pub fn by_kind(&self) -> [usize; 3] {
         let mut out = [0usize; 3];
@@ -582,6 +672,8 @@ impl InterestCensus {
             flow: *flow,
             asked_at: anchor,
             answers: 0,
+            mismatched: Vec::new(),
+            unjudged_answers: 0,
             closed_at: None,
             cancelled_at: None,
         });
@@ -631,10 +723,15 @@ impl InterestCensus {
         // binds an id every LATER reference resolves through, and reading the
         // tables after absorbing this message would let a declaration resolve
         // through a binding that had not yet gone past when it did.
+        // The declaration this message declared, when it declared one. Held so
+        // the scope judgement below runs from ONE place rather than once per
+        // arm: a fourth declaration kind must then join the judgement by
+        // construction instead of by somebody remembering the fourth call.
+        let mut declared = None;
         match &declare.body {
             V::CodecZenohDeclSubscriber(d) => {
                 let resolved = spaces.resolve(direction, &d.keyexpr.body);
-                self.push(
+                let at = self.push(
                     InterestKind::Subscriber,
                     direction,
                     d.id,
@@ -643,14 +740,12 @@ impl InterestCensus {
                     anchor,
                     solicited_by,
                 );
-                open.insert(
-                    (dir, InterestKind::Subscriber, d.id),
-                    self.interests.len() - 1,
-                );
+                open.insert((dir, InterestKind::Subscriber, d.id), at);
+                declared = Some(at);
             }
             V::CodecZenohDeclQueryable(d) => {
                 let resolved = spaces.resolve(direction, &d.keyexpr.body);
-                self.push(
+                let at = self.push(
                     InterestKind::Queryable,
                     direction,
                     d.id,
@@ -659,14 +754,12 @@ impl InterestCensus {
                     anchor,
                     solicited_by,
                 );
-                open.insert(
-                    (dir, InterestKind::Queryable, d.id),
-                    self.interests.len() - 1,
-                );
+                open.insert((dir, InterestKind::Queryable, d.id), at);
+                declared = Some(at);
             }
             V::CodecZenohDeclToken(d) => {
                 let resolved = spaces.resolve(direction, &d.keyexpr.body);
-                self.push(
+                let at = self.push(
                     InterestKind::LivelinessToken,
                     direction,
                     d.id,
@@ -675,10 +768,8 @@ impl InterestCensus {
                     anchor,
                     solicited_by,
                 );
-                open.insert(
-                    (dir, InterestKind::LivelinessToken, d.id),
-                    self.interests.len() - 1,
-                );
+                open.insert((dir, InterestKind::LivelinessToken, d.id), at);
+                declared = Some(at);
             }
             V::CodecZenohUndeclSubscriber(u) => {
                 self.withdraw(open, dir, InterestKind::Subscriber, u.id, anchor)
@@ -696,9 +787,81 @@ impl InterestCensus {
             | V::CodecZenohDeclFinal(_)
             | V::Default { .. } => {}
         }
+        // IS THIS AN ANSWER TO THE QUESTION IT NAMES? Counting it was never
+        // the same as checking it — R311y841's rule, one layer further in:
+        // completeness is a property of the MATCH, and so is correctness.
+        if let (Some(request), Some(declaration)) = (answering, declared) {
+            self.judge_answer(request, declaration);
+        }
         // The alias tables, through the one absorber, so this plane and the
         // throughput plane resolve a keyexpr identically or not at all.
         spaces.absorb(direction, declare);
+    }
+
+    /// Decide whether one declaration is within what one request asked for.
+    ///
+    /// TWO AXES, because an interest restricts on two and a peer can miss
+    /// either. The KIND axis is always decidable — the option bits are on the
+    /// wire and the declaration's kind is the arm that decoded it — while the
+    /// KEYEXPR axis inherits every "cannot tell" the coverage join has, and
+    /// the two must not be folded: a queryable answering a subscriber-only ask
+    /// is a divergence this reader observed, whichever wildcards it can read.
+    ///
+    /// The keyexpr test is INTERSECTION and not pattern-matching. Both sides
+    /// are patterns here — a `demo/*/pose` subscriber is a correct answer to a
+    /// `demo/**` ask and to a `demo/1/**` one — and upstream's own filter is
+    /// `sub.matches(res)`, which is the intersect predicate
+    /// ([`wz_session_core::keyexpr_match::keyexpr_intersects_target`]), not
+    /// the covers-a-literal one the coverage join runs against traffic keys.
+    /// Using the literal matcher here would report every wildcard declaration
+    /// in a normal session as a divergence.
+    fn judge_answer(&mut self, request: usize, declaration: usize) {
+        let (kind, answer) = {
+            let d = &self.interests[declaration];
+            (d.kind, d.keyexpr.clone())
+        };
+        let r = &self.requests[request];
+        // No body at all: there is no ask for this to be inside or outside of.
+        let verdict = match r.scope {
+            None => Verdict::Unjudged,
+            Some(scope) => {
+                let asked_for_this_kind = match kind {
+                    InterestKind::Subscriber => scope.subscribers,
+                    InterestKind::Queryable => scope.queryables,
+                    InterestKind::LivelinessToken => scope.tokens,
+                };
+                if !asked_for_this_kind {
+                    Verdict::Mismatched
+                } else if !scope.restricted {
+                    // `R` clear is an ask for ALL key expressions, so no
+                    // keyexpr can fall outside it. Distinct from a restriction
+                    // that failed to resolve, which is the arm below.
+                    Verdict::InScope
+                } else {
+                    match (r.keyexpr.as_deref(), answer.as_deref()) {
+                        (Some(ask), Some(got))
+                            if pattern_is_decidable(ask) && pattern_is_decidable(got) =>
+                        {
+                            let ask_chunks: Vec<&str> = ask.split('/').collect();
+                            if wz_session_core::keyexpr_match::keyexpr_intersects_target(
+                                got,
+                                &ask_chunks,
+                            ) {
+                                Verdict::InScope
+                            } else {
+                                Verdict::Mismatched
+                            }
+                        }
+                        _ => Verdict::Unjudged,
+                    }
+                }
+            }
+        };
+        match verdict {
+            Verdict::InScope => {}
+            Verdict::Mismatched => self.requests[request].mismatched.push(declaration),
+            Verdict::Unjudged => self.requests[request].unjudged_answers += 1,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -711,7 +874,7 @@ impl InterestCensus {
         flow: &FlowKey,
         anchor: usize,
         solicited_by: Option<u64>,
-    ) {
+    ) -> usize {
         let (keyexpr, unresolved) = match resolved {
             Ok(k) => (Some(k), None),
             Err(alias) => (None, Some(alias)),
@@ -727,6 +890,7 @@ impl InterestCensus {
             withdrawn_at: None,
             solicited_by,
         });
+        self.interests.len() - 1
     }
 
     fn withdraw(
@@ -810,6 +974,22 @@ impl InterestCensus {
         }
         out
     }
+}
+
+/// What one answer turned out to be, relative to the question it named.
+///
+/// Three and not a `bool`, for the reason [`Coverage`] has four populations:
+/// an answer this build could not judge is not an answer it judged to be in
+/// scope, and a plane that returned `false` for both would report the second
+/// as a divergence and the first as nothing at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// Within the kinds and the keyexpr the request asked for.
+    InScope,
+    /// Judged, and outside — the finding.
+    Mismatched,
+    /// Neither: an undecidable pattern, an unresolved alias, or no ask at all.
+    Unjudged,
 }
 
 /// The index [`Direction`] stands at in this module's two-slot registries.
@@ -1249,6 +1429,26 @@ mod tests {
         }
         assert!(census.unanswered().is_empty());
         assert!(census.unclosed().is_empty());
+        // R311y871 — and the answers were the ones asked for. The control arm
+        // for the scope judgement: a check that fired on a correct exchange
+        // would be worse than no check at all. Asserted in BOTH builds,
+        // because "no divergence" is the claim that must survive the matcher
+        // being absent.
+        assert!(census.mismatched().is_empty());
+        // What the two builds may honestly say differs, and saying so here is
+        // what keeps this from being a claim one of them has not earned: with
+        // a matcher `demo/**` is evaluated and both answers are IN SCOPE;
+        // without one it is undecidable and the right answer is "cannot tell".
+        #[cfg(feature = "filter-wildcards")]
+        {
+            assert_eq!(census.unjudged_answers(), 0);
+            assert_eq!(r.answers_in_scope(), 2);
+        }
+        #[cfg(not(feature = "filter-wildcards"))]
+        {
+            assert_eq!(census.unjudged_answers(), 2);
+            assert_eq!(r.answers_in_scope(), 0);
+        }
     }
 
     /// R311y870 — an `Interest` nobody answered is THE finding about the peer,
@@ -1448,6 +1648,210 @@ mod tests {
         let cov = census.coverage(&crate::agg::aggregate(&d));
         assert_eq!(cov.matched[0].keys, alloc::vec!["svc/status"]);
     }
+
+    fn qbl_reply(interest_id: u64, keyexpr: &str) -> Vec<u8> {
+        declare_build::build_declare_queryable_reply(
+            interest_id,
+            keyexpr,
+            wz_session_core::queryable_info::QueryableInfo::DEFAULT,
+        )
+        .expect("the production reply builder")
+        .try_as_borrowed()
+        .expect("re-borrow")
+        .encode_to_vec()
+    }
+
+    /// A `Current` interest for subscribers with `R` CLEAR.
+    ///
+    /// Hand-built for the reason the keyexpr-alias interest below is: every
+    /// builder in `interest_build` composes `KE | <kinds> | R | N | M`, so wz
+    /// cannot emit an unrestricted interest and a fixture that asked it to
+    /// would be testing the builder rather than the reader. Upstream emits one
+    /// whenever `wire_expr` is `None` (`Interest::wire_expr: Option<..>`,
+    /// `zenoh-protocol/src/network/interest.rs:143`), which is what an
+    /// observer meets.
+    fn interest_unrestricted(id: u64) -> Vec<u8> {
+        wz_codecs::interest::Interest {
+            header: wz_session_core::wire_const::N_MID_INTEREST | 0x20,
+            interest_id: id,
+            body: Some(wz_codecs::interest_body::InterestBody {
+                header: 0b0000_0010,
+                keyexpr: None,
+            }),
+            extensions: None,
+        }
+        .encode_to_vec()
+    }
+
+    /// R311y871 — THE DEFECT on the keyexpr axis. A peer answering a `demo/**`
+    /// ask with an `other/thing` subscriber has answered the ID and not the
+    /// QUESTION, and before this the plane reported the exchange as served.
+    ///
+    /// Measured before it was fixed: `answers == 1` and `unanswered()` empty,
+    /// with nothing anywhere saying the answer was the wrong one. `answers`
+    /// stays 1 here on purpose — the raw count is what a peer CLAIMED, and
+    /// changing it would hide the divergence rather than name it.
+    #[cfg(feature = "filter-wildcards")]
+    #[test]
+    fn an_answer_outside_the_restriction_is_a_finding_and_not_an_answer() {
+        let d = wire(&[
+            (true, interest_subs(9, true, false, "demo/**")),
+            (false, sub_reply(9, "other/thing")),
+            (false, final_reply(9)),
+        ]);
+        let census = interests(&d);
+        let r = &census.requests()[0];
+        assert_eq!(r.keyexpr.as_deref(), Some("demo/**"));
+        assert_eq!(r.answers, 1, "the peer did send a declaration for this id");
+        assert_eq!(
+            r.mismatched,
+            alloc::vec![0usize],
+            "and it is the declaration at index 0 that was not asked for"
+        );
+        assert_eq!(r.unjudged_answers, 0, "the pattern was decidable");
+        assert_eq!(r.answers_in_scope(), 0, "so NOTHING it asked for came back");
+        assert_eq!(census.mismatched(), alloc::vec![0usize]);
+        // The two findings stay apart: this peer did not stay silent, it
+        // answered wrongly, and a reader acts on those differently.
+        assert!(census.unanswered().is_empty());
+        assert!(census.unclosed().is_empty(), "the dump WAS terminated");
+    }
+
+    /// R311y871 — THE DEFECT on the kind axis, which no keyexpr test reaches.
+    ///
+    /// A router serves `S`, `Q` and `T` from three separate branches
+    /// (`hat/router/interests.rs:60,71,82`), so a queryable answering a
+    /// subscribers-only ask is upstream doing something it does not do. This
+    /// axis is decidable in EVERY build — the bits are on the wire — which is
+    /// why it is not gated on the matcher feature.
+    #[test]
+    fn an_answer_of_a_kind_nobody_asked_for_is_a_finding() {
+        let d = wire(&[
+            (true, interest_subs(11, true, false, "demo/a")),
+            (false, qbl_reply(11, "demo/a")),
+        ]);
+        let census = interests(&d);
+        let r = &census.requests()[0];
+        let scope = r.scope.expect("a body");
+        assert!(scope.subscribers && !scope.queryables, "only S was asked");
+        assert_eq!(census.interests()[0].kind, InterestKind::Queryable);
+        // The keyexpr is a perfect match, so this fires on the kind alone --
+        // which is the discriminator against a check that only compared keys.
+        assert_eq!(census.interests()[0].keyexpr.as_deref(), Some("demo/a"));
+        assert_eq!(r.mismatched, alloc::vec![0usize]);
+        assert_eq!(r.answers_in_scope(), 0);
+        assert_eq!(census.mismatched(), alloc::vec![0usize]);
+    }
+
+    /// R311y871 CONTROL — a wildcard DECLARATION answering a narrower ask is
+    /// correct, and a check written with the wrong matcher would call it a
+    /// divergence.
+    ///
+    /// THE DISCRIMINATOR for intersection over pattern-covers-a-literal:
+    /// `demo/**` does not "cover" the literal string `demo/1/**`, but the two
+    /// patterns intersect, and upstream's `sub.matches(res)` is the intersect
+    /// predicate. A plane that reused the coverage join's matcher here would
+    /// report every ordinary wildcard session as mismatched — a confident,
+    /// plausible, wrong table.
+    #[cfg(feature = "filter-wildcards")]
+    #[test]
+    fn a_wildcard_answer_that_merely_intersects_the_ask_is_in_scope() {
+        let d = wire(&[
+            (true, interest_subs(12, true, false, "demo/1/**")),
+            (false, sub_reply(12, "demo/**")),
+            (false, sub_reply(12, "demo/1/pose")),
+            (false, final_reply(12)),
+        ]);
+        let census = interests(&d);
+        let r = &census.requests()[0];
+        assert_eq!(r.answers, 2);
+        assert!(
+            r.mismatched.is_empty(),
+            "both intersect the ask: {:?}",
+            r.mismatched
+        );
+        assert_eq!(r.unjudged_answers, 0);
+        assert_eq!(r.answers_in_scope(), 2);
+        assert!(census.mismatched().is_empty());
+    }
+
+    /// R311y871 CONTROL — an UNRESTRICTED interest (`R` clear) asks for every
+    /// key expression, so no answer can be outside it.
+    ///
+    /// The arm that separates "asked for everything" from "asked for something
+    /// this reader could not resolve": the first is in scope by construction,
+    /// the second is unjudged, and both present as a `None` keyexpr.
+    #[test]
+    fn an_unrestricted_ask_puts_every_answer_in_scope() {
+        let d = wire(&[
+            (true, interest_unrestricted(13)),
+            (false, sub_reply(13, "anything/at/all")),
+        ]);
+        let census = interests(&d);
+        let r = &census.requests()[0];
+        let scope = r.scope.expect("a body");
+        assert!(!scope.restricted, "R is clear");
+        assert!(r.keyexpr.is_none());
+        assert!(r.unresolved.is_none(), "and no alias failed to resolve");
+        assert!(r.mismatched.is_empty());
+        assert_eq!(
+            r.unjudged_answers, 0,
+            "unrestricted is DECIDED, not unknown"
+        );
+        assert_eq!(r.answers_in_scope(), 1);
+    }
+
+    /// R311y871 — a restriction this reader cannot NAME leaves its answers
+    /// UNJUDGED, and the census says so rather than reporting a clean bill of
+    /// health.
+    ///
+    /// A capture begun after the `DeclKexpr` that bound the alias is the
+    /// ordinary way to meet this, and it is the shape in which "no divergence
+    /// found" would otherwise be indistinguishable from "nothing could be
+    /// checked". The mirror case — an ANSWER whose alias did not resolve —
+    /// takes the same arm, both halves of the pair being required before the
+    /// keyexpr axis can be decided at all.
+    #[test]
+    fn a_restriction_this_reader_cannot_name_leaves_its_answers_unjudged() {
+        let d = wire(&[
+            // Restricted to alias 7 + "tail", and no `DeclKexpr` ever bound 7.
+            (true, {
+                wz_session_core::interest_build::build_interest_subscribers(
+                    14,
+                    true,
+                    false,
+                    7,
+                    Some("tail"),
+                )
+                .expect("the production interest builder")
+                .try_as_borrowed()
+                .expect("re-borrow")
+                .encode_to_vec()
+            }),
+            (false, sub_reply(14, "demo/a")),
+        ]);
+        let census = interests(&d);
+        let r = &census.requests()[0];
+        assert_eq!(r.answers, 1);
+        assert!(r.keyexpr.is_none(), "the ask could not be named");
+        assert_eq!(
+            r.unresolved,
+            Some((Direction::A, 7)),
+            "and the space and id it named are carried"
+        );
+        assert!(
+            r.mismatched.is_empty(),
+            "an ask this reader cannot name judges nothing wrong"
+        );
+        assert_eq!(r.unjudged_answers, 1);
+        assert_eq!(census.unjudged_answers(), 1);
+        assert_eq!(
+            r.answers_in_scope(),
+            0,
+            "and the in-scope count is not inflated by it"
+        );
+        assert!(census.mismatched().is_empty());
+    }
 }
 
 /// R311y869 — what this plane says when the build's keyexpr matcher has no
@@ -1519,5 +1923,58 @@ mod no_wildcard_tests {
             !cov.unclaimed_exact,
             "the unclaimed list is a floor while a declaration is unjudged"
         );
+    }
+
+    /// R311y871 — the scope judgement obeys the same rule, and this is the arm
+    /// that proves it is a rule rather than a sentence in a doc comment.
+    ///
+    /// The SAME exchange the wildcard build reports as in-scope must report
+    /// here as unjudged: `demo/**` is not a pattern this build can evaluate, so
+    /// "the peer answered correctly" is a claim it has not earned. The kind
+    /// axis is decidable in every build and is asserted alongside, so a
+    /// regression that made the whole judgement fall silent without the
+    /// matcher would fail here instead of passing quietly.
+    #[test]
+    fn an_undecidable_ask_judges_its_answers_neither_way() {
+        let interest = wz_session_core::interest_build::build_interest_subscribers(
+            21,
+            true,
+            false,
+            0,
+            Some("demo/**"),
+        )
+        .expect("the production interest builder")
+        .try_as_borrowed()
+        .expect("re-borrow")
+        .encode_to_vec();
+        let reply = wz_session_core::declare_build::build_declare_subscriber_reply(21, "demo/a")
+            .expect("the production reply builder")
+            .try_as_borrowed()
+            .expect("re-borrow")
+            .encode_to_vec();
+        let mut d = Dissection::new();
+        let unit = frame_carrying(&interest);
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet(LOW, 43210, HIGH, 7447, &unit),
+        );
+        let unit = frame_carrying(&reply);
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &udp_packet(HIGH, 7447, LOW, 43210, &unit),
+        );
+
+        let census = interests(&d);
+        let r = &census.requests()[0];
+        assert_eq!(r.answers, 1);
+        assert!(
+            r.mismatched.is_empty(),
+            "'this build cannot evaluate the ask' is never 'the peer is wrong'"
+        );
+        assert_eq!(r.unjudged_answers, 1);
+        assert_eq!(r.answers_in_scope(), 0);
+        assert!(census.mismatched().is_empty());
     }
 }
