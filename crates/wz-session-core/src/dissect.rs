@@ -417,14 +417,23 @@ impl<'a> SpanCursor<'a> {
         ))
     }
 
-    /// Read a base-128 VLE `u16` — the `LinkstateWeight.weight` width.
+    /// Read a base-128 VLE field that REFUSES a value wider than 16 bits —
+    /// upstream's `Zenoh080Bounded<u16>` shape.
     ///
-    /// R311y597 — a distinct reader rather than [`Self::vle_u64`] with a cast,
-    /// because the two DISAGREE on the same bytes: the codec calls
-    /// `read_vle_u16` and refuses a value past `u16`, so a walker reading it
-    /// as a `u64` would render a field the codec would have rejected. A
-    /// dissector that accepts more than its codec is not describing the same
-    /// wire.
+    /// R311y597 introduced it for `LinkstateWeight.weight` on the rule that a
+    /// dissector must not accept what its own codec rejects. The rule is
+    /// right; the premise under it was not. That codec's refusal was itself
+    /// the defect — upstream reads a weight on the PLAIN `Zenoh080`
+    /// (`zenoh/src/net/codec/linkstate.rs:125`), which truncates — so R311y880
+    /// moved the field to [`Self::vle_u16_truncated`] on both sides of the
+    /// codegen boundary at once.
+    ///
+    /// It therefore has NO call site in this tree today, and that is a
+    /// measured statement rather than an oversight: `Zenoh080Bounded<u16>` is
+    /// a real upstream shape (its `u32` sibling decides `Encoding.id`), so the
+    /// primitive stays for the field that selects it next. A new call site is
+    /// not free — `scripts/lib/narrow_vle_read_census.py` reds until someone
+    /// names the upstream codec that decides that field.
     pub fn vle_u16(&mut self, name: &'static str) -> Result<(u16, Field), CodecError> {
         let start = self.offset();
         let v = self.cur.read_vle_u16()?;
@@ -442,19 +451,25 @@ impl<'a> SpanCursor<'a> {
     }
 
     /// Read a base-128 VLE field whose WIRE width is a full zint but whose
-    /// VALUE width is 16 bits — the OAM `id`, in both namespaces.
+    /// VALUE width is 16 bits — the OAM `id` in both namespaces (R311y879) and
+    /// the linkstate `weight` (R311y880).
     ///
     /// The third reader rather than a flag on one of the two above, because
-    /// this field agrees with NEITHER. [`Self::vle_u16`] refuses a wide
-    /// encoding, which is a message stock zenoh reads to the end; [`Self::
-    /// vle_u64`] renders the wide value, which is a number no peer computes.
-    /// Upstream does the third thing — reads the zint whole and keeps its low
-    /// 16 bits ([`wz_codecs::wire_const::oam_id_from_wire`]) — so the span
-    /// covers every wire byte while the rendered value is what the receiving
-    /// peer will act on. R311y879.
+    /// these fields agree with NEITHER. [`Self::vle_u16`] refuses a wide
+    /// encoding, which is a message stock zenoh reads to the end, and stops
+    /// INSIDE the varint while doing it; [`Self::vle_u64`] renders the wide
+    /// value, which is a number no peer computes. Upstream does the third
+    /// thing — reads the zint whole and keeps its low 16 bits
+    /// ([`wz_codecs::wire_const::zint_as_u16`]) — so the span covers every wire
+    /// byte while the rendered value is what the receiving peer will act on.
+    ///
+    /// It reads the SHAPE, not a field: which field's name applies is the
+    /// caller's knowledge, which is why the two per-field accessors
+    /// (`oam_id_from_wire`, `linkstate_weight_from_wire`) live beside the shape
+    /// rather than being called from here.
     pub fn vle_u16_truncated(&mut self, name: &'static str) -> Result<(u16, Field), CodecError> {
         let start = self.offset();
-        let v = wz_codecs::wire_const::oam_id_from_wire(self.cur.read_vle_u64()?);
+        let v = wz_codecs::wire_const::zint_as_u16(self.cur.read_vle_u64()?);
         Ok((
             v,
             Field {
@@ -1601,7 +1616,13 @@ fn walk_linkstate_entry(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
         let w_start = c.offset();
         let mut weights = Vec::new();
         for _ in 0..link_count {
-            let (_, w) = c.vle_u16("weight")?;
+            // Truncating, not refusing: upstream reads the weight on the plain
+            // `Zenoh080` (`zenoh/src/net/codec/linkstate.rs:125`), so the wire
+            // width is a full zint and the value width is 16 bits
+            // (`wire_const::linkstate_weight_from_wire`). A refusing read here
+            // cost the reader the whole ENVELOPE, because `walk_linkstate_body`
+            // declines on any parse error.
+            let (_, w) = c.vle_u16_truncated("weight")?;
             weights.push(w);
         }
         fields.push(group("weights", w_start, c.offset(), weights));
@@ -3077,6 +3098,67 @@ mod tests {
         let mut w = SpanCursor::new(&body64);
         walk_linkstate_list(&mut w).expect("the walker reads 64 too");
         assert_eq!(w.remaining(), 0);
+    }
+
+    /// A link weight wider than `u16` must TRUNCATE, the way upstream truncates
+    /// it, rather than cost the reader the whole topology.
+    ///
+    /// `zenoh/src/net/codec/linkstate.rs:125` reads the weight as
+    /// `let w: u16 = codec.read(reader)?` on the plain `Zenoh080`, whose
+    /// `uint_impl!(u16)` derive is `let x: u64 = self.read(reader)?;
+    /// Ok(x as u16)`. It TRUNCATES; the codec that REFUSES an out-of-range zint
+    /// is `Zenoh080Bounded<u16>`, and this field does not select it.
+    #[test]
+    fn a_link_weight_wider_than_u16_is_truncated_the_way_upstream_truncates_it() {
+        use wz_codecs::linkstate_list::LinkstateList;
+
+        // count=1 / options=WGT / psid=3 / sn=0 / links_len=1 / links=[5] /
+        // weights=[65537]. 65537 is VLE 0x81 0x80 0x04 and truncates to 1.
+        let body: Vec<u8> = alloc::vec![0x01, 0x08, 0x03, 0x00, 0x01, 0x05, 0x81, 0x80, 0x04];
+
+        let mut w = SpanCursor::new(&body);
+        let fields = walk_linkstate_list(&mut w).expect("the walker must read what upstream reads");
+        let root = group("linkstate", 0, w.offset(), fields);
+        assert_eq!(w.remaining(), 0, "the walker left bytes unread");
+        let weights = root
+            .find("weights")
+            .expect("the WGT block must be rendered");
+        let got = match &weights.value {
+            FieldValue::Nested(v) => match v.first().map(|f| &f.value) {
+                Some(FieldValue::Uint(n)) => *n,
+                other => panic!("weight is not a uint: {other:?}"),
+            },
+            other => panic!("weights is not nested: {other:?}"),
+        };
+        assert_eq!(
+            got, 1,
+            "65537 truncates to 1, which is the weight every peer folds in"
+        );
+
+        // The whole ENVELOPE is what a refusing read costs: `walk_linkstate_body`
+        // declines on any parse error, so one wide field turns a full topology
+        // advertisement back into the opaque blob R311y597 closed.
+        assert!(
+            walk_linkstate_body(&body, 0).is_some(),
+            "a wide weight must not cost the reader the topology"
+        );
+
+        // The generated CODEC is the routing consumer's reader and must accept
+        // what upstream folds into its own routing table. It holds the WIRE
+        // value — the field's two widths are two facts, and the codec owns the
+        // first one.
+        let mut c = SceCursor::new(&body);
+        let list = LinkstateList::decode(&mut c).expect("upstream decodes this advertisement");
+        let ws = list.link_states[0]
+            .weights
+            .as_ref()
+            .expect("WGT set => weights present");
+        assert_eq!(ws[0].weight, 65537, "the codec reads the zint whole");
+        assert_eq!(
+            wz_codecs::wire_const::linkstate_weight_from_wire(ws[0].weight),
+            1,
+            "the VALUE width is applied once, by name, at the consumer boundary"
+        );
     }
 
     /// A sub-codec's span really is that field's bytes: slicing the message at

@@ -1,4 +1,4 @@
-// SCE-MAP: linkstate_weight:34 :: _forge_body
+// SCE-MAP: linkstate_weight:50 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -23,7 +23,7 @@ use sce_forge_runtime::codec::VecSink;
 #[allow(dead_code)]
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct LinkstateWeight {
-    pub weight: u16,
+    pub weight: u64,
 }
 
 #[allow(dead_code)]
@@ -53,7 +53,7 @@ impl LinkstateWeight {
         // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
-        let weight = cursor.read_vle_u16()?;
+        let weight = cursor.read_vle_u64()?;
         Ok(Self {
             weight,
         })
@@ -63,7 +63,7 @@ impl LinkstateWeight {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 3;
+    pub const MAX_ENCODED_BYTES: usize = 9;
 
     /// Encode `self` into the caller-owned sink. Returns
     /// `CodecError::BufferOverflow` from a bounded sink when the
@@ -79,7 +79,7 @@ impl LinkstateWeight {
         // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
         // dedicated helpers; everything else uses `present_if_encode_block`
         // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_vle_u16(self.weight)?;
+        w.write_vle_u64(self.weight)?;
         Ok(())
     }
 

@@ -699,7 +699,47 @@ pub mod wire_const {
     /// Ungated for the same reason `N_MID_OAM` and `T_MID_OAM` are: neither
     /// OAM decode arm is behind a `codec-*` feature.
     pub const fn oam_id_from_wire(raw: u64) -> u16 {
+        zint_as_u16(raw)
+    }
+    /// Upstream's `uint_impl!(u16)` SHAPE — read the full zint, keep the low 16
+    /// bits (`zenoh-codec/src/core/zint.rs`).
+    ///
+    /// The two accessors around it are FIELD identities and this is the
+    /// operation they share, kept separate because they are different facts: a
+    /// round that discovers one of those fields is actually
+    /// `Zenoh080Bounded<u16>` after all changes that accessor and must not
+    /// change the other. Callers that mean a field name a field; this is for
+    /// the wire-level readers (`SpanCursor::vle_u16_truncated`, which lives a
+    /// crate above and so cannot be linked from here) that read the shape
+    /// before they know which field it is.
+    pub const fn zint_as_u16(raw: u64) -> u16 {
         raw as u16
+    }
+    /// The edge weight a conforming peer computes from a `link_weights` element.
+    ///
+    /// The SECOND field found to hold the wire/value collapse
+    /// [`oam_id_from_wire`] names, and the one that leaned the costly way.
+    /// `zenoh/src/net/codec/linkstate.rs:125` reads it as `let w: u16 =
+    /// codec.read(&mut *reader)?` on the plain `Zenoh080`, so the same
+    /// `uint_impl!(u16)` derive applies: read the full ZInt, TRUNCATE. wz
+    /// declared the field `uint16` in `sources/codecs/linkstate_weight.scxml`
+    /// and SCE derives its read width from the storage type
+    /// (`sce-build/src/forge/generator.rs:11805`), so the emitted reader was
+    /// `read_vle_u16` — which refuses TWICE over: at a value past `u16::MAX`,
+    /// and at any encoding longer than 3 bytes, where it also stops INSIDE the
+    /// varint and leaves the cursor astray.
+    ///
+    /// The price was the whole advertisement, not the field.
+    /// `walk_linkstate_body` declines on any parse error, so a reader saw the
+    /// opaque blob R311y597 had closed; and `try_parse_linkstate_oam` answered
+    /// `Malformed`, so wz dropped a topology every conforming peer folded into
+    /// its routing table — wz and the network disagreeing about who is
+    /// reachable, which is the failure a replacement cannot have.
+    ///
+    /// Ungated for the same reason its sibling is: the linkstate OAM arm sits
+    /// behind no `codec-*` feature.
+    pub const fn linkstate_weight_from_wire(raw: u64) -> u16 {
+        zint_as_u16(raw)
     }
     /// `oam::id::OAM_LINKSTATE` (zenoh `commons/zenoh-protocol/src/
     /// network/oam.rs:27`) — the OAM message id whose ZBuf body carries a

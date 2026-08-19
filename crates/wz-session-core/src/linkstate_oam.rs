@@ -213,9 +213,42 @@ mod tests {
             .expect("oam to owned")
     }
 
+    /// The stack the full round-trip needs in a DEBUG build, stated here rather
+    /// than left to `RUST_MIN_STACK`.
+    ///
+    /// The chain crosses the owned/borrowed boundary six times
+    /// (`decode` -> `try_into_owned` -> `try_as_borrowed` -> encode -> `decode`
+    /// -> `try_into_owned`), and the borrowed form is a HEAPLESS
+    /// [`the_borrowed_linkstate_lists_stack_footprint_is_bounded`]-sized value
+    /// that moves by value at every one of them, with no slot reuse at `-O0`.
+    ///
+    /// R311y880 MEASURED the requirement on the build machine after the
+    /// `link_weights` retype: 2 MiB (libtest's default) and 2.5 MiB abort,
+    /// 4 MiB passes. The margin before that round was never measured at all,
+    /// which is why a 24 KiB growth surfaced as `SIGABRT` in three tests rather
+    /// than as a number. 8 MiB is that measured floor with room, and it is a
+    /// TEST-thread figure: the library's own parse path
+    /// (`try_parse_linkstate_oam`, one crossing) fits inside 2 MiB and was
+    /// re-measured to confirm it, which is what a tokio worker gets.
+    const ROUND_TRIP_STACK: usize = 8 * 1024 * 1024;
+
     /// build an OAM from a list wire, decode+parse it back, and return the
     /// decoded list (asserting the round-trip reproduces the list bytes).
+    ///
+    /// Runs on its own thread so [`ROUND_TRIP_STACK`] is the stack it actually
+    /// gets. An env var would put the requirement somewhere a plain
+    /// `cargo test` never reads.
     fn round_trip(list_wire: &[u8]) -> LinkstateListOwned {
+        let wire = list_wire.to_vec();
+        std::thread::Builder::new()
+            .stack_size(ROUND_TRIP_STACK)
+            .spawn(move || round_trip_inner(&wire))
+            .expect("spawn the round-trip thread")
+            .join()
+            .expect("the round-trip must fit in ROUND_TRIP_STACK")
+    }
+
+    fn round_trip_inner(list_wire: &[u8]) -> LinkstateListOwned {
         let list = decode_list_owned(list_wire);
         let oam_wire = build_linkstate_oam(&list).expect("build oam");
         let oam = decode_oam_owned(&oam_wire);
@@ -321,6 +354,32 @@ mod tests {
         let list = round_trip(&[0x00]);
         assert_eq!(list.num_link_states, 0);
         assert_eq!(list.link_states.len(), 0);
+    }
+
+    /// The BORROWED `LinkstateList` is a heapless value moved by value through
+    /// every owned/borrowed crossing, and this pins how big it is allowed to
+    /// get.
+    ///
+    /// R311y880 measured it at 171_536 B (`Linkstate` 2_680 x the codec's
+    /// `HeaplessVec<_, 64>` cap), up 24_576 B from the round before, because
+    /// retyping `link_weights` to the WIRE's width grew each element from 2 to
+    /// 8 bytes. That growth was correct and stays, but it turned three
+    /// round-trip tests into a bare `SIGABRT` with no number attached — the
+    /// margin had never been measured, so nothing could say how close they
+    /// already were.
+    ///
+    /// A CEILING rather than an equality on purpose: padding can shift the
+    /// exact figure, and a pin that reds on padding teaches its readers to edit
+    /// the pin. What must not pass silently is another field-width change.
+    /// When this reds, re-measure [`ROUND_TRIP_STACK`] before raising it.
+    #[test]
+    fn the_borrowed_linkstate_lists_stack_footprint_is_bounded() {
+        let size = core::mem::size_of::<LinkstateList<'_>>();
+        assert!(
+            size <= 192 * 1024,
+            "the borrowed LinkstateList is {size} B, past the 192 KiB ceiling; \
+             re-measure ROUND_TRIP_STACK before raising this"
+        );
     }
 
     #[test]

@@ -1075,7 +1075,12 @@ impl LinkstateNetwork {
                         psid: local_psid(dest_idx),
                     });
                     weights.push(LinkstateWeight {
-                        weight: weight.as_raw(),
+                        // The EMIT boundary widens explicitly. `as_raw` is a
+                        // `u16` and the codec field is the wire's full zint, so
+                        // wz can never write a weight a conforming peer would
+                        // truncate to a different edge — the emit-side hole
+                        // `OamOwned.id` still has (R311y879 carry 3).
+                        weight: u64::from(weight.as_raw()),
                     });
                     has_weight = has_weight || weight.is_set();
                 } else {
@@ -1351,7 +1356,11 @@ impl LinkstateNetwork {
                             let weight = weights
                                 .as_ref()
                                 .and_then(|ws| ws.get(i))
-                                .map(|w| LinkEdgeWeight::from_raw(w.weight))
+                                .map(|w| {
+                                    LinkEdgeWeight::from_raw(
+                                        wz_codecs::wire_const::linkstate_weight_from_wire(w.weight),
+                                    )
+                                })
                                 .unwrap_or_default();
                             links.insert(*dst, weight);
                         } else {
@@ -2352,7 +2361,9 @@ mod tests {
         e.weights = Some(
             weights
                 .iter()
-                .map(|&w| LinkstateWeight { weight: w })
+                .map(|&w| LinkstateWeight {
+                    weight: u64::from(w),
+                })
                 .collect(),
         );
         e
@@ -2433,6 +2444,56 @@ mod tests {
             (80.0..=80.8).contains(&w),
             "max(50,80)=80 plus sub-1% jitter, got {w}"
         );
+    }
+
+    /// A weight whose wire encoding is wider than `u16` must be FOLDED, at the
+    /// value every conforming peer computes.
+    ///
+    /// R311y880. Upstream reads a link weight on the plain `Zenoh080`
+    /// (`zenoh/src/net/codec/linkstate.rs:125`) and therefore TRUNCATES; wz's
+    /// generated codec declared the field `uint16` and so refused, which cost
+    /// the whole advertisement rather than the field — `try_parse_linkstate_oam`
+    /// answered `Malformed` and this table never learned the topology every
+    /// other router had already folded in.
+    ///
+    /// The value asserted discriminates truncation from the two answers a
+    /// nearby fix would give: a SATURATING read would fold `u16::MAX`, and a
+    /// refusing one would leave no edge at all.
+    #[test]
+    fn a_link_weight_wider_than_u16_is_folded_at_the_value_peers_compute() {
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
+        // A->B advertises 65736, which every peer reads as 65736 & 0xFFFF = 200.
+        let mut a = entry_weighted(1, 1, Some(&zid(0xAA)), Some(2), &[2], &[0]);
+        a.weights = Some(alloc_weights(&[65_736]));
+        net.ingest_linkstate_list(
+            link,
+            list(vec![
+                relay(1, &[1, 2]),
+                entry(2, 1, Some(&zid(0xBB)), Some(2), &[]),
+                a,
+            ]),
+        );
+        // B->A advertises a plain 80, so the edge takes max(200, 80) = 200.
+        net.ingest_linkstate_list(
+            link,
+            list(vec![entry_weighted(2, 2, None, Some(2), &[1], &[80])]),
+        );
+        let w = net
+            .edge_weight(&zid(0xAA), &zid(0xBB))
+            .expect("a wide weight must not cost the whole advertisement");
+        assert!(
+            (200.0..=202.0).contains(&w),
+            "65736 truncates to 200, so max(200,80)=200 plus sub-1% jitter, got {w}"
+        );
+    }
+
+    /// Weights at the WIRE's width — the codec field is the full zint since
+    /// R311y880, and [`entry_weighted`] takes the value width its callers mean.
+    fn alloc_weights(raw: &[u64]) -> Vec<LinkstateWeight> {
+        raw.iter()
+            .map(|&weight| LinkstateWeight { weight })
+            .collect()
     }
 
     // ── d spanning-tree forwarding ──────────────────────────────────

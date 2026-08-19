@@ -5,10 +5,22 @@
 
 Closes a defect found in its own round rather than a listed store item. The
 open-debt numbers it touches live in the unregistered half of the register:
-335 is the `weight` MISMATCH it carries, and 338 is the axis it does NOT reach
-— nothing re-checks an ADJUDICATED verdict against upstream after it is
-written, so a row can be right the day it lands and wrong after a version bump
-without anything saying so.
+335 was the `weight` MISMATCH it carried (CLOSED R311y880), and 338 is the axis
+it does NOT reach — nothing re-checks an ADJUDICATED verdict against upstream
+after it is written, so a row can be right the day it lands and wrong after a
+version bump without anything saying so.
+
+R311y880 also refuted this file's own stated reason for carrying 335. The row
+said closing it "needs an SCE capability or a different codegen model, not an
+scxml retype", because SCE derives the read width from the storage type and
+there is no wide-read/narrow-store form to declare. Both halves of that are
+true and the conclusion still did not follow: the scxml declares the WIRE
+width, and the value width belongs at the consumer boundary, so retyping the
+field `uint64` and truncating once by name
+(`wire_const::linkstate_weight_from_wire`) is exactly upstream's own model —
+`uint_impl!(u16)` reads a full ZInt and casts. An adjudication's REASON can be
+wrong in a direction that shuts a door (open-debt item 47), and this is the
+instance that was written down inside the gate meant to prevent it.
 
 ## The class this exists for
 
@@ -37,7 +49,7 @@ and picking the wrong one is not a rendering nicety:
 
 The class has leaked three times, each found by hand and none by a test:
 
-    R311y597  `weight` read narrow; upstream reads it plain    (still open, 335)
+    R311y597  `weight` read narrow; upstream reads it plain    (fixed R311y880)
     R311y878  transport OAM `id` read narrow; upstream plain   (fixed R311y879)
     R311y879  network OAM `id` read wide, never truncated      (fixed R311y879)
 
@@ -98,8 +110,11 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
     "crates/wz-session-core/src/dissect.rs::vle_u16::": (
         "REFUSE",
         "the PRIMITIVE, not a field: `SpanCursor::vle_u16` is the refusing "
-        "reader itself. Its call sites are adjudicated on their own rows, "
-        "which is where the per-field question actually lives.",
+        "reader itself. It has NO call site as of R311y880 -- `weight` was its "
+        "last one and upstream truncates there -- and it is kept because "
+        "`Zenoh080Bounded<u16>` is a real upstream shape whose u32 sibling "
+        "decides `Encoding.id`. A new call site reds this gate until someone "
+        "names the upstream codec for that field, which is the point.",
     ),
     "crates/wz-session-core/src/dissect.rs::vle_u32::": (
         "REFUSE",
@@ -112,27 +127,6 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
         "answers `DidntRead` on a value past u32. The narrow read is right "
         "here, and this row is the CONTROL that keeps the gate from reading "
         "as `every narrow read is a bug`.",
-    ),
-    "crates/wz-session-core/src/dissect.rs::walk_linkstate_entry::weight": (
-        "MISMATCH",
-        "open-debt item 335. Upstream reads a link weight as `let w: u16 = "
-        "codec.read(&mut *reader)?` on the PLAIN `Zenoh080` (zenoh/src/net/"
-        "codec/linkstate.rs:125), which truncates; wz refuses. A wide weight "
-        "therefore makes wz drop a topology advertisement every conforming "
-        "peer folds into its routing table. The walker follows the generated "
-        "codec below on purpose (R311y597), so the two move together or not "
-        "at all.",
-    ),
-    "out/wz-codecs/linkstate_weight.rs::decode::": (
-        "MISMATCH",
-        "open-debt item 335, and the half that has to move first: this is "
-        "GENERATED from sources/codecs/linkstate_weight.scxml, whose own "
-        "comment already records that upstream `reads a VLE u64, casts to "
-        "u16` -- and which then declares `sce:type=\"uint16\" "
-        "sce:bit-size=\"vle\"`, emitting the refusing reader. SCE derives the "
-        "read width from the storage type, so there is no wide-read/"
-        "narrow-store form to declare; closing 335 needs an SCE capability or "
-        "a different codegen model, not an scxml retype.",
     ),
     "out/wz-codecs/encoding.rs::decode::": (
         "REFUSE",

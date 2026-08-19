@@ -4,7 +4,7 @@
   SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 <!-- SCE Forge conformance: Zenoh linkstate-peer routing — a single
-     `link_weights` element (one edge weight, u16).
+     `link_weights` element (one edge weight).
 
      Mirrors the per-element write/read inside zenoh
      `zenoh/src/net/codec/linkstate.rs:74-79` / `:121-131`:
@@ -22,12 +22,28 @@
      is DISTINCT from the fixed little-endian 2-byte `batch_size`
      (init_body/join) — those use `_z_uint16_encode`; link_weights ride
      the wider VLE path. Like `linkstate_link` wraps a bare VLE u64, this
-     wraps a bare VLE u16 so it can be a `<sce:repeat>` element type
+     wraps a bare VLE u64 so it can be a `<sce:repeat>` element type
      (SCE repeats codec aliases, not scalars).
 
+     THE FIELD IS DECLARED AT THE WIRE'S WIDTH, NOT THE VALUE'S — the two
+     are different facts and this file used to collapse them (R311y880).
+     `uint16` made SCE emit `cursor.read_vle_u16()`, which REFUSES both a
+     value past `u16::MAX` and any encoding longer than 3 bytes. Upstream
+     refuses neither: the mirror at `:192-194` is the plain `Zenoh080`
+     whose `uint_impl!(u16)` derive is `let x: u64 = self.read(reader)?;
+     Ok(x as $uint)` — it reads the full ZInt and TRUNCATES. The codec
+     that refuses an out-of-range zint is `Zenoh080Bounded<u16>`, which
+     this field does not select. So a refusing read here did not make wz
+     stricter, it made wz DROP a topology advertisement that every
+     conforming peer folds into its routing table — and, because a
+     too-narrow read stops mid-varint, leave the cursor inside the field.
+     The VALUE width is applied once, by name, at the consumer boundary:
+     `wz_codecs::wire_const::linkstate_weight_from_wire`.
+
      Wire shape:
-       byte 0+ : weight  (VLE u16, an edge weight; default 100 when the
-                          peer omits the WGT block — see linkstate.rs
+       byte 0+ : weight  (VLE ZInt, an edge weight truncated to u16 by
+                          every reader; default 100 when the peer omits
+                          the WGT block — see linkstate.rs
                           LinkEdgeWeight::DEFAULT_LINK_WEIGHT).
 
      Composition: B1-alpha VLE only. No new primitive surface. -->
@@ -35,6 +51,6 @@
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="linkstate_weight">
   <datamodel>
-    <sce:field id="weight" sce:type="uint16" sce:byte="0" sce:bit-size="vle"/>
+    <sce:field id="weight" sce:type="uint64" sce:byte="0" sce:bit-size="vle"/>
   </datamodel>
 </scxml>

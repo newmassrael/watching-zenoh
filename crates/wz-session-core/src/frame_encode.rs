@@ -256,6 +256,24 @@ pub(crate) fn push_body(
 ))]
 pub(crate) fn oam_body(oam: &OamOwned) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
+        // R311y880 (R311y879 carry 3) — the EMIT half of the OAM id's two
+        // widths. `OamOwned.id` is the WIRE width (a full zint), but upstream's
+        // `OamId` is a `u16` reached by TRUNCATION
+        // (`wire_const::oam_id_from_wire`), so an id past `u16::MAX` names one
+        // addressee to the caller and a DIFFERENT one to every conforming peer
+        // — `0x1_0001` is delivered as `OAM_LINKSTATE_ID` and walked as a
+        // topology advertisement by the whole network.
+        //
+        // Refusing is right HERE and truncating is right on the read side, and
+        // the asymmetry is not an inconsistency: a reader must render what the
+        // network delivered, while a sender can simply decline to produce a
+        // message whose addressee it cannot express. Silently truncating on
+        // emit would send the caller's message somewhere the caller did not ask
+        // for, which is the confident-wrong-answer failure with the blame moved
+        // onto the wire.
+        if u64::from(wz_codecs::wire_const::oam_id_from_wire(oam.id)) != oam.id {
+            return Err(CodecError::VleWidthOverflow);
+        }
         oam.try_as_borrowed()
             .expect("wz builders emit <=N exts by construction")
             .encode(sink)
@@ -1115,6 +1133,51 @@ mod tests {
             wire_best_effort[0],
             wire_const::T_MID_FRAME,
             "best-effort Frame must omit FLAG_T_FRAME_R",
+        );
+    }
+
+    /// An OAM id past `u16::MAX` must be REFUSED at the emit boundary, not
+    /// written and left for every peer to truncate onto a different addressee.
+    ///
+    /// R311y880, closing R311y879's carry 3. The read side truncates
+    /// (`wire_const::oam_id_from_wire`) because a reader must render what the
+    /// network delivered; the emit side refuses because a sender can decline to
+    /// produce a message whose addressee it cannot express. `0x1_0001` is the
+    /// value that makes the difference visible: every conforming peer is
+    /// delivered `OAM_LINKSTATE_ID` and walks the body as a topology
+    /// advertisement.
+    #[test]
+    #[cfg(all(
+        feature = "codec-linkstate",
+        feature = "codec-push",
+        feature = "session-unicast"
+    ))]
+    fn an_oam_id_past_u16_is_refused_at_the_emit_boundary() {
+        use wz_codecs::ext_unit::ExtUnit;
+        use wz_codecs::oam::{OamOwned, OamOwnedVariant};
+
+        let ok = OamOwned {
+            header: wire_const::N_MID_OAM,
+            id: u64::from(wire_const::OAM_LINKSTATE_ID),
+            extensions: Default::default(),
+            body: OamOwnedVariant::CodecZenohExtUnit(ExtUnit {}),
+        };
+        let mut buf = alloc::vec![0u8; 64];
+        let mut sink = VecSink::new(&mut buf);
+        oam_body(&ok)(&mut sink).expect("an addressable id encodes");
+
+        // The CONTROL is the pair: the same message differing ONLY in bits no
+        // peer reads is the one that must not ship.
+        let wide = OamOwned {
+            id: 0x1_0001,
+            ..ok.clone()
+        };
+        let mut buf = alloc::vec![0u8; 64];
+        let mut sink = VecSink::new(&mut buf);
+        assert_eq!(
+            oam_body(&wide)(&mut sink),
+            Err(CodecError::VleWidthOverflow),
+            "0x1_0001 is delivered as OAM_LINKSTATE_ID; wz must not emit it"
         );
     }
 }
