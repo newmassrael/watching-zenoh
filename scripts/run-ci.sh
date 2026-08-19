@@ -1848,6 +1848,23 @@ PY
     # that only one surface reaches. Enforcement MEASURED both ways this round
     # (a stale symbol row, and a flag the table did not name).
     python3 scripts/lib/analysis_surface_parity.py || return 1
+    # R311y879 — WHICH READER each narrow zint field gets, pinned against the
+    # codec UPSTREAM reads it with. The three censuses above ask whether the
+    # decode covers the wire and whether a consumer reaches it; this asks
+    # whether the decode agrees with the network on a field it already reads.
+    #
+    # It is a class, not a case: upstream picks per field between
+    # `Zenoh080Bounded<uN>` (refuses an out-of-range zint) and plain `Zenoh080`
+    # (truncates it), and wz got the choice wrong three times — `weight`
+    # (R311y597, still open), the transport OAM id (R311y878), the network OAM
+    # id (R311y879). Each was found by hand. Refusing where upstream truncates
+    # is the expensive direction: `parse_inbound_consuming` consumes nothing on
+    # `Err`, so the batch walk stops and every message behind that one is lost.
+    #
+    # Same shape as the two above — a SET pinned by name, failing in BOTH
+    # directions, with a reason on every row. Enforcement MEASURED both ways
+    # this round (an unadjudicated new read, and a row outliving its code).
+    python3 scripts/lib/narrow_vle_read_census.py || return 1
     # R311y569 — the COUNT-GUARD-to-binary gate. `run-ci.sh` carries 53 bare
     # `| grep -qE '^test result: ok\. N passed'` guards, and NOTHING tied N to
     # the binary it guards: rename a test, delete one, or add one, and the guard

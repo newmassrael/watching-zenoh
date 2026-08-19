@@ -470,11 +470,18 @@ pub fn parse_inbound_consuming(bytes: &[u8]) -> Result<(InboundFrame, usize), In
         feature = "codec-frame"
     ))]
     let has_ext = (flags & wire_const::FLAG_T_Z) != 0;
+    // R311y879 — `codec-keep-alive` is DELIBERATELY absent from this third
+    // union while it stays in the two above. The KeepAlive arm reads `has_ext`
+    // but delegates the bytes to `decode_keep_alive`, which owns its own
+    // cursor (R311y878's `#[inline(never)]` split), so a build that selects
+    // only that codec binds an outer cursor nothing touches — and
+    // `-D unused-mut` makes that a compile ERROR, not a warning. The three
+    // unions are the same list minus one arm for that reason; they are not a
+    // copy that drifted.
     #[cfg(any(
         feature = "codec-init-body",
         feature = "codec-open-body",
         feature = "codec-close",
-        feature = "codec-keep-alive",
         feature = "codec-frame"
     ))]
     let mut cursor = SceCursor::new(&bytes[1..]);
@@ -812,7 +819,16 @@ fn decode_keep_alive(
 #[inline(never)]
 fn decode_oam(header: u8, bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> {
     let mut cursor = SceCursor::new(&bytes[1..]);
-    let id = cursor.read_vle_u16().map_err(InboundParseError::Codec)?;
+    // The id's WIRE width is a full zint and its VALUE width is 16 bits, and
+    // upstream bridges the two by TRUNCATING (`oam_id_from_wire`). Reading it
+    // with the refusing `read_vle_u16` — which R311y878 did — makes this
+    // decoder answer `Err` on a message stock zenoh reads to the end, and an
+    // `Err` here consumes nothing, so the batch walk stops and every message
+    // behind the OAM is lost. That is the very defect the arm was added to
+    // remove, moved from the MID to one of its fields.
+    let id = wz_codecs::wire_const::oam_id_from_wire(
+        cursor.read_vle_u64().map_err(InboundParseError::Codec)?,
+    );
     // `0x80` spelled out: `wire_const::FLAG_T_Z` is itself gated on the
     // `codec-*` union this function deliberately stays out of, and the ungated
     // `transport_flag_mask` table spells the same bit the same way.

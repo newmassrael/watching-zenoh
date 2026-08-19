@@ -676,14 +676,45 @@ pub mod wire_const {
     /// follows the envelope header (e.g. the OAM qos extension). Bare
     /// `0x80` literals on network headers should reference this.
     pub const FLAG_N_Z: u8 = 0x80;
+    /// The `id` a conforming peer computes from an OAM's id field.
+    ///
+    /// `OamId` is a `u16` in BOTH namespaces — `zenoh-protocol/src/network/
+    /// oam.rs:16` and `zenoh-protocol/src/transport/oam.rs:16` each declare
+    /// `pub type OamId = u16;` — and both codecs reach it through the plain
+    /// `Zenoh080`, whose integer derive is `let x: u64 = self.read(reader)?;
+    /// Ok(x as $uint)` (`zenoh-codec/src/core/zint.rs`, `uint_impl!(u16)`).
+    /// It TRUNCATES. The codec that refuses an out-of-range zint is
+    /// `Zenoh080Bounded<u16>`, a different codec, and neither OAM arm selects
+    /// it.
+    ///
+    /// So the field has TWO widths and they are not the same fact: its WIRE
+    /// width is a full zint, and its VALUE width is 16 bits. A reader that
+    /// collapses them is wrong whichever way it leans — read narrow and it
+    /// refuses messages the network delivers (halting a batch walk on a
+    /// message stock zenoh reads to the end), read wide and it reports an id
+    /// no peer acts on, including missing `OAM_LINKSTATE_ID` when the low
+    /// 16 bits are exactly that. R311y879 measured both directions; before
+    /// it, wz held one of each.
+    ///
+    /// Ungated for the same reason `N_MID_OAM` and `T_MID_OAM` are: neither
+    /// OAM decode arm is behind a `codec-*` feature.
+    pub const fn oam_id_from_wire(raw: u64) -> u16 {
+        raw as u16
+    }
     /// `oam::id::OAM_LINKSTATE` (zenoh `commons/zenoh-protocol/src/
     /// network/oam.rs:27`) — the OAM message id whose ZBuf body carries a
-    /// linkstate-peer topology `LinkStateList`. Carried on the wire as the
-    /// OAM `id:z16` (a VLE u16); the OAM codec models the id field as a
-    /// VLE `u64` (a superset), so this is `u64`-typed for direct use as
-    /// the `Oam.id` value. Gated on `codec-linkstate`.
+    /// linkstate-peer topology `LinkStateList`.
+    ///
+    /// `u16`-typed because that is the width the VALUE has
+    /// ([`oam_id_from_wire`]); the generated `Oam.id` field is a VLE `u64`
+    /// because that is the width the WIRE has. Compare against a decoded id
+    /// by truncating the id, never by widening this constant — the two are
+    /// not interchangeable, and calling the wide read "a superset" (as this
+    /// doc did until R311y879) is what let an id of `0x1_0001` be reported as
+    /// a non-linkstate OAM while every conforming peer walked its body as a
+    /// topology advertisement. Gated on `codec-linkstate`.
     #[cfg(feature = "codec-linkstate")]
-    pub const OAM_LINKSTATE_ID: u64 = 0x0001;
+    pub const OAM_LINKSTATE_ID: u16 = 0x0001;
     /// INTEREST envelope MID (network.h:39). Unconditional — the
     /// `interest` codec module is always present in wz-codecs (no
     /// codec-interest feature exists).

@@ -124,7 +124,11 @@ pub fn build_linkstate_oam_owned(list: &LinkstateListOwned) -> Result<OamOwned, 
 
     let oam = OamOwned {
         header,
-        id: wire_const::OAM_LINKSTATE_ID,
+        // The generated field is the WIRE width (a zint read into `u64`); the
+        // constant is the VALUE width. Widening a `u16` constant is always
+        // sound — it is the reverse direction, narrowing a decoded id, that
+        // needs `oam_id_from_wire` and is done below.
+        id: wire_const::OAM_LINKSTATE_ID as u64,
         extensions: Some(extensions),
         body: OamOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
             value_len,
@@ -146,7 +150,12 @@ pub fn build_linkstate_oam_owned(list: &LinkstateListOwned) -> Result<OamOwned, 
 /// exceeding the generic ext-ZBuf `<32>` owned cap is fine (the structured
 /// link-state records carry their own appropriately-bounded fields).
 pub fn try_parse_linkstate_oam(oam: &OamOwned) -> LinkstateOam {
-    if oam.id != wire_const::OAM_LINKSTATE_ID {
+    // Truncate BEFORE comparing: the decoded field holds the whole zint, and a
+    // sender that wrote a wide encoding of `0x1_0001` addressed every
+    // conforming peer's linkstate handler (`oam_id_from_wire`). Comparing the
+    // wide value answers `NotLinkstate` for a message the rest of the network
+    // is acting on.
+    if wire_const::oam_id_from_wire(oam.id) != wire_const::OAM_LINKSTATE_ID {
         return LinkstateOam::NotLinkstate;
     }
     let body_bytes = match &oam.body {
@@ -263,13 +272,40 @@ mod tests {
         ));
     }
 
+    /// And the CONTROL for the control: an id whose LOW 16 BITS are the
+    /// linkstate id IS the linkstate id, because `OamId = u16`
+    /// (`zenoh-protocol/src/network/oam.rs:16`) and upstream's reader keeps
+    /// only those bits (`zenoh-codec/src/core/zint.rs`, `uint_impl!(u16)`).
+    ///
+    /// This is not a rendering question. Answering `NotLinkstate` here means
+    /// wz drops a topology advertisement that every conforming peer in the
+    /// same network folded into its routing table — the two would then
+    /// disagree about who is reachable, which is the failure a replacement
+    /// cannot have. R311y879.
+    #[test]
+    fn an_id_that_aliases_onto_linkstate_is_the_linkstate_id() {
+        let oam = OamOwned {
+            header: wire_const::N_MID_OAM | (ENC_ZBUF << 5),
+            id: wire_const::OAM_LINKSTATE_ID as u64 + 0x1_0000,
+            extensions: None,
+            body: OamOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: LIST_WIRE.len() as u64,
+                value: crate::codec_owned::owned_bytes(&LIST_WIRE).unwrap(),
+            }),
+        };
+        match try_parse_linkstate_oam(&oam) {
+            LinkstateOam::Decoded(list) => assert_eq!(list.num_link_states, 1),
+            other => panic!("a conforming peer walks this body: {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_returns_malformed_for_non_zbuf_body() {
         // OAM_LINKSTATE id but a Unit body — a wire-protocol violation,
         // distinct from a non-linkstate OAM.
         let oam = OamOwned {
             header: wire_const::N_MID_OAM,
-            id: wire_const::OAM_LINKSTATE_ID,
+            id: wire_const::OAM_LINKSTATE_ID as u64,
             extensions: None,
             body: OamOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
         };

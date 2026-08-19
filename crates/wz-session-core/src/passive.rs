@@ -3853,6 +3853,67 @@ mod tests {
         ));
     }
 
+    /// The SAME halt, one field in: an OAM whose `id` zint is wider than the
+    /// `u16` it decodes into.
+    ///
+    /// R311y878 gave `T_MID_OAM` an arm so a batch could walk past it, and
+    /// read the id with the REFUSING `vle_u16`. Upstream does not refuse:
+    /// `OamId = u16` (`zenoh-protocol/src/transport/oam.rs:16`) is read on the
+    /// plain `Zenoh080`, whose derive is `let x: u64 = self.read(reader)?;
+    /// Ok(x as u16)` (`zenoh-codec/src/core/zint.rs`, `uint_impl!(u16)`). So a
+    /// unit stock zenoh reads to the end still stopped this walk dead, and
+    /// every message batched behind the OAM was lost again — the arm had moved
+    /// the halt from the MID to one of its fields rather than removing it.
+    ///
+    /// Measured the way the arm itself was: by LANDING ON THE SENTINEL. The
+    /// discriminator is `frames.len()`, not the id.
+    #[test]
+    #[cfg(feature = "codec-keep-alive")]
+    fn an_oam_id_wider_than_u16_must_not_stop_the_batch_walk_either() {
+        let sentinel = crate::wire_const::T_MID_KEEP_ALIVE;
+        let body = [0xDEu8, 0xAD, 0xBE, 0xEF];
+        // 0x1_0002 needs three VLE bytes and truncates to 2 — a value a
+        // conforming peer reaches, and a width `vle_u16` refuses.
+        let wide = 0x1_0002u64;
+
+        let mut oam = alloc::vec![wz_codecs::wire_const::T_MID_OAM | 0x40];
+        crate::vle::encode_vle_u64_into(&mut oam, wide);
+        crate::vle::encode_vle_u64_into(&mut oam, body.len() as u64);
+        oam.extend_from_slice(&body);
+        let oam_len = oam.len();
+
+        let mut unit = oam.clone();
+        unit.push(sentinel);
+
+        let (frame, consumed) =
+            crate::inbound::parse_inbound_consuming(&unit).expect("upstream decodes this OAM");
+        assert_eq!(
+            consumed, oam_len,
+            "the decoder must eat the whole message, wide id included"
+        );
+        match &frame {
+            InboundFrame::Oam { id, .. } => assert_eq!(
+                *id, 2,
+                "the decoder reported an id the receiving peer never computes"
+            ),
+            other => panic!("not an Oam: {other:?}"),
+        }
+
+        let mut s = PassiveSession::new();
+        let frames = s.next_datagram(Direction::A, &unit, 0);
+        assert_eq!(
+            frames.len(),
+            2,
+            "the walk must reach the sentinel behind the OAM, got {:?}",
+            frames.iter().map(|f| &f.frame).collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            frames[1].frame,
+            Ok(InboundFrame::KeepAlive { .. })
+        ));
+        assert_eq!(s.unaccounted_batch_bytes(Direction::A), 0);
+    }
+
     /// R311y631 (§1.2b) — and the COUNTER-CASE that says why a batch ends with
     /// a data frame: a `Frame` eats the remainder, sentinel and all.
     ///

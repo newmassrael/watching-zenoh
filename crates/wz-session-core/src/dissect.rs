@@ -441,6 +441,33 @@ impl<'a> SpanCursor<'a> {
         ))
     }
 
+    /// Read a base-128 VLE field whose WIRE width is a full zint but whose
+    /// VALUE width is 16 bits — the OAM `id`, in both namespaces.
+    ///
+    /// The third reader rather than a flag on one of the two above, because
+    /// this field agrees with NEITHER. [`Self::vle_u16`] refuses a wide
+    /// encoding, which is a message stock zenoh reads to the end; [`Self::
+    /// vle_u64`] renders the wide value, which is a number no peer computes.
+    /// Upstream does the third thing — reads the zint whole and keeps its low
+    /// 16 bits ([`wz_codecs::wire_const::oam_id_from_wire`]) — so the span
+    /// covers every wire byte while the rendered value is what the receiving
+    /// peer will act on. R311y879.
+    pub fn vle_u16_truncated(&mut self, name: &'static str) -> Result<(u16, Field), CodecError> {
+        let start = self.offset();
+        let v = wz_codecs::wire_const::oam_id_from_wire(self.cur.read_vle_u64()?);
+        Ok((
+            v,
+            Field {
+                name: name.into(),
+                span: Span {
+                    start,
+                    end: self.offset(),
+                },
+                value: FieldValue::Uint(v as u64),
+            },
+        ))
+    }
+
     /// Read a base-128 VLE `u32` — the `Encoding.packed_id` width.
     pub fn vle_u32(&mut self, name: &'static str) -> Result<(u32, Field), CodecError> {
         let start = self.offset();
@@ -1167,7 +1194,11 @@ pub fn walk_oam(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         bits("encoding", carrier, enc as u64),
         flag("z", carrier, (header & 0x80) != 0),
     ];
-    let (oam_id, id) = c.vle_u64("id")?;
+    // The VALUE is 16 bits wide even though the WIRE encoding is a full zint,
+    // and the id SELECTS the body's meaning below, so truncating here rather
+    // than at the match is the whole difference between naming a topology
+    // advertisement and calling it opaque bytes. See `oam_id_from_wire`.
+    let (oam_id, id) = c.vle_u16_truncated("id")?;
     out.push(id);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
@@ -1788,11 +1819,12 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             // other transport MID spends on flags.
             let enc = (header & wire_const::FLAG_T_OAM_ENC) >> 5;
             out.push(bits("encoding", carrier, enc as u64));
-            // `OamId` is a `u16` upstream, so a varint that does not fit one is
-            // a message stock zenoh REJECTS. Reading it at its declared width
-            // makes this walker refuse it too, instead of rendering an id no
-            // peer would have accepted.
-            let (_, id) = c.vle_u16("id")?;
+            // `OamId` is a `u16` upstream and upstream reaches it by
+            // TRUNCATION, not by refusal (`oam_id_from_wire`). R311y878 read
+            // it with the refusing `vle_u16` on the belief that a wide zint is
+            // a message zenoh rejects; `uint_impl!(u16)` says otherwise, and
+            // the belief cost the whole message rather than one field.
+            let (_, id) = c.vle_u16_truncated("id")?;
             out.push(id);
             if has_ext {
                 out.push(c.nested("extensions", |c| {
@@ -2409,7 +2441,7 @@ mod tests {
         // Wrap it as the OAM carries it: header (MID 0x1F, ZBuf encoding),
         // VLE id = OAM_LINKSTATE_ID, VLE body length, body.
         let mut wire = alloc::vec![0x1Fu8 | 0x40];
-        wire.extend(vle(wz_codecs::wire_const::OAM_LINKSTATE_ID));
+        wire.extend(vle(wz_codecs::wire_const::OAM_LINKSTATE_ID as u64));
         wire.extend(vle(body.len() as u64));
         wire.extend_from_slice(&body);
 
@@ -2488,7 +2520,7 @@ mod tests {
             ),
         ] {
             let mut wire = alloc::vec![0x1Fu8 | 0x40];
-            wire.extend(vle(wz_codecs::wire_const::OAM_LINKSTATE_ID));
+            wire.extend(vle(wz_codecs::wire_const::OAM_LINKSTATE_ID as u64));
             wire.extend(vle(body.len() as u64));
             wire.extend_from_slice(&body);
 
@@ -2510,7 +2542,7 @@ mod tests {
     #[test]
     fn an_oam_that_is_not_linkstate_keeps_its_opaque_value() {
         let payload = [0xDEu8, 0xAD, 0xBE, 0xEF];
-        let other_id = wz_codecs::wire_const::OAM_LINKSTATE_ID + 1;
+        let other_id = wz_codecs::wire_const::OAM_LINKSTATE_ID as u64 + 1;
         let mut wire = alloc::vec![0x1Fu8 | 0x40];
         wire.extend(vle(other_id));
         wire.extend(vle(payload.len() as u64));
@@ -2524,6 +2556,93 @@ mod tests {
         assert!(
             root.find("linkstate").is_none(),
             "only the linkstate id selects the topology walk",
+        );
+    }
+
+    /// The OAM `id` is a `u16` in BOTH namespaces
+    /// (`zenoh-protocol/src/network/oam.rs:16` and
+    /// `zenoh-protocol/src/transport/oam.rs:16` each declare
+    /// `pub type OamId = u16;`), and upstream's reader reaches it by
+    /// TRUNCATION, not by refusal: both codecs read `let id: OamId =
+    /// self.codec.read(..)` on the plain `Zenoh080`, whose derive is
+    /// `let x: u64 = self.read(reader)?; Ok(x as $uint)`
+    /// (`zenoh-codec/src/core/zint.rs`, `uint_impl!(u16)`). The codec that
+    /// REFUSES an out-of-range zint is `Zenoh080Bounded<u16>`, a different
+    /// codec, and neither OAM arm selects it.
+    ///
+    /// wz disagreed with that in BOTH directions at once, which is why one
+    /// number could not describe the bug. The network walker read the field
+    /// as `vle_u64` and rendered an id no peer ever computes. The transport
+    /// walker (R311y878) read it as the refusing `vle_u16` and failed the
+    /// whole message — so a capture stock zenoh reads fine became, to this
+    /// dissector, a message with no fields at all.
+    ///
+    /// The third leg is the one that shows why width is not cosmetic: an id
+    /// of `0x1_0001` truncates to `OAM_LINKSTATE_ID`, so a conforming peer
+    /// walks the body as a topology advertisement. A walker that keeps the
+    /// full width calls the same bytes opaque and the reader never learns
+    /// what the network was told.
+    #[test]
+    fn an_oam_id_wider_than_u16_is_truncated_the_way_upstream_truncates_it() {
+        let payload = alloc::vec![0xDEu8, 0xAD, 0xBE, 0xEF];
+        // 0x1_0002 -> the low 16 bits are 2, which is NOT the linkstate id,
+        // so this leg measures the width alone.
+        let wide = 0x1_0002u64;
+
+        // NETWORK (MID 0x1F).
+        let mut wire = alloc::vec![0x1Fu8 | 0x40];
+        wire.extend(vle(wide));
+        wire.extend(vle(payload.len() as u64));
+        wire.extend_from_slice(&payload);
+        let mut c = SpanCursor::new(&wire);
+        let fields = walk_oam(&mut c).expect("the network walker must read it");
+        let root = group("Oam", 0, wire.len(), fields);
+        assert_eq!(
+            uint(&root, "id"),
+            2,
+            "the network walker rendered an id the receiving peer never sees",
+        );
+        assert_eq!(raw(&root, "value"), payload);
+        assert_eq!(c.remaining(), 0);
+        assert_tiles(&root, 0, wire.len());
+
+        // TRANSPORT (MID 0x00) — same field, same truncation, and here the
+        // refusing read cost the whole message rather than one number.
+        let t = concat(&[
+            alloc::vec![0x40u8],
+            vle(wide),
+            vle(payload.len() as u64),
+            payload.clone(),
+        ]);
+        let f = dissect_transport_message(&t, 0)
+            .expect("upstream reads this message; the walker must too");
+        assert_eq!(f.name, "Oam");
+        assert_eq!(uint(&f, "id"), 2);
+        assert_tiles(&f, 0, t.len());
+
+        // The id SELECTS the body's meaning, so truncating late is the same
+        // as not truncating at all: `0x1_0001` IS `OAM_LINKSTATE_ID` to
+        // every conforming reader.
+        let aliased = wz_codecs::wire_const::OAM_LINKSTATE_ID as u64 + 0x1_0000;
+        let empty_list = alloc::vec![0x00u8];
+        let mut wire = alloc::vec![0x1Fu8 | 0x40];
+        wire.extend(vle(aliased));
+        wire.extend(vle(empty_list.len() as u64));
+        wire.extend_from_slice(&empty_list);
+        let mut c = SpanCursor::new(&wire);
+        let fields = walk_oam(&mut c).expect("walk");
+        let root = group("Oam", 0, wire.len(), fields);
+        assert_eq!(
+            uint(&root, "id"),
+            wz_codecs::wire_const::OAM_LINKSTATE_ID as u64
+        );
+        assert!(
+            root.find("value").is_none(),
+            "an id that aliases onto linkstate must select the topology walk",
+        );
+        assert!(
+            root.find("linkstate").is_some(),
+            "the topology must be named"
         );
     }
 
