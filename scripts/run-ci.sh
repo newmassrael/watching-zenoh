@@ -2212,6 +2212,79 @@ layer_c0g_apt_ceiling() {
         return 1
     fi
 
+    # R311y872 NEGATIVE — A COMMAND THAT IGNORES TERM MUST STILL DIE.
+    #
+    # The arm above proves the deadline fires; it does NOT prove the deadline
+    # KILLS, because `sleep` accepts the TERM it is sent. apt and dpkg trap TERM
+    # during unpack on purpose — a killed unpack is a broken package database —
+    # so the shape CI actually meets is a command that is asked to stop and does
+    # not. Without `--kill-after` this fixture hangs until `timeout` gives up on
+    # its own, which is the R311y872 defect reproduced without needing root: the
+    # ceiling reports a kill it did not perform.
+    local stubborn
+    stubborn="$(mktemp)"
+    # shellcheck disable=SC2064
+    trap "rm -f '$stubborn' '$hang'" RETURN
+    printf '#!/usr/bin/env bash\ntrap "" TERM\nsleep 60\n' >"$stubborn"
+    chmod +x "$stubborn"
+
+    began="$(date +%s)"
+    if WZ_APT_CMD="$stubborn" WZ_APT_DEADLINE=2 WZ_APT_KILL_AFTER=1 \
+        bash "$script" cmake >/dev/null 2>&1; then
+        echo "  Layer C0g FAIL: a command that IGNORED the deadline's TERM was" \
+            "accepted -- the ceiling cannot end what it is pointed at" >&2
+        return 1
+    fi
+    ended="$(date +%s)"
+    elapsed=$(( ended - began ))
+    # Two-sided again, and the UPPER side is the whole point here: the fixture
+    # sleeps 60s, so anything near that means it was waited out rather than
+    # killed. Deadline 2s + grace 1s, so the honest band is [2, 15].
+    if [[ "${elapsed}" -gt 15 ]]; then
+        echo "  Layer C0g FAIL: the TERM-ignoring command was refused only after" \
+            "${elapsed}s against a 2s deadline and a 1s grace. It was WAITED OUT," \
+            "not killed -- the shape that reported nine jobs red on run" \
+            "32207350092 while every apt install had SUCCEEDED" >&2
+        return 1
+    fi
+    if [[ "${elapsed}" -lt 2 ]]; then
+        echo "  Layer C0g FAIL: the TERM-ignoring command came back in ${elapsed}s," \
+            "faster than its own 2s deadline -- the stand-in broke and this arm" \
+            "passed for the wrong reason" >&2
+        return 1
+    fi
+
+    # R311y872 — AND THE CEILING MUST STAND INSIDE THE PRIVILEGE.
+    #
+    # This is the half no runtime arm above can reach: a non-root `timeout`
+    # cannot signal a setuid `sudo`, and reproducing that needs a root password
+    # this lane must not have. So the property is read off the COMPOSITION,
+    # which is why `wz_apt_compose` prints its answer instead of running it.
+    #
+    # Both directions, because either alone is satisfiable by a stuck function:
+    # an elevated command puts `sudo` first and the ceiling second, and an
+    # unelevated one has no privilege boundary and must not grow a `sudo`.
+    local composed
+    # shellcheck disable=SC1090
+    composed="$( source "$script"; WZ_APT_KILL_AFTER=7 \
+        wz_apt_compose 42 sudo apt-get update | tr '\n' ' ' )"
+    if [[ "${composed}" != "sudo timeout --kill-after=7 42 apt-get update " ]]; then
+        echo "  Layer C0g FAIL: an elevated apt composes as '${composed}'." \
+            "The ceiling must be INSIDE the privilege: \`timeout\` outside a setuid" \
+            "\`sudo\` cannot signal it, so it waits the command out and answers 124" \
+            "for an install that finished -- run 32207350092, nine jobs" >&2
+        return 1
+    fi
+    # shellcheck disable=SC1090
+    composed="$( source "$script"; WZ_APT_KILL_AFTER=7 \
+        wz_apt_compose 42 /bin/true update | tr '\n' ' ' )"
+    if [[ "${composed}" != "timeout --kill-after=7 42 /bin/true update " ]]; then
+        echo "  Layer C0g FAIL: an UNELEVATED command composes as '${composed}'," \
+            "which is not the plain ceiling -- the sudo arm above would then pass" \
+            "over a composition that always names sudo" >&2
+        return 1
+    fi
+
     # NEGATIVE — called with no packages is a caller error, not an install of
     # nothing. Exit 2, distinct from the exit 1 the ceiling answers with.
     local rc=0

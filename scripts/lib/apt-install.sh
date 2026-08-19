@@ -56,22 +56,96 @@
 # bounded-wait core is a function, `WZ_APT_CMD` replaces the command it runs,
 # and run-ci Layer C0g drives both arms.
 #
+# R311y872 — THE CEILING BOUNDED NOTHING, AND SAID IT HAD.
+#
+# Run 32207350092 reported NINE jobs failed, every one of them at this step, and
+# the log of job 95933028814 says what the conclusion does not:
+#
+#     02:09:11  Get:1 ... 32.4 MB of archives
+#     02:11:06  Get:9 ... libclang-14-dev 25.2 MB
+#     02:16:45  Fetched 32.4 MB in 7min 34s (71.4 kB/s)
+#     02:16:49  Setting up cmake (3.22.1-1ubuntu1.22.04.2) ...
+#     02:16:51  ##[error]apt: install ... did not finish within 300s and was killed.
+#
+# THE INSTALL SUCCEEDED. Every package was fetched, unpacked and configured, and
+# two seconds after `Setting up cmake` this script reported it killed. That is a
+# gate whose verdict is about ITSELF rather than about its subject, and it was
+# red on nine jobs across two rounds.
+#
+# TWO INDEPENDENT REASONS, both of which produce that exact symptom:
+#
+#   1. `timeout` STOOD OUTSIDE THE PRIVILEGE. The invocation was
+#      `timeout 300 sudo apt-get ...`, so the process `timeout` signals is a
+#      SETUID root `sudo` and the signal comes from an unprivileged parent. The
+#      kernel refuses it. `timeout` then waits out a command it cannot stop and
+#      answers 124 on its own clock, while apt runs to completion behind it.
+#   2. NO `--kill-after`. `timeout` sends TERM and nothing else. apt and dpkg
+#      trap TERM during unpack precisely so a killed run does not leave a broken
+#      package database, so even inside the privilege a plain TERM is a request
+#      rather than a kill.
+#
+# So the ceiling is composed as `sudo timeout --kill-after=K D apt-get ...`:
+# INSIDE the privilege, and with the second signal that makes it a kill. The
+# composition is its own function because it is the property that was wrong, and
+# a property that was wrong once needs something that can fail on it —
+# `wz_apt_compose` prints the argv it would run and Layer C0g reads it.
+#
+# AND THE DEADLINE SPLITS IN TWO, because the two invocations do different
+# amounts of work and one number could not be right for both. R311y865's
+# 29-minute outage was an `update` retrying `Ign:` lines against an unreachable
+# mirror — no bytes, no progress, and 300s is generous for it. An `install` of
+# this repo's largest package set is 32.4 MB, MEASURED at 454s on a mirror that
+# was answering at 71 kB/s. Holding that to the same 300s is what turned a slow
+# success into a red, and raising the single number to cover it would have
+# doubled the silence R311y865 bought for the case it was actually built for.
+#
+# WHAT THIS DOES NOT FIX: the mirror is genuinely slow. apt's own
+# `Acquire::Retries` + `Acquire::*::Timeout` are the fast path for a mirror that
+# does not answer at all; this wall clock is the backstop for one that answers
+# and dribbles. That the knobs fail fast is NOT measured here.
+#
 # USAGE
 #   apt-install.sh <package>...
 #
 # ENVIRONMENT
-#   WZ_APT_DEADLINE   wall-clock ceiling per invocation, seconds (default 300)
-#   WZ_APT_RETRIES    apt's own per-source retry count (default 2)
-#   WZ_APT_CMD        the command to run instead of apt-get; the test lane's
-#                     only entry point. Never set in CI.
+#   WZ_APT_UPDATE_DEADLINE    ceiling on `apt-get update`, seconds (default 300)
+#   WZ_APT_INSTALL_DEADLINE   ceiling on `apt-get install`, seconds (default 900)
+#   WZ_APT_DEADLINE           sets BOTH, for the test lane and for a caller that
+#                             wants one number
+#   WZ_APT_KILL_AFTER         grace between TERM and KILL, seconds (default 30)
+#   WZ_APT_RETRIES            apt's own per-source retry count (default 2)
+#   WZ_APT_CMD                the command to run instead of apt-get; the test
+#                             lane's only entry point. Never set in CI.
 #
 # Exit 0 = installed. Exit 1 = apt failed or ran past the deadline, named.
 # Exit 2 = called wrong.
 
 set -euo pipefail
 
-WZ_APT_DEADLINE="${WZ_APT_DEADLINE:-300}"
+WZ_APT_UPDATE_DEADLINE="${WZ_APT_DEADLINE:-${WZ_APT_UPDATE_DEADLINE:-300}}"
+WZ_APT_INSTALL_DEADLINE="${WZ_APT_DEADLINE:-${WZ_APT_INSTALL_DEADLINE:-900}}"
+WZ_APT_KILL_AFTER="${WZ_APT_KILL_AFTER:-30}"
 WZ_APT_RETRIES="${WZ_APT_RETRIES:-2}"
+
+# Compose the argv that runs `$@` under a ceiling of `$1` seconds.
+#
+# The whole of the R311y872 defect is in where `timeout` goes, so it is decided
+# HERE, in a function that prints its answer and installs nothing — a lane can
+# then fail on the composition without a package mirror, a network or a root
+# password. When the command elevates, the ceiling elevates WITH it; when it
+# does not (the test lane's stand-ins), there is no privilege boundary to be on
+# the wrong side of.
+wz_apt_compose() {
+    local deadline="$1"
+    shift
+    local bound=(timeout "--kill-after=${WZ_APT_KILL_AFTER}" "${deadline}")
+    if [[ "${1:-}" == "sudo" ]]; then
+        shift
+        printf '%s\n' sudo "${bound[@]}" "$@"
+        return 0
+    fi
+    printf '%s\n' "${bound[@]}" "$@"
+}
 
 # Run one command under the wall-clock ceiling, and say which ceiling was hit.
 #
@@ -80,12 +154,22 @@ WZ_APT_RETRIES="${WZ_APT_RETRIES:-2}"
 # answering, and those send a reader to different places.
 wz_apt_bounded() {
     local what="$1"
-    shift
+    local deadline="$2"
+    shift 2
+    local argv=()
+    while IFS= read -r word; do
+        argv+=("$word")
+    done < <(wz_apt_compose "${deadline}" "$@")
     local rc=0
-    timeout "${WZ_APT_DEADLINE}" "$@" || rc=$?
-    if [[ "${rc}" -eq 124 ]]; then
+    "${argv[@]}" || rc=$?
+    # 137 as well as 124: with `--kill-after` the second signal is what actually
+    # ends a TERM-ignoring apt, and a shell reports a KILLed child as 128+9. A
+    # ceiling that named only 124 would read its own successful kill as apt
+    # refusing, and send the reader to apt's output to look for a reason that is
+    # not there.
+    if [[ "${rc}" -eq 124 || "${rc}" -eq 137 ]]; then
         cat >&2 <<EOF
-::error::apt: ${what} did not finish within ${WZ_APT_DEADLINE}s and was killed.
+::error::apt: ${what} did not finish within ${deadline}s and was killed.
 This is a package-mirror outage, NOT a lane in this repository being slow. Left
 unbounded it would have kept retrying until this job hit its timeout-minutes and
 was reported \`cancelled\` — the shape run 32160845314 took on three jobs at
@@ -118,8 +202,14 @@ wz_apt_install() {
         -o "Acquire::http::Timeout=15"
         -o "Acquire::https::Timeout=15"
     )
-    wz_apt_bounded "update" "${apt[@]}" "${opts[@]}" update || return 1
-    wz_apt_bounded "install of $*" \
+    # Two ceilings, not one. `update` fetches indices and makes no progress at
+    # all against a mirror that will not answer, which is the shape R311y865
+    # bounded; `install` fetches this repo's 32.4 MB and was MEASURED at 454s on
+    # a mirror that was answering slowly. One number could only be wrong for one
+    # of them, and it was wrong for the second on nine jobs.
+    wz_apt_bounded "update" "${WZ_APT_UPDATE_DEADLINE}" \
+        "${apt[@]}" "${opts[@]}" update || return 1
+    wz_apt_bounded "install of $*" "${WZ_APT_INSTALL_DEADLINE}" \
         "${apt[@]}" "${opts[@]}" install -y --no-install-recommends "$@" || return 1
     return 0
 }
