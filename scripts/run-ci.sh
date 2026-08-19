@@ -1865,6 +1865,20 @@ PY
     # directions, with a reason on every row. Enforcement MEASURED both ways
     # this round (an unadjudicated new read, and a row outliving its code).
     python3 scripts/lib/narrow_vle_read_census.py || return 1
+    # R311y881 — the APT PACKAGE census: what every ci.yml job downloads, and
+    # why. The same SET-pinned, both-directions shape as the censuses above,
+    # with one arm that DERIVES instead of adjudicating: `cmake` is pulled by
+    # exactly one crate here (`zenoh-pico-sys`, directly or through
+    # `wz-integration-tests`' dev-dependency), so whether a job needs it is a
+    # question about that job's lanes rather than about anyone's prose.
+    #
+    # It exists because four rounds tuned the apt CEILING without anyone asking
+    # what it bounds. R311y881 measured the mirror off run 32266212482's own
+    # logs at ~27 kB/s sustained, at which a 32.3 MB job needs ~1200s and a
+    # 142 MB job needs ~88 minutes — past its own `timeout-minutes`. No ceiling
+    # number is right for both, so the lever is BYTES, and nothing was looking
+    # at them because the package lists were copy-pasted and unowned.
+    python3 scripts/lib/apt_package_census.py || return 1
     # R311y569 — the COUNT-GUARD-to-binary gate. `run-ci.sh` carries 53 bare
     # `| grep -qE '^test result: ok\. N passed'` guards, and NOTHING tied N to
     # the binary it guards: rename a test, delete one, or add one, and the guard

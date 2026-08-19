@@ -926,11 +926,16 @@ jobs:
           submodules: recursive
 
       - name: Install system dependencies
-        # Mirrors `ci`'s list exactly. Not trimmed to what a direct-dependency
-        # read suggests: the resolved tree pulls bindgen (libclang) and the
-        # vendor/sce crates.
+        # NOT `ci`'s list: R311y881 measured the difference. The resolved tree
+        # does pull bindgen (libclang) and the vendor/sce crates, which is why
+        # a direct-dependency read is wrong here — but `cmake` is pulled by
+        # exactly one crate in this workspace (`zenoh-pico-sys`, reachable
+        # directly or through `wz-integration-tests`' dev-dependency) and this
+        # job's lanes reach neither. `scripts/lib/apt_package_census.py` is
+        # what keeps that answer honest; it derives the cmake rows rather than
+        # reading this comment.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
+          bash scripts/lib/apt-install.sh libclang-dev clang perl
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
@@ -1040,14 +1045,20 @@ jobs:
           submodules: recursive
 
       - name: Install system dependencies
-        # Mirrors `ci`'s list EXACTLY, perl included. Not trimmed to what the
-        # dep tree appears to need: `wz-ap-demo`'s manifest lists only the `wz`
+        # perl included, and libclang for the reason the old comment here gave
+        # and R311y881 confirmed: `wz-ap-demo`'s manifest lists only the `wz`
         # facade, but its resolved tree pulls bindgen (libclang), libxml, and
         # the vendor/sce crates — a direct-dependency read says "needs nothing"
-        # and is wrong. The prep is cheap and parallel; guessing it down is how
-        # the fix-and-repush series starts.
+        # and is wrong.
+        #
+        # `cmake` is the one that read WAS right about, and "mirrors `ci`'s list
+        # EXACTLY" is how it survived unexamined. Only `zenoh-pico-sys` pulls
+        # the cmake crate (directly, or via `wz-integration-tests`' dev-dep),
+        # and Layer F reaches neither. Measured, not guessed down:
+        # `scripts/lib/apt_package_census.py` derives it and reds if this job's
+        # lanes ever do reach it.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
+          bash scripts/lib/apt-install.sh libclang-dev clang perl
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         # The pin is the SSOT for channel + components + targets — see the
@@ -1731,7 +1742,13 @@ jobs:
           submodules: recursive
 
       - name: Install system dependencies
-        # cmake + libclang for the sce-codegen / *-sys build scripts;
+        # libclang for the sce-codegen / *-sys build scripts. `cmake` used to
+        # be on this line under the same clause, and R311y881 measured the
+        # clause false for it: `scripts/build-sce.sh` names cmake zero times,
+        # the only `cmake` crate consumer in the workspace is `zenoh-pico-sys`,
+        # and Layers G and Q build neither it nor `wz-integration-tests`. A
+        # comment asserting a need nobody had measured is what kept 6.9 MB on
+        # this job's critical path over a mirror running at 27 kB/s.
         # gcc-arm-none-eabi supplies arm-none-eabi-{gcc,size} (the lwIP C
         # cross-compile + the Layer Q.3 footprint `size` measurement);
         # libnewlib-arm-none-eabi supplies the bare-metal newlib C headers
@@ -1740,7 +1757,7 @@ jobs:
         # `fatal error: string.h: No such file or directory` (Layer G.6 /
         # G.11). qemu-system-arm boots the mps2 / microbit ELFs (Q.2 / Q.4).
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang \
+          bash scripts/lib/apt-install.sh libclang-dev clang \
             gcc-arm-none-eabi libnewlib-arm-none-eabi qemu-system-arm
 
       - name: Install Rust toolchain + embedded targets (pinned by rust-toolchain.toml)
@@ -2446,9 +2463,34 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install system dependencies
+      - name: What the runner image already ships (measurement, not a gate)
+        # R311y881 — `libclang-dev` is 25.2 MB of this job's download, the
+        # single largest item in the whole apt census, and it is needed because
+        # `sce-forge-runtime`'s build script build-depends on `sce-build` ->
+        # `libxml` -> `bindgen`. What NOBODY here can answer from a laptop is
+        # whether bindgen would have found a libclang the image already ships:
+        # the `clang` package came down in 3558 bytes on run 32266212482, which
+        # is a metapackage, so clang-14 itself is already installed and the
+        # runtime `libclang-14.so.1` may be too.
+        #
+        # Guessing that costs every job if it is wrong, so this measures it
+        # instead and gates on nothing. The next round reads this output and
+        # decides with data. `|| true` on every line and `always()` on the step
+        # so a probe can never be the reason a lane goes red.
+        if: always()
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
+          ldconfig -p | grep -i libclang || true
+          ls -1 /usr/lib/llvm-*/lib/libclang.so* 2>/dev/null || true
+          dpkg -l 'libclang*' 'clang*' 2>/dev/null | grep '^ii' || true
+
+      - name: Install system dependencies
+        # No `cmake`: this job's lanes reach neither `zenoh-pico-sys` nor
+        # `wz-integration-tests`, and those are the only routes to the `cmake`
+        # crate in this workspace (R311y881, derived by
+        # `scripts/lib/apt_package_census.py`). It is the job whose 32.3 MB was
+        # killed at the 900s ceiling on run 32266212482.
+        run: |
+          bash scripts/lib/apt-install.sh libclang-dev clang perl
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
