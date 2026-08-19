@@ -2285,6 +2285,74 @@ layer_c0g_apt_ceiling() {
         return 1
     fi
 
+    # R311y876 — A FAILED `update` MUST NOT VETO THE INSTALL, and an install
+    # that fails must still fail the step.
+    #
+    # BOTH arms, because either alone is satisfiable by a wrong build. Deleting
+    # the update check entirely passes the first and reds the second; restoring
+    # the `|| return 1` passes the second and reds the first. The stand-in
+    # DISTINGUISHES the two invocations by reading its own argv, which is the
+    # only way one `WZ_APT_CMD` can answer differently to the two calls this
+    # script makes.
+    #
+    # The marker file is the load-bearing half of the first arm: a script that
+    # exits 0 because it decided to skip everything is indistinguishable, from
+    # the exit status alone, from one that ran the install. The marker is what
+    # says the install was ATTEMPTED.
+    local stub marker
+    stub="$(mktemp)"
+    marker="$(mktemp -u)"
+    # All three, because a second RETURN trap REPLACES the first rather than
+    # adding to it -- naming only the new files here would leak `$hang`.
+    # shellcheck disable=SC2064
+    trap "rm -f '$hang' '$stub' '$marker'" RETURN
+    # An UNQUOTED here-doc, so `$marker` expands into the stand-in while the
+    # stand-in's own `$@` and `$a` are escaped through to it. A quoted delimiter
+    # would take the marker path with it; building this with `printf` and single
+    # quotes is what shellcheck reads as an unexpanded expression, and silencing
+    # that with a directive would be a comment standing in for a fix.
+    cat >"$stub" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    update) exit 1 ;;
+    install) echo ran >${marker}; exit 0 ;;
+  esac
+done
+exit 0
+EOF
+    chmod +x "$stub"
+    if ! WZ_APT_CMD="$stub" WZ_APT_DEADLINE=5 bash "$script" cmake >/dev/null 2>&1; then
+        echo "  Layer C0g FAIL: an \`update\` that failed took the whole step down." \
+            "\`update\` is a MEANS -- the packages are the end, and the runner image" \
+            "ships an index that usually has them. Run 32218773681 lost nine jobs" \
+            "here with not one wz lane having run" >&2
+        return 1
+    fi
+    if [[ ! -f "$marker" ]]; then
+        echo "  Layer C0g FAIL: the step reported success and the INSTALL never ran." \
+            "An exit status alone cannot tell that apart from a step that did its" \
+            "work, which is why this arm reads a marker the install writes" >&2
+        return 1
+    fi
+    # And the other direction: a failing install is still the step failing.
+    # A QUOTED delimiter here, because this stand-in interpolates nothing.
+    cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    install) exit 1 ;;
+  esac
+done
+exit 0
+EOF
+    if WZ_APT_CMD="$stub" WZ_APT_DEADLINE=5 bash "$script" cmake >/dev/null 2>&1; then
+        echo "  Layer C0g FAIL: an \`install\` that FAILED was reported as success." \
+            "Continuing past a failed update must not become continuing past" \
+            "everything -- the install is the one verdict this step owns" >&2
+        return 1
+    fi
+
     # NEGATIVE — called with no packages is a caller error, not an install of
     # nothing. Exit 2, distinct from the exit 1 the ceiling answers with.
     local rc=0
@@ -2334,7 +2402,8 @@ layer_c0g_apt_ceiling() {
 
     echo "  apt ceiling gate: OK (passes a prompt command, kills a hung one in" \
         "${elapsed}s against a 2s deadline -- bounded on BOTH sides, so an arm that" \
-        "never hung fails too -- refuses an empty package list, and ${routed} ci.yml" \
+        "never hung fails too -- installs past a failed update and still fails on a" \
+        "failed install, refuses an empty package list, and ${routed} ci.yml" \
         "step(s) route through it with 0 calling apt-get directly)"
     return 0
 }

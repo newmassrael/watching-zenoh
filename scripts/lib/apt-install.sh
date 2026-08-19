@@ -104,6 +104,27 @@
 # does not answer at all; this wall clock is the backstop for one that answers
 # and dribbles. That the knobs fail fast is NOT measured here.
 #
+# R311y876 — A FAILED `update` NO LONGER VETOES THE INSTALL.
+#
+# Run 32218773681: nine jobs, every one dead at `apt: update` on its 300s
+# deadline, and not one wz lane had run. The ceiling was doing exactly what
+# R311y872 built it to do; what was wrong is that a step whose PURPOSE is four
+# packages was answering on behalf of a step that fetches an index.
+#
+# `update` is a MEANS. The runner image ships an index, and for cmake, clang,
+# libclang-dev, perl and pkg-config it is very nearly always good enough. So a
+# failed update is annotated and the install is ATTEMPTED, and the install's own
+# verdict is the step's. R311y874's carry 6 proposed raising the deadline
+# instead; that is a guess about a mirror, and it would have left this standing
+# while making it fire less often.
+#
+# Nothing is hidden by continuing: a stale index either still names fetchable
+# versions, in which case the install succeeds, or it does not, in which case the
+# install fails by name with apt's own 404. There is no arm where a package is
+# quietly absent. The staleness is annotated in both directions, and an install
+# that fails after a failed update says so, because that is what a reader should
+# suspect first.
+#
 # USAGE
 #   apt-install.sh <package>...
 #
@@ -117,7 +138,8 @@
 #   WZ_APT_CMD                the command to run instead of apt-get; the test
 #                             lane's only entry point. Never set in CI.
 #
-# Exit 0 = installed. Exit 1 = apt failed or ran past the deadline, named.
+# Exit 0 = installed, whether or not `update` succeeded first.
+# Exit 1 = the INSTALL failed or ran past its deadline, named.
 # Exit 2 = called wrong.
 
 set -euo pipefail
@@ -152,10 +174,17 @@ wz_apt_compose() {
 # `timeout` answers 124 for its own kill, and that is the case worth naming
 # separately: a non-zero from apt is apt refusing, while a 124 is apt never
 # answering, and those send a reader to different places.
+#
+# R311y876 — `severity` is the annotation level, because the two invocations no
+# longer mean the same thing to the job. A failed `install` is the step failing;
+# a failed `update` is a note about the index the install then used. Emitting
+# `::error::` for both would put a red annotation on a job that went green, and
+# this workspace reads annotations.
 wz_apt_bounded() {
-    local what="$1"
-    local deadline="$2"
-    shift 2
+    local severity="$1"
+    local what="$2"
+    local deadline="$3"
+    shift 3
     local argv=()
     while IFS= read -r word; do
         argv+=("$word")
@@ -169,7 +198,7 @@ wz_apt_bounded() {
     # not there.
     if [[ "${rc}" -eq 124 || "${rc}" -eq 137 ]]; then
         cat >&2 <<EOF
-::error::apt: ${what} did not finish within ${deadline}s and was killed.
+::${severity}::apt: ${what} did not finish within ${deadline}s and was killed.
 This is a package-mirror outage, NOT a lane in this repository being slow. Left
 unbounded it would have kept retrying until this job hit its timeout-minutes and
 was reported \`cancelled\` — the shape run 32160845314 took on three jobs at
@@ -179,7 +208,7 @@ EOF
         return 1
     fi
     if [[ "${rc}" -ne 0 ]]; then
-        echo "::error::apt: ${what} failed with exit ${rc}." \
+        echo "::${severity}::apt: ${what} failed with exit ${rc}." \
             "This is apt REFUSING rather than apt hanging — read its output above." >&2
         return 1
     fi
@@ -207,10 +236,53 @@ wz_apt_install() {
     # bounded; `install` fetches this repo's 32.4 MB and was MEASURED at 454s on
     # a mirror that was answering slowly. One number could only be wrong for one
     # of them, and it was wrong for the second on nine jobs.
-    wz_apt_bounded "update" "${WZ_APT_UPDATE_DEADLINE}" \
-        "${apt[@]}" "${opts[@]}" update || return 1
-    wz_apt_bounded "install of $*" "${WZ_APT_INSTALL_DEADLINE}" \
-        "${apt[@]}" "${opts[@]}" install -y --no-install-recommends "$@" || return 1
+    #
+    # R311y876 — AND A FAILED `update` NO LONGER VETOES THE INSTALL.
+    #
+    # `update` is a MEANS. What this script is for is the packages; refreshing
+    # the index is how it usually gets a better chance at them, and the runner
+    # image ships an index that is already good enough for cmake, clang, perl and
+    # pkg-config the overwhelming majority of the time. Aborting here spends the
+    # mirror's bad day on a step whose actual work was never attempted — run
+    # 32218773681, nine jobs, every one of them dead at `apt: update` on its
+    # 300s deadline with not one wz lane having run.
+    #
+    # THIS IS THE SAME DEFECT THE ROUND BEFORE IT FIXED, one layer out. R311y874
+    # stopped a publisher's LABEL from vetoing a rule the label's own bytes
+    # refute; here a preparatory step vetoes the operation it exists to prepare,
+    # on its own authority and before anything has asked the packages whether
+    # they were needed. A check standing in for its subject is the shape, and it
+    # is worth naming because raising the deadline — R311y874's carry 6 — would
+    # have left it standing while making it fire less often.
+    #
+    # WHAT THIS DOES NOT HIDE, which is why it is safe. Installing against a
+    # stale index has exactly two outcomes and neither is silent: the index still
+    # names fetchable versions and the install SUCCEEDS, or it does not and the
+    # install FAILS BY NAME with apt's own 404. There is no arm where a package
+    # is quietly not installed. The staleness is annotated either way, and an
+    # install that fails after a failed update says so, because that is the first
+    # thing a reader should suspect.
+    local stale=0
+    if ! wz_apt_bounded "warning" "update" "${WZ_APT_UPDATE_DEADLINE}" \
+        "${apt[@]}" "${opts[@]}" update; then
+        stale=1
+        echo "::warning::apt: update failed, CONTINUING with the package index this" \
+            "runner image shipped. The install below is what this step is for, and" \
+            "it either succeeds or fails by name; it is not being skipped." >&2
+    fi
+    if ! wz_apt_bounded "error" "install of $*" "${WZ_APT_INSTALL_DEADLINE}" \
+        "${apt[@]}" "${opts[@]}" install -y --no-install-recommends "$@"; then
+        if [[ "${stale}" -eq 1 ]]; then
+            echo "::error::apt: and update had ALREADY failed above, so this install ran" \
+                "against the image's shipped index. A version it names may no longer be" \
+                "on the mirror. Suspect the mirror before suspecting the package list." >&2
+        fi
+        return 1
+    fi
+    if [[ "${stale}" -eq 1 ]]; then
+        echo "::notice::apt: installed from the image's shipped index -- update failed" \
+            "above and the packages were there anyway." >&2
+    fi
     return 0
 }
 
