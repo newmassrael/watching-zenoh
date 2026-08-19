@@ -85,7 +85,13 @@ PROTOCOL_VARIANTS = {
 OWN_VOCABULARY = {
     "hdr": "the header byte of a nested record, where the codec's own field is `header`",
     "ext": "one entry of an extension chain; the codec models the chain, not the entry",
-    "ext_id": "the extension's id bits, split out of the entry header",
+    "ext_id": "the extension's id bits, split out of the entry header -- the FOUR "
+    "bits zenoh's `iext::ID_MASK` gives it, not the five a `& 0x1F` reads",
+    "ext_name": "what the entry's eid MEANS in the carrier it was read from "
+    "(`ext_name::ext_name`). NOT a codec field and not read off the wire: it is a "
+    "table lookup, which is why it renders as `label` rather than `text`. Absent "
+    "rather than guessed when the carrier declares no such extension -- a chain is "
+    "where a later-vintage peer puts what this build has never heard of",
     "mapping": "zenoh-protocol's `WireExpr::mapping`; wz's codec encodes it as the "
     "local/nonlocal variant TAG rather than as a field",
     "has_schema": "the packed encoding's bit 0, surfaced as a flag",
@@ -136,7 +142,7 @@ def walker_names(src: str) -> set[str]:
     """
     names: set[str] = set()
     names |= set(re.findall(r'\bc\.[a-z_0-9]+\(\s*"([a-z0-9_]+)"', src))
-    names |= set(re.findall(r'\b(?:bits|flag|group|leaf|text)\(\s*"([a-z0-9_]+)"', src))
+    names |= set(re.findall(r'\b(?:bits|flag|group|leaf|text|label)\(\s*"([a-z0-9_]+)"', src))
     names |= set(re.findall(r'name:\s*"([a-z0-9_]+)"', src))
     return names
 

@@ -502,6 +502,70 @@ mod tests {
         );
     }
 
+    /// One framed `Frame` whose extension chain carries the mandatory transport
+    /// QoS — `transport::frame::ext::QoS`, `zextz64!(0x1, true)`, so the header
+    /// byte is the id, the MANDATORY flag and the `Z64` encoding.
+    fn framed_frame_with_qos() -> Vec<u8> {
+        let msg = vec![
+            wz_session_core::wire_const::T_MID_FRAME | 0x80,
+            0x01, // sn
+            0x01 | 0x10 | 0x20,
+            0x03, // the z64 body
+        ];
+        let mut out = vec![msg.len() as u8, 0];
+        out.extend_from_slice(&msg);
+        out
+    }
+
+    /// THE EXTENSION'S NAME REACHES THE CONSUMED SURFACE, not just the tree.
+    ///
+    /// `ext_name` is resolved down in the field walker, and a name that stopped
+    /// there would be a finding with no plane: the analyzer's readers consume
+    /// this JSON, so the label has to survive `to_json`'s rendering to be worth
+    /// anything. That is what this asserts, and it also exercises the TRANSPORT
+    /// carrier mapping, which the walker's own tests do not reach.
+    ///
+    /// The value matters as much as the presence: `0x1` is `qos` on a `Frame`
+    /// and `qos` on an `Init` too, but a `Frame` declares it MANDATORY where
+    /// `Init` does not, so a table that dropped that bit would name this nothing.
+    #[test]
+    fn an_extensions_name_reaches_the_json_a_reader_consumes() {
+        let packet = tcp_packet(1000, &framed_frame_with_qos());
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &packet);
+        d.finish();
+
+        let file = crate::pcap::write(1, &[(0, 0, packet.as_slice())]);
+        let json = fields_json(&d, &file, None, None);
+
+        assert!(
+            json.contains("\"name\":\"Frame\""),
+            "the row must be a walked Frame, not a decline: {json}"
+        );
+        assert!(
+            json.contains(
+                "\"name\":\"ext_name\",\"start\":2,\"end\":3,\
+                           \"kind\":\"label\",\"value\":\"qos\""
+            ),
+            "the extension must reach the reader NAMED, aliasing its header \
+             byte's own span: {json}"
+        );
+        assert!(
+            json.contains(
+                "\"name\":\"ext_id\",\"start\":2,\"end\":3,\
+                           \"kind\":\"bits\",\"value\":1"
+            ),
+            "and its id must be the four bits zenoh gives it, not five: {json}"
+        );
+        assert!(
+            json.contains(
+                "\"name\":\"m\",\"start\":2,\"end\":3,\
+                           \"kind\":\"flag\",\"value\":true"
+            ),
+            "and the mandatory bit must be its own field: {json}"
+        );
+    }
+
     /// R311y855 — THE BOUND HOLDS BACK ROWS AND SAYS HOW MANY.
     ///
     /// An unbounded listing over a session-sized capture is the shape the

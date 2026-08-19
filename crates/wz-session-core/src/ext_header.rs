@@ -19,6 +19,14 @@
 /// a mandatory ext must reject the message.
 pub const EXT_FLAG_M: u8 = 0x10;
 
+/// `Unit` encoding, zenoh `iext::ENC_UNIT` (bits 5-6 = `0b00`): the ext has no
+/// body at all — its PRESENCE is the whole message.
+///
+/// Zero, so it is never needed to BUILD a header; it exists to be compared
+/// against, which is the case [`EXT_ENC_MASK`] serves and which a reader that
+/// wrote `header & EXT_ENC_MASK == 0` would state less clearly.
+pub const EXT_ENC_UNIT: u8 = 0x00;
+
 /// `Z64` encoding, zenoh `iext::ENC_Z64` (bits 5-6 = `0b01`): the ext body is a
 /// `zint`.
 pub const EXT_ENC_Z64: u8 = 0x20;
@@ -27,13 +35,16 @@ pub const EXT_ENC_Z64: u8 = 0x20;
 /// length-prefixed byte buffer.
 pub const EXT_ENC_ZBUF: u8 = 0x40;
 
+/// The two encoding bits, zenoh `iext::ENC_MASK`.
+pub const EXT_ENC_MASK: u8 = 0x60;
+
 /// Chain-continuation flag, zenoh `iext::FLAG_Z` (bit 7): another ext entry
 /// follows THIS one in the chain.
 pub const EXT_FLAG_Z: u8 = 0x80;
 
 /// The extension id field (bits 0-3) of a header byte — zenoh `iext::mid`,
 /// dropping the mandatory / encoding / chain flags.
-pub fn ext_id(header: u8) -> u8 {
+pub const fn ext_id(header: u8) -> u8 {
     header & 0x0F
 }
 
@@ -55,8 +66,22 @@ pub fn ext_id(header: u8) -> u8 {
 ///
 /// Use this for "is capability X offered"; use [`ext_id`] only when you genuinely
 /// want the 4-bit id field (a codec reading the id column).
-pub fn ext_eid(header: u8) -> u8 {
+pub const fn ext_eid(header: u8) -> u8 {
     header & !EXT_FLAG_Z
+}
+
+/// Is this extension MANDATORY — zenoh `iext::is_mandatory`, the `FLAG_M` bit.
+///
+/// A separate accessor rather than an open-coded `& EXT_FLAG_M` for the reason
+/// [`ext_id`] is one: this bit sits INSIDE the byte a careless reader treats as
+/// "the id", and folding it in is a live defect class rather than a
+/// hypothetical. The dissection field layer did exactly that — it reported
+/// `header & 0x1F` under the name `ext_id`, so every mandatory extension came
+/// out 0x10 too high and the one whose entire job is to say "these bytes are
+/// not the payload" (`zenoh::put::ext::Shm`, `zextunit!(0x2, true)`) went
+/// unrecognised on real traffic.
+pub const fn ext_mandatory(header: u8) -> bool {
+    (header & EXT_FLAG_M) != 0
 }
 
 /// R311y578 — the ESTABLISHMENT (Init / Open) extension id space, as one

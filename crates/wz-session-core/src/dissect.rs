@@ -129,13 +129,33 @@ pub enum FieldValue {
     /// consumer is told they were not broken down, which is different from
     /// claiming there was nothing inside.
     Opaque,
+    /// What a carrier byte's bits MEAN, resolved from a table this build holds
+    /// rather than read off the wire. ALIASES the carrier's span, like
+    /// [`Bits`](FieldValue::Bits) and [`Flag`](FieldValue::Flag), and for the
+    /// same reason: the bytes belong to a field that already claims them.
+    ///
+    /// Distinct from `Bits` because it is a DERIVED reading and a consumer is
+    /// entitled to know which of the two it has — an id is what the sender
+    /// wrote, a label is what this build makes of it, and a later build may
+    /// name what this one could not. Distinct from
+    /// [`Text`](FieldValue::Text) because that is UTF-8 the decode VALIDATED
+    /// out of the wire; nothing about a label came from the wire but the bits
+    /// it was looked up from.
+    ///
+    /// `Cow` for the reason [`Field::name`] is one: `Deserialize` cannot borrow
+    /// a `&'static str`. Every producer hands in a `&'static str`, so the
+    /// producing path allocates nothing.
+    Label(Cow<'static, str>),
 }
 
 impl FieldValue {
     /// `true` when this value was decoded from bytes another field already
     /// claims, so its span must not be counted toward the tiling.
     pub fn is_alias(&self) -> bool {
-        matches!(self, FieldValue::Bits(_) | FieldValue::Flag(_))
+        matches!(
+            self,
+            FieldValue::Bits(_) | FieldValue::Flag(_) | FieldValue::Label(_)
+        )
     }
 }
 
@@ -153,7 +173,7 @@ impl FieldValue {
 /// |---|---:|---|
 /// | a generated codec's struct field | 50 | the wire spec, via `out/wz-codecs` |
 /// | zenoh's own flag letters and variant names | 27 | the wire spec |
-/// | **wz's own vocabulary** | **20** | **this crate** |
+/// | **wz's own vocabulary** | **21** | **this crate** |
 ///
 /// Only the third is a wz decision, and it is enumerated here so that keying on
 /// one is an informed choice rather than an accident. `scripts/lib/`
@@ -161,11 +181,17 @@ impl FieldValue {
 /// walker invents a name outside them, if a codec field goes unwalked without a
 /// declared reason, or if either allowlist goes stale.
 ///
-/// The twenty, with why each is not simply the codec's name:
+/// The twenty-one, with why each is not simply the codec's name:
 ///
 /// * `hdr` — a nested record's header byte, where the codec's field is `header`
 /// * `ext` — one entry of an extension chain; the codec models the chain
-/// * `ext_id` — the extension id bits, split out of the entry header
+/// * `ext_id` — the extension id bits, split out of the entry header: the FOUR
+///   bits zenoh's `iext::ID_MASK` gives it, not the five a `& 0x1F` reads
+/// * `ext_name` — what the entry's eid MEANS in the carrier it was read from
+///   ([`crate::ext_name`]). Not a codec field and not read off the wire — a table
+///   lookup, which is why it is a [`Label`](FieldValue::Label) rather than
+///   [`Text`](FieldValue::Text), and why it is ABSENT rather than guessed when the
+///   carrier declares no such extension
 /// * `mapping` — zenoh-protocol's `WireExpr::mapping`; wz's codec encodes it as
 ///   the local/nonlocal variant TAG rather than as a field
 /// * `has_schema` — the packed encoding's bit 0, surfaced as a flag
@@ -276,6 +302,15 @@ fn bits(name: &'static str, carrier: Span, value: u64) -> Field {
         name: name.into(),
         span: carrier,
         value: FieldValue::Bits(value),
+    }
+}
+
+/// A table-resolved reading of `carrier`'s bits, aliasing its span.
+fn label(name: &'static str, carrier: Span, value: &'static str) -> Field {
+    Field {
+        name: name.into(),
+        span: carrier,
+        value: FieldValue::Label(Cow::Borrowed(value)),
     }
 }
 
@@ -505,12 +540,25 @@ impl<'a> SpanCursor<'a> {
 /// Reads the walker's OWN output rather than re-parsing the bytes, and looks
 /// only at the chain's DIRECT entries — deliberately not [`Field::find`],
 /// which is first-match-by-name across the whole subtree and would happily
-/// match an `ext_id` nested inside something else.
-fn chain_carries_ext_id(chain: &[Field], id: u64) -> bool {
+/// match a field nested inside something else.
+///
+/// Matches on the EID — the header with only the chain flag dropped, so the
+/// mandatory and encoding bits are part of it — and not on the 4-bit id. That
+/// is [`crate::ext_header::ext_eid`]'s whole reason for existing (R311y505): two
+/// different extensions may share an id and be told apart by their encoding, so
+/// matching a capability by id alone accepts an UNRELATED extension as the one
+/// asked for. The aggregation layer already matched this way
+/// (`wz-capture/src/agg.rs`, `ext_eid(body_ext_id::SHM | EXT_FLAG_M)`); this
+/// function is what brought the field layer into agreement with it.
+fn chain_carries_ext_eid(chain: &[Field], eid: u8) -> bool {
     chain.iter().any(|entry| match &entry.value {
-        FieldValue::Nested(leaves) => leaves
-            .iter()
-            .any(|f| f.name == "ext_id" && f.value == FieldValue::Bits(id)),
+        FieldValue::Nested(leaves) => leaves.iter().any(|f| {
+            f.name == "header"
+                && match &f.value {
+                    FieldValue::Uint(raw) => crate::ext_header::ext_eid(*raw as u8) == eid,
+                    _ => false,
+                }
+        }),
         _ => false,
     })
 }
@@ -534,6 +582,22 @@ fn chain_carries_ext_id(chain: &[Field], id: u64) -> bool {
 /// on zenoh's traffic would emit confident wrong fields — the same defect
 /// wearing a different name. [`FieldValue::Opaque`] states what is true: the
 /// span is accounted for and the interior was not broken down.
+/// The SHM marker's full identity, as stock zenoh puts it on the wire:
+/// `zenoh::put::ext::Shm` / `zenoh::err::ext::Shm` are `zextunit!(0x2, true)`,
+/// so the byte is the id, the MANDATORY flag, and the `Unit` encoding — `0x12`.
+///
+/// Written as the composition rather than as `0x12` so the three facts it is
+/// made of stay legible, and derived through
+/// [`ext_eid`](crate::ext_header::ext_eid) so it is a comparison key rather than
+/// a byte that happens to match one. The bare id `0x02` — which is what the
+/// field layer used to look for, and what both of its witnesses used to build —
+/// is a DIFFERENT extension identity that stock zenoh never sends here.
+const SHM_MARKER_EID: u8 = crate::ext_header::ext_eid(
+    crate::ext_header::body_ext_id::SHM
+        | crate::ext_header::EXT_FLAG_M
+        | crate::ext_header::EXT_ENC_UNIT,
+);
+
 fn payload_or_shm_descriptor(
     c: &mut SpanCursor<'_>,
     n: usize,
@@ -550,21 +614,67 @@ fn payload_or_shm_descriptor(
     }
 }
 
-/// `ExtEntry` — a TLV entry: one header byte (id in bits 0..4, a 2-bit body
-/// encoding in bits 5..6, the Z continuation in bit 7) then the body its
-/// encoding selects.
-pub fn walk_ext_entry(c: &mut SpanCursor<'_>) -> Result<(bool, Field), CodecError> {
+/// `ExtEntry` — a TLV entry: one header byte then the body its encoding
+/// selects.
+///
+/// # The header byte's four fields, and the one this walker used to get wrong
+///
+/// zenoh's `iext` (`commons/zenoh-protocol/src/common/extension.rs`) splits the
+/// byte four ways: the id in bits 0..3 (`ID_MASK = 0x0F`, four bits and no
+/// more), the MANDATORY flag in bit 4 (`FLAG_M`), the 2-bit body encoding in
+/// bits 5..6, and the chain continuation in bit 7.
+///
+/// This walker reported `header & 0x1F` under the name `ext_id`, folding the
+/// mandatory flag into the id, and never surfaced that flag as a field at all.
+/// Both halves of that were live defects rather than cosmetic ones:
+///
+/// * Every MANDATORY extension came out `0x10` too high — `NodeId` (`0x3`) read
+///   as `19`, `WireExprExt` (`0x0f`) as `31`.
+/// * `zenoh::put::ext::Shm` is `zextunit!(0x2, true)`, so the marker whose whole
+///   job is to say "the payload slot holds an ADDRESS, not the data" is `0x12`
+///   on the wire. The SHM check compared the mis-masked id against a bare
+///   `0x02` and therefore never matched real traffic, so
+///   [`payload_or_shm_descriptor`] called the descriptor a `payload` — exactly
+///   the misreading R311y597 closed, reopened by the layer below it. Both
+///   existing witnesses built the marker as `0x02`, a byte stock zenoh never
+///   sends, so the fixtures agreed with the mistake.
+/// * The mandatory bit is what the R311y630 admission rule
+///   ([`crate::ext_admit`]) turns on, so a reader could not see the input to a
+///   decision the participant seam makes.
+///
+/// # Why the CARRIER is a parameter
+///
+/// An extension id means nothing without the chain it was read from —
+/// [`crate::ext_header::body_ext_id`] states that rule in prose, and the field
+/// layer was the one consumer that could not act on it because it walked every
+/// chain through one context-free function. `0x3` is `NodeId` on a `Push`,
+/// `ResponderId` on a `Response`, `Attachment` on a `Put`, the VALUE on a
+/// `Query` and `Auth` on an `Init`. With the carrier in hand the entry carries
+/// an `ext_name` ([`crate::ext_name`]), so a reader is told `timeout` instead of
+/// being handed `ext_id 6` and left to look it up.
+///
+/// An id the carrier does not declare gets NO `ext_name` field rather than a
+/// guessed one; see [`crate::ext_name::ext_name`] for why that is the ordinary
+/// answer in a chain and not the error case.
+pub fn walk_ext_entry(
+    c: &mut SpanCursor<'_>,
+    carrier_kind: crate::ext_name::ExtCarrier,
+) -> Result<(bool, Field), CodecError> {
     let start = c.offset();
     let (header, header_field) = c.u8("header")?;
     let carrier = header_field.span;
-    let z = (header & 0x80) != 0;
+    let z = (header & crate::ext_header::EXT_FLAG_Z) != 0;
     let enc = (header >> 5) & 0x03;
     let mut fields = alloc::vec![
         header_field,
-        bits("ext_id", carrier, (header & 0x1F) as u64),
+        bits("ext_id", carrier, crate::ext_header::ext_id(header) as u64),
+        flag("m", carrier, crate::ext_header::ext_mandatory(header)),
         bits("encoding", carrier, enc as u64),
         flag("z", carrier, z),
     ];
+    if let Some(name) = crate::ext_name::ext_name(carrier_kind, header) {
+        fields.push(label("ext_name", carrier, name));
+    }
     match enc {
         // ExtUnit — no body bytes at all.
         0 => {}
@@ -617,14 +727,18 @@ pub fn walk_ext_entry(c: &mut SpanCursor<'_>) -> Result<(bool, Field), CodecErro
 /// Both rows are pinned by `a_chain_past_the_cap_is_refused_rather_than_misread`
 /// against the codec and the walker together, so the mirror claim is a
 /// MEASURED one rather than an inspection of two loops that look alike.
-fn walk_ext_chain_z(c: &mut SpanCursor<'_>, max: usize) -> Result<Vec<Field>, CodecError> {
+fn walk_ext_chain_z(
+    c: &mut SpanCursor<'_>,
+    max: usize,
+    carrier_kind: crate::ext_name::ExtCarrier,
+) -> Result<Vec<Field>, CodecError> {
     let mut out = Vec::new();
     let mut more = false;
     for _ in 0..max {
         if c.remaining() == 0 {
             break;
         }
-        let (z, f) = walk_ext_entry(c)?;
+        let (z, f) = walk_ext_entry(c, carrier_kind)?;
         out.push(f);
         more = z;
         if !z {
@@ -643,13 +757,17 @@ fn walk_ext_chain_z(c: &mut SpanCursor<'_>, max: usize) -> Result<Vec<Field>, Co
 /// The fill-to-end ext chain: `Query` reads entries until its cursor is empty
 /// and rejects a chain longer than `max`, ignoring the Z bit entirely
 /// (`out/wz-codecs/query.rs`). Mirrored exactly, overflow error included.
-fn walk_ext_chain_fill(c: &mut SpanCursor<'_>, max: usize) -> Result<Vec<Field>, CodecError> {
+fn walk_ext_chain_fill(
+    c: &mut SpanCursor<'_>,
+    max: usize,
+    carrier_kind: crate::ext_name::ExtCarrier,
+) -> Result<Vec<Field>, CodecError> {
     let mut out = Vec::new();
     for _ in 0..max {
         if c.remaining() == 0 {
             break;
         }
-        let (_, f) = walk_ext_entry(c)?;
+        let (_, f) = walk_ext_entry(c, carrier_kind)?;
         out.push(f);
     }
     if c.remaining() > 0 {
@@ -726,8 +844,12 @@ pub fn walk_msg_put(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let mut is_shm = false;
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            let chain = walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)?;
-            is_shm = chain_carries_ext_id(&chain, crate::ext_header::body_ext_id::SHM as u64);
+            let chain = walk_ext_chain_z(
+                c,
+                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
+                crate::ext_name::ExtCarrier::Put,
+            )?;
+            is_shm = chain_carries_ext_eid(&chain, SHM_MARKER_EID);
             Ok(chain)
         })?);
     }
@@ -752,7 +874,11 @@ pub fn walk_msg_del(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     }
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+            walk_ext_chain_z(
+                c,
+                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
+                crate::ext_name::ExtCarrier::Del,
+            )
         })?);
     }
     Ok(out)
@@ -782,7 +908,11 @@ pub fn walk_query(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     }
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_fill(c, crate::ext_chain::QUERY_EXT_CHAIN_DEPTH)
+            walk_ext_chain_fill(
+                c,
+                crate::ext_chain::QUERY_EXT_CHAIN_DEPTH,
+                crate::ext_name::ExtCarrier::Query,
+            )
         })?);
     }
     Ok(out)
@@ -804,7 +934,11 @@ pub fn walk_reply(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     }
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+            walk_ext_chain_z(
+                c,
+                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
+                crate::ext_name::ExtCarrier::Reply,
+            )
         })?);
     }
     out.push(walk_put_or_del_body(c)?);
@@ -827,8 +961,12 @@ pub fn walk_err(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let mut is_shm = false;
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            let chain = walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)?;
-            is_shm = chain_carries_ext_id(&chain, crate::ext_header::body_ext_id::SHM as u64);
+            let chain = walk_ext_chain_z(
+                c,
+                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
+                crate::ext_name::ExtCarrier::Err,
+            )?;
+            is_shm = chain_carries_ext_eid(&chain, SHM_MARKER_EID);
             Ok(chain)
         })?);
     }
@@ -869,7 +1007,11 @@ pub fn walk_push(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, m))?);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+            walk_ext_chain_z(
+                c,
+                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
+                crate::ext_name::ExtCarrier::Push,
+            )
         })?);
     }
     out.push(walk_put_or_del_body(c)?);
@@ -894,7 +1036,11 @@ pub fn walk_request(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, m))?);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+            walk_ext_chain_z(
+                c,
+                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
+                crate::ext_name::ExtCarrier::Request,
+            )
         })?);
     }
     // Query is the codec's default arm here, not MsgPut.
@@ -924,7 +1070,11 @@ pub fn walk_response(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, m))?);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+            walk_ext_chain_z(
+                c,
+                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
+                crate::ext_name::ExtCarrier::Response,
+            )
         })?);
     }
     out.push(match c.peek_u8()? & 0x1F {
@@ -947,7 +1097,11 @@ pub fn walk_response_final(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecEr
     out.push(rid);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+            walk_ext_chain_z(
+                c,
+                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
+                crate::ext_name::ExtCarrier::ResponseFinal,
+            )
         })?);
     }
     Ok(out)
@@ -991,7 +1145,11 @@ pub fn walk_interest(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     }
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+            walk_ext_chain_z(
+                c,
+                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
+                crate::ext_name::ExtCarrier::Interest,
+            )
         })?);
     }
     Ok(out)
@@ -1013,7 +1171,11 @@ pub fn walk_oam(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     out.push(id);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+            walk_ext_chain_z(
+                c,
+                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
+                crate::ext_name::ExtCarrier::NetworkOam,
+            )
         })?);
     }
     match enc {
@@ -1083,7 +1245,14 @@ fn walk_declare_body(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
         out.push(id);
         if with_exts && (header & 0x80) != 0 {
             out.push(c.nested("extensions", |c| {
-                walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+                // The `Undeclare*` bodies' own chain — `declare::common::ext`,
+                // whose one row is `WireExprExt` at `0x0f`, NOT the `Declare`
+                // message's QoS / Timestamp / NodeId space.
+                walk_ext_chain_z(
+                    c,
+                    crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
+                    crate::ext_name::ExtCarrier::DeclareCommon,
+                )
             })?);
         }
         Ok(out)
@@ -1105,7 +1274,11 @@ fn walk_declare_body(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
             {
                 if (*h as u8 & 0x80) != 0 {
                     out.push(c.nested("extensions", |c| {
-                        walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+                        walk_ext_chain_z(
+                            c,
+                            crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
+                            crate::ext_name::ExtCarrier::DeclareQueryable,
+                        )
                     })?);
                 }
             }
@@ -1144,7 +1317,11 @@ pub fn walk_declare(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     }
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(c, crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH)
+            walk_ext_chain_z(
+                c,
+                crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
+                crate::ext_name::ExtCarrier::Declare,
+            )
         })?);
     }
     out.push(walk_declare_body(c)?);
@@ -1550,6 +1727,39 @@ pub fn dissect_batch(payload: &[u8], base: usize) -> BatchDissection {
 /// point is the records it carries. A `Fragment`'s is NOT: its payload is a
 /// slice of a message the reassembler has not yet completed, and walking it
 /// would produce field spans for a record that does not begin there.
+/// Which extension vocabulary a TRANSPORT message's chain is read against.
+///
+/// The transport space is where the carrier matters most, because the same id
+/// is a different extension in nearly every message: `0x2` is `Shm` on `Init`
+/// (a `ZBuf`), `Shm` on `Open` (a `Z64`), `Shm` on `Join` (a mandatory `ZBuf`)
+/// and `First` on a `Fragment` (a `Unit`). One context-free table would have to
+/// pick one and be wrong three times.
+///
+/// `0x00` is upstream's transport OAM (`transport/mod.rs` `id::OAM`), mapped
+/// here even though this build's dispatch has no arm for that mid yet — the
+/// vocabulary is a property of the wire, not of how far the dispatch has got,
+/// and a mapping that waited for the arm would be a second place to forget.
+///
+/// An unrecognised mid gets [`ExtCarrier::TransportPlain`](crate::ext_name::ExtCarrier::TransportPlain),
+/// whose row set is empty, so its entries are id-and-encoding only. That is the
+/// honest answer: this build does not know what message it is looking at, so it
+/// cannot know what its extensions are called.
+fn transport_carrier(mid: u8) -> crate::ext_name::ExtCarrier {
+    use crate::ext_name::ExtCarrier;
+    use wz_codecs::wire_const;
+    match mid {
+        0x00 => ExtCarrier::TransportOam,
+        wire_const::T_MID_INIT => ExtCarrier::Init,
+        wire_const::T_MID_OPEN => ExtCarrier::Open,
+        wire_const::T_MID_JOIN => ExtCarrier::Join,
+        wire_const::T_MID_FRAME => ExtCarrier::Frame,
+        wire_const::T_MID_FRAGMENT => ExtCarrier::Fragment,
+        // `Close` and `KeepAlive` declare no extension upstream, and so does
+        // anything this build does not recognise.
+        _ => ExtCarrier::TransportPlain,
+    }
+}
+
 pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, CodecError> {
     use wz_codecs::wire_const;
     let mut c = SpanCursor::with_base(bytes, base);
@@ -1651,7 +1861,11 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             out.push(sn);
             if has_ext {
                 out.push(c.nested("extensions", |c| {
-                    walk_ext_chain_z(c, crate::parse_error::MAX_EXT_CHAIN_DEPTH)
+                    walk_ext_chain_z(
+                        c,
+                        crate::parse_error::MAX_EXT_CHAIN_DEPTH,
+                        transport_carrier(mid),
+                    )
                 })?);
             }
             if mid == wire_const::T_MID_FRAME {
@@ -1696,7 +1910,11 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
     // read theirs before the payload, above.
     if has_ext && mid != wire_const::T_MID_FRAME && mid != wire_const::T_MID_FRAGMENT {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_z(c, crate::parse_error::MAX_EXT_CHAIN_DEPTH)
+            walk_ext_chain_z(
+                c,
+                crate::parse_error::MAX_EXT_CHAIN_DEPTH,
+                transport_carrier(mid),
+            )
         })?);
     }
     Ok(group(name, start, c.offset(), out))
@@ -1753,6 +1971,10 @@ fn push_json(field: &Field, out: &mut String) {
         }
         FieldValue::Opaque => {
             out.push_str("\"kind\":\"opaque\"");
+        }
+        FieldValue::Label(s) => {
+            out.push_str("\"kind\":\"label\",\"value\":");
+            crate::json::escape_into(s, out);
         }
         FieldValue::Nested(children) => {
             out.push_str("\"kind\":\"nested\",\"fields\":[");
@@ -2268,6 +2490,20 @@ mod tests {
         }
     }
 
+    /// The SHM marker's header byte AS STOCK ZENOH EMITS IT.
+    ///
+    /// `zenoh::put::ext::Shm` and `zenoh::err::ext::Shm` are both
+    /// `zextunit!(0x2, true)`, and `iext::id()` folds the mandatory flag into
+    /// the byte, so what a real sender puts here is `0x12`.
+    ///
+    /// This constant exists because R311y597's and R311y605's fixtures used the
+    /// BARE `0x02` — a byte stock zenoh never sends — so both witnesses passed
+    /// while the walker could not recognise the marker on any real capture.
+    /// Building the byte from its three named parts is what stops that
+    /// recurring: a fixture that drops the mandatory flag now has to drop a
+    /// visible term.
+    const SHM_MARKER_BYTE: u8 = crate::ext_header::body_ext_id::SHM | crate::ext_header::EXT_FLAG_M;
+
     /// R311y597 — an SHM-marked `Put` must NOT present its descriptor as
     /// `payload`.
     ///
@@ -2280,12 +2516,7 @@ mod tests {
     #[test]
     fn an_shm_marked_put_does_not_call_its_descriptor_a_payload() {
         let descriptor = [0x04u8, 0x07, 0x00];
-        let marked = msg_put(
-            None,
-            None,
-            &[ext_unit(crate::ext_header::body_ext_id::SHM, false)],
-            &descriptor,
-        );
+        let marked = msg_put(None, None, &[ext_unit(SHM_MARKER_BYTE, false)], &descriptor);
 
         let mut w = SpanCursor::new(&marked);
         let fields = walk_msg_put(&mut w).expect("an SHM-marked put must still walk");
@@ -2309,6 +2540,221 @@ mod tests {
             "the span must still account for every byte",
         );
         assert_eq!(w.remaining(), 0, "the walker left bytes unread");
+    }
+
+    /// The header byte's four fields, split the way zenoh splits them.
+    ///
+    /// The walker reported `header & 0x1F` as `ext_id`, so the MANDATORY flag
+    /// was folded into the id and never appeared as a field of its own. That is
+    /// what made the two SHM legs above pass on a byte no sender emits: their
+    /// `0x02` was the only value the mis-masked id could still match.
+    ///
+    /// Asserted on the MANDATORY marker specifically, because a non-mandatory
+    /// extension has the same id under either mask and cannot fail here.
+    #[test]
+    fn a_mandatory_extensions_id_is_four_bits_and_its_flag_is_its_own_field() {
+        let marked = msg_put(None, None, &[ext_unit(SHM_MARKER_BYTE, false)], b"x");
+        let mut w = SpanCursor::new(&marked);
+        let root = group(
+            "MsgPut",
+            0,
+            marked.len(),
+            walk_msg_put(&mut w).expect("walk"),
+        );
+
+        assert_eq!(
+            bits_of(&root, "ext_id"),
+            crate::ext_header::body_ext_id::SHM as u64,
+            "the id field is four bits; the mandatory flag is not part of it",
+        );
+        let m = root
+            .find("ext")
+            .and_then(|e| e.find("m"))
+            .expect("the mandatory flag must be a field");
+        assert_eq!(
+            m.value,
+            FieldValue::Flag(true),
+            "the mandatory bit is the input to the R311y630 admission rule and \
+             must be readable",
+        );
+    }
+
+    /// The wire's own extension NAME, for the two `Request` extensions that
+    /// answer opposite questions about a query.
+    ///
+    /// `Budget` (`0x5`) and `Timeout` (`0x6`) are both `zextz64`, so before the
+    /// carrier reached the entry walker they rendered as `ext_id 5, value 3` and
+    /// `ext_id 6, value 3` — every byte accounted for, and nothing that told a
+    /// reader which of "stop after three replies" and "stop after three
+    /// milliseconds" they were looking at.
+    #[test]
+    fn a_requests_budget_and_timeout_are_named_not_just_numbered() {
+        let query = concat(&[alloc::vec![0x03u8], vle(0)]);
+        let bytes = concat(&[
+            alloc::vec![0x1Cu8 | 0x80],
+            vle(7),
+            wireexpr(0, None),
+            ext_zint(0x5, true, 3),
+            ext_zint(0x6, false, 3),
+            query,
+        ]);
+
+        let f = agree(
+            "Request",
+            &bytes,
+            |b| {
+                let mut c = SceCursor::new(b);
+                wz_codecs::request::Request::decode(&mut c).expect("codec rejected");
+                b.len() - c.remaining()
+            },
+            walk_request,
+        );
+
+        let named: Vec<(String, u64)> = f
+            .find("extensions")
+            .and_then(|e| match &e.value {
+                FieldValue::Nested(entries) => Some(entries),
+                _ => None,
+            })
+            .expect("the chain must be walked")
+            .iter()
+            .map(|entry| {
+                let name = match entry.find("ext_name").map(|f| &f.value) {
+                    Some(FieldValue::Label(s)) => alloc::string::String::from(s.as_ref()),
+                    other => panic!("an entry carried no ext_name: {other:?}"),
+                };
+                (name, uint(entry, "value"))
+            })
+            .collect();
+
+        assert_eq!(
+            named,
+            alloc::vec![
+                (alloc::string::String::from("budget"), 3),
+                (alloc::string::String::from("timeout"), 3),
+            ],
+            "the two extensions must be told apart by name, not left as ids",
+        );
+    }
+
+    /// The CARRIER decides the name, and `0x3` is the case that proves it: the
+    /// same id is `node_id` on a `Push` and `responder_id` on a `Response`.
+    ///
+    /// One walker with no carrier could only ever answer one of these, so this
+    /// is the leg that fails if the carrier is ever dropped back out of the
+    /// entry walker — which a single-carrier test would not notice.
+    #[test]
+    fn one_id_is_named_by_the_message_it_was_read_from() {
+        // `NodeId` is `zextz64!(0x3, true)`, so its header byte carries the
+        // mandatory flag. Writing the fixture without it produced `None` here,
+        // which is the corrected key catching a fixture written against the old
+        // one — the same mistake, one round later, in this very test.
+        let push = concat(&[
+            alloc::vec![0x1Du8 | 0x80],
+            wireexpr(1, None),
+            ext_zint(0x3 | crate::ext_header::EXT_FLAG_M, false, 9),
+            msg_put(None, None, &[], b"x"),
+        ]);
+        let mut w = SpanCursor::new(&push);
+        let f = group("Push", 0, push.len(), walk_push(&mut w).expect("walk"));
+        assert_eq!(
+            f.find("ext_name").map(|f| f.value.clone()),
+            Some(FieldValue::Label(Cow::Borrowed("node_id"))),
+        );
+
+        // The same id, the same z64 encoding would be WRONG here: upstream's
+        // `ResponderId` is a ZBuf, so the byte differs in its encoding bits too
+        // and a reader keyed on the id alone would call this a node id.
+        let response = concat(&[
+            alloc::vec![0x1Bu8 | 0x80],
+            vle(1),
+            wireexpr(0, None),
+            ext_zbuf(0x3, false, &[0xAA, 0xBB]),
+            concat(&[
+                alloc::vec![0x04u8],
+                alloc::vec![0x01u8],
+                msg_put(None, None, &[], b"v"),
+            ]),
+        ]);
+        let mut w = SpanCursor::new(&response);
+        let f = group(
+            "Response",
+            0,
+            response.len(),
+            walk_response(&mut w).expect("walk"),
+        );
+        assert_eq!(
+            f.find("ext_name").map(|f| f.value.clone()),
+            Some(FieldValue::Label(Cow::Borrowed("responder_id"))),
+        );
+    }
+
+    /// An extension this build has no name for carries NO `ext_name` field —
+    /// not an empty one and not a guessed one.
+    ///
+    /// A chain is exactly where a later-vintage peer puts something this reader
+    /// has never heard of, so the absent case is the ordinary one. A reader
+    /// handed a synthesised placeholder could not tell a real extension from
+    /// this build's ignorance of a newer one.
+    #[test]
+    fn an_extension_this_build_cannot_name_carries_no_name() {
+        let push = concat(&[
+            alloc::vec![0x1Du8 | 0x80],
+            wireexpr(1, None),
+            ext_zint(0x0A, false, 1),
+            msg_put(None, None, &[], b"x"),
+        ]);
+        let mut w = SpanCursor::new(&push);
+        let f = group("Push", 0, push.len(), walk_push(&mut w).expect("walk"));
+        assert!(
+            f.find("ext_name").is_none(),
+            "an unnameable extension must not be handed a plausible name",
+        );
+        // But it is still ACCOUNTED FOR: the id and the value are there.
+        assert_eq!(bits_of(&f, "ext_id"), 0x0A);
+    }
+
+    /// R311y505's rule reaching the field layer: the SHM marker is matched by
+    /// its full IDENTITY, so a different extension that merely shares the id
+    /// does not make the walker rename a payload.
+    ///
+    /// The bare `0x02` UNIT byte this builds is precisely what the two legs
+    /// above used to build. It is not zenoh's SHM marker, so the payload must
+    /// stay a payload — and that is what makes those legs' `0x12` a real
+    /// discriminator rather than a value the walker would accept either way.
+    #[test]
+    fn an_ext_sharing_the_shm_id_without_its_flag_is_not_the_marker() {
+        let body = b"real data";
+        let plain = msg_put(
+            None,
+            None,
+            &[ext_unit(crate::ext_header::body_ext_id::SHM, false)],
+            body,
+        );
+
+        let mut w = SpanCursor::new(&plain);
+        let root = group(
+            "MsgPut",
+            0,
+            plain.len(),
+            walk_msg_put(&mut w).expect("walk"),
+        );
+
+        assert_eq!(
+            raw(&root, "payload"),
+            body.to_vec(),
+            "only the mandatory UNIT marker means the slot holds an address",
+        );
+        assert!(root.find("shm_descriptor").is_none());
+        // And this build does not NAME it either, which is the same judgement
+        // reached twice rather than two judgements that happen to agree:
+        // `ext_name` and the SHM check are both keyed on the eid, so a table
+        // that ignored the mandatory bit would have called these bytes `shm`
+        // while the slot beside them stayed a `payload`.
+        assert!(
+            root.find("ext_name").is_none(),
+            "upstream declares no non-mandatory `0x2` UNIT extension on a Put",
+        );
     }
 
     /// The CONTROL for the leg above: the same message shape with a chain that
@@ -2346,7 +2792,7 @@ mod tests {
         // Err: MID 0x05, Z set (the chain carries the marker), E clear.
         let marked = concat(&[
             alloc::vec![0x05u8 | 0x80],
-            ext_unit(crate::ext_header::body_ext_id::SHM, false),
+            ext_unit(SHM_MARKER_BYTE, false),
             vle(descriptor.len() as u64),
             descriptor.to_vec(),
         ]);
@@ -2791,13 +3237,38 @@ mod tests {
         //    entry clears Z, so the wire itself terminated it. The field after
         //    the chain must still read its own bytes. A guard that refused
         //    everything would pass rows 1 and 2 and fail here.
-        // R311y597 — the filler ids start ABOVE the body-ext space's assigned
-        // values on purpose. `1..=cap` used to be the range, and it contains
-        // `0x2`, which in a Put body IS the SHM marker: this row was building
-        // an SHM Put by accident and asserting its descriptor was a payload.
-        // The row is about chain DEPTH, so its ids must carry no meaning.
-        let exact: Vec<Vec<u8>> = (1..=cap)
-            .map(|i| ext_unit((i + 0x10) as u8 & 0x1F, i != cap))
+        // R311y597 — the filler ids must carry no meaning, because the row is
+        // about chain DEPTH. `1..=cap` used to be the range and it contains
+        // `0x2`, which in a Put body is the SHM marker's id: the row was
+        // building an SHM Put by accident and asserting its descriptor was a
+        // payload.
+        //
+        // The escape it reached for was `(i + 0x10) & 0x1F`, and THAT was worse
+        // rather than better — `0x10` is the MANDATORY flag, so `i = 2` produced
+        // `0x12`, which is not merely the SHM id but the marker's complete
+        // header byte as stock zenoh emits it. It only looked safe because the
+        // walker was masking the id with `0x1F` and so read `0x12` as id 18:
+        // two defects cancelling, and the fixture certifying the pair.
+        //
+        // So the filler ids are now chosen by ASKING the table, rather than by
+        // arithmetic hoped to land clear of it. A byte the `Put` carrier names
+        // nothing for is meaningless by construction, and stays meaningless when
+        // upstream adds an extension — the loop moves instead of the comment
+        // going stale.
+        let meaningless: Vec<u8> = (0x00u8..=0x0f)
+            .filter(|id| crate::ext_name::ext_name(crate::ext_name::ExtCarrier::Put, *id).is_none())
+            .take(cap)
+            .collect();
+        assert_eq!(
+            meaningless.len(),
+            cap,
+            "the Put carrier no longer leaves {cap} unassigned UNIT ids; the filler \
+             must be chosen from a wider space, not from an assigned one"
+        );
+        let exact: Vec<Vec<u8>> = meaningless
+            .iter()
+            .enumerate()
+            .map(|(i, id)| ext_unit(*id, i + 1 != cap))
             .collect();
         let ok = msg_put(None, None, &exact, &payload);
 

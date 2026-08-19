@@ -425,6 +425,12 @@ pub mod parse_error;
 /// not dead-code-flagged in feature configs that use only a subset.
 pub mod ext_header;
 
+/// The per-carrier extension NAME table — what an id means in the chain it was
+/// read from. UNCONDITIONAL for the reason [`ext_header`] is: it reads only
+/// header bytes, so an observer build that implements none of these
+/// capabilities still names them.
+pub mod ext_name;
+
 /// R311y630 (§14.1) — the MANDATORY-extension admission rule: which decoded
 /// extension chains a conforming PARTICIPANT must refuse, as distinct from
 /// which ones a decoder can read.
