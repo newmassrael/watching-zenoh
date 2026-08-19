@@ -5000,6 +5000,66 @@ mod datagram_tests {
     use super::*;
     use crate::link::LINKTYPE_ETHERNET;
 
+    /// The one's-complement sum RFC 1071 defines, over `parts` end to end.
+    ///
+    /// R311y884 — these builders wrote ZERO into every checksum field, and a
+    /// zero IPv4 or TCP checksum is present-and-wrong, so every packet this
+    /// corpus produced landed in the INVALID bucket. That is why open-debt item
+    /// 233 could not be closed: a verdict that reads
+    /// `transport_checksum_invalid` would have fired on every fixture in the
+    /// tree, and there was no way to write a capture whose checksums verify.
+    /// A corpus that cannot express the healthy case cannot test a rule about
+    /// the unhealthy one.
+    fn ones_complement(parts: &[&[u8]]) -> u16 {
+        let mut sum: u32 = 0;
+        let mut odd: Option<u8> = None;
+        for part in parts {
+            let mut bytes = part.iter().copied();
+            if let Some(hi) = odd.take() {
+                if let Some(lo) = bytes.next() {
+                    sum += u32::from(u16::from_be_bytes([hi, lo]));
+                } else {
+                    odd = Some(hi);
+                }
+            }
+            let rest: Vec<u8> = bytes.collect();
+            let mut chunks = rest.chunks_exact(2);
+            for c in &mut chunks {
+                sum += u32::from(u16::from_be_bytes([c[0], c[1]]));
+            }
+            if let [last] = chunks.remainder() {
+                odd = Some(*last);
+            }
+        }
+        if let Some(hi) = odd {
+            sum += u32::from(u16::from_be_bytes([hi, 0]));
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+
+    /// Fill an IPv4 header's checksum in place. `ip` starts at the version byte.
+    pub(crate) fn fill_ipv4_checksum(ip: &mut [u8]) {
+        ip[10] = 0;
+        ip[11] = 0;
+        let ck = ones_complement(&[&ip[..20]]);
+        ip[10..12].copy_from_slice(&ck.to_be_bytes());
+    }
+
+    /// Fill a TCP segment's checksum in place, over the IPv4 pseudo-header.
+    pub(crate) fn fill_tcp_checksum(src: [u8; 4], dst: [u8; 4], tcp: &mut [u8]) {
+        tcp[16] = 0;
+        tcp[17] = 0;
+        let len = (tcp.len() as u16).to_be_bytes();
+        let pseudo = [
+            src[0], src[1], src[2], src[3], dst[0], dst[1], dst[2], dst[3], 0, 6, len[0], len[1],
+        ];
+        let ck = ones_complement(&[&pseudo[..], tcp]);
+        tcp[16..18].copy_from_slice(&ck.to_be_bytes());
+    }
+
     /// Ethernet + IPv4 + UDP carrying `payload`, padded to the 60-byte
     /// minimum a real NIC emits.
     ///
@@ -5025,6 +5085,12 @@ mod datagram_tests {
         ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
         ip.extend_from_slice(&src);
         ip.extend_from_slice(&dst);
+        // R311y884 — the IPv4 header checksum is REAL here. The UDP checksum
+        // above stays zero on purpose: over IPv4 that is the sender declining
+        // (RFC 768), which is the ABSENT bucket, and it is the discriminator
+        // `the_roll_up_totals_what_the_per_flow_counters_hold` uses to prove
+        // absence is not folded into failure.
+        fill_ipv4_checksum(&mut ip);
         ip.extend_from_slice(&udp);
 
         let mut eth = alloc::vec![0u8; 12];
@@ -5046,15 +5112,21 @@ mod datagram_tests {
         tcp.push(5 << 4); // data offset = 5 words, no options
         tcp.push(0x10); // ACK
         tcp.extend_from_slice(&64u16.to_be_bytes()); // window
-        tcp.extend_from_slice(&0u16.to_be_bytes()); // checksum, unchecked
+        tcp.extend_from_slice(&0u16.to_be_bytes()); // checksum, filled below
         tcp.extend_from_slice(&0u16.to_be_bytes()); // urgent
         tcp.extend_from_slice(payload);
+        // R311y884 — a REAL checksum. It used to be left zero, which over IPv4
+        // is present-and-wrong rather than absent (TCP has no declining form),
+        // so this builder put every packet it ever made into the corruption
+        // bucket. See `ones_complement` for why that blocked open-debt item 233.
+        fill_tcp_checksum([10, 0, 0, 1], [10, 0, 0, 2], &mut tcp);
 
         let mut ip = alloc::vec![0x45u8, 0];
         ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
         ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
         ip.extend_from_slice(&[10, 0, 0, 1]);
         ip.extend_from_slice(&[10, 0, 0, 2]);
+        fill_ipv4_checksum(&mut ip);
         ip.extend_from_slice(&tcp);
 
         let mut eth = alloc::vec![0u8; 12];
@@ -5091,12 +5163,14 @@ mod datagram_tests {
         tcp.extend_from_slice(&0u16.to_be_bytes());
         tcp.extend_from_slice(&0u16.to_be_bytes());
         tcp.extend_from_slice(payload);
+        fill_tcp_checksum([10, 0, 0, 2], [10, 0, 0, 1], &mut tcp);
 
         let mut ip = alloc::vec![0x45u8, 0];
         ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
         ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
         ip.extend_from_slice(&[10, 0, 0, 2]);
         ip.extend_from_slice(&[10, 0, 0, 1]);
+        fill_ipv4_checksum(&mut ip);
         ip.extend_from_slice(&tcp);
 
         let mut eth = alloc::vec![0u8; 12];
@@ -5109,7 +5183,11 @@ mod datagram_tests {
     }
 
     /// One length-prefixed KeepAlive: the smallest complete framed message.
-    fn framed_keepalive() -> Vec<u8> {
+    ///
+    /// `pub(crate)` since R311y884: `report`'s checksum-verdict test needs the
+    /// SAME packet the health counters were measured on, and a second copy of
+    /// the smallest framed message is a second thing to keep in step.
+    pub(crate) fn framed_keepalive() -> Vec<u8> {
         alloc::vec![1, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE]
     }
 
@@ -7471,9 +7549,16 @@ mod datagram_tests {
         // `tcp_packet` writes a ZERO TCP checksum, which over IPv4 is
         // present-and-wrong: TCP has no declining form. That is the INVALID
         // bucket, not the absent one.
-        assert_eq!(h.transport_checksum_invalid, 2, "{h:?}");
+        // R311y884 — VALID now, and this assertion is the reason the corpus had
+        // to change before open-debt item 233 could close. `tcp_packet` used to
+        // leave the checksum zero, which over IPv4 is present-and-wrong, so
+        // every fixture in this tree landed in the corruption bucket and no
+        // verdict could ever be written about it. It now computes a real one.
+        assert_eq!(h.transport_checksum_valid, 2, "{h:?}");
+        assert_eq!(h.transport_checksum_invalid, 0, "{h:?}");
         assert_eq!(h.transport_checksum_absent, 0, "{h:?}");
-        assert!(h.any_checksum_invalid());
+        assert_eq!(h.ip_checksum_valid, 2, "{h:?}");
+        assert!(!h.any_checksum_invalid());
         assert_eq!(h.packets_skipped, 0);
 
         // The DISCRIMINATOR for the bucket above: `udp_packet` writes the SAME
@@ -9909,12 +9994,18 @@ mod ws_flow_tests {
         tcp.extend_from_slice(&0u16.to_be_bytes());
         tcp.extend_from_slice(&0u16.to_be_bytes());
         tcp.extend_from_slice(payload);
+        // R311y884 — a real checksum, for the reason `datagram_tests`'
+        // `tcp_packet` records: a zero one is present-and-wrong over IPv4, and a
+        // corpus that only ever produces the corruption bucket cannot test a
+        // verdict about it.
+        crate::datagram_tests::fill_tcp_checksum(src, dst, &mut tcp);
 
         let mut ip = alloc::vec![0x45u8, 0];
         ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
         ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
         ip.extend_from_slice(&src);
         ip.extend_from_slice(&dst);
+        crate::datagram_tests::fill_ipv4_checksum(&mut ip);
         ip.extend_from_slice(&tcp);
 
         let mut eth = alloc::vec![0u8; 12];
@@ -10698,12 +10789,18 @@ mod tls_flow_tests {
         tcp.extend_from_slice(&0u16.to_be_bytes());
         tcp.extend_from_slice(&0u16.to_be_bytes());
         tcp.extend_from_slice(payload);
+        // R311y884 — a real checksum, for the reason `datagram_tests`'
+        // `tcp_packet` records: a zero one is present-and-wrong over IPv4, and a
+        // corpus that only ever produces the corruption bucket cannot test a
+        // verdict about it.
+        crate::datagram_tests::fill_tcp_checksum(src, dst, &mut tcp);
 
         let mut ip = alloc::vec![0x45u8, 0];
         ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
         ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
         ip.extend_from_slice(&src);
         ip.extend_from_slice(&dst);
+        crate::datagram_tests::fill_ipv4_checksum(&mut ip);
         ip.extend_from_slice(&tcp);
 
         let mut eth = alloc::vec![0u8; 12];

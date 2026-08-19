@@ -4971,8 +4971,15 @@ fn a_payload_declaration_that_binds_nothing_is_reported_and_one_that_cannot_is_r
         "--payload-name",
         "other/**:1=temperature",
     ]);
+    // R311y884 — the rule is named `other/**=protobuf` and used to be named
+    // `other/**`. The declaration ledger now spells both kinds through the one
+    // function that mirrors `parse_declaration`, so what this line prints is
+    // what the reader typed rather than half of it (open-debt item 235). The
+    // name half below already read this way, which is what made the difference
+    // invisible.
     assert!(
-        missed_topic.contains("--payload-format `other/**` was installed and BOUND NOTHING"),
+        missed_topic
+            .contains("--payload-format `other/**=protobuf` was installed and BOUND NOTHING"),
         "a rule no keyexpr matched must say so: {missed_topic}"
     );
     assert!(

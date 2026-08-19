@@ -1226,9 +1226,13 @@ mod tests {
         assert!(run.for_keyexpr("demo/a").is_some(), "the rule covers it");
         let left = run.unused();
         let unused: Vec<&str> = left.iter().map(|d| d.text.as_str()).collect();
+        // R311y884 — `other/b=protobuf`, which is the line `declare` was given
+        // three statements above. It used to read `other/b`: the ledger dropped
+        // the half after the `=`, so the reported declaration was not one the
+        // reader could have written (open-debt item 235).
         assert_eq!(
             unused,
-            vec!["other/b"],
+            vec!["other/b=protobuf"],
             "the rule that met no traffic is the one a reader must be told about"
         );
 

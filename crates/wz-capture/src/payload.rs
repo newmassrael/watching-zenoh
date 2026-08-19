@@ -1413,18 +1413,30 @@ pub mod formats {
         /// one set rather than two that can disagree about which is which.
         pub fn declarations(&self) -> Vec<Declaration> {
             let mut out = Vec::with_capacity(self.rules.len() + self.names.len());
-            for (at, (pattern, _)) in self.rules.iter().enumerate() {
+            // R311y884 — both halves spelled by `declaration_text`, the mirror of
+            // `parse_declaration`. The rule half used to be the bare `pattern`,
+            // which carries no `=` and so is not a declaration by the reader's
+            // own grammar; `Declaration::text` says "How the reader wrote it"
+            // and it now is.
+            for (at, (pattern, format)) in self.rules.iter().enumerate() {
                 out.push(Declaration {
                     id: DeclarationId(at),
                     kind: DeclarationKind::FormatRule,
-                    text: pattern.clone(),
+                    text: declaration_text(&DeclarationText::Rule {
+                        pattern,
+                        format: format.name(),
+                    }),
                 });
             }
             for (at, (pattern, path, name)) in self.names.iter().enumerate() {
                 out.push(Declaration {
                     id: DeclarationId(self.rules.len() + at),
                     kind: DeclarationKind::FieldName,
-                    text: alloc::format!("{pattern}:{path}={name}"),
+                    text: declaration_text(&DeclarationText::Name {
+                        pattern,
+                        path,
+                        name,
+                    }),
                 });
             }
             out
@@ -1604,6 +1616,32 @@ pub mod formats {
         }
     }
 
+    /// R311y884 — how a declaration is WRITTEN, once.
+    ///
+    /// [`parse_declaration`] is the reader and this is its mirror, so the
+    /// spelling has one definition instead of one per writer. Open-debt item
+    /// 235 is what it closes: the same declaration was spelled in three places
+    /// -- the parser above, [`FormatMap::declarations`], and `wz-analyze`'s
+    /// refusal note -- and nothing compared them, so `FormatMap::declarations`
+    /// reported a `FormatRule` as the bare pattern. That is documented as "How
+    /// the reader wrote it" and it is not: it carries no `=`, so the reader's
+    /// own grammar rejects it.
+    ///
+    /// Not a `Display` impl, because the round trip is the contract and a
+    /// `Display` invites a `{:?}`-shaped near-miss to be used instead. The
+    /// contract is asserted rather than described:
+    /// `parse_declaration(&declaration_text(d)) == d`.
+    pub fn declaration_text(d: &DeclarationText<'_>) -> String {
+        match *d {
+            DeclarationText::Rule { pattern, format } => alloc::format!("{pattern}={format}"),
+            DeclarationText::Name {
+                pattern,
+                path,
+                name,
+            } => alloc::format!("{pattern}:{path}={name}"),
+        }
+    }
+
     /// Read one declaration line.
     ///
     /// The line is taken WHOLE and never trimmed: a pattern with a trailing
@@ -1777,6 +1815,48 @@ mod format_map_tests {
             None,
             "a keyexpr no rule covers has no format"
         );
+    }
+
+    /// R311y884 — every declaration this map REPORTS must be one the reader can
+    /// read back, and the two halves must be spelled by the same code.
+    ///
+    /// `Declaration::text` is documented as "How the reader wrote it", and for a
+    /// `FieldName` it was: `{pattern}:{path}={name}`, the spelling
+    /// `parse_declaration` accepts. For a `FormatRule` it was the bare pattern —
+    /// no `=`, no format, and therefore not a declaration at all by the reader's
+    /// own grammar. Three places spelled one thing (open-debt item 235): the
+    /// parser, this render, and `wz-analyze`'s refusal note, and nothing
+    /// compared them.
+    ///
+    /// A ROUND TRIP is the comparison, and it is stronger than any census of
+    /// spellings: it asks the writer and the reader to agree on the same string
+    /// without either being told what the string should look like.
+    #[test]
+    fn every_declaration_reported_can_be_read_back_by_the_parser() {
+        let proto = Marker("protobuf");
+        let mut map = FormatMap::new();
+        map.insert("demo/temperature", &proto).expect("a literal");
+        map.name_field("demo/temperature", "1", "celsius")
+            .expect("a name");
+
+        let declared = map.declarations();
+        assert_eq!(declared.len(), 2, "one rule and one name: {declared:?}");
+        for d in &declared {
+            let back = parse_declaration(&d.text)
+                .unwrap_or_else(|e| panic!("`{}` does not read back: {e:?}", d.text));
+            assert_eq!(
+                back.kind(),
+                d.kind,
+                "`{}` read back as a different kind",
+                d.text
+            );
+        }
+        // And the rule half spells what the reader typed, not half of it.
+        let rule = declared
+            .iter()
+            .find(|d| d.kind == DeclarationKind::FormatRule)
+            .expect("a rule");
+        assert_eq!(rule.text, "demo/temperature=protobuf");
     }
 
     /// R311y699 ([REDACTED-REQ]) — the FIRST matching rule wins, in a build of any

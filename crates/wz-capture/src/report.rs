@@ -276,6 +276,9 @@ pub enum VerdictReason {
     PayloadUndecided,
     /// IP fragment chains that never became a datagram.
     UnfinishedFragmentChains,
+    /// Every checksum this reader could verify on a layer FAILED, so nothing
+    /// corroborates the headers the rows were built from.
+    ChecksumsUncorroborated,
 }
 
 impl VerdictReason {
@@ -287,6 +290,7 @@ impl VerdictReason {
     pub fn name(self) -> &'static str {
         match self {
             Self::PacketsSkipped => "packets_skipped",
+            Self::ChecksumsUncorroborated => "checksums_uncorroborated",
             Self::BoundsDiscarded => "bounds_discarded",
             Self::EncryptedFlowsUnopened => "encrypted_flows_unopened",
             Self::QuicFlowsUnopened => "quic_flows_unopened",
@@ -446,6 +450,45 @@ impl<'a> CaptureReport<'a> {
         // that expired, was evicted, or was still open when the file ended is.
         if self.dissection.unfinished_fragment_chains() > 0 {
             out.push(VerdictReason::UnfinishedFragmentChains);
+        }
+        // R311y884 (open-debt item 233) — THE CHECKSUM COUNTERS, WHICH WERE
+        // RENDERED AND NEVER JUDGED.
+        //
+        // `valid` / `invalid` / `absent` reach both surfaces and `health` prints
+        // all six, but no leg of this verdict read one, so a capture whose every
+        // checksum failed reported itself complete. `DissectionHealth` even
+        // carries `any_checksum_invalid()`, which nothing called.
+        //
+        // WHY NOT `invalid > 0`, which is what the helper answers. Checksum
+        // OFFLOAD: a host capturing its own transmit path sees the field before
+        // the NIC fills it, and those packets are present-and-wrong through no
+        // fault of the wire. A verdict on `> 0` would fire on ordinary local
+        // captures, which is exactly the defect R311y860 removed from
+        // `packets_skipped` — a reason true of almost everything took the exit
+        // code with it.
+        //
+        // The rule is therefore: this reader verified at least one checksum on
+        // this layer and NOT ONE of them passed. That is a floor claim rather
+        // than a corruption claim, which is what this enumeration is for: with
+        // nothing corroborating the headers, the rows built from them cannot be
+        // trusted to be all the rows. `absent` is deliberately not counted on
+        // either side — IPv6 has no header checksum and a zero UDP checksum is
+        // the sender declining (RFC 768), and a capture of either is not
+        // uncorroborated, it is unchecked.
+        //
+        // WHY THE TRANSPORT LAYER AND NOT THE IP HEADER. The IPv4 header
+        // checksum covers the HEADER only, is recomputed at every hop, and does
+        // not exist in IPv6 — it was removed as redundant. It says nothing about
+        // the bytes the rows are built from. The TCP/UDP checksum covers the
+        // payload, which is exactly the claim this leg makes, so asking the IP
+        // axis would add noise on the layer with the weaker evidence.
+        //
+        // Reachable only because R311y884 also fixed the fixtures: the packet
+        // builders wrote a ZERO checksum, so the corpus sat entirely in the
+        // invalid bucket and no rule about it could be written at all.
+        let h = self.dissection.health();
+        if h.transport_checksum_invalid > 0 && h.transport_checksum_valid == 0 {
+            out.push(VerdictReason::ChecksumsUncorroborated);
         }
         if self.dissection.drops().any() {
             out.push(VerdictReason::BoundsDiscarded);
@@ -3490,6 +3533,65 @@ mod tests {
                 && measured_row.contains("\"payload_bytes\":4")
                 && measured_row.contains("\"payload_bytes_ceiling\":4"),
             "the measured row must not inherit the capture's qualifier: {measured_row}"
+        );
+    }
+
+    /// R311y884 (open-debt item 233) — a capture NOTHING corroborates is not
+    /// complete, and one with checksum offload still is.
+    ///
+    /// The six checksum counters were rendered by `health` on both surfaces and
+    /// read by no leg of the verdict, so a capture whose every checksum failed
+    /// called itself complete. Both arms are here because the rule is a PAIR:
+    /// the leg has to fire when nothing verified, and it must NOT fire on the
+    /// ordinary local capture where the transmit path's checksums are filled by
+    /// the NIC after the tap. A `> 0` rule passes the first and fails the
+    /// second, which is the shape R311y860 took out of `packets_skipped`.
+    #[test]
+    fn a_capture_no_checksum_corroborates_is_not_complete_but_offload_is() {
+        use crate::datagram_tests::{framed_keepalive, tcp_packet};
+        use crate::link::LINKTYPE_ETHERNET;
+        use crate::Dissection;
+
+        // EVERY transport checksum fails: the fixture's own is correct, so one
+        // flipped byte is the whole difference between the two arms.
+        let mut corrupt = tcp_packet(1000, &framed_keepalive());
+        corrupt[14 + 20 + 16] ^= 0xFF;
+        let mut all_bad = Dissection::new();
+        all_bad.push_packet(LINKTYPE_ETHERNET, 0, &corrupt);
+        let h = all_bad.health();
+        assert_eq!(h.transport_checksum_invalid, 1, "{h:?}");
+        assert_eq!(h.transport_checksum_valid, 0, "{h:?}");
+        // The WHOLE list, not a containment claim: a set that also names other
+        // legs would satisfy `contains` while proving nothing about this one.
+        let r = CaptureReport::of(&all_bad);
+        assert_eq!(
+            r.reasons(),
+            alloc::vec![VerdictReason::ChecksumsUncorroborated],
+            "nothing verified, so nothing corroborates the rows: {}",
+            r.to_text()
+        );
+
+        // THE CONTROL, and the reason the rule is not `invalid > 0`: the same
+        // corrupt packet beside a good one is a capture whose reader demonstrably
+        // verifies checksums, which is what a transmit-offload capture looks like.
+        let mut offload = Dissection::new();
+        offload.push_packet(LINKTYPE_ETHERNET, 0, &corrupt);
+        offload.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &tcp_packet(1000 + framed_keepalive().len() as u32, &framed_keepalive()),
+        );
+        let h = offload.health();
+        assert!(
+            h.transport_checksum_invalid > 0 && h.transport_checksum_valid > 0,
+            "the control must hold BOTH: {h:?}"
+        );
+        let control = CaptureReport::of(&offload);
+        assert_eq!(
+            control.reasons(),
+            alloc::vec![],
+            "one bad checksum among good ones is offload, not a floor: {}",
+            control.to_text()
         );
     }
 

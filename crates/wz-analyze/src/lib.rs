@@ -781,10 +781,30 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     // rather than a rule silently dropped.
     let mut payload_formats = wz_capture::payload::formats::FormatMap::new();
     let mut payload_refusals: Vec<FieldNote> = Vec::new();
+    // R311y884 — the refusal names the declaration in the ONE spelling
+    // `wz-capture` owns (`payload::formats::declaration_text`, the mirror of
+    // `parse_declaration`). Hand-built `format!("{pattern}={name}")` here was
+    // the third of three spellings open-debt item 235 names, and the one that
+    // happened to be right — which is exactly why nobody noticed the render was
+    // not.
+    let rule_text = |pattern: &str, format: &str| {
+        wz_capture::payload::formats::declaration_text(
+            &wz_capture::payload::formats::DeclarationText::Rule { pattern, format },
+        )
+    };
+    let name_text = |pattern: &str, path: &str, name: &str| {
+        wz_capture::payload::formats::declaration_text(
+            &wz_capture::payload::formats::DeclarationText::Name {
+                pattern,
+                path,
+                name,
+            },
+        )
+    };
     for (pattern, name) in payload_rules {
         match payload_formats::builtin(name) {
             None => payload_refusals.push(FieldNote::PayloadRuleRefused {
-                rule: format!("{pattern}={name}"),
+                rule: rule_text(pattern, name),
                 why: format!(
                     "this build has no decoder named `{name}` (it has: {})",
                     payload_formats::BUILTIN_NAMES.join(", ")
@@ -793,7 +813,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
             Some(format) => {
                 if let Err(err) = payload_formats.insert(pattern, format) {
                     payload_refusals.push(FieldNote::PayloadRuleRefused {
-                        rule: format!("{pattern}={name}"),
+                        rule: rule_text(pattern, name),
                         why: err.to_string(),
                     });
                 }
@@ -807,7 +827,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     for (pattern, path, name) in payload_field_names {
         if let Err(err) = payload_formats.name_field(pattern, path, name) {
             payload_refusals.push(FieldNote::PayloadRuleRefused {
-                rule: format!("{pattern}:{path}={name}"),
+                rule: name_text(pattern, path, name),
                 why: err.to_string(),
             });
         }
@@ -4410,10 +4430,16 @@ mod tests {
         );
         assert_eq!(
             unused.iter().map(|d| d.text.as_str()).collect::<Vec<_>>(),
-            vec!["demo/a", "demo/a:1=temperature"],
+            vec!["demo/a=protobuf", "demo/a:1=temperature"],
             "and each is spelled by the map that accepted it, not reassembled \
              by whoever renders it"
         );
+        // R311y884 — the rule half reads `demo/a=protobuf` and used to read
+        // `demo/a`. This assertion's own sentence is why the change is the fix
+        // rather than a churned expectation: the map spells it, and the map now
+        // spells it in the grammar `parse_declaration` accepts. The bare pattern
+        // carried no `=`, so the ledger reported a line the reader that wrote it
+        // could not have written (open-debt item 235).
     }
 
     /// The two kinds, in the order [`Declarations::unused`] yields them.
