@@ -54,7 +54,17 @@ use crate::payload::Encoding;
 pub struct Declarations<'a> {
     map: &'a FormatMap<'a>,
     used: RefCell<BTreeSet<DeclarationId>>,
+    /// R311y875 — the rules that bound the WRONG thing, tallied by the triple
+    /// that identifies one misbinding. See [`Self::misbindings`].
+    misbound: RefCell<alloc::collections::BTreeMap<MisbindingKey, usize>>,
 }
+
+/// R311y875 — what one misbinding IS, as a key: the topic, the rule's decoder,
+/// the publisher's label, and which of the two is wrong.
+///
+/// A tuple and not a struct because it is a `BTreeMap` key and nothing else;
+/// [`Misbinding`] is the value a reader is handed.
+type MisbindingKey = (String, String, String, Misbound);
 
 impl<'a> Declarations<'a> {
     /// A fresh ledger over `map`, with nothing applied yet.
@@ -62,6 +72,7 @@ impl<'a> Declarations<'a> {
         Self {
             map,
             used: RefCell::new(BTreeSet::new()),
+            misbound: RefCell::new(alloc::collections::BTreeMap::new()),
         }
     }
 
@@ -103,6 +114,225 @@ impl<'a> Declarations<'a> {
             .filter(|d| !used.contains(&d.id))
             .collect()
     }
+
+    /// R311y875 — one sample whose rule and whose label disagreed, TALLIED.
+    ///
+    /// Called from [`decode_payload`] at the moment the disagreement is decided,
+    /// which is the only place holding all four halves of the key at once. On
+    /// this type and not beside the render for the reason [`Self::unused`] is
+    /// here: what a run MET is a fact about the run, and a `FormatMap` is
+    /// configuration that does not change while a capture is walked.
+    fn record_misbinding(&self, keyexpr: &str, format: &str, declared: &str, wrong: Misbound) {
+        *self
+            .misbound
+            .borrow_mut()
+            .entry((
+                String::from(keyexpr),
+                String::from(format),
+                String::from(declared),
+                wrong,
+            ))
+            .or_insert(0) += 1;
+    }
+
+    /// R311y875 — THE RULES THAT BOUND THE WRONG THING, which is the question
+    /// [`Self::unused`] is the other half of.
+    ///
+    /// # The silence this ends
+    ///
+    /// R311y873 taught the field layer to weigh a publisher's declaration
+    /// against the rule covering it, and R311y874 taught it to weigh that
+    /// declaration against the bytes. Both findings then went out ONE MESSAGE AT
+    /// A TIME and reached no plane at all: a capture in which a rule is wrong for
+    /// ten thousand samples said so ten thousand times, in a listing a reader
+    /// bounds with `--max-messages` precisely because it is that long, and
+    /// nothing anywhere said "this mapping is wrong" or "this topic's publisher
+    /// is mislabelling". On a product whose whole output is findings, a finding
+    /// that only exists per-row is a finding a reader has to already suspect.
+    ///
+    /// `unused` answers the rule that bound NOTHING — the pattern missed. This
+    /// answers the rule that bound the wrong thing — the pattern HIT and the
+    /// traffic under it says the mapping and the wire disagree. The two failures
+    /// send a reader to opposite places, which is why they are separate
+    /// questions rather than one list of "bad rules".
+    ///
+    /// # The unit is the triple, not the sample
+    ///
+    /// A reader's remedy is per (topic, rule, label): every sample on `demo/a`
+    /// declaring `application/json` under a `protobuf` rule is ONE thing to go
+    /// fix, and ten thousand rows of it is the same one thing said ten thousand
+    /// times. The count rides along because the difference between one
+    /// mislabelled sample and every sample on a topic is the difference between
+    /// a stray publisher and a broken deployment.
+    ///
+    /// # What bounds this answer, stated rather than hidden
+    ///
+    /// The tally counts the messages a listing WALKED. A caller that bounded the
+    /// listing bounded this too, because the disagreement is decided during the
+    /// walk and a message that was not walked was not judged. Both surfaces
+    /// report that bound beside this — the command line as its `... N more not
+    /// listed` note, the C ABI as each flow's `omitted` — so the undercount is
+    /// legible rather than silent. The SET is complete for what was walked; the
+    /// counts are lower bounds when a bound bit.
+    ///
+    /// Most samples first, so the topic with the most traffic behind it is the
+    /// row a reader reads first. Ties break on the triple itself, so the order
+    /// is total and two runs over one capture render identically.
+    pub fn misbindings(&self) -> Vec<Misbinding> {
+        let mut found: Vec<Misbinding> = self
+            .misbound
+            .borrow()
+            .iter()
+            .map(|((keyexpr, format, declared, wrong), samples)| Misbinding {
+                keyexpr: keyexpr.clone(),
+                format: format.clone(),
+                declared: declared.clone(),
+                wrong: *wrong,
+                samples: *samples,
+            })
+            .collect();
+        found.sort_by(|a, b| {
+            b.samples
+                .cmp(&a.samples)
+                .then_with(|| a.keyexpr.cmp(&b.keyexpr))
+                .then_with(|| a.declared.cmp(&b.declared))
+                .then_with(|| a.wrong.cmp(&b.wrong))
+        });
+        found
+    }
+}
+
+/// R311y875 — WHICH SIDE of a misbinding is the wrong one.
+///
+/// Named for the thing to go fix and not for the mechanism, because that is the
+/// whole value of separating them: a reader who cannot tell these apart edits
+/// their command line when the deployment is broken, or files a deployment bug
+/// when their own pattern is wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Misbound {
+    /// THE RULE. The publisher declared an encoding this decoder is not for, and
+    /// its own bytes bear that declaration out — so the mapping is what is
+    /// wrong, and nothing was decoded.
+    Rule,
+    /// THE PUBLISHER. Its declaration contradicts the rule and its OWN BYTES
+    /// REFUTE THE DECLARATION, so the rule won and the sample was decoded over
+    /// the label. The fields are trustworthy; the topic is mislabelled.
+    Publisher,
+}
+
+impl Misbound {
+    /// The word a consumer branches on, written ONCE.
+    ///
+    /// R311y873's rule for [`PayloadDecoding::state`], applied to this
+    /// vocabulary from the round it is introduced rather than after a prose copy
+    /// of it has drifted: the match is exhaustive, so a third answer added later
+    /// cannot reach a consumer without choosing a word.
+    pub fn name(self) -> &'static str {
+        Self::NAMES[match self {
+            Self::Rule => 0,
+            Self::Publisher => 1,
+        }]
+    }
+
+    /// Every word [`Self::name`] can return, for the consumers that document
+    /// this vocabulary in prose a compiler cannot read.
+    pub const NAMES: [&'static str; 2] = ["rule", "publisher"];
+}
+
+/// R311y875 — one topic, one rule, one label, and how many samples met them.
+///
+/// The value [`Declarations::misbindings`] hands back; see that method for why
+/// the triple rather than the sample is the unit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Misbinding {
+    /// The key expression the rule was matched against.
+    pub keyexpr: String,
+    /// The decoder the rule named.
+    pub format: String,
+    /// What the publisher said these payloads are.
+    pub declared: String,
+    /// Which side is wrong.
+    pub wrong: Misbound,
+    /// How many WALKED samples carried this triple. A lower bound where a
+    /// listing bound bit; see [`Declarations::misbindings`].
+    pub samples: usize,
+}
+
+impl Misbinding {
+    /// The prose BOTH surfaces carry, written ONCE.
+    ///
+    /// The same rule [`crate::report::VerdictReason`] and `wz-analyze`'s
+    /// `FieldNote::sentence` follow: a sentence written twice is two sentences
+    /// to keep true, and this one has to be true on a terminal and inside a JSON
+    /// document a program reads.
+    ///
+    /// Each half names the flag to go change, because a finding a reader cannot
+    /// act on is a finding they will learn to skip.
+    pub fn sentence(&self) -> String {
+        let Self {
+            keyexpr,
+            format,
+            declared,
+            samples,
+            wrong,
+        } = self;
+        match wrong {
+            Misbound::Rule => alloc::format!(
+                "MAPPING WRONG -- {samples} sample(s) on `{keyexpr}` declare `{declared}`, \
+                 which the `{format}` rule is not for, and their bytes bear that out; \
+                 nothing was decoded. Fix the --payload-format rule, not the wire"
+            ),
+            Misbound::Publisher => alloc::format!(
+                "PUBLISHER MISLABELLING -- {samples} sample(s) on `{keyexpr}` declare \
+                 `{declared}` and carry bytes that refute it; the `{format}` rule was \
+                 applied over the label and the fields are good. Fix the publisher"
+            ),
+        }
+    }
+}
+
+/// R311y875 — the machine-readable rendering of one misbinding, written ONCE.
+///
+/// Both surfaces emit this array — `wz-analyze`'s `--fields --json` and the C
+/// ABI's `fields_json` — and they emit it through this function for the reason
+/// [`push_decoding`] exists: the field layer already carries TWO JSON emitters
+/// for its rows (`debt-census-emit-two-renderings`), and a finding whose object
+/// shape differed between the surface a person reads and the surface a product
+/// links would be a contract that disagrees with itself.
+pub fn push_misbinding(misbinding: &Misbinding, out: &mut String) {
+    use wz_session_core::json::escape_into;
+    out.push_str("{\"keyexpr\":");
+    escape_into(&misbinding.keyexpr, out);
+    out.push_str(",\"format\":");
+    escape_into(&misbinding.format, out);
+    out.push_str(",\"declared\":");
+    escape_into(&misbinding.declared, out);
+    out.push_str(",\"wrong\":\"");
+    out.push_str(misbinding.wrong.name());
+    out.push_str("\",\"samples\":");
+    out.push_str(&misbinding.samples.to_string());
+    out.push_str(",\"note\":");
+    escape_into(&misbinding.sentence(), out);
+    out.push('}');
+}
+
+/// R311y875 — the whole `payload_mapping` array, empty or not.
+///
+/// ALWAYS rendered by every caller, never omitted when empty — R311y720's
+/// standing rule. A consumer that had to test for the key would read its absence
+/// as "no rule is misbound", which is exactly the assumption this plane exists
+/// to stop being made for free.
+pub fn push_misbindings(declarations: Option<&Declarations<'_>>, out: &mut String) {
+    out.push_str("\"payload_mapping\":[");
+    if let Some(declarations) = declarations {
+        for (i, misbinding) in declarations.misbindings().iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            push_misbinding(misbinding, out);
+        }
+    }
+    out.push(']');
 }
 
 /// R311y701 (PF2) — what a keyexpr id is resolved AGAINST.
@@ -505,15 +735,24 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
     // the reader is handed fields no publisher sent.
     // R311y874 — and the claim is itself checked, so a label its own bytes
     // refute cannot hide the data behind it.
+    // R311y875 — and either disagreement is TALLIED here, at the one point that
+    // holds the topic, the rule and the label together. Both findings went out
+    // per message until this round and reached no plane at all, so a capture
+    // where a mapping is wrong for every sample on a topic said so once per row
+    // — in the listing a reader bounds precisely because it is that long.
     let despite_encoding = match judge_claim(format, node, bytes) {
         Claim::Vetoes(declared) => {
+            map.record_misbinding(&keyexpr, format.name(), &declared, Misbound::Rule);
             return PayloadDecoding::EncodingMismatch {
                 keyexpr,
                 format: String::from(format.name()),
                 declared,
-            }
+            };
         }
-        Claim::Refuted(declared) => Some(declared),
+        Claim::Refuted(declared) => {
+            map.record_misbinding(&keyexpr, format.name(), &declared, Misbound::Publisher);
+            Some(declared)
+        }
         Claim::Agrees => None,
     };
     match format.decode(bytes) {
@@ -836,6 +1075,103 @@ mod tests {
             },
             "a publisher whose bytes match its own label is believed"
         );
+    }
+
+    /// R311y875 — THE RUN COUNTS ITS MISBOUND RULES, keyed on WHO IS WRONG.
+    ///
+    /// # Why this is a separate question from `unused`
+    ///
+    /// `unused` answers the rule that bound NOTHING: the pattern missed every
+    /// topic. There was no answer at all for the rule that bound the WRONG
+    /// thing — the pattern hit, and the traffic under it says the mapping and
+    /// the wire disagree. Until this round both of those findings existed only
+    /// per message, in a listing whose whole purpose is to be bounded.
+    ///
+    /// # Why the fixture is one topic and one label
+    ///
+    /// Three samples on `demo/a`, all declaring `application/json` under one
+    /// `protobuf` rule, differing ONLY in the bytes: two the label refutes and
+    /// one it bears out. So the two rows differ in `wrong` alone, which is what
+    /// proves the tally is keyed on the verdict — a build keyed on the triple
+    /// that produced it reports a single row of 3. The two counts differ, so
+    /// neither can pass by being hard-coded, and the order is asserted because
+    /// "most samples first" is what puts the larger finding where a reader
+    /// looks.
+    #[test]
+    fn the_run_counts_which_rules_bound_the_wrong_thing() {
+        let mut map = FormatMap::new();
+        map.declare("demo/**=protobuf").expect("a keyexpr pattern");
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+        // field 1, varint, value 42 — valid protobuf, and not JSON at byte 0.
+        let refutes: &[u8] = &[0x08, 0x2a];
+        let bears_out: &[u8] = br#"{"a":1}"#;
+
+        let run = Declarations::new(&map);
+        assert!(
+            run.misbindings().is_empty(),
+            "a run that has walked nothing has met no misbinding"
+        );
+        for bytes in [refutes, bears_out, refutes] {
+            decode_payload(&put_declaring(ENC_JSON, bytes), &run, at);
+        }
+
+        assert_eq!(
+            run.misbindings(),
+            vec![
+                Misbinding {
+                    keyexpr: String::from("demo/a"),
+                    format: String::from("protobuf"),
+                    declared: String::from("application/json"),
+                    wrong: Misbound::Publisher,
+                    samples: 2,
+                },
+                Misbinding {
+                    keyexpr: String::from("demo/a"),
+                    format: String::from("protobuf"),
+                    declared: String::from("application/json"),
+                    wrong: Misbound::Rule,
+                    samples: 1,
+                },
+            ],
+            "two samples the label refutes are the PUBLISHER's finding and one \
+             it bears out is the RULE's, counted apart and larger first"
+        );
+
+        // The ledger belongs to the RUN, on R311y726's rule for `unused`: a
+        // second ledger over the same map has met nothing.
+        assert!(
+            Declarations::new(&map).misbindings().is_empty(),
+            "a second run must not inherit the first run's findings"
+        );
+    }
+
+    /// R311y875 — the `wrong` vocabulary is TOTAL and each word is distinct.
+    ///
+    /// The residue R311y873 recorded for `PayloadDecoding::STATES` applies here
+    /// too — an author can point a new variant at an EXISTING index and get two
+    /// variants sharing one word — so the distinctness is asserted rather than
+    /// assumed. `NAMES` is what `wz_dissect.h` documents in prose, and prose is
+    /// the half no compiler holds.
+    #[test]
+    fn every_misbound_verdict_has_its_own_word() {
+        let all = [Misbound::Rule, Misbound::Publisher];
+        assert_eq!(
+            all.len(),
+            Misbound::NAMES.len(),
+            "every variant must have a word and every word a variant"
+        );
+        let mut seen = BTreeSet::new();
+        for verdict in all {
+            assert!(
+                Misbound::NAMES.contains(&verdict.name()),
+                "{verdict:?} names a word outside NAMES"
+            );
+            assert!(
+                seen.insert(verdict.name()),
+                "{verdict:?} shares its word with another variant"
+            );
+        }
     }
 
     /// The vehicle, proved in the same round: the check must not cost the

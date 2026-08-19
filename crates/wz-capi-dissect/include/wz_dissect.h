@@ -218,7 +218,28 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * right and the topic is mislabelled -- because a declaration this reader
  * can prove false must not veto the rule. Always present, never omitted: a
  * consumer that had to test for the key would read its absence as "nothing
- * was overridden", which is the assumption the field exists to stop. */
+ * was overridden", which is the assumption the field exists to stop.
+ *
+ * R311y875 -- the document additionally carries `payload_mapping`, a
+ * top-level array summarising what your rules MET. Both findings above are
+ * per message, and a capture where one mapping is wrong for every sample on a
+ * topic reports it once per row -- in the listing you bound because it is
+ * that long. Each entry is one (`keyexpr`, `format`, `declared`) triple with
+ * `samples`, and `wrong` says which side to go fix:
+ *
+ *     `rule`         the publisher declared an encoding your decoder is not
+ *                    for AND its bytes bear that out, so nothing was decoded
+ *                    and your rule is what is wrong
+ *     `publisher`    its declaration contradicts your rule and its own bytes
+ *                    refute the declaration, so the rule won, the fields are
+ *                    good, and the topic is mislabelled
+ *
+ * `note` carries the same sentence the command line prints, so a consumer
+ * that only forwards findings does not have to compose one. Always present,
+ * empty array when nothing is misbound -- the same rule despite_encoding
+ * follows, for the same reason. The tally counts the messages this listing
+ * WALKED, so a bound you passed bounds it too; each flow's `omitted` is what
+ * makes that legible. The SET is complete for what was walked. */
 int wz_dissect_pcap_fields_with_payloads(const unsigned char *bytes, size_t len,
                                          size_t max_messages_per_flow,
                                          const char *declarations, char **out);

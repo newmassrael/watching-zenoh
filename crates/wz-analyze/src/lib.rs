@@ -291,10 +291,16 @@ OPTIONS:
                       first matching rule wins. Matching is zenoh's own
                       keyexpr dialect, so `demo/**` covers `demo/a`.
                       A sample whose OWN declared encoding contradicts the
-                      rule is reported and NOT decoded -- an encoding
+                      rule is weighed against its own bytes -- an encoding
                       travels per sample, so one keyexpr can carry two, and
-                      decoding a JSON body as protobuf invents fields.
-                      A publisher that declared nothing is decoded.
+                      decoding a JSON body as protobuf invents fields. A
+                      label those bytes BEAR OUT stops the rule and nothing
+                      is decoded; a label they REFUTE is overridden, said
+                      on its own line, and the fields are good. A publisher
+                      that declared nothing is decoded. Either finding is
+                      also TOTALLED per topic under the listing, so a rule
+                      that is wrong for a whole topic reads as one line
+                      and not as one per message.
                       Needs --fields. Formats: protobuf.
     --payload-name <keyexpr>:<path>=<name>
                       name one decoded field path, e.g.
@@ -1972,7 +1978,7 @@ fn field_lines(
             notes: unbound,
         });
     }
-    render_listings(&listings, format)
+    render_listings(&listings, payload_formats, format)
 }
 
 /// R311y681 (§1.1n) — one flow's contribution to the field listing: the rows it
@@ -2321,11 +2327,20 @@ fn escape(text: &str) -> String {
 
 /// R311y681 (§1.1n) — the whole field listing, in the requested format.
 ///
-/// The JSON carries TWO keys and both are structural: `fields` is the rows and
-/// `field_notes` is everything that could not become one. A consumer must never
-/// have to test for the key that explains a short array -- that is the same rule
-/// the epoch object follows, one listing over.
-fn render_listings(listings: &[FlowListing], format: Format) -> String {
+/// The JSON carries THREE keys and all of them are structural: `fields` is the
+/// rows, `field_notes` is everything that could not become one, and R311y875's
+/// `payload_mapping` is what the run learned about the rules themselves. A
+/// consumer must never have to test for the key that explains a short array --
+/// that is the same rule the epoch object follows, one listing over.
+///
+/// R311y875 — `declarations` rather than a pre-rendered list, because the answer
+/// is only correct once every row producer has run and this is the first place
+/// downstream of all of them.
+fn render_listings(
+    listings: &[FlowListing],
+    declarations: &Declarations<'_>,
+    format: Format,
+) -> String {
     let mut out = String::new();
     match format {
         Format::Text => {
@@ -2334,6 +2349,15 @@ fn render_listings(listings: &[FlowListing], format: Format) -> String {
                 for note in &listing.notes {
                     out.push_str(&note.to_text());
                 }
+            }
+            // R311y875 — LAST, under every flow's own notes, because this is the
+            // one finding here that is about the reader's command line rather
+            // than about a flow. The same placement `PayloadDeclarationUnbound`
+            // gets, and for the same reason.
+            for misbinding in declarations.misbindings() {
+                out.push_str("  ");
+                out.push_str(&misbinding.sentence());
+                out.push('\n');
             }
         }
         Format::Json => {
@@ -2350,7 +2374,11 @@ fn render_listings(listings: &[FlowListing], format: Format) -> String {
                 first = false;
                 out.push_str(&note.to_json());
             }
-            out.push(']');
+            out.push_str("],");
+            // Through `wz-capture`'s own emitter and not spelled again here:
+            // this document and the C ABI's must not disagree about the shape of
+            // one finding.
+            wz_capture::payload_decode::push_misbindings(Some(declarations), &mut out);
         }
     }
     out
@@ -4790,6 +4818,169 @@ mod tests {
         let mut w = vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
         w.extend_from_slice(record);
         w
+    }
+
+    /// One `Put` on `key` that DECLARES `encoding_id`, in zenoh's own wire
+    /// shape.
+    ///
+    /// R311y875 — the E flag (0x40) is set by hand because `walk_msg_put` reads
+    /// an `encoding` group only when it is, so a struct field alone would encode
+    /// nothing and every assertion below would pass on a build that never
+    /// looked. The wire word is `(id << 1) | has_schema`.
+    fn put_declaring(key: &str, encoding_id: u32, payload: &[u8]) -> Vec<u8> {
+        wz_codecs::push::Push {
+            header: wz_codecs::push::Push::default().header | wz_session_core::wire_const::FLAG_N_N,
+            keyexpr: wz_codecs::wireexpr::Wireexpr {
+                body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
+                    wz_codecs::wireexpr_local::WireexprLocal {
+                        id: 0,
+                        suffix_len: Some(key.len() as u64),
+                        suffix: Some(key),
+                    },
+                ),
+            },
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                header: wz_codecs::msg_put::MsgPut::default().header | 0x40,
+                encoding: Some(wz_codecs::encoding::Encoding {
+                    packed_id: encoding_id << 1,
+                    schema_len: None,
+                    schema: None,
+                }),
+                payload_len: payload.len() as u64,
+                payload,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    /// R311y875 — THE TWO ENCODING FINDINGS, AND THEIR TALLY, THROUGH THE
+    /// TERMINAL A PERSON ACTUALLY READS.
+    ///
+    /// # The gap this closes
+    ///
+    /// R311y873 added `EncodingMismatch`'s line and R311y874 added the override
+    /// line beside it, and BOTH were proved only by the state's rendering — no
+    /// fixture in this tree drove either through `wz-analyze`'s output, because
+    /// the round that could have added one built its capture on the C ABI side.
+    /// Measured rather than recalled: before this test every `payload_rules` in
+    /// this file was `&[]`, so the command line's whole payload-format path had
+    /// no capture behind it at all.
+    ///
+    /// # Why one fixture proves three things
+    ///
+    /// One rule (`demo/**=protobuf`) and one declaration (`application/json`,
+    /// id 5) over bytes that differ: `demo/a` carries two samples that refute
+    /// the label and `demo/b` one that bears it out. That is the same pair
+    /// R311y874 settled on the ABI side, so the two surfaces are now shown to
+    /// agree; the sample counts differ (2 against 1) so the tally cannot pass by
+    /// hard-coding either number; and the two topics are separate rows because
+    /// the plane is keyed on the TOPIC, which is the coordinate a reader has to
+    /// go and fix a publisher at.
+    #[test]
+    fn the_encoding_findings_and_their_tally_reach_the_terminal() {
+        const JSON: u32 = 5;
+        // Valid protobuf (field 1, varint 150) under a `application/json`
+        // label: the publisher's own bytes refute it, so the rule wins.
+        const REFUTES: &[u8] = &[0x08, 0x96, 0x01];
+        // Actual JSON under the same label: the label holds and the rule loses.
+        const BEARS_OUT: &[u8] = br#"{"a":1}"#;
+        let packets = [
+            udp_from_zenoh_port(&frame_carrying(&put_declaring("demo/a", JSON, REFUTES))),
+            udp_from_zenoh_port(&frame_carrying(&put_declaring("demo/b", JSON, BEARS_OUT))),
+            udp_from_zenoh_port(&frame_carrying(&put_declaring("demo/a", JSON, REFUTES))),
+        ];
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+        let rules = [(String::from("demo/**"), String::from("protobuf"))];
+
+        let run = |format: Format| {
+            analyze_request(&Request {
+                capture: &capture,
+                keylog: None,
+                format,
+                per_flow: true,
+                per_message: true,
+                messages_per_flow: None,
+                quic_ports: &[],
+                quic_cid_len: None,
+                payload_rules: &rules,
+                payload_field_names: &[],
+                serial_linktypes: &[],
+                census: Census::default(),
+                per_field: true,
+                health: false,
+                select: None,
+            })
+            .expect("the capture reads")
+            .0
+        };
+
+        let text = run(Format::Text);
+        // ANTI-VACUITY: all three records really decoded, so a listing that
+        // reported nothing cannot pass by having been handed nothing.
+        assert!(
+            text.contains("messages decoded: 3"),
+            "the fixture must decode: {text}"
+        );
+        // R311y873's LINE, from a capture for the first time. It names the flag,
+        // which is the whole reason this state is not `Refused`.
+        assert!(
+            text.contains(
+                "payload `demo/b`: NOT DECODED -- the publisher declared \
+                 application/json and the --payload-format rule says protobuf"
+            ),
+            "the publisher whose bytes bear its label out must send the reader \
+             to the RULE: {text}"
+        );
+        // R311y874's LINE, likewise.
+        assert!(
+            text.contains(
+                "payload `demo/a`: the publisher declared application/json and \
+                 its own bytes contradict that, so the --payload-format rule \
+                 was applied anyway"
+            ),
+            "the label its own bytes refute must not hide the data, and the \
+             override must be said: {text}"
+        );
+        // R311y875's PLANE: the same two findings, counted, once per topic.
+        assert!(
+            text.contains(
+                "PUBLISHER MISLABELLING -- 2 sample(s) on `demo/a` declare \
+                 `application/json`"
+            ),
+            "the two mislabelled samples on one topic must be counted ONCE, as \
+             a finding about the deployment: {text}"
+        );
+        assert!(
+            text.contains("MAPPING WRONG -- 1 sample(s) on `demo/b` declare `application/json`"),
+            "and the topic whose label holds must be counted separately, \
+             against the rule: {text}"
+        );
+
+        // And the same plane in the JSON a program reads, through
+        // `wz-capture`'s own emitter -- so the two documents cannot disagree
+        // about the shape of one finding.
+        let json = run(Format::Json);
+        assert!(
+            json.contains(
+                "\"payload_mapping\":[{\"keyexpr\":\"demo/a\",\"format\":\"protobuf\",\
+                 \"declared\":\"application/json\",\"wrong\":\"publisher\",\"samples\":2,"
+            ),
+            "the JSON arm carries the plane too, most samples first: {json}"
+        );
+        assert!(
+            json.contains(
+                "{\"keyexpr\":\"demo/b\",\"format\":\"protobuf\",\
+                 \"declared\":\"application/json\",\"wrong\":\"rule\",\"samples\":1,"
+            ),
+            "and both verdicts: {json}"
+        );
     }
 
     /// R311y869 (§1.1f) — THE PLANE FROM THE COMMAND LINE, both findings.

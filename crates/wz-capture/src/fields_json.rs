@@ -108,7 +108,14 @@ pub fn fields_json(
     // Said rather than left to be inferred from empty datagram listings: a
     // capture this reader cannot parse a second time yields no datagram rows
     // for a reason that has nothing to do with the traffic.
-    let _ = write!(out, "],\"capture_reread\":{}}}", reread.is_some());
+    let _ = write!(out, "],\"capture_reread\":{},", reread.is_some());
+    // R311y875 — the run's misbound rules, AFTER every row producer, for the
+    // reason `wz-analyze` places its unbound-declaration note there: this is a
+    // fact about what the capture turned out to hold, and both producers above
+    // decide it while they walk. Emitted even for a caller that declared
+    // nothing, so the key is structural rather than conditional.
+    crate::payload_decode::push_misbindings(declarations, &mut out);
+    out.push('}');
     out
 }
 

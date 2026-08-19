@@ -456,6 +456,19 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields(
 /// had to test for the key would read its absence as "nothing was overridden",
 /// which is the assumption the field exists to stop.
 ///
+/// R311y875 — the document additionally carries `payload_mapping`, a top-level
+/// array summarising what the rules MET. Both findings above are per message,
+/// and a capture where one mapping is wrong for every sample on a topic reports
+/// it once per row — in the listing a caller bounds because it is that long.
+/// Each entry is one (`keyexpr`, `format`, `declared`) triple with `samples`,
+/// and `wrong` names the side to fix: `rule` where the publisher's declaration
+/// contradicts the decoder AND its bytes bear that out, `publisher` where its
+/// own bytes refute the declaration and the rule was applied over it. `note`
+/// carries the same sentence the command line prints. Always present, empty
+/// when nothing is misbound. The tally counts the messages this listing WALKED,
+/// so `max_messages_per_flow` bounds it too and each flow's `omitted` is what
+/// makes that legible; see `wz_capture::payload_decode::Declarations`.
+///
 /// # Safety
 /// `bytes` must point to at least `len` readable bytes, `declarations` must be
 /// a NUL-terminated C string, and `out` must be a writable pointer to a
@@ -796,6 +809,31 @@ mod tests {
                 "wz_dissect.h never names the `{state}` state, which this \
                  library emits -- a C consumer branching on the header's list \
                  would fall through on traffic that produces it"
+            );
+        }
+    }
+
+    /// R311y875 — THE HEADER NAMES EVERY `payload_mapping` VERDICT TOO, and it
+    /// gets the gate in the round the vocabulary is introduced.
+    ///
+    /// The sibling above exists because a vocabulary written out in prose twice
+    /// drifted for a whole round without anything failing. That lesson costs
+    /// nothing to apply forwards, so this word set arrives already held: a third
+    /// verdict added later cannot reach a C consumer without appearing in the
+    /// header a linking product reads.
+    ///
+    /// No exclusion here, and that is a claim rather than an omission — both
+    /// verdicts are emitted by `push_misbinding` unconditionally, so any word
+    /// this set holds is a word a document can carry.
+    #[test]
+    fn the_header_names_every_misbound_verdict() {
+        const HEADER: &str = include_str!("../include/wz_dissect.h");
+        for verdict in wz_capture::payload_decode::Misbound::NAMES {
+            assert!(
+                HEADER.contains(&format!("`{verdict}`")),
+                "wz_dissect.h never names the `{verdict}` verdict, which this \
+                 library emits in payload_mapping -- a C consumer branching on \
+                 the header's list would fall through on a real finding"
             );
         }
     }
@@ -2032,7 +2070,30 @@ mod tests {
     /// the walker and the C boundary, and the assertion is that the answer
     /// changed — which it can only do if the read found something.
     fn capture_declaring(encoding_id: u32, payload: &[u8]) -> Vec<u8> {
-        let put = framed_frame(
+        capture_declaring_many(&[(encoding_id, payload)])
+    }
+
+    /// R311y875 — SEVERAL declaring `Put`s in one capture, on one keyexpr.
+    ///
+    /// The plural is the whole point of the misbinding plane: the finding it
+    /// produces is per (topic, rule, label) and carries a COUNT, and a fixture
+    /// with one sample in it cannot tell a working tally from a hard-coded 1.
+    ///
+    /// Every `Put` goes into the SAME framed batch on the same flow, which is
+    /// also what a real publisher does; separate frames would additionally be
+    /// testing the flow assembler, which has its own tests.
+    fn capture_declaring_many(samples: &[(u32, &[u8])]) -> Vec<u8> {
+        let mut low_to_high = framed_init(&ZID_A);
+        for (encoding_id, payload) in samples {
+            low_to_high.extend_from_slice(&declaring_put(*encoding_id, payload));
+        }
+        let packet = tcp_packet(1000, &low_to_high);
+        wz_capture::pcap::write(1, &[(0, 0, packet.as_slice())])
+    }
+
+    /// One framed `Put` on `demo/sensor` that DECLARES `encoding_id`.
+    fn declaring_put(encoding_id: u32, payload: &[u8]) -> Vec<u8> {
+        framed_frame(
             0,
             &wz_codecs::push::Push {
                 header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
@@ -2056,11 +2117,7 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec(),
-        );
-        let mut low_to_high = framed_init(&ZID_A);
-        low_to_high.extend_from_slice(&put);
-        let packet = tcp_packet(1000, &low_to_high);
-        wz_capture::pcap::write(1, &[(0, 0, packet.as_slice())])
+        )
     }
 
     /// R311y874 — THE PUBLISHER'S DECLARATION REACHES THE DECISION THROUGH A
@@ -2104,6 +2161,90 @@ mod tests {
             ),
             "a publisher whose bytes match its own label is believed, and the \
              rule is named as the thing to fix: {vetoed}"
+        );
+    }
+
+    /// R311y875 — THE RUN COUNTS ITS MISBOUND RULES, and tells the two apart.
+    ///
+    /// # What was missing
+    ///
+    /// R311y873 and R311y874 taught the field layer to decide whose claim wins,
+    /// and both findings went out one message at a time. A capture in which a
+    /// rule is wrong for every sample on a topic said so once per row, in the
+    /// listing a reader bounds precisely because it is that long, and no plane
+    /// anywhere said "this mapping is wrong" or "this publisher is
+    /// mislabelling". This is that plane.
+    ///
+    /// # Why this fixture is the discriminator
+    ///
+    /// Five samples on ONE keyexpr under ONE rule with ONE declaration, and the
+    /// only thing that varies is the BYTES: three refute the label and two bear
+    /// it out. So the two rows differ in `wrong` alone, which is what proves the
+    /// tally is keyed on the verdict rather than on the triple that produced it —
+    /// a build that keyed on the triple would report one row of 5.
+    ///
+    /// The counts are 3 and 2 rather than 1 and 1 because a hard-coded 1 is
+    /// indistinguishable from a working tally on a one-sample fixture.
+    #[test]
+    fn the_run_counts_which_rules_bound_the_wrong_thing() {
+        const JSON: u32 = 5;
+        // Valid protobuf (field 1, varint 150), labelled `application/json`:
+        // the label is refuted by its own bytes, so the PUBLISHER is wrong.
+        const REFUTES: &[u8] = &[0x08, 0x96, 0x01];
+        // Actual JSON under the same label: the label holds, so the RULE is.
+        const BEARS_OUT: &[u8] = br#"{"a":1}"#;
+        let capture = capture_declaring_many(&[
+            (JSON, REFUTES),
+            (JSON, BEARS_OUT),
+            (JSON, REFUTES),
+            (JSON, BEARS_OUT),
+            (JSON, REFUTES),
+        ]);
+        let doc = call_fields_with_payloads(&capture, 0, "demo/sensor=protobuf")
+            .expect("the capture reads");
+
+        assert!(
+            doc.contains(
+                "\"payload_mapping\":[{\"keyexpr\":\"demo/sensor\",\"format\":\"protobuf\",\
+                 \"declared\":\"application/json\",\"wrong\":\"publisher\",\"samples\":3,"
+            ),
+            "three samples whose bytes refute their own label must be counted \
+             once, against the PUBLISHER, and reported first because they are \
+             the larger finding: {doc}"
+        );
+        assert!(
+            doc.contains(
+                "{\"keyexpr\":\"demo/sensor\",\"format\":\"protobuf\",\
+                 \"declared\":\"application/json\",\"wrong\":\"rule\",\"samples\":2,"
+            ),
+            "two samples whose bytes bear their label out must be counted \
+             separately, against the RULE: {doc}"
+        );
+    }
+
+    /// R311y875 — the key is STRUCTURAL: present and empty when nothing is
+    /// misbound, on R311y720's standing rule.
+    ///
+    /// A consumer that had to test for the key would read its absence as "no
+    /// rule is misbound", which is the assumption this plane exists to stop
+    /// being made for free — and the two captures below are the two ways a
+    /// document can legitimately carry no finding.
+    #[test]
+    fn the_misbinding_key_is_present_when_there_is_nothing_to_report() {
+        // A rule that fires and agrees with every sample.
+        let honest = call_fields_with_payloads(&protobuf_capture(), 0, "demo/sensor=protobuf")
+            .expect("the capture reads");
+        assert!(
+            honest.contains("\"payload_mapping\":[]"),
+            "a capture whose rule is right must SAY so with an empty array: {honest}"
+        );
+        // And a caller that declared nothing at all, which is the arm that
+        // reaches `push_misbindings` with no ledger to ask.
+        let undeclared =
+            call_fields_with_payloads(&protobuf_capture(), 0, "").expect("the capture reads");
+        assert!(
+            undeclared.contains("\"payload_mapping\":[]"),
+            "a caller that declared no rule must get the key too: {undeclared}"
         );
     }
 

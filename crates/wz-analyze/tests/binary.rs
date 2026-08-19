@@ -4219,16 +4219,25 @@ fn a_message_level_failure_is_a_row_and_a_flow_level_one_is_a_note() {
     // the first row. Measured -- the first version of this test did exactly
     // that and failed looking for a separator it had already walked past.
     let (_, rows) = json.split_once("\"fields\":[").expect("the rows array");
-    let (rows, notes) = rows
+    let (rows, rest) = rows
         .split_once("],\"field_notes\":[")
         .unwrap_or_else(|| panic!("both arrays: {json}"));
+    // R311y875 — and the THIRD structural array, split off rather than trimmed.
+    // This read used to take everything after `field_notes` as the notes and
+    // strip its punctuation, which silently absorbed whatever key came next;
+    // naming the boundary is what makes the emptiness assertion below about the
+    // notes and nothing else.
+    let (notes, mapping) = rest
+        .split_once("],\"payload_mapping\":[")
+        .unwrap_or_else(|| panic!("all three arrays: {json}"));
     assert!(
         rows.contains("\"declined\":\"the field walker refused these bytes"),
         "a failure with a message to attach to is a ROW: {json}"
     );
+    assert!(notes.is_empty(), "and it is NOT also a note: {json}");
     assert!(
-        notes.trim_end_matches([']', '}']).is_empty(),
-        "and it is NOT also a note: {json}"
+        mapping.trim_end_matches([']', '}']).is_empty(),
+        "and no rule is misbound in this capture: {json}"
     );
 
     // FLOW level: a datagram flow with nothing walkable in it.
