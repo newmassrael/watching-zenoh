@@ -170,6 +170,16 @@ pub fn interests_json(c: &crate::interest::InterestCensus, t: &ThroughputTable) 
             // number there would read as one.
             None => out.push_str("null"),
         }
+        // R311y870 — WHAT ASKED FOR IT. `null` is the contract state
+        // UNSOLICITED and not a missing field; id 0 is a legal interest id, so
+        // a zero here would be indistinguishable from one.
+        out.push_str(",\"solicited_by\":");
+        match d.solicited_by {
+            Some(id) => {
+                let _ = write!(out, "{id}");
+            }
+            None => out.push_str("null"),
+        }
         out.push_str(",\"flow\":");
         push_flow(&d.flow, &mut out);
         out.push('}');
@@ -203,14 +213,75 @@ pub fn interests_json(c: &crate::interest::InterestCensus, t: &ThroughputTable) 
         }
         escape_into(key, &mut out);
     }
+    // R311y870 — the QUESTION half of the exchange, beside the answers rather
+    // than in a plane of its own: `zenoh-protocol`'s own message flow makes
+    // them one conversation, and a document that split them would leave a
+    // consumer to re-derive the correlation this fold already performed.
+    out.push_str("],\"requests\":[");
+    for (i, r) in c.requests().iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"asker\":\"{}\",\"id\":{},\"mode\":\"{}\",\"answers\":{},\
+             \"asked_at\":{},\"closed_at\":",
+            dir_name(r.asker),
+            r.id,
+            r.mode.name(),
+            r.answers,
+            r.asked_at,
+        );
+        match r.closed_at {
+            Some(at) => {
+                let _ = write!(out, "{at}");
+            }
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"cancelled_at\":");
+        match r.cancelled_at {
+            Some(at) => {
+                let _ = write!(out, "{at}");
+            }
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"keyexpr\":");
+        match &r.keyexpr {
+            Some(k) => escape_into(k, &mut out),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"asks\":");
+        match r.scope {
+            Some(s) => {
+                let _ = write!(
+                    out,
+                    "{{\"keyexprs\":{},\"subscribers\":{},\"queryables\":{},\
+                     \"tokens\":{},\"restricted\":{},\"aggregate\":{}}}",
+                    s.keyexprs, s.subscribers, s.queryables, s.tokens, s.restricted, s.aggregate
+                );
+            }
+            // A Final carries no body. An all-false object would say it asked
+            // for none of the four; it asked for nothing, being a cancellation.
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"flow\":");
+        push_flow(&r.flow, &mut out);
+        out.push('}');
+    }
+    out.push_str("],\"unanswered\":");
+    push_indices(&c.unanswered(), &mut out);
+    out.push_str(",\"unclosed\":");
+    push_indices(&c.unclosed(), &mut out);
     let by = c.by_kind();
     let _ = write!(
         out,
-        "],\"unclaimed_exact\":{},\"judged\":{},\"orphan_withdrawals\":{},\
+        ",\"unclaimed_exact\":{},\"judged\":{},\"orphan_withdrawals\":{},\
+         \"orphan_answers\":{},\
          \"by_kind\":{{\"subscriber\":{},\"queryable\":{},\"liveliness_token\":{}}},",
         coverage.unclaimed_exact,
         coverage.judged(),
         c.orphan_withdrawals(),
+        c.orphan_answers(),
         by[0],
         by[1],
         by[2],
@@ -766,14 +837,33 @@ mod fed_tests {
                 .expect("re-borrow")
                 .encode_to_vec(),
         );
+        // R311y870 — the QUESTION, and it is deliberately one NOBODY ANSWERS:
+        // A asks for B's SUBSCRIBERS and B declares a queryable. That is the
+        // finding a census of declarations cannot construct, and putting it in
+        // the shared fixture is what makes the request half of this plane
+        // visible to the document test rather than only to a unit test.
+        let interest = framed_frame(
+            1,
+            &wz_session_core::interest_build::build_interest_subscribers(
+                9,
+                true,
+                false,
+                0,
+                Some("demo/**"),
+            )
+            .expect("the production interest builder")
+            .try_as_borrowed()
+            .expect("re-borrow")
+            .encode_to_vec(),
+        );
         // The data plane: a Put under a literal keyexpr (id 0 + suffix, which
         // needs no Declare to resolve).
-        let put = framed_frame(1, &push(sender_space(0, Some(keyexpr)), b"hello"));
+        let put = framed_frame(2, &push(sender_space(0, Some(keyexpr)), b"hello"));
         // The query plane: a Request, its Reply, and the ResponseFinal that
         // CLOSES it. Without the final the exchange is unclosed and
         // `completion` has no sample -- a row that exists and measures nothing.
         let query = framed_frame(
-            2,
+            3,
             &crate::exchange::tests::request_query(7, sender_space(0, Some("demo/q"))),
         );
         let mut answer =
@@ -789,6 +879,7 @@ mod fed_tests {
         // capture begun mid-session, which is a different fixture.
         let mut low_to_high = framed_init(&ZID_A);
         low_to_high.extend_from_slice(&declare_sub);
+        low_to_high.extend_from_slice(&interest);
         low_to_high.extend_from_slice(&put);
         low_to_high.extend_from_slice(&query);
         let mut high_to_low = framed_init(&ZID_B);
@@ -953,6 +1044,28 @@ mod fed_tests {
              must say so rather than leave it inferred: {interests}"
         );
 
+        // R311y870 — THE QUESTION, and the finding that only the pair can
+        // state. A asked B for its SUBSCRIBERS; B declared a queryable and
+        // nothing else, so the ask went unanswered — which no count of the
+        // declarations above can express.
+        assert!(
+            interests.contains("\"asker\":\"a\",\"id\":9,\"mode\":\"current\",\"answers\":0"),
+            "the request is missing from the document: {interests}"
+        );
+        assert!(
+            interests.contains("\"unanswered\":[0]"),
+            "and the finding with it: {interests}"
+        );
+        assert!(
+            interests.contains("\"unclosed\":[]"),
+            "nothing was answered, so nothing is a truncated answer: {interests}"
+        );
+        assert!(
+            interests.contains("\"solicited_by\":null"),
+            "the declarations here were spontaneous, and the field says so \
+             rather than being absent: {interests}"
+        );
+
         // THE JOIN over a WILDCARD, which is the assertion a listing could not
         // satisfy: `demo/**` covers BOTH rows the keyexpr plane reports, which
         // no prefix comparison against `demo/temp` would produce.
@@ -969,7 +1082,8 @@ mod fed_tests {
                 "the subscriber's wildcard must cover the traffic: {interests}"
             );
             assert!(
-                interests.contains("\"unclaimed\":[],\"unclaimed_exact\":true,\"judged\":2"),
+                interests.contains("\"unclaimed\":[]")
+                    && interests.contains("\"unclaimed_exact\":true,\"judged\":2"),
                 "both declarations were judged and nothing went unasked-for: \
                  {interests}"
             );
@@ -986,7 +1100,8 @@ mod fed_tests {
                 "and never as a declaration that matched nothing: {interests}"
             );
             assert!(
-                interests.contains("\"unclaimed\":[\"demo/temp\"],\"unclaimed_exact\":false"),
+                interests.contains("\"unclaimed\":[\"demo/temp\"]")
+                    && interests.contains("\"unclaimed_exact\":false"),
                 "so the unclaimed list is a floor and says so: {interests}"
             );
         }

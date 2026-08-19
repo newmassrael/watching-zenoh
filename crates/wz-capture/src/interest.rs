@@ -67,6 +67,40 @@
 //! not: "a subscriber was there for the first half of this capture" is the
 //! finding, and a plane that reported only the surviving declarations would
 //! describe the capture's last instant as though it were the whole of it.
+//!
+//! # The QUESTION, not only the answers
+//!
+//! zenoh's declaration exchange is interest-driven, and reading only the
+//! declarations reads only one side of it. `zenoh-protocol`'s own message-flow
+//! diagram (`network/interest.rs:34-100`) is the contract:
+//!
+//! ```text
+//!     A                   B
+//!     |     INTEREST      |
+//!     |------------------>|  Mode: Current -- "send me your subscribers"
+//!     |  DECL SUBSCRIBER  |
+//!     |<------------------|  with interest_id set   -- SOLICITED
+//!     |     DECL FINAL    |
+//!     |<------------------|  with interest_id set   -- and that CLOSES it
+//! ```
+//!
+//! Three facts fall out that no census of declarations alone can state. A
+//! declaration is SOLICITED or spontaneous, and the `Declare` envelope's
+//! `interest_id` is which. An answer is COMPLETE or truncated, and the
+//! `DeclFinal` carrying that same id is what says so. And an `Interest` that
+//! got nothing back at all is a finding about the PEER — discovery asked for
+//! and never served — which is invisible in a plane that only counts answers.
+//!
+//! R311y841's rule governs the second of those and is the reason it is modelled
+//! as a pair rather than as a flag: completeness is not a property of one side,
+//! it is a property of the MATCH. So a request carries what became of it and a
+//! declaration carries what asked for it, and neither is derived from the other.
+//!
+//! The correlation crosses the flow: an `Interest` travels A -> B and its
+//! answers travel B -> A, so a `Declare` seen in `direction` with an
+//! `interest_id` answers the request `direction.peer()` asked. Getting that
+//! backwards would attribute every answer to the wrong side and still produce a
+//! plausible-looking table.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -107,6 +141,140 @@ impl InterestKind {
     }
 }
 
+/// The mode an `Interest` was asked in.
+///
+/// The two header bits `C` and `F` in the order upstream writes them
+/// (`zenoh-protocol/src/network/interest.rs:157-176`, `|Z|Mod|INTEREST|`).
+/// Named rather than reported as two bools because the four combinations are
+/// four different conversations, and `Final` in particular is not "neither" —
+/// it is the asker CANCELLING an earlier id and it carries no body at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterestMode {
+    /// `0b00` — cancels the asker's earlier interest of the same id.
+    Final,
+    /// `0b01` — send what you have now, then a `DeclFinal`.
+    Current,
+    /// `0b10` — send changes from now on, unsolicited.
+    Future,
+    /// `0b11` — both: the current dump, its `DeclFinal`, then the changes.
+    CurrentFuture,
+}
+
+impl InterestMode {
+    fn of(header: u8) -> Self {
+        // 0x20 is C and 0x40 is F, which is how this crate's codec exposes the
+        // two Mod bits (`out/wz-codecs/interest.rs`) and how upstream lays them
+        // out. Read from the header rather than from the accessors so the
+        // mapping is stated once, here, beside the enum it produces.
+        match (header & 0x20 != 0, header & 0x40 != 0) {
+            (false, false) => Self::Final,
+            (true, false) => Self::Current,
+            (false, true) => Self::Future,
+            (true, true) => Self::CurrentFuture,
+        }
+    }
+
+    /// The word both renderings print.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Final => "final",
+            Self::Current => "current",
+            Self::Future => "future",
+            Self::CurrentFuture => "current_future",
+        }
+    }
+
+    /// Whether this mode asks for a CURRENT dump, which is the half a
+    /// `DeclFinal` terminates.
+    ///
+    /// The predicate `unclosed` is judged against: a `Future`-only interest is
+    /// never answered by a `DeclFinal`, so counting it as unterminated would
+    /// report every correct session as truncated.
+    pub const fn expects_a_final(self) -> bool {
+        matches!(self, Self::Current | Self::CurrentFuture)
+    }
+}
+
+/// What an `Interest` asks about — the body's flag byte, named.
+///
+/// `A|M|N|R|T|Q|S|K` at `zenoh-protocol/src/network/interest.rs:249-257`. The
+/// three the reader acts on are kept and the three that describe the KEYEXPR's
+/// own encoding (`N`, `M`) or its presence (`R`) are folded into `restricted`
+/// plus the resolved keyexpr beside it, because a reader asking "what did this
+/// node want" is not asking how the keyexpr was framed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InterestScope {
+    /// `K` — keyexpr declarations (the alias bindings).
+    pub keyexprs: bool,
+    /// `S` — subscriber declarations.
+    pub subscribers: bool,
+    /// `Q` — queryable declarations.
+    pub queryables: bool,
+    /// `T` — liveliness token declarations.
+    pub tokens: bool,
+    /// `R` — restricted to the keyexpr beside it. When clear, the interest is
+    /// for ALL key expressions and the keyexpr field is absent — which is a
+    /// different statement from "the keyexpr did not resolve".
+    pub restricted: bool,
+    /// `A` — the replies SHOULD be aggregated.
+    pub aggregate: bool,
+}
+
+impl InterestScope {
+    fn of(header: u8) -> Self {
+        Self {
+            keyexprs: header & 0b0000_0001 != 0,
+            subscribers: header & 0b0000_0010 != 0,
+            queryables: header & 0b0000_0100 != 0,
+            tokens: header & 0b0000_1000 != 0,
+            restricted: header & 0b0001_0000 != 0,
+            aggregate: header & 0b1000_0000 != 0,
+        }
+    }
+
+    /// `true` when the interest names a declaration kind this plane tracks.
+    ///
+    /// Not "any bit set": `K` alone asks for keyexpr ALIAS bindings, which are
+    /// `crate::agg`'s business and produce no `DeclaredInterest`. An interest
+    /// for keyexprs only that receives no subscriber is correct, and a finding
+    /// that said otherwise would fire on every session zenoh opens.
+    pub const fn asks_for_a_declaration(self) -> bool {
+        self.subscribers || self.queryables || self.tokens
+    }
+}
+
+/// One `Interest` this capture saw, and what came back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterestRequest {
+    /// The side that ASKED. Its answers travel the other way.
+    pub asker: Direction,
+    /// The interest id, in the asker's own space.
+    pub id: u64,
+    /// The mode it was asked in.
+    pub mode: InterestMode,
+    /// What it asked about. `None` for [`InterestMode::Final`], which carries
+    /// no body — absent rather than an all-false scope, because "cancel" asks
+    /// for nothing rather than asking for none of the four.
+    pub scope: Option<InterestScope>,
+    /// The keyexpr it was restricted to, resolved. `None` both when the
+    /// interest was unrestricted and when its alias did not resolve; the two
+    /// are told apart by [`InterestScope::restricted`] and
+    /// [`Self::unresolved`].
+    pub keyexpr: Option<String>,
+    /// The `(space, id)` an unresolved restriction named.
+    pub unresolved: Option<(Direction, u64)>,
+    /// The flow it was asked on.
+    pub flow: FlowKey,
+    /// Capture anchor of the `Interest`.
+    pub asked_at: usize,
+    /// Declarations seen carrying this id.
+    pub answers: usize,
+    /// Anchor of the `DeclFinal` that terminated the current dump.
+    pub closed_at: Option<usize>,
+    /// Anchor of the asker's own `Interest(Final)` for this id.
+    pub cancelled_at: Option<usize>,
+}
+
 /// One declaration this capture saw, and what became of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredInterest {
@@ -137,6 +305,14 @@ pub struct DeclaredInterest {
     pub declared_at: usize,
     /// Anchor of the matching `Undeclare`, when one went past.
     pub withdrawn_at: Option<usize>,
+    /// The `Interest` id this declaration answers, when the envelope carried
+    /// one.
+    ///
+    /// `None` is a real answer and not a missing field: a `Future`-mode
+    /// interest's later declarations are UNSOLICITED by contract, and so is
+    /// every declaration on a session where nobody asked. Which of the two it
+    /// is, is a question about the requests beside it.
+    pub solicited_by: Option<u64>,
 }
 
 impl DeclaredInterest {
@@ -206,7 +382,9 @@ impl Coverage {
 #[derive(Debug, Clone, Default)]
 pub struct InterestCensus {
     interests: Vec<DeclaredInterest>,
+    requests: Vec<InterestRequest>,
     orphan_withdrawals: usize,
+    orphan_answers: usize,
 }
 
 impl InterestCensus {
@@ -220,6 +398,11 @@ impl InterestCensus {
         &self.interests
     }
 
+    /// Every `Interest`, in the order the capture carried them.
+    pub fn requests(&self) -> &[InterestRequest] {
+        &self.requests
+    }
+
     /// `Undeclare`s naming an id this capture never saw declared.
     ///
     /// Not an error and not zero-by-construction: a capture that begins
@@ -228,6 +411,57 @@ impl InterestCensus {
     /// list is a floor rather than assuming it whole.
     pub fn orphan_withdrawals(&self) -> usize {
         self.orphan_withdrawals
+    }
+
+    /// Declarations naming an `Interest` id this capture never saw asked.
+    ///
+    /// The same shape as [`Self::orphan_withdrawals`] and the same reading: a
+    /// tap started after the question makes the request list a floor. It is
+    /// counted rather than repaired, because inventing the request would make
+    /// [`Self::unanswered`] answer about a question nobody saw.
+    pub fn orphan_answers(&self) -> usize {
+        self.orphan_answers
+    }
+
+    /// Requests that asked for a declaration kind and got NOTHING back.
+    ///
+    /// THE FINDING: a node asked its peer for the subscribers (or queryables,
+    /// or tokens) it holds and the capture carries no answer at all. On a
+    /// working session that is a peer holding none; on a broken one it is
+    /// discovery that never happened, and either way it is the sentence a
+    /// reader of a declaration list cannot construct.
+    ///
+    /// [`InterestMode::Final`] is excluded because it is a cancellation and
+    /// asks for nothing, and so is an interest scoped to keyexpr aliases alone
+    /// — see [`InterestScope::asks_for_a_declaration`].
+    pub fn unanswered(&self) -> Vec<usize> {
+        self.requests
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                r.mode != InterestMode::Final
+                    && r.scope.is_some_and(InterestScope::asks_for_a_declaration)
+                    && r.answers == 0
+                    && r.closed_at.is_none()
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Requests whose CURRENT dump was never terminated by a `DeclFinal`.
+    ///
+    /// The answer this capture holds for such a request is a FLOOR: more
+    /// declarations were still to come when the capture ended, or the peer
+    /// never finished. Judged only for the modes that expect a `DeclFinal` at
+    /// all — a `Future`-only interest is terminated by nothing, and calling it
+    /// unclosed would report every correct session as truncated.
+    pub fn unclosed(&self) -> Vec<usize> {
+        self.requests
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.mode.expects_a_final() && r.closed_at.is_none() && r.answers > 0)
+            .map(|(i, _)| i)
+            .collect()
     }
 
     /// How many of each kind were declared, `[subscriber, queryable, token]`.
@@ -257,6 +491,11 @@ impl InterestCensus {
         // key without it would let a queryable's withdrawal close a
         // subscriber's declaration that happened to share a number.
         let mut open: BTreeMap<(usize, InterestKind, u64), usize> = BTreeMap::new();
+        // The live request per `(asker, id)`. Keyed on the ASKER and not on the
+        // direction the message travelled: an `Interest` goes one way and its
+        // answers come back the other, so a map keyed by the travelling
+        // direction would credit every answer to the wrong side.
+        let mut asked: BTreeMap<(usize, u64), usize> = BTreeMap::new();
         for frame in frames {
             let anchor = frame.stream_offset;
             let batch = match &frame.carried {
@@ -275,28 +514,119 @@ impl InterestCensus {
                 Carried::Fragment(_) => continue,
             };
             for (message, _span) in batch.records() {
-                let NetworkMessage::Declare(d) = message else {
-                    continue;
-                };
-                self.observe_declare(&mut spaces, &mut open, flow, frame.direction, anchor, d);
+                match message {
+                    NetworkMessage::Declare(d) => self.observe_declare(
+                        &mut spaces,
+                        &mut open,
+                        &mut asked,
+                        flow,
+                        frame.direction,
+                        anchor,
+                        d,
+                    ),
+                    NetworkMessage::Interest(i) => {
+                        self.observe_interest(&spaces, &mut asked, flow, frame.direction, anchor, i)
+                    }
+                    _ => {}
+                }
             }
         }
     }
 
+    /// Fold one `Interest`: a new request, or the asker cancelling its own.
+    fn observe_interest(
+        &mut self,
+        spaces: &KeyexprSpaces,
+        asked: &mut BTreeMap<(usize, u64), usize>,
+        flow: &FlowKey,
+        direction: Direction,
+        anchor: usize,
+        interest: &wz_codecs::interest::InterestOwned,
+    ) {
+        let mode = InterestMode::of(interest.header);
+        let dir = dir_index(direction);
+        if mode == InterestMode::Final {
+            // The asker stopping its OWN earlier interest. It carries no body,
+            // so there is nothing to record beyond the closure — and recording
+            // it as a fresh request would put a scope-less row in the list that
+            // `unanswered` would then have to special-case.
+            match asked.remove(&(dir, interest.interest_id)) {
+                Some(at) => self.requests[at].cancelled_at = Some(anchor),
+                // A cancellation for a question this capture never saw. Same
+                // reading as an orphan answer: the tap started late.
+                None => self.orphan_answers += 1,
+            }
+            return;
+        }
+        let scope = interest.body.as_ref().map(|b| InterestScope::of(b.header));
+        // The restriction keyexpr travels in the ASKER's own message, so it
+        // resolves exactly as a declaration's does — through the same tables,
+        // with the mapping bit choosing the space.
+        let resolved = interest
+            .body
+            .as_ref()
+            .and_then(|b| b.keyexpr.as_ref())
+            .map(|ke| spaces.resolve(direction, &ke.body));
+        let (keyexpr, unresolved) = match resolved {
+            Some(Ok(k)) => (Some(k), None),
+            Some(Err(alias)) => (None, Some(alias)),
+            None => (None, None),
+        };
+        self.requests.push(InterestRequest {
+            asker: direction,
+            id: interest.interest_id,
+            mode,
+            scope,
+            keyexpr,
+            unresolved,
+            flow: *flow,
+            asked_at: anchor,
+            answers: 0,
+            closed_at: None,
+            cancelled_at: None,
+        });
+        asked.insert((dir, interest.interest_id), self.requests.len() - 1);
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn observe_declare(
         &mut self,
         spaces: &mut KeyexprSpaces,
         open: &mut BTreeMap<(usize, InterestKind, u64), usize>,
+        asked: &mut BTreeMap<(usize, u64), usize>,
         flow: &FlowKey,
         direction: Direction,
         anchor: usize,
         declare: &wz_codecs::declare::DeclareOwned,
     ) {
         use wz_codecs::declare::DeclareOwnedVariant as V;
-        let dir = match direction {
-            Direction::A => 0usize,
-            Direction::B => 1usize,
-        };
+        let dir = dir_index(direction);
+        // THE CORRELATION CROSSES THE FLOW. This declaration travels in
+        // `direction`; the interest it answers was asked by the OTHER side.
+        // Backwards, every answer would be credited to the peer that produced
+        // it and the table would still look plausible.
+        let solicited_by = declare.interest_id;
+        let answering = solicited_by.and_then(|id| {
+            let key = (dir_index(direction.peer()), id);
+            match asked.get(&key) {
+                Some(at) => Some(*at),
+                None => {
+                    self.orphan_answers += 1;
+                    None
+                }
+            }
+        });
+        if let Some(at) = answering {
+            // A `DeclFinal` TERMINATES the dump rather than being one of it,
+            // so it closes the request without counting as an answer. Counting
+            // it would make `answers` disagree with the number of declarations
+            // in the list, which is the one thing that number must not do.
+            if matches!(declare.body, V::CodecZenohDeclFinal(_)) {
+                self.requests[at].closed_at = Some(anchor);
+            } else {
+                self.requests[at].answers += 1;
+            }
+        }
         // RESOLVED BEFORE ABSORBED. A `DeclKexpr` arriving in the same batch
         // binds an id every LATER reference resolves through, and reading the
         // tables after absorbing this message would let a declaration resolve
@@ -311,6 +641,7 @@ impl InterestCensus {
                     resolved,
                     flow,
                     anchor,
+                    solicited_by,
                 );
                 open.insert(
                     (dir, InterestKind::Subscriber, d.id),
@@ -326,6 +657,7 @@ impl InterestCensus {
                     resolved,
                     flow,
                     anchor,
+                    solicited_by,
                 );
                 open.insert(
                     (dir, InterestKind::Queryable, d.id),
@@ -341,6 +673,7 @@ impl InterestCensus {
                     resolved,
                     flow,
                     anchor,
+                    solicited_by,
                 );
                 open.insert(
                     (dir, InterestKind::LivelinessToken, d.id),
@@ -368,6 +701,7 @@ impl InterestCensus {
         spaces.absorb(direction, declare);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push(
         &mut self,
         kind: InterestKind,
@@ -376,6 +710,7 @@ impl InterestCensus {
         resolved: Result<String, (Direction, u64)>,
         flow: &FlowKey,
         anchor: usize,
+        solicited_by: Option<u64>,
     ) {
         let (keyexpr, unresolved) = match resolved {
             Ok(k) => (Some(k), None),
@@ -390,6 +725,7 @@ impl InterestCensus {
             flow: *flow,
             declared_at: anchor,
             withdrawn_at: None,
+            solicited_by,
         });
     }
 
@@ -473,6 +809,17 @@ impl InterestCensus {
             }
         }
         out
+    }
+}
+
+/// The index [`Direction`] stands at in this module's two-slot registries.
+///
+/// One spelling, so a registry keyed by the asker and one keyed by the
+/// declarer cannot disagree about which slot is which.
+fn dir_index(d: Direction) -> usize {
+    match d {
+        Direction::A => 0,
+        Direction::B => 1,
     }
 }
 
@@ -821,6 +1168,268 @@ mod tests {
             !cov.unclaimed_exact,
             "a declaration this reader could not name might have covered it"
         );
+    }
+
+    fn interest_subs(id: u64, current: bool, future: bool, keyexpr: &str) -> Vec<u8> {
+        wz_session_core::interest_build::build_interest_subscribers(
+            id,
+            current,
+            future,
+            0,
+            Some(keyexpr),
+        )
+        .expect("the production interest builder")
+        .try_as_borrowed()
+        .expect("re-borrow")
+        .encode_to_vec()
+    }
+
+    fn interest_final(id: u64) -> Vec<u8> {
+        wz_session_core::interest_build::build_interest_final(id)
+            .try_as_borrowed()
+            .expect("re-borrow")
+            .encode_to_vec()
+    }
+
+    fn sub_reply(interest_id: u64, keyexpr: &str) -> Vec<u8> {
+        declare_build::build_declare_subscriber_reply(interest_id, keyexpr)
+            .expect("the production reply builder")
+            .try_as_borrowed()
+            .expect("re-borrow")
+            .encode_to_vec()
+    }
+
+    fn final_reply(interest_id: u64) -> Vec<u8> {
+        declare_build::build_declare_final_reply(interest_id)
+            .try_as_borrowed()
+            .expect("re-borrow")
+            .encode_to_vec()
+    }
+
+    /// R311y870 — THE PAIR, and the assertion that the correlation crosses the
+    /// flow rather than following it.
+    ///
+    /// A asks; B answers; B closes. Every message is built by the production
+    /// builder that emits it, so this asserts the plane reads what wz sends.
+    ///
+    /// THE DISCRIMINATOR is `answers == 2`: a registry keyed on the direction
+    /// the message TRAVELLED — the obvious way to write it — would look up B's
+    /// answers under B's own id space, find nothing, and report `answers: 0`
+    /// with two orphans, which is a plausible-looking table about the wrong
+    /// side.
+    #[test]
+    fn an_interest_and_its_answers_are_paired_across_the_flow() {
+        let d = wire(&[
+            (true, interest_subs(9, true, false, "demo/**")),
+            (false, sub_reply(9, "demo/a")),
+            (false, sub_reply(9, "demo/b")),
+            (false, final_reply(9)),
+        ]);
+        let census = interests(&d);
+
+        assert_eq!(census.requests().len(), 1, "the QUESTION is seen");
+        let r = &census.requests()[0];
+        assert_eq!(r.asker, Direction::A, "LOW -> HIGH asked");
+        assert_eq!(r.id, 9);
+        assert_eq!(r.mode, InterestMode::Current);
+        let scope = r.scope.expect("a non-Final interest carries a body");
+        assert!(scope.subscribers, "it asked for subscribers");
+        assert!(!scope.queryables && !scope.tokens);
+        assert!(scope.restricted, "and restricted the ask to a keyexpr");
+        assert_eq!(r.keyexpr.as_deref(), Some("demo/**"));
+        assert_eq!(r.answers, 2, "BOTH answers are credited to the ASKER");
+        assert!(r.closed_at.is_some(), "and the DeclFinal terminated it");
+        assert_eq!(census.orphan_answers(), 0);
+
+        // The declarations know what asked for them, which is the half a
+        // census of declarations alone cannot state.
+        assert_eq!(census.interests().len(), 2);
+        for i in census.interests() {
+            assert_eq!(i.solicited_by, Some(9), "every one of these was SOLICITED");
+        }
+        assert!(census.unanswered().is_empty());
+        assert!(census.unclosed().is_empty());
+    }
+
+    /// R311y870 — an `Interest` nobody answered is THE finding about the peer,
+    /// and it is not reachable from any count of declarations.
+    #[test]
+    fn an_interest_nobody_answered_is_its_own_finding() {
+        let d = wire(&[(true, interest_subs(3, true, false, "demo/**"))]);
+        let census = interests(&d);
+        assert_eq!(census.requests().len(), 1);
+        assert_eq!(census.requests()[0].answers, 0);
+        assert_eq!(census.unanswered(), alloc::vec![0usize]);
+        assert!(
+            census.unclosed().is_empty(),
+            "nothing was answered, so nothing is a truncated answer"
+        );
+    }
+
+    /// R311y870 — a CURRENT dump with answers and no `DeclFinal` is a FLOOR,
+    /// and it is a different finding from having no answer at all.
+    ///
+    /// Both populations are asserted, so a plane that folded the two would
+    /// fail here rather than reporting one of them twice.
+    #[test]
+    fn a_current_dump_that_never_closed_is_a_floor_and_not_a_silence() {
+        let d = wire(&[
+            (true, interest_subs(4, true, false, "demo/**")),
+            (false, sub_reply(4, "demo/a")),
+        ]);
+        let census = interests(&d);
+        assert_eq!(census.requests()[0].answers, 1);
+        assert!(census.requests()[0].closed_at.is_none());
+        assert_eq!(census.unclosed(), alloc::vec![0usize]);
+        assert!(
+            census.unanswered().is_empty(),
+            "it WAS answered; what is missing is the terminator"
+        );
+    }
+
+    /// R311y870 — a FUTURE-only interest is terminated by nothing, so it is
+    /// never `unclosed`.
+    ///
+    /// The discriminator for `expects_a_final`. Without it every correct
+    /// future-mode session in every capture would be reported as truncated,
+    /// which is the confident-wrong shape this plane exists to avoid.
+    #[test]
+    fn a_future_only_interest_is_not_reported_as_truncated() {
+        let d = wire(&[
+            (true, interest_subs(5, false, true, "demo/**")),
+            // A future interest's declarations are UNSOLICITED by contract:
+            // no interest_id on the envelope.
+            (false, declare_sub(1, "demo/a")),
+        ]);
+        let census = interests(&d);
+        assert_eq!(census.requests()[0].mode, InterestMode::Future);
+        assert!(
+            census.unclosed().is_empty(),
+            "nothing terminates a future-mode interest"
+        );
+        assert_eq!(
+            census.interests()[0].solicited_by,
+            None,
+            "and its declarations are unsolicited, which is not a missing field"
+        );
+        // It DID get something, so it is not unanswered either -- except that
+        // the something carried no id, which is exactly why `unanswered` is
+        // judged on `answers` and this arm pins the consequence.
+        assert_eq!(census.unanswered(), alloc::vec![0usize]);
+    }
+
+    /// R311y870 — `Interest(Final)` cancels the ASKER's own earlier id, and is
+    /// not a new request.
+    #[test]
+    fn an_interest_final_cancels_the_askers_own_request() {
+        let d = wire(&[
+            (true, interest_subs(6, true, true, "demo/**")),
+            (false, sub_reply(6, "demo/a")),
+            (false, final_reply(6)),
+            (true, interest_final(6)),
+        ]);
+        let census = interests(&d);
+        assert_eq!(
+            census.requests().len(),
+            1,
+            "the Final is a closure, not a second question"
+        );
+        let r = &census.requests()[0];
+        assert_eq!(r.mode, InterestMode::CurrentFuture);
+        assert!(r.closed_at.is_some(), "the dump was terminated");
+        assert!(r.cancelled_at.is_some(), "and the asker then stopped it");
+        assert!(
+            r.cancelled_at > r.closed_at,
+            "in that order: {:?} then {:?}",
+            r.closed_at,
+            r.cancelled_at
+        );
+        assert_eq!(census.orphan_answers(), 0);
+    }
+
+    /// R311y870 — an answer naming a question this capture never saw is
+    /// COUNTED, which is what a capture begun mid-session looks like.
+    #[test]
+    fn an_answer_to_a_question_this_capture_never_saw_is_counted() {
+        let d = wire(&[(false, sub_reply(77, "demo/a"))]);
+        let census = interests(&d);
+        assert!(census.requests().is_empty());
+        assert_eq!(census.orphan_answers(), 1);
+        assert_eq!(
+            census.interests()[0].solicited_by,
+            Some(77),
+            "the declaration still records what it claims to answer"
+        );
+    }
+
+    /// R311y870 — an interest for keyexpr ALIASES alone is not "unanswered".
+    ///
+    /// The discriminator for `asks_for_a_declaration`. A `DeclKexpr` binds an
+    /// alias and produces no `DeclaredInterest`, so an interest scoped to `K`
+    /// can be perfectly served while this plane's `answers` stays 0 — and a
+    /// finding that fired on it would fire on ordinary sessions.
+    ///
+    /// Hand-built, and that is the point rather than a shortcut: every wz
+    /// builder in `interest_build` composes `KE | <kinds> | R | N | M`, so wz
+    /// cannot emit this shape. An observer meets it from a PEER, and upstream
+    /// can emit it (`InterestOptions::KEYEXPRS` is its own constant,
+    /// `zenoh-protocol/src/network/interest.rs:249`).
+    #[test]
+    fn an_interest_for_keyexpr_aliases_alone_is_not_unanswered() {
+        let interest = wz_codecs::interest::Interest {
+            header: wz_session_core::wire_const::N_MID_INTEREST | 0x20,
+            interest_id: 8,
+            body: Some(wz_codecs::interest_body::InterestBody {
+                header: 0b0000_0001,
+                keyexpr: None,
+            }),
+            extensions: None,
+        }
+        .encode_to_vec();
+        let d = wire(&[(true, interest)]);
+        let census = interests(&d);
+        let scope = census.requests()[0].scope.expect("a body");
+        assert!(scope.keyexprs);
+        assert!(!scope.asks_for_a_declaration());
+        assert!(
+            !scope.restricted,
+            "R is clear, so the keyexpr's absence is the ask being unrestricted \
+             rather than an alias that failed to resolve"
+        );
+        assert!(census.requests()[0].unresolved.is_none());
+        assert!(
+            census.unanswered().is_empty(),
+            "an alias interest is served by DeclKexpr, which declares no interest"
+        );
+    }
+
+    /// R311y870 — the four modes are read off the header the way upstream
+    /// writes them, driven through the builders that emit each.
+    #[test]
+    fn the_four_interest_modes_are_read_the_way_upstream_writes_them() {
+        for (current, future, expected) in [
+            (true, false, InterestMode::Current),
+            (false, true, InterestMode::Future),
+            (true, true, InterestMode::CurrentFuture),
+        ] {
+            let d = wire(&[(true, interest_subs(1, current, future, "demo/**"))]);
+            let census = interests(&d);
+            assert_eq!(
+                census.requests()[0].mode,
+                expected,
+                "C={current} F={future}"
+            );
+        }
+        // The Final is built by its OWN builder, because passing both bits
+        // clear to the others would emit a body the wire says is not there --
+        // the trap `build_interest_subscribers` documents.
+        let d = wire(&[(true, interest_final(1))]);
+        let census = interests(&d);
+        assert!(
+            census.requests().is_empty(),
+            "a Final for an unseen id is a closure with nothing to close"
+        );
+        assert_eq!(census.orphan_answers(), 1);
     }
 
     /// R311y869 — the plane reaches BOTH sides. A queryable declared by the

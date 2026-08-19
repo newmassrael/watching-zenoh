@@ -1432,10 +1432,29 @@ mod tests {
             .encode_to_vec(),
         );
 
+        // R311y870 — the QUESTION, and one NOBODY ANSWERS: A asks B for its
+        // subscribers and B declares nothing at all. That is the finding this
+        // door could not carry before, and it needs to cross as such.
+        let interest = framed_frame(
+            3,
+            &wz_session_core::interest_build::build_interest_subscribers(
+                9,
+                true,
+                false,
+                0,
+                Some("demo/**"),
+            )
+            .expect("the production interest builder")
+            .try_as_borrowed()
+            .expect("re-borrow")
+            .encode_to_vec(),
+        );
+
         let mut low_to_high = framed_init(&ZID_A);
         low_to_high.extend_from_slice(&declare);
         low_to_high.extend_from_slice(&put);
         low_to_high.extend_from_slice(&query);
+        low_to_high.extend_from_slice(&interest);
         let mut high_to_low = framed_init(&ZID_B);
         high_to_low.extend_from_slice(&framed_frame(0, &answer_records));
 
@@ -1490,8 +1509,19 @@ mod tests {
             "the declaration the capture carried must cross: {census}"
         );
         assert!(
-            census.contains("\"unclaimed\":[],\"unclaimed_exact\":true"),
+            census.contains("\"unclaimed\":[]") && census.contains("\"unclaimed_exact\":true"),
             "and so must the coverage joining it to the keys above: {census}"
+        );
+        // R311y870 — and the QUESTION half of that plane, which is a different
+        // fold rather than one more field: the request, and the finding that
+        // nothing answered it.
+        assert!(
+            census.contains("\"asker\":\"a\",\"id\":9,\"mode\":\"current\",\"answers\":0"),
+            "the interest must cross: {census}"
+        );
+        assert!(
+            census.contains("\"unanswered\":[0]"),
+            "and so must the finding: {census}"
         );
 
         // THE CONTROL: the same bytes through the door that already existed.

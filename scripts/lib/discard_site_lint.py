@@ -159,6 +159,16 @@ ALLOWED = [
         "list is a floor",
     ),
     (
+        "wz-capture/interest.rs",
+        "match asked.remove(&(dir, interest.interest_id)) {",
+        "R311y870 — an `Interest(Final)` closing the asker's own request. The "
+        "REQUEST is not discarded: it stays in `self.requests` and the removal "
+        "only stamps `cancelled_at` on it, so a later answer cannot be credited "
+        "to a question the asker has stopped. The arm that finds NOTHING "
+        "accounts, as its twin does -- an `orphan_answer`, which is how a "
+        "reader learns the request list is a floor",
+    ),
+    (
         "wz-capture/exchange.rs",
         "let Some(entry) = open.remove(&key) else {",
         "an exchange leaving the OPEN set because it completed; the entry is "

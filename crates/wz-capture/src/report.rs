@@ -119,6 +119,49 @@ pub struct CaptureReport<'a> {
     quic: Option<&'a crate::quic::QuicDecryption>,
 }
 
+/// R311y870 — what an `Interest` asked for, as the words a reader acts on.
+///
+/// The kinds and the keyexpr in one phrase because they are one statement:
+/// "subscribers under demo/**" is the ask, and a rendering that printed the
+/// flag letters and the keyexpr in separate columns would make the reader
+/// reassemble it. An UNRESTRICTED interest says so rather than printing an
+/// empty keyexpr, which would read as one.
+#[cfg(feature = "network-codecs")]
+fn interest_scope_words(r: &crate::interest::InterestRequest) -> String {
+    let Some(scope) = r.scope else {
+        // A Final carries no body. Saying "nothing" would be a claim about
+        // what it asked for; it asked for nothing because it is a cancellation.
+        return "a cancellation".to_string();
+    };
+    let mut kinds: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    if scope.keyexprs {
+        kinds.push("keyexprs");
+    }
+    if scope.subscribers {
+        kinds.push("subscribers");
+    }
+    if scope.queryables {
+        kinds.push("queryables");
+    }
+    if scope.tokens {
+        kinds.push("tokens");
+    }
+    if kinds.is_empty() {
+        kinds.push("nothing this reader names");
+    }
+    let what = kinds.join("+");
+    let where_ = match (&r.keyexpr, scope.restricted, r.unresolved) {
+        (Some(k), _, _) => format!(" under {k}"),
+        // R==1 with no resolved keyexpr is an alias this capture never saw
+        // bound, which is a different statement from an unrestricted ask.
+        (None, true, Some((_, id))) => format!(" under an unresolved alias {id}"),
+        (None, true, None) => " under a keyexpr this reader could not read".to_string(),
+        (None, false, _) => " (all key expressions)".to_string(),
+    };
+    let aggregate = if scope.aggregate { ", aggregated" } else { "" };
+    format!("{what}{where_}{aggregate}")
+}
+
 /// R311y714 — a zid as the hex a reader can match against a config file.
 ///
 /// zenoh prints zids as lowercase hex with no separators and so does this.
@@ -1070,7 +1113,7 @@ impl<'a> CaptureReport<'a> {
                 }
                 s.push_str(&alloc::format!(
                     "{{\"kind\":\"{}\",\"declarer\":\"{}\",\"id\":{},\"keyexpr\":{},\
-                     \"open\":{},\"covers\":{}}}",
+                     \"open\":{},\"covers\":{},\"solicited_by\":{}}}",
                     interest.kind.name(),
                     match interest.declarer {
                         wz_session_core::passive::Direction::A => "a",
@@ -1090,6 +1133,13 @@ impl<'a> CaptureReport<'a> {
                         .find(|m| m.interest == i)
                         .map(|m| m.keys.len())
                         .unwrap_or(0),
+                    // NULL and not 0: id 0 is a legal interest id, and an
+                    // UNSOLICITED declaration is a contract state rather than
+                    // an absent field.
+                    match interest.solicited_by {
+                        Some(id) => alloc::format!("{id}"),
+                        None => "null".into(),
+                    },
                 ));
             }
             s.push_str(&alloc::format!(
@@ -1103,6 +1153,49 @@ impl<'a> CaptureReport<'a> {
                 coverage.unclaimed.len(),
                 coverage.unclaimed_exact,
                 census.orphan_withdrawals(),
+            ));
+            // R311y870 — the QUESTION half. STRUCTURAL: present with an empty
+            // array whenever the plane was built, so a consumer's field lookup
+            // does not depend on whether this capture happened to carry an
+            // Interest.
+            s.push_str(",\"interest_requests\":[");
+            for (i, r) in census.requests().iter().enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push_str(&alloc::format!(
+                    "{{\"asker\":\"{}\",\"id\":{},\"mode\":\"{}\",\"answers\":{},\
+                     \"closed\":{},\"cancelled\":{},\"keyexpr\":{},\
+                     \"asks\":{{\"keyexprs\":{},\"subscribers\":{},\
+                     \"queryables\":{},\"tokens\":{},\"restricted\":{},\
+                     \"aggregate\":{}}}}}",
+                    match r.asker {
+                        wz_session_core::passive::Direction::A => "a",
+                        wz_session_core::passive::Direction::B => "b",
+                    },
+                    r.id,
+                    r.mode.name(),
+                    r.answers,
+                    r.closed_at.is_some(),
+                    r.cancelled_at.is_some(),
+                    match &r.keyexpr {
+                        Some(k) => alloc::format!("\"{k}\""),
+                        None => "null".into(),
+                    },
+                    r.scope.is_some_and(|s| s.keyexprs),
+                    r.scope.is_some_and(|s| s.subscribers),
+                    r.scope.is_some_and(|s| s.queryables),
+                    r.scope.is_some_and(|s| s.tokens),
+                    r.scope.is_some_and(|s| s.restricted),
+                    r.scope.is_some_and(|s| s.aggregate),
+                ));
+            }
+            s.push_str(&alloc::format!(
+                "],\"interest_exchange\":{{\"unanswered\":{},\"unclosed\":{},\
+                 \"orphan_answers\":{}}}",
+                census.unanswered().len(),
+                census.unclosed().len(),
+                census.orphan_answers(),
             ));
         }
         // R311y713 (§B10) — the same census the text renders, in the export.
@@ -1310,6 +1403,58 @@ impl<'a> CaptureReport<'a> {
                      saw -- the list above is a floor\n",
                     census.orphan_withdrawals()
                 ));
+            }
+            // R311y870 — the QUESTION half. Printed under the same heading
+            // because a reader asking "who wanted this" is asking one question,
+            // and splitting the ask from the answer across two blocks is how a
+            // reader concludes the two are unrelated.
+            if !census.requests().is_empty() {
+                s.push_str(&format!(
+                    "  interest requests: {}\n",
+                    census.requests().len()
+                ));
+                for r in census.requests() {
+                    s.push_str(&format!(
+                        "    {} interest {} for {} -- {} answer(s), {}{}\n",
+                        r.mode.name(),
+                        r.id,
+                        interest_scope_words(r),
+                        r.answers,
+                        if r.closed_at.is_some() {
+                            "closed"
+                        } else {
+                            "not closed"
+                        },
+                        if r.cancelled_at.is_some() {
+                            ", cancelled by the asker"
+                        } else {
+                            ""
+                        },
+                    ));
+                }
+                for at in census.unanswered() {
+                    let r = &census.requests()[at];
+                    s.push_str(&format!(
+                        "    FINDING: interest {} for {} got NO answer at all\n",
+                        r.id,
+                        interest_scope_words(r),
+                    ));
+                }
+                for at in census.unclosed() {
+                    let r = &census.requests()[at];
+                    s.push_str(&format!(
+                        "    FINDING: interest {}'s current dump never closed -- \
+                         its {} answer(s) are a floor\n",
+                        r.id, r.answers,
+                    ));
+                }
+                if census.orphan_answers() > 0 {
+                    s.push_str(&format!(
+                        "    {} declaration(s) answer an interest this capture \
+                         never saw asked -- the list above is a floor\n",
+                        census.orphan_answers()
+                    ));
+                }
             }
         }
         // R311y713 (§B10) — and WHAT the per-flow bound discarded, when it
@@ -4497,13 +4642,36 @@ mod tests {
             1,
             &crate::datagram_tests::udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 50000, &unit),
         );
+        // R311y870 — the QUESTION, on the same page: A asks B for its
+        // QUERYABLES and B says nothing at all.
+        let mut unit = alloc::vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
+        unit.extend_from_slice(
+            &wz_session_core::interest_build::build_interest_queryables(
+                4,
+                true,
+                false,
+                0,
+                Some("svc/**"),
+            )
+            .expect("the production interest builder")
+            .try_as_borrowed()
+            .expect("re-borrow")
+            .encode_to_vec(),
+        );
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            2,
+            &crate::datagram_tests::udp_packet([10, 0, 0, 1], 50000, [10, 0, 0, 2], 7447, &unit),
+        );
 
-        // THE POPULATION, before anything is asked of it: one declaration read
-        // and one row measured. A capture that carried neither would satisfy
-        // every "the finding is printed" claim below by printing a zero.
+        // THE POPULATION, before anything is asked of it: one declaration read,
+        // one request read and one row measured. A capture that carried none of
+        // them would satisfy every "the finding is printed" claim below by
+        // printing a zero.
         let census = crate::interest::interests(&d);
         let table = crate::agg::aggregate(&d);
         assert_eq!(census.interests().len(), 1, "one declaration was read");
+        assert_eq!(census.requests().len(), 1, "and one request");
         assert_eq!(table.rows().len(), 1, "and one keyexpr carried traffic");
         let coverage = census.coverage(&table);
 
@@ -4540,6 +4708,46 @@ mod tests {
         assert!(
             json.contains("\"unclaimed_exact\":true"),
             "stated as exact rather than as a floor: {json}"
+        );
+
+        // R311y870 — the QUESTION half in both renderings, and the phrase a
+        // reader acts on rather than the flag letters: "queryables under
+        // svc/**" is the ask, and a rendering that printed `Q=1 R=1` beside a
+        // keyexpr column would make them reassemble it.
+        // `keyexprs+queryables` and not `queryables`: every builder in
+        // `interest_build` composes `KE | <kinds> | R | N | M`, so a wz-emitted
+        // interest ALWAYS carries the K bit. Asserted as it is rather than as
+        // it reads more nicely, because the alternative is a test that pins
+        // this reader's idea of the message instead of the sender's.
+        assert!(
+            text.contains(
+                "current interest 4 for keyexprs+queryables under svc/** -- \
+                 0 answer(s), not closed"
+            ),
+            "the request line is missing: {text}"
+        );
+        assert!(
+            text.contains(
+                "FINDING: interest 4 for keyexprs+queryables under svc/** got \
+                 NO answer at all"
+            ),
+            "and the finding with it: {text}"
+        );
+        assert!(
+            json.contains(
+                "\"asker\":\"a\",\"id\":4,\"mode\":\"current\",\"answers\":0,\
+                 \"closed\":false,\"cancelled\":false,\"keyexpr\":\"svc/**\""
+            ),
+            "the export carries the same request: {json}"
+        );
+        assert!(
+            json.contains("\"unanswered\":1,\"unclosed\":0,\"orphan_answers\":0"),
+            "and the same verdict: {json}"
+        );
+        assert!(
+            json.contains("\"solicited_by\":null"),
+            "the declaration here was spontaneous, and null says so rather than \
+             the field being absent: {json}"
         );
     }
 

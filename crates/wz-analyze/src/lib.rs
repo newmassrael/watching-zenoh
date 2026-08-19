@@ -4879,6 +4879,119 @@ mod tests {
         );
     }
 
+    /// R311y870 — THE EXCHANGE FROM THE COMMAND LINE: a question that was
+    /// answered and closed, beside one that was not answered at all.
+    ///
+    /// Both in ONE capture on purpose. The two findings are told apart by
+    /// nothing but the answers, so a fixture holding only the unanswered one
+    /// would be satisfied by a reader that called every interest unanswered.
+    #[test]
+    fn an_answered_interest_and_an_unanswered_one_are_told_apart_by_the_cli() {
+        let interest = |id: u64, ke: &str| {
+            frame_carrying(
+                &wz_session_core::interest_build::build_interest_subscribers(
+                    id,
+                    true,
+                    false,
+                    0,
+                    Some(ke),
+                )
+                .expect("the production interest builder")
+                .try_as_borrowed()
+                .expect("re-borrow")
+                .encode_to_vec(),
+            )
+        };
+        let reply = |id: u64, ke: &str| {
+            frame_carrying(
+                &wz_session_core::declare_build::build_declare_subscriber_reply(id, ke)
+                    .expect("the production reply builder")
+                    .try_as_borrowed()
+                    .expect("re-borrow")
+                    .encode_to_vec(),
+            )
+        };
+        let closed = |id: u64| {
+            frame_carrying(
+                &wz_session_core::declare_build::build_declare_final_reply(id)
+                    .try_as_borrowed()
+                    .expect("re-borrow")
+                    .encode_to_vec(),
+            )
+        };
+        let packets = [
+            udp_to_zenoh_port(&interest(1, "demo/**")),
+            udp_from_zenoh_port(&reply(1, "demo/temp")),
+            udp_from_zenoh_port(&closed(1)),
+            udp_to_zenoh_port(&interest(2, "absent/**")),
+        ];
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+
+        let rendered = analyze_request(&Request {
+            capture: &capture,
+            keylog: None,
+            format: Format::Text,
+            per_flow: false,
+            per_message: false,
+            messages_per_flow: None,
+            quic_ports: &[],
+            quic_cid_len: None,
+            payload_rules: &[],
+            payload_field_names: &[],
+            serial_linktypes: &[],
+            census: Census {
+                interests: true,
+                ..Census::default()
+            },
+            per_field: false,
+            health: false,
+            select: None,
+        })
+        .expect("the capture reads")
+        .0;
+
+        // ANTI-VACUITY: four records really decoded, so a reader reporting
+        // nothing cannot pass by having been handed nothing.
+        assert!(
+            rendered.contains("messages decoded: 4"),
+            "the fixture must decode: {rendered}"
+        );
+        assert!(
+            rendered.contains("interest requests: 2"),
+            "both questions are seen: {rendered}"
+        );
+        // THE ANSWERED ONE: credited across the flow and terminated.
+        assert!(
+            rendered.contains(
+                "current interest 1 for keyexprs+subscribers under demo/** -- \
+                 1 answer(s), closed"
+            ),
+            "the answered exchange: {rendered}"
+        );
+        // THE OTHER ONE, and it is the only FINDING here.
+        assert!(
+            rendered.contains(
+                "FINDING: interest 2 for keyexprs+subscribers under absent/** \
+                 got NO answer at all"
+            ),
+            "the unanswered exchange: {rendered}"
+        );
+        assert!(
+            !rendered.contains("FINDING: interest 1"),
+            "the answered one must NOT be a finding, or the reader is calling \
+             every interest unanswered: {rendered}"
+        );
+        assert!(
+            !rendered.contains("never closed"),
+            "and nothing here is a truncated answer: {rendered}"
+        );
+    }
+
     /// R311y664 — a capture with no keys is analysed and SAYS SO, rather than
     /// failing.
     #[test]
