@@ -148,6 +148,17 @@ ALLOWED = [
         "id becoming unresolved again is the point (R311y622)",
     ),
     (
+        "wz-capture/interest.rs",
+        "match open.remove(&(dir, kind, id)) {",
+        "R311y869 — a declaration leaving the OPEN index because an "
+        "`Undeclare` closed it. The DECLARATION is not discarded, which is "
+        "that plane's central design point: it stays in `self.interests` and "
+        "the removal's only effect is to stamp `withdrawn_at` on it. The arm "
+        "that finds NOTHING is the one that accounts -- it counts an "
+        "`orphan_withdrawal`, which is how a reader learns the declaration "
+        "list is a floor",
+    ),
+    (
         "wz-capture/exchange.rs",
         "let Some(entry) = open.remove(&key) else {",
         "an exchange leaving the OPEN set because it completed; the entry is "

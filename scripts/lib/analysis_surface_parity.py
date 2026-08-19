@@ -71,6 +71,12 @@ BOTH = {
     "keyexpr plane": ("--throughput", "wz_dissect_pcap_census"),
     "query plane": ("--exchanges", "wz_dissect_pcap_census"),
     "node plane": ("--nodes", "wz_dissect_pcap_census"),
+    # R311y869 — the INTEREST plane, on BOTH surfaces from the round it landed,
+    # which is the point of this table existing before the capability did. It is
+    # a census plane, so the ABI reaches it through the same door the other four
+    # use; the CLI needs its own flag because `--census` is the RECORD planes and
+    # this one folds the control plane (the same split `--nodes` carries).
+    "interest plane": ("--interests", "wz_dissect_pcap_census"),
     "payload plane": ("--payloads", "wz_dissect_pcap_census"),
     "all planes at once": ("--census", "wz_dissect_pcap_census"),
     "selector over the planes": ("--select", "wz_dissect_pcap_census_where"),

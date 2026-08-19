@@ -39,6 +39,13 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     "codec-open-body",
     "codec-close",
     "codec-keep-alive",
+    # R311y869 — `declare_build`, which the census fixture uses to put a real
+    # `DeclareSubscriber` on the wire for the INTEREST plane to read. Named
+    # explicitly rather than left to unification, on the rule `wz-capture`'s
+    # manifest states at length: a subset build that happened not to unify
+    # `codec-declare` on would otherwise fail for a reason that looks like the
+    # test's.
+    "codec-declare",
 ] }
 
 # R311y851 — the CENSUS fixture's records, built by the codecs that own their

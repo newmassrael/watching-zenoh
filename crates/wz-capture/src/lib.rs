@@ -80,6 +80,15 @@ mod exit;
 /// build must not be charged for a walker only a desktop reader runs.
 #[cfg(feature = "dissect")]
 pub mod fields_json;
+/// R311y869 (§1.1f) — the capture read as DECLARED INTEREST: who asked for
+/// what, and whether anything published is anything anybody asked for.
+///
+/// Gated on `network-codecs` on [`exchange`]'s rule and not [`agg`]'s: this
+/// plane's entire input is the `Declare` message, so a build that cannot
+/// decode one has no declaration to fold, and every answer it gave would be a
+/// structural zero. A plane that cannot be fed is absent rather than empty.
+#[cfg(feature = "network-codecs")]
+pub mod interest;
 /// R311y714 (§1.1f) — the capture read as NODES: zids, their roles, and the
 /// links where both ends named themselves. The one plane whose unit is not a
 /// flow.

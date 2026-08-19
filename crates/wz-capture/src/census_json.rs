@@ -109,8 +109,127 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
     out.push_str(&payloads_json(&crate::payload::payloads_where(d, filter)));
     #[cfg(not(feature = "network-codecs"))]
     out.push_str("null");
+    // R311y869 — the INTEREST plane, and the SECOND one the selector does not
+    // narrow. A declaration is not a record the selector's terms describe, on
+    // exactly the argument the node plane above makes; the coverage it is
+    // joined against IS narrowed, which is why the plane emits its own
+    // `narrowed_by_selector: false` rather than borrowing the keyexpr plane's.
+    out.push_str(",\"interests\":");
+    #[cfg(feature = "network-codecs")]
+    out.push_str(&interests_json(
+        &crate::interest::interests(d),
+        &crate::agg::aggregate_where(d, filter),
+    ));
+    #[cfg(not(feature = "network-codecs"))]
+    out.push_str("null");
     out.push('}');
     out
+}
+
+/// The INTEREST plane: who declared what, and what their declarations cover.
+///
+/// Takes the throughput table rather than building one, so the document's
+/// coverage is joined against the SAME rows its `keyexprs` object reports. A
+/// second aggregation here would be a second answer to "what traffic was
+/// there", and the two could differ by a selector.
+#[cfg(feature = "network-codecs")]
+pub fn interests_json(c: &crate::interest::InterestCensus, t: &ThroughputTable) -> String {
+    let coverage = c.coverage(t);
+    let mut out = String::from("{\"declarations\":[");
+    for (i, d) in c.interests().iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"kind\":\"{}\",\"declarer\":\"{}\",\"id\":{},\"keyexpr\":",
+            d.kind.name(),
+            dir_name(d.declarer),
+            d.id
+        );
+        match &d.keyexpr {
+            Some(k) => escape_into(k, &mut out),
+            // Not an empty string: a declaration this reader could not name is
+            // a finding, and `""` is a keyexpr.
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"unresolved\":");
+        match d.unresolved {
+            Some((space, id)) => {
+                let _ = write!(out, "{{\"space\":\"{}\",\"id\":{id}}}", dir_name(space));
+            }
+            None => out.push_str("null"),
+        }
+        let _ = write!(out, ",\"declared_at\":{},\"withdrawn_at\":", d.declared_at);
+        match d.withdrawn_at {
+            Some(at) => {
+                let _ = write!(out, "{at}");
+            }
+            // `null` and not the declaration's own anchor: an interest still
+            // open at the end of the capture has no closing coordinate, and a
+            // number there would read as one.
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"flow\":");
+        push_flow(&d.flow, &mut out);
+        out.push('}');
+    }
+    out.push_str("],\"matched\":[");
+    for (i, m) in coverage.matched.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{{\"declaration\":{},\"keys\":[", m.interest);
+        for (j, key) in m.keys.iter().enumerate() {
+            if j > 0 {
+                out.push(',');
+            }
+            escape_into(key, &mut out);
+        }
+        out.push_str("],\"totals\":");
+        push_counts(&m.totals, &mut out);
+        out.push('}');
+    }
+    out.push_str("],\"silent\":");
+    push_indices(&coverage.silent, &mut out);
+    out.push_str(",\"undecidable\":");
+    push_indices(&coverage.undecidable, &mut out);
+    out.push_str(",\"unresolved_declarations\":");
+    push_indices(&coverage.unresolved, &mut out);
+    out.push_str(",\"unclaimed\":[");
+    for (i, key) in coverage.unclaimed.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        escape_into(key, &mut out);
+    }
+    let by = c.by_kind();
+    let _ = write!(
+        out,
+        "],\"unclaimed_exact\":{},\"judged\":{},\"orphan_withdrawals\":{},\
+         \"by_kind\":{{\"subscriber\":{},\"queryable\":{},\"liveliness_token\":{}}},",
+        coverage.unclaimed_exact,
+        coverage.judged(),
+        c.orphan_withdrawals(),
+        by[0],
+        by[1],
+        by[2],
+    );
+    push_selection(&crate::filter::Selection::default(), false, &mut out);
+    out.push('}');
+    out
+}
+
+#[cfg(feature = "network-codecs")]
+fn push_indices(v: &[usize], out: &mut String) {
+    out.push('[');
+    for (i, at) in v.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{at}");
+    }
+    out.push(']');
 }
 
 /// The KEYEXPR plane: which key expressions carried the traffic.
@@ -535,7 +654,13 @@ mod tests {
 
         let json = census_json(&d);
         assert!(
-            json.contains("\"exchanges\":null") && json.contains("\"payloads\":null"),
+            json.contains("\"exchanges\":null")
+                && json.contains("\"payloads\":null")
+                // R311y869 — the interest plane joins them, and for a sharper
+                // reason than either: its entire input is the `Declare`
+                // message, so a build that cannot decode one would answer
+                // "this capture declared nothing" about every capture there is.
+                && json.contains("\"interests\":null"),
             "a plane with no decoder behind it must be null, not an empty \
              table: {json}"
         );
@@ -559,6 +684,7 @@ mod tests {
             "\"nodes\":",
             "\"exchanges\":",
             "\"payloads\":",
+            "\"interests\":",
         ] {
             assert!(
                 json.contains(key),
@@ -614,27 +740,59 @@ mod fed_tests {
     /// renders one plane off the WRONG walk pass — the planes have to be seen
     /// disagreeing or agreeing about one capture.
     fn four_plane_capture(keyexpr: &'static str) -> Dissection {
+        // R311y869 — the CONTROL plane, and the reason it is in this fixture
+        // rather than in one of its own: the module's own rule above is that
+        // the planes have to be seen agreeing about ONE capture, and the
+        // interest plane's whole claim is a join against the keyexpr rows the
+        // same frames produced. Built by the PRODUCTION declare builders, so
+        // a plane that reads a fixture author's idea of the wire fails here.
+        //
+        // The two sides declare the two things their traffic then does: A
+        // subscribes to everything under `demo`, B offers to answer the query
+        // that arrives on `demo/q`.
+        let declare_sub = framed_frame(
+            0,
+            &wz_session_core::declare_build::build_declare_subscriber(1, 0, Some("demo/**"))
+                .expect("the production subscriber builder")
+                .try_as_borrowed()
+                .expect("re-borrow")
+                .encode_to_vec(),
+        );
+        let declare_qbl = framed_frame(
+            0,
+            &wz_session_core::declare_build::build_declare_queryable(2, 0, Some("demo/q"))
+                .expect("the production queryable builder")
+                .try_as_borrowed()
+                .expect("re-borrow")
+                .encode_to_vec(),
+        );
         // The data plane: a Put under a literal keyexpr (id 0 + suffix, which
         // needs no Declare to resolve).
-        let put = framed_frame(0, &push(sender_space(0, Some(keyexpr)), b"hello"));
+        let put = framed_frame(1, &push(sender_space(0, Some(keyexpr)), b"hello"));
         // The query plane: a Request, its Reply, and the ResponseFinal that
         // CLOSES it. Without the final the exchange is unclosed and
         // `completion` has no sample -- a row that exists and measures nothing.
         let query = framed_frame(
-            1,
+            2,
             &crate::exchange::tests::request_query(7, sender_space(0, Some("demo/q"))),
         );
         let mut answer =
             crate::exchange::tests::response_reply(7, sender_space(0, Some("demo/q")), b"answer");
         answer.extend_from_slice(&crate::exchange::tests::response_final(7));
-        let answer = framed_frame(0, &answer);
+        let answer = framed_frame(1, &answer);
 
         // The handshake rides the front of each direction: without it no
         // direction has an owner and the node plane attributes nothing.
+        //
+        // The DECLARATION leads each direction's data, as it does on a real
+        // session: a subscriber that arrived after the sample would be a
+        // capture begun mid-session, which is a different fixture.
         let mut low_to_high = framed_init(&ZID_A);
+        low_to_high.extend_from_slice(&declare_sub);
         low_to_high.extend_from_slice(&put);
         low_to_high.extend_from_slice(&query);
         let mut high_to_low = framed_init(&ZID_B);
+        high_to_low.extend_from_slice(&declare_qbl);
         high_to_low.extend_from_slice(&answer);
 
         // One packet per direction, so the whole of each stream is contiguous
@@ -766,6 +924,72 @@ mod fed_tests {
             payloads.contains("\"contradictions\":[]"),
             "and neither contradicted it: {payloads}"
         );
+
+        // R311y869 — the INTEREST plane: both declarations, from the two sides
+        // that made them, and the coverage joining them to the rows above.
+        let interests = plane(&json, ",\"interests\":");
+        assert!(
+            interests.contains(
+                "\"kind\":\"subscriber\",\"declarer\":\"a\",\"id\":1,\"keyexpr\":\"demo/**\""
+            ),
+            "A's subscriber is missing: {interests}"
+        );
+        assert!(
+            interests.contains(
+                "\"kind\":\"queryable\",\"declarer\":\"b\",\"id\":2,\"keyexpr\":\"demo/q\""
+            ),
+            "B's queryable is missing, so the plane read one direction only: \
+             {interests}"
+        );
+        // THE JOIN over a LITERAL pattern, which every build can evaluate: the
+        // queryable B declared covers exactly the key the query arrived on.
+        assert!(
+            interests.contains("\"declaration\":1,\"keys\":[\"demo/q\"]"),
+            "the queryable must cover the key it was declared for: {interests}"
+        );
+        assert!(
+            interests.contains("\"narrowed_by_selector\":false"),
+            "a declaration is not a record a selector describes, and the plane \
+             must say so rather than leave it inferred: {interests}"
+        );
+
+        // THE JOIN over a WILDCARD, which is the assertion a listing could not
+        // satisfy: `demo/**` covers BOTH rows the keyexpr plane reports, which
+        // no prefix comparison against `demo/temp` would produce.
+        //
+        // The two arms below are ONE claim seen from both builds, on the same
+        // bytes: where the matcher exists the document reports coverage, and
+        // where it does not it reports that it cannot tell. Neither may report
+        // a confident zero, and the second arm is the only place that is
+        // checkable.
+        #[cfg(feature = "filter-wildcards")]
+        {
+            assert!(
+                interests.contains("\"keys\":[\"demo/q\",\"demo/temp\"]"),
+                "the subscriber's wildcard must cover the traffic: {interests}"
+            );
+            assert!(
+                interests.contains("\"unclaimed\":[],\"unclaimed_exact\":true,\"judged\":2"),
+                "both declarations were judged and nothing went unasked-for: \
+                 {interests}"
+            );
+        }
+        #[cfg(not(feature = "filter-wildcards"))]
+        {
+            assert!(
+                interests.contains("\"undecidable\":[0]"),
+                "a wildcard this build cannot evaluate must be named as such: \
+                 {interests}"
+            );
+            assert!(
+                interests.contains("\"silent\":[]"),
+                "and never as a declaration that matched nothing: {interests}"
+            );
+            assert!(
+                interests.contains("\"unclaimed\":[\"demo/temp\"],\"unclaimed_exact\":false"),
+                "so the unclaimed list is a floor and says so: {interests}"
+            );
+        }
     }
 
     /// R311y851 — A KEYEXPR IS WIRE INPUT, SO IT IS ESCAPED.

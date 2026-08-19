@@ -97,6 +97,18 @@ fn quic_application_unread(k: &crate::quic::QuicDecryption) -> usize {
 pub struct CaptureReport<'a> {
     /// R311y714 — the node plane, when the caller built one.
     nodes: Option<&'a crate::node::NodeCensus>,
+    /// R311y869 — the interest plane, and its coverage, when the caller built
+    /// them.
+    ///
+    /// The two travel TOGETHER rather than the report re-joining them, because
+    /// a coverage is only meaningful against the table it was computed from: a
+    /// report that re-derived one could answer "this subscriber covers nothing"
+    /// about traffic a selector had removed.
+    #[cfg(feature = "network-codecs")]
+    interests: Option<(
+        &'a crate::interest::InterestCensus,
+        &'a crate::interest::Coverage,
+    )>,
     dissection: &'a crate::Dissection,
     throughput: Option<&'a ThroughputTable>,
     #[cfg(feature = "network-codecs")]
@@ -270,6 +282,8 @@ impl<'a> CaptureReport<'a> {
             #[cfg(feature = "network-codecs")]
             payloads: None,
             nodes: None,
+            #[cfg(feature = "network-codecs")]
+            interests: None,
             quic: None,
         }
     }
@@ -309,6 +323,21 @@ impl<'a> CaptureReport<'a> {
     /// R311y714 (§1.1f) — attach the NODE plane: the capture keyed by zid.
     pub fn with_nodes(mut self, census: &'a crate::node::NodeCensus) -> Self {
         self.nodes = Some(census);
+        self
+    }
+
+    /// R311y869 (§1.1f) — attach the INTEREST plane: who declared what, joined
+    /// against the traffic the caller measured.
+    ///
+    /// Both halves at once, on the rule the field states: the coverage must be
+    /// the one computed from the table this report's other planes describe.
+    #[cfg(feature = "network-codecs")]
+    pub fn with_interests(
+        mut self,
+        census: &'a crate::interest::InterestCensus,
+        coverage: &'a crate::interest::Coverage,
+    ) -> Self {
+        self.interests = Some((census, coverage));
         self
     }
 
@@ -1029,6 +1058,53 @@ impl<'a> CaptureReport<'a> {
             }
             s.push(']');
         }
+        // R311y869 (§1.1f) — the interest plane, in the export. Absent rather
+        // than empty when the plane was not built, on the node plane's rule
+        // above: `"interests":[]` would say the capture carried no declaration.
+        #[cfg(feature = "network-codecs")]
+        if let Some((census, coverage)) = self.interests {
+            s.push_str(",\"interests\":[");
+            for (i, interest) in census.interests().iter().enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push_str(&alloc::format!(
+                    "{{\"kind\":\"{}\",\"declarer\":\"{}\",\"id\":{},\"keyexpr\":{},\
+                     \"open\":{},\"covers\":{}}}",
+                    interest.kind.name(),
+                    match interest.declarer {
+                        wz_session_core::passive::Direction::A => "a",
+                        wz_session_core::passive::Direction::B => "b",
+                    },
+                    interest.id,
+                    match &interest.keyexpr {
+                        Some(k) => alloc::format!("\"{k}\""),
+                        // NULL and not "": a declaration this reader could not
+                        // name is a finding, and the empty string is a keyexpr.
+                        None => "null".into(),
+                    },
+                    interest.is_open(),
+                    coverage
+                        .matched
+                        .iter()
+                        .find(|m| m.interest == i)
+                        .map(|m| m.keys.len())
+                        .unwrap_or(0),
+                ));
+            }
+            s.push_str(&alloc::format!(
+                "],\"interest_coverage\":{{\"judged\":{},\"silent\":{},\
+                 \"undecidable\":{},\"unresolved\":{},\"unclaimed\":{},\
+                 \"unclaimed_exact\":{},\"orphan_withdrawals\":{}}}",
+                coverage.judged(),
+                coverage.silent.len(),
+                coverage.undecidable.len(),
+                coverage.unresolved.len(),
+                coverage.unclaimed.len(),
+                coverage.unclaimed_exact,
+                census.orphan_withdrawals(),
+            ));
+        }
         // R311y713 (§B10) — the same census the text renders, in the export.
         // One fact rendered in two places is one fact that can drift, so the
         // test asserts BOTH in one run.
@@ -1152,6 +1228,87 @@ impl<'a> CaptureReport<'a> {
                     "    link {} <-> {}\n",
                     hex_zid(&n.nodes()[link.a].zid),
                     hex_zid(&n.nodes()[link.b].zid)
+                ));
+            }
+        }
+        // R311y869 (§1.1f) — WHO ASKED FOR THE TRAFFIC. Printed when the
+        // caller built the plane, whatever it found: a capture with no
+        // declaration at all is itself the answer to "is anything subscribed
+        // here", and suppressing the block on an empty census would make the
+        // one deployment a reader most needs told about look like the one they
+        // did not ask about.
+        #[cfg(feature = "network-codecs")]
+        if let Some((census, coverage)) = self.interests {
+            let by = census.by_kind();
+            s.push_str(&format!(
+                "  declared interest: {} (subscriber {}, queryable {}, \
+                 liveliness {}); judged {}, silent {}\n",
+                census.interests().len(),
+                by[0],
+                by[1],
+                by[2],
+                coverage.judged(),
+                coverage.silent.len(),
+            ));
+            for m in &coverage.matched {
+                let i = &census.interests()[m.interest];
+                s.push_str(&format!(
+                    "    {} {} covers {} key(s), {} message(s), {} byte(s){}\n",
+                    i.kind.name(),
+                    i.keyexpr.as_deref().unwrap_or("<unresolved>"),
+                    m.keys.len(),
+                    m.totals.messages(),
+                    m.totals.payload_bytes,
+                    if i.is_open() { "" } else { "  [withdrawn]" },
+                ));
+            }
+            // THE FINDING, and it leads with the word a reader acts on. A
+            // declaration nobody published under is a deployment that believes
+            // it is receiving something.
+            for at in &coverage.silent {
+                let i = &census.interests()[*at];
+                s.push_str(&format!(
+                    "    FINDING: {} {} matched NO traffic in this capture\n",
+                    i.kind.name(),
+                    i.keyexpr.as_deref().unwrap_or("<unresolved>"),
+                ));
+            }
+            // The mirror finding, and it is stated as a FLOOR whenever any
+            // declaration could not be judged — see `Coverage::unclaimed`.
+            if !coverage.unclaimed.is_empty() {
+                s.push_str(&format!(
+                    "    {} keyexpr(s) carried traffic no declaration here \
+                     matches{}\n",
+                    coverage.unclaimed.len(),
+                    if coverage.unclaimed_exact {
+                        ""
+                    } else {
+                        " (AT MOST -- some declaration could not be judged)"
+                    },
+                ));
+            }
+            // Held apart from `silent` in the rendering as well as in the
+            // type: "this build cannot tell" must never read as "nobody
+            // subscribed".
+            if !coverage.undecidable.is_empty() {
+                s.push_str(&format!(
+                    "    {} declaration(s) carry a wildcard this build's \
+                     matcher cannot evaluate (feature `filter-wildcards`)\n",
+                    coverage.undecidable.len()
+                ));
+            }
+            if !coverage.unresolved.is_empty() {
+                s.push_str(&format!(
+                    "    {} declaration(s) name a keyexpr alias this capture \
+                     never saw bound\n",
+                    coverage.unresolved.len()
+                ));
+            }
+            if census.orphan_withdrawals() > 0 {
+                s.push_str(&format!(
+                    "    {} undeclare(s) for a declaration this capture never \
+                     saw -- the list above is a floor\n",
+                    census.orphan_withdrawals()
                 ));
             }
         }
@@ -4287,6 +4444,102 @@ mod tests {
             !body.starts_with(',') && !body.ends_with(','),
             "and the caller owns the separator, which is the only arrangement \
              in which appending nothing is also valid: {body}"
+        );
+    }
+
+    /// R311y869 (§1.1f) — THE INTEREST PLANE, ON A PAGE BY ITSELF.
+    ///
+    /// `solo_plane_page_lint` demanded this and was right to: a page carrying a
+    /// second plane would let the other one produce every line asserted here,
+    /// and this plane's whole output could be severed with the suite still
+    /// green. So `with_interests` is the ONLY attachment.
+    ///
+    /// What it pins is the pair of FINDINGS, which is the part of this plane a
+    /// listing could not deliver: a declaration nothing was published under,
+    /// and traffic no declaration matched. Both renderings, because one fact
+    /// rendered in two places is one fact that can drift.
+    ///
+    /// Gated on the wildcard feature for the reason `interest`'s own tests are:
+    /// without a matcher this fixture's `demo/**` is UNDECIDABLE, which is a
+    /// different page and is asserted there.
+    #[cfg(all(feature = "network-codecs", feature = "filter-wildcards"))]
+    #[test]
+    fn an_interest_plane_alone_names_both_findings_in_both_renderings() {
+        let declare = |ke: &str| {
+            let d = wz_session_core::declare_build::build_declare_subscriber(1, 0, Some(ke))
+                .expect("the production builder")
+                .try_as_borrowed()
+                .expect("re-borrow")
+                .encode_to_vec();
+            let mut w = alloc::vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
+            w.extend_from_slice(&d);
+            w
+        };
+        let mut d = crate::Dissection::new();
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &crate::datagram_tests::udp_packet(
+                [10, 0, 0, 1],
+                50000,
+                [10, 0, 0, 2],
+                7447,
+                &declare("nothing/**"),
+            ),
+        );
+        let mut unit = alloc::vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
+        unit.extend_from_slice(&crate::datagram_tests::push(
+            crate::datagram_tests::sender_space(0, Some("demo/temp")),
+            b"hello",
+        ));
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            1,
+            &crate::datagram_tests::udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 50000, &unit),
+        );
+
+        // THE POPULATION, before anything is asked of it: one declaration read
+        // and one row measured. A capture that carried neither would satisfy
+        // every "the finding is printed" claim below by printing a zero.
+        let census = crate::interest::interests(&d);
+        let table = crate::agg::aggregate(&d);
+        assert_eq!(census.interests().len(), 1, "one declaration was read");
+        assert_eq!(table.rows().len(), 1, "and one keyexpr carried traffic");
+        let coverage = census.coverage(&table);
+
+        let page = CaptureReport::of(&d).with_interests(&census, &coverage);
+
+        let text = page.to_text();
+        assert!(
+            text.contains("declared interest: 1 (subscriber 1, queryable 0, liveliness 0)"),
+            "the plane's own header is missing: {text}"
+        );
+        assert!(
+            text.contains("FINDING: subscriber nothing/** matched NO traffic in this capture"),
+            "a declaration nobody published under is THE finding: {text}"
+        );
+        assert!(
+            text.contains("1 keyexpr(s) carried traffic no declaration here matches"),
+            "and the mirror finding is the other half: {text}"
+        );
+        assert!(
+            !text.contains("AT MOST"),
+            "every declaration here was judged, so neither count is a floor: \
+             {text}"
+        );
+
+        let json = page.to_json();
+        assert!(
+            json.contains("\"keyexpr\":\"nothing/**\",\"open\":true,\"covers\":0"),
+            "the export carries the same declaration: {json}"
+        );
+        assert!(
+            json.contains("\"silent\":1") && json.contains("\"unclaimed\":1"),
+            "and the same two findings: {json}"
+        );
+        assert!(
+            json.contains("\"unclaimed_exact\":true"),
+            "stated as exact rather than as a floor: {json}"
         );
     }
 

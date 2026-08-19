@@ -7670,7 +7670,8 @@ layer_c1bt_capture_no_default_features() {
         agg::tests::the_three_planes_place_one_record_at_one_byte \
         agg::tests::an_absent_payload_and_an_unseparated_one_are_different_facts \
         report::tests::the_two_reasons_a_payload_is_unmeasured_reach_both_renderings \
-        report::tests::a_row_says_whether_its_own_byte_total_is_whole
+        report::tests::a_row_says_whether_its_own_byte_total_is_whole \
+        interest::no_wildcard_tests::a_wildcard_this_build_cannot_evaluate_is_undecidable_rather_than_silent
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the network-codecs build"
@@ -7685,9 +7686,16 @@ layer_c1bt_capture_no_default_features() {
     # reassembly`, and that is precisely the shape a consumer who wants records
     # and selectors but not chain tracking would ask for.
     #
-    # The pin is one test on purpose: the arm exists to prove the two features
+    # The pin was one test on purpose: the arm exists to prove the two features
     # COMPOSE, and the language's own semantics are pinned in the first arm
     # where they run without any of this.
+    #
+    # R311y869 adds a SECOND, on that same argument rather than against it. The
+    # interest plane is the sharpest composition of these two features there
+    # is: `network-codecs` is what decodes a `Declare` at all and
+    # `filter-wildcards` is what lets its `demo/**` be evaluated against the
+    # traffic, so the plane's whole claim is false unless both are on. The arm
+    # above pins what it says when only the first is.
     out="$(cd crates && cargo test -p wz-capture --no-default-features \
         --features network-codecs,filter-wildcards --quiet 2>&1)" || { echo "$out"; return 1; }
     listing="$(cd crates && cargo test -p wz-capture --no-default-features \
@@ -7695,7 +7703,8 @@ layer_c1bt_capture_no_default_features() {
         || { echo "  C1bt FAIL: the filter-wildcards --list did not run"; return 1; }
     for name in \
         agg::tests::a_selector_narrows_the_table_and_says_what_it_left_out \
-        filter::tests::a_wildcard_pattern_matches_the_way_zenohs_own_matcher_does
+        filter::tests::a_wildcard_pattern_matches_the_way_zenohs_own_matcher_does \
+        interest::tests::a_wildcard_subscriber_is_seen_and_covers_the_traffic_it_matches
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bt FAIL: $name is absent from the filter-wildcards build"

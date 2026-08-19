@@ -237,7 +237,11 @@ impl KeyexprCounts {
         }
     }
 
-    fn add(&mut self, other: &KeyexprCounts) {
+    /// R311y869 — `pub(crate)`, so [`crate::interest`] sums a declaration's
+    /// covered rows through the SAME addition every row already uses. The
+    /// alternative is a second spelling of "how these counts add", which is a
+    /// second chance for one of them to forget a field the next round adds.
+    pub(crate) fn add(&mut self, other: &KeyexprCounts) {
         self.puts += other.puts;
         self.dels += other.dels;
         self.queries += other.queries;

@@ -1367,8 +1367,19 @@ mod tests {
     /// One packet per direction so the whole of each stream is contiguous: a
     /// reassembly gap here would look exactly like a decode that failed.
     fn census_capture() -> Vec<u8> {
-        let put = framed_frame(
+        // R311y869 — the CONTROL plane, so the interest plane has something to
+        // read. Built by the production declare builder, and placed ahead of
+        // the traffic as it is on a real session.
+        let declare = framed_frame(
             0,
+            &wz_session_core::declare_build::build_declare_subscriber(1, 0, Some("demo/**"))
+                .expect("the production subscriber builder")
+                .try_as_borrowed()
+                .expect("re-borrow")
+                .encode_to_vec(),
+        );
+        let put = framed_frame(
+            1,
             &wz_codecs::push::Push {
                 header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
                 keyexpr: literal("demo/temp"),
@@ -1382,7 +1393,7 @@ mod tests {
             .encode_to_vec(),
         );
         let query = framed_frame(
-            1,
+            2,
             &wz_codecs::request::Request {
                 header: wz_codecs::request::Request::default().header
                     | wz_codecs::wire_const::FLAG_N_N,
@@ -1422,6 +1433,7 @@ mod tests {
         );
 
         let mut low_to_high = framed_init(&ZID_A);
+        low_to_high.extend_from_slice(&declare);
         low_to_high.extend_from_slice(&put);
         low_to_high.extend_from_slice(&query);
         let mut high_to_low = framed_init(&ZID_B);
@@ -1465,6 +1477,22 @@ mod tests {
             census.contains("\"contradictions\":[]"),
             "the payload plane must have judged rather than been skipped: {census}"
         );
+        // R311y869 — the FIFTH plane, and the one this door was claimed to
+        // reach the moment `analysis_surface_parity.py` gained its row. The
+        // claim is checked here rather than trusted: a table saying a
+        // capability is on both surfaces is worth exactly what the surface's
+        // own test proves.
+        assert!(
+            census.contains(
+                "\"kind\":\"subscriber\",\"declarer\":\"a\",\"id\":1,\
+                             \"keyexpr\":\"demo/**\""
+            ),
+            "the declaration the capture carried must cross: {census}"
+        );
+        assert!(
+            census.contains("\"unclaimed\":[],\"unclaimed_exact\":true"),
+            "and so must the coverage joining it to the keys above: {census}"
+        );
 
         // THE CONTROL: the same bytes through the door that already existed.
         let summary = call_summary(&file).expect("the capture reads");
@@ -1473,6 +1501,7 @@ mod tests {
             "a1a1a1a1",
             "\"requests\"",
             "\"contradictions\"",
+            "\"declarer\"",
         ] {
             assert!(
                 !summary.contains(absent),

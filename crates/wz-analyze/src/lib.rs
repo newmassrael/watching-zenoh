@@ -152,6 +152,16 @@ pub struct Census {
     /// and this one folds handshakes, so a reader asking for the record
     /// censuses is not asking for a topology. It is its own flag.
     pub nodes: bool,
+    /// R311y869 (§1.1f) — the INTEREST plane: the declarations the capture
+    /// carried, and which traffic each covers.
+    ///
+    /// NOT in [`Self::all`] for the reason the node plane is not: `--census`
+    /// asks what the records were, and this folds the CONTROL plane. It is
+    /// also the one plane that needs another — the coverage is a join against
+    /// the keyexpr table — so asking for it builds that table whether or not
+    /// `--throughput` was given, which is stated here rather than left as a
+    /// surprise in the timings.
+    pub interests: bool,
 }
 
 impl Census {
@@ -167,12 +177,13 @@ impl Census {
             exchanges: true,
             payloads: true,
             nodes: false,
+            interests: false,
         }
     }
 
     /// Whether any plane was asked for at all.
     pub const fn any(&self) -> bool {
-        self.throughput || self.exchanges || self.payloads || self.nodes
+        self.throughput || self.exchanges || self.payloads || self.nodes || self.interests
     }
 }
 
@@ -309,6 +320,15 @@ OPTIONS:
                       first-reply delay, and the ones never answered
     --nodes           the node plane: the capture keyed by zid, and the
                       links where both ends named themselves
+    --interests       the interest plane: every DeclareSubscriber,
+                      DeclareQueryable and DeclareToken the capture carried,
+                      and which traffic each one covers -- matched with
+                      zenoh's own keyexpr dialect, so a `robot/**` subscriber
+                      is reported as covering `robot/1/pose`. Names the two
+                      findings a keyexpr ranking cannot: a declaration nothing
+                      was published under, and traffic no declaration matches.
+                      Builds the keyexpr table for the join whether or not
+                      --throughput was given
     --payloads        the payload plane: what the samples carry, by shape
     --census          all three planes above. Each is a separate walk of every
                       frame, which is why they are asked for rather than always
@@ -369,6 +389,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
             "--exchanges" => census.exchanges = true,
             "--payloads" => census.payloads = true,
             "--nodes" => census.nodes = true,
+            "--interests" => census.interests = true,
             "--census" => census = Census::all(),
             "--fields" => per_field = true,
             "--health" => health = true,
@@ -898,6 +919,23 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     // named by a handshake that has no keyexpr, kind or payload for them to
     // read. Same reason the QUIC pass below states, one plane over.
     let node_census = census.nodes.then(|| wz_capture::node::nodes(&dissection));
+    // R311y869 (§1.1f) — the interest plane and the table its coverage is a
+    // join against, built HERE rather than inside the report so the coverage is
+    // computed exactly once and against the table the rest of this report
+    // describes. `--interests` without `--throughput` still needs the rows, so
+    // the table is built for the join and simply not attached as a plane.
+    let interest_census = census
+        .interests
+        .then(|| wz_capture::interest::interests(&dissection));
+    let interest_traffic = interest_census.as_ref().map(|_| {
+        throughput
+            .clone()
+            .unwrap_or_else(|| wz_capture::agg::aggregate_where(&dissection, filter))
+    });
+    let interest_coverage = match (&interest_census, &interest_traffic) {
+        (Some(c), Some(t)) => Some(c.coverage(t)),
+        _ => None,
+    };
     // R311y706 (Y5) — and the report SAYS the selector did not reach this pass.
     //
     // The register carried this as "--select does not reach the QUIC pass", and
@@ -926,6 +964,9 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     }
     if let Some(table) = &node_census {
         report = report.with_nodes(table);
+    }
+    if let (Some(c), Some(cov)) = (&interest_census, &interest_coverage) {
+        report = report.with_interests(c, cov);
     }
     let report = report;
     // R311y716 ([REDACTED-REQ]) — the verdict AND its reasons, from ONE call. A
@@ -4643,6 +4684,198 @@ mod tests {
         assert!(
             USAGE.contains("    --health"),
             "the usage text names every flag this tool takes"
+        );
+    }
+
+    /// R311y869 — the interest flag is parsed AND documented, on the rule the
+    /// health flag's twin states: the parity gate reads the USAGE constant, so
+    /// a flag the parser takes and the usage text does not name would be
+    /// reported as ABI-only while it is not.
+    #[test]
+    fn the_interest_flag_is_parsed_and_documented() {
+        assert!(
+            parse(&args(&["cap.pcapng", "--interests"]))
+                .expect("a capture and a flag")
+                .census
+                .interests,
+            "the parser must accept it"
+        );
+        assert!(
+            !parse(&args(&["cap.pcapng"]))
+                .expect("a capture alone")
+                .census
+                .interests,
+            "and it must be off by default"
+        );
+        assert!(
+            !parse(&args(&["cap.pcapng", "--census"]))
+                .expect("every record plane")
+                .census
+                .interests,
+            "--census is the RECORD planes; this one folds the control plane"
+        );
+        assert!(
+            USAGE.contains("    --interests"),
+            "the usage text names every flag this tool takes"
+        );
+    }
+
+    /// The same datagram builder as [`udp_to_zenoh_port`], the other way round,
+    /// so a fixture can put the DECLARER on one side and the PUBLISHER on the
+    /// other.
+    ///
+    /// Its own function rather than a parameter: a capture in which both roles
+    /// sit on one side would let a plane that ignores `Direction` pass, and
+    /// this plane's whole first assertion is about which side declared.
+    fn udp_from_zenoh_port(payload: &[u8]) -> Vec<u8> {
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&7447u16.to_be_bytes());
+        udp.extend_from_slice(&50000u16.to_be_bytes());
+        udp.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(payload);
+
+        let mut ip = vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+        ip.extend_from_slice(&[10, 0, 0, 2]);
+        ip.extend_from_slice(&[10, 0, 0, 1]);
+        ip.extend_from_slice(&udp);
+
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// A transport `Frame` carrying one network record, as
+    /// `wz-capture`'s own datagram fixtures build one.
+    fn frame_carrying(record: &[u8]) -> Vec<u8> {
+        let mut w = vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
+        w.extend_from_slice(record);
+        w
+    }
+
+    /// R311y869 (§1.1f) — THE PLANE FROM THE COMMAND LINE, both findings.
+    ///
+    /// The fixture is the deployment a reader opens a capture to understand: a
+    /// subscriber on `demo/**` declared by one side, and the other side
+    /// publishing two keys — one the subscriber covers and one nobody asked
+    /// for. Before this round the analyzer decoded the declaration and had no
+    /// output that mentioned it at all.
+    ///
+    /// EVERY declaration here is built by the PRODUCTION builder
+    /// (`wz_session_core::declare_build`), so this asserts the plane reads what
+    /// wz emits rather than what a fixture author believed the layout to be.
+    #[test]
+    fn a_declared_subscriber_and_the_traffic_nobody_asked_for_both_reach_the_cli() {
+        let declare =
+            wz_session_core::declare_build::build_declare_subscriber(1, 0, Some("demo/**"))
+                .expect("the production builder")
+                .try_as_borrowed()
+                .expect("re-borrow")
+                .encode_to_vec();
+        let put = |key: &str, payload: &[u8]| {
+            wz_codecs::push::Push {
+                header: wz_codecs::push::Push::default().header
+                    | wz_session_core::wire_const::FLAG_N_N,
+                keyexpr: wz_codecs::wireexpr::Wireexpr {
+                    body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
+                        wz_codecs::wireexpr_local::WireexprLocal {
+                            id: 0,
+                            suffix_len: Some(key.len() as u64),
+                            suffix: Some(key),
+                        },
+                    ),
+                },
+                body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                    payload_len: payload.len() as u64,
+                    payload,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+            .encode_to_vec()
+        };
+        let packets = [
+            udp_to_zenoh_port(&frame_carrying(&declare)),
+            udp_from_zenoh_port(&frame_carrying(&put("demo/temp", &[0u8; 16]))),
+            udp_from_zenoh_port(&frame_carrying(&put("private/log", &[0u8; 8]))),
+        ];
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+
+        let run = |format: Format| {
+            analyze_request(&Request {
+                capture: &capture,
+                keylog: None,
+                format,
+                per_flow: false,
+                per_message: false,
+                messages_per_flow: None,
+                quic_ports: &[],
+                quic_cid_len: None,
+                payload_rules: &[],
+                payload_field_names: &[],
+                serial_linktypes: &[],
+                census: Census {
+                    interests: true,
+                    ..Census::default()
+                },
+                per_field: false,
+                health: false,
+                select: None,
+            })
+            .expect("the capture reads")
+            .0
+        };
+
+        let text = run(Format::Text);
+        // ANTI-VACUITY: the fixture really decoded three records, so a plane
+        // reporting nothing cannot pass by having been handed nothing.
+        assert!(
+            text.contains("messages decoded: 3"),
+            "the fixture must decode: {text}"
+        );
+        assert!(
+            text.contains("declared interest: 1 (subscriber 1, queryable 0, liveliness 0)"),
+            "the declaration is SEEN: {text}"
+        );
+        // THE WILDCARD IS EVALUATED against the traffic: `demo/**` covers
+        // `demo/temp`, which no prefix comparison would produce.
+        assert!(
+            text.contains("subscriber demo/** covers 1 key(s), 1 message(s), 16 byte(s)"),
+            "and it covers the traffic it matches: {text}"
+        );
+        // THE MIRROR FINDING, and it is stated as exact because every
+        // declaration here was judged.
+        assert!(
+            text.contains("1 keyexpr(s) carried traffic no declaration here matches"),
+            "and names the traffic nobody asked for: {text}"
+        );
+        assert!(
+            !text.contains("AT MOST"),
+            "every declaration was judged, so the count is not a floor: {text}"
+        );
+
+        let json = run(Format::Json);
+        assert!(
+            json.contains(
+                "\"kind\":\"subscriber\",\"declarer\":\"a\",\"id\":1,\
+                           \"keyexpr\":\"demo/**\",\"open\":true,\"covers\":1"
+            ),
+            "the export carries the same row: {json}"
+        );
+        assert!(
+            json.contains("\"unclaimed\":1,\"unclaimed_exact\":true"),
+            "and the same verdict: {json}"
         );
     }
 
