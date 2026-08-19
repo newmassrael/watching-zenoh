@@ -277,6 +277,26 @@ impl PayloadFormat for Protobuf {
         "protobuf"
     }
 
+    /// R311y873 — the ONE table name protobuf bytes are declared under.
+    ///
+    /// Not `application/octet-stream` beside it, and the omission is the
+    /// decision rather than an oversight. A publisher that said
+    /// `octet-stream` said "these are bytes and I am claiming nothing more",
+    /// which is a claim this rule does not contradict; folding it in here
+    /// would make the list mean "encodings a protobuf body might wear" instead
+    /// of "encodings that AGREE with this rule", and every entry that means
+    /// nothing weakens the ones that mean something.
+    ///
+    /// The silent default is not listed either, and must not be: `zenoh/bytes`
+    /// is what a publisher that set no encoding gets — the nanopb deployment
+    /// this decoder exists for — and it is admitted by
+    /// `payload_decode::decode_payload` as an ABSENCE of a claim
+    /// rather than as a member of this set. Listing it here would say the
+    /// publisher claimed protobuf when it claimed nothing.
+    fn encodings(&self) -> Option<&[&str]> {
+        Some(&["application/protobuf"])
+    }
+
     fn decode(&self, payload: &[u8]) -> Result<Vec<PayloadField>, PayloadFormatError> {
         if payload.is_empty() {
             // An empty payload is not a protobuf message this reader can
@@ -312,6 +332,49 @@ pub const BUILTIN_NAMES: &[&str] = &["protobuf"];
 mod tests {
     use super::*;
     use alloc::vec;
+
+    /// R311y873 — EVERY BUILT-IN NAMES ITS ENCODINGS, and every name it gives
+    /// is one the wire table answers to.
+    ///
+    /// # Why this is a gate and not a review note
+    ///
+    /// [`PayloadFormat::encodings`] defaults to `None` so a consumer's
+    /// proprietary format keeps compiling across a version bump. That default
+    /// is an opt-out from the contradiction check, and a built-in added here
+    /// later takes it by SAYING NOTHING — the check would be off for that
+    /// format and every test of it would still pass, because what it guards
+    /// against is traffic no fixture has. This crate's own rule for that shape
+    /// is R311y860's: a member in no class must fall out of a total something
+    /// asserts, rather than be caught by whoever reads the diff.
+    ///
+    /// The second half is the sharper one. A name is matched against
+    /// `ENCODING_ID_TO_STR` by string equality, so `application/protobuff`
+    /// would be in no table entry, agree with no sample, and quietly refuse
+    /// every payload the rule covers — a total silencing that reads exactly
+    /// like "no traffic matched".
+    #[test]
+    fn every_builtin_names_encodings_the_wire_table_answers_to() {
+        use wz_codecs::encoding_ids::ENCODING_ID_TO_STR;
+        assert!(!BUILTIN_NAMES.is_empty(), "a gate over nothing is green");
+        for name in BUILTIN_NAMES {
+            let format = builtin(name).expect("a listed built-in resolves");
+            let encodings = format
+                .encodings()
+                .unwrap_or_else(|| panic!("built-in `{name}` names no encoding"));
+            assert!(
+                !encodings.is_empty(),
+                "built-in `{name}` names an EMPTY encoding set, which agrees \
+                 with nothing and silences the rule"
+            );
+            for declared in encodings {
+                assert!(
+                    ENCODING_ID_TO_STR.contains(declared),
+                    "built-in `{name}` names `{declared}`, which is in no \
+                     entry of the wire encoding table"
+                );
+            }
+        }
+    }
 
     /// R311y701 (PF3) — A NESTED MESSAGE IS WALKED, and its fields carry
     /// the ROUTE to them and spans in the OUTER payload's coordinates.

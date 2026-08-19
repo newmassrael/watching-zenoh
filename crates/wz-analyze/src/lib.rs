@@ -290,6 +290,11 @@ OPTIONS:
                       matches <keyexpr>, using <format>. Repeatable; the
                       first matching rule wins. Matching is zenoh's own
                       keyexpr dialect, so `demo/**` covers `demo/a`.
+                      A sample whose OWN declared encoding contradicts the
+                      rule is reported and NOT decoded -- an encoding
+                      travels per sample, so one keyexpr can carry two, and
+                      decoding a JSON body as protobuf invents fields.
+                      A publisher that declared nothing is decoded.
                       Needs --fields. Formats: protobuf.
     --payload-name <keyexpr>:<path>=<name>
                       name one decoded field path, e.g.
@@ -3782,6 +3787,19 @@ fn payload_block(
             format: name,
             why,
         } => format!("    payload `{keyexpr}` as {name}: REFUSED -- {why}\n"),
+        // R311y873 — this line names the FLAG, which is the whole reason the
+        // state is separate from `Refused` above. That one sends a reader to
+        // their capture; here the capture is right and the mapping is wrong,
+        // and a reader told only "refused" would go doubting a publisher that
+        // said exactly what it sent.
+        PayloadDecoding::EncodingMismatch {
+            keyexpr,
+            format: name,
+            declared,
+        } => format!(
+            "    payload `{keyexpr}`: NOT DECODED -- the publisher declared \
+             {declared} and the --payload-format rule says {name}\n"
+        ),
         PayloadDecoding::Decoded {
             keyexpr,
             format: name,

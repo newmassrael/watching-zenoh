@@ -7853,6 +7853,10 @@ layer_c1bn_passive_dissection_features() {
         fields_json::tests::a_capture_that_cannot_be_reread_is_reported_rather_than_left_empty \
         fields_json::tests::a_declared_format_decodes_the_payload_and_the_spans_are_the_messages \
         payload_decode::tests::a_declaration_that_binds_nothing_is_still_reported \
+        payload_decode::tests::a_sample_whose_declared_encoding_contradicts_the_rule_is_not_decoded \
+        payload_decode::tests::the_claim_the_rule_agrees_with_and_the_silence_that_is_no_claim_both_decode \
+        payload_decode::tests::the_encoding_ids_this_file_names_are_the_ones_upstream_holds \
+        payload_builtin::tests::every_builtin_names_encodings_the_wire_table_answers_to \
         payload_builtin::tests::a_nested_message_is_walked_and_its_paths_name_the_route \
         payload_builtin::tests::a_span_two_layers_in_is_still_in_the_outer_payloads_coordinates \
         payload_builtin::tests::a_length_field_that_is_not_a_message_falls_back_to_its_byte_count \

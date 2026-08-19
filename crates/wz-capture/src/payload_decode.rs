@@ -31,6 +31,7 @@ use wz_session_core::passive::Direction;
 
 use crate::agg::KeyexprSpaces;
 use crate::payload::formats::{Declaration, DeclarationId, FormatMap, PayloadField, PayloadFormat};
+use crate::payload::Encoding;
 
 /// R311y726 — THE DECLARATIONS IN FORCE FOR ONE RUN, and which of them applied.
 ///
@@ -160,6 +161,23 @@ pub enum PayloadDecoding {
         /// The fields, rebased into the message's coordinate space.
         fields: Vec<PayloadField>,
     },
+    /// R311y873 — the sample's OWN declared encoding contradicts the rule, so
+    /// the format was never applied.
+    ///
+    /// Distinct from [`Self::Refused`] and that distinction is the whole
+    /// finding: `Refused` says the BYTES are not this format and sends a reader
+    /// to their capture, which in this case is exactly right. Here the rule is
+    /// what is wrong — a publisher stated what it sent and the mapping
+    /// disagreed — and a reader who cannot tell the two apart will go looking
+    /// at a wire that has nothing to answer for.
+    EncodingMismatch {
+        /// The key expression the rule was matched against.
+        keyexpr: String,
+        /// The decoder the rule named.
+        format: String,
+        /// What the publisher said this payload is.
+        declared: String,
+    },
     /// The format was applied and refused.
     Refused {
         /// The key expression the rule was matched against.
@@ -169,6 +187,61 @@ pub enum PayloadDecoding {
         /// What it said.
         why: String,
     },
+}
+
+impl PayloadDecoding {
+    /// R311y873 — the `state` word a consumer branches on, written ONCE.
+    ///
+    /// # Why the emit does not spell these itself any more
+    ///
+    /// It did, and this round measured what that cost. The vocabulary is
+    /// enumerated by hand in three places — this enum, the C ABI's rustdoc, and
+    /// `wz_dissect.h` — and adding a sixth state left BOTH prose lists saying
+    /// "one of five", each naming a set that no longer existed. The strings
+    /// themselves were the only part a compiler could have held, so they are
+    /// held here: `push_decoding` asks, and a variant added later cannot reach
+    /// the wire without a word, because this match is exhaustive.
+    ///
+    /// What a compiler still cannot hold is the PROSE. That is why
+    /// `wz-capi-dissect` carries a test asserting the header names every word
+    /// this returns — the gate for the half that is not a type.
+    pub fn state(&self) -> &'static str {
+        Self::STATES[match self {
+            Self::NoRules => 0,
+            Self::NoPayload => 1,
+            Self::KeyexprUnresolved => 2,
+            Self::NoRule(_) => 3,
+            Self::EncodingMismatch { .. } => 4,
+            Self::Refused { .. } => 5,
+            Self::Decoded { .. } => 6,
+        }]
+    }
+
+    /// R311y873 — EVERY `state` word, for the consumers that document the
+    /// vocabulary in prose a compiler cannot read.
+    ///
+    /// # Why an indexed array rather than seven string literals
+    ///
+    /// The list has to be reachable as a SET — `wz-capi-dissect` asserts its
+    /// header names each one — and a set assembled by hand beside a match is a
+    /// second enumeration, which is the shape that just failed. Indexing joins
+    /// them: a variant added to [`Self::state`] must choose an index, a word
+    /// added here changes this array's LENGTH, and the length is written in the
+    /// type. Neither half can move alone.
+    ///
+    /// The residue, stated rather than hidden: an author who points a new
+    /// variant at an EXISTING index gets two variants sharing one word and no
+    /// compiler complains. That is a narrower hole than the one it replaces,
+    /// and it is a deliberate act rather than an omission.
+    pub const STATES: [&'static str; 7] = [
+        "no_rules",
+        "no_payload",
+        "keyexpr_unresolved",
+        "no_rule",
+        "encoding_mismatch",
+        "refused",
+        "decoded",
+    ];
 }
 
 /// The keyexpr of the `WireExpr` under `field`, RESOLVED.
@@ -261,16 +334,94 @@ pub fn subtree_payload_bytes(field: &Field) -> Option<&Field> {
 /// naming the right topic. So the pair is found INNERMOST-FIRST inside one
 /// subtree: the node returned is the smallest one holding both.
 pub fn keyexpr_and_payload<'a>(field: &'a Field, at: KeyexprAt<'_>) -> Option<(String, &'a Field)> {
+    message_node(field, at).map(|(_, keyexpr, payload)| (keyexpr, payload))
+}
+
+/// R311y873 — the same search, answering with the NODE it stopped at.
+///
+/// The innermost-first rule above is subtle and was arrived at by measurement,
+/// so the encoding lookup does not get a second copy of it: this is the one
+/// walk, and [`keyexpr_and_payload`] is a projection of its answer. The node is
+/// what a sibling field has to be read out of — an encoding is not under the
+/// payload, it is beside it — and taking the first `encoding` anywhere in the
+/// whole tree would pair a batch's second message's claim with this one's
+/// bytes, which is exactly the defect that doc warns about for `payload`.
+fn message_node<'a>(field: &'a Field, at: KeyexprAt<'_>) -> Option<(&'a Field, String, &'a Field)> {
     if let FieldValue::Nested(children) = &field.value {
         for child in children {
-            if let Some(found) = keyexpr_and_payload(child, at) {
+            if let Some(found) = message_node(child, at) {
                 return Some(found);
             }
         }
     }
     let keyexpr = subtree_keyexpr(field, at)?;
     let payload = subtree_payload_bytes(field)?;
-    Some((keyexpr, payload))
+    Some((field, keyexpr, payload))
+}
+
+/// R311y873 — the encoding ONE message declared, read off its walked group.
+///
+/// [`Encoding::Absent`] when the record carried no `encoding` group, which is
+/// what the type already means and what the wire already means: the default,
+/// `zenoh/bytes`. The packed word is handed over unshifted because
+/// [`Encoding::from_packed`] owns that packing — a caller that shifted it here
+/// would be a second reader of the same wire word.
+fn declared_encoding(node: &Field) -> Encoding<'_> {
+    fn group(field: &Field) -> Option<&Field> {
+        if field.name == "encoding" && matches!(field.value, FieldValue::Nested(_)) {
+            return Some(field);
+        }
+        if let FieldValue::Nested(children) = &field.value {
+            return children.iter().find_map(group);
+        }
+        None
+    }
+    let Some(FieldValue::Nested(parts)) = group(node).map(|f| &f.value) else {
+        return Encoding::Absent;
+    };
+    let mut packed: Option<u32> = None;
+    let mut schema: Option<&str> = None;
+    for part in parts {
+        match (part.name.as_ref(), &part.value) {
+            ("packed_id", FieldValue::Uint(v)) => packed = Some(*v as u32),
+            ("schema", FieldValue::Text(text)) => schema = Some(text),
+            _ => {}
+        }
+    }
+    match packed {
+        Some(packed) => Encoding::from_packed(packed, schema),
+        None => Encoding::Absent,
+    }
+}
+
+/// R311y873 — the name a publisher declared that CONTRADICTS `format`, if any.
+///
+/// # The three answers that are not contradictions
+///
+/// A format that named no encodings has opted out and is applied as before. An
+/// [`Encoding::Absent`] record and the default id 0 are the same fact — the
+/// publisher claimed nothing — and silence must never be read as disagreement,
+/// or the nanopb captures this decoder exists for would all be refused. An
+/// [`Encoding::Unknown`] id is a claim this BUILD cannot read; calling it a
+/// contradiction would blame a capture for a table this binary is behind on.
+///
+/// What is left is the one case worth a finding: the publisher named an
+/// encoding this build knows, and it is not one the rule's format is for.
+fn contradicted_by(format: &dyn PayloadFormat, node: &Field) -> Option<String> {
+    let accepted = format.encodings()?;
+    let declared = declared_encoding(node);
+    let Encoding::Known { id, name, .. } = declared else {
+        return None;
+    };
+    // Id 0 is `zenoh/bytes`, which a publisher gets by saying nothing at all.
+    // Told apart from the other table entries HERE rather than by leaving it
+    // out of the table: it is a real encoding a publisher may also name
+    // deliberately, and this reader cannot distinguish the two — so the
+    // benefit of the doubt goes to the traffic.
+    if id == 0 || accepted.contains(&name) {
+        return None;
+    }
+    Some(String::from(name))
 }
 
 /// Apply the mapping to one walked message.
@@ -278,7 +429,7 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
     if map.is_empty() {
         return PayloadDecoding::NoRules;
     }
-    let Some((keyexpr, payload)) = keyexpr_and_payload(field, at) else {
+    let Some((node, keyexpr, payload)) = message_node(field, at) else {
         // Either there is no payload under any keyexpr, or the only keyexpr is
         // a numeric id. The two are told apart by asking again for each half.
         return if subtree_payload_bytes(field).is_none() {
@@ -293,6 +444,19 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
     let Some(format) = map.for_keyexpr(&keyexpr) else {
         return PayloadDecoding::NoRule(keyexpr);
     };
+    // R311y873 — the sender's claim is checked BEFORE the decoder runs, which
+    // is this crate's own rule (`payload.rs`'s opening) finally reaching the
+    // field layer. Before the decode and not after it, because a decoder that
+    // walked contradicting bytes and happened to SUCCEED is the half of the
+    // defect a refusal never shows: `{"a":1}` opens a valid protobuf tag, and
+    // the reader is handed fields no publisher sent.
+    if let Some(declared) = contradicted_by(format, node) {
+        return PayloadDecoding::EncodingMismatch {
+            keyexpr,
+            format: String::from(format.name()),
+            declared,
+        };
+    }
     match format.decode(bytes) {
         Ok(mut fields) => {
             // The spans arrive PAYLOAD-relative and every other span in this
@@ -339,20 +503,47 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
 /// terminal is told which flag to go fix is a property of that surface.
 pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
     use wz_session_core::json::escape_into;
+    // R311y873 — the word comes from `PayloadDecoding::state`, so this function
+    // renders SHAPE and the vocabulary lives on the type. Opened here rather
+    // than repeated in seven arms, which is how the arms and the prose lists
+    // came to disagree in the first place.
+    let open = |out: &mut String| {
+        out.push_str("{\"state\":\"");
+        out.push_str(decoding.state());
+        out.push('"');
+    };
     match decoding {
         // A caller is expected to skip the block entirely for this state -- a
         // reader who declared nothing is not told about payloads they did not
         // ask about. Rendered rather than unreachable so this function is total
         // over the type: an `unreachable!` here would make a caller's ordering
         // mistake a panic in a library a C consumer links.
-        PayloadDecoding::NoRules => out.push_str("{\"state\":\"no_rules\"}"),
-        PayloadDecoding::NoPayload => out.push_str("{\"state\":\"no_payload\"}"),
+        PayloadDecoding::NoRules | PayloadDecoding::NoPayload => {
+            open(out);
+            out.push('}');
+        }
         PayloadDecoding::KeyexprUnresolved => {
-            out.push_str("{\"state\":\"keyexpr_unresolved\"}");
+            open(out);
+            out.push('}');
         }
         PayloadDecoding::NoRule(keyexpr) => {
-            out.push_str("{\"state\":\"no_rule\",\"keyexpr\":");
+            open(out);
+            out.push_str(",\"keyexpr\":");
             escape_into(keyexpr, out);
+            out.push('}');
+        }
+        PayloadDecoding::EncodingMismatch {
+            keyexpr,
+            format,
+            declared,
+        } => {
+            open(out);
+            out.push_str(",\"keyexpr\":");
+            escape_into(keyexpr, out);
+            out.push_str(",\"format\":");
+            escape_into(format, out);
+            out.push_str(",\"declared\":");
+            escape_into(declared, out);
             out.push('}');
         }
         PayloadDecoding::Refused {
@@ -360,7 +551,8 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
             format,
             why,
         } => {
-            out.push_str("{\"state\":\"refused\",\"keyexpr\":");
+            open(out);
+            out.push_str(",\"keyexpr\":");
             escape_into(keyexpr, out);
             out.push_str(",\"format\":");
             escape_into(format, out);
@@ -373,7 +565,8 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
             format,
             fields,
         } => {
-            out.push_str("{\"state\":\"decoded\",\"keyexpr\":");
+            open(out);
+            out.push_str(",\"keyexpr\":");
             escape_into(keyexpr, out);
             out.push_str(",\"format\":");
             escape_into(format, out);
@@ -411,6 +604,134 @@ mod tests {
     use super::*;
     use crate::payload::formats::FormatMap;
     use alloc::vec;
+
+    /// A walked `MsgPut` on `demo/a` declaring `encoding_id`, carrying `bytes`.
+    ///
+    /// Shaped exactly as `wz_session_core::dissect::walk_msg_put` shapes one —
+    /// the `encoding` group holds the PACKED word the wire carries, because
+    /// `Encoding::from_packed` is the only reader of it and a test that handed
+    /// it a pre-shifted id would be proving something the wire never says.
+    fn put_declaring(encoding_id: u16, bytes: &[u8]) -> Field {
+        use wz_session_core::dissect::Span;
+        let f = |name: &'static str, value: FieldValue| Field {
+            name: name.into(),
+            span: Span { start: 0, end: 0 },
+            value,
+        };
+        f(
+            "msg_put",
+            FieldValue::Nested(vec![
+                f(
+                    "keyexpr",
+                    FieldValue::Nested(vec![
+                        f("id", FieldValue::Uint(0)),
+                        f("mapping", FieldValue::Bits(1)),
+                        f("suffix", FieldValue::Text(String::from("demo/a"))),
+                    ]),
+                ),
+                f(
+                    "encoding",
+                    FieldValue::Nested(vec![
+                        f("packed_id", FieldValue::Uint(u64::from(encoding_id) << 1)),
+                        f("has_schema", FieldValue::Flag(false)),
+                        f("id", FieldValue::Bits(u64::from(encoding_id))),
+                    ]),
+                ),
+                f("payload", FieldValue::Bytes(bytes.to_vec())),
+            ]),
+        )
+    }
+
+    /// The three encoding ids this test file names, by their table position in
+    /// `wz_codecs::encoding_ids::ENCODING_ID_TO_STR`. Asserted rather than
+    /// hard-coded blind: an upstream insertion that shifted the table would
+    /// otherwise silently retarget every assertion below.
+    const ENC_ZENOH_BYTES: u16 = 0;
+    const ENC_JSON: u16 = 5;
+    const ENC_PROTOBUF: u16 = 13;
+
+    #[test]
+    fn the_encoding_ids_this_file_names_are_the_ones_upstream_holds() {
+        use wz_codecs::encoding_ids::ENCODING_ID_TO_STR;
+        assert_eq!(ENCODING_ID_TO_STR[ENC_ZENOH_BYTES as usize], "zenoh/bytes");
+        assert_eq!(ENCODING_ID_TO_STR[ENC_JSON as usize], "application/json");
+        assert_eq!(
+            ENCODING_ID_TO_STR[ENC_PROTOBUF as usize],
+            "application/protobuf"
+        );
+    }
+
+    /// R311y873 — A RULE IS NOT DECODED AGAINST A SAMPLE THAT CONTRADICTS IT.
+    ///
+    /// `payload.rs` opens by stating this crate's own rule — the encoding is
+    /// the SENDER'S CLAIM, and a claim is checked before it is believed — and
+    /// the payload PLANE checks it. The FIELD layer did not: `decode_payload`
+    /// selected a format by key expression alone and applied it to whatever
+    /// bytes were under one.
+    ///
+    /// A key expression is not the unit the claim travels in. Zenoh carries
+    /// `encoding` on every sample, so one keyexpr legitimately carries two of
+    /// them, and `--payload-format demo/**=protobuf` then walks a JSON body
+    /// with a varint reader. What that produced is the worse half of the
+    /// defect: not a refusal, but FIELDS — `{"a":1}` opens `0x7b`, a valid tag
+    /// for field 15 wire type 3, and the reader is shown a structure no
+    /// publisher ever sent.
+    ///
+    /// The verdict names the RULE, because the rule is the thing that is
+    /// wrong. `Refused` would send a reader to their capture, and the capture
+    /// is exactly right.
+    #[test]
+    fn a_sample_whose_declared_encoding_contradicts_the_rule_is_not_decoded() {
+        let mut map = FormatMap::new();
+        map.declare("demo/**=protobuf").expect("a keyexpr pattern");
+        let run = Declarations::new(&map);
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+
+        let json = put_declaring(ENC_JSON, br#"{"a":1}"#);
+        assert_eq!(
+            decode_payload(&json, &run, at),
+            PayloadDecoding::EncodingMismatch {
+                keyexpr: String::from("demo/a"),
+                format: String::from("protobuf"),
+                declared: String::from("application/json"),
+            },
+            "a publisher that said application/json is not decoded by a \
+             protobuf rule, and the report names the rule"
+        );
+    }
+
+    /// The vehicle, proved in the same round: the check must not cost the
+    /// decode it guards.
+    ///
+    /// Two arms, and the second is the one that would break every capture
+    /// already taken. `zenoh/bytes` is id 0 — what a publisher that set no
+    /// encoding gets, which is the nanopb deployment this format exists for.
+    /// Treating the DEFAULT as a contradiction would refuse the traffic the
+    /// rule was written for, so silence is not a claim and does not veto.
+    #[test]
+    fn the_claim_the_rule_agrees_with_and_the_silence_that_is_no_claim_both_decode() {
+        let mut map = FormatMap::new();
+        map.declare("demo/**=protobuf").expect("a keyexpr pattern");
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+        // field 1, varint, value 42.
+        let body: &[u8] = &[0x08, 0x2a];
+
+        for (encoding, why) in [
+            (ENC_PROTOBUF, "the publisher's claim agrees with the rule"),
+            (ENC_ZENOH_BYTES, "the publisher made no claim at all"),
+        ] {
+            let run = Declarations::new(&map);
+            let decoded = decode_payload(&put_declaring(encoding, body), &run, at);
+            match decoded {
+                PayloadDecoding::Decoded { ref fields, .. } => {
+                    assert_eq!(fields.len(), 1, "{why}: one field was sent");
+                }
+                other => panic!("{why}: expected a decode, got {other:?}"),
+            }
+        }
+    }
 
     /// R311y856 — A DECLARATION THAT BOUND NOTHING IS STILL REPORTED, and the
     /// ledger belongs to the RUN rather than to the map.
@@ -464,6 +785,11 @@ mod tests {
                 keyexpr: String::from("demo/a"),
                 format: String::from("protobuf"),
                 why: String::from("these bytes are not this format"),
+            },
+            PayloadDecoding::EncodingMismatch {
+                keyexpr: String::from("demo/\"quoted\""),
+                format: String::from("protobuf"),
+                declared: String::from("application/json"),
             },
         ];
         for state in &states {

@@ -197,12 +197,19 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * blaming the traffic for their own rule.
  *
  * Every walked row gains `payload_decode`, an object whose `state` is
- * `decoded`, `refused`, `no_rule`, `keyexpr_unresolved` or `no_payload`. The
- * last three are ANSWERS, not omissions: a rule that never fired and a rule
- * that fired and found nothing send you to opposite places, and
- * `keyexpr_unresolved` is the ordinary shape of a capture that began after
- * the declarations went past. A decoded field's start/end are in the
- * MESSAGE's coordinate space, like every other span on the row. */
+ * `decoded`, `refused`, `encoding_mismatch`, `no_rule`, `keyexpr_unresolved`
+ * or `no_payload`. The last three are ANSWERS, not omissions: a rule that
+ * never fired and a rule that fired and found nothing send you to opposite
+ * places, and `keyexpr_unresolved` is the ordinary shape of a capture that
+ * began after the declarations went past. A decoded field's start/end are in
+ * the MESSAGE's coordinate space, like every other span on the row.
+ *
+ * R311y873 -- `encoding_mismatch` is the sample's OWN declared encoding
+ * disagreeing with the rule, and it carries `declared` rather than `why`.
+ * Told apart from `refused` because the two send you to opposite places:
+ * that one says the bytes are not this format, this one says the bytes are
+ * exactly what their publisher said and the MAPPING is wrong. Folding the
+ * two would send an operator to a wire with nothing to answer for. */
 int wz_dissect_pcap_fields_with_payloads(const unsigned char *bytes, size_t len,
                                          size_t max_messages_per_flow,
                                          const char *declarations, char **out);

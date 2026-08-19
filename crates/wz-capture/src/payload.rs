@@ -1225,6 +1225,38 @@ pub mod formats {
         fn name(&self) -> &str;
         /// Decode `payload`, or say why not.
         fn decode(&self, payload: &[u8]) -> Result<Vec<PayloadField>, PayloadFormatError>;
+
+        /// R311y873 — the ENCODINGS this format is for, by their table name in
+        /// [`wz_codecs::encoding_ids::ENCODING_ID_TO_STR`], or `None` when this
+        /// format declines to say.
+        ///
+        /// # Why a format is asked at all
+        ///
+        /// A rule is keyed on a key expression and an encoding travels on the
+        /// SAMPLE, so one keyexpr legitimately carries two of them. Without
+        /// this, `payload_decode::decode_payload` walked a JSON body
+        /// with a varint reader because a rule said `demo/**=protobuf` — and
+        /// what came back blamed the bytes, which were exactly what their
+        /// publisher said they were.
+        ///
+        /// # Why NAMES and not ids
+        ///
+        /// `shape_of` settled this for the plane above: derived from the
+        /// table name rather than from a second list of ids, so an entry added
+        /// upstream lands correctly without an edit here.
+        ///
+        /// # Why a default, and what declining means
+        ///
+        /// This trait is an extension point a consumer implements for a
+        /// proprietary format without patching this crate, so a required method
+        /// would break every such implementation on a version bump. `None` is
+        /// therefore the behaviour that was there before: the format is applied
+        /// to whatever the rule covers. It is an opt-out that is stated rather
+        /// than one taken by omission — a format that names its encodings is
+        /// asking to be protected from a mapping that contradicts the wire.
+        fn encodings(&self) -> Option<&[&str]> {
+            None
+        }
     }
 
     /// Why a mapping rule was refused.

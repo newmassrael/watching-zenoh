@@ -432,12 +432,20 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields(
 /// # Reading the result
 ///
 /// Every walked row gains `payload_decode`, an object whose `state` is one of
-/// `decoded`, `refused`, `no_rule`, `keyexpr_unresolved` or `no_payload`. The
-/// last three are ANSWERS and not omissions: a rule that never fired and a rule
-/// that fired and found nothing send a reader to opposite places, and
-/// `keyexpr_unresolved` is the ordinary shape of a capture that began after the
-/// declarations went past. A `decoded` field's `start` / `end` are in the
-/// MESSAGE's coordinate space, like every other span on the row.
+/// `decoded`, `refused`, `encoding_mismatch`, `no_rule`, `keyexpr_unresolved`
+/// or `no_payload`. The last three are ANSWERS and not omissions: a rule that
+/// never fired and a rule that fired and found nothing send a reader to
+/// opposite places, and `keyexpr_unresolved` is the ordinary shape of a capture
+/// that began after the declarations went past. A `decoded` field's `start` /
+/// `end` are in the MESSAGE's coordinate space, like every other span on the
+/// row.
+///
+/// R311y873 — `encoding_mismatch` is the sample's OWN declared encoding
+/// disagreeing with the rule, and it carries `declared` rather than `why`. Told
+/// apart from `refused` because the two send a reader to opposite places: that
+/// one says the bytes are not this format, this one says the bytes are exactly
+/// what their publisher said and the MAPPING is wrong. A consumer that folded
+/// the two would send an operator to a wire with nothing to answer for.
 ///
 /// # Safety
 /// `bytes` must point to at least `len` readable bytes, `declarations` must be
@@ -731,6 +739,57 @@ fn write_string(s: String, out: *mut *mut c_char) -> c_int {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R311y873 — THE HEADER NAMES EVERY `payload_decode` STATE THE LIBRARY
+    /// CAN EMIT.
+    ///
+    /// # Why a test and not a review
+    ///
+    /// The vocabulary is written out in prose twice — this crate's rustdoc and
+    /// `wz_dissect.h` — and both lists said "one of five" for the whole round
+    /// in which a sixth was added. Nothing failed: a `state` word is a string
+    /// in a JSON document, so a header that names five of six compiles, links,
+    /// passes every ABI test, and tells a C consumer that a state they will
+    /// receive does not exist. This is the header half of what
+    /// `PayloadDecoding::STATES` made holdable at all.
+    ///
+    /// The HEADER and not the rustdoc, and the asymmetry is deliberate: the
+    /// header is what a linking product reads and the only one of the two that
+    /// ships. `include_str!` rather than a path opened at runtime, so the file
+    /// this asserts about is the one compiled into this build.
+    ///
+    /// # The one exclusion, and why it is not a skip
+    ///
+    /// `no_rules` is a state of the TYPE that no document carries, because
+    /// `fields_json` folds an empty map to `None` before any row is rendered.
+    /// The gate found that on its first run and this round settled it by
+    /// running the boundary, not by reading the fold. The exclusion is held by
+    /// `no_rules_never_reaches_a_document_so_the_header_need_not_name_it` —
+    /// remove that fold and the pair reds, which is what a bare skip here would
+    /// have cost.
+    #[test]
+    fn the_header_names_every_payload_decode_state() {
+        const HEADER: &str = include_str!("../include/wz_dissect.h");
+        const NEVER_EMITTED: &str = "no_rules";
+        let emitted: Vec<&str> = wz_capture::payload_decode::PayloadDecoding::STATES
+            .iter()
+            .copied()
+            .filter(|s| *s != NEVER_EMITTED)
+            .collect();
+        assert!(
+            emitted.len() + 1 == wz_capture::payload_decode::PayloadDecoding::STATES.len(),
+            "the exclusion must name a state that EXISTS, or this gate is \
+             quietly running over the whole set minus nothing"
+        );
+        for state in emitted {
+            assert!(
+                HEADER.contains(state),
+                "wz_dissect.h never names the `{state}` state, which this \
+                 library emits -- a C consumer branching on the header's list \
+                 would fall through on traffic that produces it"
+            );
+        }
+    }
 
     /// Drive the ABI the way C does — raw pointers in, owned string out,
     /// freed through the library's own free. Calling the Rust functions
@@ -1994,6 +2053,37 @@ mod tests {
             .to_string();
         unsafe { wz_dissect_string_free(out) };
         s
+    }
+
+    /// R311y873 — `no_rules` NEVER REACHES A DOCUMENT, which is why the header
+    /// is right not to name it.
+    ///
+    /// # Why this test exists, and what it is holding
+    ///
+    /// `the_header_names_every_payload_decode_state` reds on `no_rules` unless
+    /// that state is excluded, and a gate's first finding has to be adjudicated
+    /// before it is either obeyed or narrowed. This round asserted the opposite
+    /// of what is written above and RAN it: the answer came back from the
+    /// boundary rather than from reading the code that feeds it, and the answer
+    /// was that an empty declaration text produces no `payload_decode` key at
+    /// all. `fields_json` folds an empty map to `None` at its door
+    /// (`crates/wz-capture/src/fields_json.rs:86`), so the state exists on the
+    /// type and on no wire.
+    ///
+    /// So this is not a test of a silence for its own sake — it is what makes
+    /// the gate's exclusion honest. The moment that fold changes and `no_rules`
+    /// starts reaching a consumer, this reds and sends the next author to the
+    /// header, which is exactly the coupling a bare skip in the gate would have
+    /// thrown away.
+    #[test]
+    fn no_rules_never_reaches_a_document_so_the_header_need_not_name_it() {
+        let file = protobuf_capture();
+        let none = call_fields_with_payloads(&file, 0, "").expect("the capture reads");
+        assert!(
+            !none.contains("payload_decode"),
+            "a caller who declared nothing is told nothing about payloads, and \
+             the state word for it must stay off the wire: {none}"
+        );
     }
 
     /// R311y856 — THE PAYLOAD DECODES THROUGH THE ABI, under the declaration
