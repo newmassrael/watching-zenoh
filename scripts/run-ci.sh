@@ -2184,8 +2184,17 @@ layer_c0g_apt_ceiling() {
     # workflow routes around bounds half the workflow, and the next apt step
     # anyone adds will be written the way the thirteen that were here already
     # were. This is the arm that keeps the file from becoming a convention.
+    #
+    # COMMENTS ARE NOT CALLS, and this arm learned that from its own first
+    # hosted run (32198505957). The `ci` job's budget note lists per-step times
+    # and one of the rows reads "apt-get update  88s"; a bare `grep apt-get`
+    # reported that PROSE as an unbounded call and redded the gate. A filter
+    # that does not use the string it actually means is the R311y827 class, and
+    # the string this means is a COMMAND — so a line whose first non-space
+    # character is `#` is skipped, in YAML and in the shell inside `run:` blocks
+    # alike, since `#` opens a comment in both.
     local raw
-    raw="$(grep -n 'apt-get' .github/workflows/ci.yml || true)"
+    raw="$(grep -n 'apt-get' .github/workflows/ci.yml | grep -v ':[[:space:]]*#' || true)"
     if [[ -n "${raw}" ]]; then
         echo "  Layer C0g FAIL: ci.yml calls apt-get directly, so these steps are" \
             "OUTSIDE the ceiling and a mirror outage still spends their job's whole" \
@@ -2194,8 +2203,11 @@ layer_c0g_apt_ceiling() {
         echo "  Route them through scripts/lib/apt-install.sh." >&2
         return 1
     fi
+    # Comments skipped here too, and for the same reason as above: this number
+    # is meant to be CALLS. Counting mentions made it read 17 against 14 real
+    # ones the moment the split's notes started naming the script.
     local routed
-    routed="$(grep -c 'apt-install.sh' .github/workflows/ci.yml || true)"
+    routed="$(grep 'apt-install.sh' .github/workflows/ci.yml | grep -vc ':\?[[:space:]]*#' || true)"
     if [[ "${routed}" -lt 1 ]]; then
         echo "  Layer C0g FAIL: no step in ci.yml routes through the ceiling at all." \
             "The arm above passes trivially when the population is zero, which is" \
