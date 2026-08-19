@@ -203,7 +203,15 @@ jobs:
         # hash so a changed list gets a new key rather than a stale hit. The
         # restore-keys prefix means a changed list still starts from the last
         # good archive instead of from nothing.
-        uses: actions/cache@v4
+        # RESTORE and SAVE are split on purpose. The combined `actions/cache`
+        # saves in a post step, and R311y882 shipped it while admitting nobody
+        # knew whether that runs after a FAILED job. That unknown is load-bearing
+        # here: the job this fixes is the one a slow mirror reds, so if a red job
+        # cannot save its partial archive, the cache never warms and the fix
+        # never engages. The save below is `if: always()` precisely so a cold red
+        # run still leaves the next one better off.
+        id: apt-archives
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
           key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -615,6 +623,16 @@ jobs:
         # runs the real check rather than the local-developer skip.
         run: bash scripts/lib/apt-install.sh python3-yaml
 
+      - name: Save apt archives
+        # AFTER the second apt step, not the first: this job installs twice and
+        # a save placed between them would carry only half the archive, then sit
+        # on a key nothing updates. See the `feature-gates` copy for the rest.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
       - name: Layer D — deploy/*.yaml schema validate
         run: bash scripts/run-ci.sh --layer D
 
@@ -748,7 +766,15 @@ jobs:
         # hash so a changed list gets a new key rather than a stale hit. The
         # restore-keys prefix means a changed list still starts from the last
         # good archive instead of from nothing.
-        uses: actions/cache@v4
+        # RESTORE and SAVE are split on purpose. The combined `actions/cache`
+        # saves in a post step, and R311y882 shipped it while admitting nobody
+        # knew whether that runs after a FAILED job. That unknown is load-bearing
+        # here: the job this fixes is the one a slow mirror reds, so if a red job
+        # cannot save its partial archive, the cache never warms and the fix
+        # never engages. The save below is `if: always()` precisely so a cold red
+        # run still leaves the next one better off.
+        id: apt-archives
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
           key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -758,6 +784,10 @@ jobs:
       - name: Install system dependencies
         # cmake + libclang-dev for the sce-codegen / xtask (Layer B/B2)
         # toolchain; perl for verify-codegen.sh Layer 2 include sort.
+        #
+        # This job's `Save apt archives` step is NOT here: it installs twice
+        # (protoc below), and a save between the two would carry half the
+        # archive and then sit on a key nothing updates.
         run: |
           bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
 
@@ -777,6 +807,15 @@ jobs:
 
       - name: Install protoc (mnemosyne-server build-script dep)
         run: bash scripts/lib/apt-install.sh protobuf-compiler
+
+      - name: Save apt archives
+        # AFTER the second apt step, for the reason the first one records.
+        # See the `feature-gates` copy for why `always()` and why the dirty gate.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install mnemosyne-cli (pinned)
         # R311y417 — the `|| { ::warning; MNEMOSYNE_SKIP=1 }` fallback that used
@@ -990,7 +1029,15 @@ jobs:
         # hash so a changed list gets a new key rather than a stale hit. The
         # restore-keys prefix means a changed list still starts from the last
         # good archive instead of from nothing.
-        uses: actions/cache@v4
+        # RESTORE and SAVE are split on purpose. The combined `actions/cache`
+        # saves in a post step, and R311y882 shipped it while admitting nobody
+        # knew whether that runs after a FAILED job. That unknown is load-bearing
+        # here: the job this fixes is the one a slow mirror reds, so if a red job
+        # cannot save its partial archive, the cache never warms and the fix
+        # never engages. The save below is `if: always()` precisely so a cold red
+        # run still leaves the next one better off.
+        id: apt-archives
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
           key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -1008,6 +1055,14 @@ jobs:
         # reading this comment.
         run: |
           bash scripts/lib/apt-install.sh libclang-dev clang perl
+
+      - name: Save apt archives
+        # See the `feature-gates` copy for why `always()` and why the dirty gate.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
@@ -1133,7 +1188,15 @@ jobs:
         # hash so a changed list gets a new key rather than a stale hit. The
         # restore-keys prefix means a changed list still starts from the last
         # good archive instead of from nothing.
-        uses: actions/cache@v4
+        # RESTORE and SAVE are split on purpose. The combined `actions/cache`
+        # saves in a post step, and R311y882 shipped it while admitting nobody
+        # knew whether that runs after a FAILED job. That unknown is load-bearing
+        # here: the job this fixes is the one a slow mirror reds, so if a red job
+        # cannot save its partial archive, the cache never warms and the fix
+        # never engages. The save below is `if: always()` precisely so a cold red
+        # run still leaves the next one better off.
+        id: apt-archives
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
           key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -1155,6 +1218,14 @@ jobs:
         # lanes ever do reach it.
         run: |
           bash scripts/lib/apt-install.sh libclang-dev clang perl
+
+      - name: Save apt archives
+        # See the `feature-gates` copy for why `always()` and why the dirty gate.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         # The pin is the SSOT for channel + components + targets — see the
@@ -1245,7 +1316,15 @@ jobs:
         # hash so a changed list gets a new key rather than a stale hit. The
         # restore-keys prefix means a changed list still starts from the last
         # good archive instead of from nothing.
-        uses: actions/cache@v4
+        # RESTORE and SAVE are split on purpose. The combined `actions/cache`
+        # saves in a post step, and R311y882 shipped it while admitting nobody
+        # knew whether that runs after a FAILED job. That unknown is load-bearing
+        # here: the job this fixes is the one a slow mirror reds, so if a red job
+        # cannot save its partial archive, the cache never warms and the fix
+        # never engages. The save below is `if: always()` precisely so a cold red
+        # run still leaves the next one better off.
+        id: apt-archives
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
           key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -1257,6 +1336,14 @@ jobs:
         # wz-integration-tests dev-dep pulls in even for the spawn-class lanes.
         run: |
           bash scripts/lib/apt-install.sh cmake libclang-dev clang
+
+      - name: Save apt archives
+        # See the `feature-gates` copy for why `always()` and why the dirty gate.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml, for wz)
         # See the `ci` job's step of the same name — the pin is the SSOT for
@@ -1878,7 +1965,15 @@ jobs:
         # hash so a changed list gets a new key rather than a stale hit. The
         # restore-keys prefix means a changed list still starts from the last
         # good archive instead of from nothing.
-        uses: actions/cache@v4
+        # RESTORE and SAVE are split on purpose. The combined `actions/cache`
+        # saves in a post step, and R311y882 shipped it while admitting nobody
+        # knew whether that runs after a FAILED job. That unknown is load-bearing
+        # here: the job this fixes is the one a slow mirror reds, so if a red job
+        # cannot save its partial archive, the cache never warms and the fix
+        # never engages. The save below is `if: always()` precisely so a cold red
+        # run still leaves the next one better off.
+        id: apt-archives
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
           key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -1903,6 +1998,16 @@ jobs:
         run: |
           bash scripts/lib/apt-install.sh libclang-dev clang \
             gcc-arm-none-eabi libnewlib-arm-none-eabi qemu-system-arm
+
+      - name: Save apt archives
+        # See the `feature-gates` copy. This is the job the gate matters MOST
+        # for: ~135 MB, which at the measured 27 kB/s is past its own
+        # `timeout-minutes`, so it can only ever arrive across several runs.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain + embedded targets (pinned by rust-toolchain.toml)
         # THE job this pin exists for: Layer Q's footprint gate lives here. The
@@ -1985,7 +2090,15 @@ jobs:
         # hash so a changed list gets a new key rather than a stale hit. The
         # restore-keys prefix means a changed list still starts from the last
         # good archive instead of from nothing.
-        uses: actions/cache@v4
+        # RESTORE and SAVE are split on purpose. The combined `actions/cache`
+        # saves in a post step, and R311y882 shipped it while admitting nobody
+        # knew whether that runs after a FAILED job. That unknown is load-bearing
+        # here: the job this fixes is the one a slow mirror reds, so if a red job
+        # cannot save its partial archive, the cache never warms and the fix
+        # never engages. The save below is `if: always()` precisely so a cold red
+        # run still leaves the next one better off.
+        id: apt-archives
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
           key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -2003,6 +2116,14 @@ jobs:
             libclang-dev clang \
             gcc-arm-none-eabi libnewlib-arm-none-eabi \
             qemu-system-arm xz-utils
+
+      - name: Save apt archives
+        # See the `feature-gates` copy for why `always()` and why the dirty gate.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain + thumbv7m (pinned by rust-toolchain.toml)
         # thumbv7m comes from the pin's `targets` list. See the `ci` job's step.
@@ -2218,7 +2339,15 @@ jobs:
         # hash so a changed list gets a new key rather than a stale hit. The
         # restore-keys prefix means a changed list still starts from the last
         # good archive instead of from nothing.
-        uses: actions/cache@v4
+        # RESTORE and SAVE are split on purpose. The combined `actions/cache`
+        # saves in a post step, and R311y882 shipped it while admitting nobody
+        # knew whether that runs after a FAILED job. That unknown is load-bearing
+        # here: the job this fixes is the one a slow mirror reds, so if a red job
+        # cannot save its partial archive, the cache never warms and the fix
+        # never engages. The save below is `if: always()` precisely so a cold red
+        # run still leaves the next one better off.
+        id: apt-archives
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
           key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -2228,6 +2357,24 @@ jobs:
       - name: Install system dependencies
         run: |
           bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
+
+      - name: Save apt archives
+        # `always()`: the job this exists for is the one a slow mirror REDS, and
+        # actions/cache's combined action cannot save "as the workflow failed in
+        # between" (its own save/README.md). Without this a cold red run throws
+        # its partial download away, the cache never warms, and the fix never
+        # engages — the bootstrap would depend on a green run.
+        #
+        # Gated on WZ_APT_CACHE_DIRTY, which `apt-install.sh` sets only when the
+        # archive actually gained bytes, so a warm fleet does not re-upload ~35 MB
+        # per job per run into a 10 GB repo-wide cap and evict the Rust caches.
+        # The run_id suffix makes each save a NEW entry: saving under a key that
+        # already exists is a no-op, which would freeze a partial archive forever.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         # Same reasoning as the ci job: `rustup show` materialises the PINNED
@@ -2692,7 +2839,15 @@ jobs:
         # hash so a changed list gets a new key rather than a stale hit. The
         # restore-keys prefix means a changed list still starts from the last
         # good archive instead of from nothing.
-        uses: actions/cache@v4
+        # RESTORE and SAVE are split on purpose. The combined `actions/cache`
+        # saves in a post step, and R311y882 shipped it while admitting nobody
+        # knew whether that runs after a FAILED job. That unknown is load-bearing
+        # here: the job this fixes is the one a slow mirror reds, so if a red job
+        # cannot save its partial archive, the cache never warms and the fix
+        # never engages. The save below is `if: always()` precisely so a cold red
+        # run still leaves the next one better off.
+        id: apt-archives
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
           key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -2707,6 +2862,14 @@ jobs:
         # killed at the 900s ceiling on run 32266212482.
         run: |
           bash scripts/lib/apt-install.sh libclang-dev clang perl
+
+      - name: Save apt archives
+        # See the `feature-gates` copy for why `always()` and why the dirty gate.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
@@ -2906,7 +3069,15 @@ jobs:
         # hash so a changed list gets a new key rather than a stale hit. The
         # restore-keys prefix means a changed list still starts from the last
         # good archive instead of from nothing.
-        uses: actions/cache@v4
+        # RESTORE and SAVE are split on purpose. The combined `actions/cache`
+        # saves in a post step, and R311y882 shipped it while admitting nobody
+        # knew whether that runs after a FAILED job. That unknown is load-bearing
+        # here: the job this fixes is the one a slow mirror reds, so if a red job
+        # cannot save its partial archive, the cache never warms and the fix
+        # never engages. The save below is `if: always()` precisely so a cold red
+        # run still leaves the next one better off.
+        id: apt-archives
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
           key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -2918,6 +3089,24 @@ jobs:
         # perl matches the sibling job's set.
         run: |
           bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
+
+      - name: Save apt archives
+        # `always()`: the job this exists for is the one a slow mirror REDS, and
+        # actions/cache's combined action cannot save "as the workflow failed in
+        # between" (its own save/README.md). Without this a cold red run throws
+        # its partial download away, the cache never warms, and the fix never
+        # engages — the bootstrap would depend on a green run.
+        #
+        # Gated on WZ_APT_CACHE_DIRTY, which `apt-install.sh` sets only when the
+        # archive actually gained bytes, so a warm fleet does not re-upload ~35 MB
+        # per job per run into a 10 GB repo-wide cap and evict the Rust caches.
+        # The run_id suffix makes each save a NEW entry: saving under a key that
+        # already exists is a no-op, which would freeze a partial archive forever.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
@@ -3074,7 +3263,15 @@ jobs:
         # hash so a changed list gets a new key rather than a stale hit. The
         # restore-keys prefix means a changed list still starts from the last
         # good archive instead of from nothing.
-        uses: actions/cache@v4
+        # RESTORE and SAVE are split on purpose. The combined `actions/cache`
+        # saves in a post step, and R311y882 shipped it while admitting nobody
+        # knew whether that runs after a FAILED job. That unknown is load-bearing
+        # here: the job this fixes is the one a slow mirror reds, so if a red job
+        # cannot save its partial archive, the cache never warms and the fix
+        # never engages. The save below is `if: always()` precisely so a cold red
+        # run still leaves the next one better off.
+        id: apt-archives
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
           key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -3090,6 +3287,24 @@ jobs:
         # never been observed to need or not need.
         run: |
           bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
+
+      - name: Save apt archives
+        # `always()`: the job this exists for is the one a slow mirror REDS, and
+        # actions/cache's combined action cannot save "as the workflow failed in
+        # between" (its own save/README.md). Without this a cold red run throws
+        # its partial download away, the cache never warms, and the fix never
+        # engages — the bootstrap would depend on a green run.
+        #
+        # Gated on WZ_APT_CACHE_DIRTY, which `apt-install.sh` sets only when the
+        # archive actually gained bytes, so a warm fleet does not re-upload ~35 MB
+        # per job per run into a 10 GB repo-wide cap and evict the Rust caches.
+        # The run_id suffix makes each save a NEW entry: saving under a key that
+        # already exists is a no-op, which would freeze a partial archive forever.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
@@ -3216,7 +3431,15 @@ jobs:
         # hash so a changed list gets a new key rather than a stale hit. The
         # restore-keys prefix means a changed list still starts from the last
         # good archive instead of from nothing.
-        uses: actions/cache@v4
+        # RESTORE and SAVE are split on purpose. The combined `actions/cache`
+        # saves in a post step, and R311y882 shipped it while admitting nobody
+        # knew whether that runs after a FAILED job. That unknown is load-bearing
+        # here: the job this fixes is the one a slow mirror reds, so if a red job
+        # cannot save its partial archive, the cache never warms and the fix
+        # never engages. The save below is `if: always()` precisely so a cold red
+        # run still leaves the next one better off.
+        id: apt-archives
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
           key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -3237,6 +3460,14 @@ jobs:
         # the moment a cargo lane arrived.
         run: |
           bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
+
+      - name: Save apt archives
+        # See the `feature-gates` copy for why `always()` and why the dirty gate.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
@@ -3448,7 +3679,15 @@ jobs:
         # hash so a changed list gets a new key rather than a stale hit. The
         # restore-keys prefix means a changed list still starts from the last
         # good archive instead of from nothing.
-        uses: actions/cache@v4
+        # RESTORE and SAVE are split on purpose. The combined `actions/cache`
+        # saves in a post step, and R311y882 shipped it while admitting nobody
+        # knew whether that runs after a FAILED job. That unknown is load-bearing
+        # here: the job this fixes is the one a slow mirror reds, so if a red job
+        # cannot save its partial archive, the cache never warms and the fix
+        # never engages. The save below is `if: always()` precisely so a cold red
+        # run still leaves the next one better off.
+        id: apt-archives
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
           key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -3458,6 +3697,14 @@ jobs:
       - name: Install system dependencies
         run: |
           bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
+
+      - name: Save apt archives
+        # See the `feature-gates` copy for why `always()` and why the dirty gate.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show

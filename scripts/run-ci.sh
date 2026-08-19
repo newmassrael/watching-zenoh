@@ -2503,6 +2503,97 @@ EOF
     fi
     rm -f "$blocker"
 
+    # R311y883 — THE DIRTY FLAG, which is what makes the workflow's `Save apt
+    # archives` step both correct and cheap. Three arms, because it has three
+    # ways to be wrong and each costs something different:
+    #
+    #   not set when the archive grew   -> the download is thrown away and the
+    #                                      cache never warms. This is the one
+    #                                      that makes a cold red permanent.
+    #   set when nothing changed        -> a warm fleet re-uploads ~35 MB per job
+    #                                      per run into a 10 GB repo-wide cap and
+    #                                      evicts the Rust caches.
+    #   not set when the install FAILED -> the same as the first, on exactly the
+    #                                      path a slow mirror takes.
+    local ghenv dirty_dir
+    ghenv="$(mktemp)"
+    dirty_dir="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$archives' '$dirty_dir'; rm -f '$argv_log' '$stub' '$marker' '$ghenv'" RETURN
+
+    # A stand-in that DOWNLOADS: it reads its own argv for the archive directory
+    # and drops a file there, which is what apt does and what the fingerprint is
+    # meant to notice.
+    cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    Dir::Cache::archives=*) printf 'x' >>"${a#Dir::Cache::archives=}/pkg.deb" ;;
+  esac
+done
+[[ "${WZ_STUB_FAIL:-}" == "1" ]] && for a in "$@"; do [[ "$a" == install ]] && exit 1; done
+exit 0
+EOF
+    chmod +x "$stub"
+
+    : >"$ghenv"
+    if ! GITHUB_ENV="$ghenv" WZ_APT_ARCHIVES="$dirty_dir" WZ_APT_CMD="$stub" \
+        WZ_APT_DEADLINE=5 bash "$script" cmake >/dev/null 2>&1; then
+        echo "  Layer C0g FAIL: the install refused while the dirty flag was being" \
+            "exercised" >&2
+        return 1
+    fi
+    if ! grep -q '^WZ_APT_CACHE_DIRTY=true$' "$ghenv"; then
+        echo "  Layer C0g FAIL: the archive GREW and nothing told the workflow." \
+            "\`Save apt archives\` is gated on that variable, so the download" \
+            "would be thrown away and a cold red run would stay cold forever" >&2
+        return 1
+    fi
+
+    # UNCHANGED must not set it. Run again with nothing new to fetch.
+    : >"$ghenv"
+    cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$stub"
+    if ! GITHUB_ENV="$ghenv" WZ_APT_ARCHIVES="$dirty_dir" WZ_APT_CMD="$stub" \
+        WZ_APT_DEADLINE=5 bash "$script" cmake >/dev/null 2>&1; then
+        echo "  Layer C0g FAIL: the install refused on the unchanged-archive arm" >&2
+        return 1
+    fi
+    if grep -q 'WZ_APT_CACHE_DIRTY' "$ghenv"; then
+        echo "  Layer C0g FAIL: nothing was downloaded and the workflow was told to" \
+            "save anyway. A warm fleet would re-upload every run and evict the" \
+            "caches that make the builds fast" >&2
+        return 1
+    fi
+
+    # AND THE FAILING INSTALL, which is the path this whole mechanism exists for.
+    : >"$ghenv"
+    cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    Dir::Cache::archives=*) printf 'y' >>"${a#Dir::Cache::archives=}/pkg2.deb" ;;
+  esac
+done
+for a in "$@"; do [[ "$a" == install ]] && exit 1; done
+exit 0
+EOF
+    chmod +x "$stub"
+    if GITHUB_ENV="$ghenv" WZ_APT_ARCHIVES="$dirty_dir" WZ_APT_CMD="$stub" \
+        WZ_APT_DEADLINE=5 bash "$script" cmake >/dev/null 2>&1; then
+        echo "  Layer C0g FAIL: a failing install reported success on the dirty arm" >&2
+        return 1
+    fi
+    if ! grep -q '^WZ_APT_CACHE_DIRTY=true$' "$ghenv"; then
+        echo "  Layer C0g FAIL: the install FAILED after downloading part of the" \
+            "archive and the workflow was not told to save it. That is exactly" \
+            "the slow-mirror path, and without the save it never makes progress" >&2
+        return 1
+    fi
+
     # AND THE CEILING MUST BE THE ONLY ROAD. A bounded script that half the
     # workflow routes around bounds half the workflow, and the next apt step
     # anyone adds will be written the way the thirteen that were here already

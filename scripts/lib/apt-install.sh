@@ -221,6 +221,33 @@ EOF
     return 0
 }
 
+# What the archive directory holds, as one line: every file's size and path.
+#
+# Sizes as well as names, because a resumed download changes a file's size and
+# not its name — a name-only fingerprint would call a job that made progress
+# "unchanged" and throw the progress away. Empty string when there is no
+# directory to fingerprint, which is the local case and compares equal to
+# itself.
+wz_apt_fingerprint() {
+    local dir="$1"
+    [[ -n "${dir}" && -d "${dir}" ]] || return 0
+    find "${dir}" -type f -printf '%s %P\n' 2>/dev/null | LC_ALL=C sort || true
+}
+
+# Tell the workflow whether the archive is worth saving.
+#
+# `GITHUB_ENV` is how a step hands a variable to the steps after it; absent (a
+# developer's machine, the test lane's default) this does nothing at all.
+wz_apt_mark_dirty() {
+    local dir="$1" before="$2"
+    [[ -n "${dir}" && -n "${GITHUB_ENV:-}" ]] || return 0
+    local after
+    after="$(wz_apt_fingerprint "${dir}")"
+    if [[ "${after}" != "${before}" ]]; then
+        echo "WZ_APT_CACHE_DIRTY=true" >>"${GITHUB_ENV}"
+    fi
+}
+
 # The one entry point. Split from `main` so the test lane can drive the ceiling
 # without installing anything.
 wz_apt_install() {
@@ -311,6 +338,21 @@ wz_apt_install() {
     # is quietly not installed. The staleness is annotated either way, and an
     # install that fails after a failed update says so, because that is the first
     # thing a reader should suspect.
+    # R311y883 — WHETHER THE ARCHIVE GAINED ANYTHING, recorded for the workflow.
+    #
+    # The cache must be SAVED when a cold install fails, or the bootstrap never
+    # happens: a slow mirror reds the job, the archive is thrown away, and the
+    # next run starts cold again. R311y882 shipped the combined
+    # `actions/cache@v4`, whose save is a post step, and its own carry admitted
+    # nobody knew whether that runs after a failed job. A fix whose first half
+    # depends on an unknown is not a fix.
+    #
+    # So the workflow now saves explicitly, `if: always()`, and asks this
+    # variable whether there is anything new to save. Without that question a
+    # warm fleet re-uploads ~35 MB per job per run into a 10 GB repo-wide cap
+    # and evicts the Rust caches to store bytes that did not change.
+    local before
+    before="$(wz_apt_fingerprint "${archives}")"
     local stale=0
     if ! wz_apt_bounded "warning" "update" "${WZ_APT_UPDATE_DEADLINE}" \
         "${apt[@]}" "${opts[@]}" update; then
@@ -321,6 +363,12 @@ wz_apt_install() {
     fi
     if ! wz_apt_bounded "error" "install of $*" "${WZ_APT_INSTALL_DEADLINE}" \
         "${apt[@]}" "${opts[@]}" install -y --no-install-recommends "$@"; then
+        # BEFORE the return, and that order is the whole point: this is the path
+        # a slow mirror takes, and it is the path whose partial download has to
+        # survive into the next run. apt keeps completed .debs in the archive and
+        # resumes the one it was cut off in, so a job that dies at 60% makes the
+        # next one start at 60%.
+        wz_apt_mark_dirty "${archives}" "${before}"
         if [[ "${stale}" -eq 1 ]]; then
             echo "::error::apt: and update had ALREADY failed above, so this install ran" \
                 "against the image's shipped index. A version it names may no longer be" \
@@ -328,6 +376,7 @@ wz_apt_install() {
         fi
         return 1
     fi
+    wz_apt_mark_dirty "${archives}" "${before}"
     if [[ "${stale}" -eq 1 ]]; then
         echo "::notice::apt: installed from the image's shipped index -- update failed" \
             "above and the packages were there anyway." >&2
