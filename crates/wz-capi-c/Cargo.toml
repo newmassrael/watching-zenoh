@@ -91,5 +91,13 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "query-reply-err",
 ] }
 
+[dev-dependencies]
+# R311y867 — for `free_port()`, which three test files here used to carry a
+# private copy of. The copies were a bind-read-DROP probe whose port was handed
+# to `z_open` afterwards, and the gap between the two is what took Layer C1cc
+# red on run 32198505957. This crate already depends on wz-runtime-tokio, so the
+# dev-dep adds no graph the tests were not already building.
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
+
 [lints]
 workspace = true

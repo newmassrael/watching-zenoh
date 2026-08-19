@@ -93,13 +93,7 @@ unsafe extern "C" fn on_flag_drop(ctx: *mut c_void) {
 
 // --- helpers ---------------------------------------------------------------
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
+use wz_runtime_tokio_test_support::free_port;
 
 unsafe fn open_role(port: u16, key: u8, role: &str) -> z_owned_session_t {
     let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();

@@ -2106,6 +2106,48 @@ layer_c0b_job_budget_margin() {
 # It installs NOTHING. `WZ_APT_CMD` points the script at `true` for the positive
 # arm and at `sleep` for the negative one, so this lane runs anywhere and costs
 # about a second.
+# R311y867 — ONE `free_port`, and no seventeenth.
+#
+# Sixteen test files each carried a private copy of a bind-read-DROP probe whose
+# port was handed to something that bound it later. That gap is a TOCTOU race and
+# it redded Layer C1cc on run 32198505957; the fix is a ledger in
+# `wz-runtime-tokio-test-support`, and a fix applied in one place is only a fix
+# while nothing writes the seventeenth copy. The next person to need a port will
+# copy what they find, so what they find has to be the import.
+#
+# It runs inside Layer C0g rather than as its own lane: same subject — a bound
+# that only works if everything routes through it — and the same two-arm shape.
+_runci_free_port_gate() {
+    local local_defs
+    local_defs="$(git grep -n 'fn free_port' -- 'crates/**/*.rs' \
+        ':!crates/wz-runtime-tokio-test-support/*' || true)"
+    if [[ -n "${local_defs}" ]]; then
+        echo "  Layer C0g FAIL: a private \`fn free_port\` outside the support crate:" >&2
+        echo "${local_defs}" >&2
+        echo "  A bind-read-drop probe hands out a port it has stopped holding, which" \
+            "is the TOCTOU that redded Layer C1cc on run 32198505957. Use" \
+            "\`wz_runtime_tokio_test_support::free_port\`." >&2
+        return 1
+    fi
+
+    # THE POPULATION, because "none outside" is trivially true when there are
+    # none at all. If the support crate's own definition ever disappears, this
+    # gate would otherwise pass while nothing implements the thing it protects.
+    if ! git grep -q 'pub fn free_port' -- \
+        'crates/wz-runtime-tokio-test-support/src/lib.rs'; then
+        echo "  Layer C0g FAIL: the shared \`free_port\` is gone, so the arm above" \
+            "passes over an empty population -- the green this workspace has been" \
+            "burned by" >&2
+        return 1
+    fi
+
+    local users
+    users="$(git grep -l 'wz_runtime_tokio_test_support::free_port' -- 'crates/**/*.rs' \
+        | wc -l)"
+    echo "  free_port gate: OK (1 definition, ${users} file(s) import it, 0 private copies)"
+    return 0
+}
+
 layer_c0g_apt_ceiling() {
     local script="scripts/lib/apt-install.sh"
 
@@ -2214,6 +2256,8 @@ layer_c0g_apt_ceiling() {
             "the green this workspace has been burned by" >&2
         return 1
     fi
+
+    _runci_free_port_gate || return 1
 
     echo "  apt ceiling gate: OK (passes a prompt command, kills a hung one in" \
         "${elapsed}s against a 2s deadline -- bounded on BOTH sides, so an arm that" \

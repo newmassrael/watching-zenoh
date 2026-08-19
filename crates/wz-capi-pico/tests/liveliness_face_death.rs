@@ -108,13 +108,7 @@ unsafe extern "C" fn on_liveliness(sample: *const z_loaned_sample_t, ctx: *mut c
     ctx.captured.lock().unwrap().push((kind, text));
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
+use wz_runtime_tokio_test_support::free_port;
 
 fn init_params(whatami: WhatAmI) -> SessionInitParams {
     let mut zid = vec![0u8; 16];

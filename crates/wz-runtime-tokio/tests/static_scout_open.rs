@@ -394,13 +394,7 @@ const LISTEN_PAIR_BUDGET: std::time::Duration = std::time::Duration::from_secs(2
 /// between the probe and the bind surfaces as a loud bind error from the
 /// acceptor, not as a hang.
 #[cfg(feature = "scouting-static")]
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("probe bind")
-        .local_addr()
-        .expect("probe addr")
-        .port()
-}
+use wz_runtime_tokio_test_support::free_port;
 
 /// Dial a static connect list, retrying while the acceptor is still binding.
 ///

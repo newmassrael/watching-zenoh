@@ -529,6 +529,67 @@ pub fn test_hal_now_ticks() -> u64 {
     TEST_HAL_TICK_MS.load(Ordering::SeqCst)
 }
 
+/// Ports this process has already handed out. See [`free_port`].
+static HANDED_OUT_PORTS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+
+/// How many candidates [`free_port`] will reject before giving up. A bound
+/// rather than a loop, for the reason every other limit in this workspace has
+/// one: the number of attempts must not be decided by the kernel.
+const FREE_PORT_ATTEMPTS: usize = 64;
+
+/// A loopback TCP port no caller IN THIS PROCESS has been given before.
+///
+/// R311y867 (unregistered debt 264). Sixteen test files each carried their own
+/// copy of this, and every copy was the same three lines: bind `127.0.0.1:0`,
+/// read the port, DROP THE LISTENER, hand the number to something that will
+/// bind it later. That gap is a time-of-check-to-time-of-use race, and it is
+/// not theoretical — it took Layer C1cc red on hosted run 32198505957, where
+/// `a_put_on_a_session_with_no_peer_still_reaches_its_own_subscriber` got
+/// `z_open` = -4 (`locality_roundtrip.rs:92`) with the other eight tests in the
+/// same binary green.
+///
+/// WHY THE PROCESS IS THE RIGHT SCOPE. `cargo test` runs one binary's `#[test]`
+/// fns on many threads and the binaries themselves one after another, so the
+/// two callers that can collide are two THREADS. A probe listener on a port
+/// that was never accepted on is released completely when it drops — no
+/// TIME_WAIT — so the kernel is free to hand the same number to the next
+/// `bind(:0)` microseconds later, and under load it does. Remembering what has
+/// been handed out closes exactly that case.
+///
+/// HOW THE RETRY WORKS, and it is not a sleep-and-hope: a candidate already
+/// handed out is rejected with its listener STILL OPEN, so the kernel cannot
+/// offer the same number again on the next attempt. The held listeners drop
+/// together once a fresh port is found.
+///
+/// WHAT IS NOT CLOSED, stated rather than implied: a process outside this one —
+/// another test binary if a runner ever parallelises them, or anything else on
+/// the host — can still take the port between this call and the caller's bind.
+/// Nothing a function returning a `u16` can do about that; closing it needs the
+/// caller to hold the listener until it hands the socket over, which the C ABI
+/// under test cannot accept.
+pub fn free_port() -> u16 {
+    let mut rejected = Vec::new();
+    for _ in 0..FREE_PORT_ATTEMPTS {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
+        let port = listener.local_addr().expect("probe addr").port();
+        let mut seen = HANDED_OUT_PORTS.lock().expect("port ledger");
+        if seen.contains(&port) {
+            // HELD, not dropped: releasing it here would let the very next
+            // attempt be offered the same number.
+            rejected.push(listener);
+            continue;
+        }
+        seen.push(port);
+        return port;
+    }
+    panic!(
+        "free_port: {FREE_PORT_ATTEMPTS} consecutive candidates had already been \
+         handed out in this process. Either a test is leaking ports faster than \
+         the loopback range can supply them, or the ledger is never cleared and \
+         this binary has run for a very long time"
+    );
+}
+
 /// R311of — the loopback TLS config pair: one self-signed `localhost` cert the
 /// server presents and the client trusts (added to a fresh root store). The
 /// SSOT for every wz-runtime-tokio TLS e2e — `tls_e2e`, the scouting
@@ -756,6 +817,67 @@ pub async fn establish_capability_pair(
         resp_actions,
         init_driver,
         resp_driver,
+    }
+}
+
+#[cfg(test)]
+mod port_tests {
+    use super::free_port;
+    use std::collections::BTreeSet;
+
+    /// R311y867 — the property the sixteen hand-copied helpers did not have.
+    ///
+    /// PROBE FIRST, on the shape that failed. The old helper is three lines and
+    /// reproducing it here is what makes this a comparison rather than an
+    /// assertion about the new one alone: bind, read, drop, repeat. Run enough
+    /// times and the kernel hands the same number back, because a probe
+    /// listener that never accepted is released outright.
+    #[test]
+    fn free_port_never_repeats_and_the_old_shape_does() {
+        fn old_shape() -> u16 {
+            std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port()
+        }
+
+        // THE CONTROL ARM, and it is the one that has to fire for this test to
+        // mean anything. If the kernel on this host never reuses a just-freed
+        // ephemeral port, the race cannot happen here and the leg below proves
+        // nothing — so say so instead of passing quietly.
+        let mut old = BTreeSet::new();
+        let mut old_repeats = 0usize;
+        for _ in 0..256 {
+            if !old.insert(old_shape()) {
+                old_repeats += 1;
+            }
+        }
+        assert!(
+            old_repeats > 0,
+            "the old bind-read-drop shape produced 256 DISTINCT ports on this \
+             host, so this host does not reuse a released ephemeral port and \
+             the leg below is measuring nothing. That is a fact about the \
+             kernel, not a pass"
+        );
+
+        // Printed, not only asserted: the number is how sharp the race is on
+        // this host, and a reader comparing two runs wants it.
+        std::println!(
+            "old bind-read-drop shape: {old_repeats} repeat(s) in 256 draws \
+             ({} distinct)",
+            old.len()
+        );
+
+        let mut fresh = BTreeSet::new();
+        for _ in 0..256 {
+            assert!(
+                fresh.insert(free_port()),
+                "free_port handed out a port twice in one process after \
+                 {old_repeats} repeats from the old shape under the same \
+                 conditions"
+            );
+        }
     }
 }
 

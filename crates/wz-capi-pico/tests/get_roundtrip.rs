@@ -256,13 +256,7 @@ unsafe fn issue_get(zs: *const wz_capi_pico::z_loaned_session_t, timeout_ms: u64
 
 // --- the wz-native far end -------------------------------------------------
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
+use wz_runtime_tokio_test_support::free_port;
 
 fn init_params(whatami: WhatAmI) -> SessionInitParams {
     let mut zid = vec![0u8; 16];

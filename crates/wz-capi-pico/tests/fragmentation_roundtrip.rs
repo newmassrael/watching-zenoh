@@ -91,13 +91,7 @@ unsafe extern "C" fn on_drop(ctx: *mut c_void) {
     drop(Box::from_raw(ctx as *const Ctx as *mut Ctx));
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
+use wz_runtime_tokio_test_support::free_port;
 
 #[test]
 fn oversize_put_is_fragmented_and_delivered_whole() {

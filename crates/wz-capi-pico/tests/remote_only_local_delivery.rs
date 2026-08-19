@@ -68,13 +68,7 @@ unsafe extern "C" fn on_sample_count(_sample: *const z_loaned_sample_t, ctx: *mu
     ctx.hits.fetch_add(1, Ordering::SeqCst);
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
+use wz_runtime_tokio_test_support::free_port;
 
 unsafe fn open_with(key: u8, endpoint: &std::ffi::CStr) -> Option<z_owned_session_t> {
     let mut cfg: z_owned_config_t = std::mem::zeroed();
