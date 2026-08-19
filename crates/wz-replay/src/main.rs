@@ -368,6 +368,11 @@ fn run_alert(
         serial_linktypes: &[],
         census: wz_analyze::Census::all(),
         per_field: false,
+        // R311y884 — unbounded, which is what this path did before the flag
+        // existed. `wz-replay` reads a capture to REPLAY it, so a ceiling that
+        // silently dropped flows would change what it emits rather than what it
+        // reports.
+        bounded: false,
         select: None,
         // R311y860 — `false`, and stated rather than defaulted, on the same
         // rule as the two fields above: `health` is a RENDERING of counters

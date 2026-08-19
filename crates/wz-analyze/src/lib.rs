@@ -96,6 +96,21 @@ pub struct Options {
     /// R311y675 (§1.1n) — dissect each message into its FIELDS, with the bytes
     /// each was decoded from.
     pub per_field: bool,
+    /// R311y884 (open-debt item 234) — read the capture under the LIVE-TAP
+    /// bounds instead of unbounded.
+    ///
+    /// `dropped_by_limits` — the group that says what staying inside the caps
+    /// cost — was STRUCTURALLY zero on both consumption surfaces, because
+    /// neither built a bounded dissection: this crate calls
+    /// `from_capture_declaring`, which takes no limits, and the ABI's
+    /// `wz_dissect_pcap_summary` calls `from_capture`. The one door that could
+    /// make it non-zero, `wz_dissect_pcap_summary_bounded`, emits the SUMMARY
+    /// and not the health group. So a cap biting was invisible everywhere, and
+    /// its zeros read as evidence that nothing was dropped.
+    ///
+    /// The preset is `DissectionLimits::for_live_tap()` — the SAME one the ABI
+    /// door uses, so the two surfaces answer one question rather than two.
+    pub bounded: bool,
     /// R311y857 — the LOSS AND HEALTH counters, grouped by who lost the packet.
     ///
     /// A flag rather than always-on: the report already carries the five
@@ -359,6 +374,12 @@ OPTIONS:
                       went past before the tap started cannot be judged, and
                       counting it as a non-match would make a short total look
                       whole
+    --bounded         read the capture under the live-tap ceilings instead of
+                      unbounded -- the same preset the C ABI's
+                      wz_dissect_pcap_summary_bounded uses. Without it the
+                      `dropped_by_limits` group --health prints is zero because
+                      no cap exists to bite, which is not the same fact as
+                      nothing having been dropped
     --health          every loss counter this reader keeps, GROUPED BY WHO LOST
                       the packet, because that is the only part a reader can
                       act on: the capture tool's own admission (re-capture with
@@ -389,6 +410,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut census = Census::default();
     let mut select: Option<wz_capture::filter::Filter> = None;
     let mut per_field = false;
+    let mut bounded = false;
     let mut health = false;
     let mut at = 0usize;
     while at < args.len() {
@@ -403,6 +425,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
             "--interests" => census.interests = true,
             "--census" => census = Census::all(),
             "--fields" => per_field = true,
+            "--bounded" => bounded = true,
             "--health" => health = true,
             "--select" => {
                 at += 1;
@@ -566,6 +589,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
         max_messages,
         census,
         per_field,
+        bounded,
         health,
         select: match select {
             // A selector with nothing to narrow is a flag that does nothing.
@@ -695,6 +719,7 @@ pub fn analyze_declaring_quic(
         serial_linktypes: &[],
         census: Census::default(),
         per_field: false,
+        bounded: false,
         health: false,
         select: None,
     })
@@ -748,6 +773,9 @@ pub struct Request<'a> {
     pub census: Census,
     /// R311y675 — dissect each message into its fields.
     pub per_field: bool,
+    /// R311y884 — read under `DissectionLimits::for_live_tap()` rather than
+    /// unbounded, so `dropped_by_limits` can be non-zero at all.
+    pub bounded: bool,
     /// R311y857 — the loss and health counters, grouped by who lost the packet.
     pub health: bool,
     /// R311y674 — the selector narrowing what those planes count. `None`
@@ -772,6 +800,7 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
         serial_linktypes,
         census,
         per_field,
+        bounded,
         health,
         select,
     } = request;
@@ -837,7 +866,20 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     // at the point the map stops changing, because a ledger over a map still
     // being filled would be a set of handles into a moving list.
     let payload_declarations = Declarations::new(&payload_formats);
-    let mut dissection = Dissection::from_capture_declaring(capture, quic_ports, serial_linktypes)?;
+    // R311y884 (open-debt item 234) — bounded when the caller asked, and the
+    // caller could not ask until this round. `dropped_by_limits` was zero on
+    // every surface because no surface built a bounded dissection; zeros that
+    // are structural read exactly like zeros that were measured.
+    let mut dissection = if bounded {
+        Dissection::from_capture_declaring_bounded(
+            capture,
+            quic_ports,
+            serial_linktypes,
+            wz_capture::DissectionLimits::for_live_tap(),
+        )?
+    } else {
+        Dissection::from_capture_declaring(capture, quic_ports, serial_linktypes)?
+    };
 
     // The capture's own keys first, then the external log folded in.
     let (mut opener, foreign) = CaptureOpener::from_secrets_blocks(dissection.decryption_secrets());
@@ -4466,6 +4508,7 @@ mod tests {
                 max_messages: None,
                 census: Census::default(),
                 per_field: false,
+                bounded: false,
                 health: false,
                 select: None,
             })
@@ -4498,6 +4541,7 @@ mod tests {
                 max_messages: None,
                 census: Census::default(),
                 per_field: false,
+                bounded: false,
                 health: false,
                 select: None,
             })
@@ -4617,10 +4661,86 @@ mod tests {
         out
     }
 
+    /// Ethernet + IPv4 + UDP from a distinct source port, so N of them are N
+    /// distinct 5-tuples and therefore N flows.
+    fn udp_from(sport: u16) -> Vec<u8> {
+        let payload = [0u8; 4];
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&sport.to_be_bytes());
+        udp.extend_from_slice(&7447u16.to_be_bytes());
+        udp.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes()); // no checksum: RFC 768
+        udp.extend_from_slice(&payload);
+
+        let mut ip = vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+        ip.extend_from_slice(&[10, 0, 0, 1]);
+        ip.extend_from_slice(&[10, 0, 0, 2]);
+        ip.extend_from_slice(&udp);
+
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// R311y884 (open-debt item 234) — the caps BITING, which no surface could
+    /// show.
+    ///
+    /// `dropped_by_limits` is the group that says what staying inside this
+    /// reader's ceilings cost, and it was zero everywhere for a structural
+    /// reason rather than a measured one: `wz-analyze` built its dissection
+    /// through `from_capture_declaring`, which takes no limits, and the ABI's
+    /// `wz_dissect_pcap_summary` through `from_capture`, which takes none
+    /// either. With no cap in place nothing can be dropped by one, so the zeros
+    /// were true and told a reader nothing — and a reader cannot tell that kind
+    /// of zero from the kind that means "nothing was dropped".
+    ///
+    /// Both arms, because the flag has to do something AND the default has to
+    /// keep doing what it did: 1025 flows is one past
+    /// `DissectionLimits::for_live_tap`'s `max_flows_per_table`, so bounded
+    /// evicts exactly one and unbounded evicts none.
+    #[test]
+    fn a_cap_that_bites_is_visible_once_the_reader_can_be_bounded() {
+        let packets: Vec<Vec<u8>> = (0..1025u16).map(|i| udp_from(2000 + i)).collect();
+        let frames: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, i as u64 * 1_000, p.as_slice()))
+            .collect();
+        let pcapng =
+            wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &frames);
+
+        let unbounded = health_run_bounded(&pcapng, true, Format::Json, false);
+        assert!(
+            unbounded.contains(
+                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\"flows\":0"
+            ),
+            "with no ceiling nothing can be dropped by one -- a structural zero: {unbounded}"
+        );
+
+        let bounded = health_run_bounded(&pcapng, true, Format::Json, true);
+        assert!(
+            bounded.contains("\"flows\":1"),
+            "1025 flows is one past the live-tap ceiling, so exactly one is \
+             evicted and the group finally says so: {bounded}"
+        );
+    }
+
     /// One analysis of `file`, with `--health` on or off and nothing else
     /// changed.
     fn health_run(file: &[u8], health: bool, format: Format) -> String {
+        health_run_bounded(file, health, format, false)
+    }
+
+    /// The same, with `--bounded` as the one other variable (R311y884).
+    fn health_run_bounded(file: &[u8], health: bool, format: Format, bounded: bool) -> String {
         analyze_request(&Request {
+            bounded,
             capture: file,
             keylog: None,
             format,
@@ -4940,6 +5060,7 @@ mod tests {
                 serial_linktypes: &[],
                 census: Census::default(),
                 per_field: true,
+                bounded: false,
                 health: false,
                 select: None,
             })
@@ -5080,6 +5201,7 @@ mod tests {
                     ..Census::default()
                 },
                 per_field: false,
+                bounded: false,
                 health: false,
                 select: None,
             })
@@ -5199,6 +5321,7 @@ mod tests {
                 ..Census::default()
             },
             per_field: false,
+            bounded: false,
             health: false,
             select: None,
         })
@@ -6818,6 +6941,7 @@ mod quic_pass_tests {
                 serial_linktypes: &[],
                 census: Census::default(),
                 per_field: false,
+                bounded: false,
                 health: false,
                 select: None,
             })
@@ -6891,6 +7015,7 @@ mod quic_pass_tests {
                 serial_linktypes: &[],
                 census: Census::default(),
                 per_field: false,
+                bounded: false,
                 health: false,
                 select: None,
             })
@@ -7135,6 +7260,7 @@ mod quic_pass_tests {
             serial_linktypes: &[],
             census: Census::default(),
             per_field: false,
+            bounded: false,
             health: false,
             select: None,
         })
@@ -7228,6 +7354,7 @@ mod quic_pass_tests {
                 ..Census::default()
             },
             per_field: false,
+            bounded: false,
             health: false,
             select: None,
         })
@@ -7267,6 +7394,7 @@ mod quic_pass_tests {
             serial_linktypes: &[],
             census: Census::default(),
             per_field: true,
+            bounded: false,
             health: false,
             select: None,
         })
@@ -7364,6 +7492,7 @@ mod quic_pass_tests {
                 serial_linktypes: &[],
                 census,
                 per_field,
+                bounded: false,
                 health: false,
                 select: None,
             })
@@ -7457,6 +7586,7 @@ mod quic_pass_tests {
             serial_linktypes: &[],
             census: Census::default(),
             per_field: false,
+            bounded: false,
             health: false,
             select,
         };

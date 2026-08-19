@@ -78,6 +78,7 @@ fn main() -> ExitCode {
         serial_linktypes: &options.serial_linktypes,
         census: options.census,
         per_field: options.per_field,
+        bounded: options.bounded,
         health: options.health,
         select: options.select.as_ref(),
     }) {

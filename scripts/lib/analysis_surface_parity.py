@@ -111,6 +111,21 @@ BOTH = {
     # reaches both and renders `wz-capture`'s own grouping, byte for byte the
     # document the ABI embeds.
     "loss and health counters": ("--health", "wz_dissect_pcap_summary"),
+    # R311y884 (open-debt item 234) — reading a capture under the LIVE-TAP
+    # ceilings. The ABI had this from R311y748 and the command line did not, so
+    # `dropped_by_limits` -- the group that says what the ceilings cost -- was
+    # zero on BOTH surfaces for a structural reason: neither built a bounded
+    # dissection, so no cap existed to bite, and a structural zero reads exactly
+    # like a measured one.
+    #
+    # ⚠ THE RESIDUE, stated rather than hidden: the ABI's bounded door emits the
+    # SUMMARY document, and the drop counters live in the HEALTH group, which
+    # only `wz_dissect_pcap_summary` (unbounded) renders. So the capability is on
+    # both surfaces and its OUTPUT is not: a linking consumer can bound the read
+    # and still cannot see what the bound cost. That is a narrower gap than the
+    # one this row closes, and it is a new one to carry rather than a reason to
+    # leave the row out.
+    "reading under the live-tap bounds": ("--bounded", "wz_dissect_pcap_summary_bounded"),
 }
 
 # Reachable ONLY from the command line, each with the reason it is not on the
