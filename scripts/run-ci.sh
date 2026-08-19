@@ -5779,13 +5779,21 @@ layer_c1cb_cargo_test_init_ack_admission() {
 # R311y807 / R311y814 / R311y816 class -- a run selecting zero tests still
 # exits 0). This is the same reason C1cb guards a whole target.
 #
-# The guard is the WHOLE target at the default feature set. Two of the
-# fourteen are the PRE-fix measurement kept green on purpose -- one shared
-# runtime starving TX is what the partition exists to avoid, and it is the
-# discriminator against a pool that quietly hands every subsystem the same
-# runtime -- so a diff that drops them must be deliberate.
+# The guard is the WHOLE target at the default feature set. Two of them are the
+# PRE-fix measurement kept green on purpose -- one shared runtime starving TX is
+# what the partition exists to avoid, and it is the discriminator against a pool
+# that quietly hands every subsystem the same runtime -- so a diff that drops
+# them must be deliberate.
+#
+# R311y867 -- 14 -> 16, and the guard EARNED ITS KEEP getting here. R311y866
+# added `holders_that_arrive_far_apart_still_hold_together` and
+# `a_released_holder_gives_its_worker_back` to that target and did not sweep for
+# the guards that count it; `cargo test -p wz-runtime-tokio` is green either way,
+# because a crate suite counts nothing. This lane caught it on the next hosted
+# run with "expected exactly 14 passed ... no libtest summary matched", which is
+# exactly the sentence it exists to print.
 layer_c1cg_cargo_test_runtime_partition() {
-    _runci_guarded_test C1cg 14 \
+    _runci_guarded_test C1cg 16 \
         cargo test -p wz-runtime-tokio --test runtime_partition --quiet || return 1
 }
 
