@@ -3804,8 +3804,23 @@ fn payload_block(
             keyexpr,
             format: name,
             fields,
+            despite_encoding,
         } => {
-            let mut out = format!("    payload `{keyexpr}` as {name}:\n");
+            // R311y874 — the override is said on its OWN line, above the
+            // fields. A reader whose rule was right and whose publisher is
+            // mislabelling its topic needs that as a finding, not as a
+            // parenthetical on a header they skim; and the fields below are
+            // trustworthy either way, so the line must not read as a warning
+            // about them.
+            let mut out = match despite_encoding {
+                Some(declared) => format!(
+                    "    payload `{keyexpr}`: the publisher declared {declared} \
+                     and its own bytes contradict that, so the \
+                     --payload-format rule was applied anyway\n"
+                ),
+                None => String::new(),
+            };
+            out.push_str(&format!("    payload `{keyexpr}` as {name}:\n"));
             for f in fields {
                 // R311y720 (PF4) — the declared name follows the path rather
                 // than replacing it. Both, because they answer different

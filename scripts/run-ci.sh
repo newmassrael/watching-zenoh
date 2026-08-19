@@ -7856,6 +7856,7 @@ layer_c1bn_passive_dissection_features() {
         payload_decode::tests::a_sample_whose_declared_encoding_contradicts_the_rule_is_not_decoded \
         payload_decode::tests::the_claim_the_rule_agrees_with_and_the_silence_that_is_no_claim_both_decode \
         payload_decode::tests::the_encoding_ids_this_file_names_are_the_ones_upstream_holds \
+        payload_decode::tests::a_declaration_its_own_bytes_refute_does_not_veto_the_rule \
         payload_builtin::tests::every_builtin_names_encodings_the_wire_table_answers_to \
         payload_builtin::tests::a_nested_message_is_walked_and_its_paths_name_the_route \
         payload_builtin::tests::a_span_two_layers_in_is_still_in_the_outer_payloads_coordinates \

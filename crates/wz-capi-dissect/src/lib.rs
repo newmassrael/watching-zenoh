@@ -447,6 +447,15 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields(
 /// what their publisher said and the MAPPING is wrong. A consumer that folded
 /// the two would send an operator to a wire with nothing to answer for.
 ///
+/// R311y874 — a `decoded` block additionally carries `despite_encoding`: the
+/// name the publisher declared when the rule was applied OVER that declaration,
+/// and `null` on an ordinary decode. It is non-null exactly where the
+/// publisher's own bytes refute its own label — the operator's rule was right
+/// and the topic is mislabelled — because a declaration this reader can prove
+/// false must not veto the rule. Always present, never omitted: a consumer that
+/// had to test for the key would read its absence as "nothing was overridden",
+/// which is the assumption the field exists to stop.
+///
 /// # Safety
 /// `bytes` must point to at least `len` readable bytes, `declarations` must be
 /// a NUL-terminated C string, and `out` must be a writable pointer to a
@@ -2008,6 +2017,96 @@ mod tests {
         wz_capture::pcap::write(1, &[(0, 0, packet.as_slice())])
     }
 
+    /// R311y874 — the same capture, but the `Put` DECLARES an encoding.
+    ///
+    /// # Why a real capture and not the field tree the unit tests build
+    ///
+    /// `payload_decode`'s own tests hand-build the walked tree, so they prove
+    /// the DECISION and assume the SHAPE. What reads the encoding is
+    /// `declared_encoding`, and what writes it is `walk_msg_put` — two files
+    /// that have never met in a test. If the group's field names or the packing
+    /// of `packed_id` were anything other than what those tests assume, every
+    /// one of them would still pass and no capture would ever be judged.
+    ///
+    /// So this drives the E flag through the encoder, the pcap, the session,
+    /// the walker and the C boundary, and the assertion is that the answer
+    /// changed — which it can only do if the read found something.
+    fn capture_declaring(encoding_id: u32, payload: &[u8]) -> Vec<u8> {
+        let put = framed_frame(
+            0,
+            &wz_codecs::push::Push {
+                header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+                keyexpr: literal("demo/sensor"),
+                body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                    // 0x40 is the E flag: `walk_msg_put` reads an `encoding`
+                    // group only when it is set, so a struct field alone would
+                    // encode nothing and the test would pass on a build that
+                    // never looked.
+                    header: wz_codecs::msg_put::MsgPut::default().header | 0x40,
+                    encoding: Some(wz_codecs::encoding::Encoding {
+                        // The WIRE WORD is `(id << 1) | has_schema`.
+                        packed_id: encoding_id << 1,
+                        schema_len: None,
+                        schema: None,
+                    }),
+                    payload_len: payload.len() as u64,
+                    payload,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        let mut low_to_high = framed_init(&ZID_A);
+        low_to_high.extend_from_slice(&put);
+        let packet = tcp_packet(1000, &low_to_high);
+        wz_capture::pcap::write(1, &[(0, 0, packet.as_slice())])
+    }
+
+    /// R311y874 — THE PUBLISHER'S DECLARATION REACHES THE DECISION THROUGH A
+    /// REAL CAPTURE, and it decides both ways.
+    ///
+    /// Both arms under ONE rule (`demo/sensor=protobuf`) and one declaration
+    /// (`application/json`, id 5), differing only in the BYTES. That is what
+    /// makes the pair evidence: the rule did not change, the label did not
+    /// change, and the answer changed — so the thing being consulted is the
+    /// payload, which is precisely the credibility question R311y874 added.
+    ///
+    /// A build that never reads the walked encoding answers `decoded` twice; a
+    /// build that reads it but believes it answers `encoding_mismatch` twice.
+    /// Neither passes.
+    #[test]
+    fn a_declared_encoding_decides_both_ways_through_a_real_capture() {
+        const JSON: u32 = 5;
+        // Valid protobuf (field 1, varint 150) and NOT JSON: the publisher's
+        // own bytes refute its own label, so the operator's rule wins.
+        let mislabelled = capture_declaring(JSON, &[0x08, 0x96, 0x01]);
+        let over = call_fields_with_payloads(&mislabelled, 0, "demo/sensor=protobuf")
+            .expect("the capture reads");
+        assert!(
+            over.contains(
+                "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
+                 \"despite_encoding\":\"application/json\""
+            ),
+            "a label the bytes refute must not hide the data, and the override \
+             must be named: {over}"
+        );
+
+        // The same label over bytes that BEAR IT OUT: here the rule is the
+        // thing that is wrong and the veto is correct.
+        let honest = capture_declaring(JSON, br#"{"a":1}"#);
+        let vetoed = call_fields_with_payloads(&honest, 0, "demo/sensor=protobuf")
+            .expect("the capture reads");
+        assert!(
+            vetoed.contains(
+                "\"payload_decode\":{\"state\":\"encoding_mismatch\",\"keyexpr\":\"demo/sensor\",\
+                 \"format\":\"protobuf\",\"declared\":\"application/json\"}"
+            ),
+            "a publisher whose bytes match its own label is believed, and the \
+             rule is named as the thing to fix: {vetoed}"
+        );
+    }
+
     /// Drive the field layer WITH declarations, the way C does.
     fn call_fields_with_payloads(
         bytes: &[u8],
@@ -2127,9 +2226,19 @@ mod tests {
         assert!(
             decoded.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
-                 \"format\":\"protobuf\""
+                 \"despite_encoding\":null,\"format\":\"protobuf\""
             ),
             "the covering rule must fire: {decoded}"
+        );
+        // R311y874 — and `despite_encoding` is PRESENT with a null on the
+        // ordinary decode, asserted here rather than left to the state word.
+        // The field answers "was this decoded over the publisher's own label",
+        // and a consumer that had to test for the key would read its absence as
+        // "no" — which is the assumption the field exists to stop.
+        assert!(
+            !decoded.contains("\"despite_encoding\":\""),
+            "this publisher declared nothing, so nothing was overridden: \
+             {decoded}"
         );
         assert!(
             decoded.contains("\"path\":\"1\",\"name\":\"temperature\",\"value\":\"varint 150\""),

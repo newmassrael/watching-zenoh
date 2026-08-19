@@ -209,7 +209,16 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * Told apart from `refused` because the two send you to opposite places:
  * that one says the bytes are not this format, this one says the bytes are
  * exactly what their publisher said and the MAPPING is wrong. Folding the
- * two would send an operator to a wire with nothing to answer for. */
+ * two would send an operator to a wire with nothing to answer for.
+ *
+ * R311y874 -- a `decoded` block additionally carries `despite_encoding`: the
+ * name the publisher declared when the rule was applied OVER that
+ * declaration, and `null` on an ordinary decode. It is non-null exactly
+ * where the publisher's own bytes refute its own label -- your rule was
+ * right and the topic is mislabelled -- because a declaration this reader
+ * can prove false must not veto the rule. Always present, never omitted: a
+ * consumer that had to test for the key would read its absence as "nothing
+ * was overridden", which is the assumption the field exists to stop. */
 int wz_dissect_pcap_fields_with_payloads(const unsigned char *bytes, size_t len,
                                          size_t max_messages_per_flow,
                                          const char *declarations, char **out);

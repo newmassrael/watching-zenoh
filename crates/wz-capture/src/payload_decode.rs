@@ -160,6 +160,24 @@ pub enum PayloadDecoding {
         format: String,
         /// The fields, rebased into the message's coordinate space.
         fields: Vec<PayloadField>,
+        /// R311y874 — the encoding this sample DECLARED, when the rule was
+        /// applied over that declaration rather than in agreement with it.
+        ///
+        /// `Some` only where the publisher's own bytes refute its own label, so
+        /// the field names a deployment bug the reader is otherwise not told
+        /// about on this plane: their rule was right and the topic is
+        /// mislabelled. `None` is the ordinary decode.
+        ///
+        /// An `Option` that is always RENDERED, never omitted — R311y720's rule
+        /// for `name`, which the rest of this document follows: a consumer must
+        /// never have to test for a key to learn that a fact is unknown.
+        ///
+        /// Carries the NAME and not the reason. `Mismatch` already has two
+        /// renderings (`report.rs` for text, `census_json.rs` for JSON) and a
+        /// third spelling of one value is the standing drift this workspace
+        /// keeps paying for; the reason belongs to the payload plane, which is
+        /// where that finding is produced.
+        despite_encoding: Option<String>,
     },
     /// R311y873 — the sample's OWN declared encoding contradicts the rule, so
     /// the format was never applied.
@@ -394,7 +412,22 @@ fn declared_encoding(node: &Field) -> Encoding<'_> {
     }
 }
 
-/// R311y873 — the name a publisher declared that CONTRADICTS `format`, if any.
+/// R311y874 — what one sample's DECLARATION does to the rule that covers it.
+#[derive(Debug, PartialEq, Eq)]
+enum Claim {
+    /// Nothing stands in the rule's way: the format named no encodings, the
+    /// publisher named none, or the two agree.
+    Agrees,
+    /// The declaration contradicts the rule AND its own bytes bear it out, so
+    /// the rule is the thing that is wrong. Carries the declared name.
+    Vetoes(String),
+    /// The declaration contradicts the rule and ITS OWN BYTES REFUTE IT, so the
+    /// rule wins and the reader is told whose label was overridden.
+    Refuted(String),
+}
+
+/// R311y873 — the publisher's claim, weighed against `format`'s rule and, since
+/// R311y874, against the bytes the claim is about.
 ///
 /// # The three answers that are not contradictions
 ///
@@ -405,13 +438,30 @@ fn declared_encoding(node: &Field) -> Encoding<'_> {
 /// [`Encoding::Unknown`] id is a claim this BUILD cannot read; calling it a
 /// contradiction would blame a capture for a table this binary is behind on.
 ///
-/// What is left is the one case worth a finding: the publisher named an
-/// encoding this build knows, and it is not one the rule's format is for.
-fn contradicted_by(format: &dyn PayloadFormat, node: &Field) -> Option<String> {
-    let accepted = format.encodings()?;
+/// # R311y874 — and then the claim is CHECKED, which is the point of the rule
+///
+/// R311y873 stopped at "the publisher named something else" and vetoed. That
+/// believed a label nobody had held against the bytes it labels, which is
+/// exactly the credulity this crate's opening rule is about — pointed the other
+/// way. A publisher that declares `application/json` and ships protobuf makes
+/// the operator's rule RIGHT and its own label WRONG, and vetoing there hides
+/// the data on the authority of a statement this reader can refute in one call.
+///
+/// So the veto now rests on [`crate::payload::inspect`], the same judgement the
+/// payload plane publishes, rather than on a second opinion invented here.
+///
+/// The residue is stated rather than hidden: `inspect` can only refute a
+/// declaration whose shape says something checkable — text and JSON. A binary
+/// or unknown declaration comes back [`crate::payload::Verdict::Opaque`], so
+/// nothing contradicts it and the veto stands. That is the honest limit of what
+/// bytes can say about a label, not a gap in the check.
+fn judge_claim(format: &dyn PayloadFormat, node: &Field, bytes: &[u8]) -> Claim {
+    let Some(accepted) = format.encodings() else {
+        return Claim::Agrees;
+    };
     let declared = declared_encoding(node);
     let Encoding::Known { id, name, .. } = declared else {
-        return None;
+        return Claim::Agrees;
     };
     // Id 0 is `zenoh/bytes`, which a publisher gets by saying nothing at all.
     // Told apart from the other table entries HERE rather than by leaving it
@@ -419,9 +469,12 @@ fn contradicted_by(format: &dyn PayloadFormat, node: &Field) -> Option<String> {
     // deliberately, and this reader cannot distinguish the two — so the
     // benefit of the doubt goes to the traffic.
     if id == 0 || accepted.contains(&name) {
-        return None;
+        return Claim::Agrees;
     }
-    Some(String::from(name))
+    match crate::payload::inspect(declared, bytes) {
+        crate::payload::Verdict::NotAsDeclared { .. } => Claim::Refuted(String::from(name)),
+        _ => Claim::Vetoes(String::from(name)),
+    }
 }
 
 /// Apply the mapping to one walked message.
@@ -450,13 +503,19 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
     // walked contradicting bytes and happened to SUCCEED is the half of the
     // defect a refusal never shows: `{"a":1}` opens a valid protobuf tag, and
     // the reader is handed fields no publisher sent.
-    if let Some(declared) = contradicted_by(format, node) {
-        return PayloadDecoding::EncodingMismatch {
-            keyexpr,
-            format: String::from(format.name()),
-            declared,
-        };
-    }
+    // R311y874 — and the claim is itself checked, so a label its own bytes
+    // refute cannot hide the data behind it.
+    let despite_encoding = match judge_claim(format, node, bytes) {
+        Claim::Vetoes(declared) => {
+            return PayloadDecoding::EncodingMismatch {
+                keyexpr,
+                format: String::from(format.name()),
+                declared,
+            }
+        }
+        Claim::Refuted(declared) => Some(declared),
+        Claim::Agrees => None,
+    };
     match format.decode(bytes) {
         Ok(mut fields) => {
             // The spans arrive PAYLOAD-relative and every other span in this
@@ -478,6 +537,7 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
                 keyexpr,
                 format: format.name().to_string(),
                 fields,
+                despite_encoding,
             }
         }
         Err(why) => PayloadDecoding::Refused {
@@ -564,10 +624,21 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
             keyexpr,
             format,
             fields,
+            despite_encoding,
         } => {
             open(out);
             out.push_str(",\"keyexpr\":");
             escape_into(keyexpr, out);
+            // R311y874 — present with a `null` rather than absent, R311y720's
+            // rule: a consumer must never have to test for a key to learn that
+            // a fact is unknown. Here the fact is "was this decoded over the
+            // publisher's own label", and a missing key would read as "no",
+            // which is the answer this field exists to stop being assumed.
+            out.push_str(",\"despite_encoding\":");
+            match despite_encoding {
+                Some(declared) => escape_into(declared, out),
+                None => out.push_str("null"),
+            }
             out.push_str(",\"format\":");
             escape_into(format, out);
             out.push_str(",\"fields\":[");
@@ -698,6 +769,72 @@ mod tests {
             },
             "a publisher that said application/json is not decoded by a \
              protobuf rule, and the report names the rule"
+        );
+    }
+
+    /// R311y874 — A DECLARATION ITS OWN BYTES CONTRADICT DOES NOT GET TO VETO
+    /// THE RULE.
+    ///
+    /// # The defect this closes was made by the round before it
+    ///
+    /// R311y873 taught the field layer to check the sender's claim, on this
+    /// crate's own rule that a claim is checked before it is believed. It then
+    /// BELIEVED the claim — the veto fired on the strength of a declaration
+    /// nobody had checked against the bytes it labels, which is the very thing
+    /// `payload::inspect` exists to do.
+    ///
+    /// So the case that matters is the one where BOTH are wrong at once and
+    /// only one of them is the reader's: a publisher that declares
+    /// `application/json` and ships protobuf. The operator's rule is RIGHT, the
+    /// publisher's label is WRONG, and R311y873 answered by hiding the data on
+    /// the authority of the label. `inspect` can prove that label false in one
+    /// call, and a veto resting on a claim this reader can refute is not a
+    /// check — it is the same credulity the round was written against, pointed
+    /// the other way.
+    ///
+    /// Both arms, because either alone passes on a wrong build. Severing the
+    /// credibility question reds the first; deleting the veto outright reds the
+    /// second, which is R311y873's own case and must still refuse.
+    #[test]
+    fn a_declaration_its_own_bytes_refute_does_not_veto_the_rule() {
+        let mut map = FormatMap::new();
+        map.declare("demo/**=protobuf").expect("a keyexpr pattern");
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+        // field 1, varint, value 42 — valid protobuf, and not JSON at byte 0.
+        let protobuf: &[u8] = &[0x08, 0x2a];
+
+        let mislabelled = put_declaring(ENC_JSON, protobuf);
+        let run = Declarations::new(&map);
+        match decode_payload(&mislabelled, &run, at) {
+            PayloadDecoding::Decoded {
+                ref fields,
+                ref despite_encoding,
+                ..
+            } => {
+                assert_eq!(fields.len(), 1, "the operator's rule was the right one");
+                assert_eq!(
+                    despite_encoding.as_deref(),
+                    Some("application/json"),
+                    "decoding over a publisher's label is not the same fact as \
+                     decoding under one, and a reader must be told which"
+                );
+            }
+            other => panic!("a refuted label must not hide the data: {other:?}"),
+        }
+
+        // The vehicle for the veto itself: a label the bytes AGREE with still
+        // wins, because there the rule is the thing that is wrong.
+        let honest = put_declaring(ENC_JSON, br#"{"a":1}"#);
+        let run = Declarations::new(&map);
+        assert_eq!(
+            decode_payload(&honest, &run, at),
+            PayloadDecoding::EncodingMismatch {
+                keyexpr: String::from("demo/a"),
+                format: String::from("protobuf"),
+                declared: String::from("application/json"),
+            },
+            "a publisher whose bytes match its own label is believed"
         );
     }
 

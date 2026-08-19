@@ -732,7 +732,7 @@ mod tests {
         assert!(
             block.starts_with(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
-                 \"format\":\"protobuf\",\"fields\":["
+                 \"despite_encoding\":null,\"format\":\"protobuf\",\"fields\":["
             ),
             "the covering rule must DECODE, naming the topic and the decoder: {block}"
         );
