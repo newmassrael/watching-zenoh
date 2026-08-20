@@ -825,57 +825,101 @@ mod port_tests {
     use super::free_port;
     use std::collections::BTreeSet;
 
-    /// R311y867 — the property the sixteen hand-copied helpers did not have.
+    /// The old three-line helper: bind, read, drop. Reproduced here so the
+    /// control below is a COMPARISON rather than an assertion about the new one
+    /// alone.
     ///
-    /// PROBE FIRST, on the shape that failed. The old helper is three lines and
-    /// reproducing it here is what makes this a comparison rather than an
-    /// assertion about the new one alone: bind, read, drop, repeat. Run enough
-    /// times and the kernel hands the same number back, because a probe
-    /// listener that never accepted is released outright.
-    #[test]
-    fn free_port_never_repeats_and_the_old_shape_does() {
-        fn old_shape() -> u16 {
+    /// R311y889 — `Option` and not `unwrap`. This runs 256 times inside a test
+    /// that deliberately asserts NOTHING about the kernel, so a bind that fails
+    /// under load must not be the one thing in it that can still panic. A draw
+    /// that did not happen is not a draw.
+    fn old_shape() -> Option<u16> {
+        Some(
             std::net::TcpListener::bind("127.0.0.1:0")
-                .unwrap()
+                .ok()?
                 .local_addr()
-                .unwrap()
-                .port()
-        }
+                .ok()?
+                .port(),
+        )
+    }
 
-        // THE CONTROL ARM, and it is the one that has to fire for this test to
-        // mean anything. If the kernel on this host never reuses a just-freed
-        // ephemeral port, the race cannot happen here and the leg below proves
-        // nothing — so say so instead of passing quietly.
-        let mut old = BTreeSet::new();
-        let mut old_repeats = 0usize;
+    /// Repeats and distinct ports across 256 attempted draws, plus how many of
+    /// those draws actually bound.
+    fn old_shape_repeats() -> (usize, usize, usize) {
+        let mut seen = BTreeSet::new();
+        let (mut repeats, mut drawn) = (0usize, 0usize);
         for _ in 0..256 {
-            if !old.insert(old_shape()) {
-                old_repeats += 1;
+            let Some(port) = old_shape() else { continue };
+            drawn += 1;
+            if !seen.insert(port) {
+                repeats += 1;
             }
         }
-        assert!(
-            old_repeats > 0,
-            "the old bind-read-drop shape produced 256 DISTINCT ports on this \
-             host, so this host does not reuse a released ephemeral port and \
-             the leg below is measuring nothing. That is a fact about the \
-             kernel, not a pass"
-        );
+        (repeats, seen.len(), drawn)
+    }
 
-        // Printed, not only asserted: the number is how sharp the race is on
-        // this host, and a reader comparing two runs wants it.
-        std::println!(
-            "old bind-read-drop shape: {old_repeats} repeat(s) in 256 draws \
-             ({} distinct)",
-            old.len()
-        );
-
+    /// R311y867 — the property the sixteen hand-copied helpers did not have.
+    ///
+    /// R311y889 — SPLIT FROM ITS CONTROL, because the control was hiding it.
+    ///
+    /// The two were one test, control first, and on 2026-08-20 the hosted
+    /// runner drew 256 DISTINCT ports through the old shape — a fact about that
+    /// kernel — so the control asserted, the run went red, and the property
+    /// below never executed at all. A failing step hides the ones after it,
+    /// which this workspace has measured before; the arrangement meant the
+    /// claim that matters was untested on exactly the host where the build runs.
+    ///
+    /// This arm asserts nothing about the kernel and runs everywhere.
+    #[test]
+    fn free_port_never_repeats() {
         let mut fresh = BTreeSet::new();
         for _ in 0..256 {
             assert!(
                 fresh.insert(free_port()),
-                "free_port handed out a port twice in one process after \
-                 {old_repeats} repeats from the old shape under the same \
-                 conditions"
+                "free_port handed out a port twice in one process"
+            );
+        }
+    }
+
+    /// R311y889 — THE CONTROL, as a statement about the HOST rather than a
+    /// verdict on the code.
+    ///
+    /// # Why this is not an assertion any more, and not a silent pass either
+    ///
+    /// Whether a kernel re-hands a just-released ephemeral port is a property
+    /// of the kernel and its current port pressure. On a host that does, this
+    /// number is what makes `free_port_never_repeats` a claim about a real
+    /// race; on a host that does not, the race cannot be provoked and there is
+    /// nothing here to fail — asserting turns "this runner behaves differently"
+    /// into a broken build, which is what happened.
+    ///
+    /// So it PRINTS, and it FAILS only when armed. `WZ_PORT_RACE_REQUIRE=1` is
+    /// the same shape Layer Qz uses for its prerequisites: green-with-a-reason
+    /// where the condition is genuinely absent, red where a lane has guaranteed
+    /// it. That keeps the anti-masked-failure stance without spending a red on
+    /// a fact about somebody's scheduler.
+    #[test]
+    fn the_old_shape_repeats_where_the_kernel_lets_it() {
+        let (repeats, distinct, drawn) = old_shape_repeats();
+        // Printed, not only judged: the number is how sharp the race is on this
+        // host, and a reader comparing two runs wants it. `drawn` is printed
+        // beside it because a low repeat count over few draws says nothing.
+        std::println!(
+            "old bind-read-drop shape: {repeats} repeat(s) in {drawn} draw(s) \
+             ({distinct} distinct)"
+        );
+        if repeats == 0 {
+            let armed = std::env::var("WZ_PORT_RACE_REQUIRE").is_ok();
+            assert!(
+                !armed,
+                "WZ_PORT_RACE_REQUIRE is set and the old bind-read-drop shape \
+                 produced {distinct} DISTINCT ports over {drawn} draw(s), so \
+                 this host cannot provoke the race `free_port` exists to avoid"
+            );
+            std::println!(
+                "  this host does not reuse a released ephemeral port, so the \
+                 race is unprovokable here. That is a fact about the kernel, \
+                 and `free_port_never_repeats` stands on its own"
             );
         }
     }

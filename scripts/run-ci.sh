@@ -1121,8 +1121,17 @@ layer_b_verify_codegen() {
     if [[ "$sce_head_epoch" -gt 0 && "$bin_mtime_epoch" -gt 0 \
           && "$bin_mtime_epoch" -lt "$sce_head_epoch" ]]; then
         echo "Layer B: sce-codegen stale (built $(date -d @"$bin_mtime_epoch" +%F) vs pin $(date -d @"$sce_head_epoch" +%F)); rebuilding"
-        bash scripts/build-sce.sh >/dev/null 2>&1 || {
+        # R311y889 (open-debt item 362) — KEEP WHAT IT SAID, on the same
+        # argument R311y756 made twenty lines down. This discarded both streams
+        # and printed four words, so a failure here carried no evidence and
+        # learning anything meant running the build again by hand.
+        local sce_log="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/b-sce-rebuild.log"
+        mkdir -p "$(dirname "$sce_log")"
+        bash scripts/build-sce.sh >"$sce_log" 2>&1 || {
             echo "Layer B FAIL: sce-codegen rebuild failed" >&2
+            echo "  ── the rebuild's last 40 line(s) ──" >&2
+            tail -40 "$sce_log" >&2
+            echo "  ── full log: $sce_log ──" >&2
             return 1
         }
     fi
@@ -1296,8 +1305,18 @@ layer_b2_regen_diff() {
     fi
     # Build the xtask first; a libxml2-absent box fails here -> SKIP, not FAIL
     # (the gate is a maintainer freshness check, not a consumer build step).
-    if ! cargo build --manifest-path xtask/Cargo.toml --quiet >/dev/null 2>&1; then
+    # R311y889 (open-debt item 362) — the SKIP says WHY. This discarded both
+    # streams, so "toolchain absent?" was a GUESS printed as a diagnosis, and a
+    # real break in the xtask read exactly like a box without libxml2. A
+    # should-run lane that skips is the burn; a skip whose reason is unreadable
+    # is that burn with the evidence removed.
+    local xtask_log="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/b2-xtask-build.log"
+    mkdir -p "$(dirname "$xtask_log")"
+    if ! cargo build --manifest-path xtask/Cargo.toml --quiet >"$xtask_log" 2>&1; then
         echo "Layer B2 SKIP (xtask build failed — libxml2/sce-build toolchain absent?)"
+        echo "  ── the build's last 20 line(s), so the guess above can be checked ──"
+        tail -20 "$xtask_log"
+        echo "  ── full log: $xtask_log ──"
         return 0
     fi
     # R311y756 — KEEP WHAT IT SAID. This discarded both streams and printed four
@@ -1877,6 +1896,16 @@ PY
     # must have its sums refilled (measured: three more live sites in
     # wz-capture, invisible because the IPv4 axis stays clean).
     python3 scripts/lib/packet_fixture_lint.py || return 1
+    # R311y889 (debt-build-evidence) — a BUILD this CI runs must not throw its
+    # own output away.
+    #
+    # Hosted run 32314626012 recorded `Qz build deploy/zephyr-app (west) FAIL`
+    # in zero seconds and nothing else, because that build was written
+    # `>/dev/null 2>&1`. Diagnosing it meant provisioning Zephyr by hand and
+    # running it again — a round spent reproducing what the failing run already
+    # knew. Three sites were in that state and R311y756 had repaired a fourth,
+    # which is what makes this a rule rather than a habit.
+    python3 scripts/lib/build_evidence_lint.py || return 1
     # R311y879 — WHICH READER each narrow zint field gets, pinned against the
     # codec UPSTREAM reads it with. The three censuses above ask whether the
     # decode covers the wire and whether a consumer reaches it; this asks
@@ -13761,15 +13790,27 @@ layer_qz_zephyr_boot() {
     # west build in a subshell so the venv activate + ZEPHYR_BASE export do not
     # leak into the rest of run-ci. cargo (invoked by the CMakeLists.txt) pins
     # CC_thumbv7m_none_eabi=arm-none-eabi-gcc + WZ_LWIP_PORT itself.
+    #
+    # R311y889 (open-debt item 362) — THE BUILD'S OUTPUT IS KEPT. This
+    # discarded both streams, so hosted run 32314626012 recorded a 0-second
+    # `Qz build deploy/zephyr-app (west) FAIL` and NOTHING ELSE: the cause could
+    # not be read from the log at all, and diagnosing it meant provisioning
+    # Zephyr by hand. A gate whose red carries no evidence costs a whole round
+    # to reproduce, which is the price this line was quietly charging.
+    local west_log="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/qz-west-build.log"
+    mkdir -p "$(dirname "$west_log")"
     if (
         # shellcheck disable=SC1091
         source "$venv/bin/activate" 2>/dev/null
         export ZEPHYR_BASE="$zbase"
-        west build -b qemu_cortex_m3 -d "$build_dir" deploy/zephyr-app >/dev/null 2>&1
+        west build -b qemu_cortex_m3 -d "$build_dir" deploy/zephyr-app >"$west_log" 2>&1
     ); then
         echo "  Qz build deploy/zephyr-app (west, qemu_cortex_m3) OK"
     else
         echo "  Qz build deploy/zephyr-app (west) FAIL" >&2
+        echo "  ── the build's last 60 line(s) ──" >&2
+        tail -60 "$west_log" >&2
+        echo "  ── full log: $west_log ──" >&2
         rm -rf "$(dirname "$build_dir")"
         return 1
     fi
