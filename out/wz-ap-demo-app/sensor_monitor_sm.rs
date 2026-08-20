@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: d841d580f68f0ffa7856ca901e5c655a89caf324841c2e035c76a51a543cfe92
-// template-hash: eef83a0380a6f32e69bd8e491d75a942150e8193a11c5aedb68d2fc11fa47b6e
+// template-hash: 90ac0b7250dd34a7e14136bc481cc93d6f1302dcf207c461738cfaee4b475c98
 // generated-at: 0
 
 
@@ -235,6 +235,11 @@ impl StatePolicy for SensorMonitorPolicy {
     const HAS_PARALLEL_STATES: bool = false;
     const NEEDS_SCRIPT_ENGINE: bool = false;
     const NEEDS_DATA_MODEL_INIT: bool = false;
+    // The same fact the generate manifest publishes as `needs_event_scheduler`.
+    // A `build.rs` consumer never sees that manifest — `compile_scxml` returns
+    // `()` — so without this constant a host had no route to the knowledge that
+    // its driving loop must call `tick()` rather than `step()`.
+    const NEEDS_EVENT_SCHEDULER: bool = false;
 
     // ======================================================================
     // Static metadata methods (W3C SCXML document structure)
