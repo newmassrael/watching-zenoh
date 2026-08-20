@@ -4021,7 +4021,22 @@ layer_c1af_cargo_test_shm() {
     # compiled in NEITHER, and both exited 0 -- the `0 passed` shape open-debt
     # item 386 is a register of. 26 is MEASURED, not derived from the 17 above:
     # the two feature sets select different suites, so the counts do not add.
-    _runci_guarded_test C1af 26 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+    #
+    # R311y897 — 26 -> 27, and the guard EARNED ITS KEEP. The new member is
+    # `dissect::tests::the_same_eid_reads_as_shm_on_an_init_and_as_usrpwd_on_the_
+    # auth_chain`: the substring filter selects it because `shm` is half of what
+    # it discriminates, which is the same accident the 17 above documents.
+    #
+    # NOTHING COULD HAVE CAUGHT THIS STATICALLY, and that is the point worth
+    # writing down. `scripts/lib/count_guard_lint.py` reads only the BARE
+    # `grep -qE '^test result: ok. N passed'` shape and excludes any invocation
+    # that applies a name filter, so a filtered `_runci_guarded_test` like this
+    # one is outside its population BY DESIGN — it was run and reported clean
+    # while this number was already wrong. The only defence is running the
+    # filter against the names being added, before the push (open-debt 400).
+    # The 17 leg above was RE-RUN and did NOT move: it selects no `dissect`, so
+    # the test is not compiled there at all.
+    _runci_guarded_test C1af 27 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
     _runci_guarded_test C1af 3 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
