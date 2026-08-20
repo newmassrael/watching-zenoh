@@ -9368,6 +9368,23 @@ layer_ewirez_zenohd_wire_dissection() {
         --test zenoh_ext_body_foreign_witness -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewirez: the Z64 extension-body walkers read bytes stock zenoh wrote"
+
+    # R311y902 (open-debt item 396) — the AUTH leg. Same prereqs as the leg
+    # above (zenohd + the core zenoh examples), so it sits inside the same
+    # guard block, but its own `--test` target and its own count.
+    #
+    # WHY IT IS A SEPARATE CAPTURE and not a leg of the one above: this
+    # topology needs the client to be a usrpwd INITIATOR, which means both
+    # processes carry auth config the other capture must NOT have — a zenohd
+    # holding a credentials dictionary refuses any client without the
+    # extension, so folding the two would make the ext-body witness depend on
+    # auth succeeding.
+    _runci_guarded_test "Ewirez stock-zenoh auth bodies" 1 \
+        env WZ_ZENOH_CORE_EXAMPLES_DIR="$core_examples_dir" \
+        cargo test -p wz-integration-tests \
+        --test zenoh_auth_body_foreign_witness -- --ignored --quiet --test-threads=1 \
+        || return 1
+    echo "  Ewirez: the auth chain walkers read bytes a stock usrpwd handshake wrote"
 }
 
 layer_e_ap_demo_round_trip() {

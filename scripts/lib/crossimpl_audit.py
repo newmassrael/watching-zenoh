@@ -430,7 +430,18 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # grading a DECODER -- a decoder needs no seat at the table, and open-debt
 # item 406 was filed because the Z64 extension-body walkers had only ever been
 # judged against this tree's own producers.
-FOREIGN_ADJUDICATOR_LINKS = 853
+# R311y902 takes it to 855, in the NEW zenoh_auth_body_foreign_witness.rs. ONE
+# leg, TWO links, MEASURED not guessed (853 -> 855 is exactly the two
+# `wz-proves` lines added). It grades `session-extauth` and
+# `access-extauth-usrpwd` in the shape R311y900 opened: BOTH ENDS OF THE
+# TAPPED CONNECTION ARE FOREIGN. The reason it had to be that shape is
+# specific to auth and worth recording -- the usrpwd body that carries
+# `{user, hmac}` is written by the DIALER, and every existing auth interop
+# test in this tree has wz dialling, so pointing the dissector at those
+# captures would have graded wz's encoder against wz's decoder. A stock
+# `z_get` carrying `transport/auth/usrpwd/{user,password}` is the initiator
+# here, and a stock zenohd holding the dictionary is the acceptor.
+FOREIGN_ADJUDICATOR_LINKS = 855
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

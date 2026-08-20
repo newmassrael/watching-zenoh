@@ -1875,6 +1875,14 @@ jobs:
         # grades the record layer against a real router, not just the transport
         # envelope. Idle leg `[]`, routing leg `["Push", "Push"]`.
         #
+        # R311y902 (open-debt item 396) adds a third leg on the same oracles:
+        # the AUTH chain, captured between a stock `z_get` carrying
+        # `transport/auth/usrpwd/{user,password}` and a zenohd holding the
+        # matching dictionary. It is a SEPARATE capture from the leg below
+        # because a zenohd with a dictionary refuses any client without the
+        # extension, so folding them would make the ext-body witness depend on
+        # auth succeeding.
+        #
         # R311y900 (open-debt item 406) adds the FIELD leg one level in, and it
         # needs the core zenoh examples on top of zenohd — which this job
         # already provisions for Layer E5z directly above. Both halves of its
