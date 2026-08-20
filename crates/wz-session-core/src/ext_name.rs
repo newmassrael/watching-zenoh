@@ -116,6 +116,25 @@ pub const SHM_INIT: &str = "shm";
 /// ext multiplexes every negotiated method into one extension, so its entries
 /// are named from [`ExtCarrier::Auth`]'s own row set.
 pub const AUTH: &str = "auth";
+/// See [`SOURCE_INFO`]. The NINTH (R311y897), and the first that names a row
+/// of a carrier which is itself a BODY: [`ExtCarrier::Auth`]'s rows are the
+/// negotiated METHODS inside [`AUTH`]'s chain, not extensions of a message.
+/// It needs the carrier for the same reason [`JOIN_QOS`] does — `usrpwd`
+/// spells THREE rows of that table (`Unit` at InitSyn, `Z64` at InitAck,
+/// `ZBuf` at OpenSyn) and only the ZBuf one has a body to walk.
+pub const AUTH_USRPWD: &str = "usrpwd";
+/// See [`AUTH_USRPWD`]. The pubkey method's sub-ext, whose ZBuf half carries
+/// the mutual RSA challenge-response — the same bytes [`MULTI_LINK`] carries
+/// under a different id.
+pub const AUTH_PUBKEY: &str = "pubkey";
+/// See [`SOURCE_INFO`]. `Init`'s `0x4`: zenoh `.transmute()`s the pubkey
+/// method's payload straight onto this id, so the body is that method's own
+/// bytes with NO envelope of its own — which is why it shares
+/// [`AUTH_PUBKEY`]'s walker rather than having one of its own.
+pub const MULTI_LINK: &str = "multi_link";
+/// See [`MULTI_LINK`]. `Open`'s ZBuf half of `0x4`; the `Unit` half
+/// (`multi_link_ack`) carries no body at all.
+pub const MULTI_LINK_SYN: &str = "multi_link_syn";
 
 /// `false` spelled out, so a row's third column reads as the mandatory flag
 /// rather than as an unexplained bare `false`.
@@ -227,7 +246,7 @@ const INIT: &[Row] = &[
     (0x1, OPT, EXT_ENC_Z64, "qos_link"),
     (0x2, OPT, EXT_ENC_ZBUF, SHM_INIT),
     (0x3, OPT, EXT_ENC_ZBUF, AUTH),
-    (0x4, OPT, EXT_ENC_ZBUF, "multi_link"),
+    (0x4, OPT, EXT_ENC_ZBUF, MULTI_LINK),
     (0x5, OPT, EXT_ENC_UNIT, "low_latency"),
     (0x6, OPT, EXT_ENC_UNIT, "compression"),
     (0x7, OPT, EXT_ENC_Z64, "patch"),
@@ -239,7 +258,7 @@ const OPEN: &[Row] = &[
     (0x1, OPT, EXT_ENC_UNIT, "qos"),
     (0x2, OPT, EXT_ENC_Z64, "shm"),
     (0x3, OPT, EXT_ENC_ZBUF, AUTH),
-    (0x4, OPT, EXT_ENC_ZBUF, "multi_link_syn"),
+    (0x4, OPT, EXT_ENC_ZBUF, MULTI_LINK_SYN),
     (0x4, OPT, EXT_ENC_UNIT, "multi_link_ack"),
     (0x5, OPT, EXT_ENC_UNIT, "low_latency"),
     (0x6, OPT, EXT_ENC_UNIT, "compression"),
@@ -355,11 +374,11 @@ const ERR: &[Row] = &[
 /// a peer that does not run a method drops its sub-ext rather than rejecting
 /// the chain.
 const AUTH_SUB: &[Row] = &[
-    (0x1, OPT, EXT_ENC_ZBUF, "pubkey"),
-    (0x1, OPT, EXT_ENC_UNIT, "pubkey"),
-    (0x2, OPT, EXT_ENC_UNIT, "usrpwd"),
-    (0x2, OPT, EXT_ENC_Z64, "usrpwd"),
-    (0x2, OPT, EXT_ENC_ZBUF, "usrpwd"),
+    (0x1, OPT, EXT_ENC_ZBUF, AUTH_PUBKEY),
+    (0x1, OPT, EXT_ENC_UNIT, AUTH_PUBKEY),
+    (0x2, OPT, EXT_ENC_UNIT, AUTH_USRPWD),
+    (0x2, OPT, EXT_ENC_Z64, AUTH_USRPWD),
+    (0x2, OPT, EXT_ENC_ZBUF, AUTH_USRPWD),
 ];
 
 /// The rows a carrier declares upstream, in id order.

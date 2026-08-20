@@ -164,6 +164,47 @@ OWN_VOCABULARY = {
     "renamed because a reader told `alice_segment` on an ACK would have the "
     "direction backwards",
     "bob_segment": "the acceptor's own segment, the InitAck's second VLE",
+    # R311y897 — the four METHOD bodies one level inside the `auth` chain, plus
+    # the two `multi_link` halves that carry the same bytes under zenoh's
+    # `.transmute()`d id. Group names on the `linkstate` rule; leaf names are
+    # the layout's own, and none of them is a generated codec field because
+    # every one of these bodies is hand-encoded.
+    "usrpwd": "the usrpwd method's OpenSyn body inside the auth chain, walked. "
+    "Same rule as `auth` one level up: the codec models the sub-ext body as "
+    "`value`, and only the chain's carrier plus the method id says a "
+    "credential is what these bytes hold",
+    "pubkey": "the pubkey method's sub-ext body -- one, two or three ZBufs, "
+    "the count being which stage of the mutual challenge-response this is",
+    "multi_link": "`Init`'s `0x4`, which is pubkey's payload `.transmute()`d "
+    "onto its own ext id with no re-framing, so it shares that walker. NOT "
+    "`pubkey`: the name says which EXTENSION was read, and a reader told "
+    "`pubkey` on a multilink Init would look for an auth chain that is not "
+    "there",
+    "multi_link_syn": "the `Open` half of that transmute. Held apart from "
+    "`multi_link` because `Open` declares BOTH halves at `0x4` and only the "
+    "ZBuf one has a body",
+    "user": "the username in a usrpwd OpenSyn. Upstream's own field name "
+    "(zenoh `establishment/ext/auth/usrpwd.rs` `OpenSyn { user, hmac }`)",
+    "user_len": "that record's ZBuf length prefix, emitted so the walk TILES "
+    "the body rather than leaving the two length bytes unaccounted for",
+    "hmac": "the HMAC-SHA3-256 tag over the InitAck nonce -- upstream's own "
+    "field name. Carried as bytes and NOT interpreted: what is inside it is "
+    "the method's secret, which is the part that really is opaque",
+    "hmac_len": "as `user_len`, for the second record",
+    "pubkey_n": "the RSA modulus of a serialised public key, `n.to_bytes_le()` "
+    "(zenoh's `ZPublicKey` `WCodec`). NOT `n`: that is already a protocol FLAG "
+    "letter in this vocabulary, and a reader could not tell a modulus from a "
+    "header bit",
+    "pubkey_n_len": "as `user_len`, for the modulus record",
+    "pubkey_e": "the RSA public exponent, `e.to_bytes_le()`. NOT `e`, for the "
+    "same reason as `pubkey_n`",
+    "pubkey_e_len": "as `user_len`, for the exponent record",
+    "challenge": "the encrypted nonce of the mutual challenge-response, "
+    "ciphertext and therefore terminal. Named for what the field IS rather "
+    "than for its wz-side variable (`challenge_ct`), since the same record is "
+    "the acceptor's challenge on an InitAck and the initiator's answer on an "
+    "OpenSyn",
+    "challenge_len": "as `user_len`, for the ciphertext record",
     "priority": "which priority a `priority_sn` row belongs to. POSITIONAL on "
     "the wire -- the body carries no such field -- so it is emitted from the "
     "index and aliases the row's own span, carrying the zenoh `Priority` "
@@ -191,6 +232,21 @@ def walker_names(src: str) -> set[str]:
     """
     names: set[str] = set()
     names |= set(re.findall(r'\bc\.[a-z_0-9]+\(\s*"([a-z0-9_]+)"', src))
+    # R311y897 — the FOURTH producing form, and it was a live blind spot before
+    # it was written: a helper that takes the cursor as its first argument and
+    # the field names as literals after it. `read_zbuf_field(c, "user_len",
+    # "user", &mut out)` emits two names that no arm above can see, so `user`,
+    # `hmac`, `pubkey_n`, `pubkey_e` and `challenge` all reached the wire while
+    # this census reported "34 own vocabulary" and exit 0. Same shape as the
+    # `walked` tuple R311y896 found — a name that moves out of a call site
+    # leaves the gate that exists to decide it — except that repair changed the
+    # CODE and this one changes the gate, because a helper whose whole job is
+    # to be the tiling SSOT should not have to be inlined to stay visible.
+    # Deliberately OVER-inclusive: any literal in such a call is claimed, so a
+    # name that is not a field must still be declared rather than silently
+    # skipped.
+    for args in re.findall(r"\b[a-z_0-9]+\(\s*c,(.*?)\)\s*\?", src, re.S):
+        names |= set(re.findall(r'"([a-z0-9_]+)"', args))
     # `walked` joined this list at R311y896: the ZBuf-body dispatch was split
     # out of the walk so a test could ask WHICH rows have a walker without
     # having to hand each one a body its layout would accept. Its arms name

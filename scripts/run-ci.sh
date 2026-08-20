@@ -8262,6 +8262,32 @@ layer_c1bn_passive_dissection_features() {
     grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
         echo "  C1bn FAIL: the dissect filter matched no test"; echo "$out"; return 1; }
 
+    # R311y897 — the AUTH UNION arm. `dissect` selects no auth method, so the
+    # tests that judge a walked auth body against THIS TREE'S OWN producer are
+    # compiled out of the arm above: `the_auth_walker_agrees_with_this_trees_
+    # own_mux` has been `#[cfg(feature = "session-extauth")]` since R311y896
+    # and ran in NO lane at all — the population-0 shape open-debt item 386 is
+    # a register of, found by diffing this lane's `--list` against the union's
+    # rather than by reading either. Named tests rather than a count, because
+    # a count cannot say WHICH one went missing.
+    listing="$(cd crates && cargo test -p wz-session-core \
+        --features dissect,access-extauth-usrpwd,transport-multilink dissect:: -- --list 2>&1)" \
+        || { echo "$listing"; return 1; }
+    for name in \
+        dissect::tests::the_auth_walker_agrees_with_this_trees_own_mux \
+        dissect::tests::the_usrpwd_body_walker_agrees_with_this_trees_own_method
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1bn FAIL: $name is absent from the auth-union dissect build"
+            echo "$listing"; return 1; }
+    done
+    out="$(cd crates && cargo test -p wz-session-core \
+        --features dissect,access-extauth-usrpwd,transport-multilink dissect:: --quiet 2>&1)" \
+        || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1bn FAIL: the auth-union dissect filter matched no test"
+        echo "$out"; return 1; }
+
     # R311y605 — the JOIN arm of `parse_inbound`. Its own filter because the
     # `dissect::` one above cannot reach it: the tests live in `inbound`, and
     # the defect they pin was that the PASSIVE observer's parser reported every

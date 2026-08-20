@@ -532,6 +532,18 @@ impl<'a> SpanCursor<'a> {
         self.bytes(name, self.cur.remaining())
     }
 
+    /// The bytes left, WITHOUT consuming them.
+    ///
+    /// What a walker needs when the SHAPE of a body is decided by counting its
+    /// records before naming them — [`walk_pubkey_challenge_body`] reads one,
+    /// two or three ZBufs and each count is a different stage of the same
+    /// handshake, so the names cannot be chosen until the count is known.
+    /// Peeking is what lets that decision be made without a second cursor that
+    /// could disagree with this one about where the body ends.
+    fn peek_rest(&self) -> Result<&[u8], CodecError> {
+        self.cur.peek_slice(self.cur.remaining())
+    }
+
     /// Read `n` bytes as UTF-8, rejecting invalid sequences exactly as the
     /// generated string decode does.
     pub fn text(&mut self, name: &'static str, n: usize) -> Result<Field, CodecError> {
@@ -770,7 +782,7 @@ pub fn walk_ext_entry(
 /// on the analysis surface that is not a detail of the extension, it is the
 /// answer to "who sent this".
 ///
-/// # Why exactly these eight, and not the others
+/// # Why exactly these twelve, and not the others
 ///
 /// A walker here is a second implementation of a layout, so it is written only
 /// where this tree already holds the FIRST one and a test can judge the two
@@ -787,6 +799,10 @@ pub fn walk_ext_entry(
 /// | `shm` (Init) | `crate::extshm::encode_shm_init_syn_body` / `..._ack_body` |
 ///
 /// | `auth` (Init / Open) | `crate::auth_dispatch::AuthDispatch::mux`, via [`walk_auth_body`] |
+/// | `usrpwd` (Auth) | `crate::extauth_usrpwd`'s `encode_open_syn` |
+/// | `pubkey` (Auth) | `wz-runtime-tokio`'s `extauth_pubkey` `encode_init_syn` / `..._ack` / `..._open_syn` |
+/// | `multi_link` (Init) | the same, `.transmute()`d onto `0x4` by `crate::extmultilink` |
+/// | `multi_link_syn` (Open) | the `Open` half of that transmute |
 ///
 /// The ZBuf rows that stay `value` are not an oversight, and since R311y896
 /// their reasons are NOT written here. They live one per row in
@@ -817,6 +833,17 @@ pub fn walk_ext_entry(
 /// rounds share: a reason of the form "X is opaque" describes the body one
 /// level DOWN from the one it was filed against, and nothing checks which
 /// level a sentence is about.
+///
+/// ⚠⚠⚠ R311y897 — and the level below THAT one was the same story. The four
+/// remaining rows excused as "the METHOD's own format, not the protocol's"
+/// (`usrpwd`, `pubkey`, and the two `multi_link` halves that carry pubkey's
+/// bytes under another id) were each a sequence of [`crate::vle::write_zbuf`]
+/// records with a producer and a consumer in this tree. The sentence was true
+/// of what is INSIDE those records — an HMAC tag, an RSA modulus — and was
+/// filed against the framing around them, which is the identical mistake one
+/// level further down. The sweep below now covers these rows too, so the
+/// remaining opaque set is `Join`'s producer-less `shm` and the three
+/// `attachment` rows, whose bytes really are structureless by contract.
 ///
 /// # Declining, rather than failing
 ///
@@ -936,6 +963,28 @@ fn zbuf_body_walker(
         // at the same id `0x3` — out: those bytes can parse as a chain, so no
         // remainder check downstream would catch the misreading.
         crate::ext_name::AUTH if is_establishment(carrier_kind) => walked("auth", walk_auth_body),
+        // R311y897 — the METHOD bodies one level inside that chain. The four
+        // guards below are REDUNDANT today and are written anyway, on the
+        // `qos` arm's rule: `crate::ext_name` already separates these rows by
+        // carrier before the dispatch is asked (`0x2 | ZBuf` resolves to
+        // `shm` on an `Init` and to `usrpwd` only on `Auth`), so removing all
+        // four reds nothing — MEASURED, not assumed. What the guard buys is
+        // the day a carrier declares a row that spells the same name, which is
+        // exactly how `shm` came to need one.
+        crate::ext_name::AUTH_USRPWD if carrier_kind == crate::ext_name::ExtCarrier::Auth => {
+            walked("usrpwd", walk_auth_usrpwd_body)
+        }
+        crate::ext_name::AUTH_PUBKEY if carrier_kind == crate::ext_name::ExtCarrier::Auth => {
+            walked("pubkey", walk_pubkey_challenge_body)
+        }
+        // R311y897 — the SAME bytes under zenoh's `.transmute()`d id `0x4`,
+        // which is why they share the walker rather than copying it.
+        crate::ext_name::MULTI_LINK if carrier_kind == crate::ext_name::ExtCarrier::Init => {
+            walked("multi_link", walk_pubkey_challenge_body)
+        }
+        crate::ext_name::MULTI_LINK_SYN if carrier_kind == crate::ext_name::ExtCarrier::Open => {
+            walked("multi_link_syn", walk_pubkey_challenge_body)
+        }
         _ => return None,
     };
     Some(hit)
@@ -964,20 +1013,145 @@ fn zbuf_body_walker(
 /// that is the cap it applies. An observer that accepted a chain the
 /// participant beside it refuses would report a handshake the peer never saw.
 ///
-/// # What is NOT walked, and why that is the honest stopping point
+/// # The sub-ext bodies, and the sentence that used to stop here
 ///
-/// A sub-ext's own ZBuf body stays opaque. usrpwd's OpenSyn carries
-/// {user, hmac} and pubkey's carries a serialised RSA key, and both are the
-/// METHOD's private format rather than the protocol's — the boundary this
-/// module already draws at `attachment`. What the chain layer answers is the
-/// question a capture is opened for: WHICH methods were offered, and at which
-/// stage of the exchange.
+/// This doc said a sub-ext's own ZBuf body "stays opaque … the METHOD's
+/// private format rather than the protocol's — the boundary this module
+/// already draws at `attachment`". R311y897 measured it and it was false, in
+/// the shape R311y894 and R311y896 already found twice: the sentence described
+/// a layer BELOW the one it was excusing. `attachment` is user bytes with no
+/// declared structure anywhere; a usrpwd OpenSyn is
+/// [`crate::vle::write_zbuf`] twice and a pubkey body is that same primitive
+/// one to three times, both with a producer AND a consumer in this tree — the
+/// rule [`walk_ext_zbuf_body`] admits a walker under. The private part of the
+/// method is what is INSIDE the ZBufs (an HMAC tag, an RSA modulus), and no
+/// walker here claims to read that.
+///
+/// So the chain layer answers WHICH methods were offered and at which stage,
+/// and [`walk_auth_usrpwd_body`] / [`walk_pubkey_challenge_body`] answer what
+/// each one put on the wire.
 fn walk_auth_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     walk_ext_chain_z(
         c,
         crate::parse_error::MAX_EXT_CHAIN_DEPTH,
         crate::ext_name::ExtCarrier::Auth,
     )
+}
+
+/// One zenoh `ZBuf` — a VLE length then that many bytes — as its two fields.
+///
+/// The length is emitted rather than swallowed because the walk must TILE the
+/// body: a field per byte range, with none left unaccounted for.
+fn read_zbuf_field(
+    c: &mut SpanCursor<'_>,
+    len_name: &'static str,
+    name: &'static str,
+    out: &mut Vec<Field>,
+) -> Result<(), CodecError> {
+    let (n, len) = c.vle_u64(len_name)?;
+    out.push(len);
+    let n = usize::try_from(n).map_err(|_| CodecError::NeedMoreBytes)?;
+    out.push(c.bytes(name, n)?);
+    Ok(())
+}
+
+/// How many whole zenoh `ZBufs` `body` is, or `None` when it is not a whole
+/// number of them.
+///
+/// Counted with [`crate::vle::read_zbuf`] — the producer's own read twin —
+/// rather than with a length scan written here, so this cannot disagree with
+/// the codec about where one record ends and the next begins.
+fn zbuf_record_count(body: &[u8]) -> Option<usize> {
+    let mut cursor = SceCursor::new(body);
+    let mut count = 0usize;
+    while cursor.remaining() != 0 {
+        crate::vle::read_zbuf(&mut cursor)?;
+        count += 1;
+    }
+    Some(count)
+}
+
+/// The usrpwd method's OpenSyn body — `{user, hmac}`, two zenoh `ZBufs`.
+///
+/// Written by `crate::extauth_usrpwd`'s `encode_open_syn` and read back by its
+/// `decode_open_syn`, both over the [`crate::vle::write_zbuf`] /
+/// [`crate::vle::read_zbuf`] SSOT (code spans, not links: the method sits
+/// behind `access-extauth-usrpwd`, which `dissect` does not select, so a link
+/// would be unresolved in the builds a reader runs — the rule R311y893 wrote
+/// beside `crate::ext_name`'s constants and Layer C1bz counts).
+///
+/// # Why this is the protocol's shape and not the method's secret
+///
+/// The METHOD's private part is what is inside the second ZBuf: an
+/// HMAC-SHA3-256 tag over the InitAck nonce, which nothing here interprets.
+/// The FRAMING around it is zenoh `Zenoh080`'s two-ZBuf encoding, identical to
+/// the one `attachment` deliberately does not get — and the difference is that
+/// this one is declared, produced and consumed in this tree, while an
+/// attachment's bytes have no declared structure at all.
+///
+/// # What a capture could not show before
+///
+/// WHICH user a peer authenticated as. The chain layer already named the
+/// method and the stage; the credential's owner was thirty-odd bytes of hex,
+/// so a capture of a rejected handshake could not distinguish a wrong password
+/// from a wrong username.
+fn walk_auth_usrpwd_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
+    let mut out = Vec::with_capacity(4);
+    read_zbuf_field(c, "user_len", "user", &mut out)?;
+    read_zbuf_field(c, "hmac_len", "hmac", &mut out)?;
+    Ok(out)
+}
+
+/// The mutual RSA challenge-response body — one, two or three zenoh `ZBufs`,
+/// and the COUNT is which stage of the handshake this is.
+///
+/// Three carriers share it, because zenoh gives them the same bytes:
+/// the `pubkey` method's sub-ext inside the `0x3` auth chain, and `Init`'s /
+/// `Open`'s `0x4` multilink ext, which zenoh produces by `.transmute()`-ing
+/// the pubkey FSM's payload onto a different id with no re-framing
+/// (`crate::extmultilink`). One walker rather than three is therefore the
+/// honest encoding of one fact.
+///
+/// # The layouts, and why the count separates them exactly
+///
+/// `wz-runtime-tokio`'s `extauth_pubkey` writes a public key as
+/// [`crate::vle::write_zbuf`] of `n.to_bytes_le()` then of `e.to_bytes_le()`
+/// (zenoh's `ZPublicKey` `WCodec`), and a ciphertext as one more:
+///
+/// * InitSyn — `{n, e}`, two records: the initiator's own key.
+/// * InitAck — `{n, e, challenge}`, three: the acceptor's key plus the nonce
+///   it encrypted under the initiator's.
+/// * OpenSyn — `{challenge}`, one: that nonce re-encrypted the other way.
+///
+/// Nothing in the body says which; the message's own direction does, and that
+/// is not in this function's reach. It does not need to be. A ZBuf's length
+/// prefix fixes where it ends, so reading records until the body is exhausted
+/// yields a count that is exact — the same argument
+/// [`walk_shm_init_body`] makes from the other end, with a count in place of a
+/// length.
+///
+/// # Declining rather than guessing
+///
+/// A body that is not a whole number of records, or is more than three, gets
+/// no reading at all: [`walk_ext_zbuf_body`] hands the reader the raw bytes,
+/// which is the honest answer to "not the structure this build thought".
+fn walk_pubkey_challenge_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
+    let mut out = Vec::with_capacity(6);
+    match zbuf_record_count(c.peek_rest()?).ok_or(CodecError::NeedMoreBytes)? {
+        1 => read_zbuf_field(c, "challenge_len", "challenge", &mut out)?,
+        2 => {
+            read_zbuf_field(c, "pubkey_n_len", "pubkey_n", &mut out)?;
+            read_zbuf_field(c, "pubkey_e_len", "pubkey_e", &mut out)?;
+        }
+        3 => {
+            read_zbuf_field(c, "pubkey_n_len", "pubkey_n", &mut out)?;
+            read_zbuf_field(c, "pubkey_e_len", "pubkey_e", &mut out)?;
+            read_zbuf_field(c, "challenge_len", "challenge", &mut out)?;
+        }
+        0 => return Err(CodecError::NeedMoreBytes),
+        _ => return Err(CodecError::TooManyElements),
+    }
+    Ok(out)
 }
 
 /// `Join`'s mandatory ZBuf `qos` body — the per-priority next-SN table
@@ -5556,18 +5730,6 @@ mod tests {
     /// and has since been overtaken now reds, on the round it is overtaken.
     const OPAQUE_ZBUF_BODIES: &[(crate::ext_name::ExtCarrier, &str, &str)] = &[
         (
-            crate::ext_name::ExtCarrier::Init,
-            "multi_link",
-            "zenoh `.transmute()`s the pubkey method's payload straight onto id \
-             0x4 with no inner frame (`crate::extmultilink`), so there is no \
-             envelope here to read — only the method's own bytes",
-        ),
-        (
-            crate::ext_name::ExtCarrier::Open,
-            "multi_link_syn",
-            "the Open half of the same un-wrapped transmute",
-        ),
-        (
             crate::ext_name::ExtCarrier::Join,
             "shm",
             "a DIFFERENT extension sharing `0x2` and the ZBuf encoding with the \
@@ -5590,17 +5752,6 @@ mod tests {
             crate::ext_name::ExtCarrier::Query,
             "attachment",
             "USER bytes, as on `Put`",
-        ),
-        (
-            crate::ext_name::ExtCarrier::Auth,
-            "pubkey",
-            "the METHOD's own format (a serialised RSA key), not the \
-             protocol's — the boundary `walk_auth_body` stops at",
-        ),
-        (
-            crate::ext_name::ExtCarrier::Auth,
-            "usrpwd",
-            "the METHOD's own format ({user, hmac}), not the protocol's",
         ),
     ];
 
@@ -5630,15 +5781,19 @@ mod tests {
     /// [`zbuf_body_walker`] needs no body at all.
     #[test]
     fn every_zbuf_row_is_either_walked_or_declared_opaque() {
-        let mut zbuf_rows = 0usize;
         let mut seen: Vec<(crate::ext_name::ExtCarrier, &str)> = Vec::new();
+        let mut groups: Vec<&'static str> = Vec::new();
         for carrier in crate::ext_name::ALL_CARRIERS {
             for (_, _, enc, name) in crate::ext_name::rows(*carrier) {
                 if *enc != crate::ext_header::EXT_ENC_ZBUF {
                     continue;
                 }
-                zbuf_rows += 1;
                 seen.push((*carrier, name));
+                if let Some((group_name, _)) = zbuf_body_walker(*carrier, name) {
+                    if !groups.contains(&group_name) {
+                        groups.push(group_name);
+                    }
+                }
                 let walked = zbuf_body_walker(*carrier, name).is_some();
                 let opaque = OPAQUE_ZBUF_BODIES
                     .iter()
@@ -5657,11 +5812,32 @@ mod tests {
                 );
             }
         }
-        // ANTI-VACUITY: the table is not empty and the sweep reached it.
-        assert!(
-            zbuf_rows >= OPAQUE_ZBUF_BODIES.len() + 5,
-            "the sweep must reach every ZBuf row, walked ones included: it saw \
-             {zbuf_rows}",
+        // ANTI-VACUITY, and a SET rather than a count (R311y897). The old form
+        // was `zbuf_rows >= OPAQUE.len() + 5`, which WEAKENS every time a row
+        // stops being opaque — exactly the direction this file moves in. The
+        // set of group names the dispatch is reachable at says the same thing
+        // and cannot be satisfied by an accident: a walker no row selects any
+        // more drops out of it, and a new one has to be admitted here on
+        // purpose.
+        groups.sort_unstable();
+        assert_eq!(
+            groups,
+            alloc::vec![
+                "auth",
+                "multi_link",
+                "multi_link_syn",
+                "pubkey",
+                "qos",
+                "query_body",
+                "responder_id",
+                "shm",
+                "source_info",
+                "timestamp",
+                "usrpwd",
+                "wire_expr",
+            ],
+            "the sweep must reach every WALKED ZBuf row too, not only the \
+             opaque ones",
         );
         // And no entry names a row upstream does not declare — the drift read
         // from the other end, which the loop above cannot see.
@@ -5892,5 +6068,264 @@ mod tests {
         );
         let pubkey = entry_named(auth, "pubkey").expect("the pubkey sub-ext");
         assert_eq!(raw(pubkey, "value"), alloc::vec![0xAA, 0xBB, 0xCC]);
+    }
+
+    // ── R311y897: the METHOD bodies one level inside that chain ──────────
+    //
+    // The four rows the "it is the METHOD's own format, not the protocol's"
+    // reason covered. That sentence is true of what is INSIDE each record and
+    // was filed against the FRAMING around them, which is the same level
+    // confusion R311y894 and R311y896 each found one level up.
+
+    /// One zenoh `ZBuf` record, built through the producer's own
+    /// [`crate::vle::write_zbuf`] rather than by hand — so a test cannot
+    /// disagree with the encoder about the framing it is asserting on.
+    fn zbuf_record(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        crate::vle::write_zbuf(&mut out, bytes);
+        out
+    }
+
+    /// The walked body group under a named sub-ext of a walked auth chain.
+    fn sub_ext_body<'a>(auth: &'a Field, method: &str) -> &'a Field {
+        let entry = entry_named(auth, method)
+            .unwrap_or_else(|| panic!("the {method} sub-ext must be named"));
+        assert!(
+            !has_direct_child(entry, "value"),
+            "{method}: a walked body must not also be shown as opaque bytes",
+        );
+        entry
+            .find(method)
+            .unwrap_or_else(|| panic!("{method}'s body must be walked"))
+    }
+
+    /// An `Init` whose auth chain carries ONE sub-ext.
+    fn init_with_auth_sub(id: u8, body: &[u8]) -> Vec<u8> {
+        init_with_exts(&[init_auth_ext(&ext_zbuf(id, false, body))])
+    }
+
+    /// The walked `auth` group of such an `Init`.
+    fn auth_of(bytes: &[u8]) -> Field {
+        let f = dissect_transport_message(bytes, 0).expect("the walker rejected an auth Init");
+        assert_eq!(f.span.end, bytes.len(), "the walk must tile the datagram");
+        f.find("extensions")
+            .and_then(|e| e.find("auth"))
+            .expect("the auth body must be walked")
+            .clone()
+    }
+
+    /// The credential a capture is opened to read: WHICH user authenticated.
+    ///
+    /// Before this walker the chain layer named the method and the stage and
+    /// then handed over the whole `{user, hmac}` as hex, so a capture of a
+    /// rejected handshake could not tell a wrong password from a wrong user.
+    #[test]
+    fn a_usrpwd_open_syn_body_is_walked_into_the_user_and_the_hmac() {
+        let body = concat(&[
+            zbuf_record(b"alice"),
+            zbuf_record(&[0x01, 0x02, 0x03, 0x04]),
+        ]);
+        let auth = auth_of(&init_with_auth_sub(0x02, &body));
+        let walked = sub_ext_body(&auth, "usrpwd");
+        assert_eq!(raw(walked, "user"), b"alice".to_vec());
+        assert_eq!(raw(walked, "hmac"), alloc::vec![0x01, 0x02, 0x03, 0x04]);
+    }
+
+    /// The same body, produced by THIS TREE'S OWN usrpwd method rather than
+    /// laid out by hand — the rule every other walker in
+    /// [`walk_ext_zbuf_body`] is held to, and the one the "METHOD's own
+    /// format" reason claimed could not be met here.
+    ///
+    /// `open_recv_init_ack` then `open_open_syn` is the exact pair the live
+    /// initiator runs, so a divergence between the encoder and this reading
+    /// reds here rather than on a capture.
+    #[cfg(feature = "access-extauth-usrpwd")]
+    #[test]
+    fn the_usrpwd_body_walker_agrees_with_this_trees_own_method() {
+        use crate::auth_dispatch::{AuthMethod, AuthSubExt};
+        let mut method =
+            crate::extauth_usrpwd::UsrPwdMethod::initiator(b"bob".to_vec(), b"hunter2".to_vec());
+        method
+            .open_recv_init_ack(Some(AuthSubExt::Z64(0x0102_0304_0506_0708)))
+            .expect("the InitAck nonce");
+        let Some(AuthSubExt::Zbuf(body)) = method.open_open_syn().expect("the OpenSyn") else {
+            panic!("usrpwd's OpenSyn is a ZBuf");
+        };
+        let auth = auth_of(&init_with_auth_sub(0x02, &body));
+        let walked = sub_ext_body(&auth, "usrpwd");
+        assert_eq!(
+            raw(walked, "user"),
+            b"bob".to_vec(),
+            "the producer's own user must reach the reader",
+        );
+        assert_eq!(
+            raw(walked, "hmac").len(),
+            32,
+            "HMAC-SHA3-256 is 32 bytes, and the walker must have found the \
+             SECOND record rather than the tail of the first",
+        );
+    }
+
+    /// The pubkey / multilink body's COUNT is which stage of the mutual
+    /// challenge-response this is, and the three counts are three namings.
+    ///
+    /// `wz-runtime-tokio`'s `extauth_pubkey` writes `{n, e}` at InitSyn,
+    /// `{n, e, challenge}` at InitAck and `{challenge}` at OpenSyn, all through
+    /// the same [`crate::vle::write_zbuf`] this test builds with.
+    #[test]
+    fn a_pubkey_body_is_named_by_the_stage_its_record_count_says() {
+        let n = alloc::vec![0xA1, 0xA2, 0xA3, 0xA4];
+        let e = alloc::vec![0x01, 0x00, 0x01];
+        let ct = alloc::vec![0xC0, 0xC1, 0xC2, 0xC3, 0xC4];
+        // OpenSyn — one record.
+        let auth = auth_of(&init_with_auth_sub(0x01, &zbuf_record(&ct)));
+        let walked = sub_ext_body(&auth, "pubkey");
+        assert_eq!(raw(walked, "challenge"), ct);
+        assert!(
+            walked.find("pubkey_n").is_none(),
+            "a one-record body is the re-encrypted challenge, not a key",
+        );
+        // InitSyn — two records.
+        let auth = auth_of(&init_with_auth_sub(
+            0x01,
+            &concat(&[zbuf_record(&n), zbuf_record(&e)]),
+        ));
+        let walked = sub_ext_body(&auth, "pubkey");
+        assert_eq!(raw(walked, "pubkey_n"), n);
+        assert_eq!(raw(walked, "pubkey_e"), e);
+        assert!(
+            walked.find("challenge").is_none(),
+            "an InitSyn offers a key and carries no challenge yet",
+        );
+        // InitAck — three records, and the challenge is the LAST one.
+        let auth = auth_of(&init_with_auth_sub(
+            0x01,
+            &concat(&[zbuf_record(&n), zbuf_record(&e), zbuf_record(&ct)]),
+        ));
+        let walked = sub_ext_body(&auth, "pubkey");
+        assert_eq!(raw(walked, "pubkey_n"), n);
+        assert_eq!(raw(walked, "pubkey_e"), e);
+        assert_eq!(raw(walked, "challenge"), ct);
+    }
+
+    /// The `0x4` multilink ext carries the SAME bytes under a different id —
+    /// zenoh `.transmute()`s the pubkey FSM's payload onto it with no
+    /// re-framing — so the reading must be the same on both carriers.
+    ///
+    /// Two carriers rather than one because `Init` and `Open` spell the row
+    /// differently (`multi_link` / `multi_link_syn`), and a guard written for
+    /// one would leave the other half of the exchange as hex.
+    #[test]
+    fn a_multilink_body_reads_as_the_pubkey_bytes_it_transmutes() {
+        let n = alloc::vec![0x11, 0x22, 0x33];
+        let e = alloc::vec![0x01, 0x00, 0x01];
+        let init = init_with_exts(&[ext_zbuf(
+            0x04,
+            false,
+            &concat(&[zbuf_record(&n), zbuf_record(&e)]),
+        )]);
+        let f = dissect_transport_message(&init, 0).expect("the walker rejected a multilink Init");
+        assert_eq!(f.span.end, init.len(), "the walk must tile the datagram");
+        let walked = f
+            .find("extensions")
+            .and_then(|e| e.find("multi_link"))
+            .expect("an Init's multilink body must be walked");
+        assert_eq!(raw(walked, "pubkey_n"), n);
+        assert_eq!(raw(walked, "pubkey_e"), e);
+
+        let ct = alloc::vec![0xD0, 0xD1];
+        let mut open =
+            alloc::vec![wz_codecs::wire_const::T_MID_OPEN | wz_codecs::wire_const::FLAG_T_Z];
+        open.extend(vle(10_000));
+        open.extend(vle(7));
+        open.extend(vle(0));
+        open.extend(ext_zbuf(0x04, false, &zbuf_record(&ct)));
+        let f = dissect_transport_message(&open, 0).expect("the walker rejected a multilink Open");
+        let walked = f
+            .find("extensions")
+            .and_then(|e| e.find("multi_link_syn"))
+            .expect("an Open's multilink body must be walked too");
+        assert_eq!(raw(walked, "challenge"), ct);
+    }
+
+    /// The DISCRIMINATOR, and it is the NAME TABLE rather than the arm guard.
+    ///
+    /// The same eid `0x42` is the establishment `shm` on an `Init` and the
+    /// usrpwd method on the auth chain, and both are ZBuf bodies that parse —
+    /// so a reading keyed on the eid alone would report a segment id where a
+    /// username is. What separates them is `crate::ext_name`'s per-carrier
+    /// row set, which resolves the name BEFORE [`zbuf_body_walker`] is asked.
+    ///
+    /// Stated this way because it was MEASURED: dropping the `Auth` guard from
+    /// the `usrpwd` arm reds nothing at all, so a doc calling this test the
+    /// discriminator for that guard would have been claiming more than it
+    /// checks. The guard is kept for the reason the arm says; this test is
+    /// about the table.
+    #[test]
+    fn the_same_eid_reads_as_shm_on_an_init_and_as_usrpwd_on_the_auth_chain() {
+        let body = concat(&[zbuf_record(b"alice"), zbuf_record(&[0xAB])]);
+        let auth = auth_of(&init_with_auth_sub(0x02, &body));
+        assert_eq!(
+            raw(sub_ext_body(&auth, "usrpwd"), "user"),
+            b"alice".to_vec()
+        );
+
+        let direct = init_with_exts(&[ext_zbuf(0x02, false, &body)]);
+        let f = dissect_transport_message(&direct, 0).expect("the envelope must still walk");
+        let ext = f.find("extensions").expect("the chain must be walked");
+        assert!(
+            ext.find("usrpwd").is_none(),
+            "an Init's own 0x2 is the establishment shm, not a credential",
+        );
+    }
+
+    /// The DAMAGE PROBE. Four shapes that must DECLINE — the entry keeps its
+    /// raw `value` and the message around it still parses.
+    ///
+    /// The last two are the ones a length check alone misses: bodies that are
+    /// a whole number of records, but not a number either layout has.
+    #[test]
+    fn a_method_body_that_is_not_its_layout_stays_an_opaque_value() {
+        let rec = zbuf_record(&[0xAA, 0xBB]);
+        for (id, method, body, label) in [
+            (
+                0x02u8,
+                "usrpwd",
+                rec.clone(),
+                "usrpwd is TWO records and this is one",
+            ),
+            (
+                0x02,
+                "usrpwd",
+                concat(&[rec.clone(), rec.clone(), alloc::vec![0x00]]),
+                "two records and a byte left over",
+            ),
+            (
+                0x01,
+                "pubkey",
+                concat(&[rec.clone(), rec.clone(), rec.clone(), rec.clone()]),
+                "four records is no stage of the exchange",
+            ),
+            (
+                0x01,
+                "pubkey",
+                alloc::vec![0x05, 0x01],
+                "a record announcing more bytes than are there",
+            ),
+        ] {
+            let bytes = init_with_auth_sub(id, &body);
+            let f = dissect_transport_message(&bytes, 0)
+                .unwrap_or_else(|e| panic!("{label}: the envelope must still walk: {e:?}"));
+            let auth = f
+                .find("extensions")
+                .and_then(|e| e.find("auth"))
+                .unwrap_or_else(|| panic!("{label}: the chain must still walk"));
+            let entry = entry_named(auth, method).unwrap_or_else(|| panic!("{label}: the sub-ext"));
+            assert_eq!(raw(entry, "value"), body, "{label}");
+            assert!(
+                entry.find(method).is_none(),
+                "{label}: a declined body must not be shown as a layout",
+            );
+        }
     }
 }
