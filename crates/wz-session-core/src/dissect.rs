@@ -173,7 +173,7 @@ impl FieldValue {
 /// |---|---:|---|
 /// | a generated codec's struct field | 50 | the wire spec, via `out/wz-codecs` |
 /// | zenoh's own flag letters and variant names | 27 | the wire spec |
-/// | **wz's own vocabulary** | **21** | **this crate** |
+/// | **wz's own vocabulary** | **26** | **this crate** |
 ///
 /// Only the third is a wz decision, and it is enumerated here so that keying on
 /// one is an informed choice rather than an accident. `scripts/lib/`
@@ -181,7 +181,7 @@ impl FieldValue {
 /// walker invents a name outside them, if a codec field goes unwalked without a
 /// declared reason, or if either allowlist goes stale.
 ///
-/// The twenty-one, with why each is not simply the codec's name:
+/// The twenty-six, with why each is not simply the codec's name:
 ///
 /// * `hdr` — a nested record's header byte, where the codec's field is `header`
 /// * `ext` — one entry of an extension chain; the codec models the chain
@@ -214,6 +214,12 @@ impl FieldValue {
 ///   names the body `value`, and only the OAM id says which body it is
 /// * `linkstate_entry` — one `Linkstate` record, held apart from the
 ///   `link_states` aggregate by the same shadowing rule as `locator_entry`
+/// * `source_info` / `responder_id` / `query_body` / `wire_expr` — the four
+///   `ExtZbuf` bodies [`walk_ext_zbuf_body`] reads. Named on `linkstate`'s
+///   rule: the codec models an extension body as `value`, and only the carrier
+///   plus the eid says which structure those bytes hold
+/// * `eid` — the entity id inside `source_info` / `responder_id`. No generated
+///   codec in this tree declares it; both bodies are hand-encoded
 ///
 /// ⚠ Two codec fields have no walker and are carried by name in the census.
 /// R311y597 closed nine of the eleven at once by landing the `linkstate`
@@ -730,11 +736,174 @@ pub fn walk_ext_entry(
         2 => {
             let (n, f) = c.vle_u64("value_len")?;
             fields.push(f);
-            fields.push(c.bytes("value", n as usize)?);
+            let at = c.offset();
+            let value = c.bytes("value", n as usize)?;
+            let walked = match &value.value {
+                FieldValue::Bytes(raw) => walk_ext_zbuf_body(carrier_kind, header, raw, at),
+                _ => None,
+            };
+            fields.push(walked.unwrap_or(value));
         }
         _ => {}
     }
     Ok((z, group("ext", start, c.offset(), fields)))
+}
+
+/// The ZBuf extension bodies this build can READ, walked into their fields
+/// instead of left as an opaque `value`.
+///
+/// # The gap this closes
+///
+/// R311y890. [`crate::ext_name`] made the field layer able to NAME an
+/// extension — a reader is told `source_info` instead of `ext_id 1`. It could
+/// not READ one: every `ExtZbuf` body, whatever it was, came back as
+/// `value: <hex>`. So the surface told a reader precisely which structure it
+/// was looking at and then handed over the bytes of it, which is a stranger
+/// state than not knowing at all. A `source_info` is where the ORIGIN of a
+/// sample is — the publisher's zid, its entity id, its sequence number — and
+/// on the analysis surface that is not a detail of the extension, it is the
+/// answer to "who sent this".
+///
+/// # Why exactly these five, and not the others
+///
+/// A walker here is a second implementation of a layout, so it is written only
+/// where this tree already holds the FIRST one and a test can judge the two
+/// against each other:
+///
+/// | body | the layout's SSOT in this tree |
+/// |---|---|
+/// | `source_info` | [`crate::source_info_ext::encode_source_info_ext_body`] |
+/// | `responder_id` | [`crate::response_build::encode_responder_ext_body`] |
+/// | `query_body` | [`crate::query_value_ext::encode_query_value_ext_body`] |
+/// | `wire_expr` | [`crate::declare_ext_keyexpr::build_ext_keyexpr`] |
+/// | `timestamp` | the generated `Timestamp` codec, via [`walk_timestamp`] |
+///
+/// The ZBuf rows that stay `value` are not an oversight and each has its own
+/// reason. `attachment` is USER bytes — walking it would be inventing a
+/// structure the protocol says is not there. `auth` (Init / Open `0x3`) is the
+/// negotiated method's challenge bytes, opaque by the same rule. `multi_link`,
+/// the establishment `shm`, and `Join`'s ZBuf `qos` have a layout upstream
+/// declares and this tree does not yet encode, so a walker for them would be
+/// judged against nothing but its author's reading — the failure the `dissect`
+/// feature's own history (R311y605) is a record of.
+///
+/// # Declining, rather than failing
+///
+/// A body that does not walk cleanly comes back as `None` and the caller keeps
+/// the raw `value`. Two shapes decline, and the second is the one a length
+/// check alone misses: a body too short for what it announces, and a body that
+/// parses whole and leaves bytes over. Both mean "not the structure this build
+/// thought", and neither may kill the envelope around it — the rule
+/// [`walk_oam`]'s linkstate body established (R311y597).
+fn walk_ext_zbuf_body(
+    carrier_kind: crate::ext_name::ExtCarrier,
+    header: u8,
+    body: &[u8],
+    base: usize,
+) -> Option<Field> {
+    let name = crate::ext_name::ext_name(carrier_kind, header)?;
+    let end = base + body.len();
+    let mut c = SpanCursor::with_base(body, base);
+    // Every arm names its group with a LITERAL so the field-name census
+    // (`scripts/lib/dissect_name_census.py`) can see it. Resolving the group
+    // name from `ext_name`'s return value would be shorter and would make five
+    // names invisible to the gate that exists to decide them.
+    let walked = match name {
+        "source_info" => walk_source_info_body(&mut c).map(|f| group("source_info", base, end, f)),
+        "responder_id" => {
+            walk_responder_id_body(&mut c).map(|f| group("responder_id", base, end, f))
+        }
+        "query_body" => walk_query_value_body(&mut c).map(|f| group("query_body", base, end, f)),
+        "wire_expr" => walk_ext_wireexpr_body(&mut c).map(|f| group("wire_expr", base, end, f)),
+        "timestamp" => walk_timestamp(&mut c).map(|f| group("timestamp", base, end, f)),
+        _ => return None,
+    }
+    .ok()?;
+    if c.remaining() != 0 {
+        return None;
+    }
+    Some(walked)
+}
+
+/// The `source_info` ext body — the `(zid, eid, sn)` triple
+/// [`crate::source_info_ext::encode_source_info_ext_body`] writes: a leading
+/// byte whose HIGH nibble holds `zid_len - 1`, the zid, then two VLEs.
+///
+/// The zid length rides the high nibble exactly as `Scout` / `Hello`'s `cbyte`
+/// carries it, which is why the alias is the same `zid_len_m1` rather than a
+/// second name for one wire convention.
+fn walk_source_info_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
+    let mut out = walk_zid_prefixed(c)?;
+    let (_, eid) = c.vle_u64("eid")?;
+    out.push(eid);
+    let (_, sn) = c.vle_u64("sn")?;
+    out.push(sn);
+    Ok(out)
+}
+
+/// The `responder_id` ext body — [`crate::response_build::encode_responder_ext_body`].
+///
+/// The same leading byte and zid as `source_info`, and then it STOPS: a
+/// responder is an entity, not a sample, so there is no `sn`. A walker that
+/// shared one function with `source_info` would read the next extension's
+/// header as this one's sequence number.
+fn walk_responder_id_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
+    let mut out = walk_zid_prefixed(c)?;
+    let (_, eid) = c.vle_u64("eid")?;
+    out.push(eid);
+    Ok(out)
+}
+
+/// The `[(zid_len - 1) << 4] ++ zid` prefix both identity ext bodies open with.
+fn walk_zid_prefixed(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
+    let (byte, hdr) = c.u8("hdr")?;
+    let carrier = hdr.span;
+    let len_m1 = ((byte >> 4) & 0x0F) as u64;
+    let mut out = alloc::vec![hdr, bits("zid_len_m1", carrier, len_m1)];
+    out.push(c.bytes("zid", len_m1 as usize + 1)?);
+    Ok(out)
+}
+
+/// The Query VALUE ext body — [`crate::query_value_ext::encode_query_value_ext_body`]:
+/// an `Encoding` then the payload, which runs to the end of the ZBuf.
+///
+/// This is the ext R311y505's table calls the one "a reader that looks only at
+/// the message body never finds": a `Query` carries its value HERE, not in a
+/// field of the message, so a dissector that leaves this body opaque cannot
+/// show a query's payload at all.
+fn walk_query_value_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
+    let mut out = alloc::vec![c.nested("encoding", walk_encoding)?];
+    out.push(c.tail("payload")?);
+    Ok(out)
+}
+
+/// The `Declare` common `wire_expr` ext body —
+/// [`crate::declare_ext_keyexpr::build_ext_keyexpr`]: an inner header byte,
+/// the mapping id as a VLE, and the suffix filling the rest.
+///
+/// NOT [`walk_wireexpr`], and the difference is the whole reason this is its
+/// own walker: the message-level wireexpr length-prefixes its suffix, while
+/// this body's suffix is simply the remainder. Reusing the other walker would
+/// read the first suffix byte as a length.
+fn walk_ext_wireexpr_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
+    let (inner, hdr) = c.u8("hdr")?;
+    let carrier = hdr.span;
+    let has_suffix = (inner & 0x01) != 0;
+    let mut out = alloc::vec![
+        hdr,
+        // `is_local` IS the mapping — the same fact `walk_wireexpr` records
+        // from the carrier message's M flag, so it is recorded under the same
+        // name rather than under a second one meaning the same thing.
+        bits("mapping", carrier, ((inner & 0x02) != 0) as u64),
+        flag("n", carrier, has_suffix),
+    ];
+    let (_, id) = c.vle_u64("id")?;
+    out.push(id);
+    if has_suffix {
+        let n = c.remaining();
+        out.push(c.text("suffix", n)?);
+    }
+    Ok(out)
 }
 
 /// The Z-terminated ext chain: entries until one clears the Z bit, the cursor
@@ -4431,5 +4600,281 @@ mod tests {
             crate::inbound::parse_inbound(&reserved),
             Err(crate::parse_error::InboundParseError::ReservedEncoding)
         ));
+    }
+
+    // ── R311y890: the ZBuf extension BODIES ──────────────────────────────
+    //
+    // Before this round the field layer could NAME an extension and not read
+    // one: `ext_name` said `source_info` and the bytes under it came back as
+    // `value: "20a1b2c3072a"`. Every test below fails against that state, and
+    // fails by finding a `value` where a structure should be.
+    //
+    // Each fixture is minted by the encoder that IS the layout in this tree,
+    // so the walker — a second implementation of that layout — is judged
+    // against the producer rather than against its author's reading. That is
+    // the same rule the linkstate walker was landed under (R311y597).
+
+    /// `source_info` — the origin triple a sample carries, walked.
+    ///
+    /// Three assertions, each failing a different way. The triple must be READ
+    /// (a walker that named the group and left the bytes under it would still
+    /// satisfy a `find("source_info").is_some()` check); the entry must no
+    /// longer carry a `value` (showing the same bytes twice is how a reader
+    /// takes one field for two); and `agree` re-checks the TILING, which is
+    /// what catches a body walked at the wrong base offset.
+    #[test]
+    fn a_source_info_ext_body_is_walked_into_the_origin_triple() {
+        let zid = [0xA1u8, 0xB2, 0xC3];
+        let body = crate::source_info_ext::encode_source_info_ext_body(&zid, 7, 42);
+        let bytes = msg_put(None, None, &[ext_zbuf(0x01, false, &body)], b"x");
+        let f = agree(
+            "MsgPut",
+            &bytes,
+            |b| {
+                let mut c = SceCursor::new(b);
+                wz_codecs::msg_put::MsgPut::decode(&mut c).expect("codec rejected fixture");
+                b.len() - c.remaining()
+            },
+            walk_msg_put,
+        );
+
+        let si = f
+            .find("source_info")
+            .expect("the origin triple must be named");
+        assert_eq!(raw(si, "zid"), zid.to_vec());
+        assert_eq!(uint(si, "eid"), 7);
+        assert_eq!(uint(si, "sn"), 42);
+        assert_eq!(bits_of(si, "zid_len_m1"), 2, "3-byte zid is stored as 2");
+        assert!(
+            si.find("value").is_none(),
+            "a walked body must not also be shown as opaque bytes",
+        );
+    }
+
+    /// `responder_id` — the SAME leading byte and zid, and then it STOPS.
+    ///
+    /// The discriminator is the absence: this body has no `sn`, so a walker
+    /// that reused `source_info`'s would read the byte AFTER the extension as
+    /// one. It cannot be caught by asserting the zid and the eid — both are
+    /// correct in that failure — so what pins it is `agree`, which compares
+    /// the walker's consumed length against the codec's and reds the moment
+    /// the walk runs one VLE past the entry.
+    #[test]
+    fn a_responder_id_ext_body_stops_where_source_info_would_read_an_sn() {
+        let zid = [0x0Du8, 0x0E];
+        let body = crate::response_build::encode_responder_ext_body(&zid, 11);
+        let reply = concat(&[
+            alloc::vec![0x04u8 | 0x20],
+            alloc::vec![0x01u8],
+            msg_put(None, None, &[], b"v"),
+        ]);
+        let bytes = concat(&[
+            alloc::vec![0x1Bu8 | 0x20 | 0x40 | 0x80],
+            vle(77),
+            wireexpr(2, Some("r")),
+            ext_zbuf(0x03, false, &body),
+            reply,
+        ]);
+        let f = agree(
+            "Response",
+            &bytes,
+            |b| {
+                let mut c = SceCursor::new(b);
+                wz_codecs::response::Response::decode(&mut c).expect("codec rejected fixture");
+                b.len() - c.remaining()
+            },
+            walk_response,
+        );
+
+        let rid = f
+            .find("responder_id")
+            .expect("the responder identity must be named");
+        assert_eq!(raw(rid, "zid"), zid.to_vec());
+        assert_eq!(uint(rid, "eid"), 11);
+        assert!(
+            rid.find("sn").is_none(),
+            "a responder is an entity, not a sample -- it carries no sn",
+        );
+        assert!(rid.find("value").is_none());
+    }
+
+    /// `query_body` — the ext a reader that looks only at the message body
+    /// never finds.
+    ///
+    /// A `Query` carries its VALUE in an extension, not in a field, so a
+    /// dissector that leaves this body opaque cannot show a query's payload at
+    /// all. The `schema` leg is deliberate: it makes the walk cross the
+    /// encoding's OWN optional field before reaching the payload, so an
+    /// encoding walked at the wrong width takes the schema's bytes for the
+    /// payload and the two assertions disagree.
+    #[test]
+    fn a_query_value_ext_body_is_walked_into_its_encoding_and_payload() {
+        let mut body = encoding(7, Some("json"));
+        body.extend_from_slice(b"{\"k\":1}");
+        let bytes = concat(&[alloc::vec![0x03u8 | 0x80], ext_zbuf(0x03, false, &body)]);
+
+        let mut c = SpanCursor::new(&bytes);
+        let f = group(
+            "Query",
+            0,
+            bytes.len(),
+            walk_query(&mut c).expect("the walker rejected its own fixture"),
+        );
+        assert_eq!(c.remaining(), 0, "the fill-to-end chain left bytes unread");
+        assert_tiles(&f, 0, bytes.len());
+
+        let qb = f.find("query_body").expect("the query VALUE must be named");
+        assert_eq!(text(qb, "schema"), "json");
+        assert_eq!(raw(qb, "payload"), b"{\"k\":1}".to_vec());
+        assert!(qb.find("value").is_none());
+    }
+
+    /// `wire_expr` — the `Declare` common keyexpr ext, whose suffix is the
+    /// REMAINDER of the body rather than a length-prefixed string.
+    ///
+    /// That difference is the reason it has its own walker, and it is what
+    /// this test discriminates: reusing `walk_wireexpr` here would read the
+    /// suffix's first byte (`'d'` = 100) as a length and run off the end.
+    #[test]
+    fn a_declare_keyexpr_ext_body_is_walked_rather_than_shown_as_hex() {
+        let entry = crate::declare_ext_keyexpr::build_ext_keyexpr("demo/sub")
+            .expect("the ext builder rejected a literal keyexpr");
+        let body = match &entry.body {
+            wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => {
+                z.value.as_slice().to_vec()
+            }
+            other => panic!("the keyexpr ext is not a ZBuf: {other:?}"),
+        };
+        let mut wire = alloc::vec![crate::declare_ext_keyexpr::KEYEXPR_EXT_HEADER];
+        wire.extend(vle(body.len() as u64));
+        wire.extend_from_slice(&body);
+
+        let mut c = SpanCursor::new(&wire);
+        let chain = walk_ext_chain_z(
+            &mut c,
+            crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH,
+            crate::ext_name::ExtCarrier::DeclareCommon,
+        )
+        .expect("the chain must walk");
+        // `extensions`, the name the walkers give a chain -- the field-name
+        // census reads this file whole, tests included, so a name invented in
+        // a fixture is an invention it reds on. It caught this one.
+        let f = group("extensions", 0, wire.len(), chain);
+        assert_eq!(c.remaining(), 0);
+        assert_tiles(&f, 0, wire.len());
+
+        let we = f.find("wire_expr").expect("the keyexpr body must be named");
+        assert_eq!(text(we, "suffix"), "demo/sub");
+        assert_eq!(uint(we, "id"), 0, "a literal keyexpr is mapping id 0");
+        assert_eq!(bits_of(we, "mapping"), 1, "a fresh literal is LOCAL");
+        assert!(we.find("value").is_none());
+    }
+
+    /// `timestamp` — the network extension, walked with the SAME walker as the
+    /// in-body one.
+    ///
+    /// Grounded in upstream rather than in the resemblance: zenoh's
+    /// `WCodec<(&ext::TimestampType<ID>, bool)>` writes a `ZExtZBufHeader`
+    /// and then `self.write(writer, &tstamp.timestamp)` — the ordinary
+    /// `Timestamp` codec, which is `zint(time)` then the length-prefixed id
+    /// (`zenoh-codec/src/network/mod.rs`, `zenoh-codec/src/core/timestamp.rs`).
+    /// So this is one layout with two carriers, not two layouts that look
+    /// alike, and it may share one walker.
+    #[test]
+    fn a_timestamp_ext_body_is_walked_with_the_in_body_walker() {
+        let zid = [0x11u8, 0x22, 0x33, 0x44];
+        let bytes = concat(&[
+            alloc::vec![0x1Du8 | 0x80],
+            wireexpr(1, None),
+            ext_zbuf(0x02, false, &timestamp(0x0123_4567, &zid)),
+            msg_put(None, None, &[], b"x"),
+        ]);
+        let f = agree(
+            "Push",
+            &bytes,
+            |b| {
+                let mut c = SceCursor::new(b);
+                wz_codecs::push::Push::decode(&mut c).expect("codec rejected fixture");
+                b.len() - c.remaining()
+            },
+            walk_push,
+        );
+
+        let ts = f
+            .find("extensions")
+            .and_then(|e| e.find("timestamp"))
+            .expect("the extension timestamp must be named");
+        assert_eq!(uint(ts, "time"), 0x0123_4567);
+        assert_eq!(raw(ts, "zid"), zid.to_vec());
+        assert!(ts.find("value").is_none());
+    }
+
+    /// The CONTROL, and it is what makes the five tests above discriminators
+    /// rather than a walker that decodes whatever it is handed.
+    ///
+    /// `attachment` is USER bytes. The protocol says there is no structure
+    /// there, so inventing one would be worse than showing hex — and it sits
+    /// at `0x3` on a `Put`, the SAME id `responder_id` occupies on a
+    /// `Response`. A dispatch keyed on the eid alone instead of on the
+    /// carrier's name for it would walk this body as an identity and report a
+    /// zid that nobody sent.
+    #[test]
+    fn an_attachment_ext_body_is_still_shown_as_bytes() {
+        let att = b"\x20user-supplied";
+        let bytes = msg_put(None, None, &[ext_zbuf(0x03, false, att)], b"x");
+        let mut c = SpanCursor::new(&bytes);
+        let f = group(
+            "MsgPut",
+            0,
+            bytes.len(),
+            walk_msg_put(&mut c).expect("walk"),
+        );
+        assert_eq!(
+            f.find("ext_name").map(|n| n.value.clone()),
+            Some(FieldValue::Label(Cow::Borrowed("attachment"))),
+        );
+        assert_eq!(raw(&f, "value"), att.to_vec());
+        assert!(
+            f.find("responder_id").is_none() && f.find("source_info").is_none(),
+            "an opaque body must not be walked as an identity that shares its id",
+        );
+    }
+
+    /// The DAMAGE PROBE: a body that does not walk cleanly DECLINES — the
+    /// entry keeps its raw `value` and the message around it still parses.
+    ///
+    /// Two shapes, and the second is the one a length check alone misses: a
+    /// body too short for the zid it announces, and a body that parses whole
+    /// and leaves a byte over. Both mean "not the structure this build
+    /// thought", and neither may kill the envelope — the rule the linkstate
+    /// body established (R311y597).
+    #[test]
+    fn an_ext_body_that_does_not_walk_cleanly_stays_an_opaque_value() {
+        let mut trailing = crate::source_info_ext::encode_source_info_ext_body(&[0xAA], 1, 2);
+        trailing.push(0xFF);
+        for (body, label) in [
+            (
+                alloc::vec![0x20u8, 0xA1],
+                "announces a 3-byte zid, carries 1",
+            ),
+            (trailing, "parses whole, one byte left over"),
+        ] {
+            let bytes = msg_put(None, None, &[ext_zbuf(0x01, false, &body)], b"x");
+            let mut c = SpanCursor::new(&bytes);
+            let f = group(
+                "MsgPut",
+                0,
+                bytes.len(),
+                walk_msg_put(&mut c)
+                    .unwrap_or_else(|e| panic!("{label}: the envelope must still walk: {e:?}")),
+            );
+            assert_tiles(&f, 0, bytes.len());
+            assert_eq!(raw(&f, "value"), body, "{label}");
+            assert!(
+                f.find("source_info").is_none(),
+                "{label}: a declined body must not be shown as an origin triple",
+            );
+            assert_eq!(raw(&f, "payload"), b"x".to_vec(), "{label}");
+        }
     }
 }

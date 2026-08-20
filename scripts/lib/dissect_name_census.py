@@ -120,6 +120,24 @@ OWN_VOCABULARY = {
     "linkstate_entry": "one Linkstate record. NOT `link_states`, which is the "
     "aggregate the group itself is named for; same first-match-by-name shadowing "
     "rule as `locator_entry`",
+    # R311y890 — the five ZBuf extension BODIES the walker reads. Four are named
+    # for what the body IS, on the same rule as `linkstate`: the codec models an
+    # `ExtZbuf` as `value`, and only the carrier plus the eid says which
+    # structure those bytes hold. `eid` is the odd one -- a field of a body no
+    # generated codec in this tree declares.
+    "source_info": "the `(zid, eid, sn)` ext body, walked. The codec models it as "
+    "`value`; this name says WHICH body it is, since only the carrier and the eid "
+    "distinguish an origin triple from an opaque blob (R311y890)",
+    "responder_id": "the `(zid, eid)` ext body on a Response. Held apart from "
+    "`source_info` because it has no `sn` and a shared walker would read the next "
+    "extension's header as one",
+    "query_body": "the Query VALUE ext body (`encoding || payload`) -- the ext a "
+    "reader that looks only at the message body never finds",
+    "wire_expr": "the Declare common keyexpr ext body. NOT walked by "
+    "`walk_wireexpr`: that one length-prefixes its suffix and this body's suffix "
+    "is the remainder",
+    "eid": "the entity id inside `source_info` / `responder_id`. No generated "
+    "codec in this tree declares it -- both bodies are hand-encoded",
 }
 
 # AWAITING: codec fields no walker emits yet, each with WHY. Rule 3 makes closing
