@@ -1950,6 +1950,20 @@ PY
     # empty — a version that quietly analysed nothing would exit 0 forever and
     # read as coverage. Enforcement MEASURED by renaming a guarded test fn.
     python3 scripts/lib/count_guard_lint.py || return 1
+    # R311y892 (debt-job-budget-binding) — the JOB-BUDGET BINDING gate. Layer
+    # C0b already selftests `job-budget-margin.sh` in both directions, and what
+    # had no gate at all was the number it is HANDED: the budget argument has to
+    # equal the job's `timeout-minutes`, because the runner enforces the latter
+    # and the script grades the former. ci.yml said so in prose at each call
+    # site and nothing checked it, so a half-moved pair would leave the margin
+    # gate grading against a ceiling that is not the ceiling. Found while
+    # lowering this repo's e2e-demo job from 20 minutes to 15, where both
+    # numbers had to be moved by hand. Static, like its two neighbours above:
+    # both halves are readable in one file. Enforcement MEASURED four ways —
+    # moving one number of the pair, dropping the stamp step, quoting
+    # `timeout-minutes` into a string, and renaming the script out from under
+    # the lint's own regex (which must FAIL as population-zero, not pass).
+    python3 scripts/lib/job_budget_binding.py || return 1
     # R311y570 — the UNSEQUENCED-PROBE lint. A C probe that passes `&x` to a
     # constructor and reads `x` through a loan accessor in the SAME full
     # expression is reading an uninitialised object: C does not order call

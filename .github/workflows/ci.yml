@@ -2130,6 +2130,10 @@ jobs:
         run: rustup show
 
       - name: Set up Python 3.12 (Zephyr main requires >= 3.12)
+        # R311y892 — `id` so the RESOLVED patch version can be named in the
+        # Zephyr cache key below. "3.12" is a range, and which patch this step
+        # hands back is the runner image's choice, not ours.
+        id: setuppy
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -2139,6 +2143,20 @@ jobs:
       # a partial / failed provision can never poison the cache key (a poisoned
       # cache would cache-hit on the next run, skip provision, and build against a
       # half-tree). The Verify step catches a partial RESTORE the same way.
+      # R311y892 — THE KEY NAMES THE INTERPRETER, and that is the whole fix for
+      # hosted runs 32321994673 and 32324338415. `~/zephyrproject/.venv` is
+      # built by `python3.12 -m venv`, so its `bin/python` is a SYMLINK into the
+      # hosted tool cache and its `bin/west` is a script whose shebang names
+      # that symlink. Cache the venv under a key that does not name the
+      # interpreter and the restore is only valid while the runner image still
+      # carries the same patch release: when 3.12.x moved, the symlink dangled,
+      # `west` died with `bad interpreter: No such file or directory`, and Layer
+      # Qz failed in 0 seconds. It came back on its own when the patch lined up
+      # again, which is why this read as flake for two runs.
+      #
+      # The general rule, and the reason this is a key change rather than a
+      # repair: a cache key must name every input the cached artifact depends
+      # on. This one depended on the resolved Python and did not say so.
       - name: Restore Zephyr workspace + SDK cache
         id: zephyr-cache
         uses: actions/cache/restore@v4
@@ -2147,7 +2165,7 @@ jobs:
             ~/zephyrproject
             ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
             ~/.cmake/packages/Zephyr-sdk
-          key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-v2
+          key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-py${{ steps.setuppy.outputs.python-version }}-v3
 
       - name: Provision Zephyr (west + pinned source + SDK)
         if: steps.zephyr-cache.outputs.cache-hit != 'true'
@@ -2185,14 +2203,28 @@ jobs:
         # cache-restore or an incomplete provision is caught loudly here instead
         # of silently SKIPping Layer Qz or building a half-tree. Runs on both the
         # cache-hit and freshly-provisioned paths.
+        # R311y892 — RUN the venv's tools; do not stat them. This step's first
+        # check was `test -x ~/zephyrproject/.venv/bin/west`, and the failure it
+        # exists to catch left that true: the file was present and executable
+        # and its INTERPRETER was gone, so the step reported "provisioning
+        # verified" and Layer Qz then died on `bad interpreter`. A check that
+        # cannot fail on the defect it names is not a check — the same shape
+        # R311y887 found twice in one round, where a rule was satisfied by a
+        # comment and then by a function's name.
+        #
+        # `--version` is the cheapest thing that resolves a shebang, imports the
+        # stdlib and returns non-zero when either is missing, and it prints what
+        # it found, so a future mismatch is diagnosable from this step rather
+        # than from the build twelve steps later.
         run: |
           set -e
-          test -x ~/zephyrproject/.venv/bin/west
+          ~/zephyrproject/.venv/bin/python --version
+          ~/zephyrproject/.venv/bin/west --version
           test -d ~/zephyrproject/zephyr/boards
           test -d ~/.cmake/packages/Zephyr-sdk
           find ~/zephyr-sdk-"${ZEPHYR_SDK_VERSION}" -name arm-zephyr-eabi-gcc -type f \
             | grep -q . || { echo "arm-zephyr-eabi toolchain missing in SDK"; exit 1; }
-          echo "Zephyr provisioning verified (venv + zephyr tree + SDK arm toolchain)."
+          echo "Zephyr provisioning verified (venv RUNS + zephyr tree + SDK arm toolchain)."
 
       - name: Save Zephyr workspace + SDK cache
         # Save ONLY on a cache miss AND only after provision+verify succeeded
@@ -2204,7 +2236,7 @@ jobs:
             ~/zephyrproject
             ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
             ~/.cmake/packages/Zephyr-sdk
-          key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-v2
+          key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-py${{ steps.setuppy.outputs.python-version }}-v3
 
       - name: Cache Cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
@@ -3646,10 +3678,20 @@ jobs:
   # floor of 30% — the floor is the y794 rule and it is a claim: if this job
   # ever drops under 6 minutes its budget should come back down, and if it grows
   # past 18 it should split again rather than be topped up.
+  #
+  # R311y892 — IT DROPPED, and the claim above is being honoured rather than
+  # topped up. The floor fired on runs 32323298824 and 32321994673 at 29% of
+  # 1200s, which is the gate working: a budget a job never approaches is not a
+  # gate. MEASURED over the six runs ending at 77753278 — 349, 364, 375, 378,
+  # 395, 418s — so this job costs 5.8 to 7.0 minutes and was straddling its own
+  # floor, greening or redding on runner noise alone. 15 minutes puts the
+  # fastest of those at 39% and the slowest at 46%, clear of both edges, and
+  # re-states the claim at a number this job could actually reach: under 4.5
+  # minutes, give the budget back again.
   e2e-demo:
     name: demo-spawning e2e lanes (Layers E + E3..E6u)
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - name: Budget stamp — start this job's own clock
         # Same reason the `ci` job stamps: `timeout-minutes` measures from when
@@ -3790,12 +3832,14 @@ jobs:
 
       - name: Budget margin — this job may not approach its timeout in silence
         # Instrumented from birth rather than after its first cancel, which is
-        # the whole lesson of the two rounds that produced this job. 1200s to
-        # match `timeout-minutes: 20`; the two numbers are one fact, so move that
+        # the whole lesson of the two rounds that produced this job. 900s to
+        # match `timeout-minutes: 15`; the two numbers are one fact, so move that
         # and move this. The floor is 30%: a job that peels down below its own
-        # budget should be told to give the budget back (R311y794).
+        # budget should be told to give the budget back (R311y794) — which is
+        # exactly what it did at R311y892, and the number above records what it
+        # was measured to cost.
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1200 90 30
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 900 90 30
 
   portability:
     name: portability (${{ matrix.os }})
