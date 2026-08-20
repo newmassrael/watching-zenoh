@@ -497,6 +497,53 @@ mod tests {
                 "conduit {i} best-effort SN round-trips"
             );
         }
+        // R311y894 — the DISSECTOR is a second reader of these same bytes, and
+        // this is where the two are tied together. `dissect`'s own fixture for
+        // the table is hand-laid VLEs; what makes that fixture honest is this
+        // leg, which never lays a byte: the datagram is `encode_join`'s, and
+        // the walked numbers are compared against `decode_join_qos`'s. A walker
+        // that agreed with my reading of the layout and not with the producer
+        // fails HERE and nowhere else.
+        #[cfg(feature = "dissect")]
+        {
+            use crate::dissect::{dissect_transport_message, FieldValue};
+            let walked =
+                dissect_transport_message(&dgram, 0).expect("the walker rejected a produced JOIN");
+            assert_eq!(
+                walked.span.end,
+                dgram.len(),
+                "the walk must account for every byte the producer wrote"
+            );
+            let table = walked
+                .find("extensions")
+                .and_then(|e| e.find("qos"))
+                .expect("the per-priority SN table must be walked, not shown as hex");
+            let rows: Vec<_> = match &table.value {
+                FieldValue::Nested(children) => children
+                    .iter()
+                    .filter(|c| c.name == "priority_sn")
+                    .collect(),
+                other => panic!("the qos body must be a group of rows, not {other:?}"),
+            };
+            assert_eq!(rows.len(), Priority::NUM, "one row per priority");
+            for (i, row) in rows.iter().enumerate() {
+                let uint = |name: &str| match row.find(name).map(|f| &f.value) {
+                    Some(FieldValue::Uint(v)) => *v,
+                    other => panic!("{name} of row {i} is not a uint: {other:?}"),
+                };
+                assert_eq!(
+                    uint("next_sn_reliable"),
+                    pairs[i].reliable,
+                    "row {i} reliable SN agrees with decode_join_qos"
+                );
+                assert_eq!(
+                    uint("next_sn_best_effort"),
+                    pairs[i].best_effort,
+                    "row {i} best-effort SN agrees with decode_join_qos"
+                );
+            }
+        }
+
         // A non-qos JOIN clears Z and carries no qos ext.
         let mut p2 = params(&[0x01, 0x02, 0x03, 0x04]);
         p2.is_qos = false;

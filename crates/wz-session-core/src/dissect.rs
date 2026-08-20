@@ -214,12 +214,18 @@ impl FieldValue {
 ///   names the body `value`, and only the OAM id says which body it is
 /// * `linkstate_entry` — one `Linkstate` record, held apart from the
 ///   `link_states` aggregate by the same shadowing rule as `locator_entry`
-/// * `source_info` / `responder_id` / `query_body` / `wire_expr` — the four
-///   `ExtZbuf` bodies [`walk_ext_zbuf_body`] reads. Named on `linkstate`'s
+/// * `source_info` / `responder_id` / `query_body` / `wire_expr` / `qos` /
+///   `shm` — the `ExtZbuf` bodies [`walk_ext_zbuf_body`] reads. On `linkstate`'s
 ///   rule: the codec models an extension body as `value`, and only the carrier
 ///   plus the eid says which structure those bytes hold
 /// * `eid` — the entity id inside `source_info` / `responder_id`. No generated
 ///   codec in this tree declares it; both bodies are hand-encoded
+/// * `priority_sn` / `priority` — one row of `Join`'s `qos` table and which
+///   priority it is. The row is upstream's own `PrioritySn`; the priority is
+///   POSITIONAL, so it is emitted from the index rather than read off the wire
+/// * `alice_segment` / `alice_challenge` / `bob_segment` — the establishment
+///   `shm` handshake's fields, named as upstream's own `InitSyn` / `InitAck`
+///   structs name them; no generated codec in this tree declares them
 ///
 /// ⚠ Two codec fields have no walker and are carried by name in the census.
 /// R311y597 closed nine of the eleven at once by landing the `linkstate`
@@ -764,7 +770,7 @@ pub fn walk_ext_entry(
 /// on the analysis surface that is not a detail of the extension, it is the
 /// answer to "who sent this".
 ///
-/// # Why exactly these five, and not the others
+/// # Why exactly these seven, and not the others
 ///
 /// A walker here is a second implementation of a layout, so it is written only
 /// where this tree already holds the FIRST one and a test can judge the two
@@ -777,15 +783,30 @@ pub fn walk_ext_entry(
 /// | `query_body` | [`crate::query_value_ext::encode_query_value_ext_body`] |
 /// | `wire_expr` | [`crate::declare_ext_keyexpr::build_ext_keyexpr`] |
 /// | `timestamp` | the generated `Timestamp` codec, via [`walk_timestamp`] |
+/// | `qos` (Join) | `crate::multicast_join::write_join_qos_ext` |
+/// | `shm` (Init) | `crate::extshm::encode_shm_init_syn_body` / `..._ack_body` |
 ///
 /// The ZBuf rows that stay `value` are not an oversight and each has its own
 /// reason. `attachment` is USER bytes — walking it would be inventing a
 /// structure the protocol says is not there. `auth` (Init / Open `0x3`) is the
-/// negotiated method's challenge bytes, opaque by the same rule. `multi_link`,
-/// the establishment `shm`, and `Join`'s ZBuf `qos` have a layout upstream
-/// declares and this tree does not yet encode, so a walker for them would be
-/// judged against nothing but its author's reading — the failure the `dissect`
-/// feature's own history (R311y605) is a record of.
+/// negotiated method's challenge bytes, opaque by the same rule, and
+/// `multi_link` carries a plugged auth method's sub-extension, which is the
+/// same rule again. `Join`'s OWN `shm` — a different extension that happens to
+/// share `0x2` and the ZBuf encoding — has a layout upstream declares and this
+/// tree does not write, so a walker for it would be judged against nothing but
+/// its author's reading, the failure the `dissect` feature's own history
+/// (R311y605) is a record of.
+///
+/// ⚠ R311y894 — that last reason used to cover THREE rows, and for two of them
+/// it was false. `Join`'s ZBuf `qos` has been written by
+/// `crate::multicast_join::write_join_qos_ext` since R311y227 and read back by
+/// `decode_join_qos`; the establishment `shm` has been written by
+/// `crate::extshm` for as long as `session-extshm` has existed. Both met the
+/// rule and were excluded anyway, so the most ordinary multicast question a
+/// capture is opened to answer — which per-priority SN is each peer announcing
+/// — came back as hex. A false reason does not merely fail to close a gap; it
+/// points at the wrong side of it, and this one pointed at upstream while the
+/// producers sat two modules away.
 ///
 /// # Declining, rather than failing
 ///
@@ -831,6 +852,21 @@ fn walk_ext_zbuf_body(
         crate::ext_name::TIMESTAMP => {
             walk_timestamp(&mut c).map(|f| group("timestamp", base, end, f))
         }
+        // R311y894 — the ONE arm that needs the carrier as well as the name.
+        // `qos` names ten rows of `ext_name`'s table and nine of them are a
+        // UNIT marker or a Z64 word, which never reach this function; the
+        // guard is therefore redundant TODAY and load-bearing the day an
+        // eleventh row arrives, which is the same reason the eid rather than
+        // the bare id is the table's key.
+        crate::ext_name::JOIN_QOS if carrier_kind == crate::ext_name::ExtCarrier::Join => {
+            walk_join_qos_body(&mut c).map(|f| group("qos", base, end, f))
+        }
+        // R311y894 — and here the guard is load-bearing TODAY: `Join` declares
+        // its own `shm` at the same id with the same encoding, and that one is
+        // still a row nothing in this tree writes.
+        crate::ext_name::SHM_INIT if carrier_kind == crate::ext_name::ExtCarrier::Init => {
+            walk_shm_init_body(&mut c).map(|f| group("shm", base, end, f))
+        }
         _ => return None,
     }
     .ok()?;
@@ -838,6 +874,105 @@ fn walk_ext_zbuf_body(
         return None;
     }
     Some(walked)
+}
+
+/// `Join`'s mandatory ZBuf `qos` body — the per-priority next-SN table
+/// `crate::multicast_join::write_join_qos_ext` writes: `Priority::NUM`
+/// `(reliable, best_effort)` VLE pairs, `Control` (0) first, and nothing else.
+///
+/// A code span rather than an intra-doc link, and the reason is the one
+/// R311y893 wrote beside `crate::ext_name`'s constants: that producer is
+/// private and sits behind `session-multicast` + `transport-qos`, neither of
+/// which `dissect` selects, so the link is unresolved in every build a reader
+/// would run — and Layer C1bz counts exactly that.
+///
+/// # Why a multicast diagnosis cannot do without it
+///
+/// A qos JOIN puts the DECOY `{0, 0}` in the base `next_sn` fields (zenoh
+/// `multicast/link.rs` sets `next_sn = PrioritySn::DEFAULT` when the real
+/// numbers ride the extension) and every per-priority baseline a receiver
+/// seeds from lives HERE. Left opaque, a capture of a qos group showed two
+/// zeros where the announcement was and thirty-odd hex bytes where the answer
+/// was — which reads as a peer announcing that it has sent nothing.
+///
+/// # The priority is POSITIONAL, so it is emitted rather than read
+///
+/// Nothing in the body says which priority a pair belongs to; the index is
+/// the whole of it. `priority` therefore aliases the pair's own span — the
+/// bytes that evidence it — and carries the zenoh `Priority` discriminant
+/// (`Control` 0 … `Background` 7, [`crate::qos::Priority::wire_byte`]'s
+/// numbering) rather than a name, because a name would be an eleventh table
+/// in this tree with no adjudicator behind it.
+///
+/// # Why the count is exact, and declining is the alternative
+///
+/// The pair count is fixed at [`crate::qos::Priority::NUM`] by the protocol,
+/// not read from the body, so a table that is short runs the cursor off the
+/// end and one that is long leaves bytes over. Both decline through
+/// [`walk_ext_zbuf_body`]'s own remainder check and the reader gets the raw
+/// `value` — the honest answer to "not the structure this build thought",
+/// against a table silently missing a priority.
+fn walk_join_qos_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
+    let mut out = Vec::with_capacity(crate::qos::Priority::NUM);
+    for priority in 0..crate::qos::Priority::NUM {
+        let start = c.offset();
+        let (_, reliable) = c.vle_u64("next_sn_reliable")?;
+        let (_, best_effort) = c.vle_u64("next_sn_best_effort")?;
+        let span = Span {
+            start,
+            end: c.offset(),
+        };
+        out.push(group(
+            "priority_sn",
+            span.start,
+            span.end,
+            alloc::vec![
+                bits("priority", span, priority as u64),
+                reliable,
+                best_effort
+            ],
+        ));
+    }
+    Ok(out)
+}
+
+/// `Init`'s ZBuf `shm` body — the SHM establishment handshake, whose two
+/// halves ride one eid: `InitSyn { alice_segment }`, one VLE, and
+/// `InitAck { alice_challenge, bob_segment }`, two.
+///
+/// Produced by `crate::extshm::encode_shm_init_syn_body` and
+/// `encode_shm_init_ack_body` (code spans, not links: `session-extshm` is not
+/// among `dissect`'s features, so the link would be unresolved in the builds a
+/// reader runs). The field names are upstream's own struct fields
+/// (`zenoh-transport` `unicast/establishment/ext/shm.rs`), which is what lets
+/// a reader move between the capture and that source without a translation.
+///
+/// # Which half, told by LENGTH — and why that is exact rather than a guess
+///
+/// Nothing in the body says which half it is; the Init message's `A` flag does,
+/// and that flag is not in this function's reach. It does not need to be. A VLE
+/// occupies a number of bytes fixed by its own leading bits, so after reading
+/// the first one the cursor is either empty — and the body was one VLE, the SYN
+/// — or it is not, and the ACK's second VLE must then finish it exactly. Both
+/// cannot hold, because the alternative would need a zero-byte VLE.
+///
+/// The rename in the second branch is deliberate: the same wire position is
+/// Alice's SEGMENT in one half and the challenge AGAINST that segment in the
+/// other, and a reader told `alice_segment` on an ACK would have the direction
+/// of the handshake backwards.
+fn walk_shm_init_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
+    let (_, first) = c.vle_u64("alice_segment")?;
+    if c.remaining() == 0 {
+        return Ok(alloc::vec![first]);
+    }
+    let (_, bob_segment) = c.vle_u64("bob_segment")?;
+    Ok(alloc::vec![
+        Field {
+            name: "alice_challenge".into(),
+            ..first
+        },
+        bob_segment,
+    ])
 }
 
 /// The `source_info` ext body — the `(zid, eid, sn)` triple
@@ -4822,6 +4957,314 @@ mod tests {
         assert_eq!(uint(ts, "time"), 0x0123_4567);
         assert_eq!(raw(ts, "zid"), zid.to_vec());
         assert!(ts.find("value").is_none());
+    }
+
+    // ── R311y894: `Join`'s ZBuf `qos`, the per-priority next-SN table ─────
+    //
+    // The module doc above listed this body among the three left opaque
+    // because upstream "declares a layout this tree does not yet encode".
+    // For `qos` that reason was FALSE, and the falsity is why the body
+    // stayed unread: `crate::multicast_join::write_join_qos_ext` has written
+    // it since R311y227 and `decode_join_qos` reads it back, so the layout
+    // has a producer HERE to be judged against — the very condition the
+    // reason said was missing.
+
+    /// The sixteen numbers a JOIN qos table carries, `(reliable,
+    /// best_effort)` per priority with `Control` (0) first.
+    ///
+    /// Every one of them is distinct, so a walker that transposes a pair or
+    /// reads the table backwards fails on a VALUE rather than on a count.
+    /// Two are above 127, so a reader that took these for fixed-width bytes
+    /// cannot pass either.
+    const JOIN_QOS_TABLE: [(u64, u64); 8] = [
+        (10, 11),
+        (20, 21),
+        (30, 31),
+        (40, 41),
+        (200, 201),
+        (60, 61),
+        (70, 71),
+        (300, 301),
+    ];
+
+    /// A JOIN carrying `pairs` as its mandatory ZBuf `qos` extension.
+    ///
+    /// The base body is the CODEC's own encode and the ext body is the
+    /// tree's own VLE encoder, laid in the order
+    /// `crate::multicast_join::write_join_qos_ext` writes. `Z` is set on the
+    /// transport header because the chain only exists when it is, and the
+    /// ext header is `0x51` — id `0x1`, MANDATORY, ZBuf — which is the eid
+    /// `crate::ext_name` matches on.
+    ///
+    /// The base `next_sn` pair is the `{0, 0}` DECOY a qos beacon writes
+    /// (zenoh `multicast/link.rs` sets `next_sn = PrioritySn::DEFAULT` when
+    /// the real SNs ride the ext), so a walker that reported the base pair
+    /// as the table would show two zeros here and fail on every entry.
+    fn join_with_qos_ext(pairs: &[(u64, u64)]) -> Vec<u8> {
+        let join = wz_codecs::join::Join {
+            version: 0x09,
+            cbyte: (3 << 4) | 0x01,
+            zid: &[0xA0, 0xA1, 0xA2, 0xA3],
+            sn_res: None,
+            batch_size: None,
+            lease: 10_000,
+            next_sn_reliable: 0,
+            next_sn_best_effort: 0,
+        };
+        let mut body = Vec::new();
+        for (r, b) in pairs {
+            body.extend(vle(*r));
+            body.extend(vle(*b));
+        }
+        let mut bytes =
+            alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_Z];
+        bytes.extend_from_slice(&join.encode_to_vec(0));
+        bytes.extend(ext_zbuf(0x01 | crate::ext_header::EXT_FLAG_M, false, &body));
+        bytes
+    }
+
+    /// The table is READ, and read as sixteen numbers rather than as hex.
+    ///
+    /// Three ways to fail, each a different defect. The pairs must carry the
+    /// values the producer wrote (a walker off by one VLE reds on the first
+    /// entry); the entry must no longer also show `value` (two renderings of
+    /// three dozen bytes is how a reader takes one field for another); and
+    /// the walk must TILE the datagram, which is what catches a body walked
+    /// at the wrong base offset.
+    #[test]
+    fn a_join_qos_ext_body_is_walked_into_the_per_priority_sn_table() {
+        let bytes = join_with_qos_ext(&JOIN_QOS_TABLE);
+        let f = dissect_transport_message(&bytes, 0).expect("the walker rejected a qos JOIN");
+        assert_eq!(
+            f.span.end,
+            bytes.len(),
+            "the walk must account for every byte of the datagram",
+        );
+
+        let qos = f
+            .find("extensions")
+            .and_then(|e| e.find("qos"))
+            .expect("the per-priority SN table must be named");
+        assert!(
+            qos.find("value").is_none(),
+            "a walked body must not also be shown as opaque bytes",
+        );
+
+        let pairs: Vec<&Field> = match &qos.value {
+            FieldValue::Nested(children) => children
+                .iter()
+                .filter(|c| c.name == "priority_sn")
+                .collect(),
+            other => panic!("the qos body must be a group of pairs, not {other:?}"),
+        };
+        assert_eq!(
+            pairs.len(),
+            crate::qos::Priority::NUM,
+            "one SN pair per priority",
+        );
+        for (priority, (expected, pair)) in JOIN_QOS_TABLE.iter().zip(pairs.iter()).enumerate() {
+            assert_eq!(
+                bits_of(pair, "priority"),
+                priority as u64,
+                "the table is positional and runs Control (0) first",
+            );
+            assert_eq!(uint(pair, "next_sn_reliable"), expected.0);
+            assert_eq!(uint(pair, "next_sn_best_effort"), expected.1);
+        }
+    }
+
+    /// The CONTROL: a table that is not eight pairs must stay opaque.
+    ///
+    /// Both directions, because a length check alone catches only one. Seven
+    /// pairs runs the walker off the end of the body; nine leaves two VLEs
+    /// over after a walk that parsed whole. Either means "not the structure
+    /// this build thought", and the honest answer to that is the raw bytes —
+    /// not a table with a priority missing, and not one silently truncated.
+    #[test]
+    fn a_join_qos_body_that_is_not_eight_pairs_stays_opaque() {
+        for pair_count in [7usize, 9] {
+            let pairs: Vec<(u64, u64)> = (0..pair_count as u64).map(|i| (i, i + 1)).collect();
+            let bytes = join_with_qos_ext(&pairs);
+            let f = dissect_transport_message(&bytes, 0)
+                .expect("a mis-sized qos body may not kill the envelope around it");
+            assert_eq!(f.span.end, bytes.len(), "the envelope must still tile");
+            let ext = f
+                .find("extensions")
+                .expect("the chain must still be walked");
+            assert!(
+                ext.find("priority_sn").is_none(),
+                "{pair_count} pairs is not the JOIN qos table and must not be read as one",
+            );
+            assert!(
+                ext.find("value").is_some(),
+                "a body that does not walk must come back as raw bytes",
+            );
+        }
+    }
+
+    // ── R311y894: the establishment `shm`, the SECOND body the false reason
+    // hid. `crate::extshm::encode_shm_init_syn_body` /
+    // `encode_shm_init_ack_body` have produced this layout for as long as the
+    // `session-extshm` feature has existed, so it met the walker rule too.
+
+    /// A minimal `Init` — no A, no S — carrying `exts` as its chain.
+    ///
+    /// Hand-laid, like every envelope in this suite; what has to come from a
+    /// producer is the extension BODY, which is the thing under test.
+    fn init_with_exts(exts: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes =
+            alloc::vec![wz_codecs::wire_const::T_MID_INIT | wz_codecs::wire_const::FLAG_T_Z];
+        bytes.push(0x09);
+        bytes.push((3 << 4) | 0x01);
+        bytes.extend_from_slice(&[0xB0, 0xB1, 0xB2, 0xB3]);
+        for e in exts {
+            bytes.extend_from_slice(e);
+        }
+        bytes
+    }
+
+    /// The `Init` chain entry for an `shm` ZBuf body — `0x42`, id `0x2`,
+    /// OPTIONAL, ZBuf.
+    fn init_shm_ext(body: &[u8]) -> Vec<u8> {
+        ext_zbuf(0x02, false, body)
+    }
+
+    /// The InitSyn half — one VLE, the segment the initiator offers.
+    #[test]
+    fn an_init_shm_syn_body_is_walked_into_the_segment_it_offers() {
+        let bytes = init_with_exts(&[init_shm_ext(&vle(0x0001_2345))]);
+        let f = dissect_transport_message(&bytes, 0).expect("the walker rejected an shm Init");
+        assert_eq!(f.span.end, bytes.len(), "the walk must tile the datagram");
+        let shm = f
+            .find("extensions")
+            .and_then(|e| e.find("shm"))
+            .expect("the establishment shm body must be walked");
+        assert_eq!(uint(shm, "alice_segment"), 0x0001_2345);
+        assert!(
+            shm.find("value").is_none(),
+            "a walked body must not also be shown as opaque bytes",
+        );
+    }
+
+    /// The InitAck half — the challenge the acceptor read out of that segment,
+    /// then its own segment.
+    ///
+    /// The two halves share one eid and one carrier and are told apart by
+    /// nothing but their LENGTH, which is why this leg and the one above are
+    /// both needed: a walker that always read one VLE would pass the first and
+    /// leave a byte over here, and one that always read two would fail the
+    /// first outright.
+    #[test]
+    fn an_init_shm_ack_body_is_walked_into_the_challenge_and_the_segment() {
+        let mut body = vle(0xDEAD_BEEF);
+        body.extend(vle(0x77));
+        let bytes = init_with_exts(&[init_shm_ext(&body)]);
+        let f = dissect_transport_message(&bytes, 0).expect("the walker rejected an shm Init");
+        assert_eq!(f.span.end, bytes.len(), "the walk must tile the datagram");
+        let shm = f
+            .find("extensions")
+            .and_then(|e| e.find("shm"))
+            .expect("the establishment shm body must be walked");
+        assert_eq!(uint(shm, "alice_challenge"), 0xDEAD_BEEF);
+        assert_eq!(uint(shm, "bob_segment"), 0x77);
+        assert!(
+            shm.find("alice_segment").is_none(),
+            "an ACK offers no segment of Alice's"
+        );
+        assert!(shm.find("value").is_none());
+    }
+
+    /// The CONTROL for the CARRIER, and it is what the guard on the arm buys.
+    ///
+    /// `Join` declares its own `shm` at the SAME id `0x2` with the SAME ZBuf
+    /// encoding, and its layout is not this one — it is the row R311y605's
+    /// rule still excludes, because nothing in this tree writes it. A dispatch
+    /// keyed on the name alone would read a JOIN's opaque blob as a
+    /// segment id and report a handshake that never happened.
+    #[test]
+    fn a_join_shm_body_is_not_read_as_the_establishment_one() {
+        let mut bytes =
+            alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_Z];
+        let join = wz_codecs::join::Join {
+            version: 0x09,
+            cbyte: (3 << 4) | 0x01,
+            zid: &[0xA0, 0xA1, 0xA2, 0xA3],
+            sn_res: None,
+            batch_size: None,
+            lease: 10_000,
+            next_sn_reliable: 0,
+            next_sn_best_effort: 0,
+        };
+        bytes.extend_from_slice(&join.encode_to_vec(0));
+        bytes.extend(ext_zbuf(
+            0x02 | crate::ext_header::EXT_FLAG_M,
+            false,
+            &vle(0x0001_2345),
+        ));
+        let f = dissect_transport_message(&bytes, 0).expect("the walker rejected a JOIN");
+        let ext = f.find("extensions").expect("the chain must be walked");
+        assert!(
+            ext.find("alice_segment").is_none(),
+            "a JOIN's shm is a different extension and must not be read as the Init one",
+        );
+        assert!(
+            ext.find("value").is_some(),
+            "it must come back as raw bytes"
+        );
+    }
+
+    /// The walker agrees with THIS TREE'S producer, not with a reading of it.
+    ///
+    /// The two legs above lay their bodies with the shared `vle` helper, which
+    /// makes them a test of the layout as I understand it. This one never lays
+    /// a byte: the bodies come from `crate::extshm`'s encoders and the expected
+    /// numbers from its decoders, so a walker that agreed with my reading and
+    /// not with the producer fails HERE and nowhere else.
+    #[cfg(feature = "session-extshm")]
+    #[test]
+    fn the_shm_walker_agrees_with_this_trees_establishment_producer() {
+        let syn = crate::extshm::encode_shm_init_syn_body(0x0001_2345);
+        let bytes = init_with_exts(&[init_shm_ext(&syn)]);
+        let f = dissect_transport_message(&bytes, 0).expect("the walker rejected a produced Init");
+        let shm = f
+            .find("extensions")
+            .and_then(|e| e.find("shm"))
+            .expect("the produced InitSyn body must be walked");
+        assert_eq!(
+            uint(shm, "alice_segment"),
+            u64::from(
+                crate::extshm::decode_shm_init_syn_body(&syn).expect("the producer's own decoder")
+            ),
+        );
+
+        let ack = crate::extshm::encode_shm_init_ack_body(0xDEAD_BEEF, 0x77);
+        let bytes = init_with_exts(&[init_shm_ext(&ack)]);
+        let f = dissect_transport_message(&bytes, 0).expect("the walker rejected a produced Init");
+        let shm = f
+            .find("extensions")
+            .and_then(|e| e.find("shm"))
+            .expect("the produced InitAck body must be walked");
+        let (challenge, segment) =
+            crate::extshm::decode_shm_init_ack_body(&ack).expect("the producer's own decoder");
+        assert_eq!(uint(shm, "alice_challenge"), challenge);
+        assert_eq!(uint(shm, "bob_segment"), u64::from(segment));
+    }
+
+    /// The CONTROL for the LENGTH: three VLEs is neither half, so it declines.
+    #[test]
+    fn an_init_shm_body_of_three_vles_stays_opaque() {
+        let mut body = vle(1);
+        body.extend(vle(2));
+        body.extend(vle(3));
+        let bytes = init_with_exts(&[init_shm_ext(&body)]);
+        let f = dissect_transport_message(&bytes, 0).expect("a mis-sized body may not kill Init");
+        let ext = f.find("extensions").expect("the chain must be walked");
+        assert!(ext.find("alice_segment").is_none());
+        assert!(ext.find("alice_challenge").is_none());
+        assert!(
+            ext.find("value").is_some(),
+            "it must come back as raw bytes"
+        );
     }
 
     /// The CONTROL, and it is what makes the five tests above discriminators

@@ -138,6 +138,31 @@ OWN_VOCABULARY = {
     "is the remainder",
     "eid": "the entity id inside `source_info` / `responder_id`. No generated "
     "codec in this tree declares it -- both bodies are hand-encoded",
+    # R311y894 — the SIXTH and SEVENTH walked ZBuf bodies: `Join`'s mandatory
+    # `qos` table and the `Init` establishment `shm` handshake. Both were listed
+    # as opaque for want of a producer in this tree, and both had one.
+    "qos": "the JOIN per-priority next-SN table, walked. Same rule as "
+    "`linkstate`: the codec models the ext body as `value`, and only the "
+    "carrier plus the eid says a table of sixteen VLEs is what these bytes "
+    "hold. The name is `ext_name`'s own row for the eid",
+    "priority_sn": "one row of that table -- upstream's own type name "
+    "(`zenoh-protocol::transport::PrioritySn`). NOT `qos`, by the same "
+    "first-match-by-name shadowing rule as `locator_entry`",
+    "shm": "the ESTABLISHMENT shm handshake body on an `Init`, walked. Same "
+    "rule as `linkstate` and `qos`. Held to the Init carrier by the arm's "
+    "guard: `Join` declares an unrelated `shm` at the same id and encoding",
+    "alice_segment": "the segment an InitSyn offers -- upstream's own field "
+    "name (`zenoh-transport` `unicast/establishment/ext/shm.rs`)",
+    "alice_challenge": "the InitAck's proof it could map that segment. The "
+    "SAME wire position as `alice_segment` in the other half of the handshake, "
+    "renamed because a reader told `alice_segment` on an ACK would have the "
+    "direction backwards",
+    "bob_segment": "the acceptor's own segment, the InitAck's second VLE",
+    "priority": "which priority a `priority_sn` row belongs to. POSITIONAL on "
+    "the wire -- the body carries no such field -- so it is emitted from the "
+    "index and aliases the row's own span, carrying the zenoh `Priority` "
+    "discriminant rather than a name (a name would be a table with no "
+    "adjudicator behind it)",
 }
 
 # AWAITING: codec fields no walker emits yet, each with WHY. Rule 3 makes closing
@@ -165,6 +190,67 @@ def walker_names(src: str) -> set[str]:
     return names
 
 
+EXT_ZBUF_MATCH = re.compile(
+    r"fn walk_ext_zbuf_body\b.*?\blet walked = match name \{(?P<arms>.*?)\n    \}",
+    re.S,
+)
+"""The `match name` inside `walk_ext_zbuf_body`, arms only.
+
+Anchored on the function name AND on the binding, so a second `match name`
+elsewhere in the file cannot be mistaken for this one, and a rename of either
+end makes the block unfindable -- which this gate reports as a failure rather
+than as an empty population.
+"""
+
+ARM_HEAD = re.compile(r"^        (?P<pat>\S.*?)\s*(?:\bif\b.*?)?=>", re.M)
+"""One arm head of that match, at the block's own indentation."""
+
+
+def ext_zbuf_arms_from_the_table(src: str) -> list[str]:
+    """R311y894, open-debt item 387 -- the walker's arms must name the TABLE.
+
+    R311y893 gave `crate::ext_name` a constant per walked row so that renaming
+    a row carries the arm with it: spelled twice, the contract between the two
+    modules is invisible to the compiler, and a row renamed on one side leaves
+    the body silently back to opaque `value`. But that repair reached only the
+    rows that already had constants. A NEW arm written as `"new_ext" =>` still
+    compiles, and the class regrows one arm at a time -- the "scope of a
+    closure" shape open-debt item 47 is a register of.
+
+    So the shape of the fix is a rule about the arms rather than about the
+    names: every pattern here must be a path through `ext_name`, never a
+    literal. `_` is the decline arm and is exempt by construction.
+
+    The gate FAILS on an empty population. A regex that finds no arms would
+    otherwise report a walker with no contract at all as clean, which is the
+    most expensive way this check could be wrong.
+    """
+    block = EXT_ZBUF_MATCH.search(src)
+    if block is None:
+        return [
+            "cannot find `walk_ext_zbuf_body`'s `let walked = match name {` -- the "
+            "arm-provenance rule (item 387) measured NOTHING. Re-anchor this regex "
+            "on whatever the walker's dispatch is called now"
+        ]
+    arms = [m.group("pat").strip() for m in ARM_HEAD.finditer(block.group("arms"))]
+    named = [a for a in arms if a != "_"]
+    if not named:
+        return [
+            "`walk_ext_zbuf_body` dispatches on no named extension -- either the "
+            "match lost its arms or this gate stopped seeing them"
+        ]
+    out = []
+    for arm in named:
+        if not re.fullmatch(r"(?:crate::)?ext_name::[A-Z][A-Z0-9_]*", arm):
+            out.append(
+                f"`walk_ext_zbuf_body` matches {arm!r}, which is not an "
+                "`ext_name::` constant -- spell the arm as the table's own "
+                "constant so a renamed row carries the walker with it (R311y893, "
+                "open-debt item 387)"
+            )
+    return out
+
+
 def codec_fields() -> dict[str, list[str]]:
     """Every `pub <field>:` of every generated codec, and which codec declares it."""
     out: dict[str, list[str]] = {}
@@ -184,11 +270,12 @@ def main() -> int:
         print(f"dissect-name-census: cannot read {CODECS}", file=sys.stderr)
         return 1
 
-    walkers = walker_names(DISSECT.read_text(encoding="utf-8"))
+    src = DISSECT.read_text(encoding="utf-8")
+    walkers = walker_names(src)
     codecs = codec_fields()
     declared = PROTOCOL_FLAGS | PROTOCOL_VARIANTS | set(OWN_VOCABULARY)
 
-    failures: list[str] = []
+    failures: list[str] = ext_zbuf_arms_from_the_table(src)
 
     # Invariant 4 (structural): the declared sets must be disjoint from each other
     # and from the codec's, or a name would be excused twice and neither excuse

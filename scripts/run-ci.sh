@@ -4013,6 +4013,16 @@ layer_c1af_cargo_test_shm() {
     # measured 17.
     _runci_guarded_test C1af 17 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
         || return 1
+    # R311y894 — the establishment SHM surface WITH THE DISSECTOR ON, which no
+    # lane had. `dissect` and `session-extshm` are disjoint feature sets: the
+    # leg above compiles the producer without the walker, and Layer C1's
+    # `--workspace` unification compiles the walker without the producer. The
+    # test that judges the walker against `extshm`'s own encoders therefore
+    # compiled in NEITHER, and both exited 0 -- the `0 passed` shape open-debt
+    # item 386 is a register of. 26 is MEASURED, not derived from the 17 above:
+    # the two feature sets select different suites, so the counts do not add.
+    _runci_guarded_test C1af 26 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+        || return 1
     _runci_guarded_test C1af 3 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
     # R311y507 — 2 -> 5. The target gained the challenge-response over a real

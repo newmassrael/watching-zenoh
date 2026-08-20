@@ -64,17 +64,17 @@
 use crate::ext_header::{ext_eid, EXT_ENC_UNIT, EXT_ENC_Z64, EXT_ENC_ZBUF, EXT_FLAG_M};
 
 /// The names of the extensions whose BODY a walker reads, rather than merely
-/// naming — the five `crate::dissect` dispatches on.
+/// naming — the seven `crate::dissect` dispatches on.
 ///
 /// A code span and NOT an intra-doc link, for the reason this module is
 /// unconditional and that one is not: `dissect` is behind its own feature, so
 /// the link is unresolved in every build a reader would run, and Layer C1bz
 /// counts exactly that.
 ///
-/// # Why these five are constants and the other rows are literals
+/// # Why these are constants and the other rows are literals
 ///
 /// R311y893, open-debt item 376. Every other row's name is read by a person and
-/// by nothing else, so a literal is the whole of what it needs. These five are
+/// by nothing else, so a literal is the whole of what it needs. These are
 /// a CONTRACT between two modules: `dissect::walk_ext_zbuf_body` matches the
 /// string this table returns to decide which body layout to walk. Spelled twice
 /// that contract is invisible to the compiler — a row renamed here left the
@@ -100,6 +100,17 @@ pub const QUERY_BODY: &str = "query_body";
 pub const WIRE_EXPR: &str = "wire_expr";
 /// See [`SOURCE_INFO`].
 pub const TIMESTAMP: &str = "timestamp";
+/// See [`SOURCE_INFO`]. The SIXTH, added by R311y894, and it is the one that
+/// needs the CARRIER as well as the name: `qos` is spelled on TEN rows of this
+/// table and only [`ExtCarrier::Join`]'s is a ZBuf, the rest being UNIT markers
+/// or Z64 words with no body to walk at all.
+pub const JOIN_QOS: &str = "qos";
+/// See [`SOURCE_INFO`]. The SEVENTH, and it needs the carrier for the same
+/// reason [`JOIN_QOS`] does and one step sharper: [`ExtCarrier::Join`] declares
+/// its OWN `shm` at the same id `0x2` with the same ZBuf encoding, so the eid
+/// alone does not separate them — only the carrier does, and their layouts are
+/// unrelated.
+pub const SHM_INIT: &str = "shm";
 
 /// `false` spelled out, so a row's third column reads as the mandatory flag
 /// rather than as an unexplained bare `false`.
@@ -194,7 +205,7 @@ const fn row_eid((id, mandatory, enc, _): &Row) -> u8 {
 const INIT: &[Row] = &[
     (0x1, OPT, EXT_ENC_UNIT, "qos"),
     (0x1, OPT, EXT_ENC_Z64, "qos_link"),
-    (0x2, OPT, EXT_ENC_ZBUF, "shm"),
+    (0x2, OPT, EXT_ENC_ZBUF, SHM_INIT),
     (0x3, OPT, EXT_ENC_ZBUF, "auth"),
     (0x4, OPT, EXT_ENC_ZBUF, "multi_link"),
     (0x5, OPT, EXT_ENC_UNIT, "low_latency"),
@@ -217,7 +228,7 @@ const OPEN: &[Row] = &[
 /// `transport/join.rs` — where BOTH `qos` and `shm` are mandatory, unlike every
 /// other carrier that declares them.
 const JOIN: &[Row] = &[
-    (0x1, MAND, EXT_ENC_ZBUF, "qos"),
+    (0x1, MAND, EXT_ENC_ZBUF, JOIN_QOS),
     (0x2, MAND, EXT_ENC_ZBUF, "shm"),
     (0x7, OPT, EXT_ENC_Z64, "patch"),
 ];
