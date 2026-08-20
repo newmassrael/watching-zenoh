@@ -40,6 +40,65 @@ pub const LINKTYPE_LOOP: u32 = 108;
 /// exist, so nothing was blocking it.
 pub const LINKTYPE_VSOCK: u32 = 271;
 
+/// Every pcap link type this build reads, with its name — the answer to
+/// "will this tool open my capture" BEFORE it is run.
+///
+/// # Why this exists
+///
+/// R311y895, open-debt item 385. The set was discoverable only by reading
+/// `strip_link`'s match arms, and nothing counted them: a test in
+/// `wz-analyze` still said "decap dispatches SIX link types" two rounds after
+/// it became eight. Both surfaces that could have answered a reader —
+/// `wz-analyze --help` and the report's own skip census — answered only AFTER
+/// a run, and the run's answer for an unread capture is `messages decoded: 0`,
+/// which R311y893 measured as reading like "no traffic". A tool that cannot
+/// say what it reads makes its own silence ambiguous.
+///
+/// # Why a list beside the dispatch rather than a dispatch through the list
+///
+/// Each arm strips a DIFFERENT header — a fixed offset, a walked VLAN chain,
+/// a version nibble, an address-family word — so there is no one function the
+/// table could hold. What binds the two is a TEST rather than a type: it
+/// sweeps every link type up to 1000 through [`decapsulate`] and requires the
+/// set that is not [`SkipReason::UnsupportedLinkType`] to equal this list
+/// exactly, in BOTH directions. A new arm with no row here reds, and a row
+/// with no arm reds.
+///
+/// NOT included, because neither is a link type this reader decapsulates:
+/// `--serial <linktype>` DECLARES an arbitrary one as raw serial bytes, and
+/// raw-Ethernet zenoh rides [`LINKTYPE_ETHERNET`] rather than a code of its
+/// own.
+pub const READABLE_LINK_TYPES: &[(u32, &str)] = &[
+    (LINKTYPE_NULL, "NULL"),
+    (LINKTYPE_ETHERNET, "ETHERNET"),
+    (LINKTYPE_RAW, "RAW"),
+    (LINKTYPE_LOOP, "LOOP"),
+    (LINKTYPE_LINUX_SLL, "LINUX_SLL"),
+    (LINKTYPE_IPV4, "IPV4"),
+    (LINKTYPE_IPV6, "IPV6"),
+    (LINKTYPE_VSOCK, "VSOCK"),
+    (LINKTYPE_LINUX_SLL2, "LINUX_SLL2"),
+];
+
+/// [`READABLE_LINK_TYPES`] as one line of `<code> <NAME>`, ascending by code.
+///
+/// One renderer so the help text and the test that pins it cannot disagree
+/// about spacing — the failure `analysis_surface_parity` exists to prevent one
+/// level up.
+pub fn readable_link_types_line() -> alloc::string::String {
+    use core::fmt::Write as _;
+    let mut codes: Vec<(u32, &str)> = READABLE_LINK_TYPES.to_vec();
+    codes.sort_unstable_by_key(|(c, _)| *c);
+    let mut out = alloc::string::String::new();
+    for (i, (code, name)) in codes.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{code} {name}");
+    }
+    out
+}
+
 /// Bytes of `struct af_vsockmon_hdr` (`/usr/include/linux/vsockmon.h`), read
 /// off that header rather than remembered: `__le64 src_cid` + `__le64 dst_cid`
 /// + `__le32 src_port` + `__le32 dst_port` + `__le16 op` + `__le16 transport`
@@ -1463,6 +1522,73 @@ fn strip_tcp(
 mod tests {
     use super::*;
     use alloc::vec;
+
+    /// The declared readable set IS the set the dispatch reads — both ways.
+    ///
+    /// R311y895, open-debt item 385. The sweep is what makes
+    /// [`READABLE_LINK_TYPES`] a fact rather than a comment: every link type
+    /// from 0 to 1000 is put through [`decapsulate`], and the ones that do NOT
+    /// come back [`SkipReason::UnsupportedLinkType`] must be exactly the
+    /// declared list. A new arm nobody documented reds here; a documented row
+    /// with no arm reds here too.
+    ///
+    /// 1000 covers the whole assigned DLT space with room over — libpcap's
+    /// highest at this pin is in the 200s — and the sweep is a thousand calls
+    /// on a 64-byte buffer, so the bound buys certainty rather than costing
+    /// time.
+    ///
+    /// The probe bytes are 64 zeros: long enough that no arm can call it
+    /// truncated for its own header, and not IP under any of them, so every
+    /// readable arm declines with `NotIp` or its own reason. What separates
+    /// readable from unreadable here is which ERROR comes back, never whether
+    /// one does.
+    #[test]
+    fn the_declared_readable_link_types_are_the_ones_the_dispatch_reads() {
+        let probe = [0u8; 64];
+        let declared: alloc::collections::BTreeSet<u32> =
+            READABLE_LINK_TYPES.iter().map(|(c, _)| *c).collect();
+        let mut read: alloc::collections::BTreeSet<u32> = alloc::collections::BTreeSet::new();
+        for code in 0u32..=1000 {
+            match decapsulate(code, 0, &probe) {
+                Err(SkipReason::UnsupportedLinkType(n)) => {
+                    assert_eq!(n, code, "the skip must name the link type it refused");
+                }
+                _ => {
+                    read.insert(code);
+                }
+            }
+        }
+        assert_eq!(
+            read, declared,
+            "READABLE_LINK_TYPES and the dispatch disagree; the extra codes are \
+             on whichever side is larger",
+        );
+    }
+
+    /// The rendered line is ascending by code and names every declared row.
+    ///
+    /// Pinned here rather than only where it is printed, because the help text
+    /// this feeds is in another crate and a renderer nobody tests is how the
+    /// two drift apart.
+    #[test]
+    fn the_readable_link_type_line_renders_every_row_in_code_order() {
+        let line = readable_link_types_line();
+        for (code, name) in READABLE_LINK_TYPES {
+            assert!(
+                line.contains(&alloc::format!("{code} {name}")),
+                "{code} {name} is declared but not rendered",
+            );
+        }
+        let codes: Vec<u32> = line
+            .split(", ")
+            .map(|e| e.split(' ').next().expect("a code").parse().expect("a u32"))
+            .collect();
+        assert_eq!(codes.len(), READABLE_LINK_TYPES.len());
+        assert!(
+            codes.windows(2).all(|w| w[0] < w[1]),
+            "ascending: {codes:?}"
+        );
+    }
 
     /// Decapsulate and require a TCP segment. R311y584 made `decapsulate`
     /// return both transports; these legs are all about the TCP path, so the

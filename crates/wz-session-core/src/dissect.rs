@@ -5023,6 +5023,92 @@ mod tests {
         bytes
     }
 
+    /// A qos JOIN shaped THE WAY ZENOH-PICO EMITS ONE: the `qos` entry carries
+    /// the chain-MORE bit and a `patch` Z64 follows it.
+    ///
+    /// R311y895. `_z_join_encode` writes the qos header as
+    /// `_Z_MSG_EXT_ID_JOIN_QOS | _Z_MSG_EXT_MORE(has_patch)`
+    /// (`vendor/zenoh-pico/src/protocol/codec/transport.c:73`) and then emits
+    /// `_Z_MSG_EXT_ID_JOIN_PATCH` when `Z_FEATURE_FRAGMENTATION` is on, which
+    /// it is by default. So the ONE-ENTRY chain every other fixture here uses
+    /// is not the shape a real pico beacon has, and this is the shape the
+    /// walker will meet first in the field.
+    fn join_with_qos_then_patch(pairs: &[(u64, u64)], patch: u64) -> Vec<u8> {
+        let join = wz_codecs::join::Join {
+            version: 0x09,
+            cbyte: (3 << 4) | 0x01,
+            zid: &[0xA0, 0xA1, 0xA2, 0xA3],
+            sn_res: None,
+            batch_size: None,
+            lease: 10_000,
+            next_sn_reliable: 0,
+            next_sn_best_effort: 0,
+        };
+        let mut body = Vec::new();
+        for (r, b) in pairs {
+            body.extend(vle(*r));
+            body.extend(vle(*b));
+        }
+        let mut bytes =
+            alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_Z];
+        bytes.extend_from_slice(&join.encode_to_vec(0));
+        bytes.extend(ext_zbuf(0x01 | crate::ext_header::EXT_FLAG_M, true, &body));
+        bytes.extend(ext_zint(0x07, false, patch));
+        bytes
+    }
+
+    /// The pico shape walks: the table is read AND the chained `patch` after it
+    /// is still named and read.
+    ///
+    /// The discriminator is the SECOND entry. A body walker that consumed one
+    /// byte too many would eat the patch header and the chain would end early
+    /// — which the one-entry fixtures cannot see, because there is nothing
+    /// after them to lose.
+    #[test]
+    fn a_pico_shaped_join_walks_the_qos_table_and_the_patch_chained_after_it() {
+        let bytes = join_with_qos_then_patch(&JOIN_QOS_TABLE, 1);
+        let f =
+            dissect_transport_message(&bytes, 0).expect("the walker rejected a pico-shaped JOIN");
+        assert_eq!(
+            f.span.end,
+            bytes.len(),
+            "the walk must account for every byte of the datagram",
+        );
+        let exts = f.find("extensions").expect("the chain must be walked");
+
+        let qos = exts.find("qos").expect("the SN table must still be walked");
+        let rows: Vec<&Field> = match &qos.value {
+            FieldValue::Nested(children) => children
+                .iter()
+                .filter(|c| c.name == "priority_sn")
+                .collect(),
+            other => panic!("the qos body must be a group of pairs, not {other:?}"),
+        };
+        assert_eq!(rows.len(), crate::qos::Priority::NUM);
+        assert_eq!(uint(rows[0], "next_sn_reliable"), JOIN_QOS_TABLE[0].0);
+        assert_eq!(uint(rows[7], "next_sn_best_effort"), JOIN_QOS_TABLE[7].1);
+
+        // The chain's entries are groups named `ext`; what each one IS is the
+        // `ext_name` LABEL inside it, not a field bearing that name. Asserting
+        // `find("patch")` would look for a name this dissector never emits.
+        let entries: Vec<&Field> = match &exts.value {
+            FieldValue::Nested(children) => children.iter().filter(|c| c.name == "ext").collect(),
+            other => panic!("the chain must be a group of entries, not {other:?}"),
+        };
+        let names: Vec<Option<FieldValue>> = entries
+            .iter()
+            .map(|e| e.find("ext_name").map(|n| n.value.clone()))
+            .collect();
+        assert_eq!(
+            names,
+            alloc::vec![
+                Some(FieldValue::Label(Cow::Borrowed("qos"))),
+                Some(FieldValue::Label(Cow::Borrowed("patch"))),
+            ],
+            "both chain entries must survive: the walked body and the one after it",
+        );
+    }
+
     /// The table is READ, and read as sixteen numbers rather than as hex.
     ///
     /// Three ways to fail, each a different defect. The pairs must carry the

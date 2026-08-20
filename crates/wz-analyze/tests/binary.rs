@@ -5650,7 +5650,14 @@ fn the_node_plane_reaches_both_renderings() {
 /// ## What the register carried, and the trap it carried beside it
 ///
 /// "decap dispatches SIX link types and no serial one" has stood since
-/// R311y660, together with a standing warning that shaped the whole design:
+/// R311y660 — and R311y895 retired the count, because the number moved twice
+/// (`vsock` at y603, the two loopback encapsulations at y893) while this
+/// sentence did not, and open-debt item 385 recorded it as a live example of a
+/// true-as-a-quote figure that stops the next investigation. The set is now
+/// `wz_capture::link::READABLE_LINK_TYPES`, printed by `--help` and swept
+/// against the dispatch; the CLAUSE THAT MATTERS here is the second one, and
+/// it is unchanged: none of them is a serial link. What follows is the
+/// standing warning that shaped the whole design:
 /// `LINKTYPE_RTAC_SERIAL` (250) has a pseudo-header whose layout is NOT
 /// verifiable on this machine -- `pcap/dlt.h` gives the number and nothing
 /// else. So the link type is DECLARED by the caller, exactly as `--quic`
@@ -5911,6 +5918,66 @@ fn a_bsd_loopback_capture_is_read_through_the_binary() {
              must produce the same report"
         );
     }
+
+    // R311y893 carried this as open-debt item 388, and R311y895 pays it. The
+    // loopback encapsulation was proved in CLASSIC pcap three times and in
+    // pcapng not once — measured by hand in the y893 session and then not
+    // measured again, which is the same as not measured. The two container
+    // paths HAVE diverged before: R311y683 fixed a classic-pcap capture that
+    // dissected fine and still carried a "packets could not be re-read"
+    // notice, and the regression test that fix left behind
+    // (`a_classic_pcap_datagram_capture_is_walked_like_a_pcapng_one`) runs
+    // Ethernet only. So the crossing of the two axes is what was untested,
+    // and it is the crossing a person hits: `tcpdump -w` on a Mac writes
+    // pcapng by default.
+    //
+    // The interface's `if_tsresol` is 6 — microseconds, the pcapng default —
+    // so the only thing that differs from the leg above is the container.
+    // MEASURED while writing this leg, and it is why the comparison is not a
+    // plain equality: the two containers differ in EXACTLY one line, and that
+    // line is the one the container itself decides. pcapng has somewhere to
+    // record what the capture tool dropped and classic pcap has not, so the
+    // former says `0 packet(s) dropped` and the latter `not reported (this
+    // capture format has nowhere to say)` — the distinction R311y892 landed
+    // deliberately, because a zero there would read as a clean bill of health
+    // on a format that cannot give one. Asserting whole-report equality across
+    // containers would therefore have demanded a defect.
+    //
+    // The interface's `if_tsresol` is 6 — microseconds, the pcapng default.
+    let on_null_ng = scratch.write(
+        "null.pcapng",
+        &wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_NULL, 6)],
+            &[(0, 1_000_000, &loopback[..])],
+        ),
+    );
+    let without_capture_tool = |report: &str| {
+        report
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("capture tool:"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let ng = run(&on_null_ng);
+    assert_eq!(
+        without_capture_tool(&ng),
+        without_capture_tool(&baseline),
+        "LINKTYPE_NULL in a pcapng container must dissect to the same report \
+         as in a classic pcap, and as Ethernet — everything except the one \
+         figure the CONTAINER decides"
+    );
+    // And that one figure, asserted rather than merely excused: each container
+    // says the thing only it can say. Without this pair the filter above would
+    // be a hole rather than a distinction.
+    assert!(
+        ng.contains("capture tool: 0 packet(s) dropped by the capture tool"),
+        "pcapng has an ISB to record the figure in, so it is reported: {ng}"
+    );
+    assert!(
+        baseline.contains("capture tool: not reported"),
+        "classic pcap has nowhere to record it, and a 0 there would be a \
+         claim the format cannot support: {baseline}"
+    );
 
     // THE CONTROL. A family this build does not carry is still refused, and
     // refused for the FAMILY rather than for the file's link type -- which is

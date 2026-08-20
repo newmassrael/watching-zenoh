@@ -394,6 +394,16 @@ OPTIONS:
                       health. The report's own header already carries the five
                       figures that say whether this capture is usable at all
     -h, --help        print this and exit
+
+LINK TYPES READ:
+    0 NULL, 1 ETHERNET, 101 RAW, 108 LOOP, 113 LINUX_SLL, 228 IPV4, 229 IPV6,
+    271 VSOCK, 276 LINUX_SLL2
+    A capture whose packets carry any other pcap link type is opened and
+    counted, and none of it is decoded -- the report says which types it
+    could not read. Ask here rather than there: an unread capture reports
+    `messages decoded: 0`, and that is also what a capture with no zenoh
+    traffic reports. `--serial <linktype>` declares one of the OTHER types as
+    raw serial bytes, which is the way to read a link this list omits.
 ";
 
 /// Parse a command line, `argv[0]` already removed.
@@ -4946,6 +4956,55 @@ mod tests {
             text.contains("not reported (this capture format has nowhere to say)"),
             "and the terminal rendering must not print a zero either: {text}"
         );
+    }
+
+    /// R311y895 — the help's LINK TYPES block IS `wz-capture`'s readable set.
+    ///
+    /// Open-debt item 385: nothing in this tool said what it could read, so the
+    /// only way to find out was to run it — and the answer for a capture it
+    /// cannot read (`messages decoded: 0`) is the same sentence as "there was
+    /// no zenoh traffic here", which R311y893 paid for. The block above is that
+    /// answer, and this is what stops it going the way of the `SIX link types`
+    /// comment it replaces.
+    ///
+    /// Pinned against the RENDERER rather than a second copy of the list, and
+    /// pinned in BOTH directions: every code the dispatch reads must appear,
+    /// and a code in the help that the dispatch does not read must not. The
+    /// sweep in `wz-capture` already binds that renderer to the dispatch, so
+    /// the three surfaces are one fact.
+    #[test]
+    fn the_usage_names_every_link_type_this_build_reads_and_no_other() {
+        let rendered = wz_capture::link::readable_link_types_line();
+        assert!(
+            USAGE.contains("LINK TYPES READ:"),
+            "the help must have the section at all"
+        );
+        for entry in rendered.split(", ") {
+            assert!(
+                USAGE.contains(entry),
+                "the dispatch reads {entry} and the help does not say so"
+            );
+        }
+        // The other direction: a `<code> <NAME>` pair in the block that the
+        // dispatch does not read. Scanned off the block itself so a stale row
+        // left behind by a removed arm cannot survive here.
+        let block = USAGE
+            .split("LINK TYPES READ:")
+            .nth(1)
+            .expect("the section")
+            .split("\n    A capture whose")
+            .next()
+            .expect("the list, before its prose");
+        for entry in block.split(',') {
+            let entry = entry.trim().trim_end_matches('\n').trim();
+            if entry.is_empty() {
+                continue;
+            }
+            assert!(
+                rendered.contains(entry),
+                "the help claims {entry} and the dispatch does not read it"
+            );
+        }
     }
 
     /// R311y857 — the flag is in the USAGE, which is what the parity gate reads.
