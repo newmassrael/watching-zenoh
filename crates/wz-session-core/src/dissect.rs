@@ -1120,6 +1120,15 @@ fn z64_body_walker(
         ) => ("qos", read_qos_z64),
         (C::Request, "target") => ("target", read_target_z64),
         (C::DeclareQueryable, "queryable_info") => ("queryable_info", read_queryable_info_z64),
+        // The NARROWED rows (R311y899, item 408): read whole by nobody, so
+        // the reading is what a receiver acts on plus what it threw away. Each
+        // is silent on a value that fits, which is why the dispatch and not
+        // the walk is what a sweep must ask.
+        (C::Push | C::Interest | C::Declare | C::Request, "node_id") => {
+            ("node_id", read_node_id_z64)
+        }
+        (C::Init | C::Join, "patch") => ("patch", read_patch_z64),
+        (C::Request, "budget") => ("budget", read_budget_z64),
         _ => return None,
     };
     Some(hit)
@@ -1199,6 +1208,105 @@ fn read_queryable_info_z64(value: u64, span: Span) -> Option<Vec<Field>> {
         out.push(bits("undefined_bits", span, value & !READ_MASK));
     }
     Some(out)
+}
+
+/// The reading a Z64 row gets when its RECEIVER is narrower than the wire.
+///
+/// # The gap this closes
+///
+/// R311y899, open-debt item 408. [`SCALAR_Z64_BODIES`] declared eleven rows
+/// with one sentence between them — "the number is the whole of it" — and for
+/// seven of them upstream says otherwise in a single line each. None of the
+/// three conversions REJECTS a wider value; each silently keeps a prefix of
+/// it:
+///
+/// | row | upstream | keeps |
+/// |---|---|---|
+/// | `node_id` (Push / Interest / Declare / Request) | `NodeIdType::from`, `network/mod.rs:594-600` | low 16 |
+/// | `patch` (Init / Join) | `PatchType::from`, `transport/mod.rs:344-348` | low 8 |
+/// | `budget` (Request) | `zenoh-codec` `network/request.rs:216-219` | low 32, AND zero means ABSENT |
+///
+/// So a capture carrying `node_id: 70000` was REPORTED as 70000 while every
+/// participant in it routed on 4464 — a number the report showed and nobody on
+/// the wire ever acted on. That is the [`walk_oam`] failure again, one
+/// encoding over: not a field left unread, but a field read and misreported,
+/// which is the worse of the two because it looks like an answer.
+///
+/// The walked rows already had the counterpart — `undefined_bits`, "bits no
+/// reading covers" — and the scalar rows had nothing, because a table saying
+/// the value IS the answer has no room for a remainder.
+///
+/// # What it emits, and why only sometimes
+///
+/// * `read_as` — the value a conforming receiver acts on.
+/// * `undefined_bits` — what the narrowing discarded, the same name the
+///   walked rows use for the same fact.
+/// * `absent_to_receiver` — the third outcome, and `budget` is the row that
+///   has it: `BudgetType` is a `NonZeroU32`, so a low word of zero collapses
+///   the whole extension to `None` and the query runs with NO reply budget.
+///   It cannot be derived from `undefined_bits`, because a literal `0` on the
+///   wire discards nothing and still means it.
+///
+/// Nothing at all is emitted when the receiver acts on the value AS WRITTEN,
+/// which is the ordinary case and would otherwise restate every `node_id` in
+/// a capture. The presence of these fields is therefore a FINDING, and the
+/// tests carry the control leg that says so.
+///
+/// # Why the row is still listed as READ
+///
+/// [`readable_ext_bodies_line`] is driven by [`z64_body_walker`], so these
+/// rows join `EXT BODIES READ` even though most values leave them silent.
+/// That is the same rule `target` already lives under — a walker that
+/// declines a body is a reading that had nothing to say, not an absent one —
+/// and the alternative is a self-report that answers "do you open this?" with
+/// "sometimes".
+fn narrowed_z64(value: u64, width: u32, zero_is_absent: bool, span: Span) -> Option<Vec<Field>> {
+    let mask = if width >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    };
+    let read_as = value & mask;
+    let discarded = value & !mask;
+    let absent = zero_is_absent && read_as == 0;
+    if discarded == 0 && !absent {
+        return None;
+    }
+    let mut out = Vec::new();
+    if discarded != 0 {
+        out.push(bits("read_as", span, read_as));
+        out.push(bits("undefined_bits", span, discarded));
+    }
+    if absent {
+        out.push(flag("absent_to_receiver", span, true));
+    }
+    Some(out)
+}
+
+/// The routing-context node id — `ext.value as u16` on both sides of this
+/// wire. This tree's [`crate::ext_nodeid::read_source`] performs the identical
+/// narrowing, so a wider value is one no participant acts on.
+fn read_node_id_z64(value: u64, span: Span) -> Option<Vec<Field>> {
+    narrowed_z64(value, 16, false, span)
+}
+
+/// The protocol patch LEVEL — a `u8` newtype upstream, and the one row where
+/// the two implementations narrow DIFFERENTLY: stock zenoh truncates
+/// (`Self(ext.value as u8)`), while [`crate::extpatch::peer_patch`]
+/// deliberately SATURATES so a peer announcing something newer than `u8::MAX`
+/// does not wrap to `NO_PATCH`. This reading follows the reference reader, and
+/// `a_patch_level_wider_than_a_byte_is_read_as_upstream_reads_it` pins the
+/// disagreement so it reds on the round either side moves.
+fn read_patch_z64(value: u64, span: Span) -> Option<Vec<Field>> {
+    narrowed_z64(value, 8, false, span)
+}
+
+/// The reply budget — narrowed to a `u32` AND collapsed to "no budget" when
+/// that word is zero, because `BudgetType` is a `NonZeroU32`. Both halves
+/// matter: a wire value of `1 << 32` reads as four billion replies and buys
+/// the sender none at all.
+fn read_budget_z64(value: u64, span: Span) -> Option<Vec<Field>> {
+    narrowed_z64(value, 32, true, span)
 }
 
 /// Every extension BODY this build READS at `enc`, as `<Carrier>/<name>` rows
@@ -6396,6 +6504,190 @@ mod tests {
         );
     }
 
+    /// A `Push` whose routing-context `node_id` carries `packed`.
+    fn push_with_node_id(packed: u64) -> Field {
+        let push = concat(&[
+            alloc::vec![0x1Du8 | 0x80],
+            wireexpr(1, None),
+            ext_zint(0x1, true, 0x05),
+            ext_zint(0x3 | crate::ext_header::EXT_FLAG_M, false, packed),
+            msg_put(None, None, &[], b"x"),
+        ]);
+        let mut w = SpanCursor::new(&push);
+        let f = group("Push", 0, push.len(), walk_push(&mut w).expect("walk"));
+        assert_tiles(&f, 0, push.len());
+        f
+    }
+
+    /// The entry named `name` of a walked chain under `parent`.
+    fn named_entry<'a>(parent: &'a Field, name: &str) -> &'a Field {
+        entry_named(
+            parent.find("extensions").expect("the chain must be walked"),
+            name,
+        )
+        .unwrap_or_else(|| panic!("the {name} entry must be named"))
+    }
+
+    /// R311y899, item 408 — a value the REPORT shows and no receiver ever
+    /// acts on.
+    ///
+    /// `node_id` was declared scalar because "the number is the whole of it",
+    /// and upstream says otherwise in one line: `From<ZExtZ64> for NodeIdType`
+    /// is `node_id: ext.value as u16`
+    /// (`commons/zenoh-protocol/src/network/mod.rs:594-600`). It does not
+    /// REJECT a wider value, it silently keeps the low sixteen bits — and this
+    /// tree's own [`crate::ext_nodeid::read_source`] does the identical
+    /// `v as u16`. So a capture carrying 70000 was reported as 70000 while
+    /// every participant in it routed on 4464.
+    #[test]
+    fn a_node_id_wider_than_a_u16_reports_what_a_receiver_acts_on() {
+        // 70000 == 0x1_1170: a u16 reader keeps 0x1170 and drops 0x1_0000.
+        let f = push_with_node_id(70_000);
+        let node = named_entry(&f, "node_id");
+        assert_eq!(
+            node.find("value").map(|f| f.value.clone()),
+            Some(FieldValue::Uint(70_000)),
+            "the WIRE value stays visible — the reading aliases it",
+        );
+        assert_eq!(
+            node.find("read_as").map(|f| f.value.clone()),
+            Some(FieldValue::Bits(4_464)),
+            "upstream's `as u16` and this tree's `read_source` BOTH act on \
+             4464; 70000 is a number nobody in this capture ever saw",
+        );
+        assert_eq!(
+            node.find("undefined_bits").map(|f| f.value.clone()),
+            Some(FieldValue::Bits(0x1_0000)),
+            "what the narrowing discarded is NAMED, not dropped — the scalar \
+             counterpart of the walked rows' own field",
+        );
+        // The CONTROL, and it is what separates a reading from decoration: a
+        // value that FITS grows neither field, so their presence is a finding.
+        let fits = push_with_node_id(9);
+        let node = named_entry(&fits, "node_id");
+        assert!(
+            node.find("read_as").is_none(),
+            "a value a receiver acts on whole must not be restated",
+        );
+        assert!(node.find("undefined_bits").is_none());
+    }
+
+    /// The same disease on the establishment carrier, plus a DIVERGENCE the
+    /// two implementations already carry.
+    ///
+    /// Upstream `PatchType` is a `u8` newtype and `From<ZExtZ64>` is
+    /// `Self(ext.value as u8)` (`transport/mod.rs:344-348`), so a peer
+    /// announcing 256 is read by stock zenoh as announcing `NONE`. This
+    /// tree's [`crate::extpatch::peer_patch`] SATURATES instead
+    /// (`u8::try_from(..).unwrap_or(u8::MAX)`), deliberately and with its
+    /// reason written down. The walker follows the WIRE's own reference
+    /// reader, exactly as `read_qos_z64` does for the third congestion state,
+    /// and the second half of this test pins the disagreement so it reds on
+    /// the round either side moves.
+    #[test]
+    fn a_patch_level_wider_than_a_byte_is_read_as_upstream_reads_it() {
+        let bytes = init_with_exts(&[ext_zint(
+            crate::ext_header::establishment_ext_id::PATCH,
+            false,
+            256,
+        )]);
+        let f = dissect_transport_message(&bytes, 0).expect("the walker rejected a patch Init");
+        assert_eq!(f.span.end, bytes.len(), "the walk must tile the datagram");
+        let patch = named_entry(&f, "patch");
+        assert_eq!(
+            patch.find("read_as").map(|f| f.value.clone()),
+            Some(FieldValue::Bits(0)),
+            "`Self(ext.value as u8)` truncates: a peer announcing 256 is read \
+             by stock zenoh as announcing NOTHING",
+        );
+        assert_eq!(
+            patch.find("undefined_bits").map(|f| f.value.clone()),
+            Some(FieldValue::Bits(0x100)),
+        );
+        // The DIVERGENCE: this tree reads the same bytes as `u8::MAX`. If this
+        // line reds, one of the two moved — decide which, then move this
+        // walker to match whichever is the reference reader.
+        let entry = wz_codecs::ext_entry::ExtEntryOwned {
+            header: crate::extpatch::PATCH_EXT_ID | crate::ext_header::EXT_ENC_Z64,
+            body: wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZint(
+                wz_codecs::ext_zint::ExtZint { value: 256 },
+            ),
+        };
+        assert_eq!(
+            crate::extpatch::peer_patch(&[entry]),
+            u8::MAX,
+            "this pins the DIVERGENCE: wz saturates where upstream truncates, \
+             so the same byte means `newest known` here and `none` there",
+        );
+    }
+
+    /// A `Request` carrying one `budget` Z64 ext and a bare `Query` body.
+    fn request_with_budget(packed: u64) -> Field {
+        let bytes = concat(&[
+            alloc::vec![0x1Cu8 | 0x80],
+            vle(7),
+            wireexpr(0, None),
+            ext_zint(0x5, false, packed),
+            alloc::vec![0x03u8],
+        ]);
+        let mut w = SpanCursor::new(&bytes);
+        let f = group(
+            "Request",
+            0,
+            bytes.len(),
+            walk_request(&mut w).expect("walk"),
+        );
+        assert_tiles(&f, 0, bytes.len());
+        f
+    }
+
+    /// The narrowing whose zero is not a zero.
+    ///
+    /// `BudgetType` is `NonZeroU32` and the codec builds it with
+    /// `ext::BudgetType::new(l.value as u32)`
+    /// (`zenoh-codec/src/network/request.rs:216-219`), so the value is
+    /// narrowed AND a low word of zero collapses the whole extension to
+    /// `None` — the receiver runs the query with NO reply budget at all.
+    /// Reporting `value: 4294967296` for that is the widest possible miss:
+    /// the number says "four billion replies" and the peer accepts every one.
+    #[test]
+    fn a_budget_that_narrows_to_zero_is_no_budget_at_all() {
+        let f = request_with_budget(1u64 << 32);
+        let budget = named_entry(&f, "budget");
+        assert_eq!(
+            budget.find("read_as").map(|f| f.value.clone()),
+            Some(FieldValue::Bits(0)),
+        );
+        assert_eq!(
+            budget.find("undefined_bits").map(|f| f.value.clone()),
+            Some(FieldValue::Bits(1u64 << 32)),
+        );
+        assert_eq!(
+            budget.find("absent_to_receiver").map(|f| f.value.clone()),
+            Some(FieldValue::Flag(true)),
+            "`NonZeroU32::new(0)` is `None`: the peer reads this Request as \
+             carrying no budget, which is the OPPOSITE of a huge one",
+        );
+        // A literal zero is the SAME finding with nothing truncated, which is
+        // why the flag cannot be derived from `undefined_bits`.
+        let zero = request_with_budget(0);
+        let budget = named_entry(&zero, "budget");
+        assert_eq!(
+            budget.find("absent_to_receiver").map(|f| f.value.clone()),
+            Some(FieldValue::Flag(true)),
+        );
+        assert!(
+            budget.find("undefined_bits").is_none(),
+            "nothing was discarded — only the zero-means-absent rule bit",
+        );
+        // The CONTROL: an ordinary budget grows none of the three.
+        let ok = request_with_budget(100);
+        let budget = named_entry(&ok, "budget");
+        assert!(budget.find("read_as").is_none());
+        assert!(budget.find("undefined_bits").is_none());
+        assert!(budget.find("absent_to_receiver").is_none());
+    }
+
     /// The `qos` reading reaches the TRANSPORT carriers too, which the network
     /// tests above cannot show: `Frame` declares `qos` MANDATORY and writes its
     /// ext chain BEFORE the batch, so a dispatch keyed only on the network
@@ -6449,46 +6741,10 @@ mod tests {
              encoding as well as the name",
         ),
         (
-            crate::ext_name::ExtCarrier::Init,
-            "patch",
-            "a protocol patch LEVEL — upstream's `PatchType` is a newtype over \
-             one `u8` whose only reading is `>= 1`",
-        ),
-        (
-            crate::ext_name::ExtCarrier::Join,
-            "patch",
-            "the same `PatchType`, on the multicast carrier",
-        ),
-        (
             crate::ext_name::ExtCarrier::Open,
             "shm",
             "the SHM challenge value the peer must echo — a nonce, and the \
              `Init` half of the same negotiation is a ZBuf that IS walked",
-        ),
-        (
-            crate::ext_name::ExtCarrier::Push,
-            "node_id",
-            "a routing node id (upstream `NodeIdType`, one `u16` field)",
-        ),
-        (
-            crate::ext_name::ExtCarrier::Interest,
-            "node_id",
-            "the same node id, same rows",
-        ),
-        (
-            crate::ext_name::ExtCarrier::Declare,
-            "node_id",
-            "the same node id, same rows",
-        ),
-        (
-            crate::ext_name::ExtCarrier::Request,
-            "node_id",
-            "the same node id, same rows",
-        ),
-        (
-            crate::ext_name::ExtCarrier::Request,
-            "budget",
-            "how many replies the query will accept — a count",
         ),
         (
             crate::ext_name::ExtCarrier::Request,
@@ -6560,13 +6816,20 @@ mod tests {
         assert_eq!(
             walked_rows,
             alloc::vec![
+                "Declare/node_id",
                 "Declare/qos",
                 "DeclareQueryable/queryable_info",
                 "Fragment/qos",
                 "Frame/qos",
+                "Init/patch",
+                "Interest/node_id",
                 "Interest/qos",
+                "Join/patch",
                 "NetworkOam/qos",
+                "Push/node_id",
                 "Push/qos",
+                "Request/budget",
+                "Request/node_id",
                 "Request/qos",
                 "Request/target",
                 "Response/qos",

@@ -232,6 +232,18 @@ OWN_VOCABULARY = {
     "is `ext.value as u8`), so a walk that showed clean sub-fields for a value "
     "with a high bit set would be every field correct and the message "
     "misreported",
+    "read_as": "the value a conforming RECEIVER acts on, when that is not the "
+    "value on the wire. Three Z64 rows are narrowed rather than rejected -- "
+    "`NodeIdType::from` is `ext.value as u16`, `PatchType::from` is "
+    "`as u8`, and zenoh-codec's Request reader is "
+    "`BudgetType::new(l.value as u32)` -- so a capture carrying `node_id: "
+    "70000` was reported as 70000 while every participant routed on 4464. "
+    "Emitted only when the two differ, so its presence is a finding",
+    "absent_to_receiver": "the third outcome of a narrowing, and only "
+    "`budget` has it: `BudgetType` is a `NonZeroU32`, so a low word of zero "
+    "collapses the extension to `None` and the query runs with NO reply "
+    "budget. Not derivable from `undefined_bits` -- a literal `0` on the wire "
+    "discards nothing and still means it",
     "target": "which matching queryables a Request is FOR -- upstream's own "
     "name (`network/request.rs` `ext_target`), as a label because the wire "
     "carries the enum's discriminant and the reader wants the value. Absent "

@@ -414,9 +414,11 @@ EXT BODIES READ:
           Query/query_body, Query/source_info, Request/timestamp,
           Response/responder_id, Response/timestamp,
           ResponseFinal/responder_id, ResponseFinal/timestamp
-    Z64   Declare/qos, DeclareQueryable/queryable_info, Fragment/qos,
-          Frame/qos, Interest/qos, NetworkOam/qos, Push/qos,
-          Request/qos, Request/target, Response/qos,
+    Z64   Declare/node_id, Declare/qos,
+          DeclareQueryable/queryable_info, Fragment/qos, Frame/qos,
+          Init/patch, Interest/node_id, Interest/qos, Join/patch,
+          NetworkOam/qos, Push/node_id, Push/qos, Request/budget,
+          Request/node_id, Request/qos, Request/target, Response/qos,
           ResponseFinal/qos, TransportOam/qos
     An extension body this list omits is COUNTED and NAMED but not
     OPENED: the report shows it as `value` -- raw bytes for a ZBuf, one
@@ -425,8 +427,15 @@ EXT BODIES READ:
     LINK TYPES READ above. The rows left out are left out on purpose and
     each carries a recorded reason: user `attachment` bytes have no
     declared structure to walk, a `Join` `shm` has no producer in this
-    tree to judge a walker against, and a nonce, a patch level or a
-    reply budget IS the number it carries.
+    tree to judge a walker against, and a nonce or a millisecond
+    timeout IS the number it carries.
+    A row on this list can still be SILENT, and that is a reading too.
+    Seven of the Z64 rows are narrowed by their receiver rather than
+    read whole -- a node id keeps sixteen bits, a patch level eight, a
+    reply budget thirty-two and a zero there means no budget at all --
+    so they speak only when the value on the wire is not the value a
+    peer acts on, adding `read_as` and `undefined_bits` beside it. On
+    ordinary traffic they say nothing because there is nothing to say.
 ";
 
 /// Parse a command line, `argv[0]` already removed.

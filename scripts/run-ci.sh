@@ -8294,7 +8294,10 @@ layer_c1bn_passive_dissection_features() {
     for name in \
         dissect::tests::every_zbuf_row_is_either_walked_or_declared_opaque \
         dissect::tests::every_z64_row_is_either_walked_or_declared_scalar \
-        dissect::tests::the_readable_ext_bodies_line_is_the_dispatch_read_back
+        dissect::tests::the_readable_ext_bodies_line_is_the_dispatch_read_back \
+        dissect::tests::a_node_id_wider_than_a_u16_reports_what_a_receiver_acts_on \
+        dissect::tests::a_patch_level_wider_than_a_byte_is_read_as_upstream_reads_it \
+        dissect::tests::a_budget_that_narrows_to_zero_is_no_budget_at_all
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bn FAIL: $name is absent from the dissect build"; return 1; }
