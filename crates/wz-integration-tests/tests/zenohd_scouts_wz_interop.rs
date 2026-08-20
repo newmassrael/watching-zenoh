@@ -45,8 +45,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    assert_demo_binary_newer_than_sources, spawn_zenohd_multicast_scouting_with_args,
-    wait_for_substring, wz_ap_demo_binary, ChildGuard,
+    assert_demo_binary_newer_than_sources, configured_zid_value, face_zid_value,
+    spawn_zenohd_multicast_scouting_with_args, wait_for_substring, wz_ap_demo_binary, ChildGuard,
 };
 
 const RESPONDER_NEEDLE: &str = "SCOUT RESPONDER listening on ";
@@ -143,10 +143,20 @@ fn a_stock_zenohd_discovers_wz_by_scouting_and_dials_what_its_hello_advertised()
     // (a bare `peer` is not a JSON5 string and zenohd rejects the pair).
     //
     // NOTHING here names wz.
+    //
+    // R311y903 (item 417) — zenohd's zid is PINNED, so the face check below can
+    // name the node it expects instead of guessing from a rendering. It is
+    // derived per-process for the reason the wz `--zid` above is: a fixed zid
+    // shared with a leftover or concurrent copy makes zenoh's scouted-peer
+    // dedupe skip the dial, which is the least diagnosable failure this test
+    // has. The prefix differs from wz's `7073` so the two can never collide.
+    let zenohd_zid_hex = format!("2e0d{:04x}", std::process::id() & 0xffff);
+    let zenohd_zid = configured_zid_value(&zenohd_zid_hex);
+    let zenohd_id_cfg = format!("id:\"{zenohd_zid_hex}\"");
     let zenohd = listening.is_ok().then(|| {
         spawn_zenohd_multicast_scouting_with_args(
             "zenohd (peer, scouts and autoconnects)",
-            &["--cfg", r#"mode:"peer""#],
+            &["--cfg", r#"mode:"peer""#, "--cfg", &zenohd_id_cfg],
         )
     });
 
@@ -219,16 +229,18 @@ fn a_stock_zenohd_discovers_wz_by_scouting_and_dials_what_its_hello_advertised()
                 .lines()
                 .find(|l| l.contains("face 0 UP"))
                 .expect("the needle matched, so the line is in the capture");
-            let zid = line
-                .split_once("zid ")
-                .and_then(|(_, rest)| rest.split(')').next())
-                .map(str::trim)
-                .unwrap_or_default();
+            // R311y903 (item 417) — by VALUE, against the zid this test PINNED
+            // on zenohd. What stood here was `zid.len() == 32`, which reads a
+            // node's identity off a rendering that does not preserve width:
+            // `{:x}` drops leading zero nibbles, so a correct zenohd failed
+            // this once in sixteen runs. Naming the expected node is also
+            // strictly stronger than the length rule ever was — that rule
+            // admitted ANY 32-character zid, including a second zenohd's.
             assert_eq!(
-                zid.len(),
-                32,
-                "the face that came up must be a zenohd's (a 16-byte ZenohIdProto), \
-                 not another wz node's short demo zid; the line was: {line}"
+                face_zid_value(line),
+                Some(zenohd_zid),
+                "the face that came up is not the zenohd this test spawned \
+                 (pinned zid {zenohd_zid_hex}); the line was: {line}"
             );
             assert!(
                 line.contains("whatami Some(Peer)"),
@@ -245,3 +257,10 @@ fn a_stock_zenohd_discovers_wz_by_scouting_and_dials_what_its_hello_advertised()
         ),
     }
 }
+
+// R311y903 (item 417) — the discriminator and its deterministic tests live in
+// `wz_integration_tests::common`, not here. Layer C0 requires every `#[test]`
+// in a binary-dep test FILE to carry `#[ignore]`, and a deterministic
+// reproduction of a PROBABILISTIC defect must run always-on: putting it in the
+// library is what lets Layer C1's workspace run execute it with no oracle
+// present. The gate found this; it is not a preference.

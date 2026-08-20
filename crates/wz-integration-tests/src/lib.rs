@@ -1316,6 +1316,67 @@ pub mod common {
     /// `read_at` takes the offset as an argument and leaves the description's own
     /// offset untouched, so the hazard is closed for EVERY caller at once rather than
     /// by migrating 171 capture sites to independent descriptions.
+    /// Which node a `face N UP` log line belongs to, decided by VALUE.
+    ///
+    /// R311y903, open-debt item 417. `zenohd_scouts_wz_interop.rs` decided this
+    /// by the LENGTH of the rendered zid — `zid.len() == 32`, under a message
+    /// asserting "a 16-byte ZenohIdProto". Both halves were wrong, and upstream
+    /// says so:
+    ///
+    /// * `ZenohIdProto` is a newtype over `uhlc::ID`, whose `Debug` is
+    ///   `write!(f, "{:x}", u128::from_le_bytes(self.0))`
+    ///   (`uhlc-0.8.2/src/id.rs:279-283`). `{:x}` DROPS leading zero nibbles, so
+    ///   an ordinary zid renders in fewer than 32 characters.
+    /// * `ID::rand()` is `OsRng.gen_range(1..u128::MAX)` (`id.rs:88-92`),
+    ///   uniform — so the top nibble is zero once in sixteen and the rendering
+    ///   is short 6.25% of the time. Hosted run 32411221953's Layer M is where
+    ///   it landed: `left: 30, right: 32` on `e77a27c47363d6d97990a76230cc58`.
+    ///   zenohd was correct; the discriminator was not.
+    ///
+    /// ⚠ AND THE OBVIOUS REPAIR IS ALSO WRONG. "Use the byte count, not the
+    /// render length" fails one level down: `ID::size()` is
+    /// `MAX_SIZE - (leading_zeros / 8)` (`id.rs:63-67`) — SIGNIFICANT bytes, not
+    /// 16. A zid whose top byte is zero has size 15, once in 256. So this
+    /// asserts neither a length nor a size: it parses the rendering into the
+    /// NUMBER it denotes, which is what both sides agree on. Rendering is lossy
+    /// about width and exact about value.
+    ///
+    /// It lives HERE rather than beside its one caller because Layer C0 requires
+    /// every `#[test]` in a binary-dep test FILE to carry `#[ignore]`, and a
+    /// deterministic reproduction of a probabilistic defect must run always-on
+    /// — putting it in the library is what lets Layer C1's workspace run
+    /// execute it with no oracle present.
+    pub fn face_zid_value(line: &str) -> Option<u128> {
+        let (_, rest) = line.split_once("zid ")?;
+        let hex = rest.split(')').next()?.trim();
+        u128::from_str_radix(hex, 16).ok()
+    }
+
+    /// The VALUE a zid CONFIGURED as `hex` will be rendered as.
+    ///
+    /// R311y903 — and this is NOT `u128::from_str_radix(hex, 16)`, which is the
+    /// trap that follows immediately after avoiding the first one. zenoh parses
+    /// the `id` config string into BYTES and holds them little-endian, and
+    /// `uhlc::ID`'s `Debug` renders `u128::from_le_bytes(self.0)` — so the
+    /// printed hex is the configured hex WITH ITS BYTES REVERSED.
+    ///
+    /// MEASURED, not derived: pinning `--cfg id:"2e0db2ae"` on a real zenohd
+    /// produced `face 0 UP (... zid aeb20d2e)`. Comparing against the config
+    /// string's own numeric value would compare against a number that appears on
+    /// no wire — the same shape as the length rule it replaced, one layer down.
+    pub fn configured_zid_value(hex: &str) -> u128 {
+        assert!(
+            hex.len() % 2 == 0 && hex.len() <= 32,
+            "a zid config string is whole bytes, at most 16 of them: {hex:?}"
+        );
+        let mut bytes = [0u8; 16];
+        for (i, pair) in hex.as_bytes().chunks(2).enumerate() {
+            let pair = core::str::from_utf8(pair).expect("hex is ascii");
+            bytes[i] = u8::from_str_radix(pair, 16).expect("hex byte parses");
+        }
+        u128::from_le_bytes(bytes)
+    }
+
     pub fn read_captured(file: &mut File) -> String {
         use std::os::unix::fs::FileExt;
         let mut bytes = Vec::new();
@@ -3886,9 +3947,73 @@ pub mod common {
 #[cfg(test)]
 mod tests {
     use super::common::{
-        line_with, parse_zenoh_admin_sessions, wait_for_tcp_accept_alive, ChildGuard, ZenohSession,
-        ZENOHD_TCP_ACCEPT_BUDGET,
+        configured_zid_value, face_zid_value, line_with, parse_zenoh_admin_sessions,
+        wait_for_tcp_accept_alive, ChildGuard, ZenohSession, ZENOHD_TCP_ACCEPT_BUDGET,
     };
+
+    /// A face line as `wz-ap-demo` renders one, for the three tests below.
+    fn face_line(zid_hex: &str) -> String {
+        format!("face 0 UP (peer 127.0.0.1:54310, zid {zid_hex}) whatami Some(Peer)")
+    }
+
+    /// THE DETERMINISTIC REPRODUCTION of open-debt item 417.
+    ///
+    /// A probabilistic defect cannot be judged by re-running the e2e — that is a
+    /// dice roll, not a discriminator, which is the lesson item 393 recorded
+    /// about a different intermittent. So the rule is lifted out of the e2e and
+    /// fed the short zid directly. The fixture is the zid hosted run
+    /// 32411221953 actually failed on: 30 characters, because its top byte is
+    /// zero.
+    #[test]
+    fn a_short_zid_is_still_recognised_as_a_zenohd_face() {
+        let short = "e77a27c47363d6d97990a76230cc58";
+        assert_eq!(short.len(), 30, "the fixture must be the SHORT rendering");
+        let expected = u128::from_str_radix(short, 16).expect("the fixture parses");
+        assert_eq!(
+            face_zid_value(&face_line(short)),
+            Some(expected),
+            "a zid whose leading nibble is zero renders in fewer than 32 \
+             characters and is still the same node; this is exactly what hosted \
+             run 32411221953 reported as a failure"
+        );
+    }
+
+    /// The other half: the rule must still TELL NODES APART. A rule that
+    /// accepted anything would satisfy the test above, so this pins the
+    /// negative.
+    #[test]
+    fn a_different_zid_is_not_taken_for_a_zenohd_face() {
+        let zenohd = u128::from_str_radix("e77a27c47363d6d97990a76230cc58", 16).expect("parses");
+        let wz_demo = "70730001";
+        assert_ne!(
+            face_zid_value(&face_line(wz_demo)),
+            Some(zenohd),
+            "a wz demo zid must not be read as the zenohd face's"
+        );
+        assert_eq!(
+            face_zid_value(&face_line(wz_demo)),
+            Some(u128::from_str_radix(wz_demo, 16).expect("parses")),
+            "and it must still parse to its own value"
+        );
+    }
+
+    /// The endianness fact, pinned because it is FOREIGN BEHAVIOUR the e2e
+    /// depends on and would otherwise re-learn by failing.
+    ///
+    /// Measured against a real zenohd during R311y903: `--cfg id:"2e0db2ae"`
+    /// produced `face 0 UP (... zid aeb20d2e)`. If upstream stops reversing,
+    /// this reds here — beside the reason — instead of in an e2e whose message
+    /// would only say two numbers differ.
+    #[test]
+    fn a_configured_zenohd_zid_renders_with_its_bytes_reversed() {
+        assert_eq!(
+            configured_zid_value("2e0db2ae"),
+            u128::from_str_radix("aeb20d2e", 16).expect("parses"),
+            "zenoh holds the configured id bytes little-endian and renders \
+             `u128::from_le_bytes`, so the rendering is the config with its \
+             bytes reversed"
+        );
+    }
     use socket2::{Domain, Socket, Type};
     use std::net::{SocketAddr, TcpListener};
     use std::process::Command;
