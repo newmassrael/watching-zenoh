@@ -1119,9 +1119,12 @@ impl<'a> CaptureReport<'a> {
                     e.scout,
                     e.inadmissible,
                     node.flows.len(),
+                    // A locator is a string a PEER chose and this reader
+                    // printed, so it goes through the escaper like every other
+                    // wire-sourced field in this module. R311y891.
                     node.locators
                         .iter()
-                        .map(|l| alloc::format!("\"{l}\""))
+                        .map(|l| quoted(l))
                         .collect::<alloc::vec::Vec<_>>()
                         .join(",")
                 ));
@@ -1164,7 +1167,10 @@ impl<'a> CaptureReport<'a> {
                     },
                     interest.id,
                     match &interest.keyexpr {
-                        Some(k) => alloc::format!("\"{k}\""),
+                        // ESCAPED: a keyexpr is the attacker-influenced text
+                        // this module's own doc names, and it reached this
+                        // field raw until R311y891.
+                        Some(k) => quoted(k),
                         // NULL and not "": a declaration this reader could not
                         // name is a finding, and the empty string is a keyexpr.
                         None => "null".into(),
@@ -1227,7 +1233,9 @@ impl<'a> CaptureReport<'a> {
                     r.closed_at.is_some(),
                     r.cancelled_at.is_some(),
                     match &r.keyexpr {
-                        Some(k) => alloc::format!("\"{k}\""),
+                        // ESCAPED, for the reason the declaration plane above
+                        // states. R311y891.
+                        Some(k) => quoted(k),
                         None => "null".into(),
                     },
                     r.scope.is_some_and(|s| s.keyexprs),
@@ -2590,6 +2598,19 @@ fn opt_u64(v: Option<u64>) -> String {
         Some(v) => v.to_string(),
         None => "null".to_string(),
     }
+}
+
+/// `value` as a quoted, escaped JSON string.
+///
+/// R311y891 — the allocating form, for the emitters that build a field inside
+/// a `format!` and so have no `&mut String` to write into. Its absence is why
+/// three wire-sourced fields were spelled `format!("\"{k}\"")` instead: the
+/// escaping path took a cursor and the surrounding code had a value, and the
+/// short spelling was one character away.
+fn quoted(value: &str) -> String {
+    let mut out = String::new();
+    quote_into(value, &mut out);
+    out
 }
 
 /// Write `s` as a quoted JSON string.
@@ -6901,6 +6922,156 @@ mod tests {
             health_json(&d).contains("\"skips\":{\"total\":0"),
             "and so is its JSON: {}",
             health_json(&d)
+        );
+    }
+
+    // ── R311y891: the wire chooses the text, not the document's shape ─────
+    //
+    // `debt-census-emit-two-renderings` says the CLI report and
+    // `census_json` render the same tables twice and nothing measures the
+    // difference. Measuring it found one that is not a matter of taste:
+    // `census_json` puts every wire-sourced string through
+    // `wz_session_core::json::escape_into` and the report put THREE of them
+    // through `format!("\"{x}\"")` -- the node plane's locators and the
+    // interest plane's two keyexprs.
+    //
+    // Both tests below judge the WHOLE document with this crate's own JSON
+    // scanner rather than looking for an escaped substring. A substring check
+    // is a claim about a spelling; a publisher choosing where this document's
+    // fields end is a claim about the document, and only one of them is what
+    // this module's doc says the escaping is for.
+
+    /// A keyexpr that closes the string and opens a field of its own does not
+    /// get one.
+    ///
+    /// The keyexpr is the exact byte string `escape_into`'s own unit test uses
+    /// (`a","injected":"x`), so the two agree about what a hostile name is. The
+    /// control character is the second half and it is not decoration: RFC 8259
+    /// forbids a raw byte below 0x20 INSIDE a string even though it is legal
+    /// whitespace outside one, so a writer that escaped the quote and passed
+    /// the tab through would still emit a document this scanner refuses.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_keyexpr_that_closes_its_own_string_does_not_reshape_the_report() {
+        let hostile = "a\",\"injected\":\"x\u{9}y";
+        let declare = wz_session_core::declare_build::build_declare_subscriber(1, 0, Some(hostile))
+            .expect("the production builder")
+            .try_as_borrowed()
+            .expect("re-borrow")
+            .encode_to_vec();
+        let mut w = alloc::vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
+        w.extend_from_slice(&declare);
+
+        let mut d = crate::Dissection::new();
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &crate::datagram_tests::udp_packet([10, 0, 0, 1], 50000, [10, 0, 0, 2], 7447, &w),
+        );
+        let census = crate::interest::interests(&d);
+        // THE POPULATION. Without this the assertions below are satisfied by a
+        // report that carries no interest plane at all.
+        assert_eq!(
+            census.interests().len(),
+            1,
+            "the hostile declaration must have been READ, or nothing renders it",
+        );
+        assert_eq!(
+            census.interests()[0].keyexpr.as_deref(),
+            Some(hostile),
+            "and read whole -- a truncated keyexpr would defuse the fixture",
+        );
+        let table = crate::agg::aggregate(&d);
+        let coverage = census.coverage(&table);
+
+        let json = CaptureReport::of(&d)
+            .with_interests(&census, &coverage)
+            .to_json();
+        crate::payload::json_wellformed(json.as_bytes()).unwrap_or_else(|(at, why)| {
+            panic!("the report is not JSON at byte {at}: {why}\n{json}")
+        });
+        assert!(
+            !json.contains("\"injected\":"),
+            "the keyexpr opened a field of its own: {json}",
+        );
+    }
+
+    /// The same rule one plane over: a LOCATOR is a string a peer chose too.
+    ///
+    /// Held apart from the test above rather than folded into it, because the
+    /// two fields are rendered by different code and the escaping was missing
+    /// from both independently. A single test covering one of them would have
+    /// left the other exactly as it was.
+    #[test]
+    fn a_locator_that_closes_its_own_string_does_not_reshape_the_report() {
+        use wz_session_core::codec_owned::{owned_bytes, owned_string};
+        let hostile = "tcp/a\",\"injected\":\"x";
+        let zid = [0x55u8, 0x66, 0x77, 0x88];
+        let owned: wz_codecs::hello::HelloOwned = wz_codecs::hello::HelloOwned {
+            version: 0x09,
+            cbyte: (((zid.len() as u8) - 1) << 4) | 0x01,
+            zid: owned_bytes(&zid).expect("zid"),
+            num_locators: Some(1),
+            locators: Some(alloc::vec![wz_codecs::locator::LocatorOwned {
+                locator_len: hostile.len() as u64,
+                locator: owned_string(hostile).expect("locator"),
+            }]),
+        };
+        let body = owned
+            .try_as_borrowed()
+            .expect("borrowed projection")
+            .encode_to_vec(1);
+        let mut wire = alloc::vec![
+            wz_session_core::wire_const::S_MID_HELLO | wz_session_core::wire_const::FLAG_S_HELLO_L
+        ];
+        wire.extend_from_slice(&body);
+
+        let mut d = crate::Dissection::new();
+        // The SCOUT first: a HELLO is read as an ANSWER, so a capture that
+        // carries only the answer names no node at all. `node`'s own fixture
+        // states the same ordering.
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &crate::datagram_tests::udp_packet(
+                [192, 168, 1, 5],
+                43210,
+                crate::datagram_tests::SCOUT_GROUP,
+                7446,
+                &crate::datagram_tests::scout_message(),
+            ),
+        );
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            1,
+            &crate::datagram_tests::udp_packet(
+                [192, 168, 1, 9],
+                7447,
+                [192, 168, 1, 5],
+                43210,
+                &wire,
+            ),
+        );
+        d.finish();
+        let census = crate::node::nodes(&d);
+        assert_eq!(
+            census
+                .nodes()
+                .iter()
+                .filter(|n| n.locators.iter().any(|l| l == hostile))
+                .count(),
+            1,
+            "the hostile locator must have been READ: {:?}",
+            census.nodes(),
+        );
+
+        let json = CaptureReport::of(&d).with_nodes(&census).to_json();
+        crate::payload::json_wellformed(json.as_bytes()).unwrap_or_else(|(at, why)| {
+            panic!("the report is not JSON at byte {at}: {why}\n{json}")
+        });
+        assert!(
+            !json.contains("\"injected\":"),
+            "the locator opened a field of its own: {json}",
         );
     }
 }

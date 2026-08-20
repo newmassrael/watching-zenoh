@@ -321,6 +321,26 @@ const MAX_JSON_DEPTH: usize = 128;
 
 type ScanErr = (usize, &'static str);
 
+/// R311y891 — is `bytes` a well-formed JSON document, by THIS crate's scanner?
+///
+/// Exposed crate-internally so [`crate::report`]'s emitter can be judged by the
+/// validator this crate already ships instead of by a second reading of RFC
+/// 8259 typed into a test. That matters here for one reason: a test that
+/// asserted "the escaped form appears in the output" is a test about a
+/// SPELLING, and it passes over a document whose next field is malformed for
+/// some other reason. This answers the property.
+///
+/// The offset and the reason ride the error because a bare `false` about a
+/// 4 KB document is not diagnosable.
+///
+/// `cfg(test)` because the only caller that should ever exist is a test: a
+/// PRODUCTION consumer validating this crate's own emit would be asking the
+/// writer whether the writer was right.
+#[cfg(test)]
+pub(crate) fn json_wellformed(bytes: &[u8]) -> Result<(), ScanErr> {
+    scan_json(bytes).map(|_| ())
+}
+
 fn scan_json(bytes: &[u8]) -> Result<JsonSummary, ScanErr> {
     let mut s = Scanner {
         b: bytes,
