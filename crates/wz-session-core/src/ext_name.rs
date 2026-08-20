@@ -111,6 +111,11 @@ pub const JOIN_QOS: &str = "qos";
 /// alone does not separate them — only the carrier does, and their layouts are
 /// unrelated.
 pub const SHM_INIT: &str = "shm";
+/// See [`SOURCE_INFO`]. The EIGHTH (R311y896), and the only one whose body is
+/// itself an extension CHAIN rather than a fixed field layout: the `0x3` auth
+/// ext multiplexes every negotiated method into one extension, so its entries
+/// are named from [`ExtCarrier::Auth`]'s own row set.
+pub const AUTH: &str = "auth";
 
 /// `false` spelled out, so a row's third column reads as the mandatory flag
 /// rather than as an unexplained bare `false`.
@@ -183,6 +188,21 @@ pub enum ExtCarrier {
     /// `zenoh::Reply`, which declares no named extension and decodes any chain
     /// into `ext_unknown`.
     Reply,
+
+    // ── the one carrier that is not a MESSAGE ─────────────────────────
+    /// R311y896 — the INNER chain inside the `0x3` auth extension of an
+    /// [`ExtCarrier::Init`] or [`ExtCarrier::Open`].
+    ///
+    /// Every other variant here names a message; this one names an extension
+    /// BODY, because zenoh's auth ext is a multiplexer rather than a value:
+    /// each configured method contributes a `ZExtUnknown` keyed by its method
+    /// id, the set is encoded as a chain, and the peer demultiplexes by that id
+    /// (`establishment/ext/auth/mod.rs`, the `ztake!` macro). The id space is
+    /// therefore the METHOD space (`auth::id`), which shares nothing with the
+    /// establishment ids one level up — `0x1` is `qos` on an `Init` and
+    /// `pubkey` here — and that is exactly the reuse this enum exists to keep
+    /// apart.
+    Auth,
 }
 
 /// One row, spelled the way upstream spells its declaration: the 4-bit id, the
@@ -206,7 +226,7 @@ const INIT: &[Row] = &[
     (0x1, OPT, EXT_ENC_UNIT, "qos"),
     (0x1, OPT, EXT_ENC_Z64, "qos_link"),
     (0x2, OPT, EXT_ENC_ZBUF, SHM_INIT),
-    (0x3, OPT, EXT_ENC_ZBUF, "auth"),
+    (0x3, OPT, EXT_ENC_ZBUF, AUTH),
     (0x4, OPT, EXT_ENC_ZBUF, "multi_link"),
     (0x5, OPT, EXT_ENC_UNIT, "low_latency"),
     (0x6, OPT, EXT_ENC_UNIT, "compression"),
@@ -218,7 +238,7 @@ const INIT: &[Row] = &[
 const OPEN: &[Row] = &[
     (0x1, OPT, EXT_ENC_UNIT, "qos"),
     (0x2, OPT, EXT_ENC_Z64, "shm"),
-    (0x3, OPT, EXT_ENC_ZBUF, "auth"),
+    (0x3, OPT, EXT_ENC_ZBUF, AUTH),
     (0x4, OPT, EXT_ENC_ZBUF, "multi_link_syn"),
     (0x4, OPT, EXT_ENC_UNIT, "multi_link_ack"),
     (0x5, OPT, EXT_ENC_UNIT, "low_latency"),
@@ -316,6 +336,32 @@ const ERR: &[Row] = &[
     (0x2, MAND, EXT_ENC_UNIT, "shm"),
 ];
 
+/// The `0x3` auth ext's INNER chain — `establishment/ext/auth/mod.rs`'s
+/// `auth::id` method space, one row per `(method, encoding)` upstream declares.
+///
+/// # Why one method spans several rows
+///
+/// A method's sub-ext encoding is what says WHICH STAGE of the four-message
+/// handshake an entry belongs to, and the eid is where that lives. usrpwd
+/// (`auth/usrpwd.rs` `mod ext`) offers itself with a UNIT at InitSyn, is
+/// challenged with a `Z64` nonce at InitAck, answers with a `ZBuf`
+/// {user, hmac} at OpenSyn and is confirmed with a UNIT at OpenAck; pubkey
+/// (`auth/pubkey.rs`) is a `ZBuf` for its first three and a UNIT for its last.
+/// A table keyed on the method id alone would name all of them and distinguish
+/// none, which for an auth exchange is the difference between "a credential
+/// went past" and "one was offered".
+///
+/// Every row is NON-mandatory, upstream's own choice on all eight declarations:
+/// a peer that does not run a method drops its sub-ext rather than rejecting
+/// the chain.
+const AUTH_SUB: &[Row] = &[
+    (0x1, OPT, EXT_ENC_ZBUF, "pubkey"),
+    (0x1, OPT, EXT_ENC_UNIT, "pubkey"),
+    (0x2, OPT, EXT_ENC_UNIT, "usrpwd"),
+    (0x2, OPT, EXT_ENC_Z64, "usrpwd"),
+    (0x2, OPT, EXT_ENC_ZBUF, "usrpwd"),
+];
+
 /// The rows a carrier declares upstream, in id order.
 ///
 /// Public so a consumer can ENUMERATE a carrier's vocabulary rather than only
@@ -341,8 +387,43 @@ pub fn rows(carrier: ExtCarrier) -> &'static [(u8, bool, u8, &'static str)] {
         ExtCarrier::Query => QUERY,
         ExtCarrier::Err => ERR,
         ExtCarrier::Reply => &[],
+        ExtCarrier::Auth => AUTH_SUB,
     }
 }
+
+/// Every [`ExtCarrier`] variant, so a consumer can sweep the whole vocabulary
+/// rather than the carriers it happened to think of.
+///
+/// PUBLIC since R311y896 and for a measured reason: this list used to be a
+/// private `const` in this module's own test, so the only sweep it could serve
+/// was this module's. The `dissect` gate that decides what happens to each
+/// ZBuf body has to iterate the same set, and a second copy of a list whose
+/// whole job is completeness is the defect it exists to catch. `rows` is public
+/// for the same reason one step down.
+pub const ALL_CARRIERS: &[ExtCarrier] = &[
+    ExtCarrier::Init,
+    ExtCarrier::Open,
+    ExtCarrier::Join,
+    ExtCarrier::Frame,
+    ExtCarrier::Fragment,
+    ExtCarrier::TransportOam,
+    ExtCarrier::TransportPlain,
+    ExtCarrier::Push,
+    ExtCarrier::Request,
+    ExtCarrier::Response,
+    ExtCarrier::ResponseFinal,
+    ExtCarrier::Declare,
+    ExtCarrier::Interest,
+    ExtCarrier::NetworkOam,
+    ExtCarrier::DeclareCommon,
+    ExtCarrier::DeclareQueryable,
+    ExtCarrier::Put,
+    ExtCarrier::Del,
+    ExtCarrier::Query,
+    ExtCarrier::Err,
+    ExtCarrier::Reply,
+    ExtCarrier::Auth,
+];
 
 /// What this extension header IS in this carrier, or `None` when the carrier
 /// declares no extension with that eid.
@@ -542,29 +623,11 @@ mod tests {
     /// added and forgotten. The `rows` match is exhaustive, so a NEW variant
     /// fails to compile there; this list is what stops it being added to both
     /// and still never tested.
-    const CARRIERS: &[ExtCarrier] = &[
-        ExtCarrier::Init,
-        ExtCarrier::Open,
-        ExtCarrier::Join,
-        ExtCarrier::Frame,
-        ExtCarrier::Fragment,
-        ExtCarrier::TransportOam,
-        ExtCarrier::TransportPlain,
-        ExtCarrier::Push,
-        ExtCarrier::Request,
-        ExtCarrier::Response,
-        ExtCarrier::ResponseFinal,
-        ExtCarrier::Declare,
-        ExtCarrier::Interest,
-        ExtCarrier::NetworkOam,
-        ExtCarrier::DeclareCommon,
-        ExtCarrier::DeclareQueryable,
-        ExtCarrier::Put,
-        ExtCarrier::Del,
-        ExtCarrier::Query,
-        ExtCarrier::Err,
-        ExtCarrier::Reply,
-    ];
+    ///
+    /// R311y896 — the list itself moved OUT to [`ALL_CARRIERS`] so the
+    /// `dissect` ZBuf-decision sweep reads the same one. This alias keeps the
+    /// sweeps below reading as they did.
+    const CARRIERS: &[ExtCarrier] = ALL_CARRIERS;
 
     /// The carrier list above must hold EVERY variant. Counted against the
     /// table's own arity rather than a literal, so the two cannot drift: a
@@ -579,7 +642,7 @@ mod tests {
         }
         assert_eq!(
             CARRIERS.len(),
-            21,
+            22,
             "a carrier was added to `rows` without joining the sweeps",
         );
     }

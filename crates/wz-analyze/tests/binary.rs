@@ -6005,3 +6005,76 @@ fn a_bsd_loopback_capture_is_read_through_the_binary() {
         "a loopback capture this build reads must leave that bucket empty"
     );
 }
+
+/// R311y896 (§1.1) — THE AUTH HANDSHAKE REACHES THE PROGRAM A PERSON RUNS.
+///
+/// ## What a capture of an authenticating session used to say
+///
+/// zenoh's `0x3` auth extension is a MULTIPLEXER: every configured method
+/// contributes a sub-extension keyed by its method id, and the set rides one
+/// extension as an ext chain (`establishment/ext/auth/mod.rs` reads it back as
+/// `Vec<ZExtUnknown>`; this tree writes it in
+/// `wz_session_core::auth_dispatch::AuthDispatch::mux`). The field layer named
+/// the extension `auth` and then printed its body as hex, so the one question
+/// a capture of a REFUSED handshake is opened to answer — which method did the
+/// two ends actually try — was the one thing the dissection did not say.
+///
+/// ## Why the negative assertion names the bytes
+///
+/// The old rendering is not merely "less detail": it is this exact hex string,
+/// so pinning it as ABSENT makes the test fail if the walker is ever removed or
+/// declines. A test that only asserted the two method names would also pass
+/// against a build that printed both the names AND the opaque body, which is
+/// the state `walk_ext_zbuf_body` documents as forbidden.
+#[test]
+fn an_auth_extension_is_dissected_into_the_methods_it_carries() {
+    let scratch = Scratch::new("fields-auth");
+    // usrpwd offers itself with a UNIT (Z set, one more entry follows), pubkey
+    // answers with a ZBuf — two encodings on one chain, which is the shape the
+    // sub-extension table is keyed on the eid for.
+    let mut auth_body = vec![0x02u8 | 0x80];
+    auth_body.extend_from_slice(&[0x41, 0x02, 0xAA, 0xBB]);
+    let mut init = vec![
+        wz_codecs::wire_const::T_MID_INIT | wz_codecs::wire_const::FLAG_T_Z,
+        0x09,
+        0x31,
+    ];
+    init.extend_from_slice(&[0xB0, 0xB1, 0xB2, 0xB3]);
+    init.push(0x43);
+    init.push(auth_body.len() as u8);
+    init.extend_from_slice(&auth_body);
+    let mut framed = (init.len() as u16).to_le_bytes().to_vec();
+    framed.extend_from_slice(&init);
+
+    let file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &tcp_packet(1000, &framed))],
+    );
+    let capture = scratch.write("auth.pcapng", &file);
+    let json = String::from_utf8_lossy(
+        &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .args(["--fields", "--json"])
+            .output()
+            .expect("runs")
+            .stdout,
+    )
+    .into_owned();
+    assert_one_document(json.trim());
+
+    assert!(
+        json.contains("\"name\":\"auth\","),
+        "the auth extension's body must reach the field tree as a group: {json}"
+    );
+    for method in ["usrpwd", "pubkey"] {
+        assert!(
+            json.contains(&format!("\"kind\":\"label\",\"value\":\"{method}\"")),
+            "the {method} sub-extension must be NAMED, not counted: {json}"
+        );
+    }
+    assert!(
+        !json.contains("\"value\":\"824102aabb\""),
+        "and the body must not ALSO be handed over as the hex it used to be: \
+         {json}"
+    );
+}

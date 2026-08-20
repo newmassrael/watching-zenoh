@@ -151,6 +151,12 @@ OWN_VOCABULARY = {
     "shm": "the ESTABLISHMENT shm handshake body on an `Init`, walked. Same "
     "rule as `linkstate` and `qos`. Held to the Init carrier by the arm's "
     "guard: `Join` declares an unrelated `shm` at the same id and encoding",
+    "auth": "the `0x3` establishment auth ext body, walked -- and unlike every "
+    "sibling here it is not a field layout but an ext CHAIN: zenoh multiplexes "
+    "each configured method into one extension keyed by `auth::id`, so the "
+    "group's children are `ext` entries whose `ext_name` is the METHOD "
+    "(`pubkey` / `usrpwd`). Held to Init and Open by the arm's guard, because "
+    "`0x3` is a `Put`'s user `attachment` and those bytes can parse as a chain",
     "alice_segment": "the segment an InitSyn offers -- upstream's own field "
     "name (`zenoh-transport` `unicast/establishment/ext/shm.rs`)",
     "alice_challenge": "the InitAck's proof it could map that segment. The "
@@ -185,25 +191,48 @@ def walker_names(src: str) -> set[str]:
     """
     names: set[str] = set()
     names |= set(re.findall(r'\bc\.[a-z_0-9]+\(\s*"([a-z0-9_]+)"', src))
-    names |= set(re.findall(r'\b(?:bits|flag|group|leaf|text|label)\(\s*"([a-z0-9_]+)"', src))
+    # `walked` joined this list at R311y896: the ZBuf-body dispatch was split
+    # out of the walk so a test could ask WHICH rows have a walker without
+    # having to hand each one a body its layout would accept. Its arms name
+    # their group through `walked("literal", ..)`, which is why the helper is a
+    # function and not a tuple -- as a tuple the eight names below it left this
+    # census entirely, and the gate said so.
+    names |= set(
+        re.findall(r'\b(?:bits|flag|group|leaf|text|label|walked)\(\s*"([a-z0-9_]+)"', src)
+    )
     names |= set(re.findall(r'name:\s*"([a-z0-9_]+)"', src))
     return names
 
 
 EXT_ZBUF_MATCH = re.compile(
-    r"fn walk_ext_zbuf_body\b.*?\blet walked = match name \{(?P<arms>.*?)\n    \}",
+    r"fn zbuf_body_walker\b.*?\blet hit: \(&'static str, ZbufBodyWalker\) = match name \{"
+    r"(?P<arms>.*?)\n    \}",
     re.S,
 )
-"""The `match name` inside `walk_ext_zbuf_body`, arms only.
+"""The `match name` inside `zbuf_body_walker`, arms only.
 
 Anchored on the function name AND on the binding, so a second `match name`
 elsewhere in the file cannot be mistaken for this one, and a rename of either
 end makes the block unfindable -- which this gate reports as a failure rather
 than as an empty population.
+
+R311y896 re-anchored it: the dispatch moved out of `walk_ext_zbuf_body` into
+its own function so a test could interrogate it. The move was made visible by
+this very message, which is the whole reason the "unfindable" branch below
+exists.
 """
 
 ARM_HEAD = re.compile(r"^        (?P<pat>\S.*?)\s*(?:\bif\b.*?)?=>", re.M)
-"""One arm head of that match, at the block's own indentation."""
+"""One arm head of that match, at the block's own indentation.
+
+R311y896 MEASURED, because the opposite was assumed first and a check was
+written on the assumption: this DOES read an arm whose guard rustfmt wrapped
+onto its own line, because `\\s*` matches the newline. Probed by wrapping the
+`auth` arm's head and spelling its pattern as the literal `"auth"` -- the gate
+reported it, so a wrapped head is checked rather than skipped. The check
+written for the imagined hole was deleted: it could not be made to fail, and a
+check that cannot fail is furniture.
+"""
 
 
 def ext_zbuf_arms_from_the_table(src: str) -> list[str]:
@@ -228,22 +257,23 @@ def ext_zbuf_arms_from_the_table(src: str) -> list[str]:
     block = EXT_ZBUF_MATCH.search(src)
     if block is None:
         return [
-            "cannot find `walk_ext_zbuf_body`'s `let walked = match name {` -- the "
-            "arm-provenance rule (item 387) measured NOTHING. Re-anchor this regex "
-            "on whatever the walker's dispatch is called now"
+            "cannot find `zbuf_body_walker`'s `let hit: (&'static str, "
+            "ZbufBodyWalker) = match name {` -- the arm-provenance rule (item 387) "
+            "measured NOTHING. Re-anchor this regex on whatever the walker's "
+            "dispatch is called now"
         ]
     arms = [m.group("pat").strip() for m in ARM_HEAD.finditer(block.group("arms"))]
     named = [a for a in arms if a != "_"]
     if not named:
         return [
-            "`walk_ext_zbuf_body` dispatches on no named extension -- either the "
+            "`zbuf_body_walker` dispatches on no named extension -- either the "
             "match lost its arms or this gate stopped seeing them"
         ]
     out = []
     for arm in named:
         if not re.fullmatch(r"(?:crate::)?ext_name::[A-Z][A-Z0-9_]*", arm):
             out.append(
-                f"`walk_ext_zbuf_body` matches {arm!r}, which is not an "
+                f"`zbuf_body_walker` matches {arm!r}, which is not an "
                 "`ext_name::` constant -- spell the arm as the table's own "
                 "constant so a renamed row carries the walker with it (R311y893, "
                 "open-debt item 387)"

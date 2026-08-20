@@ -770,7 +770,7 @@ pub fn walk_ext_entry(
 /// on the analysis surface that is not a detail of the extension, it is the
 /// answer to "who sent this".
 ///
-/// # Why exactly these seven, and not the others
+/// # Why exactly these eight, and not the others
 ///
 /// A walker here is a second implementation of a layout, so it is written only
 /// where this tree already holds the FIRST one and a test can judge the two
@@ -786,16 +786,14 @@ pub fn walk_ext_entry(
 /// | `qos` (Join) | `crate::multicast_join::write_join_qos_ext` |
 /// | `shm` (Init) | `crate::extshm::encode_shm_init_syn_body` / `..._ack_body` |
 ///
-/// The ZBuf rows that stay `value` are not an oversight and each has its own
-/// reason. `attachment` is USER bytes — walking it would be inventing a
-/// structure the protocol says is not there. `auth` (Init / Open `0x3`) is the
-/// negotiated method's challenge bytes, opaque by the same rule, and
-/// `multi_link` carries a plugged auth method's sub-extension, which is the
-/// same rule again. `Join`'s OWN `shm` — a different extension that happens to
-/// share `0x2` and the ZBuf encoding — has a layout upstream declares and this
-/// tree does not write, so a walker for it would be judged against nothing but
-/// its author's reading, the failure the `dissect` feature's own history
-/// (R311y605) is a record of.
+/// | `auth` (Init / Open) | `crate::auth_dispatch::AuthDispatch::mux`, via [`walk_auth_body`] |
+///
+/// The ZBuf rows that stay `value` are not an oversight, and since R311y896
+/// their reasons are NOT written here. They live one per row in
+/// `dissect::tests`'s `OPAQUE_ZBUF_BODIES`, which a sweep holds against
+/// [`zbuf_body_walker`] in both directions — because this paragraph is exactly
+/// what went stale, three rows out of three, and a reason nothing reads is a
+/// reason nothing can contradict.
 ///
 /// ⚠ R311y894 — that last reason used to cover THREE rows, and for two of them
 /// it was false. `Join`'s ZBuf `qos` has been written by
@@ -807,6 +805,18 @@ pub fn walk_ext_entry(
 /// — came back as hex. A false reason does not merely fail to close a gap; it
 /// points at the wrong side of it, and this one pointed at upstream while the
 /// producers sat two modules away.
+///
+/// ⚠⚠ R311y896 — and the THIRD row was false as well, so the reason was wrong
+/// about every row it was written for. `auth` was called "the negotiated
+/// method's challenge bytes", which is what a method's sub-ext holds and NOT
+/// what the extension carries: the `0x3` body is an ext CHAIN keyed by method
+/// id, written here by `crate::auth_dispatch::AuthDispatch::mux` and read back
+/// by its `demux`, and read upstream as a `Vec<ZExtUnknown>`. That is the one
+/// structure this module already had a walker for, so the row was excluded for
+/// being opaque while being the least opaque of them. The lesson the two
+/// rounds share: a reason of the form "X is opaque" describes the body one
+/// level DOWN from the one it was filed against, and nothing checks which
+/// level a sentence is about.
 ///
 /// # Declining, rather than failing
 ///
@@ -823,35 +833,87 @@ fn walk_ext_zbuf_body(
     base: usize,
 ) -> Option<Field> {
     let name = crate::ext_name::ext_name(carrier_kind, header)?;
+    let (group_name, walk) = zbuf_body_walker(carrier_kind, name)?;
     let end = base + body.len();
     let mut c = SpanCursor::with_base(body, base);
-    // Every arm names its group with a LITERAL so the field-name census
-    // (`scripts/lib/dissect_name_census.py`) can see it. Resolving the group
-    // name from `ext_name`'s return value would be shorter and would make five
-    // names invisible to the gate that exists to decide them.
-    //
-    // R311y893 (open-debt item 376) — the MATCHED name is
-    // `crate::ext_name`'s own constant, not a second spelling of it. The two
-    // sides are a contract between modules and the compiler could not see it:
-    // renaming a row left the arm unmatched and the body quietly back to
-    // `value`. The group name beside it stays a literal, because that half
-    // belongs to the field vocabulary rather than to the table.
-    let walked = match name {
-        crate::ext_name::SOURCE_INFO => {
-            walk_source_info_body(&mut c).map(|f| group("source_info", base, end, f))
-        }
-        crate::ext_name::RESPONDER_ID => {
-            walk_responder_id_body(&mut c).map(|f| group("responder_id", base, end, f))
-        }
-        crate::ext_name::QUERY_BODY => {
-            walk_query_value_body(&mut c).map(|f| group("query_body", base, end, f))
-        }
-        crate::ext_name::WIRE_EXPR => {
-            walk_ext_wireexpr_body(&mut c).map(|f| group("wire_expr", base, end, f))
-        }
-        crate::ext_name::TIMESTAMP => {
-            walk_timestamp(&mut c).map(|f| group("timestamp", base, end, f))
-        }
+    let fields = walk(&mut c).ok()?;
+    if c.remaining() != 0 {
+        return None;
+    }
+    Some(group(group_name, base, end, fields))
+}
+
+/// One ZBuf body walker: the cursor in, its fields out. Every walker below
+/// shares it, which is what lets [`zbuf_body_walker`] be a lookup.
+type ZbufBodyWalker = fn(&mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError>;
+
+/// One dispatch hit — the group name the body is filed under, and the walker.
+///
+/// A FUNCTION rather than a bare tuple, and that is not style. The field-name
+/// census (`scripts/lib/dissect_name_census.py`) reads this crate's field
+/// vocabulary out of `name("literal"` call shapes; written as tuples, the eight
+/// group names below would vanish from the gate that exists to decide them —
+/// measured, when this dispatch was first split out of the walk.
+const fn walked(name: &'static str, walk: ZbufBodyWalker) -> (&'static str, ZbufBodyWalker) {
+    (name, walk)
+}
+
+/// The two carriers that run an establishment handshake, and therefore the two
+/// that declare the `0x3` auth extension (`init.rs:156` / `open.rs:121`).
+///
+/// Named rather than spelled inline so the arm it guards fits one line, which
+/// is what the census's arm-provenance rule can see.
+const fn is_establishment(carrier: crate::ext_name::ExtCarrier) -> bool {
+    matches!(
+        carrier,
+        crate::ext_name::ExtCarrier::Init | crate::ext_name::ExtCarrier::Open
+    )
+}
+
+/// The walker this build has for one ZBuf row, and the group name it files the
+/// result under — or `None` when the row is deliberately left an opaque
+/// `value`.
+///
+/// # Why the dispatch is a VALUE and not a `match` inside the walk
+///
+/// R311y896, open-debt item 389. Which rows stay opaque, and why, used to be a
+/// prose paragraph beside the `match` — and the paragraph was wrong about
+/// every row it named. R311y894 found two of the three false and this round
+/// found the third; each had stood for hundreds of rounds, because a sentence
+/// beside an arm is not read by anything.
+///
+/// Split out, the dispatch is something a test can ASK, without having to hand
+/// it a body the layout would accept: `dissect::tests`'s
+/// `every_zbuf_row_is_either_walked_or_declared_opaque` sweeps every ZBuf row
+/// `crate::ext_name` declares and requires each to be walked here XOR listed in
+/// that test's `OPAQUE_ZBUF_BODIES` with a reason. So an upstream row nobody
+/// decided about reds, and — the shape this class actually fails in — a row
+/// that GAINS a walker while the "it is opaque because…" entry still stands
+/// reds too, on the round the walker lands rather than three hundred later.
+///
+/// # The two spellings that are load-bearing
+///
+/// Every arm names its group with a LITERAL so the field-name census
+/// (`scripts/lib/dissect_name_census.py`) can see it. Resolving the group name
+/// from `ext_name`'s return value would be shorter and would make eight names
+/// invisible to the gate that exists to decide them.
+///
+/// R311y893 (open-debt item 376) — the MATCHED name is `crate::ext_name`'s own
+/// constant, not a second spelling of it. The two sides are a contract between
+/// modules and the compiler could not see it: renaming a row left the arm
+/// unmatched and the body quietly back to `value`. The group name beside it
+/// stays a literal, because that half belongs to the field vocabulary rather
+/// than to the table.
+fn zbuf_body_walker(
+    carrier_kind: crate::ext_name::ExtCarrier,
+    name: &str,
+) -> Option<(&'static str, ZbufBodyWalker)> {
+    let hit: (&'static str, ZbufBodyWalker) = match name {
+        crate::ext_name::SOURCE_INFO => walked("source_info", walk_source_info_body),
+        crate::ext_name::RESPONDER_ID => walked("responder_id", walk_responder_id_body),
+        crate::ext_name::QUERY_BODY => walked("query_body", walk_query_value_body),
+        crate::ext_name::WIRE_EXPR => walked("wire_expr", walk_ext_wireexpr_body),
+        crate::ext_name::TIMESTAMP => walked("timestamp", walk_timestamp),
         // R311y894 — the ONE arm that needs the carrier as well as the name.
         // `qos` names ten rows of `ext_name`'s table and nine of them are a
         // UNIT marker or a Z64 word, which never reach this function; the
@@ -859,21 +921,63 @@ fn walk_ext_zbuf_body(
         // eleventh row arrives, which is the same reason the eid rather than
         // the bare id is the table's key.
         crate::ext_name::JOIN_QOS if carrier_kind == crate::ext_name::ExtCarrier::Join => {
-            walk_join_qos_body(&mut c).map(|f| group("qos", base, end, f))
+            walked("qos", walk_join_qos_body)
         }
         // R311y894 — and here the guard is load-bearing TODAY: `Join` declares
         // its own `shm` at the same id with the same encoding, and that one is
         // still a row nothing in this tree writes.
         crate::ext_name::SHM_INIT if carrier_kind == crate::ext_name::ExtCarrier::Init => {
-            walk_shm_init_body(&mut c).map(|f| group("shm", base, end, f))
+            walked("shm", walk_shm_init_body)
         }
+        // R311y896 — the one body that is itself a CHAIN, so the walk is this
+        // module's own chain walker one level down rather than a field layout.
+        // The guard admits BOTH establishment carriers because both declare the
+        // extension, and it is what keeps a `Put`'s `attachment` — USER bytes
+        // at the same id `0x3` — out: those bytes can parse as a chain, so no
+        // remainder check downstream would catch the misreading.
+        crate::ext_name::AUTH if is_establishment(carrier_kind) => walked("auth", walk_auth_body),
         _ => return None,
-    }
-    .ok()?;
-    if c.remaining() != 0 {
-        return None;
-    }
-    Some(walked)
+    };
+    Some(hit)
+}
+
+/// The `0x3` auth extension's body — the inner chain of per-method sub-exts,
+/// walked with this module's own chain walker one level down.
+///
+/// # Why this body is a chain and not a value
+///
+/// zenoh's auth extension is a MULTIPLEXER: every configured method
+/// contributes a `ZExtUnknown` keyed by its `auth::id`, the set is encoded as
+/// an ext chain, and the receiver demultiplexes by that id
+/// (`establishment/ext/auth/mod.rs`, the `ztake!` macro). This tree writes the
+/// same shape — `crate::auth_dispatch::AuthDispatch::mux` runs
+/// `AuthSubExt::into_ext_entry` over its methods, `crate::ext_chain::encode_ext_chain`s
+/// them, and wraps the result with `crate::extauth::encode_auth_ext` — and
+/// reads it back through `..::demux`, which is `decode_ext_chain` on the same
+/// bytes. So the layout has a producer AND a consumer in this tree, which is
+/// the rule [`walk_ext_zbuf_body`] admits a walker under.
+///
+/// # The bound is the PARTICIPANT's
+///
+/// [`crate::parse_error::MAX_EXT_CHAIN_DEPTH`] rather than a number chosen
+/// here, because `demux` reaches this same body through `decode_ext_chain` and
+/// that is the cap it applies. An observer that accepted a chain the
+/// participant beside it refuses would report a handshake the peer never saw.
+///
+/// # What is NOT walked, and why that is the honest stopping point
+///
+/// A sub-ext's own ZBuf body stays opaque. usrpwd's OpenSyn carries
+/// {user, hmac} and pubkey's carries a serialised RSA key, and both are the
+/// METHOD's private format rather than the protocol's — the boundary this
+/// module already draws at `attachment`. What the chain layer answers is the
+/// question a capture is opened for: WHICH methods were offered, and at which
+/// stage of the exchange.
+fn walk_auth_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
+    walk_ext_chain_z(
+        c,
+        crate::parse_error::MAX_EXT_CHAIN_DEPTH,
+        crate::ext_name::ExtCarrier::Auth,
+    )
 }
 
 /// `Join`'s mandatory ZBuf `qos` body — the per-priority next-SN table
@@ -5420,5 +5524,373 @@ mod tests {
             );
             assert_eq!(raw(&f, "payload"), b"x".to_vec(), "{label}");
         }
+    }
+
+    // ── R311y896: the auth ext body — the THIRD row the "opaque bytes" reason
+    // hid, and it is false in the same shape R311y894 measured. The `0x3` body
+    // is not a method's challenge bytes; it is an ext CHAIN of per-method
+    // sub-extensions (`crate::auth_dispatch::AuthDispatch::mux` writes it,
+    // `..::demux` reads it, and zenoh's own `establishment/ext/auth/mod.rs`
+    // reads it as `Vec<ZExtUnknown>`), which is the one structure this
+    // dissector already had a walker for.
+
+    /// The `Init` chain entry for an `auth` ZBuf body — `0x43`, id `0x3`,
+    /// OPTIONAL, ZBuf.
+    fn init_auth_ext(body: &[u8]) -> Vec<u8> {
+        ext_zbuf(0x03, false, body)
+    }
+
+    /// The ZBuf rows this build deliberately leaves as an opaque `value`, one
+    /// row per `(carrier, upstream name)`, each with the reason.
+    ///
+    /// R311y896, open-debt item 389. These sentences used to be a paragraph in
+    /// [`walk_ext_zbuf_body`]'s doc, where nothing could disagree with them —
+    /// and they were wrong about `qos`, about `shm` and about `auth`, which is
+    /// every row the paragraph ever covered. Here they are a SET, and
+    /// [`every_zbuf_row_is_either_walked_or_declared_opaque`] holds the set
+    /// against the dispatch both ways round.
+    ///
+    /// A reason here is still a human judgement — nothing machine-checks that
+    /// "the protocol declares no structure" is TRUE. What the sweep removes is
+    /// the other half of the failure: a judgement that was right when written
+    /// and has since been overtaken now reds, on the round it is overtaken.
+    const OPAQUE_ZBUF_BODIES: &[(crate::ext_name::ExtCarrier, &str, &str)] = &[
+        (
+            crate::ext_name::ExtCarrier::Init,
+            "multi_link",
+            "zenoh `.transmute()`s the pubkey method's payload straight onto id \
+             0x4 with no inner frame (`crate::extmultilink`), so there is no \
+             envelope here to read — only the method's own bytes",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Open,
+            "multi_link_syn",
+            "the Open half of the same un-wrapped transmute",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Join,
+            "shm",
+            "a DIFFERENT extension sharing `0x2` and the ZBuf encoding with the \
+             establishment `shm`; upstream declares a layout and nothing in \
+             this tree writes it, so a walker would be judged against nothing \
+             but its author's reading (R311y605)",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Put,
+            "attachment",
+            "USER bytes: the protocol declares no structure there, so walking \
+             it would be inventing one",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Del,
+            "attachment",
+            "USER bytes, as on `Put`",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Query,
+            "attachment",
+            "USER bytes, as on `Put`",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Auth,
+            "pubkey",
+            "the METHOD's own format (a serialised RSA key), not the \
+             protocol's — the boundary `walk_auth_body` stops at",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Auth,
+            "usrpwd",
+            "the METHOD's own format ({user, hmac}), not the protocol's",
+        ),
+    ];
+
+    /// EVERY ZBuf row upstream declares is DECIDED: walked by
+    /// [`zbuf_body_walker`], or listed in [`OPAQUE_ZBUF_BODIES`] with a reason.
+    /// Never both, never neither, and no listed row that does not exist.
+    ///
+    /// # The three failures this reds on
+    ///
+    /// * A row `crate::ext_name` gains — a newer zenoh declaring an extension
+    ///   this tree has never seen — with nobody deciding what to do about it.
+    ///   Today that row would simply render as hex and no one would be told.
+    /// * A row that GAINS a walker while its "it is opaque because…" entry
+    ///   still stands. This is the shape the class actually fails in: R311y894
+    ///   and R311y896 between them found all three of the paragraph's rows
+    ///   false, each after hundreds of rounds. With this sweep the stale
+    ///   sentence reds on the round the walker lands.
+    /// * A row that LOSES its walker, or an opaque entry naming a row upstream
+    ///   no longer declares — the same drift read from the other end.
+    ///
+    /// # Why it asks the dispatch and not the walk
+    ///
+    /// [`walk_ext_zbuf_body`] returns `None` both for "no walker" and for "the
+    /// walker declined these bytes", so a sweep driven through it would need a
+    /// VALID body per layout to tell those apart, and would quietly pass every
+    /// row for which the author guessed the layout wrong. Asking
+    /// [`zbuf_body_walker`] needs no body at all.
+    #[test]
+    fn every_zbuf_row_is_either_walked_or_declared_opaque() {
+        let mut zbuf_rows = 0usize;
+        let mut seen: Vec<(crate::ext_name::ExtCarrier, &str)> = Vec::new();
+        for carrier in crate::ext_name::ALL_CARRIERS {
+            for (_, _, enc, name) in crate::ext_name::rows(*carrier) {
+                if *enc != crate::ext_header::EXT_ENC_ZBUF {
+                    continue;
+                }
+                zbuf_rows += 1;
+                seen.push((*carrier, name));
+                let walked = zbuf_body_walker(*carrier, name).is_some();
+                let opaque = OPAQUE_ZBUF_BODIES
+                    .iter()
+                    .any(|(c, n, _)| c == carrier && n == name);
+                assert!(
+                    walked != opaque,
+                    "{carrier:?}/{name}: a ZBuf row must be walked XOR declared \
+                     opaque — this one is {}",
+                    if walked {
+                        "BOTH: it walks and OPAQUE_ZBUF_BODIES still says it \
+                         does not, which is the R311y894/R311y896 defect"
+                    } else {
+                        "NEITHER: nobody decided what this build does with it, \
+                         so it renders as hex and says nothing"
+                    },
+                );
+            }
+        }
+        // ANTI-VACUITY: the table is not empty and the sweep reached it.
+        assert!(
+            zbuf_rows >= OPAQUE_ZBUF_BODIES.len() + 5,
+            "the sweep must reach every ZBuf row, walked ones included: it saw \
+             {zbuf_rows}",
+        );
+        // And no entry names a row upstream does not declare — the drift read
+        // from the other end, which the loop above cannot see.
+        for (carrier, name, why) in OPAQUE_ZBUF_BODIES {
+            assert!(
+                seen.contains(&(*carrier, name)),
+                "{carrier:?}/{name} is declared opaque but is not a ZBuf row of \
+                 that carrier any more",
+            );
+            assert!(!why.is_empty(), "{carrier:?}/{name}: a row needs a reason");
+        }
+    }
+
+    /// The `ext_name` label of every `ext` group DIRECTLY under `parent`, in
+    /// chain order.
+    ///
+    /// Enumerated rather than searched on purpose: `Field::find` answers with
+    /// the first match anywhere below, and a chain is a SEQUENCE whose second
+    /// entry is exactly what a mux test is about.
+    fn ext_names_in_order(parent: &Field) -> Vec<String> {
+        let FieldValue::Nested(children) = &parent.value else {
+            return Vec::new();
+        };
+        children
+            .iter()
+            .filter(|f| f.name == "ext")
+            .map(|f| match f.find("ext_name").map(|n| &n.value) {
+                Some(FieldValue::Label(l)) => String::from(l.as_ref()),
+                _ => String::from("<unnamed>"),
+            })
+            .collect()
+    }
+
+    /// Whether `parent` has a DIRECT child by this name — the check
+    /// `Field::find` cannot make, because a walked auth chain legitimately
+    /// contains a `value` several levels down (a pubkey sub-ext body is opaque
+    /// and stays so) while the walked entry itself must have none.
+    fn has_direct_child(parent: &Field, name: &str) -> bool {
+        match &parent.value {
+            FieldValue::Nested(children) => children.iter().any(|f| f.name == name),
+            _ => false,
+        }
+    }
+
+    /// The `ext` group whose `ext_name` is `name`, at the TOP level of a walked
+    /// chain.
+    fn entry_named<'a>(parent: &'a Field, name: &str) -> Option<&'a Field> {
+        let FieldValue::Nested(children) = &parent.value else {
+            return None;
+        };
+        children.iter().find(|f| {
+            f.name == "ext"
+                && matches!(
+                    f.find("ext_name").map(|n| &n.value),
+                    Some(FieldValue::Label(l)) if l.as_ref() == name,
+                )
+        })
+    }
+
+    /// The auth ext multiplexes N methods into ONE extension, so the body is a
+    /// chain and its entries are the methods.
+    ///
+    /// usrpwd's InitSyn is a UNIT marker and pubkey's is a ZBuf: two encodings
+    /// riding one chain, which is why the sub-entry table is keyed on the eid
+    /// rather than on the bare method id.
+    #[test]
+    fn an_auth_ext_body_is_walked_into_the_method_sub_chain_it_multiplexes() {
+        let mut body = alloc::vec![0x02u8 | crate::ext_header::EXT_FLAG_Z];
+        body.extend(ext_zbuf(0x01, false, b"\xAA\xBB"));
+        let bytes = init_with_exts(&[init_auth_ext(&body)]);
+        let f = dissect_transport_message(&bytes, 0).expect("the walker rejected an auth Init");
+        assert_eq!(f.span.end, bytes.len(), "the walk must tile the datagram");
+        let auth = f
+            .find("extensions")
+            .and_then(|e| e.find("auth"))
+            .expect("the auth body must be walked into its method sub-chain");
+        assert_eq!(
+            ext_names_in_order(auth),
+            alloc::vec![String::from("usrpwd"), String::from("pubkey")],
+            "both methods this chain carries must be named",
+        );
+        assert!(
+            !has_direct_child(auth, "value"),
+            "a walked body must not also be shown as opaque bytes",
+        );
+    }
+
+    /// One method id, three encodings, and the encoding is what says WHICH
+    /// STAGE of the handshake this is.
+    ///
+    /// usrpwd contributes a UNIT at InitSyn, a Z64 nonce at InitAck and a ZBuf
+    /// {user, hmac} at OpenSyn (zenoh `auth/usrpwd.rs` `mod ext`), all on id
+    /// `0x2`. A reader handed only "usrpwd" cannot tell an offer from a
+    /// challenge; the value is the half that says so, and it must survive.
+    #[test]
+    fn an_auth_sub_ext_carries_the_stage_its_encoding_names() {
+        let mut body = alloc::vec![0x02u8 | crate::ext_header::EXT_ENC_Z64];
+        body.extend(vle(0x0BAD_F00D));
+        let bytes = init_with_exts(&[init_auth_ext(&body)]);
+        let f = dissect_transport_message(&bytes, 0).expect("the walker rejected an auth Init");
+        let auth = f
+            .find("extensions")
+            .and_then(|e| e.find("auth"))
+            .expect("the auth body must be walked");
+        let usrpwd = entry_named(auth, "usrpwd").expect("the usrpwd sub-ext must be named");
+        assert_eq!(bits_of(usrpwd, "encoding"), 1, "a Z64 sub-ext");
+        assert_eq!(
+            uint(usrpwd, "value"),
+            0x0BAD_F00D,
+            "the InitAck nonce must reach the reader",
+        );
+    }
+
+    /// The CARRIER control. `Open` declares the same auth ext at the same id
+    /// with the same encoding (`open.rs:121`), so both carriers must walk it —
+    /// a guard written against `Init` alone would leave half the handshake
+    /// opaque, and the OpenSyn half is the one carrying the credential.
+    #[test]
+    fn an_open_carriers_auth_body_is_walked_the_same_way() {
+        let mut bytes =
+            alloc::vec![wz_codecs::wire_const::T_MID_OPEN | wz_codecs::wire_const::FLAG_T_Z];
+        bytes.extend(vle(10_000));
+        bytes.extend(vle(7));
+        bytes.extend(vle(0));
+        let mut body = alloc::vec![0x02u8 | crate::ext_header::EXT_ENC_ZBUF];
+        body.extend(vle(4));
+        body.extend_from_slice(b"user");
+        bytes.extend(ext_zbuf(0x03, false, &body));
+        let f = dissect_transport_message(&bytes, 0).expect("the walker rejected an auth Open");
+        let auth = f
+            .find("extensions")
+            .and_then(|e| e.find("auth"))
+            .expect("an Open's auth body must be walked too");
+        assert_eq!(
+            ext_names_in_order(auth),
+            alloc::vec![String::from("usrpwd")],
+        );
+    }
+
+    /// The DISCRIMINATOR for the carrier guard, and it is sharper than a
+    /// different-length body: these attachment bytes ARE a well-formed ext
+    /// chain.
+    ///
+    /// `0x3` is `Attachment` on a `Put` and `Auth` on an `Init`. A dispatch
+    /// keyed on the eid alone would read USER bytes as an auth handshake and
+    /// report methods nobody negotiated — and because the bytes parse, no
+    /// remainder check would catch it.
+    #[test]
+    fn user_attachment_bytes_that_parse_as_a_chain_are_not_read_as_auth() {
+        let att = alloc::vec![0x02u8 | crate::ext_header::EXT_FLAG_Z, 0x01];
+        let bytes = msg_put(None, None, &[ext_zbuf(0x03, false, &att)], b"x");
+        let mut c = SpanCursor::new(&bytes);
+        let f = group(
+            "MsgPut",
+            0,
+            bytes.len(),
+            walk_msg_put(&mut c).expect("walk"),
+        );
+        assert_eq!(
+            f.find("ext_name").map(|n| n.value.clone()),
+            Some(FieldValue::Label(Cow::Borrowed("attachment"))),
+        );
+        assert_eq!(raw(&f, "value"), att);
+        assert!(
+            f.find("auth").is_none(),
+            "an attachment that happens to parse as a chain is still user bytes",
+        );
+    }
+
+    /// The DAMAGE PROBE: an auth body that is not a clean chain DECLINES —
+    /// the entry keeps its raw `value` and the Init around it still parses.
+    ///
+    /// Two shapes, and the second is the one a parse alone misses: a chain
+    /// whose last entry still asks for more, and a chain that terminates
+    /// properly and leaves a byte over.
+    #[test]
+    fn an_auth_body_that_is_not_a_clean_chain_stays_an_opaque_value() {
+        for (body, label) in [
+            (
+                alloc::vec![0x02u8 | crate::ext_header::EXT_FLAG_Z],
+                "the Z bit promises an entry that is not there",
+            ),
+            (alloc::vec![0x02u8, 0xFF], "terminates, one byte left over"),
+        ] {
+            let bytes = init_with_exts(&[init_auth_ext(&body)]);
+            let f = dissect_transport_message(&bytes, 0)
+                .unwrap_or_else(|e| panic!("{label}: the envelope must still walk: {e:?}"));
+            let ext = f.find("extensions").expect("the chain must be walked");
+            assert_eq!(raw(ext, "value"), body, "{label}");
+            assert!(
+                ext.find("auth").is_none(),
+                "{label}: a declined body must not be shown as a method chain",
+            );
+        }
+    }
+
+    /// The walker judged against THIS TREE'S OWN producer rather than against
+    /// a hand-laid byte string — the rule every other body in
+    /// [`walk_ext_zbuf_body`] is held to.
+    ///
+    /// `AuthSubExt::into_ext_entry` + `encode_ext_chain` + `encode_auth_ext` is
+    /// the exact path `AuthDispatch::mux` takes, so a divergence between the
+    /// two layouts reds here rather than on a capture.
+    #[cfg(feature = "session-extauth")]
+    #[test]
+    fn the_auth_walker_agrees_with_this_trees_own_mux() {
+        use crate::auth_dispatch::{id, AuthSubExt};
+        let inner = alloc::vec![
+            AuthSubExt::Unit
+                .into_ext_entry(id::USRPWD)
+                .expect("usrpwd unit"),
+            AuthSubExt::Zbuf(alloc::vec![0xAA, 0xBB, 0xCC])
+                .into_ext_entry(id::PUBKEY)
+                .expect("pubkey zbuf"),
+        ];
+        let outer = crate::extauth::encode_auth_ext(&crate::ext_chain::encode_ext_chain(&inner))
+            .expect("the auth ext");
+        let bytes = init_with_exts(&[crate::ext_chain::encode_ext_chain(&[outer])]);
+        let f = dissect_transport_message(&bytes, 0).expect("the walker rejected a muxed Init");
+        assert_eq!(f.span.end, bytes.len(), "the walk must tile the datagram");
+        let auth = f
+            .find("extensions")
+            .and_then(|e| e.find("auth"))
+            .expect("the producer's own body must walk");
+        assert_eq!(
+            ext_names_in_order(auth),
+            alloc::vec![String::from("usrpwd"), String::from("pubkey")],
+        );
+        let pubkey = entry_named(auth, "pubkey").expect("the pubkey sub-ext");
+        assert_eq!(raw(pubkey, "value"), alloc::vec![0xAA, 0xBB, 0xCC]);
     }
 }
