@@ -582,6 +582,49 @@ fn the_binary_decrypts_a_capture_given_a_key_log_on_the_command_line() {
     );
 }
 
+/// R311y888 (open-debt item 363) — THIS FILE'S FIXTURES BUILD A HEALTHY
+/// CAPTURE, measured through the BINARY that reads them.
+///
+/// # Why it is asserted here and not only where the builder is
+///
+/// `tcp_segment_from` already computes both sums and its doc already says why.
+/// What it did not have is a WITNESS: a builder is correct until somebody edits
+/// it, and that edit costs nothing in this file, because every assertion here
+/// is about decryption, message counts and exit codes — none of which a corrupt
+/// checksum moves. Open-debt item 357 was exactly that state one crate over,
+/// and it stood as long as it did because nothing looked.
+///
+/// Through the binary and with `--health` on purpose: these are the counters a
+/// PERSON sees, so a fixture the library is happy with and the reported
+/// document is not fails here rather than passing twice.
+#[test]
+fn the_fixtures_this_file_builds_are_checksum_clean() {
+    let scratch = Scratch::new("checksums");
+    let (file, _log, _) = capture_and_key_log();
+    let capture = scratch.write("session.pcapng", &file);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--health")
+        .arg("--json")
+        .output()
+        .expect("the binary runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("\"ip_checksum_invalid\":0")
+            && stdout.contains("\"transport_checksum_invalid\":0"),
+        "a fixture that ships a wrong checksum makes every capture it builds \
+         read as corrupt: {stdout}"
+    );
+    assert!(
+        !stdout.contains("\"ip_checksum_valid\":0")
+            && !stdout.contains("\"transport_checksum_valid\":0"),
+        "and both axes must have VERIFIED something, or the zeros above say \
+         only that nothing was checked: {stdout}"
+    );
+}
+
 /// R311y664 — the exit codes are three states and not two.
 ///
 /// 0 is a capture this reader saw whole, 1 is one it did not, and 2 is the TOOL

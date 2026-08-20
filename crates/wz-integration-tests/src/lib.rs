@@ -4695,4 +4695,49 @@ pub mod wire_tap {
             .collect();
         wz_capture::pcap::write(wz_capture::link::LINKTYPE_ETHERNET, &borrowed)
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// R311y888 (open-debt item 363) — THE PCAP THIS MODULE SYNTHESISES IS
+        /// CHECKSUM-CLEAN, in both directions.
+        ///
+        /// # Why this module needed a witness more than most
+        ///
+        /// Until R311y886 the builder above wrote ZEROS, under a comment
+        /// asserting that `wz-capture`'s TCP path did not verify them. It
+        /// verifies both axes. So the pcap this harness hands a reader was
+        /// corrupt on both of them, the comment is why nobody checked, and the
+        /// only assertions in this crate that touch these captures are about
+        /// the damage sweep — which classifies OUTCOMES and would read a
+        /// wholly-corrupt corpus as its own baseline.
+        ///
+        /// Two segments, one per direction, because they take different
+        /// branches of the builder's port arguments and a pseudo-header built
+        /// from the wrong pair is self-consistent and wrong.
+        #[test]
+        fn the_synthesised_pcap_is_checksum_clean() {
+            let recording = vec![
+                (Side::FromDialer, b"hello from the dialer".to_vec()),
+                (Side::FromListener, b"and the listener".to_vec()),
+            ];
+            let pcap = synthesise_pcap(&recording, 40_000, 7447);
+
+            let d = wz_capture::Dissection::from_pcap(&pcap).expect("the pcap parses");
+            let h = d.health();
+            assert_eq!(
+                (h.ip_checksum_invalid, h.transport_checksum_invalid),
+                (0, 0),
+                "a harness that synthesises a corrupt capture makes every \
+                 finding read against it suspect"
+            );
+            assert_eq!(
+                (h.ip_checksum_valid, h.transport_checksum_valid),
+                (2, 2),
+                "and BOTH directions must have been verified on BOTH axes, or \
+                 the zeros above say only that nothing was checked"
+            );
+        }
+    }
 }

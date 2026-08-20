@@ -580,4 +580,58 @@ fn a_declaration_moves_a_message_out_of_the_floor_and_into_the_plan() {
     );
 }
 
+/// R311y888 (open-debt item 363) — THE SHARED FIXTURES BUILD HEALTHY CAPTURES,
+/// on both checksum axes, across every capture this module ships.
+///
+/// # Why every fixture and not one
+///
+/// `fixture/mod.rs` has two packet builders and six captures assembled from
+/// them, and the captures differ in which builder and how many packets. A
+/// witness over one of them would hold the builders and not the assembly —
+/// `datagram_capture` reaches the UDP path, where a zero checksum is a sender
+/// DECLINING rather than a mistake, and only a test that reads every capture
+/// separates "declined" from "wrong" across the set.
+///
+/// # Why this file needed a witness at all
+///
+/// These builders already compute both sums. What they lacked is anything that
+/// would notice if they stopped: every assertion in this file is about the
+/// PLAN a capture yields, and a corrupt checksum moves none of it. That is the
+/// state open-debt item 357 was found in — correct code with no witness, two
+/// crates over — and it stood for months.
+#[test]
+fn every_fixture_capture_is_checksum_clean() {
+    for (name, bytes) in [
+        ("clean", fixture::clean_capture()),
+        ("reply", fixture::reply_capture()),
+        ("two_sample", fixture::two_sample_capture()),
+        ("aliased", fixture::aliased_capture(true)),
+        ("two_packet", fixture::two_packet_capture()),
+        ("datagram", fixture::datagram_capture()),
+    ] {
+        let d = wz_capture::Dissection::from_pcapng(&bytes)
+            .unwrap_or_else(|e| panic!("{name} must parse: {e:?}"));
+        let h = d.health();
+        assert_eq!(
+            (h.ip_checksum_invalid, h.transport_checksum_invalid),
+            (0, 0),
+            "{name}: a fixture that ships a wrong checksum makes every capture \
+             it builds read as corrupt"
+        );
+        assert!(
+            h.ip_checksum_valid > 0,
+            "{name}: the IPv4 axis must have VERIFIED something, or the zeros \
+             above say only that nothing was checked"
+        );
+        // The transport axis is NOT asserted non-zero for every capture: the
+        // datagram one is UDP, where a zero checksum is RFC 768's declining
+        // form and reads as ABSENT. Demanding a verified sum there would be
+        // demanding the fixture stop expressing that case.
+        assert!(
+            h.transport_checksum_valid > 0 || h.transport_checksum_absent > 0,
+            "{name}: the transport axis must have reached a verdict at all"
+        );
+    }
+}
+
 mod fixture;

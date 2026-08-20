@@ -116,6 +116,49 @@ pub fn fill_udp_checksum(src: [u8; 4], dst: [u8; 4], udp: &mut [u8]) {
     }
 }
 
+/// R311y888 (open-debt item 364) — rewrite an Ethernet/IPv4/TCP frame's SOURCE
+/// PORT and refill the sum that rewrite invalidates.
+///
+/// # The defect this makes hard rather than merely fixed
+///
+/// A fixture that varies one field to get many flows writes the port straight
+/// into the built frame, and the port is INSIDE what the TCP checksum covers.
+/// R311y886 fixed the builders and every packet still read as corrupt for
+/// exactly this reason; measured this round, three more sites in `wz-capture`
+/// were doing the same thing. It announces itself only as one checksum axis
+/// disagreeing with the other — IPv4 does not cover the port, so that half
+/// stays clean — which is not a signal anybody reads by accident.
+///
+/// So the edit and the repair are ONE call. The addresses and the segment
+/// length come out of the frame itself, because a caller that had to supply
+/// them could supply the wrong ones and get a self-consistent wrong answer.
+///
+/// # Panics
+/// If `frame` is not at least a 14-byte Ethernet header, a 20-byte IPv4 header
+/// and a 20-byte TCP header, or if its IPv4 total-length field runs past the
+/// buffer. A fixture builder that produced such a frame has a bug this should
+/// not paper over.
+pub fn set_tcp_source_port(frame: &mut [u8], port: u16) {
+    assert!(
+        frame.len() >= 14 + 20 + 20,
+        "not an Ethernet/IPv4/TCP frame: {} byte(s)",
+        frame.len()
+    );
+    frame[34..36].copy_from_slice(&port.to_be_bytes());
+    let src = [frame[26], frame[27], frame[28], frame[29]];
+    let dst = [frame[30], frame[31], frame[32], frame[33]];
+    // The segment ends where the IPv4 header says the datagram does, NOT where
+    // the frame does: a real NIC pads to 60 bytes and those pad bytes are not
+    // part of the checksum's cover.
+    let total = usize::from(u16::from_be_bytes([frame[16], frame[17]]));
+    let end = 14 + total;
+    assert!(
+        end <= frame.len() && end >= 34 + 20,
+        "IPv4 total length {total} does not fit the frame"
+    );
+    fill_tcp_checksum(src, dst, &mut frame[34..end]);
+}
+
 /// The shared body of the two transport fills: same pseudo-header, same field
 /// offset relative to nothing — TCP's checksum sits at 16 and UDP's at 6, which
 /// is the only thing that differs and is why `at` is computed from `proto`.
@@ -229,8 +272,89 @@ mod tests {
         assert!(found, "no payload in the search space summed to zero");
     }
 
+    /// R311y888 — the port rewrite leaves the frame VERIFYING, and it is the
+    /// pad bytes that make this worth a test.
+    ///
+    /// A real NIC pads a short frame to 60 bytes and those bytes are outside
+    /// the checksum's cover, so a refill that summed to the end of the BUFFER
+    /// instead of to the end of the IPv4 datagram would be self-consistent and
+    /// wrong — the shape a caller could never see, because the sum it wrote is
+    /// the sum it would read back.
+    #[test]
+    fn rewriting_the_source_port_leaves_the_frame_verifying() {
+        let mut frame = padded_frame(&[9, 9, 9]);
+        // The control: it verifies before the edit, so a failure after it is
+        // the edit and not the fixture.
+        assert_eq!(tcp_sum_of(&frame), 0, "the built frame must verify");
+
+        set_tcp_source_port(&mut frame, 20_001);
+        assert_eq!(
+            [frame[34], frame[35]],
+            20_001u16.to_be_bytes(),
+            "the port must actually have moved"
+        );
+        assert_eq!(
+            tcp_sum_of(&frame),
+            0,
+            "and the sum the port invalidated must have been refilled"
+        );
+        assert_eq!(frame.len(), 60, "the pad is still there to be excluded");
+    }
+
+    /// R311y888 — and the SAME edit without the refill does NOT verify, or the
+    /// arm above would pass for a frame nobody could break.
+    #[test]
+    fn the_port_is_inside_what_the_sum_covers() {
+        let mut frame = padded_frame(&[9, 9, 9]);
+        frame[34..36].copy_from_slice(&20_001u16.to_be_bytes());
+        assert_ne!(
+            tcp_sum_of(&frame),
+            0,
+            "a raw port write must break the sum, or this class is imaginary"
+        );
+    }
+
+    /// An Ethernet/IPv4/TCP frame carrying a 3-byte payload, checksums filled,
+    /// padded to the 60-byte minimum a NIC emits.
+    ///
+    /// A fixed array and no `alloc`: this crate is `#![no_std]` with no
+    /// dependencies at all, which is what lets `wz-capture` dev-depend on it
+    /// without touching its own zero-third-party rule.
+    fn padded_frame(payload: &[u8; 3]) -> [u8; 60] {
+        let mut tcp = tcp_segment(payload, [0, 0]);
+        fill_tcp_checksum([10, 0, 0, 1], [10, 0, 0, 2], &mut tcp);
+
+        let mut ip = [0u8; 43];
+        ip[0] = 0x45;
+        ip[2..4].copy_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
+        ip[8] = 64;
+        ip[9] = 6;
+        ip[12..16].copy_from_slice(&[10, 0, 0, 1]);
+        ip[16..20].copy_from_slice(&[10, 0, 0, 2]);
+        fill_ipv4_checksum(&mut ip);
+        ip[20..].copy_from_slice(&tcp);
+
+        let mut eth = [0u8; 60];
+        eth[12..14].copy_from_slice(&[0x08, 0x00]);
+        eth[14..14 + ip.len()].copy_from_slice(&ip);
+        eth
+    }
+
+    /// The one's complement over a frame's TCP segment and its pseudo-header;
+    /// zero means the checksum in place verifies.
+    fn tcp_sum_of(frame: &[u8]) -> u16 {
+        let total = usize::from(u16::from_be_bytes([frame[16], frame[17]]));
+        let seg = &frame[34..14 + total];
+        let len = (seg.len() as u16).to_be_bytes();
+        let pseudo = [
+            frame[26], frame[27], frame[28], frame[29], frame[30], frame[31], frame[32], frame[33],
+            0, 6, len[0], len[1],
+        ];
+        ones_complement(&[&pseudo[..], seg])
+    }
+
     /// A 20-byte TCP header with `checksum` in place and `payload` after it.
-    fn tcp_segment(payload: &[u8], checksum: [u8; 2]) -> [u8; 23] {
+    fn tcp_segment(payload: &[u8; 3], checksum: [u8; 2]) -> [u8; 23] {
         let mut seg = [0u8; 23];
         seg[..2].copy_from_slice(&1111u16.to_be_bytes());
         seg[2..4].copy_from_slice(&7447u16.to_be_bytes());

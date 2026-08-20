@@ -1613,22 +1613,15 @@ mod tests {
         let packets: Vec<Vec<u8>> = (0..OVER_TAP_CAP)
             .map(|i| {
                 let mut p = tcp_packet(1000, &payload);
-                let port = 20_000u16 + i as u16;
-                p[34..36].copy_from_slice(&port.to_be_bytes());
-                // R311y886 — AND THE SUM IS RECOMPUTED, because the byte just
-                // overwritten is inside what it covers. This is the second
-                // shape of open-debt item 357 and the sharper one: the builder
-                // was fixed, every packet still read as corrupt, and the reason
-                // was here — a fixture that edits a packet after building it
-                // has invalidated the checksum as surely as one that never
-                // wrote it. 14 bytes of Ethernet, 20 of IPv4, then the segment.
-                let at = 14 + 20;
-                let end = at + 20 + payload.len();
-                wz_packet_fixtures::fill_tcp_checksum(
-                    [10, 0, 0, 1],
-                    [10, 0, 0, 2],
-                    &mut p[at..end],
-                );
+                // R311y886 — the byte overwritten is inside what the TCP sum
+                // covers, so the edit and the refill are ONE call. This is the
+                // second shape of open-debt item 357 and the sharper one: the
+                // builder was fixed, every packet still read as corrupt, and
+                // the reason was here. R311y888 measured three more sites of
+                // the same shape in `wz-capture` and moved the offset
+                // arithmetic behind `set_tcp_source_port`, which reads the
+                // addresses and the datagram length out of the frame itself.
+                wz_packet_fixtures::set_tcp_source_port(&mut p, 20_000u16 + i as u16);
                 p
             })
             .collect();

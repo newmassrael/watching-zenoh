@@ -1864,6 +1864,19 @@ PY
     # `wz_dissect_pcap_census_where_limited` takes its ceiling as an argument
     # and no name match would have found it.
     python3 scripts/lib/bounded_output_parity.py || return 1
+    # R311y888 (debt-packet-fixture-witness, debt-packet-edit-after-build) —
+    # the PACKET FIXTURE discipline, both halves.
+    #
+    # R311y886 found three crates writing a ZERO where a checksum goes, which
+    # over IPv4 is present-and-wrong rather than absent, so every capture they
+    # built sat whole in the corruption bucket and NOTHING WAS RED -- no test in
+    # any of those files reads a checksum counter. Two residues came out of it
+    # and this gate is both: a crate that lays packets by hand must have a
+    # WITNESS reading those counters back (population from the manifests, so a
+    # seventh crate cannot join quietly), and a frame edited AFTER it was built
+    # must have its sums refilled (measured: three more live sites in
+    # wz-capture, invisible because the IPv4 axis stays clean).
+    python3 scripts/lib/packet_fixture_lint.py || return 1
     # R311y879 — WHICH READER each narrow zint field gets, pinned against the
     # codec UPSTREAM reads it with. The three censuses above ask whether the
     # decode covers the wire and whether a consumer reaches it; this asks

@@ -2260,8 +2260,12 @@ mod live_tap_tests {
         // of IPv4.
         for i in 0..=cap {
             let mut p = crate::datagram_tests::tcp_packet(1000, &msg);
-            let port = 20_000u16 + i as u16;
-            p[34..36].copy_from_slice(&port.to_be_bytes());
+            // R311y888 (open-debt item 364) — the port and the sum it
+            // invalidates move together. The port is inside what the TCP
+            // checksum covers, so a raw write here left every packet this loop
+            // built present-and-wrong on the transport axis while the IPv4 one
+            // stayed clean, which is a disagreement nobody reads by accident.
+            wz_packet_fixtures::set_tcp_source_port(&mut p, 20_000u16 + i as u16);
             d.push_packet(crate::link::LINKTYPE_ETHERNET, i, &p);
         }
         assert_eq!(
@@ -5192,6 +5196,60 @@ mod datagram_tests {
         let mut out = (wire.len() as u16).to_le_bytes().to_vec();
         out.extend_from_slice(&wire);
         out
+    }
+
+    /// R311y888 (open-debt item 363) — THIS MODULE'S BUILDERS PRODUCE A HEALTHY
+    /// CAPTURE, on both checksum axes and in both directions.
+    ///
+    /// # Why the corpus needs an assertion of its own
+    ///
+    /// R311y884 gave these builders real checksums and nothing said so. That is
+    /// the state open-debt item 357 was found in one crate over: a builder is
+    /// correct until somebody edits it, and the edit that breaks it costs
+    /// nothing HERE — every test in this file asserts about flows, messages and
+    /// counters that a corrupt checksum does not move. The bill lands on the
+    /// next test that reads a checksum counter, and it lands as a failure with
+    /// no visible connection to the edit that caused it.
+    ///
+    /// # The UDP arm is the one that makes "clean" mean something
+    ///
+    /// `udp_packet` leaves its transport checksum zero DELIBERATELY: RFC 768
+    /// lets an IPv4 sender decline, and this reader counts that as ABSENT. So
+    /// the corpus carries a verified TCP sum, a declined UDP one, and a
+    /// verified IPv4 header under both — which is why the assertion can say "no
+    /// INVALID" and separately "something was VERIFIED" rather than passing on
+    /// a capture nobody checked.
+    #[test]
+    fn the_builders_in_this_module_are_checksum_clean() {
+        let msg = framed_keepalive();
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1000, &msg));
+        d.push_packet(LINKTYPE_ETHERNET, 1, &tcp_packet_reverse(1000, &msg));
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            2,
+            &udp_packet([10, 0, 0, 1], 5000, [10, 0, 0, 2], 7447, &msg),
+        );
+        d.finish();
+
+        let h = d.health();
+        assert_eq!(
+            (h.ip_checksum_invalid, h.transport_checksum_invalid),
+            (0, 0),
+            "a builder that ships a wrong checksum makes every capture it \
+             builds read as corrupt"
+        );
+        assert_eq!(
+            (h.ip_checksum_valid, h.transport_checksum_valid),
+            (3, 2),
+            "all three IPv4 headers and BOTH TCP segments must have been \
+             verified, or the zeros above are about nothing"
+        );
+        assert_eq!(
+            h.transport_checksum_absent, 1,
+            "and the UDP datagram must read as a sender that DECLINED, which \
+             is the arm that separates absent from wrong"
+        );
     }
 
     /// The fixture above writes a VLE by hand, which is the "author's idea of
@@ -8306,9 +8364,11 @@ mod datagram_tests {
         // Three distinct connections, by source port.
         for (i, seq) in [(0usize, 1000u32), (1, 2000), (2, 3000)] {
             let mut pkt = tcp_packet(seq, &msg);
-            // Perturb the source port so each is its own 5-tuple.
-            let sport = 1111u16 + i as u16;
-            pkt[34..36].copy_from_slice(&sport.to_be_bytes());
+            // Perturb the source port so each is its own 5-tuple. R311y888 —
+            // through the helper, because the port is inside the TCP
+            // checksum's cover and a raw write leaves the packet corrupt on
+            // that axis alone.
+            wz_packet_fixtures::set_tcp_source_port(&mut pkt, 1111u16 + i as u16);
             d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
         }
         assert_eq!(d.flows().len(), 2, "the cap holds");
@@ -8325,7 +8385,7 @@ mod datagram_tests {
         // before the third arrives, so an LRU keeps it and a FIFO drops it.
         let at = |port: u16, seq: u32| {
             let mut pkt = tcp_packet(seq, &msg);
-            pkt[34..36].copy_from_slice(&port.to_be_bytes());
+            wz_packet_fixtures::set_tcp_source_port(&mut pkt, port);
             pkt
         };
         let mut e = Dissection::with_limits(DissectionLimits {
