@@ -377,9 +377,11 @@ OPTIONS:
     --bounded         read the capture under the live-tap ceilings instead of
                       unbounded -- the same preset the C ABI's
                       wz_dissect_pcap_summary_bounded uses. Without it the
-                      `dropped_by_limits` group --health prints is zero because
-                      no cap exists to bite, which is not the same fact as
-                      nothing having been dropped
+                      `dropped_by_limits` group is zero because no cap exists
+                      to bite, which is not the same fact as nothing having
+                      been dropped. WITH it that group is reported on its own,
+                      whether or not --health was asked for: a ceiling you
+                      asked for tells you when it bites
     --health          every loss counter this reader keeps, GROUPED BY WHO LOST
                       the packet, because that is the only part a reader can
                       act on: the capture tool's own admission (re-capture with
@@ -1084,6 +1086,15 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
                     &payload_refusals,
                 ));
             }
+            // R311y885 — A BOUND IS NEVER SILENT. A reader who asked for
+            // ceilings is told what they cost, without also having to ask for
+            // the whole loss document; an unbounded run is not shown five
+            // structural zeros it would have to know how to read. `--health`
+            // still carries the group as one line of that document, from this
+            // same emitter, so the two cannot disagree.
+            if bounded {
+                rendered.push_str(&wz_capture::report::dropped_by_limits_text(&dissection));
+            }
             if health {
                 // R311y857 — `wz-capture`'s own rendering, not a second
                 // selection of the counters. Both surfaces read the same four
@@ -1123,6 +1134,22 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
                     &payload_declarations,
                     &payload_refusals,
                 ));
+            }
+            // R311y885 — the JSON half of "a bound is never silent", under the
+            // key the ABI's census document uses for the same group. It rides
+            // `--bounded` and not `--health`, so the combination a person
+            // actually types (a ceiling, because their memory is finite) is
+            // told what the ceiling cost.
+            //
+            // With BOTH flags the numbers appear twice, at the top level and
+            // inside `health`. That is accepted rather than overlooked: one
+            // location that does not move with a second flag is worth more to a
+            // consumer than a document with no repetition in it, and both
+            // spellings come from `dropped_by_limits_json`, so they cannot
+            // drift apart the way two RENDERINGS would.
+            if bounded {
+                rendered.push_str(",\"dropped_by_limits\":");
+                rendered.push_str(&wz_capture::report::dropped_by_limits_json(&dissection));
             }
             if health {
                 // The SAME document `wz_dissect_pcap_summary` embeds, under the
@@ -4728,6 +4755,58 @@ mod tests {
             bounded.contains("\"flows\":1"),
             "1025 flows is one past the live-tap ceiling, so exactly one is \
              evicted and the group finally says so: {bounded}"
+        );
+    }
+
+    /// R311y885 — AND IT IS VISIBLE WITHOUT `--health`, because a bound a
+    /// reader asked for must not be silent about what it cost.
+    ///
+    /// # The gap this pins, which the arms above cannot see
+    ///
+    /// Both arms of the test above pass `--health`. So the claim they establish
+    /// is "the group is a measurement once the reader is bounded AND the loss
+    /// document was asked for", and the combination a person actually types —
+    /// `wz-analyze cap.pcapng --bounded`, because they know their memory is
+    /// finite and not because they are auditing losses — was untested. A report
+    /// that went short by an evicted flow and said nothing would have satisfied
+    /// every assertion in this file.
+    ///
+    /// The rule this pins is the one the C ABI's bounded doors already hold:
+    /// asking for a ceiling is asking to be told when it bites. `--health` stays
+    /// the flag for the WHOLE loss document — capture drops, fragments, framing,
+    /// sequence — and this is one group of five numbers that rides the bound.
+    ///
+    /// # Both arms, so it is the BOUND that carries it
+    ///
+    /// Unbounded and without `--health` the group stays absent: a reader who
+    /// asked for neither is not shown a group of structural zeros they would
+    /// have to know how to read.
+    #[test]
+    fn a_bound_is_never_silent_even_without_the_health_flag() {
+        let packets: Vec<Vec<u8>> = (0..1025u16).map(|i| udp_from(2000 + i)).collect();
+        let frames: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, i as u64 * 1_000, p.as_slice()))
+            .collect();
+        let pcapng =
+            wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &frames);
+
+        let bounded = health_run_bounded(&pcapng, false, Format::Json, true);
+        assert!(
+            bounded.contains(
+                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
+                 \"flows\":1,\"scout_askers\":0}"
+            ),
+            "a reader who asked for a ceiling must be told it bit, without \
+             having to also ask for the loss document: {bounded}"
+        );
+
+        let unbounded = health_run_bounded(&pcapng, false, Format::Json, false);
+        assert!(
+            !unbounded.contains("\"dropped_by_limits\""),
+            "and a reader who asked for no ceiling is not shown five \
+             structural zeros: {unbounded}"
         );
     }
 

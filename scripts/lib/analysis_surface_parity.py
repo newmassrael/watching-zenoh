@@ -118,14 +118,34 @@ BOTH = {
     # dissection, so no cap existed to bite, and a structural zero reads exactly
     # like a measured one.
     #
-    # ⚠ THE RESIDUE, stated rather than hidden: the ABI's bounded door emits the
-    # SUMMARY document, and the drop counters live in the HEALTH group, which
-    # only `wz_dissect_pcap_summary` (unbounded) renders. So the capability is on
-    # both surfaces and its OUTPUT is not: a linking consumer can bound the read
-    # and still cannot see what the bound cost. That is a narrower gap than the
-    # one this row closes, and it is a new one to carry rather than a reason to
-    # leave the row out.
+    # R311y885 — THE RESIDUE THIS ROW USED TO CARRY WAS FALSE, and the
+    # correction lives here because the row is where the next reader looks.
+    #
+    # It said: "the ABI's bounded door emits the SUMMARY document, and the drop
+    # counters live in the HEALTH group, which only `wz_dissect_pcap_summary`
+    # (unbounded) renders ... a linking consumer can bound the read and still
+    # cannot see what the bound cost." Both doors call one `summary_json`, which
+    # embeds the health group, so the bounded door had been reporting its own
+    # drops since the round it landed. Measured, not re-read:
+    # `the_bounded_door_reports_a_bound_that_bit` now pins the WHOLE group off
+    # that door and reads `"flows":1`.
+    #
+    # The gap the false residue was pointing at is real and is one document
+    # over: the CENSUS was unbounded and silent. That is the row below.
     "reading under the live-tap bounds": ("--bounded", "wz_dissect_pcap_summary_bounded"),
+    # R311y885 — the ANALYSIS planes under those same ceilings, which is a
+    # SECOND capability and not the row above restated. The row above is the
+    # TRANSPORT document; this is the one a live tap actually reads, and until
+    # this round it was the half that could not be capped: `wz_dissect_pcap_census`
+    # reads with every limit `None`, on a link that does not end.
+    #
+    # The flag is the same `--bounded` on purpose. The command line bounds the
+    # DISSECTION once and every document folds over it, so one flag reaches both
+    # rows; the ABI takes bytes per call and therefore needs a door per document.
+    # That asymmetry is a property of the two surfaces rather than a gap in
+    # either, and it is written here so the next reader does not read the
+    # repeated flag as a copy-paste.
+    "bounded read of the analysis planes": ("--bounded", "wz_dissect_pcap_census_bounded"),
 }
 
 # Reachable ONLY from the command line, each with the reason it is not on the

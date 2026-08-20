@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 6
+EXPECTED_VERSION = 7
 EXPECTED_SYMBOLS = {
     "wz_dissect_abi_version",
     # R311y855 — the FIELD layer, which is the walk this header had described
@@ -66,6 +66,10 @@ EXPECTED_SYMBOLS = {
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",
+    # R311y885 — the census under the live-tap ceilings. The bounded SUMMARY
+    # had existed since R311y748 while the analysis planes stayed unbounded,
+    # so the document a live tap needs was the one that could not be capped.
+    "wz_dissect_pcap_census_bounded",
     # R311y854 — the selector: one door that narrows the census, one that
     # diagnoses the expression without a capture.
     "wz_dissect_pcap_census_where",

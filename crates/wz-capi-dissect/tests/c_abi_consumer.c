@@ -33,12 +33,13 @@
 int main(void) {
     /* The symbol/memory-contract revision. A consumer refuses a library whose
      * memory rules moved; this asserts the value the header was written for. */
-    /* R311y856 -- 6 since wz_dissect_pcap_fields_with_payloads and
-     * wz_dissect_declarations_diagnose joined the symbol set. This
-     * header's contract is the symbol SET, not a symbol's signature, so adding
-     * one moves the revision; the two statements of that contract had drifted
-     * and were reconciled in R311y748. */
-    CHECK(wz_dissect_abi_version() == 6, "abi version is %d, expected 6",
+    /* R311y885 -- 7 since wz_dissect_pcap_census_bounded joined the symbol
+     * set. This header's contract is the symbol SET, not a symbol's signature,
+     * so adding one moves the revision; the two statements of that contract had
+     * drifted and were reconciled in R311y748. The census DOCUMENT gained a
+     * dropped_by_limits key in the same round and that moves nothing here, on
+     * the same rule read the other way. */
+    CHECK(wz_dissect_abi_version() == 7, "abi version is %d, expected 7",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
@@ -172,9 +173,47 @@ int main(void) {
           "what added it: %s",
           summary);
     wz_dissect_string_free(summary);
+
+    /* R311y885 -- the BOUNDED census door is reachable from C, hands back a
+     * census, and says what its ceilings cost.
+     *
+     * The Rust side owns the claim that the live-tap flow cap BITES, which
+     * needs a capture of 1 025 distinct 5-tuples. This file owns the two claims
+     * that are only true at the boundary: that the symbol survives into the
+     * cdylib at all, and that what comes back through it is the CENSUS document
+     * rather than the summary -- a door that bounded correctly and returned the
+     * wrong document would satisfy every assertion made about the number.
+     *
+     * dropped_by_limits is asserted on BOTH doors deliberately. It is zero here
+     * because this pcap is one packet, and a key that only appeared when a cap
+     * bit would leave a consumer unable to tell "no caps" from "caps that did
+     * not bite" -- which is the whole reason the group is emitted. */
+    char *capped = NULL;
+    rc = wz_dissect_pcap_census_bounded(pcap, sizeof pcap, &capped);
+    CHECK(rc == WZ_DISSECT_OK, "census_bounded rc=%d", rc);
+    CHECK(capped != NULL, "OK came back with no string");
+    CHECK(strstr(capped, "\"keyexprs\"") != NULL,
+          "the bounded door did not hand back a census: %s", capped);
+    CHECK(strstr(capped, "\"dropped_by_limits\"") != NULL,
+          "a bounded census that cannot say what it dropped is silent: %s",
+          capped);
+    CHECK(strstr(census, "\"dropped_by_limits\"") != NULL,
+          "the unbounded census must carry the group too, or a reader cannot "
+          "tell no-caps from caps-that-did-not-bite: %s",
+          census);
+    wz_dissect_string_free(capped);
     wz_dissect_string_free(census);
 
-    /* Same memory rule, same refusals. */
+    /* Same memory rule, same refusals -- through BOTH census doors. */
+    capped = NULL;
+    rc = wz_dissect_pcap_census_bounded(truncated, sizeof truncated, &capped);
+    CHECK(rc == WZ_DISSECT_ERR_BAD_CAPTURE, "census_bounded truncated rc=%d",
+          rc);
+    CHECK(capped == NULL, "a bad capture handed back a string");
+    rc = wz_dissect_pcap_census_bounded(NULL, 0, &capped);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "census_bounded null bytes rc=%d",
+          rc);
+
     census = NULL;
     rc = wz_dissect_pcap_census(truncated, sizeof truncated, &census);
     CHECK(rc == WZ_DISSECT_ERR_BAD_CAPTURE, "census truncated rc=%d", rc);

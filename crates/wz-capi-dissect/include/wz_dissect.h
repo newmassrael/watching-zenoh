@@ -96,6 +96,29 @@ int wz_dissect_pcap_summary_bounded(const unsigned char *bytes, size_t len,
  * capture had no queries in it. */
 int wz_dissect_pcap_census(const unsigned char *bytes, size_t len, char **out);
 
+/* R311y885 (ABI 7) — the same planes, read under BOUNDED memory.
+ *
+ * The pairing wz_dissect_pcap_summary_bounded made for the transport
+ * document, made here for the analysis one, and this is the half a live tap
+ * needs: the census above reads with every cap set to none, which is right
+ * for a file that ends and wrong for a link that does not. A framework
+ * watching a running system could bound the document it did not need and
+ * not the one it did.
+ *
+ * The same live-tap preset, for the same reason: a preset is an edit and a
+ * limits struct across this boundary would be a break.
+ *
+ * The census document carries dropped_by_limits as of this revision -- the
+ * same group the summary reports, from the same emitter -- so a plane made
+ * short by an evicted flow says so instead of reading as a quiet network.
+ * That key is present through BOTH census doors; behind this one it can be
+ * non-zero.
+ *
+ * wz_dissect_pcap_census_where stays unbounded. Bounding a narrowed census
+ * is a separate decision and is not improvised here. */
+int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
+                                   char **out);
+
 /* R311y854 (ABI 4) — the same census, NARROWED by a selector in wz's own
  * filter language: `field op value` terms (key == robot/pose, kind == query,
  * bytes > 100, delay >= 10, ...) joined with and / or / not and parentheses.

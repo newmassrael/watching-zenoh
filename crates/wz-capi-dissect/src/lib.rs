@@ -104,11 +104,18 @@ pub const WZ_DISSECT_ERR_DECLARATION: c_int = -5;
 /// R311y856 — 5 → 6, ADDING [`wz_dissect_pcap_fields_with_payloads`] and
 /// [`wz_dissect_declarations_diagnose`].
 ///
+/// R311y885 — 6 → 7, ADDING [`wz_dissect_pcap_census_bounded`]. The census
+/// DOCUMENT also gained a `dropped_by_limits` group in the same round, and that
+/// half moves nothing here on purpose: `wz_dissect.h` says a consumer reads the
+/// document BY NAME and tolerates unknown keys, so a new key is the widening
+/// that contract exists to permit. The symbol is what a consumer cannot
+/// discover by reading, and the symbol is why this number moves.
+///
 /// # Safety
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    6
+    7
 }
 
 /// Release a string this library returned. Passing null is a no-op, so a
@@ -317,6 +324,68 @@ pub unsafe extern "C" fn wz_dissect_pcap_census(
         Ok(d) => d,
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
+    write_string(wz_capture::census_json::census_json(&dissection), out)
+}
+
+/// R311y885 — the ANALYSIS PLANES under the live-tap ceilings, which is the
+/// combination a tap actually needs and the one no door reached.
+///
+/// # The gap this closes, and why it was invisible
+///
+/// R311y748 gave the ABI a bounded SUMMARY, and the round after it the parity
+/// table recorded "reading under the live-tap bounds" as a capability both
+/// surfaces reach. Both statements are true and neither covers this: the
+/// summary is the TRANSPORT answer, and a consumer that wants to know which
+/// keys carry the traffic calls [`wz_dissect_pcap_census`], whose doc says
+/// UNBOUNDED in as many words. So a framework tapping a live link could bound
+/// the one document it did not need and had no way to bound the one it did —
+/// the census walk builds five planes over a `Dissection` whose every limit is
+/// `None`, on a stream that does not end.
+///
+/// That is the same shape as the gap R311y851 closed (a capability compiled
+/// into the library with no symbol to reach it), one layer in: the BOUND was
+/// compiled in, `Dissection::from_capture_bounded` is the same constructor the
+/// summary door already calls, and only this entry point was missing.
+///
+/// # It is never silent about what the bound cost
+///
+/// The census document carries `dropped_by_limits` as of this round — the same
+/// group `wz_dissect_pcap_summary` renders, from the same emitter — so a plane
+/// short by an evicted flow is read as short-and-why rather than as a quiet
+/// network. A bounded door whose output could not say what it dropped would be
+/// the structural-zero defect R311y746 pinned, inverted.
+///
+/// # A NAMED PRESET, on the argument [`wz_dissect_pcap_summary_bounded`] makes
+///
+/// `DissectionLimits::for_live_tap`, not a limits struct: this ABI hands back
+/// documents rather than taking struct trees, and freezing nine fields' layout
+/// into the boundary would make the next axis `DissectionLimits` grows an ABI
+/// break instead of a preset edit.
+///
+/// The RESIDUE, stated rather than hidden: the preset is the only bound on
+/// offer here, and [`wz_dissect_pcap_census_where`] — the selector door — is
+/// still unbounded. Both are carried, not fixed by improvisation.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes and `out` must be a
+/// writable pointer to a `*mut c_char`. Neither may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_census_bounded(
+    bytes: *const u8,
+    len: usize,
+    out: *mut *mut c_char,
+) -> c_int {
+    if bytes.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    let dissection =
+        match Dissection::from_capture_bounded(input, wz_capture::DissectionLimits::for_live_tap())
+        {
+            Ok(d) => d,
+            Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
+        };
     write_string(wz_capture::census_json::census_json(&dissection), out)
 }
 
@@ -1047,28 +1116,7 @@ mod tests {
     /// `DissectionLimits::for_live_tap`, and here they all survive.
     #[test]
     fn the_drop_group_at_this_boundary_is_structurally_zero() {
-        // A framed KeepAlive: a 2-byte length prefix and the message, which is
-        // what makes each packet a flow with a decodable message on it.
-        let payload = [1u8, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE];
-        // One flow past `DissectionLimits::for_live_tap().max_flows_per_table`.
-        let over_tap_cap = 1_025usize;
-        let packets: Vec<Vec<u8>> = (0..over_tap_cap)
-            .map(|i| {
-                let mut p = tcp_packet(1000, &payload);
-                // The SOURCE PORT is what makes each a distinct 5-tuple, and it
-                // sits at the start of the TCP header: 14 bytes of Ethernet, 20
-                // of IPv4.
-                let port = 20_000u16 + i as u16;
-                p[34..36].copy_from_slice(&port.to_be_bytes());
-                p
-            })
-            .collect();
-        let frames: Vec<(u32, u32, &[u8])> = packets
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (i as u32, 0u32, p.as_slice()))
-            .collect();
-        let file = wz_capture::pcap::write(1, &frames);
+        let file = capture_one_flow_past_the_tap_cap();
 
         let json = call_summary(&file).expect("the capture reads");
         assert!(
@@ -1082,7 +1130,7 @@ mod tests {
         // would be a zero about nothing.
         assert_eq!(
             json.matches("{\"frames\":1}").count(),
-            over_tap_cap,
+            OVER_TAP_CAP,
             "every 5-tuple must have survived, or this proves nothing"
         );
     }
@@ -1110,29 +1158,26 @@ mod tests {
     /// report five zeros and 1 025 living flows, and through the bounded one
     /// report an eviction. A single-sided assertion here would be satisfied by
     /// a library that had simply started counting something.
+    ///
+    /// R311y885 — the bounded arm now pins the WHOLE group rather than one key
+    /// from it, on this repo's own verdict-assertion rule: a `contains` of
+    /// `"flows":1` is satisfied by a group that also started reporting drops on
+    /// four other axes, and it cannot see a rule that WIDENED. Pinning the set
+    /// also settles a claim written about this door and never measured — that
+    /// the drop counters reach only the UNBOUNDED summary — which the exact
+    /// string below refutes.
     #[test]
     fn the_bounded_door_reports_a_bound_that_bit() {
-        let payload = [1u8, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE];
-        let over_tap_cap = 1_025usize;
-        let packets: Vec<Vec<u8>> = (0..over_tap_cap)
-            .map(|i| {
-                let mut p = tcp_packet(1000, &payload);
-                let port = 20_000u16 + i as u16;
-                p[34..36].copy_from_slice(&port.to_be_bytes());
-                p
-            })
-            .collect();
-        let frames: Vec<(u32, u32, &[u8])> = packets
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (i as u32, 0u32, p.as_slice()))
-            .collect();
-        let file = wz_capture::pcap::write(1, &frames);
+        let file = capture_one_flow_past_the_tap_cap();
 
         let bounded = call_summary_bounded(&file).expect("the capture reads");
         assert!(
-            bounded.contains("\"flows\":1"),
-            "the live-tap flow cap must bite and be reported: {bounded}"
+            bounded.contains(
+                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
+                 \"flows\":1,\"scout_askers\":0}"
+            ),
+            "the live-tap flow cap must bite and be reported, on that axis \
+             ALONE: {bounded}"
         );
         // The SAME bytes through the unbounded door, so the difference is the
         // caps and not the capture.
@@ -1417,6 +1462,127 @@ mod tests {
             .to_string();
         unsafe { wz_dissect_string_free(out) };
         Ok(s)
+    }
+
+    /// Drive the BOUNDED census the way C does.
+    fn call_census_bounded(bytes: &[u8]) -> Result<String, c_int> {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_pcap_census_bounded(bytes.as_ptr(), bytes.len(), &mut out) };
+        if rc != WZ_DISSECT_OK {
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// One flow past `DissectionLimits::for_live_tap().max_flows_per_table`,
+    /// which is the count that makes a bound observable at all.
+    ///
+    /// R311y885 — named ONCE. Three tests here need "a capture the live-tap cap
+    /// bites", and the number had been retyped beside each fixture; a preset
+    /// whose ceiling moves would have left the copies asserting about a capture
+    /// that no longer crosses it, each one still green.
+    const OVER_TAP_CAP: usize = 1_025;
+
+    /// A capture with [`OVER_TAP_CAP`] distinct 5-tuples on it.
+    ///
+    /// R311y885 — ONE fixture for the summary pair and the census pair, so the
+    /// two documents are compared over the same bytes rather than over two
+    /// hand-laid captures that are equal until one of them is edited. A framed
+    /// KeepAlive per packet, distinguished by SOURCE PORT, which sits 14 bytes
+    /// of Ethernet and 20 of IPv4 in.
+    fn capture_one_flow_past_the_tap_cap() -> Vec<u8> {
+        // A framed KeepAlive: a 2-byte length prefix and the message, which is
+        // what makes each packet a flow with a decodable message on it.
+        let payload = [1u8, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let packets: Vec<Vec<u8>> = (0..OVER_TAP_CAP)
+            .map(|i| {
+                let mut p = tcp_packet(1000, &payload);
+                let port = 20_000u16 + i as u16;
+                p[34..36].copy_from_slice(&port.to_be_bytes());
+                p
+            })
+            .collect();
+        let frames: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u32, 0u32, p.as_slice()))
+            .collect();
+        wz_capture::pcap::write(1, &frames)
+    }
+
+    /// R311y885 — THE CENSUS DOCUMENT SAYS WHAT THE WALK UNDER IT LOST, and
+    /// through the bounded door that statement is a measurement.
+    ///
+    /// # What this is a discriminator for
+    ///
+    /// Two defects at once, and they are separable, so both arms are pinned off
+    /// ONE capture:
+    ///
+    /// * the census document carried no `dropped_by_limits` group at all, so a
+    ///   plane short by an evicted flow read exactly like a quiet network;
+    /// * there was no door to bound a census with, so the group would have been
+    ///   a structural zero even once it existed — the defect R311y746 pinned
+    ///   for the summary, arriving one document later.
+    ///
+    /// A single-sided assertion would be satisfied by a library that had merely
+    /// started printing a group of zeros, which is why the unbounded arm asserts
+    /// the WHOLE group rather than a key from it.
+    #[test]
+    fn the_census_reports_what_its_caps_cost() {
+        let file = capture_one_flow_past_the_tap_cap();
+
+        let unbounded = call_census(&file).expect("the capture reads");
+        assert!(
+            unbounded.contains(
+                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
+                 \"flows\":0,\"scout_askers\":0}"
+            ),
+            "the unbounded census must carry the group and report no bite: {unbounded}"
+        );
+
+        let bounded = call_census_bounded(&file).expect("the capture reads");
+        assert!(
+            bounded.contains(
+                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
+                 \"flows\":1,\"scout_askers\":0}"
+            ),
+            "the live-tap flow cap must bite and the census must say so: {bounded}"
+        );
+        assert_ne!(
+            bounded, unbounded,
+            "two doors that answer identically would mean the caps never reached the walk"
+        );
+    }
+
+    /// R311y885 — and the bounded census is still a CENSUS: every plane key is
+    /// there.
+    ///
+    /// Separate from the pair above because the two failures are different. A
+    /// door that bounded correctly and returned the summary document would pass
+    /// that test — `dropped_by_limits` is in both — and would have silently
+    /// swapped what a consumer asked for.
+    #[test]
+    fn the_bounded_census_is_a_census() {
+        let bounded =
+            call_census_bounded(&capture_one_flow_past_the_tap_cap()).expect("the capture reads");
+        for key in [
+            "\"keyexprs\":",
+            "\"nodes\":",
+            "\"exchanges\":",
+            "\"payloads\":",
+            "\"interests\":",
+        ] {
+            assert!(
+                bounded.contains(key),
+                "{key} missing from the bounded census: {bounded}"
+            );
+        }
     }
 
     const ZID_A: [u8; 4] = [0xA1; 4];
@@ -2020,11 +2186,13 @@ mod tests {
     /// NOT move when a walker adds fields.
     #[test]
     fn the_abi_version_is_readable() {
-        // R311y856 — 6 since `wz_dissect_pcap_fields_with_payloads` and
-        // `wz_dissect_declarations_diagnose` joined the symbol set. The
-        // header's contract is the symbol SET, not a symbol's signature; see
+        // R311y885 — 7 since `wz_dissect_pcap_census_bounded` joined the symbol
+        // set. The census DOCUMENT gained a `dropped_by_limits` key in the same
+        // round and that half moves nothing: the header's contract is the
+        // symbol SET, not a symbol's signature and not the JSON shape, which is
+        // exactly the distinction this test exists to hold. See
         // `wz_dissect_abi_version`.
-        assert_eq!(wz_dissect_abi_version(), 6);
+        assert_eq!(wz_dissect_abi_version(), 7);
     }
 
     /// R311y856 — a capture carrying ONE `Put` on `demo/sensor` whose payload

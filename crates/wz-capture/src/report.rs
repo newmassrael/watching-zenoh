@@ -2802,6 +2802,49 @@ fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
     }
 }
 
+/// R311y885 — what THIS DISSECTION's caps cost, as one JSON object, rendered
+/// in ONE place because two documents now carry it.
+///
+/// # Why it is extracted rather than written a second time
+///
+/// [`health_json`] held this group inline and was its only consumer until the
+/// CENSUS document needed it. A census is a fold over a dissection that may
+/// have been read under [`crate::DissectionLimits`], and planes computed over a
+/// walk that lost rows have to be able to say so; copying the five-field format
+/// string into `census_json` would have made the group a fact with no owner —
+/// the same class the doc below names when it says a `--health` flag must be a
+/// second CONSUMER of one rendering rather than a second rendering
+/// (`debt-census-emit-two-renderings`).
+///
+/// # The zeros mean "no cap", not "no loss"
+///
+/// Unchanged from where this lived: every field is zero for a dissection built
+/// without caps, and STRUCTURALLY so, because no cap exists to bite. The group
+/// is emitted anyway so a consumer can tell "no caps" from "caps that did not
+/// bite" — and behind the bounded doors the numbers are a measurement.
+pub fn dropped_by_limits_json(d: &crate::Dissection) -> String {
+    let drops = d.health().drops;
+    format!(
+        "{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\"flows\":{},\
+         \"scout_askers\":{}}}",
+        drops.frames, drops.stream_bytes, drops.skipped, drops.flows, drops.scout_askers
+    )
+}
+
+/// R311y885 — the same group for a person, one indented line, and the same
+/// argument for extracting it: [`health_text`] owned the only copy until a
+/// bounded run needed to print it on its own.
+///
+/// One trailing newline, so a caller appends it wherever the line belongs.
+pub fn dropped_by_limits_text(d: &crate::Dissection) -> String {
+    let drops = d.health().drops;
+    format!(
+        "  dissection caps: {} frame(s), {} stream byte(s), {} skipped, \
+         {} flow(s), {} scout asker(s)\n",
+        drops.frames, drops.stream_bytes, drops.skipped, drops.flows, drops.scout_askers
+    )
+}
+
 /// R311y857 — WHAT THE DISSECTION LOST, AND WHO LOST IT, as one document.
 ///
 /// # Why this is here rather than in the C ABI, where it was written
@@ -2858,7 +2901,7 @@ pub fn health_json(d: &crate::Dissection) -> String {
     let h = d.health();
     let f = d.fragment_stats();
     let fr = d.framing_health();
-    let drops = h.drops;
+    let dropped = dropped_by_limits_json(d);
     let reported = match d.capture_reported_drops() {
         Some(n) => n.to_string(),
         None => String::from("null"),
@@ -2866,8 +2909,7 @@ pub fn health_json(d: &crate::Dissection) -> String {
     let mut out = format!(
         "{{\
          \"capture_reported_drops\":{reported},\
-         \"dropped_by_limits\":{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\
-         \"flows\":{},\"scout_askers\":{}}},\
+         \"dropped_by_limits\":{dropped},\
          \"fragments\":{{\"pieces\":{},\"completed\":{},\"expired\":{},\"evicted\":{},\
          \"open\":{},\"unfinished\":{},\
          \"malformed\":{},\"overlapping\":{}}},\
@@ -2882,11 +2924,6 @@ pub fn health_json(d: &crate::Dissection) -> String {
          \"sequence\":{{\"frames\":{},\"missing\":{},\"gaps\":{},\
          \"duplicates\":{},\"out_of_window\":{},\"without_resolution\":{}}},\
          \"skips\":",
-        drops.frames,
-        drops.stream_bytes,
-        drops.skipped,
-        drops.flows,
-        drops.scout_askers,
         f.pieces,
         f.completed,
         f.expired,
@@ -2942,7 +2979,6 @@ pub fn health_text(d: &crate::Dissection) -> String {
     let h = d.health();
     let f = d.fragment_stats();
     let fr = d.framing_health();
-    let drops = h.drops;
     let mut s = String::from("health:\n");
     s.push_str(&format!(
         "  capture tool: {}\n",
@@ -2953,11 +2989,7 @@ pub fn health_text(d: &crate::Dissection) -> String {
             Some(n) => format!("{n} packet(s) dropped by the capture tool"),
         }
     ));
-    s.push_str(&format!(
-        "  dissection caps: {} frame(s), {} stream byte(s), {} skipped, \
-         {} flow(s), {} scout asker(s)\n",
-        drops.frames, drops.stream_bytes, drops.skipped, drops.flows, drops.scout_askers
-    ));
+    s.push_str(&dropped_by_limits_text(d));
     s.push_str(&format!(
         "  fragments: {} piece(s), {} completed, {} expired, {} evicted, \
          {} still open, {} unfinished, {} malformed, {} overlapping\n",

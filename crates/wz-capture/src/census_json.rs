@@ -122,6 +122,20 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
     ));
     #[cfg(not(feature = "network-codecs"))]
     out.push_str("null");
+    // R311y885 — WHAT THE WALK UNDER THESE PLANES LOST, so a bounded census is
+    // not silent about its bound.
+    //
+    // Every plane above is a fold over ONE `Dissection`, and that dissection
+    // may have been built under `DissectionLimits`: a flow evicted by
+    // `max_flows_per_table` takes its keyexprs, its samples and its queries out
+    // of these tables with it. Without this group the document is short and
+    // says nothing about why — indistinguishable from a quiet network, which is
+    // the reading that makes a capped tap dangerous rather than merely partial.
+    //
+    // It is the SAME rendering `health_json` embeds (`report::dropped_by_limits_json`),
+    // not a second one, so the two documents cannot drift.
+    out.push_str(",\"dropped_by_limits\":");
+    out.push_str(&crate::report::dropped_by_limits_json(d));
     out.push('}');
     out
 }
@@ -783,6 +797,41 @@ mod tests {
         assert!(
             json.contains("\"rows\":[]"),
             "an empty plane must be an empty table rather than absent: {json}"
+        );
+    }
+
+    /// R311y885 — the census says what the walk under it LOST, and says it with
+    /// the SAME words the health document uses.
+    ///
+    /// # Why the two strings are compared rather than each pinned
+    ///
+    /// The alternative is two format strings that agree today. This module and
+    /// `report` would then each own a copy of a five-field layout, and the copy
+    /// that gained a sixth axis would be whichever document its author was
+    /// looking at — which is the failure `debt-census-emit-two-renderings`
+    /// names and the reason `dropped_by_limits_json` was extracted rather than
+    /// duplicated. An equality between the two renderings cannot be satisfied
+    /// by remembering.
+    #[test]
+    fn the_census_carries_the_drop_group_the_health_document_renders() {
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1000, &[1, 0, 0x04]));
+        d.finish();
+
+        let group = crate::report::dropped_by_limits_json(&d);
+        assert!(
+            group.starts_with('{') && group.contains("\"flows\":"),
+            "the shared emitter must render the group as an object: {group}"
+        );
+        let json = census_json(&d);
+        assert!(
+            json.contains(&alloc::format!("\"dropped_by_limits\":{group}")),
+            "the census must carry the group byte for byte: {json}"
+        );
+        assert!(
+            crate::report::health_json(&d)
+                .contains(&alloc::format!("\"dropped_by_limits\":{group}")),
+            "and so must the health document, or the two have drifted"
         );
     }
 }
