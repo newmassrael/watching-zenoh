@@ -68,17 +68,47 @@ fn progress_flag() -> (Arc<AtomicBool>, Arc<AtomicBool>) {
 /// The start signal travels over a std channel, not a tokio one: it is sent
 /// from inside an async block, where tokio's own blocking senders refuse to
 /// run, and received on a thread that holds no worker.
+///
+/// # One at a time, and why
+///
+/// This spawned all `count` tasks and only then waited for `count` signals,
+/// which made the setup depend on something tokio does not promise: that
+/// `count` tasks sitting in the injection queue are DISTRIBUTED across `count`
+/// workers rather than stacked. A worker takes a BATCH off that queue, and the
+/// first task it runs here blocks its thread outright, so any task batched
+/// behind it is stranded on a queue nobody is draining — the wait then expires
+/// and the file reads `Timeout` with no clue which holder never arrived.
+///
+/// Spawning one at a time replaces that assumption with a liveness one: holder
+/// `k` is not created until `k-1` are confirmed ON workers, so there is a free
+/// worker for it and tokio only has to poll a ready task. It is also the shape
+/// [`holders_that_arrive_far_apart_still_hold_together`] has always used by
+/// hand — the one saturating test in this file that has never gone red on
+/// hosted CI, while this helper's three callers took Layer C1j red on runs
+/// 32193989329, 32386238488 and 32418058280.
+///
+/// ⚠ NOT CLAIMED: that this is the mechanism behind those reds. It was not
+/// reproduced locally — ~200 runs across four configurations (2 CPUs, 1 CPU,
+/// six competing burners, eight concurrent processes) never once put two
+/// holders on one worker. What this change does is remove an assumption that
+/// is unguaranteed by contract, and make the remaining failure SAY something:
+/// the panic below now names which holder of how many never arrived.
 fn saturate(spawn: impl Fn(std::sync::mpsc::Sender<()>), count: usize) {
     let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
-    for _ in 0..count {
+    for arrived in 0..count {
         spawn(started_tx.clone());
+        if let Err(e) = started_rx.recv_timeout(Duration::from_millis(REACH_WORKER_MS)) {
+            panic!(
+                "saturating task {} of {count} did not reach a worker within \
+                 {REACH_WORKER_MS}ms ({e:?}); {arrived} of {count} had already \
+                 arrived. Each task is spawned only after the previous one is \
+                 ON a worker, so a free worker existed for this one and tokio \
+                 had a ready task to poll",
+                arrived + 1,
+            );
+        }
     }
     drop(started_tx);
-    for _ in 0..count {
-        started_rx
-            .recv_timeout(Duration::from_millis(REACH_WORKER_MS))
-            .expect("every saturating task reaches a worker within its budget");
-    }
 }
 
 /// A set of held workers, released when the test says so.
