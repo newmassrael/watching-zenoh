@@ -133,7 +133,16 @@ wz-session-core = { path = "../wz-session-core", features = [
     # without this pin the module is configured out and the leg cannot compile
     # — the same shape as the `transport-qos` pin above. It is what puts the
     # namespace whose MID `0x01` is NOT `T_MID_INIT` in reach of a test at all.
-    "codec-scout", "codec-hello"] }
+    "codec-scout", "codec-hello",
+    # R311y900 (open-debt item 406) — the FIELD walker itself.
+    # tests/zenoh_ext_body_foreign_witness.rs feeds bytes two stock zenoh
+    # processes wrote to `dissect::dissect_transport_message` and asserts what
+    # the Z64 extension-body walkers made of them. Every other consumer of that
+    # module in this tree reaches it through `wz-capture`'s own `dissect`
+    # feature, which renders the walk as JSON; a witness that judges a FIELD
+    # VALUE cannot go through a renderer without re-deriving the value it is
+    # judging, so this pin is what puts the typed tree in a test's hands.
+    "dissect"] }
 # R311y501 — the §5.26 REST bridge, driven IN-PROCESS by the wz<->zenohd REST
 # interop leg (tests/wz_rest_zenohd_interop.rs). The leg runs wz's bridge and
 # the real `libzenoh_plugin_rest.so` against ONE zenohd and differentials their

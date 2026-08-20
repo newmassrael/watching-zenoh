@@ -418,7 +418,19 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # no queryable at all and zenoh-pico's hardcodes `complete = false`, so before
 # this round the QueryTarget decision had no foreign adjudicator that could even
 # express its input.
-FOREIGN_ADJUDICATOR_LINKS = 851
+# R311y900 takes it to 853, in the NEW zenoh_ext_body_foreign_witness.rs. ONE
+# leg, TWO links, MEASURED not guessed (851 -> 853 is exactly the two
+# `wz-proves` lines added). It grades `codec-declare` and `codec-request`
+# against a shape no other leg in this tree has: BOTH ENDS OF THE TAPPED
+# CONNECTION ARE FOREIGN. A stock `z_queryable --complete` dials through the
+# tap and a stock `zenohd` forwards a stock `z_get --target ALL_COMPLETE`
+# query back through it, so wz appears only as the reader of the synthesised
+# pcap. Every other foreign witness here puts wz on one half of the wire,
+# which is the right shape for grading an ENCODER and the wrong one for
+# grading a DECODER -- a decoder needs no seat at the table, and open-debt
+# item 406 was filed because the Z64 extension-body walkers had only ever been
+# judged against this tree's own producers.
+FOREIGN_ADJUDICATOR_LINKS = 853
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

@@ -9337,6 +9337,37 @@ layer_ewirez_zenohd_wire_dissection() {
         --test zenohd_wire_dissection -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewirez: the analyzer parsed a real zenohd session, idle and routing"
+
+    # R311y900 (open-debt item 406) — the EXTENSION BODY leg. The two witnesses
+    # above stop at the message: they establish that every message a real
+    # zenohd wrote PARSES, and say nothing about what any FIELD inside one was
+    # read as. The Z64 extension-body walkers (`qos`, `target`,
+    # `queryable_info`, `node_id`, `patch`, `budget`) had been judged by a
+    # producer in this tree and a person's reading of upstream, which are the
+    # two things that agree with each other when both are wrong.
+    #
+    # SAME LANE, SEPARATE `--test` TARGET AND SEPARATE GUARD, because the
+    # prereq is strictly wider: this leg needs zenohd AND the core zenoh
+    # examples, which the same ci.yml job provisions (Layer E5z above it uses
+    # them) but which a developer's tree may lack independently. Folding the
+    # two counts into one `_runci_guarded_test` would make either binary's
+    # absence report as the other's.
+    local core_examples_dir="${WZ_ZENOH_CORE_EXAMPLES_DIR:-$PWD/target/zenohd}"
+    local missing_core_example=""
+    for ex in zenoh_z_queryable zenoh_z_get; do
+        [[ -x "$core_examples_dir/$ex" ]] || missing_core_example="$ex"
+    done
+    if [[ -n "$missing_core_example" ]]; then
+        _z_unavailable "zenoh core example oracle not built \
+($core_examples_dir/$missing_core_example; run: bash scripts/build-zenohd.sh)" || return 1
+        return 0
+    fi
+    _runci_guarded_test "Ewirez stock-zenoh ext bodies" 1 \
+        env WZ_ZENOH_CORE_EXAMPLES_DIR="$core_examples_dir" \
+        cargo test -p wz-integration-tests \
+        --test zenoh_ext_body_foreign_witness -- --ignored --quiet --test-threads=1 \
+        || return 1
+    echo "  Ewirez: the Z64 extension-body walkers read bytes stock zenoh wrote"
 }
 
 layer_e_ap_demo_round_trip() {

@@ -1279,6 +1279,86 @@ impl FlowDissection {
         }
     }
 
+    /// Where a stream message begins: past the framing prefix, and past
+    /// whatever of the unit's batch stands ahead of it.
+    ///
+    /// A BYTE OFFSET into the direction's retained stream, so it is the
+    /// coordinate [`Self::message_bytes`] slices at and the one a listing
+    /// prints beside a row. It is NOT a capture-file offset and not a packet
+    /// index — [`Self::packet_for`] is the door to those.
+    pub fn message_at(frame: &PassiveFrame) -> usize {
+        frame.stream_offset + frame.prefix_width + frame.unit_offset
+    }
+
+    /// The bytes ONE message of this flow was decoded from, sliced out of the
+    /// retained stream.
+    ///
+    /// # Why this is public
+    ///
+    /// R311y900, open-debt item 406. The slice was private to the
+    /// `fields_json` module, which renders every message of a capture as JSON
+    /// — NOT linked, because that module is `#[cfg(feature = "dissect")]` and
+    /// this item is not, so an intra-doc link to it is unresolved in the
+    /// default build and C1bz reds with a budget of zero. Same trap the `mod
+    /// messages` note above this impl records — so the only way to reach a
+    /// walked field tree from outside this crate was to parse that JSON back.
+    /// A witness that wants to
+    /// ASSERT on a field value (a foreign implementation's `qos` byte, say)
+    /// would then be judging a string it had re-derived, and every such
+    /// witness would carry its own copy of this arithmetic. There is one
+    /// correct slice per frame and this is it.
+    ///
+    /// # The three ways it declines, and why prose rather than a code
+    ///
+    /// `Err` carries a sentence because each case is a different statement
+    /// about the CAPTURE rather than about this call: bytes retired ahead of
+    /// the retention window, a framing unit longer than the stream that
+    /// survived, and a batch coordinate past the end of its own unit. A caller
+    /// renders it; nothing branches on it.
+    pub fn message_bytes(&self, frame: &PassiveFrame) -> Result<&[u8], alloc::string::String> {
+        use core::fmt::Write as _;
+
+        let assembler = self.assembler(frame.direction);
+        let stream = assembler.stream();
+        let origin = assembler.retained_from();
+        if frame.stream_offset < origin {
+            let mut why = alloc::string::String::from(
+                "bytes discarded to stay inside the retained stream (from ",
+            );
+            let _ = write!(
+                why,
+                "{origin}, this message begins at {})",
+                frame.stream_offset
+            );
+            return Err(why);
+        }
+        let body = (frame.stream_offset - origin) + frame.prefix_width;
+        let end = body + frame.unit_len;
+        if end > stream.len() {
+            let mut why = alloc::string::String::from("the framing unit declares ");
+            let _ = write!(
+                why,
+                "{} byte(s) and the retained stream holds {}",
+                frame.unit_len,
+                stream.len().saturating_sub(body)
+            );
+            return Err(why);
+        }
+        // The SAME sum the row's `message_at` is rendered from, so the offset a
+        // reader is given is the offset these bytes were taken at.
+        let start = Self::message_at(frame) - origin;
+        if start > end {
+            let mut why = alloc::string::String::from("this message stands ");
+            let _ = write!(
+                why,
+                "{} byte(s) into a unit of {}",
+                frame.unit_offset, frame.unit_len
+            );
+            return Err(why);
+        }
+        Ok(&stream[start..end])
+    }
+
     /// The zenoh context inferred for this flow.
     pub fn context(&self) -> FlowContext {
         self.session.context()

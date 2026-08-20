@@ -146,14 +146,13 @@ fn push_stream_flow(
             out.push(',');
         }
         emitted += 1;
-        let assembler = flow.assembler(frame.direction);
         let at = message_at(frame);
         let _ = write!(
             out,
             "{{\"direction\":\"{}\",\"offset_space\":\"stream_byte\",\"message_at\":{at},",
             dir_name(frame.direction)
         );
-        match message_bytes(assembler.stream(), assembler.retained_from(), frame) {
+        match flow.message_bytes(frame) {
             Err(why) => push_declined(&why, out),
             Ok(bytes) => push_walk(bytes, frame, declarations.map(|d| (d, &spaces)), out),
         }
@@ -328,51 +327,15 @@ fn note(
     }
 }
 
-/// Where a stream message begins: past the framing prefix, and past whatever of
-/// the unit's batch stands ahead of it.
+/// Where a stream message begins, through the crate's one accessor.
+///
+/// R311y900 — the arithmetic and the slice that reads it used to live here,
+/// private, and item 406 needed the slice from OUTSIDE the crate: a witness
+/// asserting on a foreign implementation's field values cannot go through
+/// this renderer's JSON without re-deriving what it is trying to judge. Both
+/// moved to [`crate::FlowDissection`] and this file kept the two call sites.
 fn message_at(frame: &PassiveFrame) -> usize {
-    frame.stream_offset + frame.prefix_width + frame.unit_offset
-}
-
-fn message_bytes<'a>(
-    stream: &'a [u8],
-    origin: usize,
-    frame: &PassiveFrame,
-) -> Result<&'a [u8], String> {
-    if frame.stream_offset < origin {
-        let mut why = String::from("bytes discarded to stay inside the retained stream (from ");
-        let _ = write!(
-            why,
-            "{origin}, this message begins at {})",
-            frame.stream_offset
-        );
-        return Err(why);
-    }
-    let body = (frame.stream_offset - origin) + frame.prefix_width;
-    let end = body + frame.unit_len;
-    if end > stream.len() {
-        let mut why = String::from("the framing unit declares ");
-        let _ = write!(
-            why,
-            "{} byte(s) and the retained stream holds {}",
-            frame.unit_len,
-            stream.len().saturating_sub(body)
-        );
-        return Err(why);
-    }
-    // The SAME sum the row's `message_at` is rendered from, so the offset a
-    // reader is given is the offset these bytes were taken at.
-    let start = message_at(frame) - origin;
-    if start > end {
-        let mut why = String::from("this message stands ");
-        let _ = write!(
-            why,
-            "{} byte(s) into a unit of {}",
-            frame.unit_offset, frame.unit_len
-        );
-        return Err(why);
-    }
-    Ok(&stream[start..end])
+    crate::FlowDissection::message_at(frame)
 }
 
 fn message_name(frame: &PassiveFrame) -> String {

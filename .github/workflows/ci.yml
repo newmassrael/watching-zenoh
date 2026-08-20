@@ -1875,6 +1875,13 @@ jobs:
         # grades the record layer against a real router, not just the transport
         # envelope. Idle leg `[]`, routing leg `["Push", "Push"]`.
         #
+        # R311y900 (open-debt item 406) adds the FIELD leg one level in, and it
+        # needs the core zenoh examples on top of zenohd — which this job
+        # already provisions for Layer E5z directly above. Both halves of its
+        # capture are foreign: a stock `z_queryable --complete` dials through
+        # the tap and a stock `zenohd` forwards a stock `z_get --target`
+        # query back through it, so no wz process is on that wire at all.
+        #
         # Wired HERE because this job is what builds and guarantees zenohd; the
         # same `WZ_Z_REQUIRE` reasoning applies, and the lane's own prereq check
         # turns an absent binary into a FAIL under it.
