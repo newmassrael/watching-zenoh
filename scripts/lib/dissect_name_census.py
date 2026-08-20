@@ -205,11 +205,43 @@ OWN_VOCABULARY = {
     "the acceptor's challenge on an InitAck and the initiator's answer on an "
     "OpenSyn",
     "challenge_len": "as `user_len`, for the ciphertext record",
-    "priority": "which priority a `priority_sn` row belongs to. POSITIONAL on "
-    "the wire -- the body carries no such field -- so it is emitted from the "
-    "index and aliases the row's own span, carrying the zenoh `Priority` "
-    "discriminant rather than a name (a name would be a table with no "
-    "adjudicator behind it)",
+    "priority": "which priority band a message or a `priority_sn` row belongs "
+    "to. TWO emitters, and both carry the BAND'S NAME as a label: the JOIN "
+    "table's rows, where it is POSITIONAL (the body carries no such field, so "
+    "it is emitted from the index and aliases the row's span), and the Z64 "
+    "`qos` reading, where it is the low three bits. The adjudicator behind the "
+    "name is `crate::qos::Priority::name` plus that module's own test pinning "
+    "the eight discriminants to the zenoh-pico constants. R311y898 unified the "
+    "two: this entry used to say a name 'would be a table with no adjudicator "
+    "behind it' and the JOIN row emitted the raw discriminant, which left one "
+    "field name carrying two value KINDS the moment the second emitter landed",
+    # R311y898 -- the Z64 extension BODIES the walker reads. The whole `ExtZint`
+    # encoding had no walker until this round, and three of the rows behind it
+    # are bitfields: the QoS byte, a Request's target, a queryable's info. The
+    # group name in each case is `ext_name`'s own row for the eid (`qos`,
+    # `target`, `queryable_info`); the leaf names below are the sub-fields.
+    "congestion": "the QoS byte's congestion-control field, read from bits 3 "
+    "AND 5 (`QoSType::{D_FLAG, F_FLAG}`). A label rather than a delegation to "
+    "`crate::qos::CongestionControl`, which has two variants where the wire "
+    "has three: bit 5 alone is upstream's `BlockFirst`, and a reading through "
+    "the narrower enum would call it `Drop`",
+    "express": "the QoS byte's express flag, bit 4 -- upstream's own name "
+    "(`QoSType::is_express`)",
+    "undefined_bits": "whatever the reading did NOT account for, emitted only "
+    "when non-zero. Upstream drops these silently (`From<ZExtZ64> for QoSType` "
+    "is `ext.value as u8`), so a walk that showed clean sub-fields for a value "
+    "with a high bit set would be every field correct and the message "
+    "misreported",
+    "target": "which matching queryables a Request is FOR -- upstream's own "
+    "name (`network/request.rs` `ext_target`), as a label because the wire "
+    "carries the enum's discriminant and the reader wants the value. Absent "
+    "rather than guessed for a discriminant upstream rejects",
+    "complete": "whether a declared queryable can serve the whole query by "
+    "itself -- upstream's own field name (`QueryableInfoType { complete, "
+    "distance }`), bit 0 of the z64",
+    "distance": "the hop distance to that queryable, bits 8..24 of the same "
+    "z64 -- upstream's own field name, and the ordering key a BestMatching "
+    "route is chosen by",
 }
 
 # AWAITING: codec fields no walker emits yet, each with WHY. Rule 3 makes closing

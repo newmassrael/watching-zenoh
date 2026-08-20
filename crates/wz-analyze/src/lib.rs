@@ -404,6 +404,29 @@ LINK TYPES READ:
     `messages decoded: 0`, and that is also what a capture with no zenoh
     traffic reports. `--serial <linktype>` declares one of the OTHER types as
     raw serial bytes, which is the way to read a link this list omits.
+
+EXT BODIES READ:
+    ZBuf  Auth/pubkey, Auth/usrpwd, Declare/timestamp,
+          DeclareCommon/wire_expr, Del/source_info, Err/source_info,
+          Init/auth, Init/multi_link, Init/shm, Interest/timestamp,
+          Join/qos, NetworkOam/timestamp, Open/auth,
+          Open/multi_link_syn, Push/timestamp, Put/source_info,
+          Query/query_body, Query/source_info, Request/timestamp,
+          Response/responder_id, Response/timestamp,
+          ResponseFinal/responder_id, ResponseFinal/timestamp
+    Z64   Declare/qos, DeclareQueryable/queryable_info, Fragment/qos,
+          Frame/qos, Interest/qos, NetworkOam/qos, Push/qos,
+          Request/qos, Request/target, Response/qos,
+          ResponseFinal/qos, TransportOam/qos
+    An extension body this list omits is COUNTED and NAMED but not
+    OPENED: the report shows it as `value` -- raw bytes for a ZBuf, one
+    number for a Z64 -- and that reads exactly like `there was no
+    structure here`. Ask here rather than there, for the same reason as
+    LINK TYPES READ above. The rows left out are left out on purpose and
+    each carries a recorded reason: user `attachment` bytes have no
+    declared structure to walk, a `Join` `shm` has no producer in this
+    tree to judge a walker against, and a nonce, a patch level or a
+    reply budget IS the number it carries.
 ";
 
 /// Parse a command line, `argv[0]` already removed.
@@ -5005,6 +5028,80 @@ mod tests {
                 "the help claims {entry} and the dispatch does not read it"
             );
         }
+    }
+
+    /// R311y898, open-debt item 398 — the `LINK TYPES READ:` counterpart one
+    /// level in: which extension BODIES this build opens.
+    ///
+    /// The same failure it defends against, and it is not an analogy: an
+    /// extension nobody walks renders as `value`, which on the report is
+    /// indistinguishable from a body that genuinely held nothing structured.
+    /// The reader could ask which pcap link types this build decodes and could
+    /// NOT ask which extension bodies it reads, because both dispatch tables
+    /// are private to `wz-session-core::dissect`.
+    ///
+    /// Pinned against the RENDERER, in BOTH directions, for both encodings
+    /// that have walkers — never against a second copy of the list. The
+    /// renderer is driven by the dispatch itself
+    /// (`dissect::readable_ext_bodies_line`, whose own test holds it to
+    /// `zbuf_body_walker` / `z64_body_walker`), so help text, renderer and
+    /// dispatch are one fact and a body that gains a reading appears in all
+    /// three on one commit.
+    #[test]
+    fn the_usage_names_every_ext_body_this_build_reads_and_no_other() {
+        assert!(
+            USAGE.contains("EXT BODIES READ:"),
+            "the help must have the section at all"
+        );
+        let mut readable: Vec<String> = Vec::new();
+        for enc in [
+            wz_session_core::ext_header::EXT_ENC_ZBUF,
+            wz_session_core::ext_header::EXT_ENC_Z64,
+        ] {
+            let line = wz_session_core::dissect::readable_ext_bodies_line(enc);
+            assert!(
+                !line.is_empty(),
+                "the dispatch reads nothing at encoding {enc:#x}, so this test \
+                 asserts nothing",
+            );
+            for entry in line.split(", ") {
+                assert!(
+                    USAGE.contains(entry),
+                    "the dissector reads {entry} and the help does not say so"
+                );
+                readable.push(entry.to_string());
+            }
+        }
+        // The other direction: a `<Carrier>/<name>` row in the block that the
+        // dispatch does NOT read. Scanned off the block itself so a row left
+        // behind by a removed walker cannot survive here — the drift the
+        // `SIX link types` comment R311y895 deleted had lived for months.
+        let block = USAGE
+            .split("EXT BODIES READ:")
+            .nth(1)
+            .expect("the section")
+            .split("\n    An extension body")
+            .next()
+            .expect("the rows, before their prose");
+        let mut claimed = 0usize;
+        for token in block.split([',', ' ', '\n']) {
+            let token = token.trim();
+            if !token.contains('/') {
+                continue;
+            }
+            claimed += 1;
+            assert!(
+                readable.iter().any(|r| r == token),
+                "the help claims {token} and the dispatch does not read it"
+            );
+        }
+        assert_eq!(
+            claimed,
+            readable.len(),
+            "every read row must be claimed exactly once: the help lists \
+             {claimed} and the dispatch reads {}",
+            readable.len(),
+        );
     }
 
     /// R311y857 — the flag is in the USAGE, which is what the parity gate reads.

@@ -744,10 +744,17 @@ pub fn walk_ext_entry(
     match enc {
         // ExtUnit — no body bytes at all.
         0 => {}
-        // ExtZint — a single VLE.
+        // ExtZint — a single VLE. The number is the whole body, so a reading
+        // of it ALIASES that span rather than replacing it (R311y898): unlike
+        // a ZBuf body, there is nothing here a walked group could stand in
+        // for, and the packed value stays visible beside its sub-fields.
         1 => {
-            let (_, f) = c.vle_u64("value")?;
+            let (v, f) = c.vle_u64("value")?;
+            let span = f.span;
             fields.push(f);
+            if let Some(read) = walk_ext_z64_body(carrier_kind, header, v, span) {
+                fields.extend(read);
+            }
         }
         // ExtZbuf — a VLE length then that many bytes. Anything else falls
         // through to the codec's own default arm, which is ExtUnit.
@@ -874,6 +881,13 @@ fn walk_ext_zbuf_body(
 /// shares it, which is what lets [`zbuf_body_walker`] be a lookup.
 type ZbufBodyWalker = fn(&mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError>;
 
+/// One Z64 body walker: the decoded value and the span it aliases in, its
+/// sub-fields out. `None` is DECLINE — a value upstream itself rejects
+/// (R311y898) — and takes no cursor because a Z64 body is already read: the
+/// walker reads BITS of a number, not bytes off the wire, which is why nothing
+/// here can consume more than the ext entry did.
+type Z64BodyWalker = fn(u64, Span) -> Option<Vec<Field>>;
+
 /// One dispatch hit — the group name the body is filed under, and the walker.
 ///
 /// A FUNCTION rather than a bare tuple, and that is not style. The field-name
@@ -988,6 +1002,258 @@ fn zbuf_body_walker(
         _ => return None,
     };
     Some(hit)
+}
+
+/// The Z64 extension bodies this build can READ, decoded into their sub-fields
+/// beside the packed `value`.
+///
+/// # The gap this closes
+///
+/// R311y898. Every walker above reads a ZBuf body, and after four rounds of
+/// them the ZBuf axis is decided row by row — walked, or listed in
+/// `OPAQUE_ZBUF_BODIES` with a reason. The `ExtZint` arm of
+/// [`walk_ext_entry`] never had a walker at ALL, so it was not one undecided
+/// row but a whole ENCODING nobody had asked the question of, and the rows
+/// behind it are not scalars:
+///
+/// * `qos` — the QoS byte, which every network message and three transport
+///   messages carry. Priority, congestion control and the express flag are
+///   packed into six bits, and the surface rendered `value: 28`. "What
+///   priority was this published at" is the most ordinary question a capture
+///   is opened with, and it was one number away from being answerable.
+/// * `target` (`Request`) — which queryables a query is FOR. Three named
+///   values, rendered as `value: 2`.
+/// * `queryable_info` (`DeclareQueryable`) — the completeness flag and hop
+///   distance a BestMatching route is chosen by, packed one and sixteen bits
+///   into the same number.
+///
+/// The rest of the Z64 rows genuinely ARE the number they carry;
+/// `dissect::tests`'s `SCALAR_Z64_BODIES` says so one row at a time and
+/// [`every_z64_row_is_either_walked_or_declared_scalar`] holds that set
+/// against [`z64_body_walker`] both ways round, exactly as the ZBuf sweep
+/// does. The prose-paragraph form of that list is what went stale three rows
+/// out of three on the other axis (R311y894 / y896 / y897), so this axis is
+/// born with the set rather than the paragraph.
+///
+/// # Where each layout's first implementation is
+///
+/// | body | this tree's SSOT | upstream |
+/// |---|---|---|
+/// | `qos` priority / express | [`crate::sample::QosLevel`] | `network/mod.rs` `QoSType` |
+/// | `qos` congestion | ⚠ PARTIAL — see below | the same |
+/// | `target` | ⚠ PARTIAL — [`crate::query_mode::QueryTarget`] | `zenoh-codec` `network/request.rs:59-67` |
+/// | `queryable_info` | [`crate::queryable_info`] | `zenoh-codec` `network/declare.rs:562-578` |
+///
+/// ⚠ TWO of these read a value this tree's own typed enum CANNOT NAME, and
+/// the walker follows the WIRE rather than the enum — an observer that
+/// re-rendered a peer's bytes through a narrower vocabulary would report a
+/// message nobody sent:
+///
+/// * congestion has THREE states upstream — `Drop`, `Block`, and
+///   `BlockFirst` at bit 5 (`QoSType::{D_FLAG, E_FLAG, F_FLAG}`,
+///   `get_congestion_control`'s `(false, true)` arm). This tree's
+///   [`crate::qos::CongestionControl`] has two, so a `BlockFirst` byte
+///   decodes here as `BlockFirst` and through `QosLevel::congestion()` as
+///   `Drop`. `a_qos_byte_that_blocks_only_the_first_is_read_as_neither_drop_nor_block`
+///   pins that divergence so it reds on the round the product closes it.
+/// * `target` has three values upstream and `QueryTarget` carries the two
+///   that a wz `get` can ASK for; `BestMatching` (0) is upstream's DEFAULT
+///   and omitted from the wire when unset, so a capture from any other
+///   implementation can still carry it explicitly.
+///
+/// # Bits nobody reads are NAMED, not dropped
+///
+/// A reading covers a MASK of the value, never all 64 bits, and upstream
+/// silently discards the remainder — `From<ZExtZ64> for QoSType` is
+/// `ext.value as u8`, and `queryable_info` reads bit 0 plus bits 8..24. A
+/// walker that showed six clean sub-fields for a value with bit 40 set would
+/// be the [`walk_oam`] failure in miniature: every field correct and the
+/// message misreported. So the leftover appears as `undefined_bits` whenever
+/// it is non-zero, and a reader can see there was something the reading did
+/// not account for.
+fn walk_ext_z64_body(
+    carrier_kind: crate::ext_name::ExtCarrier,
+    header: u8,
+    value: u64,
+    span: Span,
+) -> Option<Vec<Field>> {
+    let name = crate::ext_name::ext_name(carrier_kind, header)?;
+    let (_, walker) = z64_body_walker(carrier_kind, name)?;
+    walker(value, span)
+}
+
+/// WHICH walker a `(carrier, name)` Z64 row selects, or `None` when this build
+/// reads the value as the scalar it is.
+///
+/// The Z64 twin of [`zbuf_body_walker`], and public to this module for the
+/// same reason: the sweep asks the DISPATCH, not the walk. A walker that
+/// declines a body (`target` at value 7) is indistinguishable from an absent
+/// one once the answer is `None`, so a sweep driven through
+/// [`walk_ext_z64_body`] would need a valid value per row and would pass every
+/// row whose layout the author guessed wrong.
+///
+/// The group name is returned so the sweep can pin the SET of walkers the
+/// dispatch is reachable at (R311y897's anti-vacuity shape) rather than a
+/// count that weakens every time a row gains a reading.
+fn z64_body_walker(
+    carrier: crate::ext_name::ExtCarrier,
+    name: &str,
+) -> Option<(&'static str, Z64BodyWalker)> {
+    use crate::ext_name::ExtCarrier as C;
+    let hit: (&'static str, Z64BodyWalker) = match (carrier, name) {
+        // `qos` is Z64 on every carrier that declares it EXCEPT `Init` and
+        // `Open`, where it is a UNIT presence marker, and `Join`, where it is
+        // the ZBuf per-priority table `walk_join_qos_body` reads. Same name,
+        // three encodings, which is why the dispatch is keyed on both.
+        (
+            C::Frame
+            | C::Fragment
+            | C::TransportOam
+            | C::Push
+            | C::Request
+            | C::Response
+            | C::ResponseFinal
+            | C::Declare
+            | C::Interest
+            | C::NetworkOam,
+            "qos",
+        ) => ("qos", read_qos_z64),
+        (C::Request, "target") => ("target", read_target_z64),
+        (C::DeclareQueryable, "queryable_info") => ("queryable_info", read_queryable_info_z64),
+        _ => return None,
+    };
+    Some(hit)
+}
+
+/// The QoS byte: priority in the low three bits, congestion across bits 3 and
+/// 5, express at bit 4.
+///
+/// Never declines. Upstream's `From<ZExtZ64> for QoSType` is `ext.value as u8`
+/// — it accepts any value and truncates — so a reading that refused would hide
+/// the QoS of a message the peer beside it accepted. The bits above the six
+/// defined ones come back as `undefined_bits` instead.
+fn read_qos_z64(value: u64, span: Span) -> Option<Vec<Field>> {
+    /// Priority, `nodrop`, express, `blockfirst` — the six bits a reading here
+    /// accounts for (`QoSType::{P_MASK, D_FLAG, E_FLAG, F_FLAG}`).
+    const READ_MASK: u64 = 0x3F;
+    const D_FLAG: u64 = 0x08;
+    const E_FLAG: u64 = 0x10;
+    const F_FLAG: u64 = 0x20;
+
+    let priority = crate::qos::Priority::from_wire((value & 0x07) as u8);
+    // Upstream's `get_congestion_control` in its own order: `D` set means
+    // `Block` whatever `F` says, `F` alone means `BlockFirst`, neither means
+    // `Drop`. `crate::qos::CongestionControl` cannot name the third, so this
+    // is a `&str` from the WIRE rather than a delegation — see the module doc.
+    let congestion = match (value & D_FLAG != 0, value & F_FLAG != 0) {
+        (true, _) => "Block",
+        (false, true) => "BlockFirst",
+        (false, false) => "Drop",
+    };
+    let mut out = alloc::vec![
+        label("priority", span, priority.name()),
+        label("congestion", span, congestion),
+        flag("express", span, value & E_FLAG != 0),
+    ];
+    if value & !READ_MASK != 0 {
+        out.push(bits("undefined_bits", span, value & !READ_MASK));
+    }
+    Some(out)
+}
+
+/// A `Request`'s `target`: which matching queryables the query is for.
+///
+/// DECLINES an unknown value, and that is upstream's own behaviour rather than
+/// a choice made here — `zenoh-codec`'s `network/request.rs:59-67` returns
+/// `DidntRead` for anything but `0`, `1`, `2`, so the whole message is
+/// rejected. A reading that invented a fourth target would describe a query
+/// no peer would run.
+fn read_target_z64(value: u64, span: Span) -> Option<Vec<Field>> {
+    let named = match value {
+        0 => "BestMatching",
+        1 => "All",
+        2 => "AllComplete",
+        _ => return None,
+    };
+    Some(alloc::vec![label("target", span, named)])
+}
+
+/// A `DeclareQueryable`'s `queryable_info`: the complete flag at bit 0 and the
+/// hop distance at bits 8..24, which is exactly what
+/// [`crate::queryable_info`]'s `COMPLETE_FLAG` / `DISTANCE_SHIFT` pack and
+/// upstream's `network/declare.rs:575-576` unpacks.
+///
+/// Never declines: upstream masks the flag out of the low byte and shifts the
+/// distance out with `as u16`, accepting every value. The seven other bits of
+/// the low byte and everything above bit 23 are what upstream drops, so they
+/// come back named.
+fn read_queryable_info_z64(value: u64, span: Span) -> Option<Vec<Field>> {
+    /// Bit 0 plus bits 8..24 — the flag and the `u16` distance.
+    const READ_MASK: u64 = 0x00FF_FF01;
+
+    let mut out = alloc::vec![
+        flag("complete", span, value & 0x01 != 0),
+        bits("distance", span, (value >> 8) & 0xFFFF),
+    ];
+    if value & !READ_MASK != 0 {
+        out.push(bits("undefined_bits", span, value & !READ_MASK));
+    }
+    Some(out)
+}
+
+/// Every extension BODY this build READS at `enc`, as `<Carrier>/<name>` rows
+/// in sorted order — the answer to "what does this dissector actually open".
+///
+/// # The gap this closes
+///
+/// R311y898, open-debt item 398. R311y895 made the reader able to ask which
+/// pcap LINK TYPES this build decodes, for a measured reason: an unread capture
+/// reports `messages decoded: 0`, and so does a capture with no zenoh traffic
+/// in it, so a reader who cannot ask has no way to tell "I opened the wrong
+/// file" from "there was nothing there". The extension layer has the identical
+/// shape one level in — a body nobody walks renders as `value: <hex>` or
+/// `value: <n>`, which reads as "there was nothing structured here" — and it
+/// had no such question, because both dispatch tables are private to this
+/// module.
+///
+/// # Driven BY the dispatch, never beside it
+///
+/// The rows come from `crate::ext_name` and the decision from
+/// [`zbuf_body_walker`] / [`z64_body_walker`], so this cannot drift from what
+/// the walker does: a body that gains a reading appears here on the same
+/// commit, and one that loses it disappears. A hand-kept list would be the
+/// third copy of a fact this module has already had go stale twice
+/// (`OPAQUE_ZBUF_BODIES`' prose ancestor, and `wz-analyze`'s "SIX link types"
+/// comment R311y895 replaced).
+///
+/// Unknown encodings render EMPTY rather than panicking: `EXT_ENC_UNIT` has no
+/// body to read, and a caller asking about it should be told "nothing", which
+/// is true.
+pub fn readable_ext_bodies_line(enc: u8) -> String {
+    use core::fmt::Write as _;
+    let mut rows: Vec<String> = Vec::new();
+    for carrier in crate::ext_name::ALL_CARRIERS {
+        for (_, _, row_enc, name) in crate::ext_name::rows(*carrier) {
+            if *row_enc != enc {
+                continue;
+            }
+            let reads = match enc {
+                crate::ext_header::EXT_ENC_ZBUF => zbuf_body_walker(*carrier, name).is_some(),
+                crate::ext_header::EXT_ENC_Z64 => z64_body_walker(*carrier, name).is_some(),
+                _ => false,
+            };
+            if !reads {
+                continue;
+            }
+            let mut row = String::new();
+            let _ = write!(row, "{carrier:?}/{name}");
+            if !rows.contains(&row) {
+                rows.push(row);
+            }
+        }
+    }
+    rows.sort_unstable();
+    rows.join(", ")
 }
 
 /// The `0x3` auth extension's body — the inner chain of per-method sub-exts,
@@ -1204,8 +1470,19 @@ fn walk_join_qos_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> 
             "priority_sn",
             span.start,
             span.end,
+            // R311y898 — the BAND'S NAME, not its discriminant. This emitted
+            // `bits` until the Z64 `qos` reading landed a second `priority`
+            // emitter carrying a label, and one field name holding two value
+            // KINDS is a consumer that must know which walker produced it.
+            // Unified upward rather than down: `crate::qos::Priority::name` is
+            // pinned to the zenoh-pico constants by `qos`'s own test, so the
+            // name has an adjudicator behind it.
             alloc::vec![
-                bits("priority", span, priority as u64),
+                label(
+                    "priority",
+                    span,
+                    crate::qos::Priority::from_wire(priority as u8).name(),
+                ),
                 reliable,
                 best_effort
             ],
@@ -5426,10 +5703,23 @@ mod tests {
             crate::qos::Priority::NUM,
             "one SN pair per priority",
         );
+        // The eight band names in WIRE order, typed out rather than derived
+        // from `Priority::name` — an expectation read off the function under
+        // test would agree with it however it was renumbered (R311y898).
+        const BANDS: [&str; crate::qos::Priority::NUM] = [
+            "Control",
+            "RealTime",
+            "InteractiveHigh",
+            "InteractiveLow",
+            "DataHigh",
+            "Data",
+            "DataLow",
+            "Background",
+        ];
         for (priority, (expected, pair)) in JOIN_QOS_TABLE.iter().zip(pairs.iter()).enumerate() {
             assert_eq!(
-                bits_of(pair, "priority"),
-                priority as u64,
+                pair.find("priority").map(|f| f.value.clone()),
+                Some(FieldValue::Label(Cow::Borrowed(BANDS[priority]))),
                 "the table is positional and runs Control (0) first",
             );
             assert_eq!(uint(pair, "next_sn_reliable"), expected.0);
@@ -5849,6 +6139,503 @@ mod tests {
             );
             assert!(!why.is_empty(), "{carrier:?}/{name}: a row needs a reason");
         }
+    }
+
+    // ── R311y898: the Z64 AXIS. Every walker above reads a ZBuf body. The
+    // `ExtZint` arm of `walk_ext_entry` has never had one, so a Z64 extension
+    // renders as `value: <n>` whatever structure that number holds — and three
+    // of the rows upstream declares are not scalars at all.
+
+    /// A `Push` carrying one `qos` Z64 ext with this packed value, walked.
+    fn push_with_qos(packed: u64) -> Field {
+        let push = concat(&[
+            alloc::vec![0x1Du8 | 0x80],
+            wireexpr(1, None),
+            ext_zint(0x1, true, packed),
+            ext_zint(0x3 | crate::ext_header::EXT_FLAG_M, false, 9),
+            msg_put(None, None, &[], b"x"),
+        ]);
+        let mut w = SpanCursor::new(&push);
+        let f = group("Push", 0, push.len(), walk_push(&mut w).expect("walk"));
+        assert_tiles(&f, 0, push.len());
+        f
+    }
+
+    /// The `qos` entry of a walked chain under `parent`.
+    fn qos_entry(parent: &Field) -> &Field {
+        entry_named(
+            parent.find("extensions").expect("the chain must be walked"),
+            "qos",
+        )
+        .expect("the qos entry must be named")
+    }
+
+    /// R311y898 — the QoS byte is a BITFIELD, and until this round the field
+    /// layer handed over the packed number.
+    ///
+    /// This is the most ordinary question a capture is opened with — what
+    /// priority, whether the publisher blocks on congestion, whether the
+    /// sample jumped the queue — and all three sat inside `value: 28`.
+    #[test]
+    fn a_pushs_qos_z64_is_read_into_priority_congestion_and_express() {
+        // DataHigh(4) | nodrop(1<<3) | express(1<<4) == 0x1C.
+        let f = push_with_qos(0x1C);
+        let qos = qos_entry(&f);
+        assert_eq!(
+            qos.find("priority").map(|f| f.value.clone()),
+            Some(FieldValue::Label(Cow::Borrowed("DataHigh"))),
+            "the priority sub-field must be READ, not left inside `value`",
+        );
+        assert_eq!(
+            qos.find("congestion").map(|f| f.value.clone()),
+            Some(FieldValue::Label(Cow::Borrowed("Block"))),
+        );
+        assert_eq!(
+            qos.find("express").map(|f| f.value.clone()),
+            Some(FieldValue::Flag(true)),
+        );
+        // The packed value stays visible: a Z64 body IS its bytes, so the
+        // reading aliases the span rather than replacing it.
+        assert_eq!(
+            qos.find("value").map(|f| f.value.clone()),
+            Some(FieldValue::Uint(0x1C)),
+        );
+        // And the whole message still tiles, which is what says the aliasing
+        // claim is true rather than intended.
+        assert_eq!(
+            qos.find("priority").map(|f| f.span),
+            qos.find("value").map(|f| f.span),
+        );
+    }
+
+    /// The three-way congestion field, and the DIVERGENCE it pins.
+    ///
+    /// Upstream congestion is TWO bits: `D_FLAG` (3) means `Block` whatever
+    /// else is set, and `F_FLAG` (5) ALONE means `BlockFirst` — block for the
+    /// first message with this strategy, drop the rest
+    /// (`commons/zenoh-protocol/src/network/mod.rs`, `QoSType::
+    /// get_congestion_control`, whose `(false, true)` arm is that value).
+    ///
+    /// This tree's [`crate::qos::CongestionControl`] has TWO variants, so
+    /// `QosLevel::congestion()` reads bit 3 and nothing else: it calls this
+    /// byte `Drop`. The walker follows the WIRE, so it says `BlockFirst`, and
+    /// the two disagreeing is the point of this test — an observer that
+    /// re-rendered a peer's bytes through the narrower vocabulary would report
+    /// a publisher that drops when it does not. When the product gains the
+    /// third variant this test REDS, which is the round to delete the second
+    /// half of it.
+    #[test]
+    fn a_qos_byte_that_blocks_only_the_first_is_read_as_neither_drop_nor_block() {
+        // Data(5) | F_FLAG(1<<5), with bit 3 CLEAR — the arm a one-bit reading
+        // cannot see.
+        let f = push_with_qos(0x25);
+        let qos = qos_entry(&f);
+        assert_eq!(
+            qos.find("congestion").map(|f| f.value.clone()),
+            Some(FieldValue::Label(Cow::Borrowed("BlockFirst"))),
+            "bit 5 alone is upstream's BlockFirst, not Drop",
+        );
+        assert_eq!(
+            crate::sample::QosLevel::from_raw(0x25).congestion(),
+            crate::qos::CongestionControl::Drop,
+            "this pins the DIVERGENCE: the product's own decoder cannot name \
+             BlockFirst, so it reads this byte as Drop. If this line reds, \
+             `crate::qos::CongestionControl` gained the third variant — \
+             delete this assertion and delegate the walker to it",
+        );
+        // The CONTROL that says bit 3 still dominates, which is upstream's
+        // `(true, _)` arm and not a symmetry a reader would guess.
+        let both = push_with_qos(0x2D);
+        assert_eq!(
+            qos_entry(&both).find("congestion").map(|f| f.value.clone()),
+            Some(FieldValue::Label(Cow::Borrowed("Block"))),
+        );
+    }
+
+    /// Bits no reading covers are NAMED, and this is the leg that separates a
+    /// walker from a plausible one.
+    ///
+    /// Upstream's `From<ZExtZ64> for QoSType` is `ext.value as u8`, so it
+    /// accepts any value and silently drops everything above the byte. A
+    /// reading that showed three clean sub-fields for a value with bit 40 set
+    /// would be every field correct and the message misreported — the
+    /// [`walk_oam`] failure in miniature.
+    #[test]
+    fn a_qos_value_with_bits_no_reading_covers_says_so() {
+        // Data(5) plus bit 6 (undefined in the byte) and bit 40 (outside it).
+        let packed = 0x05 | 0x40 | (1u64 << 40);
+        let f = push_with_qos(packed);
+        let qos = qos_entry(&f);
+        assert_eq!(
+            qos.find("priority").map(|f| f.value.clone()),
+            Some(FieldValue::Label(Cow::Borrowed("Data"))),
+            "the defined bits are still read",
+        );
+        assert_eq!(
+            qos.find("undefined_bits").map(|f| f.value.clone()),
+            Some(FieldValue::Bits(0x40 | (1u64 << 40))),
+            "everything the reading did not account for must be named",
+        );
+
+        // The CONTROL: a value the reading covers WHOLLY grows no such field,
+        // so the name is a signal and not decoration.
+        assert!(
+            push_with_qos(0x05).find("undefined_bits").is_none(),
+            "a fully-read value must not carry an undefined_bits field",
+        );
+    }
+
+    /// A `Request` carrying `node_id` then one `target` Z64 ext, and a bare
+    /// `Query` body — the codec's default arm, which reads its lone header
+    /// byte and nothing more.
+    fn request_with_target(packed: u64) -> Vec<u8> {
+        concat(&[
+            alloc::vec![0x1Cu8 | 0x80],
+            vle(7),
+            wireexpr(0, None),
+            ext_zint(0x3 | crate::ext_header::EXT_FLAG_M, true, 9),
+            ext_zint(0x4 | crate::ext_header::EXT_FLAG_M, false, packed),
+            alloc::vec![0x03u8],
+        ])
+    }
+
+    /// A `Request`'s `target` — which matching queryables the query is FOR,
+    /// three named values that rendered as `value: 2`.
+    #[test]
+    fn a_requests_target_is_read_as_the_queryables_it_selects() {
+        for (packed, named) in [(0u64, "BestMatching"), (1, "All"), (2, "AllComplete")] {
+            let bytes = request_with_target(packed);
+            let f = agree(
+                "Request",
+                &bytes,
+                |b| {
+                    let mut c = SceCursor::new(b);
+                    wz_codecs::request::Request::decode(&mut c).expect("codec rejected");
+                    b.len() - c.remaining()
+                },
+                walk_request,
+            );
+            let chain = f.find("extensions").expect("the chain must be walked");
+            let target = entry_named(chain, "target").expect("the target entry must be named");
+            assert_eq!(
+                target.find("target").map(|f| f.value.clone()),
+                Some(FieldValue::Label(Cow::Borrowed(named))),
+                "target {packed} must be named",
+            );
+        }
+    }
+
+    /// The DECLINE arm, which is upstream's own behaviour and not a choice
+    /// made here: `zenoh-codec`'s `network/request.rs` returns `DidntRead` for
+    /// any target but `0`, `1`, `2`, so the whole `Request` is rejected. A
+    /// reading that invented a fourth target would describe a query no peer
+    /// would run — and, per [`walk_oam`]'s rule, declining must not kill the
+    /// envelope around it either.
+    #[test]
+    fn a_target_value_upstream_rejects_is_not_given_a_name() {
+        let bytes = request_with_target(7);
+        let f = agree(
+            "Request",
+            &bytes,
+            |b| {
+                let mut c = SceCursor::new(b);
+                wz_codecs::request::Request::decode(&mut c).expect("codec rejected");
+                b.len() - c.remaining()
+            },
+            walk_request,
+        );
+        let chain = f.find("extensions").expect("the chain must be walked");
+        let entry = entry_named(chain, "target").expect("the entry is still NAMED");
+        assert!(
+            entry.find("target").is_none(),
+            "an unnamed target value must not be given one",
+        );
+        assert_eq!(
+            entry.find("value").map(|f| f.value.clone()),
+            Some(FieldValue::Uint(7)),
+            "and the raw value must survive the decline",
+        );
+    }
+
+    /// A `DeclareQueryable`'s `queryable_info`: the complete flag at bit 0 and
+    /// the hop distance at bits 8..24 — the two inputs a BestMatching route is
+    /// chosen by, packed into one number.
+    #[test]
+    fn a_declare_queryables_info_is_read_into_complete_and_distance() {
+        // complete | (distance 300 << 8). 300 straddles the byte, so a reading
+        // that shifted by the wrong width lands somewhere visible.
+        let packed = 0x01 | (300u64 << 8);
+        let bytes = concat(&[
+            alloc::vec![0x1Eu8 | 0x20],
+            vle(99),
+            alloc::vec![0x04u8 | 0x20 | 0x80],
+            vle(5),
+            wireexpr(0, Some("c")),
+            ext_zint(0x01, false, packed),
+        ]);
+        let mut w = SpanCursor::new(&bytes);
+        let f = group(
+            "Declare",
+            0,
+            bytes.len(),
+            walk_declare(&mut w).expect("walk"),
+        );
+        assert_tiles(&f, 0, bytes.len());
+        let info = entry_named(
+            f.find("extensions").expect("the chain must be walked"),
+            "queryable_info",
+        )
+        .expect("the queryable_info entry must be named");
+        assert_eq!(
+            info.find("complete").map(|f| f.value.clone()),
+            Some(FieldValue::Flag(true)),
+        );
+        assert_eq!(
+            info.find("distance").map(|f| f.value.clone()),
+            Some(FieldValue::Bits(300)),
+        );
+    }
+
+    /// The `qos` reading reaches the TRANSPORT carriers too, which the network
+    /// tests above cannot show: `Frame` declares `qos` MANDATORY and writes its
+    /// ext chain BEFORE the batch, so a dispatch keyed only on the network
+    /// carriers would leave every frame in a capture unread.
+    #[test]
+    fn a_frames_mandatory_qos_is_read_like_a_pushs() {
+        let record = concat(&[
+            alloc::vec![0x1Du8],
+            wireexpr(1, None),
+            msg_put(None, None, &[], b"aa"),
+        ]);
+        // RealTime(1) | express(1<<4) == 0x11.
+        let frame = concat(&[
+            alloc::vec![0x05u8 | 0x20 | 0x80],
+            vle(1_000_000),
+            ext_zint(0x1 | crate::ext_header::EXT_FLAG_M, false, 0x11),
+            record,
+        ]);
+        let f = dissect_transport_message(&frame, 0).expect("frame did not dissect");
+        assert_tiles(&f, 0, frame.len());
+        let qos = qos_entry(&f);
+        assert_eq!(
+            qos.find("priority").map(|f| f.value.clone()),
+            Some(FieldValue::Label(Cow::Borrowed("RealTime"))),
+        );
+        assert_eq!(
+            qos.find("express").map(|f| f.value.clone()),
+            Some(FieldValue::Flag(true)),
+        );
+    }
+
+    /// The Z64 rows this build reads AS the number they carry, one row per
+    /// `(carrier, upstream name)`, each with the reason.
+    ///
+    /// R311y898, the Z64 twin of [`OPAQUE_ZBUF_BODIES`], and born as a SET for
+    /// the reason that set exists: the paragraph form of the same list went
+    /// stale three rows out of three on the ZBuf axis, each time by describing
+    /// a layer one level away from the row it was filed against.
+    ///
+    /// "Scalar" here means the value IS the answer — a nonce, a version, a
+    /// count, a millisecond budget — so `value: <n>` is already the whole
+    /// reading and a sub-field would be inventing one.
+    const SCALAR_Z64_BODIES: &[(crate::ext_name::ExtCarrier, &str, &str)] = &[
+        (
+            crate::ext_name::ExtCarrier::Init,
+            "qos_link",
+            "upstream declares `QoSLink = zextz64!(0x1, false)` and no codec \
+             anywhere packs or unpacks it — the value is carried whole. \
+             NOTE this is NOT the QoS byte: `Init` puts a UNIT presence marker \
+             at the same id, which is why the dispatch is keyed on the \
+             encoding as well as the name",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Init,
+            "patch",
+            "a protocol patch LEVEL — upstream's `PatchType` is a newtype over \
+             one `u8` whose only reading is `>= 1`",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Join,
+            "patch",
+            "the same `PatchType`, on the multicast carrier",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Open,
+            "shm",
+            "the SHM challenge value the peer must echo — a nonce, and the \
+             `Init` half of the same negotiation is a ZBuf that IS walked",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Push,
+            "node_id",
+            "a routing node id (upstream `NodeIdType`, one `u16` field)",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Interest,
+            "node_id",
+            "the same node id, same rows",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Declare,
+            "node_id",
+            "the same node id, same rows",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Request,
+            "node_id",
+            "the same node id, same rows",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Request,
+            "budget",
+            "how many replies the query will accept — a count",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Request,
+            "timeout",
+            "how long it will wait — milliseconds",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Auth,
+            "usrpwd",
+            "the usrpwd InitAck CHALLENGE — upstream stores this z64 straight \
+             into `state.nonce` and echoes it back \
+             (`establishment/ext/auth/usrpwd.rs`), so the number is the whole \
+             of it. The method's OTHER two encodings on this same id are a \
+             UNIT offer and the ZBuf {user, hmac} R311y897 walked",
+        ),
+    ];
+
+    /// EVERY Z64 row upstream declares is DECIDED: read by
+    /// [`z64_body_walker`], or listed in [`SCALAR_Z64_BODIES`] with a reason.
+    /// Never both, never neither, and no listed row that does not exist.
+    ///
+    /// The Z64 twin of
+    /// [`every_zbuf_row_is_either_walked_or_declared_opaque`], and it reds on
+    /// the same three drifts: a row `crate::ext_name` gains with nobody
+    /// deciding about it, a row that GAINS a reading while its "it is just the
+    /// number" entry still stands, and a row that loses its reading or is
+    /// listed after upstream stopped declaring it.
+    ///
+    /// This axis had no such gate for its whole life because it had no walker
+    /// either — a whole ENCODING nobody had asked the question of, which is
+    /// the state the ZBuf axis was in before R311y890.
+    #[test]
+    fn every_z64_row_is_either_walked_or_declared_scalar() {
+        let mut seen: Vec<(crate::ext_name::ExtCarrier, &str)> = Vec::new();
+        let mut walked_rows: Vec<String> = Vec::new();
+        for carrier in crate::ext_name::ALL_CARRIERS {
+            for (_, _, enc, name) in crate::ext_name::rows(*carrier) {
+                if *enc != crate::ext_header::EXT_ENC_Z64 {
+                    continue;
+                }
+                seen.push((*carrier, name));
+                let walked = z64_body_walker(*carrier, name).is_some();
+                if walked {
+                    walked_rows.push(alloc::format!("{carrier:?}/{name}"));
+                }
+                let scalar = SCALAR_Z64_BODIES
+                    .iter()
+                    .any(|(c, n, _)| c == carrier && n == name);
+                assert!(
+                    walked != scalar,
+                    "{carrier:?}/{name}: a Z64 row must be read XOR declared \
+                     scalar — this one is {}",
+                    if walked {
+                        "BOTH: it has a reading and SCALAR_Z64_BODIES still \
+                         says the number is the whole of it"
+                    } else {
+                        "NEITHER: nobody decided what this build does with it, \
+                         so it renders as one number and says nothing"
+                    },
+                );
+            }
+        }
+        // ANTI-VACUITY as a SET of ROWS, not of walker names and not a count.
+        // The row set is the stronger pin of the two: `qos` is read on TEN
+        // carriers and a group-name set would still be satisfied with nine, so
+        // a dispatch that quietly dropped `Frame` — the carrier every batch in
+        // a capture goes through — would pass.
+        walked_rows.sort_unstable();
+        assert_eq!(
+            walked_rows,
+            alloc::vec![
+                "Declare/qos",
+                "DeclareQueryable/queryable_info",
+                "Fragment/qos",
+                "Frame/qos",
+                "Interest/qos",
+                "NetworkOam/qos",
+                "Push/qos",
+                "Request/qos",
+                "Request/target",
+                "Response/qos",
+                "ResponseFinal/qos",
+                "TransportOam/qos",
+            ],
+            "the sweep must reach every READ Z64 row too, not only the scalar \
+             ones",
+        );
+        // And no entry names a row upstream does not declare — the drift read
+        // from the other end, which the loop above cannot see.
+        for (carrier, name, why) in SCALAR_Z64_BODIES {
+            assert!(
+                seen.contains(&(*carrier, name)),
+                "{carrier:?}/{name} is declared scalar but is not a Z64 row of \
+                 that carrier any more",
+            );
+            assert!(!why.is_empty(), "{carrier:?}/{name}: a row needs a reason");
+        }
+    }
+
+    /// The rendering is the DISPATCH read back, both ways round, for both
+    /// encodings that have walkers — the invariant that lets a consumer's help
+    /// text be pinned to it instead of to a second list (R311y898, item 398).
+    #[test]
+    fn the_readable_ext_bodies_line_is_the_dispatch_read_back() {
+        for (enc, name) in [
+            (crate::ext_header::EXT_ENC_ZBUF, "ZBuf"),
+            (crate::ext_header::EXT_ENC_Z64, "Z64"),
+        ] {
+            let line = readable_ext_bodies_line(enc);
+            let mut rendered: Vec<&str> = line.split(", ").collect();
+            let mut from_dispatch: Vec<String> = Vec::new();
+            for carrier in crate::ext_name::ALL_CARRIERS {
+                for (_, _, row_enc, row) in crate::ext_name::rows(*carrier) {
+                    if *row_enc != enc {
+                        continue;
+                    }
+                    let reads = if enc == crate::ext_header::EXT_ENC_ZBUF {
+                        zbuf_body_walker(*carrier, row).is_some()
+                    } else {
+                        z64_body_walker(*carrier, row).is_some()
+                    };
+                    if reads {
+                        from_dispatch.push(alloc::format!("{carrier:?}/{row}"));
+                    }
+                }
+            }
+            assert!(
+                !from_dispatch.is_empty(),
+                "{name}: the dispatch reads nothing, so this test asserts nothing",
+            );
+            from_dispatch.sort_unstable();
+            rendered.sort_unstable();
+            let expected: Vec<&str> = from_dispatch.iter().map(String::as_str).collect();
+            assert_eq!(
+                rendered, expected,
+                "{name}: the rendering and the dispatch must be one fact",
+            );
+        }
+        // A UNIT extension has no body, so the honest answer is nothing — and
+        // it must be EMPTY rather than a panic or a stale row, because a
+        // consumer asking "what do you read at this encoding" is entitled to
+        // "nothing" as an answer.
+        assert_eq!(
+            readable_ext_bodies_line(crate::ext_header::EXT_ENC_UNIT),
+            "",
+            "a UNIT row carries no body to read",
+        );
     }
 
     /// The `ext_name` label of every `ext` group DIRECTLY under `parent`, in

@@ -69,6 +69,27 @@ impl Priority {
     /// a pre-QoS Frame).
     pub const DEFAULT: Priority = Priority::Data;
 
+    /// The band's NAME, as the upstream constant spells it.
+    ///
+    /// R311y898 — added for the dissect surface's `qos` reading, and put HERE
+    /// rather than in the walker because a second `match` over these eight
+    /// variants is a second place for the vocabulary to drift from the enum.
+    /// A reader of a capture is told `DataHigh`, not `priority 4`, and the
+    /// eight strings are the enum's own variant names so a renamed variant
+    /// moves both at once.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Priority::Control => "Control",
+            Priority::RealTime => "RealTime",
+            Priority::InteractiveHigh => "InteractiveHigh",
+            Priority::InteractiveLow => "InteractiveLow",
+            Priority::DataHigh => "DataHigh",
+            Priority::Data => "Data",
+            Priority::DataLow => "DataLow",
+            Priority::Background => "Background",
+        }
+    }
+
     /// Inverse of [`Self::wire_byte`]: map a wire byte to its `Priority`.
     /// The 3-bit priority field cannot encode a value > 7, so the
     /// out-of-range arm is unreachable from a conforming wire; it clamps to

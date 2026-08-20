@@ -7329,7 +7329,9 @@ layer_c1bw_analyze_cli() {
         quic_pass_tests::a_mid_connection_quic_capture_opens_only_once_the_length_is_declared \
         quic_pass_tests::an_assumed_identity_is_never_reported_as_a_clienthello \
         tests::the_two_unreachable_loss_groups_reach_the_command_line \
-        tests::the_health_flag_is_parsed_and_documented
+        tests::the_health_flag_is_parsed_and_documented \
+        tests::the_usage_names_every_link_type_this_build_reads_and_no_other \
+        tests::the_usage_names_every_ext_body_this_build_reads_and_no_other
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bw FAIL: $name is absent from the wz-analyze lib target"
@@ -8276,6 +8278,27 @@ layer_c1bn_passive_dissection_features() {
         || { echo "$out"; return 1; }
     grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
         echo "  C1bn FAIL: the dissect filter matched no test"; echo "$out"; return 1; }
+
+    # R311y898 — the two SWEEPS of the extension-body axes, pinned BY NAME
+    # rather than left to the count above. Each one is the gate that decides a
+    # whole encoding's rows: `every_z64_row_..` reds when a Z64 row gains or
+    # loses a reading with nobody deciding about it, and
+    # `the_readable_ext_bodies_line_..` is what lets `wz-analyze`'s help be
+    # pinned to the dispatch instead of to a second copy of the list. A count
+    # cannot say WHICH one went missing, and the shape it would go missing in
+    # is one more `#[cfg]` — which is how open-debt item 386's population-0
+    # case arrived, in this same lane.
+    listing="$(cd crates && cargo test -p wz-session-core --features dissect-serde \
+        dissect:: -- --list 2>/dev/null)" \
+        || { echo "  C1bn FAIL: the dissect --list did not run"; return 1; }
+    for name in \
+        dissect::tests::every_zbuf_row_is_either_walked_or_declared_opaque \
+        dissect::tests::every_z64_row_is_either_walked_or_declared_scalar \
+        dissect::tests::the_readable_ext_bodies_line_is_the_dispatch_read_back
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1bn FAIL: $name is absent from the dissect build"; return 1; }
+    done
 
     # R311y897 — the AUTH UNION arm. `dissect` selects no auth method, so the
     # tests that judge a walked auth body against THIS TREE'S OWN producer are
