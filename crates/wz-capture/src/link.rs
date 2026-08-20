@@ -23,6 +23,13 @@ pub const LINKTYPE_IPV4: u32 = 228;
 pub const LINKTYPE_IPV6: u32 = 229;
 /// `LINKTYPE_LINUX_SLL2` — the 20-byte cooked v2 header.
 pub const LINKTYPE_LINUX_SLL2: u32 = 276;
+/// `LINKTYPE_NULL` — BSD loopback encapsulation (`/usr/include/pcap/dlt.h:62`).
+/// What `tcpdump -i lo0` yields on macOS and on every BSD.
+pub const LINKTYPE_NULL: u32 = 0;
+/// `LINKTYPE_LOOP` — OpenBSD's loopback encapsulation
+/// (`/usr/include/pcap/dlt.h:279-289`). Identical to [`LINKTYPE_NULL`] except
+/// that its address-family word is specified in network byte order.
+pub const LINKTYPE_LOOP: u32 = 108;
 /// `LINKTYPE_VSOCK` — AF_VSOCK, captured through the kernel's `vsockmon`
 /// device (`DLT_VSOCK`, `/usr/include/pcap/dlt.h:1448`).
 ///
@@ -1108,8 +1115,64 @@ fn strip_link(link_type: u32, bytes: &[u8]) -> Result<(&[u8], bool), SkipReason>
         }
         LINKTYPE_IPV4 => Ok((bytes, false)),
         LINKTYPE_IPV6 => Ok((bytes, true)),
+        LINKTYPE_NULL | LINKTYPE_LOOP => strip_loopback(bytes),
         other => Err(SkipReason::UnsupportedLinkType(other)),
     }
+}
+
+/// `AF_INET`, which is 2 on every system that has ever written this
+/// encapsulation.
+const BSD_AF_INET: u32 = 2;
+
+/// `AF_INET6`, which is the one number here that is NOT portable: 24 on
+/// NetBSD / OpenBSD, 28 on FreeBSD / DragonFly, 30 on Darwin. A capture does
+/// not record which system wrote it, so all three are read.
+///
+/// Linux's `AF_INET6` (10) is deliberately ABSENT. This is a BSD loopback
+/// encapsulation and Linux does not write it — `tcpdump` refuses 10 here, and a
+/// table that accepted it would be reading a number no producer of this format
+/// emits.
+const BSD_AF_INET6: [u32; 3] = [24, 28, 30];
+
+/// The BSD loopback header: four bytes naming the address family, then the IP
+/// packet.
+///
+/// R311y893. This is the `lo0` capture — the shape a developer's own
+/// `tcpdump -i lo0` produces on macOS, and the one an OpenBSD host writes as
+/// [`LINKTYPE_LOOP`]. Without it every packet of such a file came back
+/// [`SkipReason::UnsupportedLinkType`] and the dissection was empty, which
+/// reads as "this deployment carried no zenoh traffic" — a wrong conclusion
+/// about a working system, reached from a correct number, and the same
+/// under-promise R311y603 removed for `vsock`.
+///
+/// # Both byte orders, and why that is not a guess
+///
+/// [`LINKTYPE_NULL`]'s word is in the byte order of the machine that SAVED the
+/// capture, so a reader may not assume its own. [`LINKTYPE_LOOP`] is specified
+/// as network order (`/usr/include/pcap/dlt.h:280`) and is read the same way
+/// regardless, because `tcpdump` accepts either on both — measured against
+/// `tcpdump 4.99.4` rather than remembered.
+///
+/// Reading both is unambiguous rather than lenient: no member of this table is
+/// the byte-swap of another member, so at most one of the two readings can
+/// name a family. A word neither reading answers to is [`SkipReason::NotIp`],
+/// the same answer the Ethernet arm gives an ethertype it does not carry — the
+/// version nibble behind it is NOT consulted, because a reader that overruled
+/// the header it was handed would be inventing the family rather than reading
+/// it.
+fn strip_loopback(bytes: &[u8]) -> Result<(&[u8], bool), SkipReason> {
+    let Some(word) = bytes.first_chunk::<4>() else {
+        return Err(SkipReason::Truncated);
+    };
+    for af in [u32::from_le_bytes(*word), u32::from_be_bytes(*word)] {
+        if af == BSD_AF_INET {
+            return Ok((&bytes[4..], false));
+        }
+        if BSD_AF_INET6.contains(&af) {
+            return Ok((&bytes[4..], true));
+        }
+    }
+    Err(SkipReason::NotIp)
 }
 
 fn strip_ipv4(bytes: &[u8]) -> Result<IpDatagram<'_>, SkipReason> {
@@ -2216,5 +2279,122 @@ mod tests {
             Ok(Transport::Udp(d)) => assert_eq!(d.payload, b"abc"),
             other => panic!("expected a datagram, got {other:?}"),
         }
+    }
+
+    /// A loopback frame: the four-byte address-family word this DLT puts in
+    /// front of the packet, in the byte order asked for.
+    ///
+    /// `af` is passed as a NUMBER rather than a named constant so a leg can
+    /// build a word this build must refuse; the production table is this
+    /// module's own and a fixture that shared it would agree with the parser
+    /// by construction.
+    fn loopback_frame(af: u32, big_endian: bool, ip: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&if big_endian {
+            af.to_be_bytes()
+        } else {
+            af.to_le_bytes()
+        });
+        out.extend_from_slice(ip);
+        out
+    }
+
+    /// R311y893 — a capture taken on a BSD / macOS **loopback** interface.
+    ///
+    /// # The defect this ends
+    ///
+    /// `tcpdump -i lo0` on macOS, and the same on any BSD, writes
+    /// `LINKTYPE_NULL` (`/usr/include/pcap/dlt.h:62`, "BSD loopback
+    /// encapsulation"); OpenBSD writes `LINKTYPE_LOOP`
+    /// (`/usr/include/pcap/dlt.h:279-289`). Neither was in this table, so every
+    /// packet of such a capture came back `UnsupportedLinkType` and the
+    /// dissection was EMPTY — the reading R311y603 called an under-promise for
+    /// `vsock`, landing here on the most ordinary way there is to capture a
+    /// local zenoh session.
+    ///
+    /// # Why both byte orders, and where the table came from
+    ///
+    /// `LINKTYPE_NULL`'s word is in the byte order of the machine that SAVED
+    /// the capture, so a reader may not assume its own. `LINKTYPE_LOOP` is
+    /// specified as network order (`dlt.h:280`) and is read the same way
+    /// anyway, because `tcpdump` accepts either on both — MEASURED, not
+    /// remembered: `tcpdump 4.99.4` was handed files carrying AF 2, 10, 17, 24,
+    /// 26, 28 and 30 in both orders, and read 2 as IPv4 and 24 / 28 / 30 as
+    /// IPv6 in either order while refusing 10, 17 and 26 outright.
+    #[test]
+    fn a_bsd_loopback_capture_is_read_in_either_byte_order() {
+        const AF_INET_WORD: u32 = 2;
+        let v4 = eth_ipv4_udp([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, b"scout")[14..].to_vec();
+        for link_type in [LINKTYPE_NULL, LINKTYPE_LOOP] {
+            for big_endian in [false, true] {
+                let pkt = loopback_frame(AF_INET_WORD, big_endian, &v4);
+                match decapsulate(link_type, 3, &pkt) {
+                    Ok(Transport::Udp(d)) => {
+                        assert_eq!(d.payload, b"scout", "dlt {link_type} be={big_endian}");
+                        assert_eq!(d.packet_index, 3);
+                        assert_eq!(d.flow.high.port, 7447);
+                    }
+                    other => panic!("dlt {link_type} be={big_endian}: {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// The v6 half, and the three address families that mean it.
+    ///
+    /// `AF_INET6` is the one number that is NOT portable — 24 on
+    /// NetBSD / OpenBSD, 28 on FreeBSD, 30 on Darwin — which is why it is a
+    /// table rather than a constant, and why this leg drives every member.
+    #[test]
+    fn every_bsd_af_inet6_spelling_reaches_the_v6_walk() {
+        let v6 =
+            eth_ipv6(V6_A, V6_B, IP_PROTO_UDP, &udp_body(43210, 7447, b"scout"))[14..].to_vec();
+        for af in [24u32, 28, 30] {
+            for big_endian in [false, true] {
+                let pkt = loopback_frame(af, big_endian, &v6);
+                match decapsulate(LINKTYPE_NULL, 0, &pkt) {
+                    Ok(Transport::Udp(d)) => {
+                        assert_eq!(d.payload, b"scout", "af {af} be={big_endian}");
+                        assert_eq!(d.flow.low.addr(), &V6_A, "af {af}: the v6 walk ran");
+                    }
+                    other => panic!("af {af} be={big_endian}: {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// THE CONTROL, and what stops this from being "skip four bytes".
+    ///
+    /// An implementation that discarded the word and read what follows as IPv4
+    /// would pass both legs above. These three say the word is READ: a family
+    /// this encapsulation does not carry is refused BY NAME, and a v4 body
+    /// under a v6 word is refused rather than walked as the family it happens
+    /// to look like — a reader may not overrule the header it was handed, the
+    /// same rule the Ethernet arm follows for an ethertype.
+    #[test]
+    fn a_loopback_word_this_build_does_not_know_is_refused_by_name() {
+        let v4 = eth_ipv4_udp([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, b"scout")[14..].to_vec();
+        // 10 is Linux's `AF_INET6` and 17 is BSD's `AF_ROUTE`; `tcpdump` reads
+        // neither, and Linux never writes this encapsulation at all.
+        for af in [10u32, 17, 26] {
+            assert_eq!(
+                decapsulate(LINKTYPE_NULL, 0, &loopback_frame(af, false, &v4)),
+                Err(SkipReason::NotIp),
+                "af {af} must be refused, not guessed"
+            );
+        }
+        // The word says IPv6; the body is IPv4. Nothing may come back whole.
+        assert!(
+            !matches!(
+                decapsulate(LINKTYPE_NULL, 0, &loopback_frame(30, false, &v4)),
+                Ok(Transport::Udp(_) | Transport::Tcp(_))
+            ),
+            "a v4 body under a v6 word must not decode"
+        );
+        // And a frame with no room for the word at all.
+        assert_eq!(
+            decapsulate(LINKTYPE_NULL, 0, &[0u8, 0, 0]),
+            Err(SkipReason::Truncated)
+        );
     }
 }

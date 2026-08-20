@@ -808,14 +808,29 @@ fn walk_ext_zbuf_body(
     // (`scripts/lib/dissect_name_census.py`) can see it. Resolving the group
     // name from `ext_name`'s return value would be shorter and would make five
     // names invisible to the gate that exists to decide them.
+    //
+    // R311y893 (open-debt item 376) — the MATCHED name is
+    // `crate::ext_name`'s own constant, not a second spelling of it. The two
+    // sides are a contract between modules and the compiler could not see it:
+    // renaming a row left the arm unmatched and the body quietly back to
+    // `value`. The group name beside it stays a literal, because that half
+    // belongs to the field vocabulary rather than to the table.
     let walked = match name {
-        "source_info" => walk_source_info_body(&mut c).map(|f| group("source_info", base, end, f)),
-        "responder_id" => {
+        crate::ext_name::SOURCE_INFO => {
+            walk_source_info_body(&mut c).map(|f| group("source_info", base, end, f))
+        }
+        crate::ext_name::RESPONDER_ID => {
             walk_responder_id_body(&mut c).map(|f| group("responder_id", base, end, f))
         }
-        "query_body" => walk_query_value_body(&mut c).map(|f| group("query_body", base, end, f)),
-        "wire_expr" => walk_ext_wireexpr_body(&mut c).map(|f| group("wire_expr", base, end, f)),
-        "timestamp" => walk_timestamp(&mut c).map(|f| group("timestamp", base, end, f)),
+        crate::ext_name::QUERY_BODY => {
+            walk_query_value_body(&mut c).map(|f| group("query_body", base, end, f))
+        }
+        crate::ext_name::WIRE_EXPR => {
+            walk_ext_wireexpr_body(&mut c).map(|f| group("wire_expr", base, end, f))
+        }
+        crate::ext_name::TIMESTAMP => {
+            walk_timestamp(&mut c).map(|f| group("timestamp", base, end, f))
+        }
         _ => return None,
     }
     .ok()?;

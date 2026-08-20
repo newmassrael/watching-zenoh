@@ -5823,3 +5823,118 @@ fn a_declared_serial_capture_is_read_and_its_direction_is_measured() {
          {no_nodes}"
     );
 }
+
+/// R311y893 — A LOOPBACK CAPTURE IS READ, through the binary, over a file.
+///
+/// ## The defect
+///
+/// `tcpdump -i lo0` on macOS or on any BSD writes `LINKTYPE_NULL`
+/// (`/usr/include/pcap/dlt.h:62`); OpenBSD's loopback writes `LINKTYPE_LOOP`
+/// (`dlt.h:279-289`). Neither was in `wz_capture::link`'s table, so every
+/// packet of such a file was refused as an unsupported link type and the tool
+/// printed a clean, empty report — the reading that says "this deployment
+/// carried no zenoh traffic" about a deployment that carried it all. Capturing
+/// a router and a peer on one host is the most ordinary thing a person does
+/// with this tool, and on those two families it read nothing.
+///
+/// ## The discriminator
+///
+/// The SAME datagram, three containers: Ethernet, `LINKTYPE_NULL` and
+/// `LINKTYPE_LOOP`. All three must produce the same message row. A build that
+/// grew only the constants — or that skipped four bytes without reading them —
+/// would differ here, and the last leg is what says the four bytes are READ:
+/// an address family this encapsulation does not carry stays unread, and the
+/// skip census names the family rather than the file.
+#[test]
+fn a_bsd_loopback_capture_is_read_through_the_binary() {
+    let scratch = Scratch::new("loopback-dlt");
+    let scout = [0x01u8, 0x09, (3 << 4) | 0x08 | 0x03, 0x11, 0x22, 0x33, 0x44];
+    let eth = udp_packet([127, 0, 0, 1], [127, 0, 0, 1], 43210, 7446, &scout);
+    // The IP packet alone: what a loopback capture carries behind its
+    // four-byte family word, with no Ethernet header in front of it.
+    let ip = &eth[14..];
+
+    // `AF_INET` in the byte order of a little-endian host, which is what a
+    // capture written on an x86 Mac or BSD holds.
+    let mut loopback = vec![2u8, 0, 0, 0];
+    loopback.extend_from_slice(ip);
+    // `AF_APPLETALK` — a family this encapsulation can legally name and that
+    // carries no IP at all. The control.
+    let mut foreign = vec![16u8, 0, 0, 0];
+    foreign.extend_from_slice(ip);
+
+    let file = |name: &str, dlt: u32, packet: &[u8]| {
+        scratch.write(name, &wz_capture::pcap::write(dlt, &[(0, 1_000, packet)]))
+    };
+    let on_eth = file("eth.pcap", wz_capture::link::LINKTYPE_ETHERNET, &eth);
+    let on_null = file("null.pcap", wz_capture::link::LINKTYPE_NULL, &loopback);
+    let on_loop = file("loop.pcap", wz_capture::link::LINKTYPE_LOOP, &loopback);
+    let on_foreign = file("foreign.pcap", wz_capture::link::LINKTYPE_NULL, &foreign);
+
+    let run = |path: &std::path::Path| {
+        String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                .arg(path)
+                .arg("--fields")
+                .arg("--health")
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned()
+    };
+    // The line the report prints when a whole file was refused for its
+    // container. Spelled here as the RENDERING spells it: an assertion on a
+    // phrase this tool never emits could not fail, and the first draft of this
+    // test asserted on one.
+    const REFUSED_FOR_ITS_CONTAINER: &str = "link type(s) not read by this build";
+
+    let baseline = run(&on_eth);
+    // ANTI-VACUITY: the Ethernet side must really carry a message, or "the
+    // same as Ethernet" compares two empty listings. `Init` and not `Scout`
+    // because this datagram is addressed to a host rather than to the
+    // discovery group -- the namespace a message is read in is the
+    // DESTINATION's property, and a loopback capture is unicast by nature.
+    assert!(
+        baseline.contains("] Init") && baseline.contains("messages decoded: 1"),
+        "the Ethernet baseline must walk the message: {baseline}"
+    );
+    for (name, path) in [("LINKTYPE_NULL", &on_null), ("LINKTYPE_LOOP", &on_loop)] {
+        // The WHOLE report, not a phrase in it. Everything downstream of the
+        // decapsulation is the same bytes, so anything at all that differs is
+        // a difference the container made, and a `contains` would let most of
+        // them through.
+        assert_eq!(
+            run(path),
+            baseline,
+            "{name}: the same datagram, read out of a different container, \
+             must produce the same report"
+        );
+    }
+
+    // THE CONTROL. A family this build does not carry is still refused, and
+    // refused for the FAMILY rather than for the file's link type -- which is
+    // what separates "the word was read" from "four bytes were skipped".
+    let refused = run(&on_foreign);
+    assert!(
+        refused.contains("messages decoded: 0"),
+        "an AppleTalk frame holds no zenoh and must not decode: {refused}"
+    );
+    assert!(
+        !refused.contains(REFUSED_FOR_ITS_CONTAINER),
+        "the LINK TYPE is supported now; it is the address family that is \
+         not, and reporting the container would send a reader to fix the \
+         wrong thing: {refused}"
+    );
+    assert!(
+        refused.contains("1 not IP"),
+        "and the refusal must land in the bucket that names WHAT was wrong \
+         with it, the same place an ARP frame lands: {refused}"
+    );
+    // And the SAME assertion run against the file that does decode, so the
+    // line above is a discriminator rather than furniture every run prints.
+    assert!(
+        run(&on_null).contains("0 not IP"),
+        "a loopback capture this build reads must leave that bucket empty"
+    );
+}

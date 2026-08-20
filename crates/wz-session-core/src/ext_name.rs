@@ -63,6 +63,44 @@
 
 use crate::ext_header::{ext_eid, EXT_ENC_UNIT, EXT_ENC_Z64, EXT_ENC_ZBUF, EXT_FLAG_M};
 
+/// The names of the extensions whose BODY a walker reads, rather than merely
+/// naming — the five `crate::dissect` dispatches on.
+///
+/// A code span and NOT an intra-doc link, for the reason this module is
+/// unconditional and that one is not: `dissect` is behind its own feature, so
+/// the link is unresolved in every build a reader would run, and Layer C1bz
+/// counts exactly that.
+///
+/// # Why these five are constants and the other rows are literals
+///
+/// R311y893, open-debt item 376. Every other row's name is read by a person and
+/// by nothing else, so a literal is the whole of what it needs. These five are
+/// a CONTRACT between two modules: `dissect::walk_ext_zbuf_body` matches the
+/// string this table returns to decide which body layout to walk. Spelled twice
+/// that contract is invisible to the compiler — a row renamed here left the
+/// walker's arm unmatched and the body silently back to opaque `value`, and a
+/// typo in a NEW arm is dead code no build complains about.
+///
+/// MEASURED before this change, and the measurement is why the fix is shaped
+/// this way rather than as a gate: renaming all five rows reds five dedicated
+/// walker tests in `dissect::tests`, one per name. The binding was already
+/// caught; what it was not, was VISIBLE. One constant makes the rename carry
+/// the arm with it, which removes the failure mode instead of detecting it.
+///
+/// These are NOT the dissector's field names. A walked body is grouped under a
+/// literal at the call site on purpose, because `dissect_name_census.py` reads
+/// those literals to decide the field vocabulary; the two spaces are separately
+/// owned and only happen to agree today.
+pub const SOURCE_INFO: &str = "source_info";
+/// See [`SOURCE_INFO`].
+pub const RESPONDER_ID: &str = "responder_id";
+/// See [`SOURCE_INFO`].
+pub const QUERY_BODY: &str = "query_body";
+/// See [`SOURCE_INFO`].
+pub const WIRE_EXPR: &str = "wire_expr";
+/// See [`SOURCE_INFO`].
+pub const TIMESTAMP: &str = "timestamp";
+
 /// `false` spelled out, so a row's third column reads as the mandatory flag
 /// rather than as an unexplained bare `false`.
 const OPT: bool = false;
@@ -202,7 +240,7 @@ const TRANSPORT_OAM: &[Row] = &[(0x1, MAND, EXT_ENC_Z64, "qos")];
 /// `network/request.rs`. `node_id` is the MANDATORY one.
 const NETWORK_COMMON: &[Row] = &[
     (0x1, OPT, EXT_ENC_Z64, "qos"),
-    (0x2, OPT, EXT_ENC_ZBUF, "timestamp"),
+    (0x2, OPT, EXT_ENC_ZBUF, TIMESTAMP),
     (0x3, MAND, EXT_ENC_Z64, "node_id"),
 ];
 
@@ -210,7 +248,7 @@ const NETWORK_COMMON: &[Row] = &[
 /// query DOES. `target` is mandatory; `budget` and `timeout` are not.
 const REQUEST: &[Row] = &[
     (0x1, OPT, EXT_ENC_Z64, "qos"),
-    (0x2, OPT, EXT_ENC_ZBUF, "timestamp"),
+    (0x2, OPT, EXT_ENC_ZBUF, TIMESTAMP),
     (0x3, MAND, EXT_ENC_Z64, "node_id"),
     (0x4, MAND, EXT_ENC_Z64, "target"),
     (0x5, OPT, EXT_ENC_Z64, "budget"),
@@ -221,18 +259,18 @@ const REQUEST: &[Row] = &[
 /// neither the encoding NOR the mandatory flag of `NodeId`.
 const RESPONSE: &[Row] = &[
     (0x1, OPT, EXT_ENC_Z64, "qos"),
-    (0x2, OPT, EXT_ENC_ZBUF, "timestamp"),
-    (0x3, OPT, EXT_ENC_ZBUF, "responder_id"),
+    (0x2, OPT, EXT_ENC_ZBUF, TIMESTAMP),
+    (0x3, OPT, EXT_ENC_ZBUF, RESPONDER_ID),
 ];
 
 /// `network/oam.rs` — QoS and Timestamp only; OAM carries no node id.
 const NETWORK_OAM: &[Row] = &[
     (0x1, OPT, EXT_ENC_Z64, "qos"),
-    (0x2, OPT, EXT_ENC_ZBUF, "timestamp"),
+    (0x2, OPT, EXT_ENC_ZBUF, TIMESTAMP),
 ];
 
 /// `network/declare.rs` `common::ext` — `WireExprExt`, `zextzbuf!(0x0f, true)`.
-const DECLARE_COMMON: &[Row] = &[(0x0f, MAND, EXT_ENC_ZBUF, "wire_expr")];
+const DECLARE_COMMON: &[Row] = &[(0x0f, MAND, EXT_ENC_ZBUF, WIRE_EXPR)];
 
 /// `network/declare.rs` `queryable::ext`.
 const DECLARE_QUERYABLE: &[Row] = &[(0x01, OPT, EXT_ENC_Z64, "queryable_info")];
@@ -240,7 +278,7 @@ const DECLARE_QUERYABLE: &[Row] = &[(0x01, OPT, EXT_ENC_Z64, "queryable_info")];
 /// `zenoh/put.rs` — `shm` is `zextunit!(0x2, true)`, the mandatory marker that
 /// says the payload slot holds an ADDRESS.
 const PUT: &[Row] = &[
-    (0x1, OPT, EXT_ENC_ZBUF, "source_info"),
+    (0x1, OPT, EXT_ENC_ZBUF, SOURCE_INFO),
     (0x2, MAND, EXT_ENC_UNIT, "shm"),
     (0x3, OPT, EXT_ENC_ZBUF, "attachment"),
 ];
@@ -248,7 +286,7 @@ const PUT: &[Row] = &[
 /// `zenoh/del.rs` — `Attachment` moves DOWN to `0x2` because `Del` has no SHM
 /// marker; a table keyed on the id alone would call it `shm`.
 const DEL: &[Row] = &[
-    (0x1, OPT, EXT_ENC_ZBUF, "source_info"),
+    (0x1, OPT, EXT_ENC_ZBUF, SOURCE_INFO),
     (0x2, OPT, EXT_ENC_ZBUF, "attachment"),
 ];
 
@@ -256,14 +294,14 @@ const DEL: &[Row] = &[
 /// (`ValueType<{ ZExtZBuf::<0x03>::id(false) }, 0x04>`), the ext a reader that
 /// looks only at the message body never finds.
 const QUERY: &[Row] = &[
-    (0x1, OPT, EXT_ENC_ZBUF, "source_info"),
-    (0x3, OPT, EXT_ENC_ZBUF, "query_body"),
+    (0x1, OPT, EXT_ENC_ZBUF, SOURCE_INFO),
+    (0x3, OPT, EXT_ENC_ZBUF, QUERY_BODY),
     (0x5, OPT, EXT_ENC_ZBUF, "attachment"),
 ];
 
 /// `zenoh/err.rs` — `SourceInfo` and the SHM marker, no attachment.
 const ERR: &[Row] = &[
-    (0x1, OPT, EXT_ENC_ZBUF, "source_info"),
+    (0x1, OPT, EXT_ENC_ZBUF, SOURCE_INFO),
     (0x2, MAND, EXT_ENC_UNIT, "shm"),
 ];
 
