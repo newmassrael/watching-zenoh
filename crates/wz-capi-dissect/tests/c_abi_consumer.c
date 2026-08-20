@@ -33,13 +33,14 @@
 int main(void) {
     /* The symbol/memory-contract revision. A consumer refuses a library whose
      * memory rules moved; this asserts the value the header was written for. */
-    /* R311y885 -- 7 since wz_dissect_pcap_census_bounded joined the symbol
-     * set. This header's contract is the symbol SET, not a symbol's signature,
-     * so adding one moves the revision; the two statements of that contract had
-     * drifted and were reconciled in R311y748. The census DOCUMENT gained a
-     * dropped_by_limits key in the same round and that moves nothing here, on
-     * the same rule read the other way. */
-    CHECK(wz_dissect_abi_version() == 7, "abi version is %d, expected 7",
+    /* R311y887 -- 8 since wz_dissect_pcap_census_where_limited joined the
+     * symbol set. This header's contract is the symbol SET, not a symbol's
+     * signature, so adding one moves the revision; the two statements of that
+     * contract had drifted and were reconciled in R311y748. The census DOCUMENT
+     * gained a dropped_by_limits key in R311y885 and the WZ_DISSECT_LIMITS_*
+     * constants arrived here, and neither moves this number: a document key is
+     * read by name and a constant is compiled in, while a symbol is linked. */
+    CHECK(wz_dissect_abi_version() == 8, "abi version is %d, expected 8",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
@@ -203,6 +204,44 @@ int main(void) {
           census);
     wz_dissect_string_free(capped);
     wz_dissect_string_free(census);
+
+    /* R311y887 -- the PARAMETERISED census door, and the claim that matters at
+     * this boundary: the preset really is an argument.
+     *
+     * The Rust side owns the byte-for-byte equalities against the three named
+     * doors. This file owns what only C can say: that the symbol is in the
+     * cdylib with the signature the header declares, that the two
+     * WZ_DISSECT_LIMITS_* macros a consumer compiles in are the values the
+     * library reads, and that an UNKNOWN preset is refused rather than falling
+     * back to unbounded -- the failure that would hand a caller an uncapped
+     * read while it believed otherwise. */
+    char *limited = NULL;
+    rc = wz_dissect_pcap_census_where_limited(pcap, sizeof pcap, "",
+                                              WZ_DISSECT_LIMITS_LIVE_TAP,
+                                              &limited);
+    CHECK(rc == WZ_DISSECT_OK, "census_where_limited rc=%d", rc);
+    CHECK(limited != NULL, "OK came back with no string");
+    CHECK(strstr(limited, "\"keyexprs\"") != NULL,
+          "the limited door did not hand back a census: %s", limited);
+    CHECK(strstr(limited, "\"dropped_by_limits\"") != NULL,
+          "a bounded census that cannot say what it dropped is silent: %s",
+          limited);
+    wz_dissect_string_free(limited);
+
+    limited = NULL;
+    rc = wz_dissect_pcap_census_where_limited(pcap, sizeof pcap, "",
+                                              WZ_DISSECT_LIMITS_NONE, &limited);
+    CHECK(rc == WZ_DISSECT_OK, "census_where_limited NONE rc=%d", rc);
+    CHECK(limited != NULL, "OK came back with no string");
+    wz_dissect_string_free(limited);
+
+    limited = NULL;
+    rc = wz_dissect_pcap_census_where_limited(pcap, sizeof pcap, "", 12345,
+                                              &limited);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
+          "an unknown preset must be refused, not read as unbounded: rc=%d",
+          rc);
+    CHECK(limited == NULL, "a refused preset handed back a string");
 
     /* Same memory rule, same refusals -- through BOTH census doors. */
     capped = NULL;

@@ -39,6 +39,20 @@ extern "C" {
  * wz_dissect_declarations_diagnose to learn which line and why. */
 #define WZ_DISSECT_ERR_DECLARATION (-5)
 
+/* R311y887 -- LIMIT PRESETS, for the doors that take one as an argument.
+ *
+ * An int and not a struct: a struct across this boundary would freeze wz's
+ * DissectionLimits layout into the ABI, so the next axis it bounds would be a
+ * break rather than an edit. An int grows by gaining VALUES, and a consumer
+ * that does not know a new one simply never passes it.
+ *
+ * NONE is zero so a zero-initialised argument reads a file the way every door
+ * here read one before presets existed. An UNKNOWN value is
+ * WZ_DISSECT_ERR_INVALID_ARG and never a quiet fall back to unbounded -- a
+ * caller that believes it asked for a ceiling must not be given none. */
+#define WZ_DISSECT_LIMITS_NONE 0
+#define WZ_DISSECT_LIMITS_LIVE_TAP 1
+
 /* Symbol/memory-contract revision. Not a JSON-shape revision. */
 int wz_dissect_abi_version(void);
 
@@ -142,6 +156,30 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  * string. For the position, call wz_dissect_selector_diagnose. */
 int wz_dissect_pcap_census_where(const unsigned char *bytes, size_t len,
                                  const char *selector, char **out);
+
+/* R311y887 (ABI 8) -- the census with BOTH axes as arguments, and the shape
+ * every read door that needs a ceiling takes from here on.
+ *
+ * Boundedness is orthogonal to everything else a read door varies, so a
+ * `_bounded` twin per document multiplies: the summary got one, the census got
+ * one, and a narrowed census under a ceiling would have been the fourth name
+ * for the fourth combination. The preset is a parameter instead, so the fifth
+ * combination needs no fifth name.
+ *
+ * An EMPTY selector selects everything, so ("", NONE) is
+ * wz_dissect_pcap_census, ("", LIVE_TAP) is wz_dissect_pcap_census_bounded and
+ * (expr, NONE) is wz_dissect_pcap_census_where. Those three keep their symbols
+ * -- a published symbol is one somebody links -- and are not deprecated; they
+ * are simply not the pattern a new combination follows.
+ *
+ * The document carries dropped_by_limits through every one of them, so a plane
+ * made short by an evicted flow says so instead of reading as a quiet network.
+ *
+ * A bad selector is WZ_DISSECT_ERR_SELECTOR; an unknown preset is
+ * WZ_DISSECT_ERR_INVALID_ARG. Neither hands back a string. */
+int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
+                                         const char *selector, int limits,
+                                         char **out);
 
 /* R311y854 (ABI 4) — compile a selector and say what is wrong with it,
  * without a capture.

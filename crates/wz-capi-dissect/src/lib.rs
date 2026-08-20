@@ -77,6 +77,23 @@ pub const WZ_DISSECT_ERR_SELECTOR: c_int = -4;
 /// [`wz_dissect_declarations_diagnose`] to learn which line and why.
 pub const WZ_DISSECT_ERR_DECLARATION: c_int = -5;
 
+/// R311y887 — read with no ceilings at all, which is what a FILE deserves: it
+/// ends, so keeping every byte of it is already bounded.
+///
+/// Zero on purpose. A caller that zero-initialises its argument struct gets the
+/// behaviour every door here had before presets existed, which is the only
+/// default that cannot surprise one.
+pub const WZ_DISSECT_LIMITS_NONE: c_int = 0;
+/// R311y887 — `DissectionLimits::for_live_tap`, this tree's one bounded
+/// configuration, for a caller reading a LINK rather than a file.
+///
+/// A named preset and not a struct, for the reason
+/// [`wz_dissect_pcap_summary_bounded`]'s doc gives: a struct across this
+/// boundary freezes nine fields' layout into the ABI, so the next axis
+/// `DissectionLimits` grows becomes a break rather than an edit. An integer
+/// grows by gaining VALUES, which no consumer has to be recompiled for.
+pub const WZ_DISSECT_LIMITS_LIVE_TAP: c_int = 1;
+
 /// The ABI revision. Bumped when the SYMBOL SET or the memory contract changes
 /// — NOT when the JSON gains fields, which is the whole point of handing back
 /// JSON.
@@ -111,11 +128,17 @@ pub const WZ_DISSECT_ERR_DECLARATION: c_int = -5;
 /// that contract exists to permit. The symbol is what a consumer cannot
 /// discover by reading, and the symbol is why this number moves.
 ///
+/// R311y887 — 7 → 8, ADDING [`wz_dissect_pcap_census_where_limited`]. The
+/// [`WZ_DISSECT_LIMITS_NONE`] / [`WZ_DISSECT_LIMITS_LIVE_TAP`] constants arrive
+/// with it and move nothing further: a constant is a value a consumer compiles
+/// in, not a symbol it links, and this revision answers "does this library have
+/// it?" about the door that reads them.
+///
 /// # Safety
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    7
+    8
 }
 
 /// Release a string this library returned. Passing null is a no-op, so a
@@ -696,6 +719,93 @@ pub unsafe extern "C" fn wz_dissect_pcap_census_where(
     // SAFETY: caller contract above.
     let input = unsafe { core::slice::from_raw_parts(bytes, len) };
     let dissection = match Dissection::from_capture(input) {
+        Ok(d) => d,
+        Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
+    };
+    write_string(
+        wz_capture::census_json::census_json_where(&dissection, &filter),
+        out,
+    )
+}
+
+/// R311y887 — the CENSUS with both axes as ARGUMENTS, which is the answer to
+/// the shape question R311y885 left open rather than one more twin.
+///
+/// # The doubling this stops
+///
+/// Boundedness is orthogonal to every other thing a read door varies. R311y748
+/// gave the summary a `_bounded` twin and R311y885 gave the census one, and the
+/// residue that round recorded was that the next document needing a bound would
+/// take the door count to eight, then sixteen: a twin per document times a twin
+/// per selector. The combination this call adds — a NARROWED census under a
+/// ceiling — was the pair that would have been added next, and adding it as a
+/// twin would have settled the pattern by repeating it.
+///
+/// So the preset is a PARAMETER. Not the limits struct the sibling doors'
+/// docs refuse — [`WZ_DISSECT_LIMITS_NONE`] and [`WZ_DISSECT_LIMITS_LIVE_TAP`]
+/// are small integers, so a preset added later is a new VALUE and not a new
+/// field, and nothing about the boundary's layout moves. An unknown value is
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] and never a silent fallback to unbounded,
+/// which is the one way a caller could believe it had asked for a ceiling and
+/// not have one.
+///
+/// # It subsumes the three census doors and replaces none of them
+///
+/// An EMPTY selector selects everything, so `("", NONE)` is
+/// [`wz_dissect_pcap_census`], `("", LIVE_TAP)` is
+/// [`wz_dissect_pcap_census_bounded`] and `(expr, NONE)` is
+/// [`wz_dissect_pcap_census_where`]. Those three stay exported: a symbol this
+/// ABI has published is a symbol a consumer links, and the memory rule says
+/// nothing about symbols going away because they never do. What changes is
+/// that the FOURTH combination did not need a fourth name, and the fifth will
+/// not need a fifth.
+///
+/// # Never silent about what the ceiling cost
+///
+/// The census document carries `dropped_by_limits` (R311y885), from the same
+/// emitter the summary's health group uses, so a plane made short by an evicted
+/// flow is read as short-and-why rather than as a quiet network. That property
+/// is a RULE across the bounded doors now, not three separate habits, and
+/// `scripts/lib/bounded_output_parity.py` is what holds it.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes, `selector` must be a
+/// NUL-terminated C string, and `out` must be a writable pointer to a
+/// `*mut c_char`. None may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_census_where_limited(
+    bytes: *const u8,
+    len: usize,
+    selector: *const c_char,
+    limits: c_int,
+    out: *mut *mut c_char,
+) -> c_int {
+    if bytes.is_null() || selector.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let preset = match limits {
+        WZ_DISSECT_LIMITS_NONE => wz_capture::DissectionLimits::default(),
+        WZ_DISSECT_LIMITS_LIVE_TAP => wz_capture::DissectionLimits::for_live_tap(),
+        // Refused rather than defaulted. A caller that asked for a preset this
+        // build does not have wants to know, and the failure mode of the other
+        // choice is a consumer that believes its memory is bounded.
+        _ => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    // SAFETY: caller contract above.
+    let expr = match unsafe { std::ffi::CStr::from_ptr(selector) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let filter = match wz_capture::filter::Filter::parse(expr) {
+        Ok(f) => f,
+        Err(_) => return WZ_DISSECT_ERR_SELECTOR,
+    };
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    // ONE constructor for both presets: `DissectionLimits::default()` is every
+    // field `None`, so the unbounded arm is the bounded call with no ceilings
+    // rather than a second code path that could drift from it.
+    let dissection = match Dissection::from_capture_bounded(input, preset) {
         Ok(d) => d,
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
@@ -1574,6 +1684,139 @@ mod tests {
         );
     }
 
+    /// Drive the LIMITED census the way C does.
+    fn call_census_where_limited(
+        bytes: &[u8],
+        selector: &str,
+        limits: c_int,
+    ) -> Result<String, c_int> {
+        let sel = std::ffi::CString::new(selector).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_pcap_census_where_limited(
+                bytes.as_ptr(),
+                bytes.len(),
+                sel.as_ptr(),
+                limits,
+                &mut out,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must hand back no string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// R311y887 (open-debt item 360) — THE PARAMETERISED DOOR ANSWERS EXACTLY
+    /// WHAT THE THREE NAMED ONES DO, which is the claim that stops the doubling.
+    ///
+    /// # Why equality and not "it works"
+    ///
+    /// The argument for a preset ARGUMENT over a `_bounded` twin per document
+    /// is that the twins are special cases of it. If that is true, the fourth
+    /// combination needs no fourth name and the fifth needs no fifth; if it is
+    /// merely nearly true, this ABI has grown a second answer to a question it
+    /// already answered, which is worse than the doubling it was meant to
+    /// avoid. So the arms are compared BYTE FOR BYTE against the doors they
+    /// claim to subsume, off one capture the live-tap ceiling actually bites.
+    #[test]
+    fn the_limited_door_subsumes_the_three_named_census_doors() {
+        let file = capture_one_flow_past_the_tap_cap();
+
+        assert_eq!(
+            call_census_where_limited(&file, "", WZ_DISSECT_LIMITS_NONE).expect("reads"),
+            call_census(&file).expect("reads"),
+            "an empty selector with no ceiling IS the plain census door"
+        );
+        assert_eq!(
+            call_census_where_limited(&file, "", WZ_DISSECT_LIMITS_LIVE_TAP).expect("reads"),
+            call_census_bounded(&file).expect("reads"),
+            "an empty selector under the live tap IS the bounded census door"
+        );
+        assert_eq!(
+            call_census_where_limited(&file, "kind == put", WZ_DISSECT_LIMITS_NONE).expect("reads"),
+            call_census_where(&file, "kind == put").expect("reads"),
+            "a selector with no ceiling IS the narrowed census door"
+        );
+    }
+
+    /// R311y887 (open-debt item 360) — and the FOURTH combination, which is the
+    /// one no door reached: a narrowed census under a ceiling.
+    ///
+    /// Both arms off one capture, because a door that ignored its preset would
+    /// pass a single-sided assertion. The selector is held constant across
+    /// them, so the difference is the ceiling and not the narrowing.
+    #[test]
+    fn a_narrowed_census_can_be_bounded_and_says_what_the_bound_cost() {
+        let file = capture_one_flow_past_the_tap_cap();
+        let sel = "kind == put";
+
+        let bounded = call_census_where_limited(&file, sel, WZ_DISSECT_LIMITS_LIVE_TAP)
+            .expect("the capture reads");
+        assert!(
+            bounded.contains(
+                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
+                 \"flows\":1,\"scout_askers\":0}"
+            ),
+            "the ceiling must bite and the narrowed document must say so: {bounded}"
+        );
+        let unbounded =
+            call_census_where_limited(&file, sel, WZ_DISSECT_LIMITS_NONE).expect("reads");
+        assert!(
+            unbounded.contains(
+                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
+                 \"flows\":0,\"scout_askers\":0}"
+            ),
+            "and the same selector with no ceiling must report no bite: {unbounded}"
+        );
+    }
+
+    /// R311y887 — an UNKNOWN preset is refused, and refused with the code that
+    /// means "the caller has a bug".
+    ///
+    /// The alternative a door like this usually ships with is a silent fall
+    /// back to the zero value, and that failure mode is the reason this arm
+    /// exists: a consumer that passed a preset a newer build understands would
+    /// be handed an UNBOUNDED read while believing its memory was capped, and
+    /// nothing in the document it got back would say otherwise.
+    #[test]
+    fn an_unknown_limit_preset_is_refused_rather_than_defaulted() {
+        let file = capture_one_flow_past_the_tap_cap();
+        for bad in [2, -1, i32::MAX] {
+            assert_eq!(
+                call_census_where_limited(&file, "", bad),
+                Err(WZ_DISSECT_ERR_INVALID_ARG),
+                "preset {bad} must be refused, not read as unbounded"
+            );
+        }
+        // And the two it DOES know are not refused, or the arm above would pass
+        // for a door that refuses everything.
+        assert!(call_census_where_limited(&file, "", WZ_DISSECT_LIMITS_NONE).is_ok());
+        assert!(call_census_where_limited(&file, "", WZ_DISSECT_LIMITS_LIVE_TAP).is_ok());
+    }
+
+    /// R311y887 — a bad selector keeps its OWN code through this door too.
+    ///
+    /// The preset argument sits between the selector and the output, and an
+    /// implementation that validated it first would answer INVALID_ARG for text
+    /// a person typed — sending a UI to the wrong box.
+    #[test]
+    fn a_bad_selector_through_the_limited_door_is_still_a_selector_error() {
+        let file = capture_one_flow_past_the_tap_cap();
+        assert_eq!(
+            call_census_where_limited(&file, "key ==", WZ_DISSECT_LIMITS_LIVE_TAP),
+            Err(WZ_DISSECT_ERR_SELECTOR),
+            "a selector that does not compile is not an invalid argument"
+        );
+    }
+
     /// R311y886 (open-debt item 357) — THIS FILE'S OWN FIXTURES BUILD A HEALTHY
     /// CAPTURE, on both checksum axes.
     ///
@@ -2261,13 +2504,13 @@ mod tests {
     /// NOT move when a walker adds fields.
     #[test]
     fn the_abi_version_is_readable() {
-        // R311y885 — 7 since `wz_dissect_pcap_census_bounded` joined the symbol
-        // set. The census DOCUMENT gained a `dropped_by_limits` key in the same
-        // round and that half moves nothing: the header's contract is the
-        // symbol SET, not a symbol's signature and not the JSON shape, which is
-        // exactly the distinction this test exists to hold. See
+        // R311y887 — 8 since `wz_dissect_pcap_census_where_limited` joined the
+        // symbol set. The two `WZ_DISSECT_LIMITS_*` constants arrived with it
+        // and move nothing further: a constant is compiled in, not linked. The
+        // header's contract is the symbol SET, not a symbol's signature and not
+        // the JSON shape, which is exactly the distinction this test holds. See
         // `wz_dissect_abi_version`.
-        assert_eq!(wz_dissect_abi_version(), 7);
+        assert_eq!(wz_dissect_abi_version(), 8);
     }
 
     /// R311y856 — a capture carrying ONE `Put` on `demo/sensor` whose payload

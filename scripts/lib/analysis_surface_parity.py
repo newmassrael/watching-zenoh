@@ -146,6 +146,13 @@ BOTH = {
     # either, and it is written here so the next reader does not read the
     # repeated flag as a copy-paste.
     "bounded read of the analysis planes": ("--bounded", "wz_dissect_pcap_census_bounded"),
+    # R311y887 — a NARROWED census under a ceiling. On the command line it is
+    # `--select` and `--bounded` in the same argv, which needed nothing new;
+    # on the ABI it needed a door, and the door takes the preset as an ARGUMENT
+    # rather than being a fourth twin. `--select` is the flag named here because
+    # it is the half that was missing from the ABI's bounded reach, and the
+    # `--bounded` rows above already carry the other half.
+    "a narrowed census under a ceiling": ("--select", "wz_dissect_pcap_census_where_limited"),
 }
 
 # Reachable ONLY from the command line, each with the reason it is not on the

@@ -1848,6 +1848,22 @@ PY
     # that only one surface reaches. Enforcement MEASURED both ways this round
     # (a stale symbol row, and a flag the table did not name).
     python3 scripts/lib/analysis_surface_parity.py || return 1
+    # R311y887 (open-debt item 361) — and what a bounded read's OUTPUT must
+    # contain, which is the gate above one layer in.
+    #
+    # `analysis_surface_parity.py` asks whether a consumer can REACH a
+    # capability. This asks whether a capability that can throw data away SAYS
+    # SO. Three doors and a flag hold that property today because three tests
+    # written in three different rounds say so one at a time, and R311y885
+    # recorded the residue plainly: a fourth door added without its own test is
+    # silent again, in the way that is hardest to see -- the document comes
+    # back, the planes are short, and nothing in it is wrong.
+    #
+    # The population is read from the CODE (a body calling a bounded
+    # constructor) rather than from a `_bounded` suffix, because
+    # `wz_dissect_pcap_census_where_limited` takes its ceiling as an argument
+    # and no name match would have found it.
+    python3 scripts/lib/bounded_output_parity.py || return 1
     # R311y879 — WHICH READER each narrow zint field gets, pinned against the
     # codec UPSTREAM reads it with. The three censuses above ask whether the
     # decode covers the wire and whether a consumer reaches it; this asks

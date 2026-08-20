@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 7
+EXPECTED_VERSION = 8
 EXPECTED_SYMBOLS = {
     "wz_dissect_abi_version",
     # R311y855 — the FIELD layer, which is the walk this header had described
@@ -73,6 +73,11 @@ EXPECTED_SYMBOLS = {
     # R311y854 — the selector: one door that narrows the census, one that
     # diagnoses the expression without a capture.
     "wz_dissect_pcap_census_where",
+    # R311y887 — the census with the selector AND the limit preset as
+    # arguments, which is the shape that stops a `_bounded` twin per document.
+    # The three census doors above are kept, not replaced: a published symbol is
+    # one a consumer links.
+    "wz_dissect_pcap_census_where_limited",
     "wz_dissect_pcap_summary",
     "wz_dissect_pcap_summary_bounded",
     "wz_dissect_selector_diagnose",
