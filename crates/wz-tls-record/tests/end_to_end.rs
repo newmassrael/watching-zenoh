@@ -34,6 +34,13 @@ fn traffic_secret() -> Vec<u8> {
 }
 
 /// Ethernet + IPv4 + TCP from low to high, carrying `payload` at `seq`.
+///
+/// R311y886 (open-debt item 357) — WITH REAL CHECKSUMS. Both fields used to be
+/// zero, and over IPv4 that is not absence: neither IPv4 nor TCP has a
+/// declining form, so `wz-capture` counted every packet this file built as
+/// present-and-wrong and every capture assembled from them read as corrupt.
+/// Nothing here asserted on those counters, so nothing went red; the cost lands
+/// on the next test that does.
 fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
     let mut tcp = Vec::new();
     tcp.extend_from_slice(&1111u16.to_be_bytes());
@@ -46,12 +53,14 @@ fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
     tcp.extend_from_slice(&0u16.to_be_bytes());
     tcp.extend_from_slice(&0u16.to_be_bytes());
     tcp.extend_from_slice(payload);
+    wz_packet_fixtures::fill_tcp_checksum([10, 0, 0, 1], [10, 0, 0, 2], &mut tcp);
 
     let mut ip = vec![0x45u8, 0];
     ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
     ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
     ip.extend_from_slice(&[10, 0, 0, 1]);
     ip.extend_from_slice(&[10, 0, 0, 2]);
+    wz_packet_fixtures::fill_ipv4_checksum(&mut ip);
     ip.extend_from_slice(&tcp);
 
     let mut eth = vec![0u8; 12];
@@ -724,6 +733,52 @@ fn the_server_direction_decrypts_with_its_own_secret() {
     assert_eq!(summary.frames, 3, "and all three decode as zenoh");
 }
 
+/// R311y886 (open-debt item 357) — THIS FILE'S FIXTURES BUILD A HEALTHY
+/// CAPTURE, on both checksum axes and in both directions.
+///
+/// # Why the fixtures get a test of their own
+///
+/// Both builders here wrote a ZERO where a checksum goes. Over IPv4 that is
+/// present-and-wrong rather than absent — neither IPv4 nor TCP has a declining
+/// form — so `wz-capture` read every capture this file has ever assembled as
+/// corrupt on both axes. Nothing was red, because every assertion in this file
+/// is about decryption and none of them looks at the health counters. The bill
+/// arrives for the NEXT test that does, which then fails for a reason that has
+/// nothing to do with TLS.
+///
+/// Both directions, because they are separate builders and a fix applied to one
+/// is not a fix: the reverse packet swaps the addresses, and a pseudo-header
+/// built from the forward pair would be self-consistent and wrong.
+#[test]
+fn the_fixtures_this_file_builds_are_checksum_clean() {
+    let mut d = wz_capture::Dissection::new();
+    d.push_packet(
+        wz_capture::link::LINKTYPE_ETHERNET,
+        0,
+        &tcp_packet(1000, b"forward"),
+    );
+    d.push_packet(
+        wz_capture::link::LINKTYPE_ETHERNET,
+        0,
+        &tcp_packet_from_server(1000, b"reverse"),
+    );
+    d.finish();
+
+    let h = d.health();
+    assert_eq!(
+        (h.ip_checksum_invalid, h.transport_checksum_invalid),
+        (0, 0),
+        "a fixture that ships a wrong checksum makes every capture it builds \
+         read as corrupt"
+    );
+    assert_eq!(
+        (h.ip_checksum_valid, h.transport_checksum_valid),
+        (2, 2),
+        "and both packets must have been VERIFIED on both axes, or the zeros \
+         above are about nothing"
+    );
+}
+
 /// The server's half of the same 5-tuple: ports and addresses reversed.
 fn tcp_packet_from_server(seq: u32, payload: &[u8]) -> Vec<u8> {
     let mut tcp = Vec::new();
@@ -737,12 +792,14 @@ fn tcp_packet_from_server(seq: u32, payload: &[u8]) -> Vec<u8> {
     tcp.extend_from_slice(&0u16.to_be_bytes());
     tcp.extend_from_slice(&0u16.to_be_bytes());
     tcp.extend_from_slice(payload);
+    wz_packet_fixtures::fill_tcp_checksum([10, 0, 0, 2], [10, 0, 0, 1], &mut tcp);
 
     let mut ip = vec![0x45u8, 0];
     ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
     ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
     ip.extend_from_slice(&[10, 0, 0, 2]);
     ip.extend_from_slice(&[10, 0, 0, 1]);
+    wz_packet_fixtures::fill_ipv4_checksum(&mut ip);
     ip.extend_from_slice(&tcp);
 
     let mut eth = vec![0u8; 12];

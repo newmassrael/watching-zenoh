@@ -57,6 +57,12 @@ libc = "0.2"
 # `inventory_kinds` for the inventory predicate. This crate is test-only and
 # reaches no footprint / MCU / no_std lane, so the dependency costs nothing there.
 wz-capture = { path = "../wz-capture" }
+# R311y886 (open-debt item 357) — at LIB scope for the same reason wz-capture is:
+# `wire_tap` synthesises the pcap envelope in `src/lib.rs`, and its checksums are
+# part of that envelope. They used to be zero, which over IPv4 is
+# present-and-wrong rather than absent, under a comment claiming wz-capture did
+# not verify them — it does, on both axes.
+wz-packet-fixtures = { path = "../wz-packet-fixtures" }
 
 [dev-dependencies]
 # R311y498 — the §5.27 api-compat-c layout gate dlopens wz's OWN cdylib to read

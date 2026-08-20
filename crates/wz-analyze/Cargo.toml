@@ -51,6 +51,11 @@ wz-session-core = { path = "../wz-session-core", features = ["dissect"] }
 # more than once -- so the fixture builds real zenoh messages, which means
 # encoding them with the codec that owns their wire form.
 wz-codecs = { path = "../wz-codecs" }
+# R311y886 (open-debt item 357) — the RFC 1071 sum, which `tests/binary.rs` kept
+# its own byte-identical copy of. It was already RIGHT about why a fixture needs
+# real checksums; three other crates were writing zeros, so the answer moved to
+# one place rather than the reasoning being copied a fourth time.
+wz-packet-fixtures = { path = "../wz-packet-fixtures" }
 # R311y675 — A REAL JSON PARSER, as an ORACLE for the one-document claim.
 #
 # `assert_one_document` counted brackets, which answers "is this ONE value" and

@@ -66,6 +66,13 @@ members = [
     "wz-capi-dissect",
     "wz-codecs",
     "wz-codecs-test-support",
+    # R311y886 (open-debt item 357) — the RFC 1071 arithmetic the workspace's
+    # hand-laid packet fixtures need. A sibling crate on the R71 path-dep
+    # pattern: three copies of the sum, and three more builders that wrote a
+    # ZERO where a checksum goes, which over IPv4 is present-and-wrong. Only
+    # the arithmetic is shared; the layouts stay per-crate, because a layout is
+    # a claim about the wire and a one's complement sum is not.
+    "wz-packet-fixtures",
     # R311y492 (§5.22 plugin-dynamic-loading) — the host<->plugin C ABI contract,
     # linked INDEPENDENTLY by the loader and by every plugin cdylib. Its own crate
     # rather than a wz-session-core module precisely so a third-party plugin author

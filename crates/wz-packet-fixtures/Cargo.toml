@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-packet-fixtures — the RFC 1071 arithmetic every hand-laid packet
+# fixture in this workspace needs, owned once.
+#
+# R311y886 (open-debt item 357). Six crates build Ethernet/IPv4/TCP or
+# /UDP packets by hand for their own tests. Three of them wrote ZERO
+# into the checksum fields, which over IPv4 is present-and-wrong rather
+# than absent, so every capture they produced sat in the corruption
+# bucket; the other three each carried their own copy of the ones'
+# complement sum, two of them byte-identical.
+#
+# Only the ARITHMETIC moves here, and that boundary is the point. A
+# packet LAYOUT is a claim a crate is making about the wire, and
+# `wz-capi-dissect`'s own fixture doc states why those stay hand-laid:
+# "a fixture the reader and the writer share proves only that they hold
+# one belief between them". A one's complement sum is not a belief.
+# It has one right answer, RFC 1071 gives it, and six copies of it are
+# six chances to be wrong in a way no test would attribute correctly.
+#
+# It is deliberately NOT `wz-capture`'s reader-side `link::ones_complement`.
+# A fixture that computed its checksum with the function that verifies it
+# would make "this capture's checksums are valid" tautological -- the two
+# implementations agreeing is evidence, and one implementation agreeing
+# with itself is not. See this crate's own known-answer test.
+#
+# A sibling crate rather than a feature-gated `pub mod` in `wz-capture`:
+# the R71 path-dep pattern this workspace already follows for
+# wz-codecs-test-support and wz-session-core-test-support. Consumed only
+# from dev-dependencies, so no production build carries a byte of it --
+# which also keeps `wz-capture`'s zero-third-party rule untouched, since
+# this crate has no dependencies at all.
+
+[package]
+name = "wz-packet-fixtures"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Test-only RFC 1071 checksum arithmetic for the workspace's hand-laid packet fixtures (R311y886, open-debt 357)."
+publish = false
+
+[lib]
+name = "wz_packet_fixtures"
+path = "src/lib.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

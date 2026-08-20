@@ -50,6 +50,11 @@ wz-capture = { path = "../wz-capture" }
 # derives what this crate derives. Two independent implementations agreeing is
 # the claim; one implementation agreeing with itself is not.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# R311y886 (open-debt item 357) — the RFC 1071 arithmetic this crate's hand-laid
+# packet fixtures need. They wrote a ZERO into both checksum fields, which over
+# IPv4 is present-and-wrong rather than absent, so every capture the end-to-end
+# test built read as corrupt on both axes.
+wz-packet-fixtures = { path = "../wz-packet-fixtures" }
 
 [features]
 # R311y698 (§1.2a) — the QUIC packet BUILDERS, for a consumer that must make a

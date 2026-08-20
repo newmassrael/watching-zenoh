@@ -72,3 +72,13 @@ features = [
     "codec-response",
     "codec-response-final",
 ]
+
+# R311y886 (open-debt item 357) — the RFC 1071 arithmetic this crate's hand-laid
+# packet fixtures need. Measured before it was added: every packet `tcp_packet`
+# built carried a ZERO in both checksum fields, which over IPv4 is
+# present-and-wrong rather than absent, so a 1 025-packet capture reported
+# `ip_checksum_invalid: 1025` and `transport_checksum_invalid: 1025` and the
+# whole corpus sat in the corruption bucket. Only the arithmetic is shared; the
+# layouts stay hand-laid, for the reason their own doc gives.
+[dev-dependencies.wz-packet-fixtures]
+path = "../wz-packet-fixtures"

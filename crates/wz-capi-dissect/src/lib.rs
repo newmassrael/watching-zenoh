@@ -1505,6 +1505,20 @@ mod tests {
                 let mut p = tcp_packet(1000, &payload);
                 let port = 20_000u16 + i as u16;
                 p[34..36].copy_from_slice(&port.to_be_bytes());
+                // R311y886 — AND THE SUM IS RECOMPUTED, because the byte just
+                // overwritten is inside what it covers. This is the second
+                // shape of open-debt item 357 and the sharper one: the builder
+                // was fixed, every packet still read as corrupt, and the reason
+                // was here — a fixture that edits a packet after building it
+                // has invalidated the checksum as surely as one that never
+                // wrote it. 14 bytes of Ethernet, 20 of IPv4, then the segment.
+                let at = 14 + 20;
+                let end = at + 20 + payload.len();
+                wz_packet_fixtures::fill_tcp_checksum(
+                    [10, 0, 0, 1],
+                    [10, 0, 0, 2],
+                    &mut p[at..end],
+                );
                 p
             })
             .collect();
@@ -1557,6 +1571,46 @@ mod tests {
         assert_ne!(
             bounded, unbounded,
             "two doors that answer identically would mean the caps never reached the walk"
+        );
+    }
+
+    /// R311y886 (open-debt item 357) — THIS FILE'S OWN FIXTURES BUILD A HEALTHY
+    /// CAPTURE, on both checksum axes.
+    ///
+    /// # Why a test about the fixtures and not about the library
+    ///
+    /// `tcp_packet` here wrote a ZERO into the IPv4 and TCP checksum fields.
+    /// Over IPv4 that is not absence — neither protocol has a declining form —
+    /// so `wz-capture` counted every packet this file has ever built as
+    /// present-and-wrong, and every capture assembled from them sat whole in
+    /// the corruption bucket. Nothing went red because nothing in this file
+    /// asserted on those counters; the cost lands on the NEXT test that does,
+    /// which fails for a reason that has nothing to do with what it is testing.
+    /// R311y884 paid exactly that cost in `wz-capture` and could not close its
+    /// item until the corpus could express a healthy capture at all.
+    ///
+    /// # It is a control, so it is asserted where the corpus is
+    ///
+    /// A fixture is not "correct" in the abstract; it is correct against the
+    /// reader that will read it. Both counts come from the same summary
+    /// document every other test in this file drives, so a change to the
+    /// builder or to the verifier moves this arm.
+    #[test]
+    fn the_fixtures_this_file_builds_are_checksum_clean() {
+        let file = capture_one_flow_past_the_tap_cap();
+        let json = call_summary(&file).expect("the capture reads");
+        assert!(
+            json.contains("\"ip_checksum_invalid\":0")
+                && json.contains("\"transport_checksum_invalid\":0"),
+            "a fixture that ships a wrong checksum makes every capture it \
+             builds read as corrupt: {json}"
+        );
+        // And the reader really looked, or the zeros above are about nothing.
+        assert!(
+            !json.contains("\"ip_checksum_valid\":0")
+                && !json.contains("\"transport_checksum_valid\":0"),
+            "both axes must have VERIFIED something, or this proves only that \
+             nothing was checked: {json}"
         );
     }
 
@@ -2095,6 +2149,14 @@ mod tests {
     }
 
     /// Ethernet + IPv4 + TCP carrying `payload` at `seq`.
+    ///
+    /// R311y886 (open-debt item 357) — WITH REAL CHECKSUMS. They used to be
+    /// left zero, and over IPv4 a zero is not absence: neither IPv4 nor TCP has
+    /// a declining form, so `wz-capture` counted every packet this built as
+    /// present-and-wrong. Measured before the fix, a 1 025-packet capture from
+    /// here reported `ip_checksum_invalid: 1025` and
+    /// `transport_checksum_invalid: 1025` with zero valid on either axis.
+    /// `the_fixtures_this_file_builds_are_checksum_clean` is what keeps it.
     fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
         let mut tcp = Vec::new();
         tcp.extend_from_slice(&1111u16.to_be_bytes());
@@ -2107,12 +2169,14 @@ mod tests {
         tcp.extend_from_slice(&0u16.to_be_bytes());
         tcp.extend_from_slice(&0u16.to_be_bytes());
         tcp.extend_from_slice(payload);
+        wz_packet_fixtures::fill_tcp_checksum([10, 0, 0, 1], [10, 0, 0, 2], &mut tcp);
 
         let mut ip = vec![0x45u8, 0];
         ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
         ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
         ip.extend_from_slice(&[10, 0, 0, 1]);
         ip.extend_from_slice(&[10, 0, 0, 2]);
+        wz_packet_fixtures::fill_ipv4_checksum(&mut ip);
         ip.extend_from_slice(&tcp);
 
         let mut eth = vec![0u8; 12];
@@ -2139,12 +2203,14 @@ mod tests {
         tcp.extend_from_slice(&0u16.to_be_bytes());
         tcp.extend_from_slice(&0u16.to_be_bytes());
         tcp.extend_from_slice(payload);
+        wz_packet_fixtures::fill_tcp_checksum([10, 0, 0, 2], [10, 0, 0, 1], &mut tcp);
 
         let mut ip = vec![0x45u8, 0];
         ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
         ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
         ip.extend_from_slice(&[10, 0, 0, 2]);
         ip.extend_from_slice(&[10, 0, 0, 1]);
+        wz_packet_fixtures::fill_ipv4_checksum(&mut ip);
         ip.extend_from_slice(&tcp);
 
         let mut eth = vec![0u8; 12];
@@ -2157,6 +2223,14 @@ mod tests {
     }
 
     /// Ethernet + IPv4 + UDP carrying `payload`.
+    ///
+    /// R311y886 — the IPv4 checksum is REAL and the UDP one is deliberately
+    /// left zero, and the difference is the point. RFC 768 lets an IPv4 sender
+    /// decline the UDP checksum by writing zero, so this fixture is a sender
+    /// that declined and `wz-capture` reads it as ABSENT; IPv4 has no such
+    /// form, so a zero there was simply wrong. Keeping one of each is what lets
+    /// `the_fixtures_this_file_builds_are_checksum_clean` mean "no INVALID"
+    /// rather than "nothing was ever checked".
     fn udp_packet(src: [u8; 4], sport: u16, dst: [u8; 4], dport: u16, payload: &[u8]) -> Vec<u8> {
         let mut udp = Vec::new();
         udp.extend_from_slice(&sport.to_be_bytes());
@@ -2170,6 +2244,7 @@ mod tests {
         ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
         ip.extend_from_slice(&src);
         ip.extend_from_slice(&dst);
+        wz_packet_fixtures::fill_ipv4_checksum(&mut ip);
         ip.extend_from_slice(&udp);
 
         let mut eth = vec![0u8; 12];

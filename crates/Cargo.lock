@@ -2407,6 +2407,7 @@ dependencies = [
  "serde_json",
  "wz-capture",
  "wz-codecs",
+ "wz-packet-fixtures",
  "wz-session-core",
  "wz-tls-record",
 ]
@@ -2460,6 +2461,7 @@ version = "0.1.0"
 dependencies = [
  "wz-capture",
  "wz-codecs",
+ "wz-packet-fixtures",
  "wz-session-core",
 ]
 
@@ -2480,6 +2482,7 @@ name = "wz-capture"
 version = "0.1.0"
 dependencies = [
  "wz-codecs",
+ "wz-packet-fixtures",
  "wz-session-core",
 ]
 
@@ -2594,6 +2597,7 @@ dependencies = [
  "wz-capi-pico",
  "wz-capture",
  "wz-codecs",
+ "wz-packet-fixtures",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
  "wz-session-core",
@@ -2639,6 +2643,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-packet-fixtures"
+version = "0.1.0"
+
+[[package]]
 name = "wz-plugin-abi"
 version = "0.1.0"
 
@@ -2659,6 +2667,7 @@ dependencies = [
  "wz-analyze",
  "wz-capture",
  "wz-codecs",
+ "wz-packet-fixtures",
  "wz-runtime-tokio-test-support",
  "wz-session-core",
 ]
@@ -2870,6 +2879,7 @@ dependencies = [
  "ring",
  "rustls",
  "wz-capture",
+ "wz-packet-fixtures",
 ]
 
 [[package]]

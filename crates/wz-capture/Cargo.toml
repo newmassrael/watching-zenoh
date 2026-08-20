@@ -160,6 +160,15 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     # graph, including as a dev-dependency.
 ] }
 
+# R311y886 (open-debt item 357) — the RFC 1071 fills this crate's own packet
+# fixtures use, moved out of `datagram_tests` so the five other crates that lay
+# packets by hand stop each keeping their own answer. A DEV-dependency and never
+# a real one: nothing in the shipped path builds a packet, and this crate's
+# zero-third-party rule is load-bearing for the MCU profiles. The dependency has
+# no dependencies of its own, so it adds nothing to any graph it enters.
+[dev-dependencies.wz-packet-fixtures]
+path = "../wz-packet-fixtures"
+
 # R311y605 — the JOIN test fixture is built by the CODEC's own encode rather
 # than by a hand-laid byte string, so a walker or a decode that disagrees with
 # the codec fails instead of agreeing with the fixture author's reading of the

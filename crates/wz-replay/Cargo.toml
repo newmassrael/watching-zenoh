@@ -87,6 +87,11 @@ log = { version = "0.4", optional = true }
 # its own fixtures. A hand-written byte string would be a second opinion about
 # the wire.
 wz-codecs = { path = "../wz-codecs" }
+# R311y886 (open-debt item 357) — the RFC 1071 sum, which this crate's fixture
+# module kept its own byte-identical copy of. Same argument as the codec line
+# above, one layer down: a second opinion about arithmetic is not a second
+# opinion, it is a second chance to be wrong.
+wz-packet-fixtures = { path = "../wz-packet-fixtures" }
 # R311y702 — the e2e stands a REAL wz acceptor up in-process and asserts what
 # its subscriber callback received. `wz-runtime-tokio-test-support` is where the
 # interop-shaped `SessionInitParams` fixture lives, which is the same one every

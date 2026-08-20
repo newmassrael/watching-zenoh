@@ -38,36 +38,12 @@ fn sealer(secret: &[u8]) -> Box<dyn rustls::crypto::cipher::MessageEncrypter> {
         .encrypter(AeadKey::from(key), Iv::from(iv))
 }
 
-/// The ones' complement sum RFC 1071 defines, over `parts` concatenated.
-fn checksum(parts: &[&[u8]]) -> u16 {
-    let mut sum = 0u32;
-    let mut carry: Option<u8> = None;
-    for part in parts {
-        let mut at = 0usize;
-        if let Some(hi) = carry.take() {
-            if let Some(lo) = part.first() {
-                sum += u32::from(u16::from_be_bytes([hi, *lo]));
-                at = 1;
-            } else {
-                carry = Some(hi);
-            }
-        }
-        while at + 1 < part.len() {
-            sum += u32::from(u16::from_be_bytes([part[at], part[at + 1]]));
-            at += 2;
-        }
-        if at < part.len() {
-            carry = Some(part[at]);
-        }
-    }
-    if let Some(hi) = carry {
-        sum += u32::from(u16::from_be_bytes([hi, 0]));
-    }
-    while sum >> 16 != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-    !(sum as u16)
-}
+// R311y886 (open-debt item 357) — the local `checksum` is gone; the RFC 1071
+// sum lives in `wz-packet-fixtures` now. This file's copy was byte-identical to
+// `wz-replay`'s, and three other crates had no copy at all and wrote zeros.
+// This file was already RIGHT about the reason (see `tcp_packet` below), which
+// is why the shared crate's doc argues the same case: a zero over IPv4 is
+// present-and-wrong, not absent.
 
 /// One Ethernet/IPv4/TCP packet WITH VALID CHECKSUMS.
 ///
@@ -128,21 +104,15 @@ fn tcp_segment_from(seq: u32, payload: &[u8], reverse: bool, client_port: u16) -
     tcp.extend_from_slice(&0u16.to_be_bytes());
     tcp.extend_from_slice(payload);
     // The TCP checksum covers a pseudo-header of the addresses, the protocol
-    // and the segment length.
-    let mut pseudo = src.to_vec();
-    pseudo.extend_from_slice(&dst);
-    pseudo.extend_from_slice(&[0, 6]);
-    pseudo.extend_from_slice(&(tcp.len() as u16).to_be_bytes());
-    let tcp_sum = checksum(&[&pseudo, &tcp]);
-    tcp[16..18].copy_from_slice(&tcp_sum.to_be_bytes());
+    // and the segment length; the helper builds it.
+    wz_packet_fixtures::fill_tcp_checksum(src, dst, &mut tcp);
 
     let mut ip = vec![0x45u8, 0];
     ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
     ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
     ip.extend_from_slice(&src);
     ip.extend_from_slice(&dst);
-    let ip_sum = checksum(&[&ip[..20]]);
-    ip[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+    wz_packet_fixtures::fill_ipv4_checksum(&mut ip);
     ip.extend_from_slice(&tcp);
 
     let mut eth = vec![0u8; 12];
@@ -5054,8 +5024,7 @@ fn udp_to_zenoh(payload: &[u8]) -> Vec<u8> {
     // Checked, so the report this fixture produces carries no finding of its
     // own: an `ip_checksum_invalid` beside the rows would be a second thing for
     // a reader of a failure here to rule out.
-    let ip_sum = checksum(&[&ip[..20]]);
-    ip[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+    wz_packet_fixtures::fill_ipv4_checksum(&mut ip);
     ip.extend_from_slice(&udp);
     let mut eth = vec![0u8; 12];
     eth.extend_from_slice(&[0x08, 0x00]);

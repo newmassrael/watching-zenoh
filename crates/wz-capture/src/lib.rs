@@ -5000,7 +5000,7 @@ mod datagram_tests {
     use super::*;
     use crate::link::LINKTYPE_ETHERNET;
 
-    /// The one's-complement sum RFC 1071 defines, over `parts` end to end.
+    /// The RFC 1071 fills these builders need, from the workspace's one copy.
     ///
     /// R311y884 — these builders wrote ZERO into every checksum field, and a
     /// zero IPv4 or TCP checksum is present-and-wrong, so every packet this
@@ -5010,55 +5010,16 @@ mod datagram_tests {
     /// tree, and there was no way to write a capture whose checksums verify.
     /// A corpus that cannot express the healthy case cannot test a rule about
     /// the unhealthy one.
-    fn ones_complement(parts: &[&[u8]]) -> u16 {
-        let mut sum: u32 = 0;
-        let mut odd: Option<u8> = None;
-        for part in parts {
-            let mut bytes = part.iter().copied();
-            if let Some(hi) = odd.take() {
-                if let Some(lo) = bytes.next() {
-                    sum += u32::from(u16::from_be_bytes([hi, lo]));
-                } else {
-                    odd = Some(hi);
-                }
-            }
-            let rest: Vec<u8> = bytes.collect();
-            let mut chunks = rest.chunks_exact(2);
-            for c in &mut chunks {
-                sum += u32::from(u16::from_be_bytes([c[0], c[1]]));
-            }
-            if let [last] = chunks.remainder() {
-                odd = Some(*last);
-            }
-        }
-        if let Some(hi) = odd {
-            sum += u32::from(u16::from_be_bytes([hi, 0]));
-        }
-        while sum >> 16 != 0 {
-            sum = (sum & 0xFFFF) + (sum >> 16);
-        }
-        !(sum as u16)
-    }
-
-    /// Fill an IPv4 header's checksum in place. `ip` starts at the version byte.
-    pub(crate) fn fill_ipv4_checksum(ip: &mut [u8]) {
-        ip[10] = 0;
-        ip[11] = 0;
-        let ck = ones_complement(&[&ip[..20]]);
-        ip[10..12].copy_from_slice(&ck.to_be_bytes());
-    }
-
-    /// Fill a TCP segment's checksum in place, over the IPv4 pseudo-header.
-    pub(crate) fn fill_tcp_checksum(src: [u8; 4], dst: [u8; 4], tcp: &mut [u8]) {
-        tcp[16] = 0;
-        tcp[17] = 0;
-        let len = (tcp.len() as u16).to_be_bytes();
-        let pseudo = [
-            src[0], src[1], src[2], src[3], dst[0], dst[1], dst[2], dst[3], 0, 6, len[0], len[1],
-        ];
-        let ck = ones_complement(&[&pseudo[..], tcp]);
-        tcp[16..18].copy_from_slice(&ck.to_be_bytes());
-    }
+    ///
+    /// R311y886 (open-debt item 357) — and the arithmetic MOVED OUT, because
+    /// that repair was applied here and nowhere else: three other crates were
+    /// still writing zeros and two more carried their own byte-identical copy
+    /// of the sum. It is still not [`crate::link`]'s implementation, which is
+    /// the one that VERIFIES — a fixture computing its checksum with the
+    /// function that checks it makes "these checksums are valid" tautological.
+    /// Re-exported rather than imported at each call site so the fifty-odd
+    /// existing ones read unchanged.
+    pub(crate) use wz_packet_fixtures::{fill_ipv4_checksum, fill_tcp_checksum};
 
     /// Ethernet + IPv4 + UDP carrying `payload`, padded to the 60-byte
     /// minimum a real NIC emits.

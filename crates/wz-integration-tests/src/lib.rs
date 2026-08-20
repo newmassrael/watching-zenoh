@@ -4523,10 +4523,22 @@ pub mod wire_tap {
 
     /// Wrap one recorded segment as Ethernet / IPv4 / TCP.
     ///
-    /// Checksums are left zero: `wz-capture`'s TCP path does not verify them, so
-    /// computing them would assert nothing this harness is about. The lengths and
-    /// sequence numbers ARE real, because reassembly reads them.
+    /// R311y886 (open-debt item 357) — THE CHECKSUMS ARE REAL, and the comment
+    /// that used to stand here was a false claim about another crate that would
+    /// have stopped the next reader from looking.
+    ///
+    /// It said: "Checksums are left zero: `wz-capture`'s TCP path does not
+    /// verify them, so computing them would assert nothing this harness is
+    /// about." Measured, that path verifies BOTH the IPv4 and the TCP checksum
+    /// and reports each as valid / invalid / absent. A zero is not absence
+    /// either — neither protocol has a declining form — so every capture this
+    /// function synthesised read as corrupt on both axes, and the sentence
+    /// above is the reason nobody checked.
+    ///
+    /// The lengths and sequence numbers were always real, because reassembly
+    /// reads them; now the checksums are too, because something else does.
     fn tcp_packet(src_port: u16, dst_port: u16, seq: u32, payload: &[u8]) -> Vec<u8> {
+        const HOST: [u8; 4] = [127, 0, 0, 1];
         let mut pkt = Vec::with_capacity(14 + 20 + 20 + payload.len());
         pkt.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x02]);
         pkt.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x01]);
@@ -4535,8 +4547,8 @@ pub mod wire_tap {
         pkt.extend_from_slice(&[0x45, 0x00]);
         pkt.extend_from_slice(&total_len.to_be_bytes());
         pkt.extend_from_slice(&[0x00, 0x00, 0x40, 0x00, 64, IPPROTO_TCP, 0x00, 0x00]);
-        pkt.extend_from_slice(&[127, 0, 0, 1]);
-        pkt.extend_from_slice(&[127, 0, 0, 1]);
+        pkt.extend_from_slice(&HOST);
+        pkt.extend_from_slice(&HOST);
         pkt.extend_from_slice(&src_port.to_be_bytes());
         pkt.extend_from_slice(&dst_port.to_be_bytes());
         pkt.extend_from_slice(&seq.to_be_bytes());
@@ -4545,6 +4557,10 @@ pub mod wire_tap {
         pkt.extend_from_slice(&8192u16.to_be_bytes());
         pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
         pkt.extend_from_slice(payload);
+        // Filled in place, over the frame this function has already laid: the
+        // IPv4 header starts 14 bytes in and the segment 20 bytes after that.
+        wz_packet_fixtures::fill_ipv4_checksum(&mut pkt[14..34]);
+        wz_packet_fixtures::fill_tcp_checksum(HOST, HOST, &mut pkt[34..]);
         pkt
     }
 
