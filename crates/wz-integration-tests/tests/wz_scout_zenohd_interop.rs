@@ -47,8 +47,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, spawn_zenohd_multicast_scouting_on_ephemeral_tcp, wait_for_substring,
-    wz_ap_demo_binary, ChildGuard,
+    configured_zid_value, hello_zid_value, read_captured,
+    spawn_zenohd_multicast_scouting_with_args, wait_for_substring, wz_ap_demo_binary, ChildGuard,
 };
 
 // wz-proves: scouting-active wz->zenohd
@@ -72,8 +72,32 @@ fn wz_scout_discovers_zenohd_over_multicast_and_opens_the_advertised_locator() {
     // is bound and joined before wz emits anything (zenoh binds unicast
     // listeners first — a scout into that window would be lost, and nothing
     // retransmits a Scout).
-    let (mut zenohd, zenohd_port) =
-        spawn_zenohd_multicast_scouting_on_ephemeral_tcp("zenohd (multicast-scouting router)");
+    // R311y904 (item 420) — zenohd's zid is PINNED so the decode below can be
+    // checked by VALUE, and pinned at FULL WIDTH on purpose.
+    //
+    // 16 bytes with a non-zero top byte means `ZenohIdProto::size()` is 16, so
+    // zenoh puts 15 in the Hello cbyte's high nibble and writes all sixteen
+    // (`zenoh-codec/src/scouting/hello.rs:62-66`) — the maximum the nibble can
+    // carry, and what a production zenohd sends 255 times in 256. A SHORT pin
+    // would have been the more direct regression guard for the defect this
+    // round fixed, and it was rejected: it would have stopped this e2e ever
+    // driving a full-width decode, which is what the assertion was written to
+    // check. The short-rendering case is covered deterministically in
+    // `wz_integration_tests`'s own library tests instead, where it needs no
+    // oracle.
+    //
+    // Per-process for the reason the sibling test's `--zid` is: a fixed zid
+    // shared with a leftover or a concurrent copy collides in zenoh's peer
+    // dedupe.
+    let zenohd_zid_hex = format!(
+        "3f1c{:04x}{}",
+        std::process::id() & 0xffff,
+        "0123456789abcdef01234567"
+    );
+    let (mut zenohd, zenohd_port) = spawn_zenohd_multicast_scouting_with_args(
+        "zenohd (multicast-scouting router)",
+        &["--cfg", &format!("id:\"{zenohd_zid_hex}\"")],
+    );
     let expected_locator = format!("tcp/127.0.0.1:{zenohd_port}");
 
     // wz-ap-demo in `--scout` mode. NOTE what is absent: no --connect, no
@@ -166,19 +190,29 @@ fn wz_scout_discovers_zenohd_over_multicast_and_opens_the_advertised_locator() {
          a ROUTER and says so in its Hello.\nline: {scouted_line}\n\
          --- captured wz-ap-demo stderr ---\n{demo_captured}"
     );
-    // And the zid is a real 16-byte zenoh id, not an empty or truncated read.
-    let zid_hex = scouted_line
-        .split("zid=")
-        .nth(1)
-        .and_then(|rest| rest.split_whitespace().next())
-        .unwrap_or("");
+    // And the zid wz decoded is the one zenohd actually carries — BY VALUE.
+    //
+    // R311y904 (open-debt item 420). What stood here asserted the rendered hex
+    // was 32 characters, reasoning that the cbyte's high nibble carries the
+    // length so a wrong length means a misread length field. THE REASONING WAS
+    // SOUND AND THE ASSERTION WAS STILL WRONG: zenoh writes only `zid.size()`
+    // bytes and puts `size() - 1` in that nibble
+    // (`zenoh-codec/src/scouting/hello.rs:62-66`), and `ID::size()` subtracts
+    // leading zero BYTES (`uhlc-0.8.2/src/id.rs:63-67`). A legal zenohd whose
+    // top byte is zero therefore travels in 15 bytes and renders in 30
+    // characters — measured at 1 in 256, and NOT item 417's 1 in 16, because
+    // wz's renderer is fixed-width per byte and loses nothing.
+    //
+    // Comparing the VALUE keeps everything the old rule was reaching for and
+    // adds what it could not express: an empty read, a truncated read, and a
+    // misread length nibble all produce a different number, and so does the
+    // wrong node. The zid is pinned above so there IS a number to compare to.
     assert_eq!(
-        zid_hex.len(),
-        32,
-        "zenohd's zid decoded to {} hex chars, not the 32 of a 16-byte zid — the \
-         cbyte high nibble carries its length (pico message.c:676), so a wrong \
-         length means the length field was misread.\nline: {scouted_line}",
-        zid_hex.len()
+        hello_zid_value(scouted_line),
+        Some(configured_zid_value(&zenohd_zid_hex)),
+        "the zid wz decoded from zenohd's Hello is not the one zenohd was \
+         given (pinned {zenohd_zid_hex}); a misread length nibble, a truncated \
+         read, or another node's Hello all land here.\nline: {scouted_line}"
     );
 
     // Assertion 3 — the discovered locator carried a real session. This is also

@@ -1346,10 +1346,52 @@ pub mod common {
     /// deterministic reproduction of a probabilistic defect must run always-on
     /// — putting it in the library is what lets Layer C1's workspace run
     /// execute it with no oracle present.
+    /// R311y904 (item 420) — generalised over the MARKER, because the same
+    /// question is asked of two differently-shaped log lines and the answer
+    /// must be one implementation.
+    ///
+    /// The face line spells it `zid <hex>)` and the scouted-hello line spells
+    /// it `zid=<hex> locators=[..]`. Rather than a terminator per caller, the
+    /// hex run is taken up to the first character that is not a hex digit,
+    /// which is true of both and of any third shape.
+    pub fn zid_value_after(line: &str, marker: &str) -> Option<u128> {
+        let (_, rest) = line.split_once(marker)?;
+        let hex: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+        if hex.is_empty() {
+            return None;
+        }
+        u128::from_str_radix(&hex, 16).ok()
+    }
+
     pub fn face_zid_value(line: &str) -> Option<u128> {
-        let (_, rest) = line.split_once("zid ")?;
-        let hex = rest.split(')').next()?.trim();
-        u128::from_str_radix(hex, 16).ok()
+        zid_value_after(line, "zid ")
+    }
+
+    /// The zid of a peer wz DISCOVERED, out of the `hellos=[..]` rendering.
+    ///
+    /// R311y904, open-debt item 420. `wz_scout_zenohd_interop.rs` asserted the
+    /// rendered hex was 32 characters, under the reasoning that a wrong length
+    /// means wz misread the cbyte's length nibble. That reasoning is sound and
+    /// the assertion was still wrong, for a reason DIFFERENT from item 417's:
+    ///
+    /// * wz's renderer is FIXED-WIDTH per byte —
+    ///   `h.zid.iter().map(|b| format!("{b:02x}"))`
+    ///   (`wz-ap-demo/src/runner.rs:601-605`) — so nothing is lost to nibble
+    ///   formatting here. Item 417's 1/16 does NOT apply, and copying it would
+    ///   have been wrong.
+    /// * But the WIRE is variable-length. zenoh writes
+    ///   `flags |= ((zid.size() - 1) as u8) << 4` and then exactly `zid.size()`
+    ///   bytes (`zenoh-codec/src/scouting/hello.rs:62-66`), and `ID::size()` is
+    ///   `MAX_SIZE - (leading_zeros / 8)` (`uhlc-0.8.2/src/id.rs:63-67`). So a
+    ///   zid whose top BYTE is zero travels in 15 bytes and renders in 30
+    ///   characters.
+    ///
+    /// `ID::rand()` is uniform over `1..u128::MAX` (`id.rs:88-92`), so the
+    /// measured rate is **1 in 256** — not item 417's 1 in 16. Same class,
+    /// different mechanism, different number, and the number was measured here
+    /// rather than carried over.
+    pub fn hello_zid_value(line: &str) -> Option<u128> {
+        zid_value_after(line, "zid=")
     }
 
     /// The VALUE a zid CONFIGURED as `hex` will be rendered as.
@@ -3947,8 +3989,9 @@ pub mod common {
 #[cfg(test)]
 mod tests {
     use super::common::{
-        configured_zid_value, face_zid_value, line_with, parse_zenoh_admin_sessions,
-        wait_for_tcp_accept_alive, ChildGuard, ZenohSession, ZENOHD_TCP_ACCEPT_BUDGET,
+        configured_zid_value, face_zid_value, hello_zid_value, line_with,
+        parse_zenoh_admin_sessions, wait_for_tcp_accept_alive, ChildGuard, ZenohSession,
+        ZENOHD_TCP_ACCEPT_BUDGET,
     };
 
     /// A face line as `wz-ap-demo` renders one, for the three tests below.
@@ -3995,6 +4038,43 @@ mod tests {
             Some(u128::from_str_radix(wz_demo, 16).expect("parses")),
             "and it must still parse to its own value"
         );
+    }
+
+    /// THE DETERMINISTIC REPRODUCTION of open-debt item 420 — the sibling
+    /// shape, whose marker and terminator both differ.
+    ///
+    /// The fixture is a real measurement: pinning `id:"3f1c8341"` on a
+    /// multicast-scouting zenohd produced
+    /// `hellos=[v9 router zid=41831c3f locators=[...]]`, eight characters, and
+    /// the old `len() == 32` assertion failed on it. A legal zenohd zid whose
+    /// top byte is zero produces the same shape once in 256 runs.
+    #[test]
+    fn a_scouted_hello_zid_is_read_by_value_whatever_its_width() {
+        let line = "wz-ap-demo: scouted peer locator tcp/127.0.0.1:38693 \
+                    (scout_emit=1, record_hello=1) \
+                    hellos=[v9 router zid=41831c3f locators=[tcp/127.0.0.1:38693]]";
+        assert_eq!(
+            hello_zid_value(line),
+            Some(u128::from_str_radix("41831c3f", 16).expect("parses")),
+            "the hex run must end at the first non-hex character, so a short \
+             zid followed by ` locators=[..]` still reads as its own value"
+        );
+        // And it is the value the config produced: same relationship item 417
+        // measured on the other line, re-measured here rather than assumed.
+        assert_eq!(
+            hello_zid_value(line),
+            Some(configured_zid_value("3f1c8341")),
+            "a zid configured as 3f1c8341 renders here as 41831c3f — the bytes \
+             reversed, exactly as on the face line"
+        );
+    }
+
+    /// The negative half: a marker that is not present, and a marker followed
+    /// by no hex, must both come back `None` rather than as some number.
+    #[test]
+    fn a_line_without_a_zid_yields_no_zenohd_value() {
+        assert_eq!(hello_zid_value("no marker here"), None);
+        assert_eq!(hello_zid_value("hellos=[v9 router zid= locators=[]]"), None);
     }
 
     /// The endianness fact, pinned because it is FOREIGN BEHAVIOUR the e2e
