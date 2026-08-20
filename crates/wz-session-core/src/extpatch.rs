@@ -81,14 +81,33 @@ pub const CURRENT_PATCH: u8 = 1;
 /// A value wider than a `u8` is saturated rather than truncated: zenoh's
 /// `PatchType` is a `u8` and a peer announcing `256` means "newer than
 /// anything I know", which must not wrap to `NO_PATCH`.
-pub fn peer_patch(extensions: &[ExtEntryOwned]) -> u8 {
+/// The type a protocol patch LEVEL is read as, and the ONE place its width is
+/// written down.
+///
+/// R311y901, open-debt item 410 — the same single-sourcing [`crate::ext_nodeid::NodeId`]
+/// gets, for the same reason: `dissect::read_patch_z64` carried an `8` literal
+/// that nothing held against this module.
+///
+/// ⚠ The WIDTH is shared with the dissector; the NARROWING RULE is not, and
+/// that is deliberate. Upstream TRUNCATES (`Self(ext.value as u8)`) and
+/// [`peer_patch`] below SATURATES, because a peer announcing something newer
+/// than `u8::MAX` must not wrap to `NO_PATCH`. A gate that bound the two by
+/// value equality would turn that intended divergence into a false red, so the
+/// binding is on `PATCH_BITS` alone.
+pub type PatchLevel = u8;
+
+/// How many bits of a `patch` extension a receiver acts on — derived from
+/// [`PatchLevel`] rather than restated.
+pub const PATCH_BITS: u32 = PatchLevel::BITS;
+
+pub fn peer_patch(extensions: &[ExtEntryOwned]) -> PatchLevel {
     let want = crate::ext_header::ext_eid(PATCH_EXT_ID | crate::ext_header::EXT_ENC_Z64);
     for ext in extensions {
         if crate::ext_header::ext_eid(ext.header) != want {
             continue;
         }
         if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &ext.body {
-            return u8::try_from(z.value).unwrap_or(u8::MAX);
+            return PatchLevel::try_from(z.value).unwrap_or(PatchLevel::MAX);
         }
     }
     NO_PATCH

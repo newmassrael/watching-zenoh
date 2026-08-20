@@ -139,13 +139,39 @@ pub fn set_z64_ext(
     }
 }
 
+/// The type a routing-context `node_id` is READ as, and the ONE place its
+/// width is written down.
+///
+/// R311y901, open-debt item 410. The dissector reports what a receiver acts on
+/// rather than what the wire said, and for this row that means narrowing to 16
+/// bits — upstream's `From<ZExtZ64> for NodeIdType` is `ext.value as u16`
+/// (`network/mod.rs:594-600`) and [`read_source`] below performs the identical
+/// narrowing. The width therefore appeared in TWO places that nothing held
+/// together: the cast here, and a `16` literal in `dissect::read_node_id_z64`.
+/// Either could move alone, and the report would be wrong by the difference
+/// while every test stayed green.
+///
+/// So the width is no longer written twice. The cast is `as NodeId`, the
+/// constant is `NodeId::BITS`, and the dissector reads the constant — one
+/// fact, one place, and changing this alias moves all three together.
+pub type NodeId = u16;
+
+/// How many bits of a `node_id` extension a receiver acts on — derived from
+/// [`NodeId`] rather than restated, so it cannot disagree with the cast.
+pub const NODE_ID_BITS: u32 = NodeId::BITS;
+
 /// Read the routing-context source `node_id` from an extension chain. Returns
 /// `0` when the `ext_nodeid` is absent — zenoh's DEFAULT, meaning the message
 /// was originated by the SENDING node itself, so a forwarder treats `0` as
 /// "the inbound neighbour is the source". A thin projection of the shared
 /// [`read_z64_ext`] over the `ext_nodeid` id.
-pub fn read_source(exts: Option<&Vec<ExtEntryOwned>>) -> u16 {
-    read_z64_ext(exts, NODEID_EXT_ID).map_or(0, |v| v as u16)
+///
+/// TRUNCATES a wider value, exactly as upstream does. [`NODE_ID_BITS`] is the
+/// boundary, and `dissect`'s width-binding test drives this function across it
+/// so the constant is held against this function's BEHAVIOUR and not only
+/// against its signature.
+pub fn read_source(exts: Option<&Vec<ExtEntryOwned>>) -> NodeId {
+    read_z64_ext(exts, NODEID_EXT_ID).map_or(0, |v| v as NodeId)
 }
 
 /// Set / replace / remove the `ext_nodeid` in an extension chain, mirroring

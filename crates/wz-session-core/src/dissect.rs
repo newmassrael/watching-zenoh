@@ -1287,7 +1287,7 @@ fn narrowed_z64(value: u64, width: u32, zero_is_absent: bool, span: Span) -> Opt
 /// wire. This tree's [`crate::ext_nodeid::read_source`] performs the identical
 /// narrowing, so a wider value is one no participant acts on.
 fn read_node_id_z64(value: u64, span: Span) -> Option<Vec<Field>> {
-    narrowed_z64(value, 16, false, span)
+    narrowed_z64(value, crate::ext_nodeid::NODE_ID_BITS, false, span)
 }
 
 /// The protocol patch LEVEL — a `u8` newtype upstream, and the one row where
@@ -1298,7 +1298,7 @@ fn read_node_id_z64(value: u64, span: Span) -> Option<Vec<Field>> {
 /// `a_patch_level_wider_than_a_byte_is_read_as_upstream_reads_it` pins the
 /// disagreement so it reds on the round either side moves.
 fn read_patch_z64(value: u64, span: Span) -> Option<Vec<Field>> {
-    narrowed_z64(value, 8, false, span)
+    narrowed_z64(value, crate::extpatch::PATCH_BITS, false, span)
 }
 
 /// The reply budget — narrowed to a `u32` AND collapsed to "no budget" when
@@ -1306,7 +1306,7 @@ fn read_patch_z64(value: u64, span: Span) -> Option<Vec<Field>> {
 /// matter: a wire value of `1 << 32` reads as four billion replies and buys
 /// the sender none at all.
 fn read_budget_z64(value: u64, span: Span) -> Option<Vec<Field>> {
-    narrowed_z64(value, 32, true, span)
+    narrowed_z64(value, crate::request_build::BUDGET_BITS, true, span)
 }
 
 /// Every extension BODY this build READS at `enc`, as `<Carrier>/<name>` rows
@@ -6776,6 +6776,114 @@ mod tests {
     /// This axis had no such gate for its whole life because it had no walker
     /// either — a whole ENCODING nobody had asked the question of, which is
     /// the state the ZBuf axis was in before R311y890.
+    /// The NARROWED rows, each paired with the module that OWNS its width.
+    ///
+    /// R311y901, open-debt item 410. The widths used to be three literals in
+    /// the walkers — `16`, `8`, `32` — asserting what upstream casts to, with
+    /// one doc sentence per row as the only thing measuring the assertion. A
+    /// literal cannot be wrong in a way anything notices: if upstream widened
+    /// `NodeIdType` to `u32` the report would be sixteen bits wrong and every
+    /// test in this workspace would stay green.
+    ///
+    /// The fix is not a comparison, it is a REMOVAL: each width now comes from
+    /// the module that performs the narrowing, so the walker and its pair
+    /// cannot disagree — there is one constant, not two numbers that happen to
+    /// match. This table is what the gate below sweeps, and it names the pair
+    /// so a reader can see WHICH module each width belongs to.
+    ///
+    /// ⚠ The pairs are three DIFFERENT kinds of thing, which is why this binds
+    /// the WIDTH and never the narrowing rule:
+    ///
+    /// | row | pair | rule |
+    /// |---|---|---|
+    /// | `node_id` | READER [`crate::ext_nodeid::read_source`] | truncates, same as here |
+    /// | `patch` | READER [`crate::extpatch::peer_patch`] | **SATURATES** — deliberately different |
+    /// | `budget` | PRODUCER [`crate::request_build::RequestQueryBuilder::request_budget`] | nothing in this tree reads one |
+    ///
+    /// A gate that bound the rules by value equality would turn `patch`'s
+    /// intended divergence into a false red, and would have no pair at all to
+    /// bind `budget` to.
+    const NARROWED_ROWS: &[(&str, u32, Z64BodyWalker)] = &[
+        ("node_id", crate::ext_nodeid::NODE_ID_BITS, read_node_id_z64),
+        ("patch", crate::extpatch::PATCH_BITS, read_patch_z64),
+        ("budget", crate::request_build::BUDGET_BITS, read_budget_z64),
+    ];
+
+    /// EVERY narrowed row reads at exactly the width its owning module
+    /// declares — silent one below the boundary, and naming what it discarded
+    /// one above.
+    ///
+    /// The boundary is COMPUTED from the pair's constant, never written here,
+    /// so this test cannot drift from the walkers the way the literals could
+    /// drift from their pairs. Both sides are asserted because only the pair
+    /// of them pins a width: a walker that never spoke would satisfy the
+    /// `inside` leg, and one that always spoke would satisfy the `outside` leg.
+    #[test]
+    fn every_narrowed_row_reads_at_the_width_its_owning_module_declares() {
+        let span = Span { start: 0, end: 1 };
+        let mut covered: Vec<&str> = Vec::new();
+        for (name, bits, walker) in NARROWED_ROWS {
+            let bits = *bits;
+            assert!(
+                bits > 0 && bits < 64,
+                "{name}: a width of {bits} has no boundary inside a u64, so \
+                 this row's legs would be about nothing",
+            );
+            let inside = (1u64 << bits) - 1;
+            let outside = 1u64 << bits;
+
+            // INSIDE — a receiver acts on this value as written, so R311y899's
+            // rule says the reading must say nothing at all.
+            let quiet = walker(inside, span);
+            let spoke: Vec<&str> = quiet
+                .iter()
+                .flatten()
+                .map(|f| f.name.as_ref())
+                .filter(|n| *n == "read_as" || *n == "undefined_bits")
+                .collect();
+            assert!(
+                spoke.is_empty(),
+                "{name}: the widest value that FITS in {bits} bit(s) ({inside}) \
+                 was reported as narrowed {spoke:?}. Every conforming message \
+                 would carry a false finding",
+            );
+
+            // OUTSIDE — one bit past the boundary the pair acts at.
+            let loud = walker(outside, span).unwrap_or_else(|| {
+                panic!(
+                    "{name}: a value one bit past the {bits}-bit boundary \
+                     ({outside}) produced NO reading, so the dissector reports \
+                     a number no receiver acts on"
+                )
+            });
+            let discarded = loud
+                .iter()
+                .find(|f| f.name == "undefined_bits")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name}: {outside} exceeds the {bits} bit(s) its module \
+                         narrows to and no `undefined_bits` was emitted; fields \
+                         were {:?}",
+                        loud.iter().map(|f| f.name.as_ref()).collect::<Vec<&str>>()
+                    )
+                });
+            assert_eq!(
+                discarded.value,
+                FieldValue::Bits(outside),
+                "{name}: the discarded bits must be exactly what lies above \
+                 the {bits}-bit boundary",
+            );
+            covered.push(name);
+        }
+        // ANTI-VACUITY as a SET, not a count (R311y897's shape): a count still
+        // reads as three if one row silently swapped for another.
+        assert_eq!(
+            covered,
+            ["node_id", "patch", "budget"],
+            "the narrowed-row sweep did not cover the rows it declares",
+        );
+    }
+
     #[test]
     fn every_z64_row_is_either_walked_or_declared_scalar() {
         let mut seen: Vec<(crate::ext_name::ExtCarrier, &str)> = Vec::new();

@@ -308,6 +308,29 @@ pub fn build_request_query_with_meta(
 /// (Only target + timeout are implemented as setters today; qos /
 /// tstamp / budget sub-setters layer in once their codec wiring lands
 /// — see the audit-traced carry in the Round 121j-1d /1e entries.)
+/// The type a Request's reply BUDGET is carried as, and the ONE place its
+/// width is written down.
+///
+/// R311y901, open-debt item 410. This row's pair is a PRODUCER rather than a
+/// reader — nothing in this tree consumes a `budget` extension — so the width
+/// binding runs the other way: [`RequestQueryBuilder::request_budget`] accepts
+/// a `Budget`, and `dissect::read_budget_z64` narrows to [`BUDGET_BITS`]. Both
+/// come from this alias, so the `32` literal the dissector used to carry is
+/// gone.
+///
+/// Upstream is `BudgetType::new(l.value as u32)` over a `NonZeroU32`
+/// (`zenoh-codec` `network/request.rs:216-219`), which is why the setter
+/// refuses zero: a low word of zero collapses the extension to `None` and the
+/// query runs with no budget at all. That second half is what the dissector's
+/// `absent_to_receiver` reports, and it is bound to the same fact.
+#[cfg(feature = "codec-request")]
+pub type Budget = u32;
+
+/// How many bits of a `budget` extension a receiver acts on — derived from
+/// [`Budget`] rather than restated.
+#[cfg(feature = "codec-request")]
+pub const BUDGET_BITS: u32 = Budget::BITS;
+
 #[cfg(feature = "codec-request")]
 pub struct RequestQueryBuilder {
     rid: u64,
@@ -326,7 +349,7 @@ pub struct RequestQueryBuilder {
     request_qos: Option<u8>,
     request_tstamp: Option<TimestampOwned>,
     request_target: Option<QueryTarget>,
-    request_budget: Option<u32>,
+    request_budget: Option<Budget>,
     request_timeout_ms: Option<u64>,
 }
 
@@ -570,7 +593,7 @@ impl RequestQueryBuilder {
     /// budget is encoded as "ext absent"). The value is the
     /// per-Query reply-volume budget; emit position sits between
     /// target and timeout in the Request-level ext chain.
-    pub fn request_budget(mut self, value: u32) -> Self {
+    pub fn request_budget(mut self, value: Budget) -> Self {
         assert!(
             value != 0,
             "RequestQueryBuilder::request_budget requires a non-zero budget; \
