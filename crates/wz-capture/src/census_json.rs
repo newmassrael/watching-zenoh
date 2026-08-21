@@ -926,7 +926,98 @@ mod fed_tests {
     /// of the same frames, and a fixture per plane would let a document that
     /// renders one plane off the WRONG walk pass — the planes have to be seen
     /// disagreeing or agreeing about one capture.
+    /// R311y927 (item 456) — the fixture above, plus the CAPTURE FILE those
+    /// same packets make and an optional scouting pair carrying `locator`.
+    ///
+    /// Two things item 456 named needed this. The field document
+    /// ([`crate::fields_json`]) takes the capture bytes and the fixture handed
+    /// back only a `Dissection`, so no test could ask it to render at all. And
+    /// the node plane's `locators` is a second wire-sourced string that the
+    /// census writes; the report's own guard covers the REPORT document and
+    /// says nothing about this one, which a probe confirmed by deleting the
+    /// census locator escaper and watching the well-formedness guard pass.
+    ///
+    /// `locator` is an Option so the six callers of [`four_plane_capture`] see
+    /// a byte-identical capture: passing `None` adds no packets, and the
+    /// key-set pin and the plane assertions are measuring what they were.
+    fn four_plane_capture_with_file(
+        keyexpr: &'static str,
+        locator: Option<&str>,
+    ) -> (Dissection, alloc::vec::Vec<u8>) {
+        let mut packets: alloc::vec::Vec<(u32, u32, alloc::vec::Vec<u8>)> = alloc::vec::Vec::new();
+        let mut d = Dissection::new();
+        if let Some(locator) = locator {
+            // The SCOUT leads: a HELLO is read as an ANSWER, so a capture that
+            // carries only the answer names no node at all. `node`'s own
+            // fixture states the same ordering, and so does the report's
+            // locator guard this mirrors.
+            let scout = crate::datagram_tests::udp_packet(
+                [192, 168, 1, 5],
+                43210,
+                crate::datagram_tests::SCOUT_GROUP,
+                7446,
+                &crate::datagram_tests::scout_message(),
+            );
+            let hello = crate::datagram_tests::udp_packet(
+                [192, 168, 1, 9],
+                7447,
+                [192, 168, 1, 5],
+                43210,
+                &hello_wire_with_locator(locator),
+            );
+            d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &scout);
+            d.push_packet(crate::link::LINKTYPE_ETHERNET, 1, &hello);
+            packets.push((0, 0, scout));
+            packets.push((1, 0, hello));
+        }
+        let (low, high) = four_plane_streams(keyexpr);
+        let low_packet = tcp_packet(1000, &low);
+        let high_packet = tcp_packet_reverse(2000, &high);
+        d.push_packet_at(LINKTYPE_ETHERNET, 0, Some(0), &low_packet);
+        d.push_packet_at(LINKTYPE_ETHERNET, 1, Some(9), &high_packet);
+        d.finish();
+        packets.push((0, 0, low_packet));
+        packets.push((1, 0, high_packet));
+        let refs: alloc::vec::Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .map(|(s, u, b)| (*s, *u, b.as_slice()))
+            .collect();
+        let file = crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs);
+        (d, file)
+    }
+
+    /// A HELLO answer whose single locator is `locator`, on the wire.
+    fn hello_wire_with_locator(locator: &str) -> alloc::vec::Vec<u8> {
+        use wz_session_core::codec_owned::{owned_bytes, owned_string};
+        let zid = [0x55u8, 0x66, 0x77, 0x88];
+        let owned: wz_codecs::hello::HelloOwned = wz_codecs::hello::HelloOwned {
+            version: 0x09,
+            cbyte: (((zid.len() as u8) - 1) << 4) | 0x01,
+            zid: owned_bytes(&zid).expect("zid"),
+            num_locators: Some(1),
+            locators: Some(alloc::vec![wz_codecs::locator::LocatorOwned {
+                locator_len: locator.len() as u64,
+                locator: owned_string(locator).expect("locator"),
+            }]),
+        };
+        let body = owned
+            .try_as_borrowed()
+            .expect("borrowed projection")
+            .encode_to_vec(1);
+        let mut wire = alloc::vec![
+            wz_session_core::wire_const::S_MID_HELLO | wz_session_core::wire_const::FLAG_S_HELLO_L
+        ];
+        wire.extend_from_slice(&body);
+        wire
+    }
+
     fn four_plane_capture(keyexpr: &'static str) -> Dissection {
+        four_plane_capture_with_file(keyexpr, None).0
+    }
+
+    /// The two directions' framed streams, so the fixture above can build both
+    /// a dissection and the capture file over the same bytes.
+    fn four_plane_streams(keyexpr: &'static str) -> (alloc::vec::Vec<u8>, alloc::vec::Vec<u8>) {
         // R311y869 — the CONTROL plane, and the reason it is in this fixture
         // rather than in one of its own: the module's own rule above is that
         // the planes have to be seen agreeing about ONE capture, and the
@@ -1005,21 +1096,7 @@ mod fed_tests {
         // One packet per direction, so the whole of each stream is contiguous
         // and no reassembly gap can stand in for a decode failure. The
         // timestamps are what make the exchange's delay measurable at all.
-        let mut d = Dissection::new();
-        d.push_packet_at(
-            LINKTYPE_ETHERNET,
-            0,
-            Some(0),
-            &tcp_packet(1000, &low_to_high),
-        );
-        d.push_packet_at(
-            LINKTYPE_ETHERNET,
-            1,
-            Some(9),
-            &tcp_packet_reverse(2000, &high_to_low),
-        );
-        d.finish();
-        d
+        (low_to_high, high_to_low)
     }
 
     /// R311y923 (open-debt item 288) — THE CENSUS DOCUMENT'S KEY SET IS PINNED,
@@ -1275,7 +1352,18 @@ mod fed_tests {
     #[test]
     fn a_wire_string_of_json_metacharacters_leaves_every_document_well_formed() {
         const HOSTILE: &str = "de\"mo/a\\b\u{1}c\nd/\u{fc}";
-        let d = four_plane_capture(HOSTILE);
+        // R311y927 (item 456) — the hostile string now rides a SECOND wire
+        // field. The keyexpr alone left the node plane's `locators` unmeasured
+        // here, and a probe proved it: deleting this module's locator escaper
+        // outright left this test passing, because no locator in the fixture
+        // carried anything that needed escaping. The report has a guard of its
+        // own for locators; it judges the REPORT document and says nothing
+        // about the census, which is written by different code.
+        const HOSTILE_LOCATOR: &str = "tcp/a\"b\\c\u{1}d";
+        // `file` is read only by the field-document arm below, which is behind
+        // `dissect`; underscored rather than cfg'd so the fixture call reads
+        // the same in both builds.
+        let (d, _file) = four_plane_capture_with_file(HOSTILE, Some(HOSTILE_LOCATOR));
 
         let census = census_json_where(&d, &crate::filter::Filter::any());
         crate::payload::json_wellformed(census.as_bytes()).unwrap_or_else(|e| {
@@ -1304,6 +1392,36 @@ mod fed_tests {
             report.contains("de\\\"mo/a\\\\b"),
             "the hostile keyexpr never reached the report: {report}"
         );
+
+        // The LOCATOR, on the plane this module writes. Asserted arriving
+        // before the parse below is judged, because a census that dropped the
+        // node would parse perfectly and measure nothing.
+        assert!(
+            census.contains("tcp/a\\\"b\\\\c"),
+            "the hostile locator never reached the census: {census}"
+        );
+
+        // The FIELD document, which no test could reach before the fixture
+        // handed back the capture file. It carries walked field NAMES and
+        // VALUES, and the keyexpr arrives as one of those values, so the same
+        // class lives in it.
+        //
+        // Behind `dissect` because the module is: that feature is default-off
+        // so an MCU build is not charged for a desktop reader's walker, and
+        // Layer C1bt builds this crate with default features to say so. The
+        // capture file above is built either way -- it is the fixture's own
+        // packets and costs nothing to keep honest.
+        #[cfg(feature = "dissect")]
+        {
+            let fields = crate::fields_json::fields_json(&d, &_file, None, None);
+            crate::payload::json_wellformed(fields.as_bytes()).unwrap_or_else(|e| {
+                panic!("the FIELD document is not JSON: {e:?}\n{fields}");
+            });
+            assert!(
+                fields.contains("de\\\"mo/a\\\\b"),
+                "the hostile keyexpr never reached the field document: {fields}"
+            );
+        }
     }
 
     /// R311y919 (open-debt item 452) — EVERY ANCHOR THIS DOCUMENT EMITS NAMES
