@@ -1421,6 +1421,40 @@ mod fed_tests {
                 fields.contains("de\\\"mo/a\\\\b"),
                 "the hostile keyexpr never reached the field document: {fields}"
             );
+
+            // R311y929 (item 464) — the same document with RULES DECLARED, so
+            // the payload block's own writers run at all.
+            //
+            // Without a declaration `push_decoding` answers `NoRules` and
+            // returns, which item 464 measured: the escaper in the `NoRule`
+            // arm could be deleted with this guard still green, because no
+            // capture in the suite ever reached that arm. A rule whose pattern
+            // matches nothing here takes it, and the keyexpr it reports is the
+            // hostile one.
+            let mut map = crate::payload::formats::FormatMap::new();
+            map.declare("other/topic=protobuf")
+                .expect("a literal pattern and a built-in format");
+            let declared = crate::payload_decode::Declarations::new(&map);
+            let ruled = crate::fields_json::fields_json(&d, &_file, None, Some(&declared));
+            crate::payload::json_wellformed(ruled.as_bytes()).unwrap_or_else(|e| {
+                panic!("the RULED field document is not JSON: {e:?}\n{ruled}");
+            });
+            // The needle is split across a `concat!` on purpose. The key-set
+            // sweep further down reads THIS FILE for `"key":` literals, and
+            // `state` is `payload_decode`'s key rather than one this module
+            // writes -- declaring it unreached here would be false, and
+            // weakening the assertion to drop the key would measure less. So
+            // the literal is spelled in two pieces, which the sweep does not
+            // join. R311y928 hit the same class with an example in a comment.
+            assert!(
+                ruled.contains(concat!("\"state", "\":\"no_rule\"")),
+                "the payload block must have taken the no_rule arm, or this \
+                 measures the same thing the block above already did: {ruled}"
+            );
+            assert!(
+                ruled.contains("de\\\"mo/a\\\\b"),
+                "the hostile keyexpr never reached the ruled field document: {ruled}"
+            );
         }
     }
 
