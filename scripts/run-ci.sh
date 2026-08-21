@@ -1857,6 +1857,14 @@ PY
     # one of them created by the round that closed the sibling debt. See the
     # script's docstring for why this is a gate and not a fourth comment.
     python3 scripts/lib/unwired_lane_lint.py || return 1
+    # R311y922 — the GATE TEST-PIN lint, item 232's own round. Several lanes
+    # pin a SET of test names that must be PRESENT in a feature build, and
+    # that pin goes stale when the test is renamed or moved. It has cost two
+    # hosted reds (R311y858 across crates, R311y921 across modules), and the
+    # second stayed red for six pushes. This asks the question the per-crate
+    # suites structurally cannot: is the subject still HERE. Seconds, and no
+    # build -- the lanes that own these pins take minutes.
+    python3 scripts/lib/gate_test_pin_lint.py || return 1
     # R311y595 — the DISSECT NAME CENSUS. `Field::name`'s doc declares that a
     # field is named after the generated codec's struct field, and nothing
     # compared the two: the prose was the specification and the walkers were
@@ -8037,6 +8045,21 @@ layer_c1bo_dissect_c_abi() {
 # thing that is absent is exactly the witness a later round deletes as
 # redundant, because the rendering it guards looks obviously correct once it is
 # there. Both run in this arm, which is the leanest build that has them.
+#
+# R311y922 replaces the escaper witness, and the replacement is the lesson.
+# R311y921 moved the RFC character table out of `wz-capture::report` into
+# `wz_session_core::json`, where the escaper itself now lives, and left a
+# comment saying "a pin travels with the code it pins" -- about the in-code
+# pin. THIS list is a pin too, and it did not travel: the lane went red on the
+# name of a test that had not been deleted, only rehoused. It stayed red for
+# six pushes because the verdict for a push is read a round later.
+#
+# The successor named here is `this_crate_has_one_json_escaper`, which is a
+# DIFFERENT claim from the one it replaces: equivalence between this crate's
+# writer and the shared escaper, not the RFC table. That is deliberate. The
+# table is the implementation's own business and is asserted where the
+# implementation lives; what this arm needs a witness for is that the lean
+# wz-capture build still reaches ONE escaper rather than growing a second.
 layer_c1bt_capture_no_default_features() {
     local out listing missing name
     (cd crates && cargo clippy -p wz-capture --no-default-features --all-targets \
@@ -8066,7 +8089,7 @@ layer_c1bt_capture_no_default_features() {
         ws::tests::every_structural_desync_recovers_and_not_only_the_announced_one \
         ws_flow_tests::a_structural_desync_mid_segment_does_not_end_the_flow \
         datagram_tests::a_frame_carries_the_capture_instant_in_every_feature_arm \
-        report::tests::every_character_json_requires_escaping_is_escaped_as_the_rfc_names_it \
+        report::tests::this_crate_has_one_json_escaper \
         report::tests::a_keyexpr_cannot_end_the_field_it_is_printed_in \
         report::tests::every_skip_reason_the_reader_counts_reaches_the_health_surface \
         report::tests::a_capture_that_skipped_nothing_says_so_only_where_the_document_is_structural \
