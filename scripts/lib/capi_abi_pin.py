@@ -50,9 +50,17 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 8
+EXPECTED_VERSION = 9
 EXPECTED_SYMBOLS = {
     "wz_dissect_abi_version",
+    # R311y913 (unregistered item 435) — what this build can READ, with no
+    # capture. The command line had answered it in `--help` for a while and the
+    # linked surface could not answer it at all; R311y912 gave
+    # `analysis_surface_parity.py` the axis that made the gap countable, and
+    # this symbol is what that axis had counted as missing. The strings are
+    # DERIVED from the link-type match and the two body dispatches, so this
+    # door, the help text and the dispatch are one fact.
+    "wz_dissect_readable_surfaces",
     # R311y855 — the FIELD layer, which is the walk this header had described
     # since R311y586 and could not perform.
     "wz_dissect_pcap_fields",

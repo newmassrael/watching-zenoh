@@ -319,6 +319,25 @@ int wz_dissect_pcap_fields_with_payloads(const unsigned char *bytes, size_t len,
  * operator bisect their own configuration. */
 int wz_dissect_declarations_diagnose(const char *declarations, char **out);
 
+/* R311y913 (ABI 9) — what this build can READ, without a capture.
+ *
+ * Writes {"link_types":"0 NULL, 1 ETHERNET, …",
+ *         "ext_bodies":{"zbuf":"Auth/pubkey, …","z64":"Declare/node_id, …"}}
+ *
+ * Two questions `wz-analyze --help` has answered for a while and this surface
+ * could not. Both matter for the same reason: an unread capture reports
+ * `messages decoded: 0`, and so does a capture with no zenoh traffic in it, so
+ * a consumer that cannot ask which link types this build decodes cannot tell
+ * its operator to re-capture. Likewise an extension body this build does not
+ * open goes out as `value` -- raw bytes -- which reads exactly like "there was
+ * no structure here".
+ *
+ * The strings are DERIVED from the link-type match and the two body dispatches
+ * themselves, and are the same strings the terminal prints. A consumer wanting
+ * them as lists splits on ", " and cannot be shown a different answer than
+ * `--help` gives. */
+int wz_dissect_readable_surfaces(char **out);
+
 #ifdef __cplusplus
 }
 #endif

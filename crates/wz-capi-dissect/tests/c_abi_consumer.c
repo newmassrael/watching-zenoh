@@ -40,7 +40,8 @@ int main(void) {
      * gained a dropped_by_limits key in R311y885 and the WZ_DISSECT_LIMITS_*
      * constants arrived here, and neither moves this number: a document key is
      * read by name and a constant is compiled in, while a symbol is linked. */
-    CHECK(wz_dissect_abi_version() == 8, "abi version is %d, expected 8",
+    /* R311y913 -- 9 since wz_dissect_readable_surfaces joined it. */
+    CHECK(wz_dissect_abi_version() == 9, "abi version is %d, expected 9",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
@@ -368,6 +369,34 @@ int main(void) {
     CHECK(strstr(declared, "\"line\":0") != NULL,
           "the verdict must name the line: %s", declared);
     wz_dissect_string_free(declared);
+
+    /* R311y913 (unregistered item 435) -- the library says what it can READ,
+     * with no capture. The two lists are the same strings `wz-analyze --help`
+     * prints, derived from the link-type match and the two body dispatches, so
+     * a consumer and a person at a terminal are told one fact.
+     *
+     * Checked from C rather than only from Rust because that is what this lane
+     * is for: the door takes ONE out-parameter and no bytes, which is a calling
+     * convention nothing else here exercises. */
+    char *surfaces = NULL;
+    rc = wz_dissect_readable_surfaces(&surfaces);
+    CHECK(rc == WZ_DISSECT_OK, "readable_surfaces rc=%d", rc);
+    CHECK(surfaces != NULL, "OK came back with no string");
+    CHECK(strstr(surfaces, "\"link_types\"") != NULL, "no link types in %s",
+          surfaces);
+    /* A NAME rather than only the key: an empty list would satisfy the key. */
+    CHECK(strstr(surfaces, "ETHERNET") != NULL,
+          "the link-type line must name a type it reads: %s", surfaces);
+    CHECK(strstr(surfaces, "\"z64\"") != NULL, "no z64 bodies in %s", surfaces);
+    CHECK(strstr(surfaces, "/qos") != NULL,
+          "the z64 line must name a body it opens: %s", surfaces);
+    wz_dissect_string_free(surfaces);
+
+    /* Null out is the argument error, not a crash -- the rule every door here
+     * follows, and this one has no other argument to get wrong. */
+    rc = wz_dissect_readable_surfaces(NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
+          "a null out-pointer must be refused, got rc=%d", rc);
 
     printf("  C1bo: C consumer linked the cdylib and read the tree\n");
     return 0;

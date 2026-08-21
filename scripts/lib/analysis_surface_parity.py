@@ -274,23 +274,25 @@ def capi_symbols() -> set[str]:
 STRUCTURAL_HEADINGS = {"USAGE:", "OPTIONS:"}
 
 SELF_REPORT = {
+    # R311y913 (unregistered item 435) — both rows had `None` and an OPEN DEBT
+    # tag for exactly one round, which is what an axis added to make a gap
+    # countable is FOR. The door answers both questions in one document because
+    # they are one question a consumer asks -- "what can you read?" -- and
+    # because both lists are DERIVED (`readable_link_types_line`,
+    # `readable_ext_bodies_line`), so the door, the help text and the dispatch
+    # are one fact rather than three copies.
     "LINK TYPES READ:": (
-        None,
-        "OPEN DEBT (unregistered item 435). Which pcap link types this build "
-        "decodes is exactly what a linking consumer needs before it hands over "
-        "a capture -- an unread capture reports `messages decoded: 0`, and so "
-        "does a capture with no zenoh traffic. The command line says which "
-        "types it could not read; the ABI's documents do not carry the list at "
-        "all, so a UI cannot tell a reader to re-capture.",
+        "wz_dissect_readable_surfaces",
+        "An unread capture reports `messages decoded: 0`, and so does a capture "
+        "with no zenoh traffic, so a consumer that cannot ask which link types "
+        "this build decodes cannot tell its operator to re-capture.",
     ),
     "EXT BODIES READ:": (
-        None,
-        "OPEN DEBT (unregistered item 435). An extension body this build does "
-        "not open is COUNTED and NAMED and rendered as `value`, which reads "
-        "exactly like `there was no structure here`. The command line answers "
-        "it in prose; the ABI has no door that does, so the surface a product "
-        "LINKS cannot say what it can open. The honest fix derives the list "
-        "from `dissect`'s own dispatch rather than restating it a third time.",
+        "wz_dissect_readable_surfaces",
+        "An extension body this build does not open is COUNTED and NAMED and "
+        "rendered as `value`, which reads exactly like `there was no structure "
+        "here`. Both surfaces now answer which ones it opens, from the same "
+        "dispatch-driven renderer.",
     ),
 }
 
@@ -326,6 +328,11 @@ def main() -> int:
     named_flags |= {f for f, _ in ONLY_CLI.values()}
     named_symbols = {s for _, s in BOTH.values() if s}
     named_symbols |= {s for s, _ in ONLY_CAPI.values()}
+    # R311y913 — a self-report row's symbol is a NAMED symbol like any other.
+    # Measured by leaving it out for one run: the symbol axis then reported
+    # `wz_dissect_readable_surfaces` as unnamed while the section axis reported
+    # it as answered, which is two halves of one table disagreeing.
+    named_symbols |= {s for s, _ in SELF_REPORT.values() if s}
 
     findings: list[str] = []
     for flag in sorted(named_flags - flags):

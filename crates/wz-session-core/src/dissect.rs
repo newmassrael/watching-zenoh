@@ -6421,6 +6421,82 @@ mod tests {
         );
     }
 
+    /// R311y913 (open-debt item 411) — `budget` IS THE ONLY ROW WITH A THIRD
+    /// OUTCOME, AND NOW THAT IS A PINNED SET RATHER THAN ONE READING.
+    ///
+    /// # What was wrong with knowing it
+    ///
+    /// `absent_to_receiver` was attached to `budget` because a `NonZeroU32` was
+    /// VISIBLE in one line of upstream's codec while somebody was reading it.
+    /// Nothing swept the other rows for the same property, so "the only row
+    /// with a third outcome is `budget`" was an observation and not a measured
+    /// set — the shape item 47 calls being wider than the evidence.
+    ///
+    /// # The upstream sweep that settled it
+    ///
+    /// Every ext-arm assignment across upstream's whole network + transport
+    /// codec set is one of nineteen shapes, and exactly ONE is a fallible
+    /// constructor: `ext_limit = ext::BudgetType::new(l.value as u32)`
+    /// (`zenoh-codec/src/network/request.rs:218`, `BudgetType = NonZeroU32`).
+    /// Every other arm is `Some(x)` — where the optionality is the extension's
+    /// PRESENCE and not a value meaning absent — or a bare value going through
+    /// a narrowing type, which truncates rather than absents and is item 408's
+    /// axis. `NonZeroUsize` occurs three times in that crate and none is an ext
+    /// body; the SHM one (`core/shm.rs:126`) is `.ok_or(DidntRead)?`, a
+    /// REFUSAL, which is a fourth outcome a row would have to be named for.
+    ///
+    /// # Why a test and not a script
+    ///
+    /// The sweep's input is the machine-local Rust reference, and `CLAUDE.md`
+    /// forbids a committed gate naming a path to it. What is IN this tree is
+    /// the conclusion, so that is what gets pinned: the set of rows whose zero
+    /// means absent is exactly `{budget}`. A second row acquiring it reds here
+    /// and has to be argued for, which is the property a one-off sweep cannot
+    /// leave behind.
+    #[test]
+    fn budget_is_the_only_narrowed_row_whose_zero_means_absent() {
+        // Driven off the DISPATCH, so a row added to `z64_body_walker` without
+        // a thought about this axis cannot escape the sweep.
+        let mut absent_rows: Vec<&'static str> = Vec::new();
+        let mut narrowed_rows: Vec<&'static str> = Vec::new();
+        for carrier in crate::ext_name::ALL_CARRIERS {
+            for (_, _, enc, name) in crate::ext_name::rows(*carrier) {
+                if *enc != crate::ext_header::EXT_ENC_Z64 {
+                    continue;
+                }
+                let Some((group, walker)) = z64_body_walker(*carrier, name) else {
+                    continue;
+                };
+                let fields = walker(0, Span { start: 0, end: 1 });
+                let absent = fields
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|f| f.name == "absent_to_receiver");
+                if absent && !absent_rows.contains(&group) {
+                    absent_rows.push(group);
+                }
+                if !narrowed_rows.contains(&group) {
+                    narrowed_rows.push(group);
+                }
+            }
+        }
+        // ANTI-VACUITY: the sweep must have reached the narrowed rows at all.
+        assert!(
+            narrowed_rows.contains(&"budget")
+                && narrowed_rows.contains(&"node_id")
+                && narrowed_rows.contains(&"patch"),
+            "the dispatch sweep did not reach the narrowed rows: {narrowed_rows:?}",
+        );
+        assert_eq!(
+            absent_rows,
+            alloc::vec!["budget"],
+            "exactly one row's zero means ABSENT to a receiver, and it is \
+             `budget` (`BudgetType = NonZeroU32`). A second row here needs the \
+             upstream line that makes its zero an absence rather than a value",
+        );
+    }
+
     /// Bits no reading covers are NAMED, and this is the leg that separates a
     /// walker from a plausible one.
     ///

@@ -134,11 +134,87 @@ pub const WZ_DISSECT_LIMITS_LIVE_TAP: c_int = 1;
 /// in, not a symbol it links, and this revision answers "does this library have
 /// it?" about the door that reads them.
 ///
+/// R311y913 (unregistered item 435) — 8 → 9, ADDING
+/// [`wz_dissect_readable_surfaces`]. A new symbol, so the revision moves under
+/// the rule this doc already states.
+///
 /// # Safety
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    8
+    9
+}
+
+/// R311y913 (unregistered item 435) — WHAT THIS BUILD CAN READ, as a document.
+///
+/// # The asymmetry this ends
+///
+/// `wz-analyze --help` has answered two questions for a while: which pcap link
+/// types this build decodes (`LINK TYPES READ`) and which extension bodies it
+/// OPENS rather than rendering as `value` (`EXT BODIES READ`). The surface a
+/// product LINKS could answer neither, and `analysis_surface_parity.py` was
+/// blind to the gap because a help SECTION is neither a flag nor a symbol —
+/// R311y912 gave that gate the axis that made this countable, and this is the
+/// half it counted as missing.
+///
+/// Both questions matter to a consumer for the same reason: an unread capture
+/// reports `messages decoded: 0`, and so does a capture with no zenoh traffic
+/// in it. A UI that cannot tell those apart cannot tell its operator to
+/// re-capture, and an extension body this build does not open goes out as
+/// `value` — raw bytes — which reads exactly like "there was no structure
+/// here".
+///
+/// # DERIVED, not restated
+///
+/// The lists come from `wz_capture::link::readable_link_types_line` and
+/// `wz_session_core::dissect::readable_ext_bodies_line`, which are driven by
+/// the link-type match and the two body dispatches themselves. So this door,
+/// the help text and the dispatch are ONE fact: a body that gains a walker
+/// appears in all three on the commit that adds it. A hand-written list here
+/// would have been the third copy of something that already has two, which is
+/// the failure this whole family of self-reports keeps being caught by.
+///
+/// # The document
+///
+/// ```json
+/// {"link_types":"0 NULL, 1 ETHERNET, …",
+///  "ext_bodies":{"zbuf":"Auth/pubkey, …","z64":"Declare/node_id, …"}}
+/// ```
+///
+/// Strings rather than arrays, and deliberately: they are the SAME strings the
+/// command line prints, so a consumer rendering them beside a capture shows
+/// what a person reading `--help` would see. A consumer wanting them split has
+/// one separator to apply and cannot be shown a different answer than the
+/// terminal gives.
+///
+/// Takes no capture: this is a property of the LIBRARY, not of a file, which is
+/// why it is worth asking before a capture is opened.
+///
+/// # Safety
+/// `out` must be a writable pointer to a `*mut c_char` and must not be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_readable_surfaces(out: *mut *mut c_char) -> c_int {
+    if out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let mut s = String::from("{\"link_types\":");
+    wz_session_core::json::escape_into(&wz_capture::link::readable_link_types_line(), &mut s);
+    s.push_str(",\"ext_bodies\":{\"zbuf\":");
+    wz_session_core::json::escape_into(
+        &wz_session_core::dissect::readable_ext_bodies_line(
+            wz_session_core::ext_header::EXT_ENC_ZBUF,
+        ),
+        &mut s,
+    );
+    s.push_str(",\"z64\":");
+    wz_session_core::json::escape_into(
+        &wz_session_core::dissect::readable_ext_bodies_line(
+            wz_session_core::ext_header::EXT_ENC_Z64,
+        ),
+        &mut s,
+    );
+    s.push_str("}}");
+    write_string(s, out)
 }
 
 /// Release a string this library returned. Passing null is a no-op, so a
@@ -2503,7 +2579,67 @@ mod tests {
         // header's contract is the symbol SET, not a symbol's signature and not
         // the JSON shape, which is exactly the distinction this test holds. See
         // `wz_dissect_abi_version`.
-        assert_eq!(wz_dissect_abi_version(), 8);
+        //
+        // R311y913 — 9 since `wz_dissect_readable_surfaces` joined it.
+        assert_eq!(wz_dissect_abi_version(), 9);
+    }
+
+    /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
+    /// READS, and it says the SAME thing the terminal does.
+    ///
+    /// # The discriminator is the identity, not the shape
+    ///
+    /// Asserting that the document has the two keys would pass over a door that
+    /// hand-wrote its own list — which is the failure this family of
+    /// self-reports keeps being caught by, and the reason `readable_*_line` are
+    /// public functions rather than prose. So the test compares against those
+    /// functions' output directly: if the door ever grows its own copy, the two
+    /// drift and this reds.
+    ///
+    /// The anti-vacuity leg matters as much: a build whose dispatch read
+    /// nothing would produce two empty strings and satisfy any "contains the
+    /// key" assertion.
+    #[test]
+    fn the_readable_surfaces_door_reports_the_dispatch_and_not_a_second_copy() {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        // SAFETY: `out` is a writable pointer to a null pointer.
+        let rc = unsafe { wz_dissect_readable_surfaces(&mut out) };
+        assert_eq!(rc, WZ_DISSECT_OK);
+        assert!(!out.is_null());
+        // SAFETY: OK means a NUL-terminated string this library owns.
+        let doc = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("the document is UTF-8")
+            .to_string();
+        // SAFETY: the pointer this library just handed back, freed once.
+        unsafe { wz_dissect_string_free(out) };
+
+        let links = wz_capture::link::readable_link_types_line();
+        let zbuf = wz_session_core::dissect::readable_ext_bodies_line(
+            wz_session_core::ext_header::EXT_ENC_ZBUF,
+        );
+        let z64 = wz_session_core::dissect::readable_ext_bodies_line(
+            wz_session_core::ext_header::EXT_ENC_Z64,
+        );
+        // ANTI-VACUITY: a build that read nothing would make every `contains`
+        // below true of an empty string.
+        assert!(
+            !links.is_empty() && !zbuf.is_empty() && !z64.is_empty(),
+            "the dispatch reads nothing, so this test asserts nothing: \
+             {links:?} {zbuf:?} {z64:?}"
+        );
+        assert!(
+            doc.contains(&links),
+            "the door must carry the link-type line the renderer produces: {doc}"
+        );
+        assert!(
+            doc.contains(&zbuf) && doc.contains(&z64),
+            "and both ext-body lines: {doc}"
+        );
+        assert!(
+            doc.starts_with("{\"link_types\":\"") && doc.ends_with("}}"),
+            "the document is one JSON object: {doc}"
+        );
     }
 
     /// R311y856 — a capture carrying ONE `Put` on `demo/sensor` whose payload
