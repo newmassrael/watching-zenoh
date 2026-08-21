@@ -17,7 +17,8 @@
 //!
 //! ## What stays in the command line
 //!
-//! The RENDERING. [`PayloadDecoding`] is the answer; how it is spelled for a
+//! The RENDERING. [`crate::payload_decode::PayloadDecoding`] is the answer; how
+//! it is spelled for a
 //! person reading a terminal, and which flag a reader should go fix, are
 //! properties of that surface and stay there.
 
