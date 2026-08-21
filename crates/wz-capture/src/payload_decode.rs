@@ -238,6 +238,52 @@ impl Misbound {
     /// Every word [`Self::name`] can return, for the consumers that document
     /// this vocabulary in prose a compiler cannot read.
     pub const NAMES: [&'static str; 2] = ["rule", "publisher"];
+
+    /// R311y925 (open-debt item 301) — the NEXT variant, so a caller can walk
+    /// every one of them without writing the list down.
+    ///
+    /// # Why a chain and not an array
+    ///
+    /// The totality test used to open with `let all = [Rule, Publisher]`, a
+    /// hand-written list. `name`'s match is exhaustive, so a third variant
+    /// cannot reach a consumer unnamed — but it CAN reach one untested: leave
+    /// the list alone and the new variant is simply never visited, and the
+    /// duplicate-word check that is the point of the test never sees it.
+    ///
+    /// This match is exhaustive too, so a third variant forces an arm HERE, and
+    /// an author who writes `Both => None` without linking it into the chain
+    /// leaves the walk one short of [`Self::NAMES`] — which the test compares.
+    /// Between the two, a variant cannot be added and go unvisited.
+    ///
+    /// `None` from the last variant is the end of the walk, not an absence.
+    ///
+    /// `cfg(test)` because nothing in a shipping build walks the variants, and
+    /// a method with no production caller is dead code this workspace refuses.
+    /// The forcing therefore happens when the TESTS compile, which is every
+    /// gate that runs one — an author who adds a variant and only ever calls
+    /// `cargo build` is the one case this does not reach.
+    #[cfg(test)]
+    fn next(self) -> Option<Self> {
+        match self {
+            Self::Rule => Some(Self::Publisher),
+            Self::Publisher => None,
+        }
+    }
+
+    /// Every variant, walked rather than listed.
+    ///
+    /// `Rule` is the head because it is the first arm of [`Self::name`]; the
+    /// walk's ORDER is not a contract, only its completeness.
+    #[cfg(test)]
+    fn all() -> alloc::vec::Vec<Self> {
+        let mut out = alloc::vec::Vec::new();
+        let mut cur = Some(Self::Rule);
+        while let Some(v) = cur {
+            out.push(v);
+            cur = v.next();
+        }
+        out
+    }
 }
 
 /// R311y875 — one topic, one rule, one label, and how many samples met them.
@@ -1272,11 +1318,15 @@ mod tests {
     /// the half no compiler holds.
     #[test]
     fn every_misbound_verdict_has_its_own_word() {
-        let all = [Misbound::Rule, Misbound::Publisher];
+        // R311y925 (item 301) — WALKED, not written down. The list this opened
+        // with was a second statement of the variant set, and a third variant
+        // added without touching it was never visited by anything below.
+        let all = Misbound::all();
         assert_eq!(
             all.len(),
             Misbound::NAMES.len(),
-            "every variant must have a word and every word a variant"
+            "every variant must have a word and every word a variant -- a walk \
+             shorter than NAMES means a variant is not linked into `next`"
         );
         let mut seen = BTreeSet::new();
         for verdict in all {
