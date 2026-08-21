@@ -14,6 +14,20 @@ exclude = ["/crates/target", "/target"]
 
 needs = ["cargo", "python3", "git"]
 
+# WHERE THIS TREE'S CARGO WORKSPACE IS, because it is not the repository root and
+# cannot be derived. Read by bx when a cargo command is issued from a directory
+# with no `Cargo.toml` at or above it: without this the command reaches cargo,
+# which exits 101 saying it could not find a manifest — the same 101 a panicking
+# test binary returns, so "the command never started" and "the code is red" are
+# one number. Measured: five calls in one session were issued from the root by
+# accident and one was nearly recorded as a probe's own verdict.
+#
+# It has to be DECLARED rather than found, because deriving it lands on a tie:
+# eight tracked manifests here declare `[workspace]`, and `crates/` and `xtask/`
+# both sit one level down. Which one a bare `cargo test` meant is this tree's
+# knowledge, not a build wrapper's.
+workspace_dir = "crates"
+
 # MEASURED by RUNNING the full sweep there once (R311y752/y753, sentinel
 # `REMOTE_BUILD_EXIT=1`), which corrected two guesses this file made before the
 # run:
