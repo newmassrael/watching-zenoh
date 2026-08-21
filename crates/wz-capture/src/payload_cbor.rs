@@ -36,11 +36,17 @@
 //! by definition not a closed ecosystem, and a text string whose bytes are not
 //! UTF-8 is a finding rather than a rendering problem.
 //!
-//! One validity rule is NOT enforced, and saying so is the point: §5.6's
-//! prohibition on DUPLICATE MAP KEYS. Detecting it means holding every key of
-//! every map, which is an allocation per container on a path that runs over
-//! every payload in a capture. A reader is told what the map holds and can see
-//! two identical paths; this walk does not call it malformed.
+//! §5.6's prohibition on DUPLICATE MAP KEYS is REPORTED but not enforced, and
+//! the difference is the point. R311y914 declined to look at all, because
+//! detecting it means holding every key of every map and that path runs over
+//! every payload in a capture; item 441 was registered against that silence and
+//! R311y916 pays it in the one place the cost is warranted. The map's own row
+//! now carries `, N duplicate key(s)`, and the walk still does not call the
+//! document malformed — a duplicate is invalid CBOR that is nonetheless
+//! perfectly well-formed CBOR, so refusing it would make
+//! [`crate::payload::inspect`] refute an `application/cbor` label over bytes
+//! that really are CBOR. The set is taken only when rows are being emitted;
+//! [`scan_cbor`] has nowhere to put the answer and does not pay for it.
 //!
 //! # Paths: the decision item 434 asked for
 //!
@@ -67,9 +73,13 @@
 //! |---|---|---|
 //! | integer (major 0/1) | `\i<decimal>` | `\i5`, `\i-3` |
 //! | byte string (major 2, definite) | `\b<lowercase hex>` | `\b01ff` |
-//! | float (major 7, 25/26/27) | `\f<value>` | `\f1.5` |
+//! | float (major 7, 25/26/27) | `\f<value>` | `\f1\.5` |
 //! | simple (major 7, 20-24) | `\s<word>` | `\strue`, `\snull` |
 //! | anything else | `\x<byte offset>` | `\x17` |
+//!
+//! R311y916 (item 442) took one more letter out of that free space: `\e`, the
+//! document a tag 24 byte string spells. It is not a key form — it is the one
+//! place a segment names something the wire carries INSIDE another item.
 //!
 //! `\x` is the honest arm rather than the lazy one. A key that is a container, a
 //! tag, or an indefinite-length string has no NAME to be called by — an operator
@@ -92,11 +102,20 @@
 //! What it cannot give is meaning for a TAG it does not know. RFC 8949 §3.4
 //! registers a few (0/1 date-time, 2/3 bignum, 24 embedded CBOR) and IANA holds
 //! the rest; this walk reports the tag NUMBER and walks the item under it. It
-//! does not decode a bignum into a number or re-enter tag 24's embedded
-//! document, and both omissions are the same rule this crate applies to
-//! protobuf's missing field names: a decoder that invented the answer would be
-//! the worst kind of wrong on a plane whose whole output is findings.
+//! does not decode a bignum into a number, which is the rule this crate applies
+//! to protobuf's missing field names: a decoder that invented the answer would
+//! be the worst kind of wrong on a plane whose whole output is findings.
+//!
+//! TAG 24 IS THE EXCEPTION, AND ITEM 442 IS WHY IT IS NOT AN INCONSISTENCY.
+//! §3.4.5.1 does not say what the tag 24 content MEANS — it says what the
+//! content IS, "a byte string containing an encoded CBOR data item". That is a
+//! statement about the encoding, so [`Walk::embedded`] walks it and invents
+//! nothing, which is the argument item 433 used to open CBOR in the first
+//! place. A bignum needs a reading and gets none; an embedded document needs a
+//! walk and this module already has one. The two were one sentence in this doc
+//! until R311y916, and that sentence was wrong about which of them is which.
 
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -183,6 +202,18 @@ const CBOR_PATH_SEP: char = '.';
 /// walk is the second consumer of that decision and re-spelling it would make
 /// one rule two.
 const CBOR_PATH_ESCAPE: char = '\\';
+
+/// RFC 8949 §3.4.5.1 — the tag whose byte string IS an encoded CBOR data item.
+const TAG_EMBEDDED_CBOR: u64 = 24;
+
+/// R311y916 (item 442) — the segment the document inside a tag 24 hangs from.
+///
+/// Another letter out of the free space item 434 found: a segment beginning `\`
+/// followed by anything other than `.` or `\` cannot be produced by a text key,
+/// because R311y910's rule emits `\` in exactly those two positions. `\t` is the
+/// tag's content and `\e` is the document that content spells, which are two
+/// different things — the byte string exists on the wire either way.
+const CBOR_EMBEDDED_SEGMENT: &str = "\\e";
 
 /// The rows a walk is building, or `None` when it is only validating.
 struct Emit {
@@ -437,15 +468,15 @@ impl<'a> Walk<'a> {
                 )
             }
             5 => {
-                let (n, indef) = self.map_body(&h, start)?;
+                let (n, indef, dup) = self.map_body(&h, start)?;
                 (
                     CborKind::Map,
                     KeyForm::Opaque,
-                    format!("map {n} pair(s){}", indef_note(indef)),
+                    format!("map {n} pair(s){}{}", indef_note(indef), dup_note(dup)),
                 )
             }
             6 => {
-                self.nest(start, "\\t")?;
+                self.tagged(start, h.arg)?;
                 (CborKind::Tag, KeyForm::Opaque, format!("tag {}", h.arg))
             }
             7 => self.seven(&h, start)?,
@@ -558,9 +589,29 @@ impl<'a> Walk<'a> {
     /// value's path segment and gets no row of its own, which is the rule the
     /// JSON walk follows for the same reason (the key is not lost — it IS the
     /// last segment of the path).
-    fn map_body(&mut self, h: &Head, start: usize) -> Result<(usize, bool), CborErr> {
+    ///
+    /// # R311y916 (item 441) — the duplicate count
+    ///
+    /// RFC 8949 §5.6 makes a map with two equal keys INVALID, and the third
+    /// return value is how many pairs arrived on a key already seen. Compared
+    /// on the PATH SEGMENT, which is the right comparison twice over: §5.6's
+    /// equality is over §2's generic data model rather than over the encoding,
+    /// and the segment is derived from the value, so `1` in its immediate form
+    /// and `1` in its one-byte form come out equal though their bytes do not.
+    /// What it cannot compare is a key with no name — a container key gets a
+    /// `\x<offset>` locator, unique by construction, so two identical container
+    /// keys are not counted and a test pins that gap rather than hiding it.
+    ///
+    /// The cost item 441 named is real and is paid here rather than argued
+    /// away: one set per open container, holding the key segments this walk
+    /// already builds. It is taken only when rows are being emitted, because on
+    /// the validation path (`scan_cbor`, which every payload in a capture runs
+    /// through) there is no row for the answer to land on.
+    fn map_body(&mut self, h: &Head, start: usize) -> Result<(usize, bool, usize), CborErr> {
         self.enter(start)?;
         let mut n = 0usize;
+        let mut dup = 0usize;
+        let mut seen = self.emit.as_ref().map(|_| BTreeSet::new());
         let definite = if h.indefinite {
             None
         } else {
@@ -573,6 +624,11 @@ impl<'a> Walk<'a> {
                 _ => {}
             }
             let segment = self.key_segment()?;
+            if let Some(seen) = seen.as_mut() {
+                if !seen.insert(segment.clone()) {
+                    dup += 1;
+                }
+            }
             let mark = self.push(&segment);
             let r = self.item();
             self.pop(mark);
@@ -580,19 +636,111 @@ impl<'a> Walk<'a> {
             n += 1;
         }
         self.leave();
-        Ok((n, h.indefinite))
+        Ok((n, h.indefinite, dup))
     }
 
-    /// Major 6's one contained item, and major 7's own dispatch, share this: an
-    /// item walked under a fixed segment with the depth accounted for.
-    fn nest(&mut self, start: usize, segment: &str) -> Result<(), CborErr> {
+    /// Major 6 — the tag's one item, walked under `\t` with the depth
+    /// accounted for, and for tag 24 the DOCUMENT that item spells.
+    ///
+    /// The re-entry is not an interpretation of the tag: RFC 8949 §3.4.5.1 says
+    /// the content of tag 24 is "a byte string containing an encoded CBOR data
+    /// item", which is a statement about the ENCODING and needs no schema. Tag
+    /// 2's bignum is the other kind and still gets none — rendering its bytes
+    /// as a number is a reading, and this crate does not read.
+    fn tagged(&mut self, start: usize, tag: u64) -> Result<(), CborErr> {
         self.enter(start)?;
-        let mark = self.push(segment);
-        let r = self.item();
+        let mark = self.push("\\t");
+        let walked = self.item();
+        // Only a DEFINITE major 2 answers `KeyForm::Bytes`, which is exactly the
+        // case that can be re-entered: the content is then a contiguous slice of
+        // the buffer, so the offsets the sub-walk reports are still offsets into
+        // the capture. `self.i` is the end of the tag's one item, so the content
+        // start is that minus its length.
+        let span = match (&walked, tag) {
+            (Ok((_, KeyForm::Bytes(raw))), TAG_EMBEDDED_CBOR) => Some((self.i - raw.len(), self.i)),
+            _ => None,
+        };
+        if let Some((from, to)) = span {
+            self.embedded(from, to);
+        }
         self.pop(mark);
-        r?;
+        walked?;
         self.leave();
         Ok(())
+    }
+
+    /// R311y916 (item 442) — walk the document a tag 24 byte string spells.
+    ///
+    /// # Why the buffer is narrowed rather than copied
+    ///
+    /// `start..end` is a slice of the ORIGINAL bytes, so the sub-walk runs over
+    /// `self.b` with its end moved in. Every offset it reports therefore stays
+    /// an offset into the capture, which is the only kind of span a reader of
+    /// this crate can act on — a row whose span means something else is worse
+    /// than an absent row. It also shares the depth counter, so nesting through
+    /// tag 24 cannot buy an attacker a fresh budget for the price of a wrapper.
+    ///
+    /// # Why a failure never reaches the outer walk
+    ///
+    /// The decision item 442 asked for. §3.4.5.1's requirement is a VALIDITY
+    /// rule about the content, and the outer document's ENCODING is well-formed
+    /// whatever the byte string holds — R311y914 drew this crate's line between
+    /// the two and this is the same line. So a sub-walk that fails drops its
+    /// partial rows, leaves one row saying where it stopped, and the outer walk
+    /// carries on. The precedent is the protobuf walk's `text_like` fallback: a
+    /// sub-decode that fails describes what it found rather than condemning
+    /// what carried it.
+    fn embedded(&mut self, start: usize, end: usize) {
+        let mark = self.push(CBOR_EMBEDDED_SEGMENT);
+        let outcome = match self.enter(start) {
+            Err(e) => Err(e),
+            Ok(()) => {
+                let rows = self.emit.as_ref().map(|e| e.fields.len());
+                let outer_b = self.b;
+                let outer_i = self.i;
+                self.b = &self.b[..end];
+                self.i = start;
+                let walked = match self.item() {
+                    Err(e) => Err(e),
+                    Ok(_) if self.i == end => Ok(()),
+                    // The same rule `scan` applies to the outer document, and
+                    // for the same reason: §3.4.5.1 says "an encoded CBOR data
+                    // item", singular.
+                    Ok(_) => Err((self.i, "trailing input after the one top-level data item")),
+                };
+                self.b = outer_b;
+                self.i = outer_i;
+                self.leave();
+                if walked.is_err() {
+                    if let (Some(rows), Some(e)) = (rows, self.emit.as_mut()) {
+                        e.fields.truncate(rows);
+                    }
+                }
+                walked
+            }
+        };
+        if let Err((at, why)) = outcome {
+            self.note(
+                start,
+                end,
+                format!("not an embedded document: {why} at byte {at}"),
+            );
+        }
+        self.pop(mark);
+    }
+
+    /// One row at the current path that no item reserved — what the walk found
+    /// where an item was expected.
+    fn note(&mut self, start: usize, end: usize, value: String) {
+        let Some(e) = self.emit.as_mut() else { return };
+        let path = e.path.clone();
+        e.fields.push(PayloadField {
+            path,
+            name: None,
+            value,
+            start,
+            end,
+        });
     }
 
     /// Major 7 — the simple values and the floats.
@@ -671,16 +819,7 @@ impl<'a> Walk<'a> {
         self.emit = saved;
         let (_, form) = walked?;
         Ok(match form {
-            KeyForm::Text(s) => {
-                let mut out = String::new();
-                for c in s.chars() {
-                    if c == CBOR_PATH_SEP || c == CBOR_PATH_ESCAPE {
-                        out.push(CBOR_PATH_ESCAPE);
-                    }
-                    out.push(c);
-                }
-                out
-            }
+            KeyForm::Text(s) => escape_segment(s),
             KeyForm::Int(v) => format!("\\i{v}"),
             KeyForm::Bytes(raw) => {
                 let mut out = String::from("\\b");
@@ -689,7 +828,13 @@ impl<'a> Walk<'a> {
                 }
                 out
             }
-            KeyForm::Float(v) => format!("\\f{v}"),
+            // R311y916 (item 443) — ESCAPED, because `format!("{v}")` puts a `.`
+            // in every float that has a fractional part, and an unescaped
+            // separator inside a segment is the collision item 434 exists to
+            // prevent: `$.\f1.5` would otherwise be both `{1.5: _}` and
+            // `{1.0: {"5": _}}`. The other reserved forms render digits, hex or
+            // a fixed word and need nothing.
+            KeyForm::Float(v) => format!("\\f{}", escape_segment(&format!("{v}"))),
             KeyForm::Simple(word) => format!("\\s{word}"),
             KeyForm::SimpleOther(n) => format!("\\s{n}"),
             KeyForm::Opaque => format!("\\x{at}"),
@@ -731,6 +876,39 @@ fn indef_note(indefinite: bool) -> &'static str {
         ", indefinite"
     } else {
         ""
+    }
+}
+
+/// R311y910's rule, in one place: a `.` or a `\` going INTO a path segment is
+/// written with a leading `\`.
+///
+/// R311y916 (item 443) made this a function rather than a loop inside the text
+/// arm of `key_segment`, because the float arm needed the same rule and did not
+/// have it — a rendering with a `.` in it re-opened item 434's collision from
+/// inside the reserved namespace. Any arm that puts a RENDERED value into a
+/// segment goes through here.
+fn escape_segment(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if c == CBOR_PATH_SEP || c == CBOR_PATH_ESCAPE {
+            out.push(CBOR_PATH_ESCAPE);
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// R311y916 (item 441) — `, N duplicate key(s)` when RFC 8949 §5.6 was broken,
+/// and nothing at all when it was not.
+///
+/// Absent rather than `, 0 duplicate key(s)` for the reason every other note in
+/// this module is absent when it has nothing to say: a row a reader scans for
+/// findings should carry only what was found.
+fn dup_note(duplicates: usize) -> String {
+    if duplicates == 0 {
+        String::new()
+    } else {
+        format!(", {duplicates} duplicate key(s)")
     }
 }
 
@@ -813,6 +991,14 @@ const RFC8949_APPENDIX_A: &[(&[u8], &str, CborKind)] = &[
     (
         &[0xd7, 0x44, 0x01, 0x02, 0x03, 0x04],
         "23(h'01020304')",
+        CborKind::Tag,
+    ),
+    // R311y916 (item 442) — Appendix A's tag 24 vector, which the table had
+    // been missing. Its byte string is Appendix A's own `"IETF"` vector, so
+    // this row is the RFC saying that the content of a tag 24 IS a document.
+    (
+        &[0xd8, 0x18, 0x45, 0x64, 0x49, 0x45, 0x54, 0x46],
+        "24(h'6449455446')",
         CborKind::Tag,
     ),
     (&[0x40], "h''", CborKind::Bytes),
@@ -1074,6 +1260,159 @@ mod tests {
         );
     }
 
+    /// R311y916 (item 443) — A FLOAT KEY MUST NOT SPELL A PATH SEPARATOR.
+    ///
+    /// # Found by writing item 443's gate, not by reading
+    ///
+    /// Item 434's namespace works because every reserved form is a `\` followed
+    /// by a letter and a rendering that contains no unescaped separator. The
+    /// float form did not hold up its half: `format!("{v}")` for `1.5` puts a
+    /// `.` INSIDE the segment, so the path `$.\f1.5` parses as two segments and
+    /// means two different documents —
+    ///
+    /// * `{1.5: 1}` — one pair, whose key is a float, and
+    /// * `{1.0: {"5": 1}}` — a float key holding a map, since `1.0` renders `1`.
+    ///
+    /// That is exactly the collision item 434 was registered to prevent,
+    /// re-entered through the escape hatch rather than the front door, and it
+    /// had been live since R311y914 with a test asserting the broken form. The
+    /// fix is the rule that was already there: a rendering going into a segment
+    /// gets `.` and `\` escaped, whichever arm builds it.
+    #[test]
+    fn a_float_key_does_not_spell_a_path_separator() {
+        let leaf = |bytes: &[u8]| {
+            walk_cbor(bytes)
+                .expect("a map")
+                .last()
+                .expect("a leaf row")
+                .path
+                .clone()
+        };
+        // {1.5: 1}
+        let flat = leaf(&[0xa1, 0xf9, 0x3e, 0x00, 0x01]);
+        // {1.0: {"5": 1}} -- 1.0 renders as `1`, and then the `.` is the separator.
+        let nested = leaf(&[0xa1, 0xf9, 0x3c, 0x00, 0xa1, 0x61, 0x35, 0x01]);
+        assert_eq!(
+            flat, "$.\\f1\\.5",
+            "the `.` inside a float's rendering is escaped like any other"
+        );
+        assert_eq!(nested, "$.\\f1.5", "and here the `.` really is a separator");
+        assert_ne!(
+            flat, nested,
+            "two different documents must not share a path"
+        );
+    }
+
+    /// R311y916 (item 441) — A MAP WITH A DUPLICATE KEY SAYS SO, at the map.
+    ///
+    /// # The symptom item 441 registered
+    ///
+    /// RFC 8949 §5.6 makes a map with two equal keys INVALID, and until this
+    /// round nothing here looked. The cost is not abstract: the duplicate
+    /// arrives as two rows with the SAME path, and a `--payload-name`
+    /// declaration matches a path by string equality, so it renames both. That
+    /// is the accident items 431 and 434 were opened to prevent, with the
+    /// publisher as the cause rather than the path syntax.
+    ///
+    /// # Why the count sits on the container's row
+    ///
+    /// The duplicate pairs are already visible as two identical paths — what
+    /// was missing is anything NAMING it. The map's own row is where a reader
+    /// looking at those two rows goes next, it is one row rather than one per
+    /// duplicate, and it leaves the field rows exactly as they were.
+    #[test]
+    fn a_map_with_a_duplicate_key_reports_it_on_the_maps_own_row() {
+        // {"a": 1, "a": 2}
+        let body = &[0xa2, 0x61, 0x61, 0x01, 0x61, 0x61, 0x02];
+        let fields = walk_cbor(body).expect("a two-pair map");
+        assert_eq!(
+            fields[0].value, "map 2 pair(s), 1 duplicate key(s)",
+            "the map names what §5.6 makes it"
+        );
+        let paths: Vec<&str> = fields.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["$", "$.a", "$.a"],
+            "and the pairs are still both there, at the path they share"
+        );
+    }
+
+    /// R311y916 (item 441) — TWO ENCODINGS OF ONE KEY ARE ONE KEY.
+    ///
+    /// The discriminator against the detector a byte comparison would give.
+    /// §5.6's equality is over the GENERIC DATA MODEL (§2), not over the
+    /// encoding, so `1` written as the immediate form and `1` written as the
+    /// one-byte form are the same key — and their heads share no byte. This
+    /// walk compares the PATH SEGMENT, which is derived from the value, so it
+    /// gets this right for the same reason item 434's namespace works.
+    #[test]
+    fn one_key_encoded_two_ways_is_still_a_duplicate() {
+        // {1: 1, 1: 2} with the second key in the one-byte form.
+        let body = &[0xa2, 0x01, 0x01, 0x18, 0x01, 0x02];
+        let fields = walk_cbor(body).expect("a two-pair map");
+        assert_eq!(fields[0].value, "map 2 pair(s), 1 duplicate key(s)");
+    }
+
+    /// R311y916 (item 441) — AND TWO KEYS THAT ONLY LOOK ALIKE ARE TWO KEYS.
+    ///
+    /// The other half, without which the check would fire on the legal document
+    /// item 434 was registered about. A false "invalid" on a well-formed
+    /// publisher's traffic is worse than the silence this replaces.
+    #[test]
+    fn a_map_whose_keys_differ_only_by_type_has_no_duplicate() {
+        // {5: "a", "5": "b"} -- an integer key and a text key.
+        let body = &[0xa2, 0x05, 0x61, 0x61, 0x61, 0x35, 0x61, 0x62];
+        let fields = walk_cbor(body).expect("a two-pair map");
+        assert_eq!(
+            fields[0].value, "map 2 pair(s)",
+            "the integer 5 and the text \"5\" are different keys in §2's data model"
+        );
+    }
+
+    /// R311y916 (item 441) — WHAT THIS CHECK CANNOT SEE, pinned rather than
+    /// left to be discovered.
+    ///
+    /// A key with no name gets a `\x<offset>` segment, and an offset is unique
+    /// by construction — so two IDENTICAL container keys are two different
+    /// segments and this check does not count them. That is a real gap in
+    /// §5.6 coverage and it is asserted here so a later reader finds it stated
+    /// instead of assuming the check is total.
+    #[test]
+    fn duplicate_container_keys_are_not_counted_and_that_is_pinned() {
+        // {[]: 1, []: 2} -- the same key twice, by §2's data model.
+        let body = &[0xa2, 0x80, 0x01, 0x80, 0x02];
+        let fields = walk_cbor(body).expect("a two-pair map");
+        assert_eq!(
+            fields[0].value, "map 2 pair(s)",
+            "a locator-keyed pair is outside what segment equality can compare"
+        );
+    }
+
+    /// R311y916 (item 441) — A DUPLICATE IS COUNTED AT ITS OWN MAP.
+    ///
+    /// The count is per container, so a nested map's problem does not surface
+    /// on the outer map's row where a reader would look for the wrong pairs.
+    #[test]
+    fn a_nested_maps_duplicate_stays_on_the_nested_map() {
+        // {"o": {"a": 1, "a": 2}}
+        let body = &[0xa1, 0x61, 0x6f, 0xa2, 0x61, 0x61, 0x01, 0x61, 0x61, 0x02];
+        let fields = walk_cbor(body).expect("a nested map");
+        let seen: Vec<(&str, &str)> = fields
+            .iter()
+            .map(|f| (f.path.as_str(), f.value.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("$", "map 1 pair(s)"),
+                ("$.o", "map 2 pair(s), 1 duplicate key(s)"),
+                ("$.o.a", "unsigned 1"),
+                ("$.o.a", "unsigned 2"),
+            ],
+            "the outer map has one pair and no duplicate; the inner one owns both"
+        );
+    }
+
     /// R311y914 (item 434) — EVERY NON-TEXT KEY FORM, one path each.
     ///
     /// The table in the module doc, asserted. `\x` carries the key's byte
@@ -1092,8 +1431,8 @@ mod tests {
             ),
             (
                 &[0xa1, 0xf9, 0x3e, 0x00, 0x01],
-                "$.\\f1.5",
-                "a half-float key",
+                "$.\\f1\\.5",
+                "a half-float key, whose own `.` is escaped (item 443)",
             ),
             (&[0xa1, 0xf5, 0x01], "$.\\strue", "a boolean key"),
             (&[0xa1, 0xf6, 0x01], "$.\\snull", "a null key"),
@@ -1223,6 +1562,162 @@ mod tests {
             seen,
             vec![("$", "tag 1"), ("$.\\t", "unsigned 1363896240")],
             "the tag is a row and its content is a child, uninterpreted"
+        );
+    }
+
+    /// R311y916 (item 442) — TAG 24'S BYTE STRING IS A DOCUMENT, AND IT IS
+    /// WALKED.
+    ///
+    /// # Why this one tag and not the rest
+    ///
+    /// RFC 8949 §3.4.5.1 says the tag 24 content is "a byte string containing
+    /// an encoded CBOR data item". That is a structural statement, not a
+    /// semantic one, so re-entering it invents nothing — the same argument that
+    /// made item 433 open CBOR at all. A bignum is the other kind: rendering
+    /// tag 2's bytes as a number is an INTERPRETATION, and the module doc's
+    /// refusal there still stands.
+    ///
+    /// # The witness
+    ///
+    /// `24(h'6449455446')` is RFC 8949 Appendix A's own tag 24 vector, and the
+    /// bytes it wraps are Appendix A's `"IETF"` vector. So the assertion below
+    /// is that walking the inner bytes gives what the RFC says the inner bytes
+    /// are — a witness this decoder did not write.
+    #[test]
+    fn tag_24s_embedded_document_is_walked_rather_than_counted() {
+        // 24(h'6449455446')
+        let body = &[0xd8, 0x18, 0x45, 0x64, 0x49, 0x45, 0x54, 0x46];
+        let fields = walk_cbor(body).expect("a tag 24 item");
+        let seen: Vec<(&str, &str)> = fields
+            .iter()
+            .map(|f| (f.path.as_str(), f.value.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("$", "tag 24"),
+                ("$.\\t", "bytes 5 byte(s)"),
+                ("$.\\t.\\e", "text \"IETF\""),
+            ],
+            "the embedded document is a child of the byte string that carries it"
+        );
+        let inner = fields.last().expect("the embedded row");
+        assert_eq!(
+            (inner.start, inner.end),
+            (3, 8),
+            "the embedded rows carry OUTER offsets, so a reader can find them in the capture"
+        );
+    }
+
+    /// R311y916 (item 442) — BYTES THAT ARE NOT A DOCUMENT ARE A FINDING ABOUT
+    /// THE CONTENT, NOT A MALFORMED OUTER DOCUMENT.
+    ///
+    /// The decision item 442 asked for. The outer encoding is well-formed
+    /// whatever the byte string holds — §3.4.5.1's requirement is a VALIDITY
+    /// rule about the content, and this crate's line between the two is
+    /// R311y914's. So the walk reports the outer document as good, says at its
+    /// own path why the inner one was not walked, and emits no partial rows for
+    /// it. The precedent is the protobuf walk's `text_like` fallback: a
+    /// sub-decode that fails describes what it found rather than condemning
+    /// what carried it.
+    #[test]
+    fn a_tag_24_whose_bytes_are_not_a_document_leaves_the_outer_walk_good() {
+        // 24(h'ff') — a break byte, which is not a document at all.
+        let body = &[0xd8, 0x18, 0x41, 0xff];
+        assert!(
+            scan_cbor(body).is_ok(),
+            "the outer document's encoding is well-formed whatever the bytes hold"
+        );
+        let fields = walk_cbor(body).expect("a tag 24 item");
+        let seen: Vec<(&str, &str)> = fields
+            .iter()
+            .map(|f| (f.path.as_str(), f.value.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("$", "tag 24"),
+                ("$.\\t", "bytes 1 byte(s)"),
+                (
+                    "$.\\t.\\e",
+                    "not an embedded document: a break outside an indefinite-length item at byte 3"
+                ),
+            ],
+            "the failure is named at the position it happened, with no partial rows"
+        );
+    }
+
+    /// R311y916 (item 442) — TRAILING BYTES INSIDE THE BYTE STRING ARE NOT A
+    /// DOCUMENT EITHER.
+    ///
+    /// §3.4.5.1 says "an encoded CBOR data item", singular, and the outer walk
+    /// already refuses a second top-level item for the same reason (`scan`).
+    /// Asserted separately because a walk that stopped at the first item would
+    /// pass the test above and silently drop the rest of the byte string.
+    #[test]
+    fn a_tag_24_holding_two_items_is_not_an_embedded_document() {
+        // 24(h'0101') — two unsigned items in the byte string.
+        let body = &[0xd8, 0x18, 0x42, 0x01, 0x01];
+        let fields = walk_cbor(body).expect("a tag 24 item");
+        let last = fields.last().expect("the embedded row");
+        assert_eq!(
+            last.value,
+            "not an embedded document: trailing input after the one top-level data item at byte 4",
+            "a second item inside the byte string is refused where the outer walk refuses one"
+        );
+    }
+
+    /// R311y916 (item 442) — AND THE INDEFINITE FORM IS NOT RE-ENTERED, on
+    /// purpose.
+    ///
+    /// An indefinite-length byte string's content is the CONCATENATION of its
+    /// chunks, so the document only exists in a buffer this walk would have to
+    /// build — and every offset in it would then be an offset into that buffer
+    /// rather than into the capture. The rows this crate emits are findable
+    /// byte spans; a row whose span means something else is worse than an
+    /// absent row. `\b` draws this line for map keys already.
+    #[test]
+    fn an_indefinite_byte_string_under_tag_24_is_left_as_bytes() {
+        // 24(_ h'64', h'49455446') — the same "IETF" document, chunked.
+        let body = &[
+            0xd8, 0x18, 0x5f, 0x41, 0x64, 0x44, 0x49, 0x45, 0x54, 0x46, 0xff,
+        ];
+        let fields = walk_cbor(body).expect("a tag 24 item");
+        let seen: Vec<&str> = fields.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            seen,
+            vec!["$", "$.\\t"],
+            "no embedded row: the content is not a contiguous slice of the capture"
+        );
+    }
+
+    /// R311y916 (item 442) — THE EMBEDDED WALK IS INSIDE THE DEPTH BOUND, so a
+    /// document that nests through tag 24 cannot outrun it.
+    ///
+    /// The bound is a guard over attacker-influenced bytes, and a sub-walk that
+    /// started its own count would hand an attacker `MAX_CBOR_DEPTH` levels per
+    /// wrapper for the price of three bytes. Built by wrapping a document that
+    /// is already at the bound, so the failure is the recursion and not the
+    /// arithmetic.
+    #[test]
+    fn tag_24_nesting_cannot_outrun_the_depth_bound() {
+        let mut inner: Vec<u8> = core::iter::repeat_n(0x81u8, MAX_CBOR_DEPTH)
+            .chain(core::iter::once(0x00))
+            .collect();
+        assert!(
+            scan_cbor(&inner).is_ok(),
+            "the inner document is at the bound"
+        );
+        let len = u8::try_from(inner.len()).expect("a short fixture");
+        let mut body: Vec<u8> = vec![0xd8, 0x18, 0x58, len];
+        body.append(&mut inner);
+        let fields = walk_cbor(&body).expect("the outer document is still well-formed");
+        let last = fields.last().expect("the embedded row");
+        assert!(
+            last.value
+                .starts_with("not an embedded document: nested deeper than this reader walks"),
+            "the bound is shared with the outer walk, not restarted: {}",
+            last.value
         );
     }
 

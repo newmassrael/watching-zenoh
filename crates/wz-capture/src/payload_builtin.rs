@@ -575,6 +575,247 @@ mod tests {
         );
     }
 
+    /// R311y916 (item 443) — the letters a path segment may begin with after a
+    /// `\`, declared in one place.
+    ///
+    /// `i` integer, `b` byte string, `f` float, `s` simple value, `x` locator,
+    /// `t` a tag's content, `e` the document inside a tag 24. Every one of them
+    /// is `crate::payload_cbor`'s today, and the constant lives HERE rather
+    /// than there because the namespace belongs to the PATH SYNTAX, which every
+    /// built-in shares — a fourth format that wanted a reserved segment would
+    /// come to this list, and the gate below is what makes it have to.
+    const RESERVED_PATH_LETTERS: &[char] = &['b', 'e', 'f', 'i', 's', 't', 'x'];
+
+    /// R311y916 (item 443) — payloads that MAKE each built-in emit its paths.
+    ///
+    /// The population is [`BUILTIN_NAMES`] and the gate refuses a name with no
+    /// entry here, which is the half that matters: a fourth format added later
+    /// cannot join by saying nothing, and this workspace has paid for the
+    /// "a lane nobody runs" shape often enough to write it down.
+    const PATH_CORPUS: &[(&str, &[u8], &str)] = &[
+        (
+            "cbor",
+            &[
+                0xa5, 0x05, 0x01, 0x42, 0x01, 0xff, 0x02, 0xf9, 0x3e, 0x00, 0x03, 0xf5, 0x04, 0x80,
+                0x05,
+            ],
+            "{5: 1, h'01ff': 2, 1.5: 3, true: 4, []: 5} -- the key forms",
+        ),
+        (
+            "cbor",
+            &[0xd8, 0x18, 0x45, 0x64, 0x49, 0x45, 0x54, 0x46],
+            "24(h'6449455446') -- a tag and the document inside it",
+        ),
+        (
+            "cbor",
+            &[0xa2, 0x61, 0x2e, 0x01, 0x61, 0x5c, 0x02],
+            "{\".\": 1, \"\\\\\": 2} -- text keys that are ONLY the escape characters",
+        ),
+        (
+            "json",
+            br#"{"a.b":1,"\\":2,"c":[3]}"#,
+            "keys carrying a separator and an escape, and an array index",
+        ),
+        (
+            "protobuf",
+            &[0x12, 0x02, 0x08, 0x07],
+            "a length-delimited field holding a message -- the `2.1` form",
+        ),
+    ];
+
+    /// Split a path on the separators that are SEPARATORS, honouring the one
+    /// escape rule this crate has.
+    fn path_segments(path: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cur = String::new();
+        let mut chars = path.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => {
+                    cur.push(c);
+                    if let Some(next) = chars.next() {
+                        cur.push(next);
+                    }
+                }
+                '.' => out.push(core::mem::take(&mut cur)),
+                _ => cur.push(c),
+            }
+        }
+        out.push(cur);
+        out
+    }
+
+    /// R311y916 (item 443) — EVERY BUILT-IN'S PATH SEGMENTS STAY INSIDE THE
+    /// RESERVED NAMESPACE, run rather than reasoned.
+    ///
+    /// # The invariant, and why prose was not enough
+    ///
+    /// R311y914 (item 434) answered "what path does a non-text map key get?"
+    /// with "the escape alphabet is already closed": R311y910's rule emits `\`
+    /// only before a `.` or a `\`, so a segment beginning `\` followed by
+    /// anything else cannot come from a text key, and that free space is where
+    /// the reserved forms live. The whole design rests on that one sentence and
+    /// NOTHING CHECKED IT — each walk's own tests only look at their own
+    /// output. Item 443 was registered for that, as a sibling of item 438: an
+    /// invariant that lives in prose is re-derived by whoever edits next.
+    ///
+    /// It was not hypothetical. Writing this gate is what found the float form
+    /// emitting `\f1.5` — an UNESCAPED separator inside a reserved segment,
+    /// live since R311y914, which made `{1.5: 1}` and `{1.0: {"5": 1}}` share a
+    /// path. See `payload_cbor::tests::a_float_key_does_not_spell_a_path_separator`.
+    ///
+    /// # Both directions
+    ///
+    /// A letter observed but not declared is a form that slipped in without
+    /// coming to this list. A letter declared but not observed is a corpus that
+    /// stopped exercising a form, which is how a gate quietly becomes a gate
+    /// over nothing — so the assertion is on the SET, not on a count.
+    #[test]
+    fn every_builtins_path_segments_stay_inside_the_reserved_namespace() {
+        assert!(!BUILTIN_NAMES.is_empty(), "a gate over nothing is green");
+        let mut reserved_seen: Vec<char> = Vec::new();
+        let mut escaped_text_seen: Vec<char> = Vec::new();
+        for name in BUILTIN_NAMES {
+            let entries: Vec<&(&str, &[u8], &str)> =
+                PATH_CORPUS.iter().filter(|(n, _, _)| n == name).collect();
+            assert!(
+                !entries.is_empty(),
+                "built-in `{name}` has no PATH_CORPUS entry, so this gate says \
+                 nothing at all about the paths it emits"
+            );
+            let format = builtin(name).expect("a listed built-in resolves");
+            for (_, bytes, what) in entries {
+                let fields = format
+                    .decode(bytes)
+                    .unwrap_or_else(|e| panic!("`{name}` corpus `{what}` did not decode: {e:?}"));
+                assert!(
+                    !fields.is_empty(),
+                    "`{name}` corpus `{what}` produced no rows, so it exercises no path"
+                );
+                for field in &fields {
+                    for segment in path_segments(&field.path) {
+                        let mut chars = segment.chars();
+                        if chars.next() != Some('\\') {
+                            continue;
+                        }
+                        let letter = chars.next().unwrap_or_else(|| {
+                            panic!(
+                                "`{name}` corpus `{what}` emitted a lone `\\` as a whole \
+                                 segment in `{}`",
+                                field.path
+                            )
+                        });
+                        if letter == '.' || letter == '\\' {
+                            // A text key whose first character needed escaping.
+                            escaped_text_seen.push(letter);
+                            continue;
+                        }
+                        assert!(
+                            RESERVED_PATH_LETTERS.contains(&letter),
+                            "`{name}` corpus `{what}` emitted the segment `{segment}` in \
+                             `{}`, and `\\{letter}` is in no declared form -- either the \
+                             form is new and belongs in RESERVED_PATH_LETTERS, or a text \
+                             key reached the reserved namespace unescaped",
+                            field.path
+                        );
+                        reserved_seen.push(letter);
+                    }
+                }
+            }
+        }
+        reserved_seen.sort_unstable();
+        reserved_seen.dedup();
+        assert_eq!(
+            reserved_seen,
+            RESERVED_PATH_LETTERS.to_vec(),
+            "the corpus and the declared namespace disagree: a declared letter no \
+             payload produces is a form nothing tests"
+        );
+        escaped_text_seen.sort_unstable();
+        escaped_text_seen.dedup();
+        assert_eq!(
+            escaped_text_seen,
+            vec!['.', '\\'],
+            "the corpus must also carry the LEGAL `\\`-leading segments, or the \
+             check above is only ever asked the easy question"
+        );
+    }
+
+    /// R311y916 (item 443) — pairs of documents that a path syntax with a hole
+    /// in it would give the SAME path.
+    ///
+    /// The namespace check above cannot see this class, and saying so is why
+    /// this list exists: an unescaped `.` INSIDE a reserved segment splits into
+    /// two segments that both look perfectly legal (`\f1` and `5`), so nothing
+    /// about the segments alone is wrong. What is wrong is that a second
+    /// document reaches the same string.
+    const PATH_COLLISION_CORPUS: &[(&str, &[u8], &[u8], &str)] = &[
+        (
+            "cbor",
+            &[0xa1, 0xf9, 0x3e, 0x00, 0x01],
+            &[0xa1, 0xf9, 0x3c, 0x00, 0xa1, 0x61, 0x35, 0x01],
+            "{1.5: 1} vs {1.0: {\"5\": 1}} -- a float rendering carries a `.`",
+        ),
+        (
+            "cbor",
+            &[0xa1, 0x05, 0x61, 0x61],
+            &[0xa1, 0x61, 0x35, 0x61, 0x62],
+            "{5: \"a\"} vs {\"5\": \"b\"} -- item 434's own collision",
+        ),
+        (
+            "cbor",
+            &[0xa1, 0x63, 0x5c, 0x69, 0x35, 0x01],
+            &[0xa1, 0x05, 0x01],
+            "{\"\\\\i5\": 1} vs {5: 1} -- a text key spelling a reserved form",
+        ),
+        (
+            "json",
+            br#"{"a.b":1}"#,
+            br#"{"a":{"b":1}}"#,
+            "a dotted key vs the nesting it would otherwise mean",
+        ),
+    ];
+
+    /// R311y916 (item 443) — TWO DIFFERENT DOCUMENTS NEVER SHARE A LEAF PATH.
+    ///
+    /// # Why this is the second half of item 443 and not a duplicate of it
+    ///
+    /// A `--payload-name` declaration matches a path by string equality, so a
+    /// path that two documents can produce renames a field the operator never
+    /// meant — that is the harm the reserved namespace exists to prevent, and
+    /// the namespace check is a PROXY for it. This is the harm itself. The
+    /// float form is the proof the proxy was not enough: `\f1.5` passes a check
+    /// on segment letters and collides anyway.
+    ///
+    /// The LEAF is compared rather than the whole row list, deliberately. The
+    /// two documents differ in shape, so their lists differ even when the leaves
+    /// collide, and a list comparison would have called the float defect green.
+    #[test]
+    fn no_two_documents_in_the_collision_corpus_share_a_leaf_path() {
+        assert!(
+            !PATH_COLLISION_CORPUS.is_empty(),
+            "a gate over nothing is green"
+        );
+        for (name, left, right, what) in PATH_COLLISION_CORPUS {
+            let format = builtin(name).expect("a listed built-in resolves");
+            let leaf = |bytes: &[u8]| -> String {
+                format
+                    .decode(bytes)
+                    .unwrap_or_else(|e| panic!("`{name}` collision case `{what}`: {e:?}"))
+                    .last()
+                    .unwrap_or_else(|| panic!("`{name}` collision case `{what}` produced no rows"))
+                    .path
+                    .clone()
+            };
+            assert_ne!(
+                leaf(left),
+                leaf(right),
+                "`{name}`: {what} -- two documents reach one path, so a \
+                 `--payload-name` declaration for it renames both"
+            );
+        }
+    }
+
     /// R311y909 — THE JSON BUILT-IN CLAIMS EXACTLY THE TABLE ENTRIES THIS
     /// CRATE ALREADY CALLS JSON, derived rather than re-read.
     ///
