@@ -219,8 +219,121 @@ pub unsafe extern "C" fn wz_dissect_readable_surfaces(out: *mut *mut c_char) -> 
         ),
         &mut s,
     );
-    s.push_str("}}");
+    s.push_str("},\"doors\":[");
+    let mut first = true;
+    let mut door = Some(Door::FIRST);
+    while let Some(d) = door {
+        if !first {
+            s.push(',');
+        }
+        first = false;
+        s.push_str("{\"name\":");
+        wz_session_core::json::escape_into(d.name(), &mut s);
+        match d.subsumed_by() {
+            Some(current) => {
+                s.push_str(",\"subsumed_by\":");
+                wz_session_core::json::escape_into(current.name(), &mut s);
+            }
+            None => s.push_str(",\"subsumed_by\":null"),
+        }
+        s.push('}');
+        door = d.next();
+    }
+    s.push_str("]}");
     write_string(s, out)
+}
+
+/// R311y932 (open-debt item 451) — every pcap door this ABI exports, and which
+/// of them a newly written integration should NOT pick.
+///
+/// # The judgement nothing was making
+///
+/// Five doors were SUBSUMED and none were removed, which is the right call:
+/// a symbol this ABI published is a symbol a consumer has already linked. The
+/// cost item 451 names is that the header shows fifteen symbols in one list
+/// and says nothing about which five are the older shape, so an integrator
+/// writing fresh code can pick one and never get the ceiling it does not
+/// offer. The Rust doc and two tests state the subsumption -- `It subsumes the
+/// three census doors and replaces none of them`,
+/// `the_limited_field_door_subsumes_both_doors_it_joins` -- and the header,
+/// which is what a C consumer reads, carries none of it.
+///
+/// So the library ANSWERS it, beside the other things it already reports about
+/// itself. A consumer asking what this build can read now also learns which
+/// door is the current shape for each job.
+///
+/// # Why an enum and not a table
+///
+/// `name` is exhaustive, so a door added later cannot reach this document
+/// unnamed, and `subsumed_by` is exhaustive too, so its author has to say
+/// whether it joins an older one. The chain is what makes the SET complete:
+/// a variant with both answers but no place in the walk would simply never be
+/// visited, which is the shape R311y925 and R311y926 both paid for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Door {
+    Summary,
+    SummaryBounded,
+    Census,
+    CensusBounded,
+    CensusWhere,
+    CensusWhereLimited,
+    Fields,
+    FieldsWithPayloads,
+    FieldsLimited,
+}
+
+impl Door {
+    /// The head of the walk.
+    const FIRST: Self = Door::Summary;
+
+    /// The exported symbol, spelled as the header spells it.
+    fn name(self) -> &'static str {
+        match self {
+            Door::Summary => "wz_dissect_pcap_summary",
+            Door::SummaryBounded => "wz_dissect_pcap_summary_bounded",
+            Door::Census => "wz_dissect_pcap_census",
+            Door::CensusBounded => "wz_dissect_pcap_census_bounded",
+            Door::CensusWhere => "wz_dissect_pcap_census_where",
+            Door::CensusWhereLimited => "wz_dissect_pcap_census_where_limited",
+            Door::Fields => "wz_dissect_pcap_fields",
+            Door::FieldsWithPayloads => "wz_dissect_pcap_fields_with_payloads",
+            Door::FieldsLimited => "wz_dissect_pcap_fields_limited",
+        }
+    }
+
+    /// The door that joined this one, or `None` when this IS the current shape.
+    ///
+    /// `wz_dissect_pcap_summary_bounded` answers `None` beside its own plain
+    /// door on purpose: it takes a preset rather than subsuming, so neither is
+    /// the older shape of the other. Item 451 counted five subsumed and that
+    /// number is what this match makes checkable.
+    fn subsumed_by(self) -> Option<Self> {
+        match self {
+            Door::Census | Door::CensusBounded | Door::CensusWhere => {
+                Some(Door::CensusWhereLimited)
+            }
+            Door::Fields | Door::FieldsWithPayloads => Some(Door::FieldsLimited),
+            Door::Summary
+            | Door::SummaryBounded
+            | Door::CensusWhereLimited
+            | Door::FieldsLimited => None,
+        }
+    }
+
+    /// The next door in a fixed order, so the set is WALKED rather than listed.
+    fn next(self) -> Option<Self> {
+        match self {
+            Door::Summary => Some(Door::SummaryBounded),
+            Door::SummaryBounded => Some(Door::Census),
+            Door::Census => Some(Door::CensusBounded),
+            Door::CensusBounded => Some(Door::CensusWhere),
+            Door::CensusWhere => Some(Door::CensusWhereLimited),
+            Door::CensusWhereLimited => Some(Door::Fields),
+            Door::Fields => Some(Door::FieldsWithPayloads),
+            Door::FieldsWithPayloads => Some(Door::FieldsLimited),
+            Door::FieldsLimited => None,
+        }
+    }
 }
 
 /// Release a string this library returned. Passing null is a no-op, so a
@@ -2868,9 +2981,105 @@ mod tests {
             doc.contains(&zbuf) && doc.contains(&z64),
             "and both ext-body lines: {doc}"
         );
+        // R311y932 (item 451) — the tail moved when the `doors` axis joined,
+        // so this asserts the document's OPENING and that it parses, rather
+        // than a closing brace count that describes the shape of the day.
         assert!(
-            doc.starts_with("{\"link_types\":\"") && doc.ends_with("}}"),
+            doc.starts_with("{\"link_types\":\""),
             "the document is one JSON object: {doc}"
+        );
+        // R311y932 (item 451) — the doors axis is IN the document, and the
+        // subsumption is what a C consumer could not learn anywhere else.
+        assert!(
+            doc.contains(concat!(
+                "\"subsumed_by",
+                "\":\"wz_dissect_pcap_census_where_limited\""
+            )),
+            "the surfaces document must name the current census door: {doc}"
+        );
+        assert!(
+            doc.contains(concat!("\"subsumed_by", "\":null")),
+            "and must mark the doors that are themselves current: {doc}"
+        );
+        // The braces are counted rather than parsed: this crate cannot reach
+        // `wz_capture`'s scanner, which is `pub(crate)` there, and a balance
+        // check is enough to catch the axis being appended outside the object.
+        let opens = doc.matches('{').count();
+        let closes = doc.matches('}').count();
+        assert_eq!(
+            opens, closes,
+            "the surfaces document's braces do not balance: {doc}"
+        );
+        assert!(
+            doc.ends_with(']') || doc.ends_with('}'),
+            "the document ends mid-value: {doc}"
+        );
+    }
+
+    /// R311y932 (open-debt item 451) — EVERY PCAP DOOR THIS ABI EXPORTS SAYS
+    /// WHETHER IT IS THE CURRENT SHAPE.
+    ///
+    /// # What was unmeasured
+    ///
+    /// Five doors were subsumed and none removed, which is right: a published
+    /// symbol is one a consumer already links. But the header lists fifteen
+    /// symbols in one run and states the subsumption NOWHERE -- measured, by
+    /// reading it for the words subsume, supersede, prefer and instead. The
+    /// Rust doc says it and a C consumer does not read the Rust doc.
+    ///
+    /// # The population is the HEADER, not this enum
+    ///
+    /// The set is taken from `wz_dissect.h` and the walk must match it exactly.
+    /// Transcribing the list here would let the enum and the ABI drift in
+    /// either direction: a door added to the header and not the walk would be
+    /// undescribed, and a name misspelled in the walk would describe a door
+    /// that does not exist.
+    #[test]
+    fn every_pcap_door_the_header_exports_says_whether_it_is_current() {
+        const HEADER: &str = include_str!("../include/wz_dissect.h");
+
+        let mut exported: Vec<&str> = HEADER
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|w| w.starts_with("wz_dissect_pcap_"))
+            .collect();
+        exported.sort_unstable();
+        exported.dedup();
+        assert!(
+            !exported.is_empty(),
+            "no pcap door was read out of the header, so this test measured \
+             nothing"
+        );
+
+        let mut walked: Vec<&str> = Vec::new();
+        let mut subsumed = 0usize;
+        let mut door = Some(Door::FIRST);
+        while let Some(d) = door {
+            walked.push(d.name());
+            if let Some(current) = d.subsumed_by() {
+                assert_ne!(current, d, "{} cannot subsume itself", d.name());
+                assert!(
+                    current.subsumed_by().is_none(),
+                    "{} points at {}, which is itself subsumed -- the reader \
+                     would have to follow a chain",
+                    d.name(),
+                    current.name()
+                );
+                subsumed += 1;
+            }
+            door = d.next();
+        }
+        let mut sorted = walked.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted, exported,
+            "the walk and the header's pcap doors disagree -- a door added to \
+             one and not the other is exactly what this pins"
+        );
+        assert_eq!(
+            subsumed, 5,
+            "item 451 counted five subsumed doors; a different number means \
+             the ABI moved and this comment is what should be re-read"
         );
     }
 
