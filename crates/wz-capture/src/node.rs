@@ -440,7 +440,7 @@ pub fn nodes(dissection: &crate::Dissection) -> NodeCensus {
     // `quic/...` peer's Init is inside a QUIC stream and a serial peer's is
     // inside a COBS frame; a census that named the two flow tables would report
     // either deployment as having no participants at all.
-    for (flow, frames) in dissection.message_lists() {
+    for (flow, _, frames) in dissection.message_lists() {
         census.observe_flow(&flow, frames);
     }
     for flow in dissection.datagram_flows() {

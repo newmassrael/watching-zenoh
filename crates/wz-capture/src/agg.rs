@@ -392,9 +392,39 @@ pub struct KeyexprRow {
     /// Capture anchor of the first record attributed here, and of the last.
     /// A packet index on a datagram flow and a stream offset on a stream one —
     /// whatever [`PassiveFrame::stream_offset`] carries for that link.
+    ///
+    /// R311y918 — the pair is an interval in ONE coordinate space, named by
+    /// [`crate::AnchorSpace`], and [`Self::anchors_exact`] says whether every
+    /// record in this row is in that space.
     pub first_anchor: usize,
     /// See [`Self::first_anchor`].
     pub last_anchor: usize,
+    /// R311y918 (open-debt item 270's prerequisite) — `true` when every record
+    /// folded here shares the coordinate space [`Self::first_anchor`] is in, so
+    /// the pair covers all of them.
+    ///
+    /// # Why this exists, and what `false` means
+    ///
+    /// A row is keyed on the keyexpr ALONE, so it folds records from every flow
+    /// and both directions. An anchor is a byte offset absolute within ONE
+    /// direction of one stream, or a packet index — see [`crate::AnchorSpace`].
+    /// Before this field the pair was updated from whichever record arrived,
+    /// and a row carrying one keyexpr on both directions of a TCP flow reported
+    /// the interval `[419, 0]`: not a span, and not anything.
+    ///
+    /// So the pair now belongs to the FIRST space that contributed and records
+    /// from another space do not move it. `false` says other spaces also landed
+    /// here, which makes the interval a statement about part of the row rather
+    /// than a wrong statement about all of it. The name follows
+    /// [`crate::interest::Coverage::unclaimed_exact`], which draws the same
+    /// line between an answer and a partial one.
+    pub anchors_exact: bool,
+    /// The space token [`Self::first_anchor`] is in, as composed by
+    /// [`ThroughputTable::observe_flow_where`]. Private: it is an internal
+    /// identity with no meaning outside this fold, and a consumer that needed
+    /// to compare two rows' spaces would be asking a question this crate has
+    /// not answered yet.
+    space: usize,
 }
 
 impl KeyexprRow {
@@ -639,6 +669,15 @@ impl KeyexprSpaces {
 /// one table across both would cross-resolve them.
 #[derive(Debug, Default, Clone)]
 pub struct ThroughputTable {
+    /// R311y918 — the coordinate space of the record currently being folded,
+    /// composed by [`Self::observe_flow_where`] from the list's
+    /// [`crate::AnchorSpace`], its position and the frame's direction.
+    ///
+    /// Carried on the table rather than threaded through `observe_batch` /
+    /// `observe_message` / `fold` because it is a property of the WALK and not
+    /// of any record: adding a parameter to four private methods to reach the
+    /// one place that reads it would put the same value in four signatures.
+    anchor_space: usize,
     rows: BTreeMap<String, KeyexprRow>,
     unresolved: BTreeMap<(usize, u64), UnresolvedAlias>,
     declarations: usize,
@@ -751,10 +790,33 @@ impl ThroughputTable {
     /// could read, so no predicate over its records can be evaluated — it stays
     /// in [`Self::gaps`], where a reader looking for what is missing will find
     /// it, rather than being quietly attributed to the selector.
-    pub fn observe_flow_where(&mut self, frames: &[PassiveFrame], filter: &Filter) {
+    ///
+    /// # R311y918 — `anchors`
+    ///
+    /// What this list's [`PassiveFrame::stream_offset`] MEANS, from the
+    /// enumeration that knows ([`crate::Dissection::message_lists`]), and
+    /// `list` is that enumeration's position. Together with each frame's
+    /// DIRECTION they compose the token a row records beside its anchor pair:
+    /// every [`crate::AnchorSpace::PacketIndex`] list shares one token because
+    /// a packet index is global to the capture, while a byte offset is absolute
+    /// only within its own list and direction. A caller that passed the same
+    /// `list` for two stream lists would make two spaces look like one, which
+    /// is why the production callers pass `enumerate()`'s index rather than a
+    /// number of their own.
+    pub fn observe_flow_where(
+        &mut self,
+        frames: &[PassiveFrame],
+        filter: &Filter,
+        anchors: crate::AnchorSpace,
+        list: usize,
+    ) {
         let mut spaces = KeyexprSpaces::new();
         for frame in frames {
             let anchor = frame.stream_offset;
+            self.anchor_space = match anchors {
+                crate::AnchorSpace::PacketIndex => 0,
+                crate::AnchorSpace::StreamBytes => 1 + list * 2 + dir_index(frame.direction),
+            };
             match &frame.carried {
                 Carried::Batch(batch) => {
                     self.observe_batch(&mut spaces, frame, anchor, batch, filter)
@@ -912,14 +974,26 @@ impl ThroughputTable {
         self.unresolved_at_most_bytes += counts.unresolved_at_most_bytes;
         match resolved {
             Ok(keyexpr) => {
+                let space = self.anchor_space;
                 let row = self.rows.entry(keyexpr.clone()).or_insert(KeyexprRow {
                     keyexpr,
                     per_direction: [KeyexprCounts::default(); 2],
                     first_anchor: anchor,
                     last_anchor: anchor,
+                    anchors_exact: true,
+                    space,
                 });
                 row.per_direction[dir_index(direction)].add(&counts);
-                row.last_anchor = anchor;
+                // R311y918 — the pair belongs to the space that OPENED it. A
+                // record from another space cannot extend an interval it is not
+                // in; what it does instead is make the interval partial, which
+                // the row says rather than absorbing the number and reporting a
+                // span that spans nothing.
+                if row.space == space {
+                    row.last_anchor = anchor;
+                } else {
+                    row.anchors_exact = false;
+                }
             }
             Err((space, id)) => {
                 self.unresolved
@@ -1582,8 +1656,8 @@ pub fn aggregate_where(dissection: &crate::Dissection, filter: &Filter) -> Throu
     // enumeration. Naming the two flow tables here is what left this plane
     // blind to a serial line, which is in neither: see
     // `Dissection::message_lists`.
-    for (_, frames) in dissection.message_lists() {
-        table.observe_flow_where(frames, filter);
+    for (list, (_, anchors, frames)) in dissection.message_lists().enumerate() {
+        table.observe_flow_where(frames, filter, anchors, list);
     }
     table
 }
@@ -2617,8 +2691,13 @@ pub(crate) mod tests {
         let filter = Filter::parse("elapsed < 5000").expect("parses");
 
         let mut by_hand = ThroughputTable::new();
-        for flow in d.datagram_flows() {
-            by_hand.observe_flow_where(&flow.frames, &filter);
+        for (list, flow) in d.datagram_flows().iter().enumerate() {
+            by_hand.observe_flow_where(
+                &flow.frames,
+                &filter,
+                crate::AnchorSpace::PacketIndex,
+                list,
+            );
         }
         assert_eq!(by_hand.selection().undecided, 1);
         assert_eq!(by_hand.rows().len(), 0);
@@ -3359,6 +3438,89 @@ pub(crate) mod tests {
         assert_eq!(row.totals().payload_bytes, 12);
     }
 
+    /// R311y918 (open-debt item 270's prerequisite) — A ROW'S ANCHOR PAIR IS
+    /// NEVER AN IMPOSSIBLE INTERVAL.
+    ///
+    /// # What this is really about
+    ///
+    /// [`KeyexprRow::first_anchor`] and [`KeyexprRow::last_anchor`] read as a
+    /// span and are emitted as one by both surfaces. They are not: an anchor is
+    /// `PassiveFrame::stream_offset`, which is a byte offset ABSOLUTE WITHIN A
+    /// DIRECTION on a stream link and a PACKET INDEX on a datagram one — two
+    /// coordinate systems, with nothing on a frame saying which. A row is keyed
+    /// on the keyexpr alone, so it folds records from every flow and both
+    /// directions into one pair.
+    ///
+    /// The fixture is one TCP flow whose two directions both carry
+    /// `shared/topic`. Direction A carries it after 400 bytes of padding, so
+    /// its anchor is large; direction B carries it first in ITS stream, so its
+    /// anchor is zero. Both land in one row, and `last_anchor` is whichever
+    /// arrived last.
+    ///
+    /// Asserted as the INVARIANT rather than as the defect: a test that pinned
+    /// `last < first` would be item 438's shape, a test whose name is a claim
+    /// about something being broken.
+    #[test]
+    fn a_rows_anchor_pair_is_never_an_impossible_interval() {
+        fn framed(records: &[Vec<u8>]) -> Vec<u8> {
+            let mut out = Vec::new();
+            for record in records {
+                let wire = crate::datagram_tests::frame_carrying(record);
+                out.extend_from_slice(&(wire.len() as u16).to_le_bytes());
+                out.extend_from_slice(&wire);
+            }
+            out
+        }
+        let mut d = Dissection::new();
+        let a = framed(&[
+            push(sender_space(0, Some("pad/topic")), &[0u8; 400]),
+            push(sender_space(0, Some("shared/topic")), &[0u8; 8]),
+        ]);
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &crate::datagram_tests::tcp_packet(1000, &a),
+        );
+        let b = framed(&[push(sender_space(0, Some("shared/topic")), &[0u8; 8])]);
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &crate::datagram_tests::tcp_packet_reverse(1000, &b),
+        );
+
+        let table = aggregate(&d);
+        let row = table
+            .row("shared/topic")
+            .expect("both directions fold here");
+        assert_eq!(
+            row.totals().messages(),
+            2,
+            "the fixture must actually put both directions in one row"
+        );
+        assert!(
+            row.first_anchor <= row.last_anchor,
+            "a row that reports [{}, {}] is reporting an interval that cannot \
+             exist, which is what folding two coordinate systems into one pair \
+             produces",
+            row.first_anchor,
+            row.last_anchor
+        );
+        assert!(
+            !row.anchors_exact,
+            "and it must SAY the interval covers only part of the row -- \
+             a valid interval that silently described one direction would be \
+             the same defect with better arithmetic"
+        );
+
+        // The control arm. Without it, a build that hardwired `anchors_exact`
+        // to `false` would pass everything above.
+        let single = table.row("pad/topic").expect("one direction only");
+        assert!(
+            single.anchors_exact,
+            "a row every record of which came from one space is exact"
+        );
+    }
+
     /// Push a list through the whole pipeline under a selector — the same
     /// packets-in / table-out path [`aggregate_datagrams`] drives, with the
     /// production filtered entry point at the end of it.
@@ -4056,7 +4218,7 @@ pub(crate) mod tests {
         let mut seen = 0usize;
         for _ in 0..4 {
             for flow in d.datagram_flows() {
-                for frames in flow.frame_lists() {
+                for (_, frames) in flow.frame_lists() {
                     for frame in frames {
                         seen += frame.stream_offset & 1;
                     }

@@ -1029,7 +1029,7 @@ fn pattern_is_decidable(pattern: &str) -> bool {
 /// nothing.
 pub fn interests(dissection: &crate::Dissection) -> InterestCensus {
     let mut census = InterestCensus::new();
-    for (flow, frames) in dissection.message_lists() {
+    for (flow, _, frames) in dissection.message_lists() {
         census.observe_flow(&flow, frames);
     }
     census

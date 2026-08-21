@@ -536,6 +536,43 @@ pub struct DatagramDissection {
     pub quic_datagrams: messages::MessageList,
 }
 
+/// R311y918 (open-debt item 270's prerequisite) — WHAT A LIST'S
+/// [`PassiveFrame::stream_offset`] MEANS.
+///
+/// # The defect this names
+///
+/// That field is the anchor every census plane in this crate reports, and it
+/// carries two different kinds of number: a byte offset within one DIRECTION of
+/// one stream, or the INDEX of the packet that carried the message. Nothing on
+/// a frame says which — [`Dissection::message_lists`]' own doc has said so
+/// since R311y718, and [`DatagramDissection::frame_lists`] keeps its lists apart
+/// rather than flattening them for exactly that reason.
+///
+/// What neither of them did was TELL the caller, so a plane that folds several
+/// lists into one row folded two coordinate systems into one pair. R311y918
+/// measured a `ThroughputTable` row reporting the interval `[419, 0]`, which
+/// cannot exist. The field layer solved the same problem for its own rows in
+/// R311y855 by putting `offset_space` ON the row; this is that discriminator,
+/// moved to where the enumeration already knows the answer.
+///
+/// # Why two variants and not a flow identity
+///
+/// A packet index is global to the capture, so every list that answers
+/// [`Self::PacketIndex`] shares ONE space and rows folding them are comparable.
+/// A byte offset is absolute only within its own direction of its own list, so
+/// each (list, direction) pair is a space of its own — which is a fact about
+/// the LIST plus the frame, and is composed by the consumer rather than encoded
+/// here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorSpace {
+    /// The anchor is the index of the packet that carried the message. Global
+    /// to the capture.
+    PacketIndex,
+    /// The anchor is a byte offset within one direction of this list's stream.
+    /// Absolute there and meaningless against any other list or direction.
+    StreamBytes,
+}
+
 /// R311y718 (§1.2a) — one recovered QUIC stream, framed as zenoh.
 ///
 /// The QUIC half of it — packet protection, frame walking, reassembly — is a
@@ -627,7 +664,7 @@ impl DatagramDissection {
     /// about the QUIC half with it. The lesson is R311y700's: a new list that
     /// reaches one row producer reports the rest as empty.
     pub fn decoded_messages(&self) -> usize {
-        self.frame_lists().map(<[_]>::len).sum()
+        self.frame_lists().map(|(_, list)| list.len()).sum()
     }
 
     /// R311y718 — every list of decoded transport messages this flow holds.
@@ -647,10 +684,22 @@ impl DatagramDissection {
     /// meanings — see [`Self::quic_streams`] — so this is deliberately an
     /// iterator of SLICES and not a flattened frame iterator, which would fuse
     /// two offset spaces into one sequence.
-    pub fn frame_lists(&self) -> impl Iterator<Item = &[PassiveFrame]> {
-        core::iter::once(self.frames.as_slice())
-            .chain(self.quic_streams.iter().map(|s| s.frames.as_slice()))
-            .chain(core::iter::once(self.quic_datagrams.as_slice()))
+    pub fn frame_lists(&self) -> impl Iterator<Item = (AnchorSpace, &[PassiveFrame])> {
+        core::iter::once((AnchorSpace::PacketIndex, self.frames.as_slice()))
+            .chain(
+                self.quic_streams
+                    .iter()
+                    .map(|s| (AnchorSpace::StreamBytes, s.frames.as_slice())),
+            )
+            // R311y918 — the SAME space as the cleartext list beside it, which
+            // is what `quic_datagrams`' own doc says: the anchor is the index
+            // of the QUIC packet that carried the message. The two lists are
+            // kept apart because one consumer RESOLVES the coordinate against
+            // protected bytes, not because the coordinate differs.
+            .chain(core::iter::once((
+                AnchorSpace::PacketIndex,
+                self.quic_datagrams.as_slice(),
+            )))
     }
 
     /// R311y713 (§B6) — the chains this flow lost, whatever the cause.
@@ -2168,11 +2217,11 @@ mod message_list_census {
         // AND THE THREE ARE THE ENUMERATION. Without this the pattern above
         // would only prove that someone typed the names, not that the door
         // opens onto them.
-        let enumerated: usize = d.message_lists().map(|(_, frames)| frames.len()).sum();
+        let enumerated: usize = d.message_lists().map(|(_, _, frames)| frames.len()).sum();
         let named: usize = flows.iter().map(|f| f.frames.len()).sum::<usize>()
             + datagram_flows
                 .iter()
-                .map(|f| f.frame_lists().map(<[_]>::len).sum::<usize>())
+                .map(|f| f.frame_lists().map(|(_, list)| list.len()).sum::<usize>())
                 .sum::<usize>()
             + serial_frames.len();
         assert_eq!(
@@ -3469,20 +3518,22 @@ impl Dissection {
     /// SLICES and not a flattened frame iterator, deliberately: each list keeps
     /// its own coordinate meaning (see [`DatagramDissection::quic_streams`]),
     /// and fusing them into one sequence would fuse three offset spaces.
-    pub fn message_lists(&self) -> impl Iterator<Item = (FlowKey, &[PassiveFrame])> {
+    pub fn message_lists(&self) -> impl Iterator<Item = (FlowKey, AnchorSpace, &[PassiveFrame])> {
         self.flows
             .iter()
-            .map(|f| (f.flow, f.frames.as_slice()))
-            .chain(
-                self.datagram_flows
-                    .iter()
-                    .flat_map(|f| f.frame_lists().map(move |frames| (f.flow, frames))),
-            )
+            .map(|f| (f.flow, AnchorSpace::StreamBytes, f.frames.as_slice()))
+            .chain(self.datagram_flows.iter().flat_map(|f| {
+                f.frame_lists()
+                    .map(move |(space, frames)| (f.flow, space, frames))
+            }))
             .chain(core::iter::once((
                 // The key a serial line stands under: empty in every field,
                 // because a serial link is point to point and there is one per
                 // capture. See `FlowKey::serial_line`.
                 FlowKey::serial_line(),
+                // A serial line is a byte stream with two directions, so its
+                // anchor is an offset like any other stream's.
+                AnchorSpace::StreamBytes,
                 self.serial_frames.as_slice(),
             )))
     }

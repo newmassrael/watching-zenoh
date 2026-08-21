@@ -600,10 +600,16 @@ fn push_row(row: &KeyexprRow, t: &ThroughputTable, out: &mut String) {
         // would read as "this topic carried nothing".
         None => out.push_str(",\"share_bp\":null"),
     }
+    // R311y918 — the pair, and whether it covers the whole row. An anchor is a
+    // coordinate in ONE space (`crate::AnchorSpace`) and a row folds every flow
+    // and both directions, so `anchors_exact` is what separates an interval
+    // over all of this row's records from one over the first space's. Emitted
+    // structurally, like `unclaimed_exact` beside it: a consumer that had to
+    // test for the key's absence would read it as "exact".
     let _ = write!(
         out,
-        ",\"first_anchor\":{},\"last_anchor\":{}}}",
-        row.first_anchor, row.last_anchor
+        ",\"first_anchor\":{},\"last_anchor\":{},\"anchors_exact\":{}}}",
+        row.first_anchor, row.last_anchor, row.anchors_exact
     );
 }
 

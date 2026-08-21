@@ -1331,7 +1331,7 @@ pub fn payloads_where(
     let mut census = PayloadCensus::new();
     census.capture_origin_ms = dissection.capture_origin_ms();
     // R311y721 — see `agg::aggregate_where`: the dissection's enumeration.
-    for (_, frames) in dissection.message_lists() {
+    for (_, _, frames) in dissection.message_lists() {
         census.observe_flow_where(frames, filter);
     }
     census
