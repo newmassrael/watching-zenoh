@@ -974,6 +974,7 @@ mod fed_tests {
         let (mut low, high) = four_plane_streams(keyexpr);
         if contradicting {
             low.extend_from_slice(&framed_frame(4, &contradicting_records(keyexpr)));
+            low.extend_from_slice(&framed_frame(5, &unresolved_records()));
         }
         let low_packet = tcp_packet(1000, &low);
         let high_packet = tcp_packet_reverse(2000, &high);
@@ -1047,6 +1048,23 @@ mod fed_tests {
             6,
             b"not json at all",
         ));
+        out
+    }
+
+    /// R311y931 (item 465, the half R311y930 left) — a Put addressed to a
+    /// keyexpr ID THIS CAPTURE NEVER DECLARES.
+    ///
+    /// The fixture's own records use id 0 with a suffix, which resolves
+    /// without a Declare and so leaves the keyexpr table's `unresolved` list
+    /// empty. An id with no suffix and no declaration is what fills it, and
+    /// that list is the only writer of `space` and `references`.
+    ///
+    /// Two records under the same id, because `references` is a COUNT: one
+    /// would let a renderer that always wrote `1` pass.
+    fn unresolved_records() -> alloc::vec::Vec<u8> {
+        let mut out = alloc::vec::Vec::new();
+        out.extend_from_slice(&push(sender_space(77, None), b"a"));
+        out.extend_from_slice(&push(sender_space(77, None), b"bb"));
         out
     }
 
@@ -1954,6 +1972,15 @@ mod fed_tests {
             "the contradicting capture must have produced a finding, or the \
              union below is the plain capture's set again: {finding}"
         );
+        // R311y931 (item 465) — the same capture also carries a keyexpr id it
+        // never declares, which is the ONLY writer of `space` and
+        // `references`. Asserted here for the same reason as the line above:
+        // a clause that did not run cannot widen the set.
+        assert!(
+            finding.contains(concat!("\"references", "\":2")),
+            "the unresolved alias must have been counted twice, or the \
+             `references` key below is unmeasured: {finding}"
+        );
         let mut observed = json_keys(&doc);
         observed.extend(json_keys(&finding));
         observed.sort_unstable();
@@ -1961,14 +1988,19 @@ mod fed_tests {
 
         // MEASURED, not transcribed: written first as an empty table so the
         // failure printed the real difference.
-        // R311y930 (item 465) — three left this list when the contradicting
-        // capture arrived, and the list's OWN stale-exemption arm is what
-        // reported them rather than a reader noticing. What remains is the
-        // unresolved-keyexpr and id-table clause, which needs a capture whose
-        // keyexpr is referenced by id and never declared -- a different shape
-        // from a contradicting payload, which is why item 465 said the two
-        // halves want different fixtures.
-        const UNREACHED: [&str; 2] = ["references", "space"];
+        // R311y930 took this list from five to three and R311y931 emptied it,
+        // and BOTH times the list's own stale-exemption arm is what reported
+        // the change rather than a reader noticing. That arm is the reason an
+        // empty list is safe to keep: it is not a place a key can hide, it is
+        // a place a key is named while nothing produces it.
+        //
+        // Empty is not the goal and is not a milestone. Item 465 says so and
+        // it is right: a clause no capture can reach belongs here with the
+        // reason it cannot, and the next such clause should be ADDED rather
+        // than chased. What emptied it was two fixtures, not one -- a
+        // contradicting payload for the finding clause and an undeclared
+        // keyexpr id for the alias clause.
+        const UNREACHED: [&str; 0] = [];
 
         let literals = emitter_key_literals();
         assert!(
