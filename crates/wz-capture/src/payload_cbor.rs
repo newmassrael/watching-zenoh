@@ -1259,16 +1259,14 @@ mod tests {
     /// refuses the legal depth is the other way to get this wrong.
     #[test]
     fn nesting_past_the_bound_is_reported_and_the_bound_itself_is_walked() {
-        let at_bound: Vec<u8> = core::iter::repeat(0x81u8)
-            .take(MAX_CBOR_DEPTH)
+        let at_bound: Vec<u8> = core::iter::repeat_n(0x81u8, MAX_CBOR_DEPTH)
             .chain(core::iter::once(0x00))
             .collect();
         assert!(
             scan_cbor(&at_bound).is_ok(),
             "a document at the bound must still walk"
         );
-        let past: Vec<u8> = core::iter::repeat(0x81u8)
-            .take(MAX_CBOR_DEPTH + 1)
+        let past: Vec<u8> = core::iter::repeat_n(0x81u8, MAX_CBOR_DEPTH + 1)
             .chain(core::iter::once(0x00))
             .collect();
         let (_, why) = scan_cbor(&past).expect_err("past the bound must be refused");
