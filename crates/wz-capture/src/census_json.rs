@@ -943,6 +943,7 @@ mod fed_tests {
     fn four_plane_capture_with_file(
         keyexpr: &'static str,
         locator: Option<&str>,
+        contradicting: bool,
     ) -> (Dissection, alloc::vec::Vec<u8>) {
         let mut packets: alloc::vec::Vec<(u32, u32, alloc::vec::Vec<u8>)> = alloc::vec::Vec::new();
         let mut d = Dissection::new();
@@ -970,7 +971,10 @@ mod fed_tests {
             packets.push((0, 0, scout));
             packets.push((1, 0, hello));
         }
-        let (low, high) = four_plane_streams(keyexpr);
+        let (mut low, high) = four_plane_streams(keyexpr);
+        if contradicting {
+            low.extend_from_slice(&framed_frame(4, &contradicting_records(keyexpr)));
+        }
         let low_packet = tcp_packet(1000, &low);
         let high_packet = tcp_packet_reverse(2000, &high);
         d.push_packet_at(LINKTYPE_ETHERNET, 0, Some(0), &low_packet);
@@ -1012,11 +1016,40 @@ mod fed_tests {
     }
 
     fn four_plane_capture(keyexpr: &'static str) -> Dissection {
-        four_plane_capture_with_file(keyexpr, None).0
+        four_plane_capture_with_file(keyexpr, None, false).0
     }
 
     /// The two directions' framed streams, so the fixture above can build both
     /// a dissection and the capture file over the same bytes.
+    /// R311y930 (item 465) — a Put DECLARING an encoding its bytes refute, so
+    /// the payload census has a CONTRADICTION and the finding clause runs.
+    ///
+    /// Encoding 6 is `application/json` in the wire table and `[0xff]` is not
+    /// UTF-8, so the verdict is `NotUtf8` and the clause writes `reason` and
+    /// `at`. `why` needs a body that IS UTF-8 and is not JSON, which the
+    /// second record supplies.
+    ///
+    /// Appended as an Option so the six callers that pass `None` see a
+    /// byte-identical capture, which is the property item 456 bought the same
+    /// way: a shared fixture widened unconditionally moves what every other
+    /// test measures.
+    fn contradicting_records(keyexpr: &'static str) -> alloc::vec::Vec<u8> {
+        let mut out = alloc::vec::Vec::new();
+        // NotUtf8: declared JSON, bytes are a lone 0xff.
+        out.extend_from_slice(&crate::payload::tests_support::push_declaring(
+            keyexpr,
+            6,
+            &[0xff],
+        ));
+        // NotJson: declared JSON, bytes are valid UTF-8 that is not JSON.
+        out.extend_from_slice(&crate::payload::tests_support::push_declaring(
+            keyexpr,
+            6,
+            b"not json at all",
+        ));
+        out
+    }
+
     fn four_plane_streams(keyexpr: &'static str) -> (alloc::vec::Vec<u8>, alloc::vec::Vec<u8>) {
         // R311y869 — the CONTROL plane, and the reason it is in this fixture
         // rather than in one of its own: the module's own rule above is that
@@ -1363,7 +1396,7 @@ mod fed_tests {
         // `file` is read only by the field-document arm below, which is behind
         // `dissect`; underscored rather than cfg'd so the fixture call reads
         // the same in both builds.
-        let (d, _file) = four_plane_capture_with_file(HOSTILE, Some(HOSTILE_LOCATOR));
+        let (d, _file) = four_plane_capture_with_file(HOSTILE, Some(HOSTILE_LOCATOR), false);
 
         let census = census_json_where(&d, &crate::filter::Filter::any());
         crate::payload::json_wellformed(census.as_bytes()).unwrap_or_else(|e| {
@@ -1905,13 +1938,37 @@ mod fed_tests {
             &four_plane_capture("demo/temp"),
             &crate::filter::Filter::any(),
         );
+        // R311y930 (item 465) — a SECOND capture that carries contradictions,
+        // so the payload finding clause runs at all. Its keys join the observed
+        // set rather than replacing it: the plain capture is what every other
+        // assertion in this module measures and it stays untouched.
+        let (contradicting, _) = four_plane_capture_with_file("demo/temp", None, true);
+        let finding = census_json_where(&contradicting, &crate::filter::Filter::any());
+        // MEASURED: both records report `not_json`. The bytes that are not
+        // UTF-8 do NOT reach `Mismatch::NotUtf8` here -- the JSON scanner
+        // answers first and says so in `why` ("not UTF-8, which RFC 8259
+        // requires of a JSON text"). The first draft of this assertion looked
+        // for `not_utf8` and the dump is what corrected it.
+        assert!(
+            finding.contains(concat!("\"reason", "\":\"not_json\"")),
+            "the contradicting capture must have produced a finding, or the \
+             union below is the plain capture's set again: {finding}"
+        );
         let mut observed = json_keys(&doc);
+        observed.extend(json_keys(&finding));
         observed.sort_unstable();
         observed.dedup();
 
         // MEASURED, not transcribed: written first as an empty table so the
         // failure printed the real difference.
-        const UNREACHED: [&str; 5] = ["at", "reason", "references", "space", "why"];
+        // R311y930 (item 465) — three left this list when the contradicting
+        // capture arrived, and the list's OWN stale-exemption arm is what
+        // reported them rather than a reader noticing. What remains is the
+        // unresolved-keyexpr and id-table clause, which needs a capture whose
+        // keyexpr is referenced by id and never declared -- a different shape
+        // from a contradicting payload, which is why item 465 said the two
+        // halves want different fixtures.
+        const UNREACHED: [&str; 2] = ["references", "space"];
 
         let literals = emitter_key_literals();
         assert!(
