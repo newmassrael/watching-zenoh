@@ -7632,6 +7632,71 @@ mod datagram_tests {
         assert_eq!(d.datagram_flows()[0].frames[0].stream_offset, 1);
     }
 
+    /// R311y924 (open-debt item 247) — THE TWO FRAGMENT SKIP COUNTERS STAY AT
+    /// ZERO ON A CAPTURE FULL OF FRAGMENTS, AND THAT IS PINNED RATHER THAN
+    /// LEFT TO BE DISCOVERED.
+    ///
+    /// # The misreading this stops
+    ///
+    /// `SkipCensus::ipv4_fragment` and `ipv6_fragment` reach both documents
+    /// this crate emits, and their names say what a reader wants to know. They
+    /// cannot move: R311y606 made `decapsulate` report every piece as
+    /// `Transport::IpFragment` and left reassembly to the consumer, and this
+    /// crate's consumer always reassembles -- `frag` is not behind a feature.
+    /// A grep of the whole workspace finds `SkipReason::Ipv4Fragment` in
+    /// exactly two places, both of them the `match` arms that COUNT it.
+    ///
+    /// So a reader looking at a capture of nothing but fragments sees
+    /// `"ipv4_fragment": 0` and concludes there were none. What actually moved
+    /// is `ip_fragment_pending`, whose name says something narrower than what
+    /// it is carrying.
+    ///
+    /// # Why pinned rather than removed
+    ///
+    /// Removing them takes two keys out of a document a consumer reads by key,
+    /// which `wz_dissect.h`'s contract permits only for ADDED keys -- the same
+    /// wall item 455 records for `first_packet`. That is an owner's decision
+    /// about when a contract may break, so this asserts the state instead: the
+    /// day something does produce one of them, this test fails and somebody
+    /// decides what the counter now means.
+    #[test]
+    fn a_capture_of_fragments_leaves_the_fragment_skip_counters_at_zero() {
+        let mut msg = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        msg.extend_from_slice(&[0u8; 47]);
+        let mut udp = alloc::vec![0u8; 4];
+        udp.extend_from_slice(&((8 + msg.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(&msg);
+        let cut = 24;
+        let first = ipv4_fragment(
+            [10, 0, 0, 1],
+            [10, 0, 0, 2],
+            0x4242,
+            17,
+            0,
+            true,
+            &udp[..cut],
+        );
+
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &first);
+        let sk = d.skip_census();
+
+        // The counter that MOVED, asserted first: without it a build that
+        // skipped the packet for some other reason entirely would satisfy the
+        // two zeroes below and say nothing.
+        assert_eq!(
+            sk.ip_fragment_pending, 1,
+            "the held piece must be counted somewhere, or this fixture proves nothing"
+        );
+        assert_eq!(
+            sk.ipv4_fragment, 0,
+            "`ipv4_fragment` reads like the answer to `were there fragments` and \
+             is not: this capture is a fragment and the counter is zero"
+        );
+        assert_eq!(sk.ipv6_fragment, 0, "and its v6 twin cannot move either");
+    }
+
     /// The NEGATIVE arm: the same bytes delivered as one unfragmented datagram
     /// decode identically.
     ///
