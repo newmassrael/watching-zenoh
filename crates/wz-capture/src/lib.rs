@@ -147,6 +147,15 @@ pub mod payload;
 /// Private on purpose: the file boundary is an authoring convenience and must
 /// not become a second place a caller looks for a decoder.
 mod payload_builtin;
+/// R311y914 (open-debt items 433, 434) — the CBOR scanner and walk, beside the
+/// JSON one it is modelled on.
+///
+/// Private for the same reason [`payload_builtin`] is: [`payload`] is the one
+/// module a caller reads. It is a separate file rather than more of `payload.rs`
+/// because that file is already the largest in this crate, and RFC 8949's head
+/// encoding, chunked strings and simple-value rules are a self-contained
+/// grammar.
+mod payload_cbor;
 /// R311y856 — APPLYING a declaration to one walked message: resolve the key
 /// expression, pick the rule, decode, rebase the spans.
 ///

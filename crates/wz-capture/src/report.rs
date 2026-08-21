@@ -2582,6 +2582,7 @@ fn describe_mismatch(m: &crate::payload::Mismatch) -> String {
     match m {
         Mismatch::NotUtf8 { at } => format!("is not valid UTF-8 at byte {at}"),
         Mismatch::NotJson { at, reason } => format!("is not JSON at byte {at}: {reason}"),
+        Mismatch::NotCbor { at, reason } => format!("is not CBOR at byte {at}: {reason}"),
     }
 }
 
@@ -2589,7 +2590,9 @@ fn describe_mismatch(m: &crate::payload::Mismatch) -> String {
 fn mismatch_offset(m: &crate::payload::Mismatch) -> usize {
     use crate::payload::Mismatch;
     match m {
-        Mismatch::NotUtf8 { at } | Mismatch::NotJson { at, .. } => *at,
+        Mismatch::NotUtf8 { at } | Mismatch::NotJson { at, .. } | Mismatch::NotCbor { at, .. } => {
+            *at
+        }
     }
 }
 

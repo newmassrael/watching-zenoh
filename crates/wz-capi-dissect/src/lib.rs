@@ -3004,6 +3004,67 @@ mod tests {
         );
     }
 
+    /// R311y914 (open-debt item 433) — A CBOR TOPIC CAN BE DECODED THROUGH THE
+    /// ABI, and a cbor LABEL no longer silences the rule.
+    ///
+    /// # What the two arms are for
+    ///
+    /// The first is the ordinary case and the second is item 433's actual
+    /// symptom, which was never "no cbor decoder": `crate::payload::shape_of`
+    /// called `application/cbor` binary, so `inspect` answered `Opaque`, so
+    /// `judge_claim` could not REFUTE the label — and an unrefutable label is a
+    /// VETO over the operator's rule. A publisher labelling JSON bodies
+    /// `application/cbor` therefore made every rule on that topic come back
+    /// `encoding_mismatch` with nothing decoded, and the reader was told their
+    /// mapping was wrong when the publisher's label was.
+    ///
+    /// So the second arm sends JSON under a cbor label and asks for `json`. It
+    /// must now DECODE, carrying `despite_encoding` — the answer that was
+    /// unreachable before, in a shape a build that merely added a decoder would
+    /// still fail.
+    #[test]
+    fn a_cbor_topic_decodes_through_the_abi_and_its_label_can_be_refuted() {
+        const CBOR: u32 = 8;
+        // {"t": 21, 5: "a"} -- a text key and the integer key item 434 is about.
+        let honest = capture_declaring(CBOR, &[0xa2, 0x61, 0x74, 0x15, 0x05, 0x61, 0x61]);
+        let decoded =
+            call_fields_with_payloads(&honest, 0, "demo/sensor=cbor").expect("the capture reads");
+        assert!(
+            decoded.contains(
+                "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
+                 \"despite_encoding\":null,\"format\":\"cbor\""
+            ),
+            "the publisher said cbor and the rule says cbor, so it decodes with \
+             nothing overridden: {decoded}"
+        );
+        assert!(
+            decoded.contains("\"value\":\"unsigned 21\""),
+            "a text-keyed member must reach the linked surface: {decoded}"
+        );
+        assert!(
+            decoded.contains("\"path\":\"$.\\\\i5\""),
+            "and so must the integer key, in the namespace item 434 reserved \
+             for the keys a text key cannot spell: {decoded}"
+        );
+
+        // ITEM 433'S SYMPTOM. JSON bytes under a `application/cbor` label: the
+        // label is refuted by its own bytes, so the operator's `json` rule wins
+        // and the override is REPORTED rather than the rule being silenced.
+        let mislabelled = capture_declaring(CBOR, br#"{"a":1}"#);
+        let over = call_fields_with_payloads(&mislabelled, 0, "demo/sensor=json")
+            .expect("the capture reads");
+        assert!(
+            over.contains("\"state\":\"decoded\"")
+                && over.contains("\"despite_encoding\":\"application/cbor\""),
+            "a cbor label its own bytes refute must not veto the rule: {over}"
+        );
+        assert!(
+            !over.contains("\"state\":\"encoding_mismatch\""),
+            "`encoding_mismatch` here is the pre-R311y914 answer, and it was \
+             wrong about which side was at fault: {over}"
+        );
+    }
+
     /// R311y856 — A DECLARATION THIS BUILD CANNOT INSTALL IS REFUSED, with a
     /// code of its own and no document.
     ///

@@ -397,6 +397,80 @@ impl PayloadFormat for Json {
     }
 }
 
+/// R311y914 (open-debt items 433, 434) — CBOR, walked into its own fields.
+///
+/// # The silence this ends
+///
+/// `application/cbor` was in the position `application/json` held before
+/// R311y909 and one step worse. `crate::payload::shape_of` answered
+/// [`crate::payload::Shape::Binary`] for it, `Binary` makes
+/// [`crate::payload::inspect`] answer `Opaque`, and `Opaque` agrees with every
+/// claim — so `payload_decode::judge_claim` could not refute an
+/// `application/cbor` label, and an unrefuted label VETOES the operator's rule.
+/// The symptom was therefore not "a cbor body is shown as a byte count" but "no
+/// rule can be applied to a cbor topic", which is strictly worse than having no
+/// decoder at all.
+///
+/// # One grammar, not two
+///
+/// The walk is `crate::payload_cbor::walk_cbor` (a code span and not a link, on
+/// this crate's own rule: that item is crate-private, and a link to it from a
+/// public doc is what Layer C1bz counts), the SAME scanner
+/// [`crate::payload::inspect`] validates with. A decoder with its own reading of
+/// RFC 8949 would let this crate call a payload well-formed that the plane below
+/// refused.
+///
+/// # What it gives, and what it cannot
+///
+/// Kinds, values, byte spans and paths for every data item. Names arrive in the
+/// PATH, as JSON's do and for the same reason. What it does not do is interpret
+/// a TAG: the number is reported and the item under it is walked, but a bignum
+/// is not turned into a number and tag 24's embedded document is not re-entered.
+/// That is the rule this crate already applies to protobuf's absent field names
+/// — a decoder that invented the answer would be the worst kind of wrong on a
+/// plane whose whole output is findings.
+pub struct Cbor;
+
+impl PayloadFormat for Cbor {
+    fn name(&self) -> &str {
+        "cbor"
+    }
+
+    /// The one table name whose declared shape is CBOR.
+    ///
+    /// Kept honest by `the_cbor_builtin_claims_exactly_the_tables_cbor_shapes`
+    /// below rather than by this list being read carefully — the same guard the
+    /// JSON built-in has, against the same drift.
+    fn encodings(&self) -> Option<&[&str]> {
+        Some(&["application/cbor"])
+    }
+
+    fn decode(&self, payload: &[u8]) -> Result<Vec<PayloadField>, PayloadFormatError> {
+        if payload.is_empty() {
+            // The answer `Json` and `Protobuf` both give: an empty payload is
+            // not a document and is also not malformed, and `NotThisFormat`
+            // sends the reader to their mapping.
+            return Err(PayloadFormatError::NotThisFormat);
+        }
+        crate::payload_cbor::walk_cbor(payload).map_err(|(at, why)| {
+            // The same two-of-three split the JSON built-in makes, and for the
+            // same reason: a document that ran out is a capture question, one
+            // that broke at a byte inside it is a sender question.
+            // `NotThisFormat` is unreachable from here on purpose — bytes that
+            // are not CBOR at all fail at an offset inside them, and the mapping
+            // question is answered one level up by the encodings set.
+            if at >= payload.len() {
+                PayloadFormatError::Truncated(at)
+            } else {
+                PayloadFormatError::Malformed {
+                    at,
+                    why: String::from(why),
+                }
+            }
+        })
+    }
+}
+
 /// The format a name selects, or `None` for a name this build has no
 /// decoder for.
 ///
@@ -405,6 +479,7 @@ impl PayloadFormat for Json {
 /// their rule was live.
 pub fn builtin(name: &str) -> Option<&'static dyn PayloadFormat> {
     match name {
+        "cbor" => Some(&Cbor),
         "json" => Some(&Json),
         "protobuf" => Some(&Protobuf),
         _ => None,
@@ -413,7 +488,7 @@ pub fn builtin(name: &str) -> Option<&'static dyn PayloadFormat> {
 
 /// Every built-in name, for the usage text and for a refusal that can say
 /// what IS available.
-pub const BUILTIN_NAMES: &[&str] = &["json", "protobuf"];
+pub const BUILTIN_NAMES: &[&str] = &["cbor", "json", "protobuf"];
 
 #[cfg(test)]
 mod tests {
@@ -538,6 +613,71 @@ mod tests {
             claimed, shaped,
             "the `json` built-in and `shape_of` disagree about which declared \
              encodings are JSON documents"
+        );
+    }
+
+    /// R311y914 (item 433) — THE CBOR BUILT-IN CLAIMS EXACTLY THE TABLE ENTRIES
+    /// THIS CRATE CALLS CBOR, derived rather than re-read.
+    ///
+    /// The same gate the JSON built-in has, against the same drift and for a
+    /// sharper reason here: the wire table has one cbor entry today, and an
+    /// upstream `application/cbor-seq` would be a SEQUENCE of data items, which
+    /// this walk refuses by design (it requires exactly one). Whichever way that
+    /// lands, it must land as a red on the round it arrives rather than as a
+    /// silent contradiction between two hand-kept lists.
+    #[test]
+    fn the_cbor_builtin_claims_exactly_the_shapes_this_crate_calls_cbor() {
+        use wz_codecs::encoding_ids::ENCODING_ID_TO_STR;
+        let mut shaped: Vec<&str> = ENCODING_ID_TO_STR
+            .iter()
+            .copied()
+            .filter(|name| matches!(crate::payload::shape_of(name), crate::payload::Shape::Cbor))
+            .collect();
+        shaped.sort_unstable();
+        assert!(
+            !shaped.is_empty(),
+            "the table names no CBOR shape at all, so this gate would be green \
+             over an empty set"
+        );
+        let mut claimed: Vec<&str> = Cbor.encodings().expect("cbor names its encodings").to_vec();
+        claimed.sort_unstable();
+        assert_eq!(
+            claimed, shaped,
+            "the `cbor` built-in and `shape_of` disagree about which declared \
+             encodings are CBOR documents"
+        );
+    }
+
+    /// R311y914 — THE CBOR BUILT-IN IS REACHED THROUGH THE TRAIT, with the
+    /// spans a reader keys on.
+    ///
+    /// `payload_cbor`'s own tests gate the grammar; this one gates the SEAM —
+    /// that `--payload-format 'demo/**=cbor'` resolves to a decoder that returns
+    /// rows, and that an empty payload takes the `NotThisFormat` arm the other
+    /// two built-ins take rather than being called malformed.
+    #[test]
+    fn the_cbor_builtin_decodes_through_the_trait_and_declines_an_empty_body() {
+        let format = builtin("cbor").expect("`cbor` is a built-in");
+        // {"a": [1, 2]}
+        let body = &[0xa1, 0x61, 0x61, 0x82, 0x01, 0x02];
+        let decoded = format.decode(body).expect("a CBOR map");
+        let rows: Vec<(&str, &str)> = decoded
+            .iter()
+            .map(|f| (f.path.as_str(), f.value.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("$", "map 1 pair(s)"),
+                ("$.a", "array 2 element(s)"),
+                ("$.a.0", "unsigned 1"),
+                ("$.a.1", "unsigned 2"),
+            ]
+        );
+        assert_eq!(
+            format.decode(&[]),
+            Err(PayloadFormatError::NotThisFormat),
+            "an empty payload is a mapping question, not a malformed document"
         );
     }
 

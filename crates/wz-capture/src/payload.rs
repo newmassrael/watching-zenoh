@@ -59,6 +59,16 @@ use alloc::vec::Vec;
 
 use wz_codecs::encoding_ids::ENCODING_ID_TO_STR;
 
+/// R311y914 — the CBOR walk's two public types, named from HERE.
+///
+/// `crate::payload_cbor` is private for the same reason
+/// [`crate::payload_builtin`] is: this module is the one a caller reads. But
+/// [`Verdict::Cbor`] carries a [`CborSummary`], so a consumer matching on it
+/// needs a path to write — and a type reachable only through a variant is a
+/// type they cannot name in a signature. The same shape [`formats`] uses for
+/// the built-in decoders.
+pub use crate::payload_cbor::{CborKind, CborSummary};
+
 /// What a payload's declared encoding says about its BYTES.
 ///
 /// Derived from the table name rather than from a second list of ids, so a
@@ -70,6 +80,17 @@ pub enum Shape {
     Utf8Text,
     /// The bytes should be one well-formed JSON value.
     Json,
+    /// R311y914 (item 433) — the bytes should be one well-formed CBOR data
+    /// item.
+    ///
+    /// Its own shape rather than [`Shape::Binary`], and that distinction is the
+    /// whole of item 433's symptom: `Binary` makes [`inspect`] answer
+    /// [`Verdict::Opaque`], `Opaque` is consistent with every claim, and so
+    /// `crate::payload_decode::judge_claim` could never refute an
+    /// `application/cbor` label. An unrefuted label VETOES the operator's rule,
+    /// so a cbor topic was one no rule could be applied to at all — a state
+    /// strictly worse than having no decoder.
+    Cbor,
     /// The bytes are not text and nothing is claimed about their structure.
     Binary,
     /// The declared id is not in the table, so nothing is claimed at all.
@@ -151,6 +172,13 @@ impl<'a> Encoding<'a> {
 pub(crate) fn shape_of(name: &str) -> Shape {
     match name {
         "application/json" | "text/json" => Shape::Json,
+        // R311y914 — the ONE table name whose bytes are CBOR. There is no
+        // `application/cbor-seq` in the table, and if one arrives upstream it
+        // must NOT be folded in here for the reason `application/json-seq` is
+        // not folded into `Shape::Json`: a sequence is several data items, and a
+        // scanner that requires exactly one would manufacture a
+        // `NotAsDeclared` finding against a publisher that did nothing wrong.
+        "application/cbor" => Shape::Cbor,
         "zenoh/string" => Shape::Utf8Text,
         // Everything the table spells `text/*` is text by definition, and these
         // `application/*` entries are text formats whose bytes a reader can
@@ -186,6 +214,13 @@ pub enum Mismatch {
         /// What was wrong there, in one phrase.
         reason: &'static str,
     },
+    /// R311y914 — declared as CBOR, and the walk stopped.
+    NotCbor {
+        /// Byte offset where the walk stopped.
+        at: usize,
+        /// What was wrong there, in one phrase.
+        reason: &'static str,
+    },
 }
 
 /// What one JSON payload turned out to be.
@@ -217,6 +252,8 @@ pub enum Verdict<'a> {
     Text(&'a str),
     /// One well-formed JSON value.
     Json(JsonSummary),
+    /// R311y914 — one well-formed CBOR data item.
+    Cbor(CborSummary),
     /// Declared binary (or unknown): the bytes are shown as bytes and nothing
     /// is claimed about them.
     Opaque {
@@ -262,7 +299,11 @@ impl Verdict<'_> {
     pub fn is_consistent(&self) -> bool {
         matches!(
             self,
-            Verdict::Empty | Verdict::Text(_) | Verdict::Json(_) | Verdict::Opaque { .. }
+            Verdict::Empty
+                | Verdict::Text(_)
+                | Verdict::Json(_)
+                | Verdict::Cbor(_)
+                | Verdict::Opaque { .. }
         )
     }
 }
@@ -291,6 +332,13 @@ pub fn inspect<'a>(encoding: Encoding<'_>, bytes: &'a [u8]) -> Verdict<'a> {
             Err((at, reason)) => Verdict::NotAsDeclared {
                 declared: encoding.name().unwrap_or("application/json"),
                 reason: Mismatch::NotJson { at, reason },
+            },
+        },
+        Shape::Cbor => match crate::payload_cbor::scan_cbor(bytes) {
+            Ok(summary) => Verdict::Cbor(summary),
+            Err((at, reason)) => Verdict::NotAsDeclared {
+                declared: encoding.name().unwrap_or("application/cbor"),
+                reason: Mismatch::NotCbor { at, reason },
             },
         },
         Shape::Binary | Shape::Unclaimed => Verdict::Opaque { bytes: bytes.len() },
@@ -1899,7 +1947,7 @@ pub mod formats {
     // R311y856 — the SHIPPED decoders, re-exported from the file that holds
     // them so a caller reads one module. See `crate::payload_builtin` for why
     // they moved out of `wz-analyze`.
-    pub use crate::payload_builtin::{builtin, Json, Protobuf, BUILTIN_NAMES};
+    pub use crate::payload_builtin::{builtin, Cbor, Json, Protobuf, BUILTIN_NAMES};
 
     /// R311y856 — ONE SPELLING for a declaration, read here rather than by each
     /// surface that accepts one.
@@ -3104,6 +3152,82 @@ mod tests {
             ),
             "the text arm was already right, which is what made JSON the outlier"
         );
+    }
+
+    /// R311y914 (open-debt item 433) — A `application/cbor` LABEL CAN NOW BE
+    /// REFUTED, which is the symptom the item was registered for.
+    ///
+    /// # Why the refusal is the interesting half
+    ///
+    /// `shape_of` answered [`Shape::Binary`] for `application/cbor`, so
+    /// [`inspect`] answered [`Verdict::Opaque`], and `Opaque` is consistent with
+    /// every claim there is. `payload_decode::judge_claim` reads exactly that:
+    /// a claim it cannot REFUTE it treats as a veto over the operator's rule. So
+    /// the state before this round was not "a cbor body renders as a byte count"
+    /// — it was "a `--payload-format` rule cannot be applied to a cbor topic at
+    /// all", which is strictly worse than having no decoder.
+    ///
+    /// Both directions are asserted because only the pair distinguishes the fix
+    /// from a shape that refuses everything: bytes that ARE one CBOR item must
+    /// come back [`Verdict::Cbor`], or the new arm would veto the honest
+    /// publisher instead of the dishonest one.
+    #[test]
+    fn a_declared_cbor_body_is_judged_and_a_wrong_one_is_a_finding() {
+        let declared = Encoding::Known {
+            id: 8,
+            name: "application/cbor",
+            schema: None,
+        };
+        // {"a": 1} -- one well-formed data item.
+        let good = [0xa1, 0x61, 0x61, 0x01];
+        match inspect(declared, &good) {
+            Verdict::Cbor(summary) => {
+                assert_eq!(summary.top_level, CborKind::Map);
+                assert_eq!(summary.depth, 1);
+            }
+            other => panic!("one well-formed CBOR map is not a finding: {other:?}"),
+        }
+        // A JSON document under a cbor label. `{` is 0x7b, which reads as major
+        // type 3 with additional information 27 -- a text string whose LENGTH is
+        // the next eight bytes -- and the document holds six. So the walk stops
+        // at byte 1 reading the argument, not at the end reading content, and
+        // the offset is asserted because that distinction is the diagnosis a
+        // reader is handed.
+        let json = br#"{"a":1}"#;
+        match inspect(declared, json) {
+            Verdict::NotAsDeclared {
+                declared: name,
+                reason: Mismatch::NotCbor { at, .. },
+            } => {
+                assert_eq!(name, "application/cbor");
+                assert_eq!(at, 1, "the eight-byte length argument starts at byte 1");
+            }
+            other => panic!("a JSON body under a cbor label is a finding: {other:?}"),
+        }
+        // AND THE STATE THIS ROUND LEFT: `Opaque` is what the same call used to
+        // answer, and it is what `judge_claim` reads as "cannot be refuted".
+        assert!(
+            !matches!(inspect(declared, json), Verdict::Opaque { .. }),
+            "an `application/cbor` label that cannot be refuted vetoes the \
+             operator's rule -- item 433's actual symptom"
+        );
+    }
+
+    /// R311y914 — AND A CBOR VERDICT IS CONSISTENT, which is not the same claim.
+    ///
+    /// [`Verdict::is_consistent`] is what a caller asking "did everything
+    /// verify" reads. A new verdict arm that fell through to `false` would make
+    /// every honest cbor publisher look like a finding — the mirror of the
+    /// defect above, and the one a test of `inspect` alone would miss.
+    #[test]
+    fn a_well_formed_cbor_verdict_counts_as_consistent() {
+        let declared = Encoding::Known {
+            id: 8,
+            name: "application/cbor",
+            schema: None,
+        };
+        assert!(inspect(declared, &[0xa1, 0x61, 0x61, 0x01]).is_consistent());
+        assert!(!inspect(declared, br#"{"a":1}"#).is_consistent());
     }
 
     /// Nesting deeper than the scanner accepts is REPORTED, not accepted and

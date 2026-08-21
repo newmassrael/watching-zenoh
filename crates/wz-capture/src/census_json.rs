@@ -558,6 +558,14 @@ pub fn payloads_json(c: &crate::payload::PayloadCensus) -> String {
                 let _ = write!(out, ",\"reason\":\"not_json\",\"at\":{at},\"why\":");
                 escape_into(reason, &mut out);
             }
+            // R311y914 — its own reason word rather than folded into
+            // `not_json`: a consumer filtering this stream is asking which
+            // FORMAT the publisher contradicted, and two formats sharing one
+            // word would make that question unanswerable downstream.
+            crate::payload::Mismatch::NotCbor { at, reason } => {
+                let _ = write!(out, ",\"reason\":\"not_cbor\",\"at\":{at},\"why\":");
+                escape_into(reason, &mut out);
+            }
         }
         out.push('}');
     }

@@ -5368,6 +5368,108 @@ mod tests {
         );
     }
 
+    /// R311y914 (open-debt items 433, 434) — A CBOR PUBLISHER'S PAYLOAD IS
+    /// OPENED AT THE TERMINAL, non-text map keys included.
+    ///
+    /// # What was measurably absent
+    ///
+    /// `application/cbor` is entry 8 of the wire table and the field layer had
+    /// no decoder for it — the same silence `application/json` was in before
+    /// R311y909 and one step worse, because `shape_of` called it `Binary`, so
+    /// `inspect` answered `Opaque`, so a cbor label could not be REFUTED, so
+    /// `judge_claim` vetoed every rule pointed at a cbor topic. The reader could
+    /// not open the bytes and could not be told why.
+    ///
+    /// # Why the terminal and not the decoder
+    ///
+    /// The decoder's own tests are in `wz-capture`. This one is here for the
+    /// reason the JSON one above it is: what it gates is that the path from a
+    /// `--payload-format` argument to a printed row is JOINED, which no unit
+    /// test of the walk can show.
+    ///
+    /// The fixture carries an integer map key deliberately. `--payload-name`
+    /// matches a path by string equality, so item 434's collision — the integer
+    /// key `5` and a text key `"5"` sharing `$.5` — is a rename landing on the
+    /// wrong field, and it is only visible where a rename is actually applied.
+    #[test]
+    fn a_cbor_publishers_payload_is_opened_into_named_rows_at_the_terminal() {
+        const CBOR: u32 = 8;
+        // {"t": 21, 5: "a"} -- a text key, then the integer key item 434 is
+        // about, so the listing shows both segment rules in one document.
+        const BODY: &[u8] = &[0xa2, 0x61, 0x74, 0x15, 0x05, 0x61, 0x61];
+        let packets = [udp_from_zenoh_port(&frame_carrying(&put_declaring(
+            "demo/a", CBOR, BODY,
+        )))];
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .map(|p| (0u32, 1_000_000u64, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+        let rules = [(String::from("demo/**"), String::from("cbor"))];
+        let names = [(
+            String::from("demo/**"),
+            String::from("$.t"),
+            String::from("celsius"),
+        )];
+
+        let text = analyze_request(&Request {
+            capture: &capture,
+            keylog: None,
+            format: Format::Text,
+            per_flow: true,
+            per_message: true,
+            messages_per_flow: None,
+            quic_ports: &[],
+            quic_cid_len: None,
+            payload_rules: &rules,
+            payload_field_names: &names,
+            serial_linktypes: &[],
+            census: Census::default(),
+            per_field: true,
+            bounded: false,
+            health: false,
+            select: None,
+        })
+        .expect("the capture reads")
+        .0;
+
+        // ANTI-VACUITY: the sample really decoded, so a listing that reported
+        // nothing cannot pass by having been handed nothing.
+        assert!(
+            text.contains("messages decoded: 1"),
+            "the fixture must decode: {text}"
+        );
+        assert!(
+            text.contains("payload `demo/a` as cbor:"),
+            "the rule must be INSTALLED and applied under its own name: {text}"
+        );
+        assert!(
+            text.contains("$ = map 2 pair(s)"),
+            "the document's own row must be there, so a reader sees the shape \
+             before the leaves: {text}"
+        );
+        assert!(
+            text.contains("$.t (celsius) = unsigned 21"),
+            "the wire's name is the path and the declaration renames it: {text}"
+        );
+        // ITEM 434, AT THE SURFACE: the integer key is not `$.5`, so a rename
+        // written for a text key `\"5\"` cannot land on it.
+        assert!(
+            text.contains("$.\\i5 = text \"a\""),
+            "an integer map key must reach the terminal in the reserved \
+             namespace: {text}"
+        );
+        // And nothing here reads as a mapping quarrel: the publisher said cbor,
+        // the rule says cbor, so no override or veto line may appear. This is
+        // the assertion that would have been unwritable before this round --
+        // the rule could not be applied at all.
+        assert!(
+            !text.contains("NOT DECODED") && !text.contains("applied anyway"),
+            "the label and the rule agree, so there is no finding to print: \
+             {text}"
+        );
+    }
+
     #[test]
     fn the_encoding_findings_and_their_tally_reach_the_terminal() {
         const JSON: u32 = 5;
