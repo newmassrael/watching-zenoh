@@ -422,12 +422,23 @@ pub fn nodes_json(c: &NodeCensus) -> String {
         let e = &node.evidence;
         let _ = write!(
             out,
-            ",\"evidence\":{{\"init\":{},\"join\":{},\"hello\":{},\"scout\":{},\
             // R311y919 (item 452) — `offset_space` BEFORE `first_packet`,
             // because over a stream that name is wrong and this is the only
             // thing that says so. The field is not renamed: a consumer reads
             // this document by key and an added key is the widening the
             // contract permits, while a rename is a break.
+            //
+            // R311y920 — AND THIS COMMENT WAS INSIDE THE FORMAT STRING. A
+            // line-continuation `\` at the end of a string literal swallows the
+            // next line, comment and all, so these five lines were emitted into
+            // every census document for a whole round. Every gate passed:
+            // `cargo test` because the round's own assertion looked for
+            // `"offset_space":"…","first_packet"` and that substring still
+            // occurred further along the same literal, Layer C1bo because the C
+            // consumer greps for keys, clippy and the doc build because a string
+            // is a string. Nothing judged the DOCUMENT, which is open-debt item
+            // 380 stated as an accident instead of a sentence.
+            ",\"evidence\":{{\"init\":{},\"join\":{},\"hello\":{},\"scout\":{},\
              \"inadmissible\":{},\"admissible\":{}}},\"offset_space\":\"{}\",\
              \"first_packet\":{},\"wire_bytes\":{}",
             e.init,
@@ -1009,6 +1020,66 @@ mod fed_tests {
         );
         d.finish();
         d
+    }
+
+    /// R311y920 (open-debt item 380) — A WIRE STRING FULL OF JSON
+    /// METACHARACTERS LEAVES EVERY DOCUMENT WELL-FORMED.
+    ///
+    /// # Why a property test and not a lint
+    ///
+    /// Item 380 is the residue of three real leaks (the node plane's
+    /// `locators` and two interest keyexprs) and it says why the obvious guard
+    /// does not work: a static rule for "a wire string reaches JSON without
+    /// `escape_into`" would need an exemption per SAFE site, and today's safe
+    /// sites — enum names, hex zids, fixed strings — outnumber the unsafe ones,
+    /// so the exemption table would be longer than the findings. R311y889's own
+    /// rule refuses a lint in that shape.
+    ///
+    /// So the guard is the harm instead of its cause: push a hostile string
+    /// through the wire and require the DOCUMENT to still parse. That covers
+    /// the fourth site, and the fifth, without naming any of them.
+    ///
+    /// # What is hostile, and why each character is here
+    ///
+    /// `"` and `\` are the two a naive writer breaks on. U+0001 is the one a
+    /// writer that handles those two still breaks on, because JSON forbids raw
+    /// control characters below U+0020 rather than merely discouraging them.
+    /// The newline is the same class and the one a human notices. U+00FC is
+    /// legal raw and is here as the control arm: a "writer" that escaped
+    /// everything non-ASCII would still pass, so the assertion below also
+    /// requires the string to arrive.
+    #[test]
+    fn a_wire_string_of_json_metacharacters_leaves_every_document_well_formed() {
+        const HOSTILE: &str = "de\"mo/a\\b\u{1}c\nd/\u{fc}";
+        let d = four_plane_capture(HOSTILE);
+
+        let census = census_json_where(&d, &crate::filter::Filter::any());
+        crate::payload::json_wellformed(census.as_bytes()).unwrap_or_else(|e| {
+            panic!("the CENSUS document is not JSON: {e:?}\n{census}");
+        });
+
+        // The wire string must actually REACH the document. Without this a
+        // plane that dropped the keyexpr entirely would pass -- the same
+        // "population of zero is green" this workspace keeps paying for.
+        assert!(
+            census.contains("de\\\"mo/a\\\\b"),
+            "the hostile keyexpr never reached the census: {census}"
+        );
+
+        // The REPORT is a second writer over the same tables (open-debt item
+        // 379 is that this crate has two escapers), so a document that only
+        // asserted the census would say nothing about it.
+        let table = crate::agg::aggregate(&d);
+        let report = crate::report::CaptureReport::of(&d)
+            .with_throughput(&table)
+            .to_json();
+        crate::payload::json_wellformed(report.as_bytes()).unwrap_or_else(|e| {
+            panic!("the REPORT document is not JSON: {e:?}\n{report}");
+        });
+        assert!(
+            report.contains("de\\\"mo/a\\\\b"),
+            "the hostile keyexpr never reached the report: {report}"
+        );
     }
 
     /// R311y919 (open-debt item 452) — EVERY ANCHOR THIS DOCUMENT EMITS NAMES
