@@ -1801,4 +1801,114 @@ mod fed_tests {
             "a plane this build CAN feed must not report itself absent: {json}"
         );
     }
+
+    /// This module's own source, so the key set can be read from the WRITER
+    /// rather than only from what one capture happened to produce.
+    const SOURCE: &str = include_str!("census_json.rs");
+
+    /// Every `"key":` literal this module can write.
+    ///
+    /// Deliberately over-inclusive and with NO exclusion list: it sweeps the
+    /// whole file, tests included, so a literal cannot escape by living in a
+    /// place the sweep was told to skip. Item 400's warning is about filters
+    /// that carry exemptions; this one carries none, and every literal it finds
+    /// must be accounted for below in one list or the other.
+    fn emitter_key_literals() -> Vec<&'static str> {
+        let mut out = Vec::new();
+        let mut rest = SOURCE;
+        // The literals appear inside Rust string literals as an escaped quote,
+        // the key, an escaped quote and a colon -- so on disk: backslash,
+        // quote, key, backslash, quote, colon. Spelled in words rather than
+        // shown, because the sweep below reads THIS FILE and an example would
+        // be picked up as a key of its own. It was: the first run reported
+        // `name`, which was the example this comment used to carry.
+        while let Some(at) = rest.find("\\\"") {
+            let after = &rest[at + 2..];
+            let Some(end) = after.find("\\\"") else { break };
+            let name = &after[..end];
+            let tail = &after[end + 2..];
+            if tail.starts_with(':')
+                && !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+            {
+                out.push(name);
+            }
+            rest = after;
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// R311y928 (open-debt item 458) — EVERY KEY THIS MODULE CAN WRITE IS
+    /// EITHER OBSERVED BY THE PIN OR DECLARED UNREACHED.
+    ///
+    /// # The direction the pin could not see
+    ///
+    /// `the_census_documents_key_set_is_pinned` reads the keys one capture
+    /// produced. That is the wire truth and it is worth pinning, but its
+    /// population is a FIXTURE: a key emitted only under a condition that
+    /// capture never reaches is in neither direction of the assertion, because
+    /// the set it compares against is built from the same document. A probe
+    /// measured it -- a `probe_conditional` key added to the node plane behind
+    /// an unreachable byte count left that test at 1 passed.
+    ///
+    /// # Why this is a second test and not a wider fixture
+    ///
+    /// Item 458's own candidate was a second capture, and R311y927's locator
+    /// capture was tried first: the union of the two key sets is IDENTICAL to
+    /// the first alone, measured rather than assumed. A capture that reaches
+    /// every conditional branch does not exist, which item 458 says outright.
+    ///
+    /// So the writer is the denominator instead. What a fixture cannot reach is
+    /// named here, in a list that is itself pinned, and a NEW conditional key
+    /// lands in neither list until its author puts it in one.
+    #[test]
+    fn every_key_this_module_can_write_is_observed_or_declared_unreached() {
+        let doc = census_json_where(
+            &four_plane_capture("demo/temp"),
+            &crate::filter::Filter::any(),
+        );
+        let mut observed = json_keys(&doc);
+        observed.sort_unstable();
+        observed.dedup();
+
+        // MEASURED, not transcribed: written first as an empty table so the
+        // failure printed the real difference.
+        const UNREACHED: [&str; 5] = ["at", "reason", "references", "space", "why"];
+
+        let literals = emitter_key_literals();
+        assert!(
+            !literals.is_empty(),
+            "no key literal was read out of this module's source, so this test \
+             measured nothing"
+        );
+        let missing: Vec<&str> = literals
+            .iter()
+            .copied()
+            .filter(|k| !observed.contains(k) && !UNREACHED.contains(k))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "this module can write {missing:?}, and no capture in the suite \
+             produces them -- either give a fixture that reaches the condition, \
+             or add them to UNREACHED with the round that decided so"
+        );
+
+        // And the other direction: a name in UNREACHED that the fixture now
+        // DOES produce is a stale exemption, which is how a list like this
+        // rots into a place to hide a key.
+        let stale: Vec<&str> = UNREACHED
+            .iter()
+            .copied()
+            .filter(|k| observed.contains(k))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "{stale:?} are declared unreached but the capture emits them -- \
+             delete them from UNREACHED"
+        );
+    }
 }
