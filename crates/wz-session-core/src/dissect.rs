@@ -7727,4 +7727,80 @@ mod tests {
             );
         }
     }
+
+    /// The word `to_json` writes as this field's `kind`, read back off the
+    /// WIRE rather than off the enum, because the wire is the surface a
+    /// consumer branches on and the two are only the same thing while
+    /// something checks that they are.
+    fn kind_word_on_the_wire(value: FieldValue) -> String {
+        use alloc::string::ToString as _;
+        // The name is drawn from the vocabulary the dissect-name census
+        // already accepts: that census scans `name:` literals across the whole
+        // file, tests included, and is over-inclusive on purpose.
+        let json = to_json(&Field {
+            name: "m".into(),
+            span: Span { start: 0, end: 1 },
+            value,
+        });
+        let opener = "\"kind\":\"";
+        let at = json.find(opener).expect("every field names its kind");
+        let rest = &json[at + opener.len()..];
+        let end = rest.find('"').expect("the kind word is quoted");
+        rest[..end].to_string()
+    }
+
+    /// One representative of the variant after `value`, in a fixed order.
+    /// Exhaustive on purpose: a new [`FieldValue`] variant does not compile
+    /// until it is given a successor here, and it does not pass until it is
+    /// named in [`FIELD_VALUE_KINDS`] too. Two layers, because either alone
+    /// can be satisfied while the other is quietly skipped.
+    fn next_field_value(value: &FieldValue) -> Option<FieldValue> {
+        match value {
+            FieldValue::Bits(_) => Some(FieldValue::Flag(true)),
+            FieldValue::Flag(_) => Some(FieldValue::Uint(7)),
+            FieldValue::Uint(_) => Some(FieldValue::Bytes(Vec::from([0xab_u8]))),
+            FieldValue::Bytes(_) => Some(FieldValue::Text("t".into())),
+            FieldValue::Text(_) => Some(FieldValue::Opaque),
+            FieldValue::Opaque => Some(FieldValue::Label("l".into())),
+            FieldValue::Label(_) => Some(FieldValue::Nested(Vec::new())),
+            FieldValue::Nested(_) => None,
+        }
+    }
+
+    /// The kind vocabulary as MEASURED off the wire, in walk order -- written
+    /// down only after an empty table made the test print what `to_json`
+    /// actually writes, so this is a record and not a wish.
+    const FIELD_VALUE_KINDS: [&str; 8] = [
+        "bits", "flag", "uint", "bytes", "text", "opaque", "label", "nested",
+    ];
+
+    /// Each variant reaches the wire under a word of its own. The enum's own
+    /// documentation makes this a promise -- `Label` says a consumer "is
+    /// entitled to know which of the two it has" against `Bits` -- and until
+    /// this test that promise was kept only by the arms happening to spell
+    /// eight different words. Copying one arm onto another stayed green.
+    #[test]
+    fn every_field_value_kind_word_is_its_own() {
+        use alloc::string::ToString as _;
+        let mut walked = Vec::new();
+        let mut cursor = Some(FieldValue::Bits(1));
+        while let Some(value) = cursor {
+            cursor = next_field_value(&value);
+            walked.push(kind_word_on_the_wire(value));
+        }
+        assert_eq!(
+            walked,
+            FIELD_VALUE_KINDS
+                .iter()
+                .map(|k| k.to_string())
+                .collect::<Vec<_>>(),
+            "the walk read {walked:?} off the wire",
+        );
+        let distinct: alloc::collections::BTreeSet<&String> = walked.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            walked.len(),
+            "two variants share a kind word, so a consumer cannot tell them apart: {walked:?}",
+        );
+    }
 }
