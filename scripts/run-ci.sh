@@ -7694,17 +7694,34 @@ layer_c1bz_docs_resolve() {
     # private-link findings with it). This gate aims at doc LINKS and caught a
     # doc-OWNERSHIP bug, which is the second time in this arc a gate found
     # something other than what it was pointed at.
+    # R311y922 (open-debt item 446) — RE-MEASURED ON `--all-features`, in the
+    # commit that added the flag. Every line moved or could have: this is not
+    # the same population it was, and six of the twelve went DOWN.
+    #
+    # That direction is the surprise worth recording. `--all-features` is not
+    # "more findings": a link whose TARGET is behind a feature is unresolved in
+    # the default build and resolves once the feature is on, so turning
+    # everything on fixes some findings and exposes others. A round that
+    # expected the numbers to only rise would have read six of these as a
+    # regression in the other direction.
+    #
+    # The total roughly doubles (636 to 1243) and NOTHING got worse. The gate
+    # simply started measuring the docs a consumer can actually build. The
+    # ratchet is unchanged in kind: it fails in both directions, so the next
+    # round that fixes a link must lower its line here.
     budget="
-        wz-ap-demo:13
-        wz-capi-c:56
+        wz:2
+        wz-ap-demo:27
+        wz-capi-c:45
         wz-capi-core:7
         wz-capi-pico:45
-        wz-link-lwip:11
-        wz-mcu-session-acceptor:6
+        wz-link-lwip:10
+        wz-mcu-session-acceptor:4
         wz-routing-graph:6
-        wz-runtime-coop:19
-        wz-runtime-tokio:189
-        wz-session-core:273
+        wz-runtime-coop:12
+        wz-runtime-tokio:532
+        wz-session-core:538
+        wz-session-lwip:4
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
     "
@@ -7719,7 +7736,18 @@ layer_c1bz_docs_resolve() {
         # docs did not build. A gate that cannot count a finding does not have
         # it. The trailing `could not document <crate>` summary is excluded
         # because it is one line per failing crate rather than a finding.
-        count="$( (cd crates && cargo doc -p "$crate" --no-deps --quiet 2>&1) |
+        # R311y922 (open-debt item 446) — `--all-features`, because a module
+        # behind a non-default feature is not COMPILED without it and its doc
+        # links are therefore never checked. This lane read `wz-capture` as
+        # budget-0 green while `payload_decode.rs` carried an unresolved link
+        # (R311y915), and read `wz-session-core` the same way while it carried
+        # nine more (R311y921) -- both measured, both invisible here.
+        #
+        # The budget above was re-measured on this command in the same commit,
+        # which is item 400's prescription: a ceiling moved on a different
+        # measurement than the one that will be checked against it is a ceiling
+        # nobody can reason about.
+        count="$( (cd crates && cargo doc -p "$crate" --no-deps --quiet --all-features 2>&1) |
             grep -E '^error' | grep -cvE '^error: could not document' || true)"
         expected="$(grep -oE "\b${crate}:[0-9]+" <<<"$budget" | cut -d: -f2)"
         expected="${expected:-0}"
