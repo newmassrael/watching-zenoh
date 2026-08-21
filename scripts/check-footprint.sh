@@ -485,11 +485,24 @@ declare -A BASELINE_MC_TEXT=(
     # direction. This gate is unaffected: it weighs whole-section `text`, not
     # symbols.
     #
-    # Figures below are the HOSTED measurement (+1612 M3 / +1624 M4F) from run
-    # 32437029707, not this host's: local gcc 13.2.1 reads 4 B under CI's
-    # 10.3.1 on the same tree. Old: 53696/53796 (R311y878).
-    ["thumbv7m-none-eabi"]=55308
-    ["thumbv7em-none-eabihf"]=55420
+    # Round 1955 — SHRANK, and this is the 7% of the paragraph above being
+    # claimed. `wz-session-core`'s new `no_macrostep_diagnostics` profile
+    # selector forwards to the upstream flag, and this image's composition
+    # boundary sets it: -144 B (M3) / -152 B (M4F), measured on this host with
+    # the pin at `0ac56f1a`. Setting it asserts that nothing on this image
+    # reads the truncated-macrostep counters, which is checked rather than
+    # assumed — no crate in this tree names them, and upstream `#[cfg]`s the
+    # accessors away so a false assertion would not compile.
+    #
+    # The BOUND is untouched and is the other 93%; see the paragraph above for
+    # why it should stay that way.
+    #
+    # These are the hosted figures MINUS the locally-measured deltas, because
+    # the delta is what transfers across toolchains and the absolute is not
+    # (this host reads 4 B under CI on M3, 36 B on M4F). Old: 55308/55420
+    # (Round 1953, hosted run 32437029707, +1612 / +1624 over R311y878).
+    ["thumbv7m-none-eabi"]=55164
+    ["thumbv7em-none-eabihf"]=55268
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck

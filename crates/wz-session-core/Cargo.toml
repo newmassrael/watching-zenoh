@@ -299,6 +299,33 @@ session-extshm = ["transport-shm", "session-unicast"]
 # concern the MCU deploy supplies (cf. Layer G.8).
 no_std = ["sce-rust-runtime?/no_std", "dep:portable-atomic"]
 
+# ROM profile selector: forwards to sce-rust-runtime's
+# `no_macrostep_diagnostics`, which compiles out the truncated-macrostep
+# counter, the `Option<P::State>` snapshot, their two public accessors and
+# the error log. It does NOT touch the BOUND — the engine still refuses to
+# walk a macrostep that will not end, which is the property SCXML 3.13
+# makes necessary and which no flag should be able to switch off.
+#
+# Weak (`?`) for the same reason `no_std` above is: this feature alone must
+# never pull the optional dep. A profile decision, not a per-capability one
+# — the same distinction the `reassembly` comment draws when it explains
+# why capability features do not force runtime features.
+#
+# WHAT SETTING IT ASSERTS, because upstream made it opt-out on purpose: that
+# nothing in the built image reads those counters. It is true here — no
+# crate in this tree names `last_truncated_macrostep` or its sibling — and
+# upstream `#[cfg]`s the accessors away rather than returning a zero, so a
+# consumer that made the assertion falsely gets a compile error instead of a
+# count that reads as "did not happen".
+#
+# MEASURED (Round 1955) on deploy/mcu-multicast-e2e, thumbv7m-none-eabi,
+# `opt-level = "s"`, three Engine instantiations: -144 B of `.text`, of
+# which -70 B is the `Engine<..>` symbols themselves and the rest is helper
+# and accessor code that had no symbols of its own in the shipped build.
+# Upstream measures 44 B per instantiation on thumbv7em-hf at `"z"`; the
+# ratio transfers and the absolutes do not, exactly as it predicted.
+no_macrostep_diagnostics = ["sce-rust-runtime?/no_macrostep_diagnostics"]
+
 # R311di-11 — body-codec feature forwarders for the NetworkMessage
 # dispatch cluster. Each forwards to wz-codecs/codec-* so the 3-stage
 # chain (wz-runtime-tokio codec-X -> wz-session-core codec-X ->

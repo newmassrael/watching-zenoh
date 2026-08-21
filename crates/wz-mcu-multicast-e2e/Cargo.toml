@@ -112,6 +112,12 @@ wz = { path = "../wz", default-features = false, features = [
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "alloc",
     "no_std",
+    # Round 1955 — the second ROM profile selector, set here for the same
+    # reason `no_std` is: this crate is the composition boundary, so the
+    # deploy bin never names wz internals. Nothing on this image reads the
+    # macrostep counters, and no logger is installed, so the report the flag
+    # removes was already unreachable at runtime; -144 B of `.text`.
+    "no_macrostep_diagnostics",
     "session-multicast",
     "codec-join",
     "codec-frame",
