@@ -167,8 +167,11 @@ fn push_stream_flow(
         let at = message_at(frame);
         let _ = write!(
             out,
-            "{{\"direction\":\"{}\",\"offset_space\":\"stream_byte\",\"message_at\":{at},",
-            dir_name(frame.direction)
+            // R311y919 — the word comes from `AnchorSpace` now, so this row and
+            // the census planes cannot drift into two vocabularies for one fact.
+            "{{\"direction\":\"{}\",\"offset_space\":\"{}\",\"message_at\":{at},",
+            dir_name(frame.direction),
+            crate::AnchorSpace::StreamBytes.name()
         );
         match flow.message_bytes(frame) {
             Err(why) => push_declined(&why, out),
@@ -249,8 +252,9 @@ fn push_datagram_flow(
         emitted += 1;
         let _ = write!(
             out,
-            "{{\"direction\":\"{}\",\"offset_space\":\"packet\",\"packet\":{index},",
-            dir_name(frame.direction)
+            "{{\"direction\":\"{}\",\"offset_space\":\"{}\",\"packet\":{index},",
+            dir_name(frame.direction),
+            crate::AnchorSpace::PacketIndex.name()
         );
         push_walk(message, frame, declarations.map(|d| (d, &spaces)), out);
         out.push('}');

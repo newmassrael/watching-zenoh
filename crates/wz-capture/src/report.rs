@@ -2387,8 +2387,12 @@ fn throughput_json(t: &ThroughputTable, s: &mut String) {
         // moving between them must not find the pair qualified on one and bare
         // on the other.
         s.push_str(&format!(
-            ",\"first_anchor\":{},\"last_anchor\":{},\"anchors_exact\":{}}}",
-            row.first_anchor, row.last_anchor, row.anchors_exact
+            ",\"offset_space\":\"{}\",\"first_anchor\":{},\"last_anchor\":{},\
+             \"anchors_exact\":{}}}",
+            row.anchors.name(),
+            row.first_anchor,
+            row.last_anchor,
+            row.anchors_exact
         ));
     }
     s.push_str("],\"unresolved\":[");

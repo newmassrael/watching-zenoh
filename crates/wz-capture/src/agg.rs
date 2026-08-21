@@ -419,6 +419,14 @@ pub struct KeyexprRow {
     /// [`crate::interest::Coverage::unclaimed_exact`], which draws the same
     /// line between an answer and a partial one.
     pub anchors_exact: bool,
+    /// R311y919 (open-debt item 452) — WHICH coordinate space
+    /// [`Self::first_anchor`] is in, so the pair is readable at all.
+    ///
+    /// R311y918 made the pair internally consistent and left it unlabelled on
+    /// both surfaces, which means a reader still cannot tell a byte offset from
+    /// a packet index. The field layer has named its own since R311y855; this
+    /// is the same word, from [`crate::AnchorSpace::name`].
+    pub anchors: crate::AnchorSpace,
     /// The space token [`Self::first_anchor`] is in, as composed by
     /// [`ThroughputTable::observe_flow_where`]. Private: it is an internal
     /// identity with no meaning outside this fold, and a consumer that needed
@@ -678,6 +686,8 @@ pub struct ThroughputTable {
     /// of any record: adding a parameter to four private methods to reach the
     /// one place that reads it would put the same value in four signatures.
     anchor_space: usize,
+    /// R311y919 — the KIND of the space above, which is what a document reports.
+    anchor_kind: crate::AnchorSpace,
     rows: BTreeMap<String, KeyexprRow>,
     unresolved: BTreeMap<(usize, u64), UnresolvedAlias>,
     declarations: usize,
@@ -817,6 +827,11 @@ impl ThroughputTable {
                 crate::AnchorSpace::PacketIndex => 0,
                 crate::AnchorSpace::StreamBytes => 1 + list * 2 + dir_index(frame.direction),
             };
+            // R311y919 — the KIND beside the token. The token distinguishes two
+            // stream directions from each other, which a document does not need
+            // and could not read; the kind is what makes the pair a number a
+            // reader can act on.
+            self.anchor_kind = anchors;
             match &frame.carried {
                 Carried::Batch(batch) => {
                     self.observe_batch(&mut spaces, frame, anchor, batch, filter)
@@ -981,6 +996,7 @@ impl ThroughputTable {
                     first_anchor: anchor,
                     last_anchor: anchor,
                     anchors_exact: true,
+                    anchors: self.anchor_kind,
                     space,
                 });
                 row.per_direction[dir_index(direction)].add(&counts);

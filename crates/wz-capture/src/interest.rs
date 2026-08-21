@@ -294,6 +294,10 @@ pub struct InterestRequest {
     pub flow: FlowKey,
     /// Capture anchor of the `Interest`.
     pub asked_at: usize,
+    /// R311y919 (open-debt item 452) — WHICH space `asked_at`, `closed_at` and
+    /// `cancelled_at` are in. Found while testing item 452: the item named the
+    /// declaration's two anchors and this plane carries three more.
+    pub anchors: crate::AnchorSpace,
     /// Declarations seen carrying this id.
     ///
     /// The RAW count, deliberately: it is how many declarations claimed to
@@ -365,6 +369,11 @@ pub struct DeclaredInterest {
     pub declared_at: usize,
     /// Anchor of the matching `Undeclare`, when one went past.
     pub withdrawn_at: Option<usize>,
+    /// R311y919 (open-debt item 452) — WHICH space the two anchors above are
+    /// in. A byte offset within this flow's direction, or a packet index; the
+    /// two are told apart nowhere else, and a reader handed a small integer
+    /// cannot guess.
+    pub anchors: crate::AnchorSpace,
     /// The `Interest` id this declaration answers, when the envelope carried
     /// one.
     ///
@@ -441,6 +450,14 @@ impl Coverage {
 /// Every declaration this capture carried.
 #[derive(Debug, Clone, Default)]
 pub struct InterestCensus {
+    /// R311y919 (open-debt item 452) — the coordinate space of the list being
+    /// walked, set once per [`Self::observe_flow`] and read where a declaration
+    /// or a request records its anchor.
+    ///
+    /// On the census rather than in the two constructors' signatures: both are
+    /// already `#[allow(clippy::too_many_arguments)]`, and this is a property of
+    /// the WALK rather than of any one declaration.
+    anchors: crate::AnchorSpace,
     interests: Vec<DeclaredInterest>,
     requests: Vec<InterestRequest>,
     orphan_withdrawals: usize,
@@ -573,7 +590,13 @@ impl InterestCensus {
     /// Per FLOW and not per capture, for the reason [`ThroughputTable`] states:
     /// id spaces are per session, so one table across two flows would
     /// cross-resolve them.
-    pub fn observe_flow(&mut self, flow: &FlowKey, frames: &[PassiveFrame]) {
+    pub fn observe_flow(
+        &mut self,
+        flow: &FlowKey,
+        frames: &[PassiveFrame],
+        anchors: crate::AnchorSpace,
+    ) {
+        self.anchors = anchors;
         let mut spaces = KeyexprSpaces::new();
         // The OPEN declaration per `(declarer, kind, id)`, as an index into
         // `self.interests`. Keyed on the kind as well as the id because zenoh
@@ -676,6 +699,7 @@ impl InterestCensus {
             unjudged_answers: 0,
             closed_at: None,
             cancelled_at: None,
+            anchors: self.anchors,
         });
         asked.insert((dir, interest.interest_id), self.requests.len() - 1);
     }
@@ -889,6 +913,7 @@ impl InterestCensus {
             declared_at: anchor,
             withdrawn_at: None,
             solicited_by,
+            anchors: self.anchors,
         });
         self.interests.len() - 1
     }
@@ -1029,8 +1054,8 @@ fn pattern_is_decidable(pattern: &str) -> bool {
 /// nothing.
 pub fn interests(dissection: &crate::Dissection) -> InterestCensus {
     let mut census = InterestCensus::new();
-    for (flow, _, frames) in dissection.message_lists() {
-        census.observe_flow(&flow, frames);
+    for (flow, anchors, frames) in dissection.message_lists() {
+        census.observe_flow(&flow, frames, anchors);
     }
     census
 }

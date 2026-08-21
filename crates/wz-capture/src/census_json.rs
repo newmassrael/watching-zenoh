@@ -174,7 +174,17 @@ pub fn interests_json(c: &crate::interest::InterestCensus, t: &ThroughputTable) 
             }
             None => out.push_str("null"),
         }
-        let _ = write!(out, ",\"declared_at\":{},\"withdrawn_at\":", d.declared_at);
+        // R311y919 (item 452) — the SPACE before the numbers, in the field
+        // layer's own vocabulary (`AnchorSpace::name`). A reader handed
+        // `declared_at: 9` cannot tell a ninth packet from a ninth byte, and
+        // this plane's numbers are compared against the traffic rows' by
+        // anyone answering "what did this declaration actually cover".
+        let _ = write!(
+            out,
+            ",\"offset_space\":\"{}\",\"declared_at\":{},\"withdrawn_at\":",
+            d.anchors.name(),
+            d.declared_at
+        );
         match d.withdrawn_at {
             Some(at) => {
                 let _ = write!(out, "{at}");
@@ -238,12 +248,16 @@ pub fn interests_json(c: &crate::interest::InterestCensus, t: &ThroughputTable) 
         }
         let _ = write!(
             out,
+            // R311y919 (item 452) — one `offset_space` for the THREE anchors
+            // this row carries (`asked_at`, `closed_at`, `cancelled_at`), which
+            // share a space because they are all this request's own flow.
             "{{\"asker\":\"{}\",\"id\":{},\"mode\":\"{}\",\"answers\":{},\
-             \"asked_at\":{},\"closed_at\":",
+             \"offset_space\":\"{}\",\"asked_at\":{},\"closed_at\":",
             dir_name(r.asker),
             r.id,
             r.mode.name(),
             r.answers,
+            r.anchors.name(),
             r.asked_at,
         );
         match r.closed_at {
@@ -409,14 +423,20 @@ pub fn nodes_json(c: &NodeCensus) -> String {
         let _ = write!(
             out,
             ",\"evidence\":{{\"init\":{},\"join\":{},\"hello\":{},\"scout\":{},\
-             \"inadmissible\":{},\"admissible\":{}}},\"first_packet\":{},\
-             \"wire_bytes\":{}",
+            // R311y919 (item 452) — `offset_space` BEFORE `first_packet`,
+            // because over a stream that name is wrong and this is the only
+            // thing that says so. The field is not renamed: a consumer reads
+            // this document by key and an added key is the widening the
+            // contract permits, while a rename is a break.
+             \"inadmissible\":{},\"admissible\":{}}},\"offset_space\":\"{}\",\
+             \"first_packet\":{},\"wire_bytes\":{}",
             e.init,
             e.join,
             e.hello,
             e.scout,
             e.inadmissible,
             e.admissible(),
+            node.anchors.name(),
             node.first_packet,
             node.wire_bytes,
         );
@@ -608,8 +628,12 @@ fn push_row(row: &KeyexprRow, t: &ThroughputTable, out: &mut String) {
     // test for the key's absence would read it as "exact".
     let _ = write!(
         out,
-        ",\"first_anchor\":{},\"last_anchor\":{},\"anchors_exact\":{}}}",
-        row.first_anchor, row.last_anchor, row.anchors_exact
+        ",\"offset_space\":\"{}\",\"first_anchor\":{},\"last_anchor\":{},\
+         \"anchors_exact\":{}}}",
+        row.anchors.name(),
+        row.first_anchor,
+        row.last_anchor,
+        row.anchors_exact
     );
 }
 
@@ -982,6 +1006,84 @@ mod fed_tests {
             1,
             Some(9),
             &tcp_packet_reverse(2000, &high_to_low),
+        );
+        d.finish();
+        d
+    }
+
+    /// R311y919 (open-debt item 452) — EVERY ANCHOR THIS DOCUMENT EMITS NAMES
+    /// ITS COORDINATE SPACE.
+    ///
+    /// # The defect, and why the node plane is the sharp end
+    ///
+    /// `PassiveFrame::stream_offset` carries two different kinds of number: a
+    /// byte offset absolute within ONE DIRECTION of a stream, and the INDEX of
+    /// the packet on a datagram link. R311y918 gave `AnchorSpace` to the
+    /// enumeration that knows, and fixed the throughput row's pair, but the
+    /// SURFACES still print bare numbers.
+    ///
+    /// The node plane is worse than unlabelled: its field is called
+    /// `first_packet`, and over a TCP flow the value is a byte offset. The name
+    /// is not missing, it is WRONG — which is the failure a reader cannot
+    /// detect, because a plausible small integer under a plausible name reads
+    /// as an answer.
+    ///
+    /// # Both values, so the label cannot be hardwired
+    ///
+    /// The stream capture must say `stream_byte` and the datagram capture must
+    /// say `packet`. A build that emitted one constant would pass either half
+    /// alone.
+    #[test]
+    fn every_anchor_this_document_emits_names_its_coordinate_space() {
+        let over_tcp = census_json_where(
+            &four_plane_capture("demo/temp"),
+            &crate::filter::Filter::any(),
+        );
+        // PER PLANE, by adjacency. Asserting only that the word appears
+        // somewhere would let ONE labelled plane stand for four, which is the
+        // failure this whole item is about -- a number that reads as answered
+        // because its neighbour was.
+        for anchor in [
+            "\"first_anchor\"", // the throughput rows
+            "\"first_packet\"", // the node census
+            "\"declared_at\"",  // the interest declarations
+            "\"asked_at\"",     // the interest requests
+        ] {
+            assert!(
+                over_tcp.contains(anchor),
+                "the fixture must actually reach the plane carrying {anchor}: {over_tcp}"
+            );
+            let labelled = alloc::format!("\"offset_space\":\"stream_byte\",{anchor}");
+            assert!(
+                over_tcp.contains(&labelled),
+                "the anchor {anchor} is emitted with no space beside it, so a \
+                 reader cannot tell a byte offset from a packet index: {over_tcp}"
+            );
+        }
+        assert!(
+            !over_tcp.contains("\"offset_space\":\"packet\""),
+            "and over TCP none of them is a packet index: {over_tcp}"
+        );
+
+        let over_udp = census_json_where(&datagram_capture(), &crate::filter::Filter::any());
+        assert!(
+            over_udp.contains("\"offset_space\":\"packet\",\"first_anchor\""),
+            "a datagram capture's anchors ARE packet indices and the label must \
+             follow the wire rather than being a constant: {over_udp}"
+        );
+    }
+
+    /// A one-flow DATAGRAM capture, the control arm for the label above.
+    fn datagram_capture() -> Dissection {
+        let mut d = Dissection::new();
+        let wire = crate::datagram_tests::frame_carrying(&push(
+            sender_space(0, Some("demo/temp")),
+            &[0u8; 8],
+        ));
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &crate::datagram_tests::udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire),
         );
         d.finish();
         d

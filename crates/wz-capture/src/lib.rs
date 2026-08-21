@@ -563,14 +563,37 @@ pub struct DatagramDissection {
 /// each (list, direction) pair is a space of its own — which is a fact about
 /// the LIST plus the frame, and is composed by the consumer rather than encoded
 /// here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Default` is [`Self::PacketIndex`] and it is a placeholder rather than a
+/// claim: the tables that carry one overwrite it per frame before any row can
+/// exist, and the alternative — an `Option` on every row — would put a "not
+/// known yet" state into a document where it can never occur.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AnchorSpace {
     /// The anchor is the index of the packet that carried the message. Global
     /// to the capture.
+    #[default]
     PacketIndex,
     /// The anchor is a byte offset within one direction of this list's stream.
     /// Absolute there and meaningless against any other list or direction.
     StreamBytes,
+}
+
+impl AnchorSpace {
+    /// R311y919 (open-debt item 452) — the word a DOCUMENT calls this space by.
+    ///
+    /// The two spellings are the field layer's, unchanged since R311y855, and
+    /// this method exists so they are spelled ONCE. Every plane that reports an
+    /// anchor now says which space it is in, and a second vocabulary would mean
+    /// a reader moving between the field rows and the census had to learn two
+    /// names for one fact — which is the shape `crate::census_json` and
+    /// `crate::report` already carry a debt about.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::PacketIndex => "packet",
+            Self::StreamBytes => "stream_byte",
+        }
+    }
 }
 
 /// R311y718 (§1.2a) — one recovered QUIC stream, framed as zenoh.

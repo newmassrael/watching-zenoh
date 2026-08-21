@@ -94,8 +94,20 @@ pub struct ObservedNode {
     pub whatami: Option<u8>,
     /// How it was seen.
     pub evidence: NodeEvidence,
-    /// Capture index of the first message that named it.
+    /// Capture anchor of the first message that named it.
+    ///
+    /// R311y919 (open-debt item 452) — THE NAME IS WRONG OVER A STREAM AND IS
+    /// KEPT ANYWAY. The value is `PassiveFrame::stream_offset`, which is a
+    /// packet index on a datagram link and a BYTE OFFSET on a stream one, so
+    /// over TCP this field has always reported an offset under a name that says
+    /// packet. Renaming it would break a consumer reading the census document
+    /// by key, which the C ABI's own contract permits only for ADDED keys — so
+    /// [`Self::anchors`] arrives beside it and the misnomer is registered
+    /// rather than fixed by a break.
     pub first_packet: usize,
+    /// R311y919 (open-debt item 452) — which space [`Self::first_packet`] is
+    /// in. Read this before reading that.
+    pub anchors: crate::AnchorSpace,
     /// Flows this zid was named on, in first-appearance order.
     pub flows: Vec<FlowKey>,
     /// R311y714 (§1.1f) — transport-unit bytes this node SENT, over the flows
@@ -134,6 +146,9 @@ pub struct ObservedLink {
 /// A capture read as a set of nodes and the links between them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NodeCensus {
+    /// R311y919 (open-debt item 452) — the coordinate space of the list being
+    /// walked, set once per [`Self::observe_flow`].
+    anchors: crate::AnchorSpace,
     nodes: Vec<ObservedNode>,
     links: Vec<ObservedLink>,
     /// R311y714 (§1.1f) — unit bytes on a direction whose SENDER this capture
@@ -215,7 +230,13 @@ impl NodeCensus {
     /// `flow` is what makes a link answerable: two zids are peers because they
     /// named themselves on THE SAME flow in opposite directions, and a fold
     /// that took only the frames could not say that.
-    pub fn observe_flow(&mut self, flow: &FlowKey, frames: &[PassiveFrame]) {
+    pub fn observe_flow(
+        &mut self,
+        flow: &FlowKey,
+        frames: &[PassiveFrame],
+        anchors: crate::AnchorSpace,
+    ) {
+        self.anchors = anchors;
         // Per-direction, the last zid seen naming itself on an admissible
         // message. A flow that re-handshakes names the same pair again, and a
         // flow that is genuinely reused by a different node names the new one —
@@ -365,6 +386,7 @@ impl NodeCensus {
                     whatami,
                     evidence: NodeEvidence::default(),
                     first_packet,
+                    anchors: self.anchors,
                     flows: Vec::new(),
                     wire_bytes: 0,
                     locators: Vec::new(),
@@ -440,8 +462,8 @@ pub fn nodes(dissection: &crate::Dissection) -> NodeCensus {
     // `quic/...` peer's Init is inside a QUIC stream and a serial peer's is
     // inside a COBS frame; a census that named the two flow tables would report
     // either deployment as having no participants at all.
-    for (flow, _, frames) in dissection.message_lists() {
-        census.observe_flow(&flow, frames);
+    for (flow, anchors, frames) in dissection.message_lists() {
+        census.observe_flow(&flow, frames, anchors);
     }
     for flow in dissection.datagram_flows() {
         // The scouting list, which is where a discovery-only capture's nodes
