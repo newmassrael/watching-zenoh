@@ -215,6 +215,20 @@ ALLOWED = [
         "marker IS the accounting; consuming it is how it reaches a report",
     ),
     (
+        "wz-capture/payload_cbor.rs",
+        "self.pop(mark);",
+        "R311y916 — the CBOR walk's own PATH, truncated back to the mark its "
+        "`push` returned as it leaves a container. Not a collection at all: "
+        "`Walk::pop` shortens a `String` that is being rebuilt on the way down, "
+        "and every row the walk emitted below it already carries its own copy "
+        "of the path it was at. Nothing captured is in it. Registered rather "
+        "than renamed -- `pop` is the right name for the inverse of `push` on a "
+        "path stack, and dodging a lint's regex by renaming a correct method is "
+        "the workaround this list exists to make unnecessary. This is the red "
+        "R311y914 shipped and two pushes carried, because the pre-push hook "
+        "does not run Layer C0",
+    ),
+    (
         "wz-replay/lib.rs",
         "out.pop();",
         "one character off a rendered STRING -- the trailing newline, so a "
