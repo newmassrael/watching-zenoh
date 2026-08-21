@@ -1011,6 +1011,122 @@ mod tests {
         );
     }
 
+    /// R311y909 — A JSON RULE OVER A JSON PUBLISHER DECODES ITS FIELDS.
+    ///
+    /// # Why this test is the round and not a corollary of the decoder's own
+    ///
+    /// Every mechanism on this seam was built around JSON and none of them
+    /// could reach it. The test directly above is the proof: the encodings set,
+    /// the claim adjudication and the misbinding tally all exist because a
+    /// `protobuf` rule walked a JSON body, and the only thing a reader whose
+    /// fleet publishes JSON could be told was which rule NOT to apply. A unit
+    /// test of the decoder would not have shown that, because the decoder is
+    /// not where the gap was — the REGISTRY was.
+    #[test]
+    fn a_json_rule_over_a_publisher_that_declared_json_decodes_its_fields() {
+        let mut map = FormatMap::new();
+        map.declare("demo/**=json").expect("a keyexpr pattern");
+        let run = Declarations::new(&map);
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+
+        let sample = put_declaring(ENC_JSON, br#"{"temp":21.5}"#);
+        match decode_payload(&sample, &run, at) {
+            PayloadDecoding::Decoded {
+                keyexpr,
+                format,
+                fields,
+                despite_encoding,
+            } => {
+                assert_eq!(keyexpr, "demo/a");
+                assert_eq!(format, "json");
+                assert_eq!(
+                    despite_encoding, None,
+                    "the label and the bytes agree, so nothing was overridden"
+                );
+                let seen: Vec<(&str, &str)> = fields
+                    .iter()
+                    .map(|f| (f.path.as_str(), f.value.as_str()))
+                    .collect();
+                assert_eq!(
+                    seen,
+                    vec![("$", "object 1 member(s)"), ("$.temp", "number 21.5")],
+                    "and the document's own member name is the path to it"
+                );
+            }
+            other => panic!("a JSON rule over a JSON publisher must decode: {other:?}"),
+        }
+    }
+
+    /// R311y909 — and the veto works in the OTHER direction now that there are
+    /// two formats to point it in.
+    ///
+    /// Until this round the encodings check had exactly one member, so every
+    /// witness for it was `protobuf` rule versus JSON label. A rule that is
+    /// wrong the other way round — a `json` rule over a topic whose publisher
+    /// says protobuf — had no way to be written, and a check with one direction
+    /// is a check that has never been asked the general question.
+    #[test]
+    fn a_json_rule_over_a_protobuf_publisher_is_vetoed_and_names_the_rule() {
+        let mut map = FormatMap::new();
+        map.declare("demo/**=json").expect("a keyexpr pattern");
+        let run = Declarations::new(&map);
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+
+        // field 1, varint, value 42 -- real protobuf, and not JSON at byte 0.
+        let sample = put_declaring(ENC_PROTOBUF, &[0x08, 0x2a]);
+        assert_eq!(
+            decode_payload(&sample, &run, at),
+            PayloadDecoding::EncodingMismatch {
+                keyexpr: String::from("demo/a"),
+                format: String::from("json"),
+                declared: String::from("application/protobuf"),
+            },
+            "the rule is what is wrong, so the verdict names the rule"
+        );
+    }
+
+    /// R311y909 — a publisher that declared NOTHING is decoded by a JSON rule,
+    /// the same rule `protobuf` answers to.
+    ///
+    /// Id 0 is `zenoh/bytes`, which is what a publisher gets by saying nothing,
+    /// and silence must never be read as disagreement. Written for `json` too
+    /// because the branch is per-format only in the sense that each format's
+    /// encodings set is consulted — a format whose set accidentally CONTAINED
+    /// the default would silently claim every unlabelled payload in a capture.
+    #[test]
+    fn a_json_rule_decodes_a_publisher_that_declared_no_encoding_at_all() {
+        use wz_codecs::encoding_ids::ENCODING_ID_TO_STR;
+        let mut map = FormatMap::new();
+        map.declare("demo/**=json").expect("a keyexpr pattern");
+        let run = Declarations::new(&map);
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+
+        let sample = put_declaring(ENC_ZENOH_BYTES, br#"[1,2]"#);
+        match decode_payload(&sample, &run, at) {
+            PayloadDecoding::Decoded { format, fields, .. } => {
+                assert_eq!(format, "json");
+                assert_eq!(
+                    fields.first().map(|f| f.value.as_str()),
+                    Some("array 2 element(s)"),
+                    "an unlabelled payload the rule covers is read: {fields:?}"
+                );
+            }
+            other => panic!("silence is not disagreement: {other:?}"),
+        }
+        // And the default is not in the claimed set, which is what keeps the
+        // branch above a decision about SILENCE rather than a claim about it.
+        assert!(
+            !crate::payload::formats::Json
+                .encodings()
+                .expect("json names its encodings")
+                .contains(&ENCODING_ID_TO_STR[ENC_ZENOH_BYTES as usize]),
+            "`zenoh/bytes` must not be a claimed encoding"
+        );
+    }
+
     /// R311y874 — A DECLARATION ITS OWN BYTES CONTRADICT DOES NOT GET TO VETO
     /// THE RULE.
     ///

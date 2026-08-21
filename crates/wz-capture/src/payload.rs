@@ -148,7 +148,7 @@ impl<'a> Encoding<'a> {
 /// [`crate::payload::Verdict::NotAsDeclared`] against a publisher that did nothing wrong — a
 /// false finding, which is worse here than a missing one because this plane
 /// exists to produce findings.
-fn shape_of(name: &str) -> Shape {
+pub(crate) fn shape_of(name: &str) -> Shape {
     match name {
         "application/json" | "text/json" => Shape::Json,
         "zenoh/string" => Shape::Utf8Text,
@@ -311,13 +311,73 @@ struct Scanner<'a> {
     i: usize,
     depth: usize,
     max_depth: usize,
+    /// R311y909 — the rows this walk is BUILDING, or `None` when it is only
+    /// validating.
+    ///
+    /// One grammar with two outputs rather than two grammars: [`scan_json`]
+    /// answers well-formed-or-where for [`inspect`], and [`walk_json`] answers
+    /// the same question and hands back the fields. A second reader would be a
+    /// second opinion about what JSON is, and this crate has measured what a
+    /// second notion of a boundary costs (`crate::agg`'s framing, three times).
+    emit: Option<Emit>,
 }
+
+/// R311y909 — the emitting half of [`Scanner`]: the rows so far, the path of
+/// the value being walked, and the member count of the container just closed.
+struct Emit {
+    fields: Vec<formats::PayloadField>,
+    /// The path of the value currently being walked — `$`, `$.sensor.temp`,
+    /// `$.readings.0`.
+    path: String,
+    /// How many members or elements the container that just returned held.
+    /// Read by [`Scanner::fill`] the moment that container's row is written,
+    /// which is the only point at which it is about that container.
+    members: usize,
+}
+
+/// R311y909 — the root of a JSON field path.
+///
+/// JSONPath's own root symbol, so a reader who has seen one anywhere else
+/// already knows what it means, and — the reason it is a symbol at all — so
+/// that every row is ROOTED. An unrooted scheme makes the document's own row
+/// pathless and collides a top-level member named `$` with it; rooted, the
+/// document is `$`, that member is `$.$`, and the two are told apart.
+pub(crate) const JSON_ROOT_PATH: &str = "$";
+
+/// The separator between path segments. Shared with the protobuf decoder's
+/// `2.1` form on purpose: `--payload-name` keys on one path syntax, and a
+/// second one would be a second thing for a reader to hold.
+const JSON_PATH_SEP: char = '.';
+
+/// What a member whose key is not UTF-8 is called.
+///
+/// A key this reader cannot print is not a name it may invent one for: putting
+/// a plausible name on a real row is the failure mode this whole plane exists
+/// to avoid. RFC 8259 requires a JSON text to be UTF-8, so a key that reaches
+/// this is already outside the format — see the caveat on [`walk_json`].
+const JSON_UNNAMEABLE_KEY: &str = "<not-utf8>";
 
 /// Guard against a document whose nesting would recurse this scanner off the
 /// stack. 128 is deeper than any zenoh payload observed and shallow enough to
 /// be safe on the MCU profile this crate also builds for; a document deeper
 /// than that is REPORTED, not silently accepted.
-const MAX_JSON_DEPTH: usize = 128;
+pub(crate) const MAX_JSON_DEPTH: usize = 128;
+
+/// R311y909 — the word a row leads with, one per [`JsonKind`].
+///
+/// A TOTAL match rather than a `_ =>` fallback, on this crate's own rule for
+/// wire-name functions: a seventh kind must be named here rather than silently
+/// rendered as whichever string happened to be the default.
+const fn json_kind_word(kind: JsonKind) -> &'static str {
+    match kind {
+        JsonKind::Object => "object",
+        JsonKind::Array => "array",
+        JsonKind::String => "string",
+        JsonKind::Number => "number",
+        JsonKind::Bool => "bool",
+        JsonKind::Null => "null",
+    }
+}
 
 type ScanErr = (usize, &'static str);
 
@@ -341,12 +401,14 @@ pub(crate) fn json_wellformed(bytes: &[u8]) -> Result<(), ScanErr> {
     scan_json(bytes).map(|_| ())
 }
 
-fn scan_json(bytes: &[u8]) -> Result<JsonSummary, ScanErr> {
+/// The one walk, with or without an emitter.
+fn scan(bytes: &[u8], emit: Option<Emit>) -> Result<(JsonSummary, Option<Emit>), ScanErr> {
     let mut s = Scanner {
         b: bytes,
         i: 0,
         depth: 0,
         max_depth: 0,
+        emit,
     };
     s.ws();
     let top = s.value()?;
@@ -354,10 +416,61 @@ fn scan_json(bytes: &[u8]) -> Result<JsonSummary, ScanErr> {
     if s.i != s.b.len() {
         return Err((s.i, "trailing input after the top-level value"));
     }
-    Ok(JsonSummary {
-        top_level: top,
-        depth: s.max_depth,
-    })
+    Ok((
+        JsonSummary {
+            top_level: top,
+            depth: s.max_depth,
+        },
+        s.emit,
+    ))
+}
+
+fn scan_json(bytes: &[u8]) -> Result<JsonSummary, ScanErr> {
+    scan(bytes, None).map(|(summary, _)| summary)
+}
+
+/// R311y909 — the same walk, EMITTING: one row per JSON value, in reading
+/// order, each with the byte range it was decoded from.
+///
+/// # What the rows are, and what a path means
+///
+/// Every value gets a row, containers included, so a reader sees the shape
+/// before the leaves: `$` names the document, `$.sensor` the member under it,
+/// `$.readings.0` the first element of an array under `readings`. A container's
+/// row carries how many members it holds and its children follow it, which is
+/// the order [`crate::payload_builtin::Protobuf`] already emits in.
+///
+/// # The span is the VALUE, not the member
+///
+/// A member's row spans its value's bytes and not the `"key": ` in front of
+/// them. Two reasons, and the first is the one that decides it: an array
+/// element has no key, so a member-wide span would make the same field mean
+/// two different byte ranges depending on what contained it. The second is that
+/// the key is not lost — it IS the last segment of the path.
+///
+/// # Names come from the path, never from [`formats::PayloadField::name`]
+///
+/// JSON carries its own names, which protobuf does not, and it would be easy to
+/// read that as licence to fill `name` in. It is not: that field's contract is
+/// "the DECLARED name, from `FormatMap::field_name`", and a decoder writing it
+/// would make one field mean two provenances. A JSON name is on the wire, so it
+/// belongs where the wire put it — in the path.
+///
+/// # The caveat, stated rather than hidden
+///
+/// A member key containing a `.` produces a path that reads as nesting:
+/// `{"a.b": 1}` yields `$.a.b`, which is also what `{"a":{"b":1}}` yields. The
+/// spans differ and the container rows above them differ, so a reader has the
+/// evidence, but a `--payload-name` declaration keyed on that path cannot tell
+/// the two apart. Registered rather than papered over.
+pub(crate) fn walk_json(bytes: &[u8]) -> Result<Vec<formats::PayloadField>, ScanErr> {
+    let emit = Emit {
+        fields: Vec::new(),
+        path: String::from(JSON_ROOT_PATH),
+        members: 0,
+    };
+    let (_, emit) = scan(bytes, Some(emit))?;
+    Ok(emit.expect("the walk was handed an emitter").fields)
 }
 
 impl<'a> Scanner<'a> {
@@ -389,7 +502,108 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    /// R311y909 — reserve this value's row BEFORE walking it, so a container
+    /// lands above its children rather than below them.
+    ///
+    /// The placeholder is overwritten by [`Self::fill`]. A walk that errors
+    /// leaves it behind, which costs nothing: an error abandons the whole
+    /// document, and [`walk_json`] returns the error rather than the rows.
+    fn reserve(&mut self) -> Option<usize> {
+        let e = self.emit.as_mut()?;
+        let at = e.fields.len();
+        e.fields.push(formats::PayloadField {
+            path: String::new(),
+            name: None,
+            value: String::new(),
+            start: 0,
+            end: 0,
+        });
+        Some(at)
+    }
+
+    /// Write the reserved row, now that the value's extent and kind are known.
+    fn fill(&mut self, slot: Option<usize>, start: usize, kind: JsonKind) {
+        let Some(slot) = slot else { return };
+        let end = self.i;
+        let b: &'a [u8] = self.b;
+        let raw = &b[start..end];
+        let Some(e) = self.emit.as_mut() else { return };
+        let value = match kind {
+            JsonKind::Object => alloc::format!("object {} member(s)", e.members),
+            JsonKind::Array => alloc::format!("array {} element(s)", e.members),
+            JsonKind::Null => String::from("null"),
+            // A string, a number or a bool IS its source text, so the row shows
+            // it verbatim -- escapes included, because what the publisher wrote
+            // is what a reader comparing against the capture will see.
+            _ => match core::str::from_utf8(raw) {
+                Ok(text) => alloc::format!("{} {text}", json_kind_word(kind)),
+                // RFC 8259 requires UTF-8 and this scanner does not enforce it
+                // inside a string (see `walk_json`), so the row says what it
+                // has rather than lossily inventing characters.
+                Err(_) => {
+                    alloc::format!("{} {} byte(s), not UTF-8", json_kind_word(kind), raw.len())
+                }
+            },
+        };
+        let path = e.path.clone();
+        e.fields[slot] = formats::PayloadField {
+            path,
+            name: None,
+            value,
+            start,
+            end,
+        };
+    }
+
+    /// Record how many members the container that just closed held.
+    fn closed(&mut self, members: usize) {
+        if let Some(e) = self.emit.as_mut() {
+            e.members = members;
+        }
+    }
+
+    /// Extend the path by one object key, whose string began at `key_at` and
+    /// which the cursor has just walked past. `None` when not emitting.
+    fn push_key(&mut self, key_at: usize) -> Option<usize> {
+        let b: &'a [u8] = self.b;
+        // `string()` has consumed both quotes, so the key's own bytes are the
+        // range between them.
+        let raw = &b[key_at + 1..self.i - 1];
+        let e = self.emit.as_mut()?;
+        let mark = e.path.len();
+        e.path.push(JSON_PATH_SEP);
+        match core::str::from_utf8(raw) {
+            Ok(text) => e.path.push_str(text),
+            Err(_) => e.path.push_str(JSON_UNNAMEABLE_KEY),
+        }
+        Some(mark)
+    }
+
+    /// Extend the path by one array index. `None` when not emitting.
+    fn push_index(&mut self, index: usize) -> Option<usize> {
+        let e = self.emit.as_mut()?;
+        let mark = e.path.len();
+        e.path.push(JSON_PATH_SEP);
+        e.path.push_str(&alloc::format!("{index}"));
+        Some(mark)
+    }
+
+    /// Undo a [`Self::push_key`] / [`Self::push_index`].
+    fn pop_segment(&mut self, mark: Option<usize>) {
+        if let (Some(e), Some(mark)) = (self.emit.as_mut(), mark) {
+            e.path.truncate(mark);
+        }
+    }
+
     fn value(&mut self) -> Result<JsonKind, ScanErr> {
+        let start = self.i;
+        let slot = self.reserve();
+        let kind = self.value_inner()?;
+        self.fill(slot, start, kind);
+        Ok(kind)
+    }
+
+    fn value_inner(&mut self) -> Result<JsonKind, ScanErr> {
         match self.peek() {
             None => Err((self.i, "expected a value, found end of input")),
             Some(b'{') => self.object(),
@@ -424,21 +638,28 @@ impl<'a> Scanner<'a> {
         if self.peek() == Some(b'}') {
             self.i += 1;
             self.depth -= 1;
+            self.closed(0);
             return Ok(JsonKind::Object);
         }
+        let mut members = 0usize;
         loop {
             self.ws();
+            let key_at = self.i;
             self.string()?;
+            let mark = self.push_key(key_at);
             self.ws();
             self.expect(b':', "expected ':' after an object key")?;
             self.ws();
             self.value()?;
+            self.pop_segment(mark);
+            members += 1;
             self.ws();
             match self.peek() {
                 Some(b',') => self.i += 1,
                 Some(b'}') => {
                     self.i += 1;
                     self.depth -= 1;
+                    self.closed(members);
                     return Ok(JsonKind::Object);
                 }
                 _ => return Err((self.i, "expected ',' or '}' in an object")),
@@ -453,17 +674,23 @@ impl<'a> Scanner<'a> {
         if self.peek() == Some(b']') {
             self.i += 1;
             self.depth -= 1;
+            self.closed(0);
             return Ok(JsonKind::Array);
         }
+        let mut elements = 0usize;
         loop {
             self.ws();
+            let mark = self.push_index(elements);
             self.value()?;
+            self.pop_segment(mark);
+            elements += 1;
             self.ws();
             match self.peek() {
                 Some(b',') => self.i += 1,
                 Some(b']') => {
                     self.i += 1;
                     self.depth -= 1;
+                    self.closed(elements);
                     return Ok(JsonKind::Array);
                 }
                 _ => return Err((self.i, "expected ',' or ']' in an array")),
@@ -1580,7 +1807,7 @@ pub mod formats {
     // R311y856 — the SHIPPED decoders, re-exported from the file that holds
     // them so a caller reads one module. See `crate::payload_builtin` for why
     // they moved out of `wz-analyze`.
-    pub use crate::payload_builtin::{builtin, Protobuf, BUILTIN_NAMES};
+    pub use crate::payload_builtin::{builtin, Json, Protobuf, BUILTIN_NAMES};
 
     /// R311y856 — ONE SPELLING for a declaration, read here rather than by each
     /// surface that accepts one.

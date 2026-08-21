@@ -311,6 +311,92 @@ impl PayloadFormat for Protobuf {
     }
 }
 
+/// R311y909 — JSON, walked into its own fields.
+///
+/// # The silence this ends
+///
+/// [`crate::payload`]'s opening sentence is that "a capture of a fleet
+/// publishing JSON was, to this tool, a capture of some bytes", and the plane
+/// it introduced closed half of that: a payload declaring `application/json`
+/// gets a VERDICT — the bytes parsed, or they did not and here is where. The
+/// other half stayed open for the whole of that track. The reader was told the
+/// document is well-formed and was then handed its length, because the FIELD
+/// layer had exactly one decoder and it was protobuf.
+///
+/// That gap had a sharp edge, and the trait beside this one names it:
+/// [`PayloadFormat::encodings`] exists because a `demo/**=protobuf` rule
+/// "walked a JSON body with a varint reader". Every mechanism for that
+/// collision — the encodings set, the claim adjudication, the misbinding tally
+/// — was built while the format on one side of it did not exist, so a reader
+/// whose fleet publishes JSON could only ever be told which rule NOT to apply.
+///
+/// # One grammar, not two
+///
+/// The walk is `crate::payload::walk_json` (a code span and not a link, on this
+/// crate's own rule: that item is crate-private, and a link to it from a public
+/// doc is what Layer C1bz counts), which is the SAME scanner
+/// [`crate::payload::inspect`] validates with, running with an emitter
+/// attached. A decoder with its own reading of RFC 8259 would let this crate
+/// hold two opinions about what JSON is, and the plane above would then be able
+/// to call a document well-formed that the plane below refused.
+///
+/// # What it gives, and what it cannot
+///
+/// Field paths, kinds, values and byte spans, for every value in the document.
+/// Unlike protobuf it also gives NAMES, because JSON carries them — but they
+/// arrive in the PATH rather than in
+/// [`crate::payload::formats::PayloadField::name`], which is reserved for a
+/// deployment's own declaration. See `crate::payload::walk_json` for why, and
+/// for the one path ambiguity this leaves.
+pub struct Json;
+
+impl PayloadFormat for Json {
+    fn name(&self) -> &str {
+        "json"
+    }
+
+    /// The table names whose declared SHAPE is JSON, and no others.
+    ///
+    /// Kept honest by `the_json_builtin_claims_exactly_the_tables_json_shapes`
+    /// below rather than by this list being read carefully: the set is derived
+    /// from `crate::payload::shape_of`, which is where `application/json5`,
+    /// `application/json-seq` and `application/jsonpath` are already decided
+    /// NOT to be JSON — json5 admits comments and trailing commas a strict
+    /// scanner rejects, a json-seq body is several documents with a separator,
+    /// and a jsonpath body is a query rather than a document. Restating that
+    /// judgement here would be a second place for it to drift.
+    fn encodings(&self) -> Option<&[&str]> {
+        Some(&["application/json", "text/json"])
+    }
+
+    fn decode(&self, payload: &[u8]) -> Result<Vec<PayloadField>, PayloadFormatError> {
+        if payload.is_empty() {
+            // Same answer `Protobuf` gives, for the same reason: an empty
+            // payload is not a JSON document and is also not malformed, and
+            // `NotThisFormat` sends the reader to their mapping.
+            return Err(PayloadFormatError::NotThisFormat);
+        }
+        crate::payload::walk_json(payload).map_err(|(at, why)| {
+            // The scanner's own two failures map onto two of the three
+            // answers, and WHICH one is the reader's next move. A document
+            // that ran out is a capture question; one that broke at a byte
+            // that is inside it is a sender question. `NotThisFormat` is not
+            // reachable from here on purpose: bytes that are not JSON at all
+            // fail at offset 0, which is a malformed document rather than a
+            // mapping mistake -- and the mapping question is already answered
+            // one level up, by the encodings set above.
+            if at >= payload.len() {
+                PayloadFormatError::Truncated(at)
+            } else {
+                PayloadFormatError::Malformed {
+                    at,
+                    why: String::from(why),
+                }
+            }
+        })
+    }
+}
+
 /// The format a name selects, or `None` for a name this build has no
 /// decoder for.
 ///
@@ -319,6 +405,7 @@ impl PayloadFormat for Protobuf {
 /// their rule was live.
 pub fn builtin(name: &str) -> Option<&'static dyn PayloadFormat> {
     match name {
+        "json" => Some(&Json),
         "protobuf" => Some(&Protobuf),
         _ => None,
     }
@@ -326,7 +413,7 @@ pub fn builtin(name: &str) -> Option<&'static dyn PayloadFormat> {
 
 /// Every built-in name, for the usage text and for a refusal that can say
 /// what IS available.
-pub const BUILTIN_NAMES: &[&str] = &["protobuf"];
+pub const BUILTIN_NAMES: &[&str] = &["json", "protobuf"];
 
 #[cfg(test)]
 mod tests {
@@ -374,6 +461,295 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// R311y909 — EVERY LISTED NAME RESOLVES TO THE FORMAT THAT WEARS IT.
+    ///
+    /// [`BUILTIN_NAMES`] is what the usage text and every refusal read, and
+    /// [`builtin`] is what a rule actually binds. They are two hand-written
+    /// lists of the same fact, so a name added to one and not the other is the
+    /// ordinary way this drifts: listed-but-unresolvable makes the usage text
+    /// offer a format `--payload-format` then refuses, and resolvable-but-
+    /// unlisted makes a working format invisible to the reader who would use
+    /// it. The third assertion is the one a `match` arm typo needs: a name that
+    /// resolves to the WRONG decoder passes both of the others.
+    #[test]
+    fn every_listed_builtin_resolves_to_the_format_that_wears_its_name() {
+        for name in BUILTIN_NAMES {
+            let format = builtin(name).unwrap_or_else(|| {
+                panic!("`{name}` is listed as a built-in and resolves to nothing")
+            });
+            assert_eq!(
+                format.name(),
+                *name,
+                "`{name}` resolves to a decoder that calls itself \
+                 `{}` -- one of the two spellings is wrong",
+                format.name()
+            );
+        }
+        // And the list is a SET, because a duplicate would render twice in the
+        // usage text and read as two formats.
+        let mut sorted: Vec<&str> = BUILTIN_NAMES.to_vec();
+        sorted.sort_unstable();
+        let before = sorted.len();
+        sorted.dedup();
+        assert_eq!(
+            before,
+            sorted.len(),
+            "a name is listed twice: {BUILTIN_NAMES:?}"
+        );
+    }
+
+    /// R311y909 — THE JSON BUILT-IN CLAIMS EXACTLY THE TABLE ENTRIES THIS
+    /// CRATE ALREADY CALLS JSON, derived rather than re-read.
+    ///
+    /// # Why derived
+    ///
+    /// `crate::payload::shape_of` is where this crate decides what a declared
+    /// encoding CLAIMS, and it already rules that `application/json5`,
+    /// `application/json-seq` and `application/jsonpath` are not JSON. The
+    /// format's `encodings()` is a second statement of the same judgement, and
+    /// R311y873's own lesson beside it is that a hand-kept list of table names
+    /// drifts silently: a name in no entry agrees with no sample and quietly
+    /// refuses every payload, which reads exactly like "no traffic matched".
+    ///
+    /// So the gate does not re-read the table by eye. It asks `shape_of` for
+    /// every entry the wire table has and requires the claimed set to be
+    /// exactly the JSON-shaped ones. An upstream entry added later that
+    /// `shape_of` calls JSON reds here on the round it lands, and a claim this
+    /// crate does not consider JSON reds too.
+    #[test]
+    fn the_json_builtin_claims_exactly_the_shapes_this_crate_calls_json() {
+        use wz_codecs::encoding_ids::ENCODING_ID_TO_STR;
+        let mut shaped: Vec<&str> = ENCODING_ID_TO_STR
+            .iter()
+            .copied()
+            .filter(|name| matches!(crate::payload::shape_of(name), crate::payload::Shape::Json))
+            .collect();
+        shaped.sort_unstable();
+        assert!(
+            !shaped.is_empty(),
+            "the table names no JSON shape at all, so this gate would be green \
+             over an empty set"
+        );
+        let mut claimed: Vec<&str> = Json.encodings().expect("json names its encodings").to_vec();
+        claimed.sort_unstable();
+        assert_eq!(
+            claimed, shaped,
+            "the `json` built-in and `shape_of` disagree about which declared \
+             encodings are JSON documents"
+        );
+    }
+
+    /// R311y909 — A JSON DOCUMENT IS WALKED INTO ITS VALUES, each with the
+    /// path that names it and the bytes it was decoded from.
+    ///
+    /// The witness for the whole round: before it, a payload declaring
+    /// `application/json` was told it parsed and then handed to the reader as
+    /// a length. Containers stand above their children so the listing reads
+    /// top-down, which is the order the protobuf walk already emits in.
+    #[test]
+    fn a_json_document_is_walked_into_its_values_with_paths_and_spans() {
+        //             0         1         2
+        //             0123456789012345678901 2
+        let body = br#"{"a":1,"b":[true,null]}"#;
+        let fields = Json.decode(body).expect("a JSON document");
+        let seen: Vec<(&str, &str, usize, usize)> = fields
+            .iter()
+            .map(|f| (f.path.as_str(), f.value.as_str(), f.start, f.end))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("$", "object 2 member(s)", 0, 23),
+                ("$.a", "number 1", 5, 6),
+                ("$.b", "array 2 element(s)", 11, 22),
+                ("$.b.0", "bool true", 12, 16),
+                ("$.b.1", "null", 17, 21),
+            ],
+            "every value gets a row, rooted at `$`, containers above their \
+             children"
+        );
+        // The spans are the reader's coordinate into the capture, so they must
+        // be the bytes and not an approximation of them.
+        for f in &fields {
+            assert!(
+                f.end <= body.len() && f.start < f.end,
+                "a row's span must be inside the payload: {f:?}"
+            );
+        }
+        assert_eq!(&body[5..6], b"1");
+        assert_eq!(&body[12..16], b"true");
+    }
+
+    /// R311y909 — A MEMBER'S SPAN IS ITS VALUE AND NOT ITS KEY.
+    ///
+    /// The rule is on `crate::payload::walk_json` and this is what tells it
+    /// apart from the plausible alternative: spanning `"a":1` would make the
+    /// row start at byte 1 rather than byte 5. An array element has no key, so
+    /// the member-wide span would give the same field two meanings depending on
+    /// what contained it.
+    #[test]
+    fn a_members_span_is_its_value_and_not_the_key_in_front_of_it() {
+        let body = br#"{"a":1}"#;
+        let fields = Json.decode(body).expect("a JSON document");
+        let member = fields
+            .iter()
+            .find(|f| f.path == "$.a")
+            .expect("the member has a row");
+        assert_eq!(
+            (member.start, member.end),
+            (5, 6),
+            "the span is the value's own bytes: {member:?}"
+        );
+        assert_ne!(member.start, 1, "and NOT the key's");
+    }
+
+    /// R311y909 — THE NAME IS IN THE PATH AND NEVER IN `name`.
+    ///
+    /// JSON carries its own member names, which is exactly the reason to state
+    /// the invariant: `PayloadField::name` means "the DECLARED name, from
+    /// `FormatMap::field_name`", and a decoder filling it in would make one
+    /// field carry two provenances. The wire's name goes where the wire put it.
+    #[test]
+    fn a_json_decoder_never_fills_in_the_declared_name_field() {
+        let fields = Json
+            .decode(br#"{"sensor":{"temp":21.5}}"#)
+            .expect("a JSON document");
+        assert!(
+            fields.iter().all(|f| f.name.is_none()),
+            "the decoder must leave `name` for the declaration: {fields:?}"
+        );
+        let leaf = fields
+            .iter()
+            .find(|f| f.value == "number 21.5")
+            .expect("the leaf is walked");
+        assert_eq!(
+            leaf.path, "$.sensor.temp",
+            "and the wire's own names are the route to it"
+        );
+    }
+
+    /// R311y909 — a body that BREAKS says where, and one that RUNS OUT says
+    /// so differently.
+    ///
+    /// Three answers exist and a reader acts differently on each
+    /// (`PayloadFormatError`'s own doc). A truncation is a capture question —
+    /// re-capture with a bigger snaplen — and a broken byte inside the document
+    /// is a sender question. Told apart by whether the stop is AT the end.
+    #[test]
+    fn a_json_body_that_breaks_says_where_and_one_that_runs_out_says_so() {
+        assert_eq!(
+            Json.decode(br#"{"a":}"#),
+            Err(PayloadFormatError::Malformed {
+                at: 5,
+                why: String::from("not a JSON value"),
+            }),
+            "a byte inside the document that is not a value is the sender's"
+        );
+        assert_eq!(
+            Json.decode(br#"{"a":"#),
+            Err(PayloadFormatError::Truncated(5)),
+            "a document that ends mid-value is the capture's"
+        );
+        assert_eq!(
+            Json.decode(br#"{"a":1}x"#),
+            Err(PayloadFormatError::Malformed {
+                at: 7,
+                why: String::from("trailing input after the top-level value"),
+            }),
+            "and a second document behind the first is neither -- it is bytes \
+             the sender put there"
+        );
+        assert_eq!(
+            Json.decode(b""),
+            Err(PayloadFormatError::NotThisFormat),
+            "an empty payload sends the reader to their mapping"
+        );
+    }
+
+    /// R311y909 — THE DECODER AND THE VALIDATOR ARE ONE READER.
+    ///
+    /// `crate::payload::inspect` publishes a verdict about a declared JSON
+    /// payload and this decoder opens it. Two readings of RFC 8259 would let
+    /// the plane above call a document well-formed that the plane below
+    /// refuses — a disagreement inside one report, which is the worst shape a
+    /// finding can take.
+    ///
+    /// It is one grammar today by construction, so what this asserts is that it
+    /// STAYS one: the corpus covers the rules a second reader gets wrong (a
+    /// leading zero, a bare control character in a string, a trailing comma,
+    /// the depth bound) and requires the two entry points to agree on the
+    /// OFFSET as well as on the verdict.
+    #[test]
+    fn the_json_decoder_and_the_json_validator_never_disagree() {
+        let deep_ok = nested_json(crate::payload::MAX_JSON_DEPTH);
+        let deep_over = nested_json(crate::payload::MAX_JSON_DEPTH + 1);
+        let corpus: Vec<Vec<u8>> = vec![
+            br#"{"a":1}"#.to_vec(),
+            br#"[]"#.to_vec(),
+            br#"{}"#.to_vec(),
+            br#""text""#.to_vec(),
+            br#"01"#.to_vec(),
+            br#"{"a":1,}"#.to_vec(),
+            br#"[1,2,]"#.to_vec(),
+            b"\"a\nb\"".to_vec(),
+            br#"tru"#.to_vec(),
+            br#"1e"#.to_vec(),
+            br#"-"#.to_vec(),
+            deep_ok,
+            deep_over,
+        ];
+        for body in &corpus {
+            let walked = Json.decode(body);
+            let validated = crate::payload::json_wellformed(body);
+            assert_eq!(
+                walked.is_ok(),
+                validated.is_ok(),
+                "the two readers disagree about {:?}: walk={walked:?} \
+                 validate={validated:?}",
+                String::from_utf8_lossy(body)
+            );
+            if let (Err(err), Err((at, _))) = (&walked, &validated) {
+                let walked_at = match err {
+                    PayloadFormatError::Truncated(at) => *at,
+                    PayloadFormatError::Malformed { at, .. } => *at,
+                    PayloadFormatError::NotThisFormat => continue,
+                };
+                assert_eq!(
+                    walked_at,
+                    *at,
+                    "the two readers stop at different bytes in {:?}",
+                    String::from_utf8_lossy(body)
+                );
+            }
+        }
+    }
+
+    /// `depth` nested arrays around a `0`.
+    fn nested_json(depth: usize) -> Vec<u8> {
+        let mut out = vec![b'['; depth];
+        out.push(b'0');
+        out.resize(out.len() + depth, b']');
+        out
+    }
+
+    /// R311y909 — a member key this reader cannot print is SAID, not invented.
+    ///
+    /// RFC 8259 requires a JSON text to be UTF-8 and this crate's scanner does
+    /// not enforce that inside a string, so such a key does reach here. The
+    /// path must not carry a plausible-looking name for it: putting a wrong
+    /// name on a real row is the failure this whole plane exists to avoid.
+    #[test]
+    fn a_key_that_is_not_utf8_is_named_as_unprintable_rather_than_guessed() {
+        let body = [b'{', b'"', 0xFF, b'"', b':', b'1', b'}'];
+        let fields = Json.decode(&body).expect("the scanner accepts the bytes");
+        let member = fields
+            .iter()
+            .find(|f| f.path != "$")
+            .expect("the member has a row");
+        assert_eq!(member.path, "$.<not-utf8>");
+        assert_eq!(member.value, "number 1", "and its VALUE is still read");
     }
 
     /// R311y701 (PF3) — A NESTED MESSAGE IS WALKED, and its fields carry

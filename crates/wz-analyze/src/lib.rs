@@ -316,13 +316,16 @@ OPTIONS:
                       also TOTALLED per topic under the listing, so a rule
                       that is wrong for a whole topic reads as one line
                       and not as one per message.
-                      Needs --fields. Formats: protobuf.
+                      Needs --fields. Formats: json, protobuf.
     --payload-name <keyexpr>:<path>=<name>
                       name one decoded field path, e.g.
                       `demo/**:1=temperature`. Repeatable; the first matching
-                      declaration wins. A schemaless walk recovers `1` and its
-                      bytes and NEVER a name, so this is the only place a name
-                      can come from. Needs --fields.
+                      declaration wins. A schemaless protobuf walk recovers `1`
+                      and its bytes and NEVER a name, so for that format this is
+                      the only place a name can come from. A JSON walk is the
+                      other case: the document names its own members, and those
+                      names ARE the path (`$.sensor.temp`), so a declaration is
+                      a rename rather than the only source. Needs --fields.
     --serial <linktype>
                       treat packets on this pcap link type as raw zenoh SERIAL
                       bytes: COBS envelope, CRC32, handshake flags.
@@ -5268,6 +5271,100 @@ mod tests {
     /// hard-coding either number; and the two topics are separate rows because
     /// the plane is keyed on the TOPIC, which is the coordinate a reader has to
     /// go and fix a publisher at.
+    /// R311y909 — A JSON PAYLOAD IS OPENED AT THE TERMINAL, which is the whole
+    /// of what this round is for.
+    ///
+    /// # What was measurably absent
+    ///
+    /// `wz_capture::payload`'s opening line is that "a capture of a fleet
+    /// publishing JSON was, to this tool, a capture of some bytes". That plane
+    /// closed half of it — a payload declaring `application/json` gets a
+    /// verdict — and the FIELD layer kept the other half open for the whole
+    /// track, because `payload_builtin::BUILTIN_NAMES` held exactly one entry
+    /// and it was `protobuf`. The test below this one is the proof: every
+    /// witness for the encodings check was a `protobuf` rule losing to a JSON
+    /// label, and the reason it could only ever be phrased that way is that the
+    /// format on the other side of the collision did not exist.
+    ///
+    /// # Why the terminal and not the decoder
+    ///
+    /// The decoder's own tests are in `wz-capture`. This one is here for the
+    /// reason the test below it was: a state that renders correctly proves the
+    /// renderer, and it took a capture driven through `analyze_request` to
+    /// prove that the path from a `--payload-format` argument to a printed row
+    /// is joined. `--payload-name` rides along, because the JSON case is the
+    /// one where the wire already names the field and a rename must therefore
+    /// still be a rename rather than the only source.
+    #[test]
+    fn a_json_publishers_payload_is_opened_into_named_rows_at_the_terminal() {
+        const JSON: u32 = 5;
+        const BODY: &[u8] = br#"{"temp":21.5}"#;
+        let packets = [udp_from_zenoh_port(&frame_carrying(&put_declaring(
+            "demo/a", JSON, BODY,
+        )))];
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .map(|p| (0u32, 1_000_000u64, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+        let rules = [(String::from("demo/**"), String::from("json"))];
+        let names = [(
+            String::from("demo/**"),
+            String::from("$.temp"),
+            String::from("celsius"),
+        )];
+
+        let text = analyze_request(&Request {
+            capture: &capture,
+            keylog: None,
+            format: Format::Text,
+            per_flow: true,
+            per_message: true,
+            messages_per_flow: None,
+            quic_ports: &[],
+            quic_cid_len: None,
+            payload_rules: &rules,
+            payload_field_names: &names,
+            serial_linktypes: &[],
+            census: Census::default(),
+            per_field: true,
+            bounded: false,
+            health: false,
+            select: None,
+        })
+        .expect("the capture reads")
+        .0;
+
+        // ANTI-VACUITY: the sample really decoded, so a listing that reported
+        // nothing cannot pass by having been handed nothing.
+        assert!(
+            text.contains("messages decoded: 1"),
+            "the fixture must decode: {text}"
+        );
+        assert!(
+            text.contains("payload `demo/a` as json:"),
+            "the rule must be INSTALLED and applied under its own name: {text}"
+        );
+        assert!(
+            text.contains("$ = object 1 member(s)"),
+            "the document's own row must be there, so a reader sees the shape \
+             before the leaves: {text}"
+        );
+        // The leaf, its declared rename, and its value -- one line, and the
+        // path is the wire's own member name rather than an invented number.
+        assert!(
+            text.contains("$.temp (celsius) = number 21.5"),
+            "the wire's name is the path and the declaration renames it: {text}"
+        );
+        // And nothing on this capture reads as a mapping quarrel: the publisher
+        // said JSON, the rule says JSON, so no override or veto line may appear.
+        assert!(
+            !text.contains("NOT DECODED") && !text.contains("applied anyway"),
+            "the label and the rule agree, so there is no finding to print: \
+             {text}"
+        );
+    }
+
     #[test]
     fn the_encoding_findings_and_their_tally_reach_the_terminal() {
         const JSON: u32 = 5;
