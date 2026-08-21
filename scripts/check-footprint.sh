@@ -437,8 +437,59 @@ declare -A BASELINE_MC_TEXT=(
     # elision lane required; against the inline shape those attribution
     # readings came from, thumbv7m is -68 and thumbv7em-hf is +0.
     # Old: 53100/53128 (R311y636).
-    ["thumbv7m-none-eabi"]=53696
-    ["thumbv7em-none-eabihf"]=53796
+    #
+    # Round 1953 — GREW across two SCE pin bumps, and the bytes are attributed
+    # UPSTREAM by measurement rather than inferred here. This is the first
+    # baseline move on this artifact whose cause is a LINKED submodule runtime
+    # rather than anything in this tree: `mcu-multicast-e2e` links
+    # `sce-rust-runtime` from inside `vendor/sce`, so a pin bump moves the
+    # binary even when the generated `out/**` is byte-identical.
+    #
+    # WHAT THE BYTES ARE. Two upstream commits, one axis: `37a47335a3` and
+    # `e00d4eee04` add a per-macrostep microstep CEILING and the report a host
+    # reads when a document exhausts it. Upstream bisected each range to
+    # exactly one commit and then weighed them on a probe that instantiates
+    # `Engine<P>` for an MCU target, four pins built at one fixed path:
+    #   1072 -> 1418 (+346) -> 1418 (+0) -> 1666 (+248) = +594 per
+    # instantiation on `thumbv7em-none-eabihf` at `opt-level = "z"`. The `+0`
+    # middle row is the control: the instrument tracks the engine, not the
+    # toolchain.
+    #
+    # WHY IT IS NOT GATEABLE, which is why this is a baseline move and not a
+    # fix. Of the 594, **550 (93%) is the bound itself** — the budget
+    # arithmetic and the guard that stops a refused chain being handed a second
+    # budget. A capability flag that switched it off would let a policy opt out
+    # of TERMINATING, and SCXML 3.13 permits a macrostep that never ends, so
+    # the engine refuses to walk one rather than asking. Only 44 B (7%) is the
+    # report, which upstream has since put behind `no_macrostep_diagnostics`;
+    # that is worth 44 x 3 = 132 B here (this image instantiates THREE engines)
+    # and was not reachable when this baseline moved. Taking it later lands
+    # -132, inside the +-256 band, so it does not re-red this gate.
+    #
+    # WHAT WAS RULED OUT BY MEASUREMENT, not by argument: the logging. This
+    # image installs no `log` logger, so at `lto = true` LTO already discards
+    # the whole `sce_log_error!` path; `release_max_level_off` buys +0 here
+    # (proved against an `lto = false` control where the same feature is worth
+    # -6468 B). The scheduler was ruled out too — `NEEDS_EVENT_SCHEDULER` is
+    # `false` on all eight generated policies and its guard folds at
+    # `engine.rs:955`, inside `step_in_turn`, which is not the function that
+    # grew.
+    #
+    # WARNING FOR THE NEXT ATTRIBUTION ON THIS ARTIFACT: do NOT read a
+    # per-symbol delta on `run_main_event_loop` as its cost. It ABSORBS its
+    # callees — upstream's table has it growing 528 B in a range where the
+    # whole engine grew 346, because `check_eventless_transitions` and
+    # `process_internal_queue` were inlined into it while other symbols shrank.
+    # `check_eventless_transitions` also has two callers (`engine.rs:2030` and
+    # `:2418`), so a sum over the loop symbol alone undercounts in the other
+    # direction. This gate is unaffected: it weighs whole-section `text`, not
+    # symbols.
+    #
+    # Figures below are the HOSTED measurement (+1612 M3 / +1624 M4F) from run
+    # 32437029707, not this host's: local gcc 13.2.1 reads 4 B under CI's
+    # 10.3.1 on the same tree. Old: 53696/53796 (R311y878).
+    ["thumbv7m-none-eabi"]=55308
+    ["thumbv7em-none-eabihf"]=55420
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
