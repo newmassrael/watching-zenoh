@@ -1022,6 +1022,230 @@ mod fed_tests {
         d
     }
 
+    /// R311y923 (open-debt item 288) — THE CENSUS DOCUMENT'S KEY SET IS PINNED,
+    /// SO A ROUND THAT CHANGES THE SHAPE HAS TO SAY SO.
+    ///
+    /// # The judgement nothing was making
+    ///
+    /// `wz_dissect.h` states the rule in prose: the ABI revision moves when a
+    /// SYMBOL or the memory rule changes, "never when the JSON gains fields".
+    /// Which side of that line a given key change falls on was decided by
+    /// reading, every time, and nothing checked the reading — item 288.
+    ///
+    /// The last four rounds are the evidence. R311y917 added
+    /// `dropped_by_limits` to a document, R311y919 added `offset_space` six
+    /// times, and each round argued in a comment that an ADDED key is the
+    /// widening the read-by-name contract permits. That argument is correct.
+    /// What it does not cover is a key REMOVED or RENAMED, which is a break —
+    /// and R311y919 came within one edit of renaming `first_packet` on exactly
+    /// that prose reading.
+    ///
+    /// # Why the whole set and not a rule about additions
+    ///
+    /// A gate that only refused removals would let the shape grow unremarked,
+    /// and the growth is what a consumer pinned to a revision has to be told
+    /// about. Pinning the SET means both directions land on this table, in the
+    /// commit that changes the document, where the author states which side of
+    /// the header's line the change is on. It is `capi_abi_pin.py`'s shape one
+    /// layer in: that pins the symbol set against the revision, this pins the
+    /// document the symbols hand back.
+    #[test]
+    fn the_census_documents_key_set_is_pinned() {
+        let doc = census_json_where(
+            &four_plane_capture("demo/temp"),
+            &crate::filter::Filter::any(),
+        );
+        let mut seen = json_keys(&doc);
+        seen.sort_unstable();
+        seen.dedup();
+        // MEASURED, not transcribed: the first run of this test carried an
+        // empty table and printed the set, which is the same trick the C1bz
+        // budget is re-measured with. 136 keys over the four planes plus the
+        // interest plane and the loss group.
+        let expected: Vec<&str> = alloc::vec![
+            "a",
+            "a_to_b",
+            "addr",
+            "admissible",
+            "aggregate",
+            "anchors_exact",
+            "answers",
+            "answers_in_scope",
+            "asked_at",
+            "asker",
+            "asks",
+            "at_most_bytes",
+            "attributed_bytes",
+            "b",
+            "b_to_a",
+            "by_kind",
+            "bytes",
+            "cancelled_at",
+            "children",
+            "closed_at",
+            "completed",
+            "completion",
+            "consistent",
+            "contradictions",
+            "count",
+            "declaration",
+            "declarations",
+            "declared",
+            "declared_at",
+            "declarer",
+            "dels",
+            "descriptors",
+            "dropped_by_limits",
+            "elsewhere",
+            "errs",
+            "evidence",
+            "exchanges",
+            "first_anchor",
+            "first_packet",
+            "first_reply",
+            "flow",
+            "flows",
+            "frames",
+            "gaps",
+            "halted_batches",
+            "hello",
+            "high",
+            "id",
+            "inadmissible",
+            "init",
+            "interests",
+            "join",
+            "judged",
+            "keyexpr",
+            "keyexprs",
+            "keys",
+            "kind",
+            "last_anchor",
+            "links",
+            "liveliness_token",
+            "locators",
+            "low",
+            "matched",
+            "max_ms",
+            "mean_ms",
+            "messages",
+            "min_ms",
+            "mismatched",
+            "mode",
+            "narrowed_by_selector",
+            "nodes",
+            "non_monotonic",
+            "not_as_declared",
+            "offset_space",
+            "orphan_answers",
+            "orphan_responses",
+            "orphan_withdrawals",
+            "payload_bytes",
+            "payload_bytes_ceiling",
+            "payloads",
+            "port",
+            "prefix",
+            "puts",
+            "queries",
+            "queryable",
+            "queryables",
+            "records",
+            "rejected",
+            "replies",
+            "requests",
+            "restricted",
+            "rows",
+            "scout",
+            "scout_askers",
+            "selection",
+            "share_bp",
+            "silent",
+            "skipped",
+            "solicited_by",
+            "source_ahead_of_observer",
+            "stream_bytes",
+            "subscriber",
+            "subscribers",
+            "subtrees",
+            "tokens",
+            "total_ms",
+            "total_payload_bytes",
+            "totals",
+            "unanswered",
+            "unattributed_bytes",
+            "unattributed_records",
+            "unattributed_requests",
+            "unclaimed",
+            "unclaimed_exact",
+            "unclosed",
+            "undecidable",
+            "undecided",
+            "undeclarations",
+            "undecompressible_batches",
+            "unjudged_answers",
+            "unknown_ids",
+            "unlocatable_records",
+            "unmeasured_payloads",
+            "unparsed_bytes",
+            "unread",
+            "unresolvable_fragments",
+            "unresolved",
+            "unresolved_declarations",
+            "unresolved_records",
+            "unsized_payloads",
+            "unstamped",
+            "walked_records",
+            "whatami",
+            "wire_bytes",
+            "withdrawn_at",
+            "zid",
+        ];
+        assert_eq!(
+            seen, expected,
+            "the census document's key set moved; if that is deliberate, put the \
+             new set here and say in the same commit which side of \
+             `wz_dissect.h`'s line it falls on"
+        );
+    }
+
+    /// Every KEY in a JSON document, in order of appearance, duplicates
+    /// included.
+    ///
+    /// A string is a key when the next non-space character after it is a colon.
+    /// Deliberately not a parser: this crate already has one
+    /// (`payload::json_wellformed`, which the test above runs), and a second
+    /// would be a second opinion about what JSON is.
+    fn json_keys(doc: &str) -> Vec<&str> {
+        let b = doc.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        while i < b.len() {
+            if b[i] != b'"' {
+                i += 1;
+                continue;
+            }
+            let start = i + 1;
+            let mut j = start;
+            while j < b.len() && b[j] != b'"' {
+                // The escape is what stops a key containing a quote from
+                // ending here, which the hostile-string test above makes real.
+                j += if b[j] == b'\\' { 2 } else { 1 };
+            }
+            if j >= b.len() {
+                break;
+            }
+            let mut k = j + 1;
+            while k < b.len() && b[k] == b' ' {
+                k += 1;
+            }
+            if k < b.len() && b[k] == b':' {
+                out.push(&doc[start..j]);
+            }
+            i = j + 1;
+        }
+        out
+    }
+
     /// R311y920 (open-debt item 380) — A WIRE STRING FULL OF JSON
     /// METACHARACTERS LEAVES EVERY DOCUMENT WELL-FORMED.
     ///
