@@ -266,16 +266,36 @@ AWAITING_WALKER = {
 }
 
 
-def walker_names(src: str) -> set[str]:
-    """Every field name the walkers emit.
+def walker_sites(src: str) -> dict[str, list[int]]:
+    """Every field name the walkers emit, and the LINES it was read from.
 
     Three producing forms, and MISSING ONE IS HOW THIS GOES WRONG: the first
     version of this census matched only a fixed list of cursor methods, missed
     `c.text(` and `c.vle_u32(`, and reported `suffix` / `schema` / `packed_id` as
     absent when all three are emitted. So the cursor arm matches ANY method.
+
+    R311y924 (item 321) — the lines ride along because the over-inclusion above
+    is right and the REPORT of it was not. These patterns run over the raw file,
+    so a `name: "x"` inside a doc comment, or inside a test that builds a field
+    by hand, is claimed exactly as a walker's own literal is. That is deliberate:
+    a name that is not a field must be DECLARED rather than silently skipped.
+    But the failure then said "walker emits 'x'" and named no location, so a
+    reader went looking for a walker that does not exist. R311y920 lost a round
+    to it: a test wrote `name: "f"` and the census reported a walker.
+
+    Nothing here classifies the site -- no attempt to tell a comment from a test
+    from a walker, which is the kind of heuristic that earns false positives and
+    stops being read. It reports WHERE, and the reader decides what they are
+    looking at in one keystroke.
     """
-    names: set[str] = set()
-    names |= set(re.findall(r'\bc\.[a-z_0-9]+\(\s*"([a-z0-9_]+)"', src))
+    names: dict[str, list[int]] = {}
+
+    def claim(pattern: str, text: str, base: int = 0) -> None:
+        for m in re.finditer(pattern, text):
+            line = text.count("\n", 0, m.start()) + 1 + base
+            names.setdefault(m.group(1), []).append(line)
+
+    claim(r'\bc\.[a-z_0-9]+\(\s*"([a-z0-9_]+)"', src)
     # R311y897 — the FOURTH producing form, and it was a live blind spot before
     # it was written: a helper that takes the cursor as its first argument and
     # the field names as literals after it. `read_zbuf_field(c, "user_len",
@@ -289,19 +309,23 @@ def walker_names(src: str) -> set[str]:
     # Deliberately OVER-inclusive: any literal in such a call is claimed, so a
     # name that is not a field must still be declared rather than silently
     # skipped.
-    for args in re.findall(r"\b[a-z_0-9]+\(\s*c,(.*?)\)\s*\?", src, re.S):
-        names |= set(re.findall(r'"([a-z0-9_]+)"', args))
+    for call in re.finditer(r"\b[a-z_0-9]+\(\s*c,(.*?)\)\s*\?", src, re.S):
+        base = src.count("\n", 0, call.start(1))
+        claim(r'"([a-z0-9_]+)"', call.group(1), base)
     # `walked` joined this list at R311y896: the ZBuf-body dispatch was split
     # out of the walk so a test could ask WHICH rows have a walker without
     # having to hand each one a body its layout would accept. Its arms name
     # their group through `walked("literal", ..)`, which is why the helper is a
     # function and not a tuple -- as a tuple the eight names below it left this
     # census entirely, and the gate said so.
-    names |= set(
-        re.findall(r'\b(?:bits|flag|group|leaf|text|label|walked)\(\s*"([a-z0-9_]+)"', src)
-    )
-    names |= set(re.findall(r'name:\s*"([a-z0-9_]+)"', src))
+    claim(r'\b(?:bits|flag|group|leaf|text|label|walked)\(\s*"([a-z0-9_]+)"', src)
+    claim(r'name:\s*"([a-z0-9_]+)"', src)
     return names
+
+
+def walker_names(src: str) -> set[str]:
+    """The names alone, for the arms that ask only whether one is present."""
+    return set(walker_sites(src))
 
 
 EXT_ZBUF_MATCH = re.compile(
@@ -393,15 +417,34 @@ def codec_fields() -> dict[str, list[str]]:
 
 
 def main() -> int:
-    if not DISSECT.is_file():
-        print(f"dissect-name-census: cannot read {DISSECT}", file=sys.stderr)
+    # An optional path, so a fixture can drive the arms below. R311y924 wanted
+    # to SHOW that a name read out of a doc comment reports the comment's line
+    # rather than an imaginary walker, and a gate whose message cannot be
+    # exercised is a message nobody has read.
+    dissect = Path(sys.argv[1]) if len(sys.argv) > 1 else DISSECT
+    if not dissect.is_file():
+        print(f"dissect-name-census: cannot read {dissect}", file=sys.stderr)
         return 1
     if not CODECS.is_dir():
         print(f"dissect-name-census: cannot read {CODECS}", file=sys.stderr)
         return 1
 
-    src = DISSECT.read_text(encoding="utf-8")
-    walkers = walker_names(src)
+    src = dissect.read_text(encoding="utf-8")
+    where = dissect.name
+    sites = walker_sites(src)
+    walkers = set(sites)
+
+    def at(name: str) -> str:
+        """Where this name was read, so the reader looks at the site and not
+        for a walker that may not be one.
+
+        Every caller passes a name drawn FROM `walkers`, so the lookup cannot
+        come back empty and there is no fallback string to write -- a branch
+        that cannot be reached is one nobody has ever seen be right.
+        """
+        lines = sorted(set(sites[name]))
+        shown = ", ".join(f"{where}:{n}" for n in lines[:3])
+        return shown if len(lines) <= 3 else f"{shown} (+{len(lines) - 3} more)"
     codecs = codec_fields()
     declared = PROTOCOL_FLAGS | PROTOCOL_VARIANTS | set(OWN_VOCABULARY)
 
@@ -423,9 +466,11 @@ def main() -> int:
     # Invariant 1: no undeclared invention.
     for name in sorted(walkers - set(codecs) - declared):
         failures.append(
-            f"walker emits {name!r}, which is neither a codec field nor declared "
-            "vocabulary -- name it after the codec's field, or add it to "
-            "OWN_VOCABULARY with the reason it differs"
+            f"{name!r} is read at {at(name)} and is neither a codec field nor "
+            "declared vocabulary -- name it after the codec's field, or add it "
+            "to OWN_VOCABULARY with the reason it differs. This census claims "
+            "any such literal, a doc comment's and a test's included, so read "
+            "the site before assuming a walker emits it"
         )
 
     # Invariant 2: no silently unwalked codec field.
@@ -438,8 +483,8 @@ def main() -> int:
     # Invariant 3: no stale excuse.
     for name in sorted(set(AWAITING_WALKER) & walkers):
         failures.append(
-            f"{name!r} is declared as awaiting a walker, but a walker now emits it -- "
-            "delete the AWAITING_WALKER entry"
+            f"{name!r} is declared as awaiting a walker, but it is now read at "
+            f"{at(name)} -- delete the AWAITING_WALKER entry"
         )
     for name in sorted(set(OWN_VOCABULARY) - walkers):
         failures.append(
