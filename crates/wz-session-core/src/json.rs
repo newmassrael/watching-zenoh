@@ -14,11 +14,29 @@
 use alloc::string::String;
 
 /// Push `s` onto `out` as a correct JSON string literal: a leading `"`, each
-/// character RFC-8259-escaped (`"` `\` `\n` `\r` `\t`, and any control char
-/// `< 0x20` as `\u00XX`), then a trailing `"`. The emitter stays a correct JSON
-/// string serializer rather than a `format!` a stray byte could corrupt — the
-/// admin/config payloads can carry untrusted bytes (e.g. a config-write PUT's
-/// keyexpr), so escaping is mandatory, not cosmetic.
+/// character RFC-8259-escaped (all FIVE of §7's short forms — `"` `\` `\n`
+/// `\r` `\t` `\b` `\f` — and any other control char `< 0x20` as `\u00XX`),
+/// then a trailing `"`. The emitter stays a correct JSON string serializer
+/// rather than a `format!` a stray byte could corrupt — the admin/config
+/// payloads can carry untrusted bytes (e.g. a config-write PUT's keyexpr), so
+/// escaping is mandatory, not cosmetic.
+///
+/// # R311y921 (open-debt item 379) — `\b` and `\f` arrived, and the module doc
+/// above had already named them
+///
+/// That doc says a future fix "(surrogate handling, `\b`/`\f`) silently
+/// desyncs the two §5.23 admin-JSON surfaces" if the escaper is duplicated. It
+/// was duplicated — not in the two surfaces it warned about, but in
+/// `wz-capture::report`, which grew its own content-only escaper WITH the two
+/// short forms while this one folded them into the generic arm. Both are
+/// correct JSON and both parse, so the well-formedness guard R311y920 added
+/// could never see it: the divergence is in the BYTES, not the grammar.
+///
+/// Merged here rather than there because the richer behaviour is the RFC's own
+/// and because this is the one every other emitter already calls. The change
+/// moves two characters' bytes on every surface that uses it — ``
+/// becomes `\b` — which no reader can tell apart and no test in this workspace
+/// pinned.
 pub fn escape_into(s: &str, out: &mut String) {
     out.push('"');
     for c in s.chars() {
@@ -28,6 +46,11 @@ pub fn escape_into(s: &str, out: &mut String) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            // R311y921 — the other two short forms RFC 8259 §7 defines. They
+            // were `` / `` here and `\b` / `\f` in the report
+            // writer, which is the whole of item 379.
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
             c if (c as u32) < 0x20 => {
                 use core::fmt::Write as _;
                 let _ = write!(out, "\\u{:04x}", c as u32);
@@ -63,6 +86,40 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R311y921 (open-debt item 379) — EVERY ESCAPE RFC 8259 §7 REQUIRES, in
+    /// the form the RFC names, checked one character at a time.
+    ///
+    /// Moved here from `wz-capture::report` in the round that merged that
+    /// module's private escaper into this one: a pin travels with the code it
+    /// pins, and this is now the only implementation in the workspace. Checked
+    /// against the RFC's spelling rather than against this writer's own output,
+    /// which is the difference between a table and a snapshot.
+    #[test]
+    fn every_character_json_requires_escaping_is_escaped_as_the_rfc_names_it() {
+        for (input, expected) in [
+            ("plain", "\"plain\""),
+            ("with\"quote", "\"with\\\"quote\""),
+            ("back\\slash", "\"back\\\\slash\""),
+            ("new\nline", "\"new\\nline\""),
+            ("carriage\rreturn", "\"carriage\\rreturn\""),
+            ("tab\there", "\"tab\\there\""),
+            ("bs\u{08}", "\"bs\\b\""),
+            ("ff\u{0C}", "\"ff\\f\""),
+            ("nul\u{00}", "\"nul\\u0000\""),
+            ("esc\u{1B}", "\"esc\\u001b\""),
+            ("unit\u{1F}", "\"unit\\u001f\""),
+            // Above 0x1F nothing is required, including non-ASCII: valid UTF-8
+            // is valid JSON, and escaping it would be a second encoding of the
+            // same bytes.
+            ("공간/온도", "\"공간/온도\""),
+            ("space here", "\"space here\""),
+        ] {
+            let mut got = String::new();
+            escape_into(input, &mut got);
+            assert_eq!(got, expected, "escaping {input:?}");
+        }
+    }
 
     #[test]
     fn str_array_emits_escaped_comma_joined_brackets() {

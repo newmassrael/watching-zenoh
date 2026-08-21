@@ -2626,34 +2626,20 @@ fn quoted(value: &str) -> String {
 }
 
 /// Write `s` as a quoted JSON string.
-fn quote_into(value: &str, out: &mut String) {
-    out.push('"');
-    escape_into(value, out);
-    out.push('"');
-}
-
-/// Escape one string's contents per RFC 8259 §7.
+///
+/// R311y921 (open-debt item 379) — THE ESCAPER IS THE WORKSPACE'S, not this
+/// module's. This file carried its own for long enough to drift from it in two
+/// characters (`\b` and `\f` against `` and ``), and both spellings
+/// are correct JSON, so nothing that judges the DOCUMENT could ever have seen
+/// the difference. What is left here is the one thing that is this module's own
+/// business: the fact that a value is being written as a string at all.
 ///
 /// A keyexpr arrives from the wire and this tool prints it, so the escaping is
 /// a correctness boundary rather than a formatting nicety: a publisher that
 /// chooses a name containing a quote would otherwise choose where this
-/// document's fields end. Every character the RFC requires is handled —
-/// quote, reverse solidus, and every control character below 0x20 — with the
-/// five short forms it defines and `\u00XX` for the rest.
-fn escape_into(value: &str, out: &mut String) {
-    for c in value.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
+/// document's fields end.
+fn quote_into(value: &str, out: &mut String) {
+    wz_session_core::json::escape_into(value, out);
 }
 
 /// R311y859 — the skip census as JSON, written ONCE.
@@ -3083,33 +3069,53 @@ pub fn health_text(d: &crate::Dissection) -> String {
 mod tests {
     use super::*;
 
-    /// Every escape RFC 8259 §7 requires, checked one character at a time
-    /// against the form the RFC names — not against this writer's own output.
+    /// R311y921 (open-debt item 379) — THIS WORKSPACE HAS ONE JSON ESCAPER.
+    ///
+    /// # Why a second one is invisible to every guard that exists
+    ///
+    /// R311y920 made the emitted documents provably JSON, and that guard cannot
+    /// see this: `\b` and `` are both correct, both parse, and both mean
+    /// the same character. So the two writers this crate carried could disagree
+    /// on the BYTES of the same string forever while every test stayed green —
+    /// which is `debt-census-emit-two-renderings` one layer down, in the layer
+    /// that turns a wire string into a document.
+    ///
+    /// Asserted as EQUIVALENCE rather than against a table, because a table
+    /// would be a third statement of the same fact and the failure this guards
+    /// is exactly two statements drifting. The RFC's own character table lives
+    /// with the implementation, in `wz_session_core::json`.
     #[test]
-    fn every_character_json_requires_escaping_is_escaped_as_the_rfc_names_it() {
-        for (input, expected) in [
-            ("plain", "plain"),
-            ("with\"quote", "with\\\"quote"),
-            ("back\\slash", "back\\\\slash"),
-            ("new\nline", "new\\nline"),
-            ("carriage\rreturn", "carriage\\rreturn"),
-            ("tab\there", "tab\\there"),
-            ("bs\u{08}", "bs\\b"),
-            ("ff\u{0C}", "ff\\f"),
-            ("nul\u{00}", "nul\\u0000"),
-            ("esc\u{1B}", "esc\\u001b"),
-            ("unit\u{1F}", "unit\\u001f"),
-            // Above 0x1F nothing is required, including non-ASCII: valid UTF-8
-            // is valid JSON, and escaping it would be a second encoding of the
-            // same bytes.
-            ("공간/온도", "공간/온도"),
-            ("space here", "space here"),
+    fn this_crate_has_one_json_escaper() {
+        for s in [
+            "plain",
+            "with\"quote",
+            "back\\slash",
+            "new\nline",
+            "carriage\rreturn",
+            "tab\there",
+            "bs\u{08}",
+            "ff\u{0C}",
+            "nul\u{0}",
+            "esc\u{1b}",
+            "unit\u{1f}",
+            "공간/온도",
         ] {
-            let mut got = String::new();
-            escape_into(input, &mut got);
-            assert_eq!(got, expected, "escaping {input:?}");
+            let mut mine = String::new();
+            quote_into(s, &mut mine);
+            let mut shared = String::new();
+            wz_session_core::json::escape_into(s, &mut shared);
+            assert_eq!(
+                mine, shared,
+                "this crate's writer and the workspace's escaper disagree on {s:?}"
+            );
         }
     }
+
+    // R311y921 (item 379) — the RFC's own character table MOVED to
+    // `wz_session_core::json`, which is where the escaper now lives. A pin
+    // travels with the code it pins; left here it would have been a third
+    // statement of the fact `this_crate_has_one_json_escaper` above already
+    // makes, and the drift it exists to catch is statements multiplying.
 
     /// A keyexpr that ends its own JSON string cannot. The one attacker-facing
     /// leg of this module, driven through the public renderer rather than the
