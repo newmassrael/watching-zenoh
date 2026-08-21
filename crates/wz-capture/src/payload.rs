@@ -61,12 +61,16 @@ use wz_codecs::encoding_ids::ENCODING_ID_TO_STR;
 
 /// R311y914 — the CBOR walk's two public types, named from HERE.
 ///
-/// `crate::payload_cbor` is private for the same reason
-/// [`crate::payload_builtin`] is: this module is the one a caller reads. But
-/// [`Verdict::Cbor`] carries a [`CborSummary`], so a consumer matching on it
-/// needs a path to write — and a type reachable only through a variant is a
-/// type they cannot name in a signature. The same shape [`formats`] uses for
-/// the built-in decoders.
+/// `crate::payload_cbor` is private for the same reason `crate::payload_builtin`
+/// is: this module is the one a caller reads. But [`Verdict::Cbor`] carries a
+/// [`CborSummary`], so a consumer matching on it needs a path to write — and a
+/// type reachable only through a variant is a type they cannot name in a
+/// signature. The same shape [`formats`] uses for the built-in decoders.
+///
+/// Both module names are CODE SPANS and not links, which is this crate's own
+/// rule for a private item named from a public doc: rustdoc counts such a link
+/// as broken, and Layer C1bz counts it against a budget of zero. This paragraph
+/// was written with the link form and the pre-push hook refused the push.
 pub use crate::payload_cbor::{CborKind, CborSummary};
 
 /// What a payload's declared encoding says about its BYTES.
