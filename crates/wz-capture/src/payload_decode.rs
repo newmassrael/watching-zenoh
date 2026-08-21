@@ -537,6 +537,67 @@ impl PayloadDecoding {
         "refused",
         "decoded",
     ];
+
+    /// R311y926 (open-debt item 283) — the NEXT variant, so a test can visit
+    /// every one of them without writing the list down.
+    ///
+    /// # The hole this closes, which the doc above named and left open
+    ///
+    /// `STATES` is indexed, so a variant added to [`Self::state`] must choose
+    /// an index and a new word changes the array's length, which is written in
+    /// the type. What neither holds is an author who points the new variant at
+    /// an EXISTING index: two variants then render one word and the compiler
+    /// says nothing. That residue is the whole of item 283, and until R311y926
+    /// nothing in the workspace asserted the map from variant to word is
+    /// injective — `wz-capi-dissect`'s test checks the HEADER names each word,
+    /// which is a different claim.
+    ///
+    /// # Why a chain, on an enum whose variants carry data
+    ///
+    /// The walk is about the DISCRIMINANT, so each arm builds the next variant
+    /// with empty payloads; the data is furniture here and is not asserted on.
+    /// The match is exhaustive, so an eighth variant forces an arm, and an
+    /// author who ends the chain early leaves the walk shorter than `STATES` —
+    /// which the test compares. Item 301 settled this shape on `Misbound` one
+    /// round earlier.
+    #[cfg(test)]
+    fn next(&self) -> Option<Self> {
+        Some(match self {
+            Self::NoRules => Self::NoPayload,
+            Self::NoPayload => Self::KeyexprUnresolved,
+            Self::KeyexprUnresolved => Self::NoRule(String::new()),
+            Self::NoRule(_) => Self::EncodingMismatch {
+                keyexpr: String::new(),
+                format: String::new(),
+                declared: String::new(),
+            },
+            Self::EncodingMismatch { .. } => Self::Refused {
+                keyexpr: String::new(),
+                format: String::new(),
+                why: String::new(),
+            },
+            Self::Refused { .. } => Self::Decoded {
+                keyexpr: String::new(),
+                format: String::new(),
+                fields: Vec::new(),
+                despite_encoding: None,
+            },
+            Self::Decoded { .. } => return None,
+        })
+    }
+
+    /// Every variant, walked rather than listed. The ORDER is not a contract,
+    /// only the completeness.
+    #[cfg(test)]
+    fn all() -> Vec<Self> {
+        let mut out = Vec::new();
+        let mut cur = Some(Self::NoRules);
+        while let Some(v) = cur {
+            cur = v.next();
+            out.push(v);
+        }
+        out
+    }
 }
 
 /// The keyexpr of the `WireExpr` under `field`, RESOLVED.
@@ -1309,13 +1370,46 @@ mod tests {
         );
     }
 
+    /// R311y926 (open-debt item 283) — THE `state` VOCABULARY IS TOTAL AND EACH
+    /// WORD IS DISTINCT.
+    ///
+    /// The residue `PayloadDecoding::STATES`' own doc records: an author who
+    /// points a new variant at an EXISTING index gets two variants rendering
+    /// one word, and no compiler complains. Nothing asserted otherwise —
+    /// `wz-capi-dissect` checks that the HEADER names every word, which says
+    /// nothing about whether two variants share one.
+    ///
+    /// Asserted on the WALK rather than on a list, for the reason item 301
+    /// settled a round earlier: a list is a second statement of the variant
+    /// set, and a variant left out of it is not tested at all.
+    #[test]
+    fn every_decoding_state_has_its_own_word() {
+        let all = PayloadDecoding::all();
+        assert_eq!(
+            all.len(),
+            PayloadDecoding::STATES.len(),
+            "every variant must have a word and every word a variant -- a walk \
+             shorter than STATES means a variant is not linked into `next`"
+        );
+        let mut seen = BTreeSet::new();
+        for decoding in &all {
+            assert!(
+                PayloadDecoding::STATES.contains(&decoding.state()),
+                "{} names a word outside STATES",
+                decoding.state()
+            );
+            assert!(
+                seen.insert(decoding.state()),
+                "two variants render the word `{}` -- an index was reused",
+                decoding.state()
+            );
+        }
+    }
+
     /// R311y875 — the `wrong` vocabulary is TOTAL and each word is distinct.
     ///
-    /// The residue R311y873 recorded for `PayloadDecoding::STATES` applies here
-    /// too — an author can point a new variant at an EXISTING index and get two
-    /// variants sharing one word — so the distinctness is asserted rather than
-    /// assumed. `NAMES` is what `wz_dissect.h` documents in prose, and prose is
-    /// the half no compiler holds.
+    /// `NAMES` is what `wz_dissect.h` documents in prose, and prose is the half
+    /// no compiler holds.
     #[test]
     fn every_misbound_verdict_has_its_own_word() {
         // R311y925 (item 301) — WALKED, not written down. The list this opened
