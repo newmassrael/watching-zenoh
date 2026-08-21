@@ -32,11 +32,23 @@ directions.
    `wz-capi-dissect`'s source.
 3. Every flag in `USAGE` is named by some capability.
 4. Every `wz_dissect_*` symbol is named by some capability.
+5. R311y912 (unregistered item 409) — every ALL-CAPS SELF-REPORT SECTION in
+   `USAGE` is named in `SELF_REPORT`, and every declared section is still
+   there.
 
-(3) and (4) are the half that matters. A new capability added to ONE surface
-now has to be written down here, and writing it down is where somebody has to
-answer "and the other surface?" -- in prose, at the row, where the next reader
-finds it.
+(3), (4) and (5) are the half that matters. A new capability added to ONE
+surface now has to be written down here, and writing it down is where somebody
+has to answer "and the other surface?" -- in prose, at the row, where the next
+reader finds it.
+
+(5) exists because a capability the command line delivers as a SECTION rather
+than as a flag was in NEITHER of the two populations above. `LINK TYPES READ`
+and `EXT BODIES READ` each answer a question a linking consumer asks, and
+widening either moved none of this banner's numbers. That is a different miss
+from an asymmetric row: a row the gate can see has been DECIDED, and a section
+it cannot see has not been asked about. Both sections carry an `OPEN DEBT` tag
+today, so the banner reports two where it used to report none -- which is the
+whole of what the axis was added for.
 
 ## What it deliberately does NOT check
 
@@ -244,6 +256,60 @@ def capi_symbols() -> set[str]:
     return set(re.findall(r'pub (?:unsafe )?extern "C" fn (wz_dissect_[a-z_0-9]+)', src))
 
 
+# R311y912 (unregistered item 409) — the THIRD axis: a capability the command
+# line delivers as a SELF-REPORT SECTION rather than as a flag.
+#
+# `USAGE` carries two of them, and both answer a question a consumer of either
+# surface asks: which pcap link types this build decodes, and which extension
+# BODIES it opens rather than showing as `value`. Neither is a flag and neither
+# is a symbol, so the two checks above were blind to both — MEASURED when the
+# `EXT BODIES READ` section was last widened, the banner's four numbers did not
+# move by one.
+#
+# That is a different miss from an asymmetric ROW (item 242's "one-sided is a
+# decision"): a row the gate can see has been decided, and a section it cannot
+# see has not even been asked about. So the axis exists to force the same
+# question the flag axis forces, and the answer for both sections today is that
+# the ABI has no counterpart.
+STRUCTURAL_HEADINGS = {"USAGE:", "OPTIONS:"}
+
+SELF_REPORT = {
+    "LINK TYPES READ:": (
+        None,
+        "OPEN DEBT (unregistered item 435). Which pcap link types this build "
+        "decodes is exactly what a linking consumer needs before it hands over "
+        "a capture -- an unread capture reports `messages decoded: 0`, and so "
+        "does a capture with no zenoh traffic. The command line says which "
+        "types it could not read; the ABI's documents do not carry the list at "
+        "all, so a UI cannot tell a reader to re-capture.",
+    ),
+    "EXT BODIES READ:": (
+        None,
+        "OPEN DEBT (unregistered item 435). An extension body this build does "
+        "not open is COUNTED and NAMED and rendered as `value`, which reads "
+        "exactly like `there was no structure here`. The command line answers "
+        "it in prose; the ABI has no door that does, so the surface a product "
+        "LINKS cannot say what it can open. The honest fix derives the list "
+        "from `dissect`'s own dispatch rather than restating it a third time.",
+    ),
+}
+
+
+def cli_self_report_headings() -> set[str]:
+    """Every ALL-CAPS section heading `USAGE` carries.
+
+    Read from the same constant the flags come from, and deliberately by SHAPE
+    rather than from a list of known headings: a third section added later must
+    be decided here, which is the property the flag axis already has and this
+    one was missing.
+    """
+    src = CLI.read_text()
+    block = re.search(r'pub const USAGE: &str = "\\\n(.*?)\n";', src, re.S)
+    if block is None:
+        return set()
+    return set(re.findall(r"^([A-Z][A-Z /]*:)$", block.group(1), re.M))
+
+
 def main() -> int:
     flags = cli_flags()
     symbols = capi_symbols()
@@ -285,6 +351,33 @@ def main() -> int:
             f"Add it to BOTH or to ONLY_CAPI with its reason"
         )
 
+    # R311y912 — the self-report axis, in both directions like the two above.
+    headings = cli_self_report_headings()
+    if not headings:
+        findings.append(
+            "no section heading was read out of USAGE at all, so this axis "
+            "would be green over an empty set"
+        )
+    for heading in sorted(set(SELF_REPORT) - headings):
+        findings.append(
+            f"this table declares the self-report section `{heading}` and "
+            f"wz-analyze's USAGE no longer has it -- the row is stale"
+        )
+    for heading in sorted(headings - set(SELF_REPORT) - STRUCTURAL_HEADINGS):
+        findings.append(
+            f"wz-analyze's USAGE carries the self-report section `{heading}` and "
+            f"this table does not name it. Add it to SELF_REPORT with the ABI "
+            f"symbol that answers the same question, or with the reason there "
+            f"is none -- a section is a capability a consumer reads, and until "
+            f"this axis existed neither of the two here was ever asked about"
+        )
+    for symbol, _ in SELF_REPORT.values():
+        if symbol and symbol not in symbols:
+            findings.append(
+                f"SELF_REPORT names C symbol `{symbol}` and wz-capi-dissect does "
+                f"not export it -- the row is stale"
+            )
+
     if findings:
         print("analysis-surface-parity: FAIL", file=sys.stderr)
         for f in findings:
@@ -306,7 +399,12 @@ def main() -> int:
     # were two. A count that under-reports debt is worse than no count -- it is
     # the confident zero this workspace keeps paying for -- and the fix cannot
     # be "remember to put it first", which is what had just failed.
-    one_sided = list(ONLY_CLI.values()) + list(ONLY_CAPI.values())
+    # The self-report rows answer to the SAME tag rule, and they must: an axis
+    # added to make debt visible that then under-counted it would be the exact
+    # failure the rule below was written for, one axis over.
+    one_sided = (
+        list(ONLY_CLI.values()) + list(ONLY_CAPI.values()) + list(SELF_REPORT.values())
+    )
     mis_tagged = [
         reason
         for _, reason in one_sided
@@ -324,8 +422,10 @@ def main() -> int:
     open_debt = sum(1 for _, reason in one_sided if reason.startswith("OPEN DEBT"))
     print(
         f"  analysis-surface-parity: {len(BOTH)} capability(ies) on both surfaces, "
-        f"{len(ONLY_CLI)} CLI-only, {len(ONLY_CAPI)} ABI-only, {open_debt} of those "
-        f"an OPEN DEBT; {len(flags)} flag(s) and {len(symbols)} symbol(s) accounted for"
+        f"{len(ONLY_CLI)} CLI-only, {len(ONLY_CAPI)} ABI-only, "
+        f"{len(SELF_REPORT)} self-report section(s), {open_debt} of those "
+        f"an OPEN DEBT; {len(flags)} flag(s), {len(symbols)} symbol(s) and "
+        f"{len(headings)} section(s) accounted for"
     )
     return 0
 
