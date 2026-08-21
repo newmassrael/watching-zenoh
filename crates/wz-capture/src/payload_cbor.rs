@@ -206,14 +206,101 @@ const CBOR_PATH_ESCAPE: char = '\\';
 /// RFC 8949 §3.4.5.1 — the tag whose byte string IS an encoded CBOR data item.
 const TAG_EMBEDDED_CBOR: u64 = 24;
 
-/// R311y916 (item 442) — the segment the document inside a tag 24 hangs from.
+/// R311y925 (item 448) — every reserved leading form a path segment may take,
+/// as SHIPPING code rather than as a list in a test.
 ///
-/// Another letter out of the free space item 434 found: a segment beginning `\`
+/// The letters live in the free space item 434 found: a segment beginning `\`
 /// followed by anything other than `.` or `\` cannot be produced by a text key,
-/// because R311y910's rule emits `\` in exactly those two positions. `\t` is the
-/// tag's content and `\e` is the document that content spells, which are two
-/// different things — the byte string exists on the wire either way.
-const CBOR_EMBEDDED_SEGMENT: &str = "\\e";
+/// because R311y910's rule emits `\` in exactly those two positions.
+///
+/// It is an enum and not a table of constants because of what item 448
+/// measured: the declared list was `#[cfg(test)]` and nothing shipping was
+/// bound to it, so a walker that began emitting a new form touched no list at
+/// all. The corpus gate then said nothing in EITHER direction -- the new letter
+/// was not observed (no payload makes that shape) and not declared (nobody had
+/// to declare it). A round proved it: an eighth form added here passed a green
+/// suite.
+///
+/// Now the set the gate compares against is derived from these variants, so a
+/// new form is declared the moment it can be written, and its absence from
+/// `PATH_CORPUS` is a FAILURE rather than a silence. The residue, stated rather
+/// than hidden: this makes the registered road the easy one, it does not make a
+/// raw `"\\q"` literal impossible. Catching that needs a source lint over
+/// escape literals, which is the shape item 400 warns decays.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Reserved {
+    /// A byte-string key, rendered as hex.
+    Bytes,
+    /// The document encoded INSIDE a tag 24 byte string. Distinct from
+    /// [`Reserved::Tag`]: `\t` is the tag's content and `\e` is the document
+    /// that content spells, and the byte string exists on the wire either way.
+    Embedded,
+    /// A floating-point key.
+    Float,
+    /// An integer key.
+    Int,
+    /// A simple value, named where RFC 8949 names one and numbered otherwise.
+    Simple,
+    /// The content of a tagged item.
+    Tag,
+    /// A key whose interior this build does not walk, anchored by its offset.
+    Opaque,
+}
+
+impl Reserved {
+    /// The letter this form claims. Exhaustive on purpose: a new variant does
+    /// not compile until it has one, which is the half of the enforcement that
+    /// bites in a shipping build.
+    pub(crate) const fn letter(self) -> char {
+        match self {
+            Reserved::Bytes => 'b',
+            Reserved::Embedded => 'e',
+            Reserved::Float => 'f',
+            Reserved::Int => 'i',
+            Reserved::Simple => 's',
+            Reserved::Tag => 't',
+            Reserved::Opaque => 'x',
+        }
+    }
+
+    /// This form's segment, with `body` after the letter.
+    pub(crate) fn segment(self, body: &str) -> String {
+        let mut out = String::with_capacity(2 + body.len());
+        out.push(CBOR_PATH_ESCAPE);
+        out.push(self.letter());
+        out.push_str(body);
+        out
+    }
+
+    /// The variant after this one, so the set can be WALKED rather than
+    /// transcribed. Exhaustive too, so a new variant must be given a place in
+    /// the chain before the tests compile -- the second layer, because a letter
+    /// alone would leave the new form out of the set the gate compares.
+    #[cfg(test)]
+    pub(crate) const fn next(self) -> Option<Self> {
+        match self {
+            Reserved::Bytes => Some(Reserved::Embedded),
+            Reserved::Embedded => Some(Reserved::Float),
+            Reserved::Float => Some(Reserved::Int),
+            Reserved::Int => Some(Reserved::Simple),
+            Reserved::Simple => Some(Reserved::Tag),
+            Reserved::Tag => Some(Reserved::Opaque),
+            Reserved::Opaque => None,
+        }
+    }
+
+    /// Every reserved letter, in chain order.
+    #[cfg(test)]
+    pub(crate) fn letters() -> alloc::vec::Vec<char> {
+        let mut out = alloc::vec::Vec::new();
+        let mut cursor = Some(Reserved::Bytes);
+        while let Some(form) = cursor {
+            out.push(form.letter());
+            cursor = form.next();
+        }
+        out
+    }
+}
 
 /// The rows a walk is building, or `None` when it is only validating.
 struct Emit {
@@ -649,7 +736,7 @@ impl<'a> Walk<'a> {
     /// as a number is a reading, and this crate does not read.
     fn tagged(&mut self, start: usize, tag: u64) -> Result<(), CborErr> {
         self.enter(start)?;
-        let mark = self.push("\\t");
+        let mark = self.push(&Reserved::Tag.segment(""));
         let walked = self.item();
         // Only a DEFINITE major 2 answers `KeyForm::Bytes`, which is exactly the
         // case that can be re-entered: the content is then a contiguous slice of
@@ -691,7 +778,7 @@ impl<'a> Walk<'a> {
     /// sub-decode that fails describes what it found rather than condemning
     /// what carried it.
     fn embedded(&mut self, start: usize, end: usize) {
-        let mark = self.push(CBOR_EMBEDDED_SEGMENT);
+        let mark = self.push(&Reserved::Embedded.segment(""));
         let outcome = match self.enter(start) {
             Err(e) => Err(e),
             Ok(()) => {
@@ -820,13 +907,13 @@ impl<'a> Walk<'a> {
         let (_, form) = walked?;
         Ok(match form {
             KeyForm::Text(s) => escape_segment(s),
-            KeyForm::Int(v) => format!("\\i{v}"),
+            KeyForm::Int(v) => Reserved::Int.segment(&alloc::format!("{v}")),
             KeyForm::Bytes(raw) => {
-                let mut out = String::from("\\b");
+                let mut hex = String::new();
                 for b in raw {
-                    out.push_str(&format!("{b:02x}"));
+                    hex.push_str(&alloc::format!("{b:02x}"));
                 }
-                out
+                Reserved::Bytes.segment(&hex)
             }
             // R311y916 (item 443) — ESCAPED, because `format!("{v}")` puts a `.`
             // in every float that has a fractional part, and an unescaped
@@ -834,10 +921,10 @@ impl<'a> Walk<'a> {
             // prevent: `$.\f1.5` would otherwise be both `{1.5: _}` and
             // `{1.0: {"5": _}}`. The other reserved forms render digits, hex or
             // a fixed word and need nothing.
-            KeyForm::Float(v) => format!("\\f{}", escape_segment(&format!("{v}"))),
-            KeyForm::Simple(word) => format!("\\s{word}"),
-            KeyForm::SimpleOther(n) => format!("\\s{n}"),
-            KeyForm::Opaque => format!("\\x{at}"),
+            KeyForm::Float(v) => Reserved::Float.segment(&escape_segment(&alloc::format!("{v}"))),
+            KeyForm::Simple(word) => Reserved::Simple.segment(word),
+            KeyForm::SimpleOther(n) => Reserved::Simple.segment(&alloc::format!("{n}")),
+            KeyForm::Opaque => Reserved::Opaque.segment(&alloc::format!("{at}")),
         })
     }
 

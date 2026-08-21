@@ -584,7 +584,22 @@ mod tests {
     /// than there because the namespace belongs to the PATH SYNTAX, which every
     /// built-in shares — a fourth format that wanted a reserved segment would
     /// come to this list, and the gate below is what makes it have to.
-    const RESERVED_PATH_LETTERS: &[char] = &['b', 'e', 'f', 'i', 's', 't', 'x'];
+    /// R311y925 (item 448) — WALKED out of the shipping enum, not transcribed.
+    ///
+    /// It used to be the literal list `['b', 'e', 'f', 'i', 's', 't', 'x']`,
+    /// and item 448's measurement is why it is not one any more: nothing
+    /// shipping was bound to it, so an eighth form added to the walker touched
+    /// no list, was never observed by the corpus, and passed a green suite. A
+    /// probe confirmed that before this changed -- 19 tests passed with a new
+    /// reserved letter live in the code.
+    ///
+    /// Derived, the two directions swap roles usefully. A new form is declared
+    /// the moment it can be written, and the assertion below then FAILS until
+    /// `PATH_CORPUS` carries a payload that produces it, which is the direction
+    /// that was silent.
+    fn reserved_path_letters() -> Vec<char> {
+        crate::payload_cbor::Reserved::letters()
+    }
 
     /// R311y916 (item 443) — payloads that MAKE each built-in emit its paths.
     ///
@@ -711,10 +726,10 @@ mod tests {
                             continue;
                         }
                         assert!(
-                            RESERVED_PATH_LETTERS.contains(&letter),
+                            reserved_path_letters().contains(&letter),
                             "`{name}` corpus `{what}` emitted the segment `{segment}` in \
                              `{}`, and `\\{letter}` is in no declared form -- either the \
-                             form is new and belongs in RESERVED_PATH_LETTERS, or a text \
+                             form is new and belongs in `payload_cbor::Reserved`, or a text \
                              key reached the reserved namespace unescaped",
                             field.path
                         );
@@ -725,11 +740,12 @@ mod tests {
         }
         reserved_seen.sort_unstable();
         reserved_seen.dedup();
+        let mut declared = reserved_path_letters();
+        declared.sort_unstable();
         assert_eq!(
-            reserved_seen,
-            RESERVED_PATH_LETTERS.to_vec(),
-            "the corpus and the declared namespace disagree: a declared letter no \
-             payload produces is a form nothing tests"
+            reserved_seen, declared,
+            "the corpus and the walker's own namespace disagree: a form the \
+             walker can write and no payload produces is a form nothing tests"
         );
         escaped_text_seen.sort_unstable();
         escaped_text_seen.dedup();
