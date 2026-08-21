@@ -228,16 +228,36 @@ impl Misbound {
     /// vocabulary from the round it is introduced rather than after a prose copy
     /// of it has drifted: the match is exhaustive, so a third answer added later
     /// cannot reach a consumer without choosing a word.
+    /// R311y926 (item 461) — the word is written HERE rather than looked up by
+    /// index in a second list. The index was a third place to get it wrong: a
+    /// variant added with someone else's number compiled, shipped, and shared
+    /// that variant's word, which a measurement confirmed before this changed.
     pub fn name(self) -> &'static str {
-        Self::NAMES[match self {
-            Self::Rule => 0,
-            Self::Publisher => 1,
-        }]
+        match self {
+            Self::Rule => "rule",
+            Self::Publisher => "publisher",
+        }
     }
 
     /// Every word [`Self::name`] can return, for the consumers that document
     /// this vocabulary in prose a compiler cannot read.
-    pub const NAMES: [&'static str; 2] = ["rule", "publisher"];
+    ///
+    /// R311y926 (item 461) — WALKED rather than written down, and no longer
+    /// `cfg(test)`. It used to be a hand-written array, which made the private
+    /// `next` chain a test-only method: nothing shipping walked the variants,
+    /// and a method with no production caller is dead code this workspace
+    /// refuses. That put the chain's forcing at TEST-compile time, so an author
+    /// who added a variant and only ran `cargo build` was the one case it did
+    /// not reach.
+    ///
+    /// Deriving the list gives the chain a shipping caller, which moves that
+    /// forcing to `cargo build`. What it does not do -- and cannot, in this
+    /// language -- is make two variants sharing a word a compile error; that
+    /// stays a test, and it is one the walk now guarantees will VISIT the new
+    /// variant.
+    pub fn names() -> alloc::vec::Vec<&'static str> {
+        Self::all().into_iter().map(Self::name).collect()
+    }
 
     /// R311y925 (open-debt item 301) — the NEXT variant, so a caller can walk
     /// every one of them without writing the list down.
@@ -250,19 +270,18 @@ impl Misbound {
     /// the list alone and the new variant is simply never visited, and the
     /// duplicate-word check that is the point of the test never sees it.
     ///
-    /// This match is exhaustive too, so a third variant forces an arm HERE, and
-    /// an author who writes `Both => None` without linking it into the chain
-    /// leaves the walk one short of [`Self::NAMES`] — which the test compares.
-    /// Between the two, a variant cannot be added and go unvisited.
+    /// This match is exhaustive too, so a third variant forces an arm HERE.
+    /// R311y926 (item 461) made that arm a SHIPPING requirement rather than a
+    /// test one: [`Self::names`] walks the chain, so a variant with no arm
+    /// fails `cargo build`. Between the two matches, a variant cannot be added
+    /// and go unvisited — and the word it chooses is then checked for being its
+    /// own by the totality test, which is the one claim no compiler can make.
     ///
     /// `None` from the last variant is the end of the walk, not an absence.
     ///
-    /// `cfg(test)` because nothing in a shipping build walks the variants, and
-    /// a method with no production caller is dead code this workspace refuses.
-    /// The forcing therefore happens when the TESTS compile, which is every
-    /// gate that runs one — an author who adds a variant and only ever calls
-    /// `cargo build` is the one case this does not reach.
-    #[cfg(test)]
+    /// R311y926 (item 461) — no longer `cfg(test)`. [`Self::names`] walks the
+    /// chain in a shipping build, so a variant added without an arm here fails
+    /// `cargo build` rather than only `cargo test`.
     fn next(self) -> Option<Self> {
         match self {
             Self::Rule => Some(Self::Publisher),
@@ -274,7 +293,6 @@ impl Misbound {
     ///
     /// `Rule` is the head because it is the first arm of [`Self::name`]; the
     /// walk's ORDER is not a contract, only its completeness.
-    #[cfg(test)]
     fn all() -> alloc::vec::Vec<Self> {
         let mut out = alloc::vec::Vec::new();
         let mut cur = Some(Self::Rule);
@@ -1415,19 +1433,27 @@ mod tests {
         // R311y925 (item 301) — WALKED, not written down. The list this opened
         // with was a second statement of the variant set, and a third variant
         // added without touching it was never visited by anything below.
+        //
+        // R311y926 (item 461) — what this asserts NARROWED, and deliberately.
+        // It used to compare the walk against a hand-written `NAMES`, and that
+        // comparison is gone because `NAMES` is gone: the list is now derived
+        // from this same walk, so comparing them would be the walk agreeing
+        // with itself. What was bought for it is worth more -- the chain is no
+        // longer `cfg(test)`, so a variant missing an arm fails `cargo build`
+        // rather than only a test build, which is exactly what item 461 asked
+        // for.
+        //
+        // The claim left here is the one no compiler can make: two variants
+        // must not SHARE a word. The other half of the old assertion moved to
+        // `the_header_names_every_misbound_verdict`, which now iterates the
+        // walk, so a new variant demands an entry in `wz_dissect.h` too.
         let all = Misbound::all();
-        assert_eq!(
-            all.len(),
-            Misbound::NAMES.len(),
-            "every variant must have a word and every word a variant -- a walk \
-             shorter than NAMES means a variant is not linked into `next`"
+        assert!(
+            !all.is_empty(),
+            "the walk visited no variant at all, so nothing below was measured"
         );
         let mut seen = BTreeSet::new();
         for verdict in all {
-            assert!(
-                Misbound::NAMES.contains(&verdict.name()),
-                "{verdict:?} names a word outside NAMES"
-            );
             assert!(
                 seen.insert(verdict.name()),
                 "{verdict:?} shares its word with another variant"

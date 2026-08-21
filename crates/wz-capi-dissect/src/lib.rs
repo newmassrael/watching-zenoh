@@ -1175,7 +1175,10 @@ mod tests {
     #[test]
     fn the_header_names_every_misbound_verdict() {
         const HEADER: &str = include_str!("../include/wz_dissect.h");
-        for verdict in wz_capture::payload_decode::Misbound::NAMES {
+        // R311y926 (item 461) — driven by the WALK rather than by a
+        // hand-written list, so a variant added upstream demands a header entry
+        // without anyone remembering to widen a constant here.
+        for verdict in wz_capture::payload_decode::Misbound::names() {
             assert!(
                 HEADER.contains(&format!("`{verdict}`")),
                 "wz_dissect.h never names the `{verdict}` verdict, which this \
