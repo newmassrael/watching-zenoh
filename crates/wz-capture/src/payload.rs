@@ -324,11 +324,23 @@ struct Scanner<'a> {
 
 /// R311y909 — the emitting half of [`Scanner`]: the rows so far, the path of
 /// the value being walked, and the member count of the container just closed.
+///
+/// # Why `String` and `Vec` are spelled in full here
+///
+/// The two `use alloc::…` lines at the top of this file are gated on
+/// `network-codecs`, and the comment above them is the reason: the DECISION
+/// half of this module allocates nothing and has to compose in a build with no
+/// network codecs at all. This half does allocate — but it is reached from
+/// [`formats`], which is ungated, so it cannot be gated either. Naming the
+/// types in full keeps that narrow gate exactly as narrow as its comment
+/// claims, instead of widening it and leaving the claim false. Layer C1cf is
+/// what measures the difference, and it caught this in the shape it names:
+/// a cfg-gated import behind an ungated signature.
 struct Emit {
-    fields: Vec<formats::PayloadField>,
+    fields: alloc::vec::Vec<formats::PayloadField>,
     /// The path of the value currently being walked — `$`, `$.sensor.temp`,
     /// `$.readings.0`.
-    path: String,
+    path: alloc::string::String,
     /// How many members or elements the container that just returned held.
     /// Read by [`Scanner::fill`] the moment that container's row is written,
     /// which is the only point at which it is about that container.
@@ -463,10 +475,10 @@ fn scan_json(bytes: &[u8]) -> Result<JsonSummary, ScanErr> {
 /// spans differ and the container rows above them differ, so a reader has the
 /// evidence, but a `--payload-name` declaration keyed on that path cannot tell
 /// the two apart. Registered rather than papered over.
-pub(crate) fn walk_json(bytes: &[u8]) -> Result<Vec<formats::PayloadField>, ScanErr> {
+pub(crate) fn walk_json(bytes: &[u8]) -> Result<alloc::vec::Vec<formats::PayloadField>, ScanErr> {
     let emit = Emit {
-        fields: Vec::new(),
-        path: String::from(JSON_ROOT_PATH),
+        fields: alloc::vec::Vec::new(),
+        path: alloc::string::String::from(JSON_ROOT_PATH),
         members: 0,
     };
     let (_, emit) = scan(bytes, Some(emit))?;
@@ -512,9 +524,9 @@ impl<'a> Scanner<'a> {
         let e = self.emit.as_mut()?;
         let at = e.fields.len();
         e.fields.push(formats::PayloadField {
-            path: String::new(),
+            path: alloc::string::String::new(),
             name: None,
-            value: String::new(),
+            value: alloc::string::String::new(),
             start: 0,
             end: 0,
         });
@@ -531,7 +543,7 @@ impl<'a> Scanner<'a> {
         let value = match kind {
             JsonKind::Object => alloc::format!("object {} member(s)", e.members),
             JsonKind::Array => alloc::format!("array {} element(s)", e.members),
-            JsonKind::Null => String::from("null"),
+            JsonKind::Null => alloc::string::String::from("null"),
             // A string, a number or a bool IS its source text, so the row shows
             // it verbatim -- escapes included, because what the publisher wrote
             // is what a reader comparing against the capture will see.
