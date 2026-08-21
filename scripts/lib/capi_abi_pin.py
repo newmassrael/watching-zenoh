@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 9
+EXPECTED_VERSION = 10
 EXPECTED_SYMBOLS = {
     "wz_dissect_abi_version",
     # R311y913 (unregistered item 435) — what this build can READ, with no
@@ -70,6 +70,13 @@ EXPECTED_SYMBOLS = {
     # which line" with no capture, which is the question a UI asks while it is
     # being typed.
     "wz_dissect_pcap_fields_with_payloads",
+    # R311y917 (unregistered item 366) — the field layer under a CEILING. The
+    # one read plane with no bounded form, and the one that walks every message
+    # in the capture; `max_messages_per_flow` trims the output after the whole
+    # dissection is already built, so it was never the bound it looks like. One
+    # symbol on R311y887's pattern rather than a `_bounded` twin for each of the
+    # two existing field doors, which would have made four.
+    "wz_dissect_pcap_fields_limited",
     "wz_dissect_declarations_diagnose",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.

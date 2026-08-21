@@ -40,8 +40,9 @@ int main(void) {
      * gained a dropped_by_limits key in R311y885 and the WZ_DISSECT_LIMITS_*
      * constants arrived here, and neither moves this number: a document key is
      * read by name and a constant is compiled in, while a symbol is linked. */
-    /* R311y913 -- 9 since wz_dissect_readable_surfaces joined it. */
-    CHECK(wz_dissect_abi_version() == 9, "abi version is %d, expected 9",
+    /* R311y913 -- 9 since wz_dissect_readable_surfaces joined it.
+     * R311y917 -- 10 since wz_dissect_pcap_fields_limited joined it. */
+    CHECK(wz_dissect_abi_version() == 10, "abi version is %d, expected 10",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
@@ -243,6 +244,40 @@ int main(void) {
           "an unknown preset must be refused, not read as unbounded: rc=%d",
           rc);
     CHECK(limited == NULL, "a refused preset handed back a string");
+
+    /* R311y917 -- the FIELD layer under a ceiling, on the same claim: the
+     * symbol is in the cdylib with the signature the header declares, the
+     * preset really is an argument, and an unknown one is refused rather than
+     * read as unbounded. The Rust side owns the byte-for-byte equalities
+     * against the two field doors this one subsumes. */
+    char *bounded_fields = NULL;
+    rc = wz_dissect_pcap_fields_limited(pcap, sizeof pcap, 0, "",
+                                        WZ_DISSECT_LIMITS_LIVE_TAP,
+                                        &bounded_fields);
+    CHECK(rc == WZ_DISSECT_OK, "fields_limited rc=%d", rc);
+    CHECK(bounded_fields != NULL, "OK came back with no string");
+    CHECK(strstr(bounded_fields, "\"stream_flows\"") != NULL,
+          "the limited door did not hand back a field document: %s",
+          bounded_fields);
+    CHECK(strstr(bounded_fields, "\"dropped_by_limits\"") != NULL,
+          "a bounded field listing that cannot say what it dropped is silent: %s",
+          bounded_fields);
+    wz_dissect_string_free(bounded_fields);
+
+    bounded_fields = NULL;
+    rc = wz_dissect_pcap_fields_limited(pcap, sizeof pcap, 0, "",
+                                        WZ_DISSECT_LIMITS_NONE,
+                                        &bounded_fields);
+    CHECK(rc == WZ_DISSECT_OK, "fields_limited NONE rc=%d", rc);
+    CHECK(bounded_fields != NULL, "OK came back with no string");
+    wz_dissect_string_free(bounded_fields);
+
+    bounded_fields = NULL;
+    rc = wz_dissect_pcap_fields_limited(pcap, sizeof pcap, 0, "", 12345,
+                                        &bounded_fields);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
+          "an unknown preset must be refused on the field door too: rc=%d", rc);
+    CHECK(bounded_fields == NULL, "a refused preset handed back a string");
 
     /* Same memory rule, same refusals -- through BOTH census doors. */
     capped = NULL;

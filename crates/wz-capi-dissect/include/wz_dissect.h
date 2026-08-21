@@ -305,6 +305,36 @@ int wz_dissect_pcap_fields_with_payloads(const unsigned char *bytes, size_t len,
                                          size_t max_messages_per_flow,
                                          const char *declarations, char **out);
 
+/* R311y917 (ABI 10) — THE FIELD LAYER UNDER A CEILING, with both of its
+ * other axes as arguments.
+ *
+ * The summary has had a bounded form since ABI 2 and the census since ABI 7.
+ * The field layer had none, and it is the plane that walks EVERY MESSAGE of
+ * the capture -- so it is the one a live tap can least afford unbounded.
+ * max_messages_per_flow is not a ceiling: it trims the OUTPUT after the whole
+ * dissection has been built, so asking for ten messages still costs you the
+ * whole file.
+ *
+ * ONE door and not two more twins, on the shape
+ * wz_dissect_pcap_census_where_limited settled: an EMPTY declarations text
+ * declares nothing, so ("", NONE) is wz_dissect_pcap_fields and
+ * (text, NONE) is wz_dissect_pcap_fields_with_payloads. Both of those stay
+ * exported -- a symbol this ABI has published is one you may already link.
+ *
+ * limits is WZ_DISSECT_LIMITS_NONE or WZ_DISSECT_LIMITS_LIVE_TAP. An unknown
+ * value is WZ_DISSECT_ERR_INVALID_ARG and never a quiet fall back to
+ * unbounded.
+ *
+ * The field document gained `dropped_by_limits` in the same round -- the same
+ * five counters the summary's health object and the census document carry --
+ * so a listing made short by an evicted flow says so instead of reading like
+ * a capture that ended. Present with every counter zero when no ceiling was
+ * asked for, so "no caps" and "caps that did not bite" are distinguishable. */
+int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
+                                   size_t max_messages_per_flow,
+                                   const char *declarations, int limits,
+                                   char **out);
+
 /* R311y856 (ABI 6) — compile a declaration text and say what is wrong with
  * it, WITHOUT a capture.
  *

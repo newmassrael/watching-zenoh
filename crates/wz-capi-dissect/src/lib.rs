@@ -138,11 +138,17 @@ pub const WZ_DISSECT_LIMITS_LIVE_TAP: c_int = 1;
 /// [`wz_dissect_readable_surfaces`]. A new symbol, so the revision moves under
 /// the rule this doc already states.
 ///
+/// R311y917 (open-debt item 366) — 9 → 10, ADDING
+/// [`wz_dissect_pcap_fields_limited`]. The FIELD document also gained a
+/// `dropped_by_limits` group in the same round, and that half moves nothing
+/// here for the reason R311y885's entry above gives: a new key is the widening
+/// the read-by-name contract exists to permit.
+///
 /// # Safety
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    9
+    10
 }
 
 /// R311y913 (unregistered item 435) — WHAT THIS BUILD CAN READ, as a document.
@@ -666,6 +672,92 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields_with_payloads(
     // SAFETY: caller contract above.
     let input = unsafe { core::slice::from_raw_parts(bytes, len) };
     let dissection = match Dissection::from_capture(input) {
+        Ok(d) => d,
+        Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
+    };
+    let cap = (max_messages_per_flow > 0).then_some(max_messages_per_flow);
+    let declared = wz_capture::payload_decode::Declarations::new(&map);
+    write_string(
+        wz_capture::fields_json::fields_json(&dissection, input, cap, Some(&declared)),
+        out,
+    )
+}
+
+/// R311y917 (ABI 10, open-debt item 366) — THE FIELD LAYER UNDER A CEILING,
+/// with both of its other axes as arguments.
+///
+/// # The plane that could not be bounded
+///
+/// The summary has had a bounded form since R311y748 and the census since
+/// R311y885, and the field layer had none — which is the plane that walks
+/// EVERY MESSAGE of the capture, so it is the one a live tap can least afford
+/// unbounded. `max_messages_per_flow` looks like a ceiling and is not one: it
+/// trims the OUTPUT after a full dissection has already been built, so a
+/// caller asking for ten messages still pays for the whole file.
+///
+/// # One door, on R311y887's pattern rather than two more twins
+///
+/// [`wz_dissect_pcap_census_where_limited`] settled the shape: boundedness is
+/// orthogonal to everything else a read door varies, so it is a PARAMETER. The
+/// field layer already had two doors varying on one axis
+/// ([`wz_dissect_pcap_fields`] and [`wz_dissect_pcap_fields_with_payloads`]),
+/// and a `_bounded` twin each would have made four. This is one, and it
+/// subsumes both: an EMPTY `declarations` text declares nothing, so
+/// `("", NONE)` is [`wz_dissect_pcap_fields`] and `(text, NONE)` is
+/// [`wz_dissect_pcap_fields_with_payloads`]. Those stay exported — a symbol
+/// this ABI has published is a symbol a consumer links.
+///
+/// An unknown `limits` value is [`WZ_DISSECT_ERR_INVALID_ARG`] and never a
+/// silent fallback to unbounded, which is the one way a caller could believe
+/// it had asked for a ceiling and not have one.
+///
+/// # Never silent about what the ceiling cost
+///
+/// The field document gained `dropped_by_limits` in the same round, from the
+/// same emitter the summary and census use. Without it this door would have
+/// been the fourth bounded reader and the first silent one — a plane made
+/// short by an evicted flow reading exactly like a capture that ended.
+/// `scripts/lib/bounded_output_parity.py` is what holds that across the doors.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes, `declarations` must be
+/// a NUL-terminated C string, and `out` must be a writable pointer to a
+/// `*mut c_char`. None may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_fields_limited(
+    bytes: *const u8,
+    len: usize,
+    max_messages_per_flow: usize,
+    declarations: *const c_char,
+    limits: c_int,
+    out: *mut *mut c_char,
+) -> c_int {
+    if bytes.is_null() || declarations.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let preset = match limits {
+        WZ_DISSECT_LIMITS_NONE => wz_capture::DissectionLimits::default(),
+        WZ_DISSECT_LIMITS_LIVE_TAP => wz_capture::DissectionLimits::for_live_tap(),
+        // Refused rather than defaulted, exactly as the census door refuses:
+        // the failure mode of the other choice is a consumer that believes its
+        // memory is bounded.
+        _ => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    // SAFETY: caller contract above.
+    let text = match unsafe { std::ffi::CStr::from_ptr(declarations) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let mut map = wz_capture::payload::formats::FormatMap::new();
+    if map.declare_all(text).is_err() {
+        return WZ_DISSECT_ERR_DECLARATION;
+    }
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    // ONE constructor for both presets: `DissectionLimits::default()` is every
+    // field `None`, so the unbounded arm is the bounded call with no ceilings
+    // rather than a second code path that could drift from it.
+    let dissection = match Dissection::from_capture_bounded(input, preset) {
         Ok(d) => d,
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
@@ -2222,6 +2314,139 @@ mod tests {
         Ok(s)
     }
 
+    /// R311y917 (open-debt item 366) — THE FIELD DOCUMENT CARRIES THE GROUP A
+    /// CEILING WOULD SPEAK THROUGH.
+    ///
+    /// # Why this is the first half and not the whole
+    ///
+    /// The field layer is the one read door with no way to ask for a ceiling:
+    /// the summary has had a bounded form since R311y748 and the census since
+    /// R311y885, and `nm -D` over the release cdylib says there is no third.
+    /// But adding the door alone would have made it SILENT — `fields_json` had
+    /// no `dropped_by_limits` group at all, so a field document made short by
+    /// an evicted flow reads exactly like a capture that ended. That is the
+    /// defect `bounded_output_parity.py` was written for, and it is asserted
+    /// here on the UNBOUNDED door on purpose: the group is structural, so it is
+    /// present with every counter at zero when nothing was capped.
+    #[test]
+    fn the_field_document_carries_the_group_a_ceiling_would_speak_through() {
+        let file = capture_one_flow_past_the_tap_cap();
+        let doc = call_fields(&file, 0).expect("the capture reads");
+        assert!(
+            doc.contains("\"dropped_by_limits\":"),
+            "a field document with no such group can never say a ceiling bit: {doc}"
+        );
+    }
+
+    /// Drive the LIMITED field door the way C does.
+    fn call_fields_limited(
+        bytes: &[u8],
+        cap: usize,
+        declarations: &str,
+        limits: c_int,
+    ) -> Result<String, c_int> {
+        let text = std::ffi::CString::new(declarations).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_pcap_fields_limited(
+                bytes.as_ptr(),
+                bytes.len(),
+                cap,
+                text.as_ptr(),
+                limits,
+                &mut out,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must hand back no string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// R311y917 (open-debt item 366) — THE FIELD LAYER CAN BE BOUNDED, AND
+    /// SAYS WHAT THE BOUND COST.
+    ///
+    /// # What the two arms separate
+    ///
+    /// `max_messages_per_flow` was never a ceiling: it trims the OUTPUT after
+    /// the whole dissection is built. So a test that only checked the listing
+    /// got shorter would pass on a door that ignored `limits` entirely. The
+    /// discriminator is `dropped_by_limits`, which counts what the DISSECTION
+    /// threw away — `flows: 1` here, the one flow past the live-tap cap — and
+    /// the unbounded arm beside it, which must carry the same group reporting
+    /// no bite. Two doors answering identically would mean the preset never
+    /// reached the walk.
+    #[test]
+    fn the_field_layer_can_be_bounded_and_says_what_the_bound_cost() {
+        let file = capture_one_flow_past_the_tap_cap();
+
+        let unbounded =
+            call_fields_limited(&file, 0, "", WZ_DISSECT_LIMITS_NONE).expect("the capture reads");
+        assert!(
+            unbounded.contains(
+                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
+                 \"flows\":0,\"scout_askers\":0}"
+            ),
+            "the unbounded field document must carry the group and report no bite: {unbounded}"
+        );
+
+        let bounded = call_fields_limited(&file, 0, "", WZ_DISSECT_LIMITS_LIVE_TAP)
+            .expect("the capture reads");
+        assert!(
+            bounded.contains(
+                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
+                 \"flows\":1,\"scout_askers\":0}"
+            ),
+            "the live-tap flow cap must bite and the field document must say so: {bounded}"
+        );
+        assert_ne!(
+            bounded, unbounded,
+            "two doors that answer identically would mean the preset never reached the walk"
+        );
+    }
+
+    /// R311y917 (open-debt item 366) — AND IT SUBSUMES THE TWO DOORS IT JOINS
+    /// RATHER THAN REPLACING THEM.
+    ///
+    /// The argument for a preset ARGUMENT over a `_bounded` twin per document,
+    /// asserted the way R311y887 asserted it for the census: the combinations
+    /// the old doors answer must come back BYTE-IDENTICAL through the new one,
+    /// or this is a fourth field door rather than one that subsumes.
+    /// An unknown preset is refused, never defaulted — a caller that believes
+    /// it asked for a ceiling must not be handed none.
+    #[test]
+    fn the_limited_field_door_subsumes_both_doors_it_joins() {
+        let file = census_capture();
+        assert_eq!(
+            call_fields_limited(&file, 0, "", WZ_DISSECT_LIMITS_NONE).expect("reads"),
+            call_fields(&file, 0).expect("reads"),
+            "(\"\", NONE) must be the plain field door"
+        );
+        let rules = "demo/**=protobuf";
+        assert_eq!(
+            call_fields_limited(&file, 2, rules, WZ_DISSECT_LIMITS_NONE).expect("reads"),
+            call_fields_with_payloads(&file, 2, rules).expect("reads"),
+            "(text, NONE) must be the field door with payloads, cap included"
+        );
+        assert_eq!(
+            call_fields_limited(&file, 0, "", 9_999),
+            Err(WZ_DISSECT_ERR_INVALID_ARG),
+            "an unknown preset is refused rather than quietly unbounded"
+        );
+        assert_eq!(
+            call_fields_limited(&file, 0, "not a declaration", WZ_DISSECT_LIMITS_NONE),
+            Err(WZ_DISSECT_ERR_DECLARATION),
+            "a bad declaration reaches the same refusal it does on the older door"
+        );
+    }
+
     /// R311y855 — THE FIELD LAYER CROSSES, AND THE WALK THIS HEADER DESCRIBED
     /// BECOMES POSSIBLE.
     ///
@@ -2581,7 +2806,11 @@ mod tests {
         // `wz_dissect_abi_version`.
         //
         // R311y913 — 9 since `wz_dissect_readable_surfaces` joined it.
-        assert_eq!(wz_dissect_abi_version(), 9);
+        //
+        // R311y917 — 10 since `wz_dissect_pcap_fields_limited` joined it. The
+        // field DOCUMENT's new `dropped_by_limits` key moves nothing further,
+        // which is the same half of the rule the R311y887 note above states.
+        assert_eq!(wz_dissect_abi_version(), 10);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT

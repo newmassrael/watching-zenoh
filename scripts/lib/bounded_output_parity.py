@@ -64,6 +64,7 @@ CAPI = ROOT / "crates" / "wz-capi-dissect" / "src" / "lib.rs"
 CLI = ROOT / "crates" / "wz-analyze" / "src" / "lib.rs"
 CAPTURE_REPORT = ROOT / "crates" / "wz-capture" / "src" / "report.rs"
 CAPTURE_CENSUS = ROOT / "crates" / "wz-capture" / "src" / "census_json.rs"
+CAPTURE_FIELDS = ROOT / "crates" / "wz-capture" / "src" / "fields_json.rs"
 
 # The group every bounded read's document must carry, spelled as the JSON KEY
 # appears in Rust source — quotes included.
@@ -105,6 +106,13 @@ DOORS = {
         "argument. Found by its CONSTRUCTOR and not by its name, which is why "
         "the population rule here is not a suffix match.",
     ),
+    "wz_dissect_pcap_fields_limited": (
+        CAPI,
+        "the_field_layer_can_be_bounded_and_says_what_the_bound_cost",
+        "emits the FIELD document, which gained the group in R311y917 — the "
+        "plane that walks every message in the capture was the last one with "
+        "no ceiling at all, and its emitter had nothing to say one with.",
+    ),
     "--bounded": (
         CLI,
         "a_bound_is_never_silent_even_without_the_health_flag",
@@ -120,6 +128,7 @@ DOORS = {
 EMITTERS = {
     CAPTURE_REPORT: ("health_json", "the summary document's health object"),
     CAPTURE_CENSUS: ("census_json_where", "the census document"),
+    CAPTURE_FIELDS: ("fields_json", "the field document"),
 }
 
 

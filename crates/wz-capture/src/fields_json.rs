@@ -109,6 +109,24 @@ pub fn fields_json(
     // capture this reader cannot parse a second time yields no datagram rows
     // for a reason that has nothing to do with the traffic.
     let _ = write!(out, "],\"capture_reread\":{},", reread.is_some());
+    // R311y917 (open-debt item 366) — WHAT A CEILING COST, in the document the
+    // ceiling made short.
+    //
+    // The field layer was the one read plane with no way to be bounded, and
+    // adding the door without this would have made it silent in the way
+    // R311y885 measured for the census: a plane made short by an evicted flow
+    // reads exactly like a quiet network. The group is the SAME rendering the
+    // summary's health object and the census document carry
+    // (`report::dropped_by_limits_json`), a second consumer rather than a
+    // second rendering.
+    //
+    // Emitted STRUCTURALLY, for the reason that rendering's own doc gives:
+    // every counter is zero for a dissection built without caps, and a
+    // consumer that can only see the group when it is non-zero cannot tell
+    // "no caps" from "caps that did not bite".
+    out.push_str("\"dropped_by_limits\":");
+    out.push_str(&crate::report::dropped_by_limits_json(d));
+    out.push(',');
     // R311y875 — the run's misbound rules, AFTER every row producer, for the
     // reason `wz-analyze` places its unbound-declaration note there: this is a
     // fact about what the capture turned out to hold, and both producers above

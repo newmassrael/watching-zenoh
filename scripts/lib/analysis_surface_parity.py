@@ -165,6 +165,16 @@ BOTH = {
     # it is the half that was missing from the ABI's bounded reach, and the
     # `--bounded` rows above already carry the other half.
     "a narrowed census under a ceiling": ("--select", "wz_dissect_pcap_census_where_limited"),
+    # R311y917 (unregistered item 366) — the FIELD LAYER under a ceiling, which
+    # is the plane that walks every message in the capture and was the last one
+    # the ABI could only read unbounded. On the command line it is `--fields`
+    # and `--bounded` in the same argv and always was, by the one-dissection
+    # asymmetry the note above states; on the ABI it needed a door, and that
+    # door takes the preset as an ARGUMENT rather than becoming a third and
+    # fourth field twin. `--fields` is the flag named here for the reason the
+    # census row names `--select`: it is the half that was missing from the
+    # ABI's bounded reach.
+    "the field layer under a ceiling": ("--fields", "wz_dissect_pcap_fields_limited"),
 }
 
 # Reachable ONLY from the command line, each with the reason it is not on the
