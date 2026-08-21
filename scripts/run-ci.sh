@@ -1878,6 +1878,21 @@ PY
     # place every carrier appears exactly once, so that is where the gate goes.
     # Enforcement MEASURED by removing `codec-join` from the feature list.
     python3 scripts/lib/dissect_feature_census.py || return 1
+    # R311y911 (unregistered item 407) — the LABEL VALUE census, the third
+    # sibling. The two above decide the field NAMES a walker may invent and the
+    # MIDs it must reach; nothing decided the VALUES a `FieldValue::Label`
+    # carries. `"Drop"` / `"BlockFirst"` / `"BestMatching"` were literals typed
+    # by hand and confirmed by a test written the same round from the same
+    # reading, which is the same author twice rather than an adjudicator.
+    #
+    # `Priority::name()` already had one — `qos.rs` holds its eight bands
+    # against `vendor/zenoh-pico`'s constants — so the shape was proven and
+    # applied to exactly one label. This generalises it: pico is IN-REPO for
+    # every clone, which the Rust reference checkout is not, so the adjudicator
+    # is one every clone can run. What pico cannot name (`BlockFirst`, its
+    # third congestion state) is declared with the test that pins the
+    # divergence rather than skipped.
+    python3 scripts/lib/dissect_label_census.py || return 1
     # R311y854 — WHICH SURFACE reaches each analysis capability, pinned.
     #
     # The two censuses above ask whether the DECODE covers the wire. This asks
