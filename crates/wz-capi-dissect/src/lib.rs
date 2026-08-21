@@ -2528,6 +2528,81 @@ mod tests {
         );
     }
 
+    /// R311y933 (open-debt item 450) — THE OUTPUT CAP AND THE MEMORY PRESET ARE
+    /// NOT THE SAME KIND OF ARGUMENT, AND THE DOCUMENT SHOWS IT.
+    ///
+    /// # The sentence nothing was checking
+    ///
+    /// `wz_dissect_pcap_fields_limited` takes both, side by side, and only one
+    /// of them is a statement about memory. `max_messages_per_flow` trims each
+    /// flow's OUTPUT after the whole dissection is built, so a caller asking
+    /// for ten messages still pays for the file; `limits` is a preset the walk
+    /// itself reads. The header and the Rust doc both say so and item 450 is
+    /// that nothing measured it -- a reader who believes a cap bounded their
+    /// memory had nothing to correct them.
+    ///
+    /// # Why this shape and not a rename
+    ///
+    /// Item 450's first candidate was to rename the argument, which is a break
+    /// in a published signature. Its third was a gate holding the sentence, and
+    /// a sentence about BEHAVIOUR is held by behaviour: the cap changes the
+    /// document and leaves `dropped_by_limits` alone, the preset moves that
+    /// group. Two arguments, two different marks, asserted in one place.
+    ///
+    /// The discriminating arm comes first. If the cap did not actually shorten
+    /// the document, every claim below would be true of a call that ignored it.
+    #[test]
+    fn the_output_cap_and_the_memory_preset_leave_different_marks() {
+        const ZERO_GROUP: &str = concat!(
+            "\"dropped_by_limits",
+            "\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\"flows\":0,\"scout_askers\":0}"
+        );
+        // TWO fixtures, because the two arguments bite on different shapes and
+        // the first draft of this test used only the tap-cap one. That capture
+        // is many flows carrying ONE message each -- built to cross the flow
+        // ceiling -- so a per-flow output cap trimmed nothing and the capped
+        // and uncapped documents came back byte-identical at 467570. The
+        // assertion was right and the fixture could not exercise it.
+        let many =
+            capture_declaring_many(&[(2, b"first"), (2, b"second"), (2, b"third"), (2, b"fourth")]);
+        let file = capture_one_flow_past_the_tap_cap();
+
+        let uncapped =
+            call_fields_limited(&many, 0, "", WZ_DISSECT_LIMITS_NONE).expect("the capture reads");
+        let capped =
+            call_fields_limited(&many, 1, "", WZ_DISSECT_LIMITS_NONE).expect("the capture reads");
+        assert!(
+            capped.len() < uncapped.len(),
+            "the output cap must have trimmed the document, or nothing below \
+             is about it: capped {} bytes, uncapped {}",
+            capped.len(),
+            uncapped.len()
+        );
+
+        // The cap is not a memory statement, asserted on the capture where a
+        // PRESET would move the group. Measured the hard way: this arm first
+        // used the small `many` capture, and a probe that wired the cap to a
+        // live-tap preset PASSED -- that capture is too small for any ceiling
+        // to bite, so the group was zero either way and the arm discriminated
+        // nothing. It has to run where the group CAN move.
+        let capped_big =
+            call_fields_limited(&file, 1, "", WZ_DISSECT_LIMITS_NONE).expect("the capture reads");
+        assert!(
+            capped_big.contains(ZERO_GROUP),
+            "an output cap must not move dropped_by_limits: {capped_big}"
+        );
+
+        // The preset is. Same door, no cap at all, and the group moves.
+        let bounded = call_fields_limited(&file, 0, "", WZ_DISSECT_LIMITS_LIVE_TAP)
+            .expect("the capture reads");
+        assert!(
+            !bounded.contains(ZERO_GROUP),
+            "the live-tap preset must move dropped_by_limits, or this capture \
+             no longer passes the ceiling and the test above is vacuous: \
+             {bounded}"
+        );
+    }
+
     /// R311y917 (open-debt item 366) — AND IT SUBSUMES THE TWO DOORS IT JOINS
     /// RATHER THAN REPLACING THEM.
     ///
