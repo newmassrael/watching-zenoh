@@ -1665,6 +1665,29 @@ pub mod formats {
         WildcardUnsupported(String),
         /// The pattern is not a key expression.
         NotAKeyexpr(String),
+        /// R311y923 (item 236) — the pattern IS a key expression, and cannot be
+        /// written in the declaration dialect without changing what the line
+        /// means.
+        ///
+        /// The two spellings are told apart by a `:` in the scope: `a=f` is a
+        /// format rule and `a:p=n` names a field. That is a bet that no pattern
+        /// carries a colon, and the bet was never stated, never asserted, and
+        /// is FALSE -- a colon is an ordinary character in a key expression, and
+        /// this crate's pattern validation refuses an empty pattern and a
+        /// leading or trailing `/` and nothing else. So `demo/temp:c=protobuf`
+        /// was written as a rule and read back as a field name, silently.
+        ///
+        /// Refused by name rather than guessed, which is the rule
+        /// [`crate::filter`] settled for a malformed selector and the rule
+        /// [`Self::WildcardUnsupported`] states one variant up: a reader who is
+        /// told their pattern cannot be declared can rename the topic or
+        /// declare its parent, while a reader whose rule quietly became a field
+        /// name has no way to find out.
+        ///
+        /// What this does NOT do is make such a topic declarable. That needs a
+        /// delimiter no key expression may carry, which changes the dialect
+        /// every existing declaration is written in.
+        PatternNotDeclarable(String),
         /// R311y720 (PF4) — a field-name declaration with an empty path or an
         /// empty name.
         ///
@@ -1702,6 +1725,12 @@ pub mod formats {
                      pattern `{p}` cannot be answered (feature `filter-wildcards`)"
                 ),
                 Self::NotAKeyexpr(p) => write!(f, "`{p}` is not a key expression"),
+                Self::PatternNotDeclarable(p) => write!(
+                    f,
+                    "`{p}` is a key expression but carries the `:` that tells a \
+                     format rule from a field name, so a declaration written \
+                     with it would read back as the other one"
+                ),
                 Self::NotADeclaration(line) => write!(
                     f,
                     "`{line}` is not a declaration -- expected \
@@ -1845,6 +1874,9 @@ pub mod formats {
             if pattern.contains('*') && !cfg!(feature = "filter-wildcards") {
                 return Err(FormatMapError::WildcardUnsupported(pattern.to_owned()));
             }
+            if pattern.contains(':') {
+                return Err(FormatMapError::PatternNotDeclarable(pattern.to_owned()));
+            }
             self.rules.push((pattern.to_owned(), format));
             Ok(())
         }
@@ -1911,6 +1943,9 @@ pub mod formats {
             }
             if pattern.contains('*') && !cfg!(feature = "filter-wildcards") {
                 return Err(FormatMapError::WildcardUnsupported(pattern.to_owned()));
+            }
+            if pattern.contains(':') {
+                return Err(FormatMapError::PatternNotDeclarable(pattern.to_owned()));
             }
             if path.is_empty() || name.is_empty() {
                 return Err(FormatMapError::EmptyFieldName(pattern.to_owned()));
@@ -2248,6 +2283,91 @@ mod format_map_tests {
             .find(|d| d.kind == DeclarationKind::FormatRule)
             .expect("a rule");
         assert_eq!(rule.text, "demo/temperature=protobuf");
+    }
+
+    /// The round trip above holds for a pattern that carries the character the
+    /// two spellings are told apart BY.
+    ///
+    /// `parse_declaration` decides which spelling it has by looking for a `:`
+    /// in the scope, which is a bet that no pattern contains one. Nothing
+    /// stated that bet and nothing tested it: the corpus above is
+    /// `demo/temperature`, which cannot see it, and this build's pattern
+    /// validation refuses an empty pattern and a leading or trailing `/` and
+    /// nothing else -- so a colon-bearing pattern INSTALLS.
+    ///
+    /// Nothing installs that would read back as the other spelling.
+    ///
+    /// `parse_declaration` decides which spelling it has by looking for a `:`
+    /// in the scope, which is a bet that no pattern contains one. Nothing
+    /// stated that bet and nothing tested it: the corpus above is
+    /// `demo/temperature`, which cannot see it, and pattern validation here
+    /// refuses an empty pattern and a leading or trailing `/` and nothing else
+    /// -- so before R311y923 a colon-bearing pattern INSTALLED, and
+    /// `demo/temp:c=protobuf` was written as a rule and read back as a field
+    /// name with nothing reporting it.
+    ///
+    /// Both surfaces are asserted, because a refusal that only one door makes
+    /// is a door the other walks around: the typed API and the line reader
+    /// each refuse, and the field-name spelling refuses on the same ground as
+    /// the rule spelling.
+    #[test]
+    fn a_pattern_that_would_read_back_as_the_other_spelling_is_refused_by_name() {
+        let proto = Marker("protobuf");
+        let mut map = FormatMap::new();
+
+        assert_eq!(
+            map.insert("demo/temp:c", &proto),
+            Err(FormatMapError::PatternNotDeclarable(
+                alloc::string::String::from("demo/temp:c")
+            )),
+            "a rule whose pattern carries the discriminator is refused, and by name"
+        );
+        assert_eq!(
+            map.name_field("demo/temp:c", "1", "celsius"),
+            Err(FormatMapError::PatternNotDeclarable(
+                alloc::string::String::from("demo/temp:c")
+            )),
+            "and so is a field name under the same pattern"
+        );
+        assert_eq!(
+            map.declarations().len(),
+            0,
+            "and nothing was installed on the way to those refusals"
+        );
+
+        // The line reader is NOT asked to refuse the same text, and that is
+        // the point rather than an omission: `demo/temp:c=protobuf` is a
+        // well-formed FIELD NAME in this dialect -- pattern `demo/temp`, path
+        // `c`, name `protobuf` -- and refusing it would take the field-name
+        // spelling away entirely. The ambiguity is real and the dialect
+        // resolves it toward the name. What must not happen is the other
+        // direction: something INSTALLED that cannot be written back.
+        assert_eq!(
+            map.declare("demo/temp:c=protobuf"),
+            Ok(DeclarationKind::FieldName),
+            "the dialect reads a colon in the scope as the name spelling"
+        );
+        let named = map.declarations();
+        assert_eq!(named.len(), 1, "one name: {named:?}");
+        assert_eq!(named[0].text, "demo/temp:c=protobuf");
+        let back = parse_declaration(&named[0].text)
+            .unwrap_or_else(|e| panic!("`{}` does not read back: {e:?}", named[0].text));
+        assert_eq!(
+            back.kind(),
+            DeclarationKind::FieldName,
+            "and it reads back as the kind it was installed as"
+        );
+
+        let mut map = FormatMap::new();
+
+        // The colon is the only thing being refused: the same topic without it
+        // installs and reads back as what it was.
+        assert!(map.insert("demo/temp_c", &proto).is_ok());
+        let declared = map.declarations();
+        assert_eq!(declared.len(), 1, "one rule: {declared:?}");
+        let back = parse_declaration(&declared[0].text)
+            .unwrap_or_else(|e| panic!("`{}` does not read back: {e:?}", declared[0].text));
+        assert_eq!(back.kind(), DeclarationKind::FormatRule);
     }
 
     /// R311y699 ([REDACTED-REQ]) — the FIRST matching rule wins, in a build of any
