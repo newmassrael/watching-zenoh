@@ -325,7 +325,10 @@ OPTIONS:
                       the only place a name can come from. A JSON walk is the
                       other case: the document names its own members, and those
                       names ARE the path (`$.sensor.temp`), so a declaration is
-                      a rename rather than the only source. Needs --fields.
+                      a rename rather than the only source. A `.` inside a JSON
+                      key is escaped in the path (`a.b` becomes `a\\.b`) and a
+                      backslash doubles, so a dotted key and a nested member are
+                      different paths. Needs --fields.
     --serial <linktype>
                       treat packets on this pcap link type as raw zenoh SERIAL
                       bytes: COBS envelope, CRC32, handshake flags.

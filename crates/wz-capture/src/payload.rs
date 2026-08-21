@@ -308,6 +308,23 @@ pub fn inspect<'a>(encoding: Encoding<'_>, bytes: &'a [u8]) -> Verdict<'a> {
 
 struct Scanner<'a> {
     b: &'a [u8],
+    /// R311y910 (open-debt item 432) — the SAME bytes as [`Self::b`], as text.
+    ///
+    /// [`scan`] validates UTF-8 before the walk starts, because RFC 8259 §8.1
+    /// requires a JSON text to be encoded in it, so this field exists exactly
+    /// when the walk does. Two consequences, and the second is why it is a
+    /// field rather than a local:
+    ///
+    /// * the check is in ONE place, at the top, instead of at each of the
+    ///   several points that used to ask `from_utf8` about a range and have to
+    ///   decide what a failure meant;
+    /// * every range this walk names is bounded by STRUCTURAL bytes — a quote,
+    ///   a brace, a bracket, a digit, a literal's first letter — all of which
+    ///   are ASCII, so slicing this `str` by those offsets can never split a
+    ///   character. That is what lets the emitting half hand out `&str`
+    ///   directly and carry the guarantee in the type instead of in a branch
+    ///   whose failure arm nothing could reach.
+    t: &'a str,
     i: usize,
     depth: usize,
     max_depth: usize,
@@ -361,13 +378,21 @@ pub(crate) const JSON_ROOT_PATH: &str = "$";
 /// second one would be a second thing for a reader to hold.
 const JSON_PATH_SEP: char = '.';
 
-/// What a member whose key is not UTF-8 is called.
+/// R311y910 (open-debt item 431) — what a `.` inside a member KEY is written
+/// with, so nesting and a dotted key are told apart.
 ///
-/// A key this reader cannot print is not a name it may invent one for: putting
-/// a plausible name on a real row is the failure mode this whole plane exists
-/// to avoid. RFC 8259 requires a JSON text to be UTF-8, so a key that reaches
-/// this is already outside the format — see the caveat on [`walk_json`].
-const JSON_UNNAMEABLE_KEY: &str = "<not-utf8>";
+/// It escapes itself as well, or `{"a\\.b": 1}` and `{"a.b": 1}` would collide
+/// one level down from the collision this closes — the ordinary way an escape
+/// scheme is got wrong.
+const JSON_PATH_ESCAPE: char = '\\';
+
+/// R311y910 (open-debt item 432) — what a body that is not UTF-8 is told.
+///
+/// RFC 8259 §8.1: "JSON text exchanged between systems that are not part of a
+/// closed ecosystem MUST be encoded using UTF-8." A capture is the definition
+/// of not-a-closed-ecosystem, so this is a requirement of the format and not a
+/// strictness this reader chose.
+const JSON_NOT_UTF8: &str = "not UTF-8, which RFC 8259 requires of a JSON text";
 
 /// Guard against a document whose nesting would recurse this scanner off the
 /// stack. 128 is deeper than any zenoh payload observed and shallow enough to
@@ -414,9 +439,33 @@ pub(crate) fn json_wellformed(bytes: &[u8]) -> Result<(), ScanErr> {
 }
 
 /// The one walk, with or without an emitter.
+///
+/// # The encoding is checked BEFORE the grammar (R311y910, item 432)
+///
+/// RFC 8259 §8.1 makes UTF-8 part of what a JSON text IS, and this scanner used
+/// to ignore that: [`Scanner::string`] admits any byte from 0x20 up that is not
+/// a quote or a backslash, and outside a string every legal byte is ASCII
+/// already. So a body carrying raw Latin-1 inside a string parsed cleanly and
+/// [`inspect`] answered [`Verdict::Json`] — "it parsed" — about bytes that are
+/// not a JSON text at all.
+///
+/// That verdict is LOAD-BEARING rather than cosmetic, which is why the omission
+/// mattered: `payload_decode::judge_claim` uses it to decide whether a
+/// publisher's `application/json` label survives being weighed against its own
+/// bytes, and a label that survives VETOES the operator's rule and hides the
+/// data behind it. So the reader could be talked out of decoding a topic by a
+/// body it should have refuted.
+///
+/// The check is here and not in `string` because the requirement is about the
+/// TEXT, not about one token, and because one pass at the top is what lets the
+/// emitting half hold a `&str` (see [`Scanner::t`]). The offset is
+/// `Utf8Error::valid_up_to`, so the answer is still "where", which is what the
+/// Text arm of `inspect` has always given for the same failure.
 fn scan(bytes: &[u8], emit: Option<Emit>) -> Result<(JsonSummary, Option<Emit>), ScanErr> {
+    let text = core::str::from_utf8(bytes).map_err(|e| (e.valid_up_to(), JSON_NOT_UTF8))?;
     let mut s = Scanner {
         b: bytes,
+        t: text,
         i: 0,
         depth: 0,
         max_depth: 0,
@@ -468,13 +517,14 @@ fn scan_json(bytes: &[u8]) -> Result<JsonSummary, ScanErr> {
 /// would make one field mean two provenances. A JSON name is on the wire, so it
 /// belongs where the wire put it — in the path.
 ///
-/// # The caveat, stated rather than hidden
+/// # A `.` inside a key is ESCAPED (R311y910, item 431)
 ///
-/// A member key containing a `.` produces a path that reads as nesting:
-/// `{"a.b": 1}` yields `$.a.b`, which is also what `{"a":{"b":1}}` yields. The
-/// spans differ and the container rows above them differ, so a reader has the
-/// evidence, but a `--payload-name` declaration keyed on that path cannot tell
-/// the two apart. Registered rather than papered over.
+/// `{"a.b": 1}` yields `$.a\.b` and `{"a":{"b":1}}` yields `$.a.b`, so a path
+/// names exactly one value and a `--payload-name` declaration can be exact. The
+/// backslash escapes itself, so a key that really contains one is not the next
+/// collision. R311y909 shipped this as a caveat and registered it; the reason it
+/// had to close rather than stay a caveat is that the rows were distinguishable
+/// only by their SPANS, and a declaration cannot read a span.
 pub(crate) fn walk_json(bytes: &[u8]) -> Result<alloc::vec::Vec<formats::PayloadField>, ScanErr> {
     let emit = Emit {
         fields: alloc::vec::Vec::new(),
@@ -534,11 +584,18 @@ impl<'a> Scanner<'a> {
     }
 
     /// Write the reserved row, now that the value's extent and kind are known.
+    ///
+    /// R311y910 — the source text is taken from [`Self::t`] and not decoded
+    /// here. Before item 432 closed, this read `from_utf8` over a byte range
+    /// and had to answer for a failure it could not diagnose; the encoding is
+    /// now settled once, in [`scan`], so there is no second decision and no arm
+    /// whose failure case is unreachable-but-written.
     fn fill(&mut self, slot: Option<usize>, start: usize, kind: JsonKind) {
         let Some(slot) = slot else { return };
         let end = self.i;
-        let b: &'a [u8] = self.b;
-        let raw = &b[start..end];
+        // Both offsets sit on structural ASCII bytes, so this cannot split a
+        // character -- the guarantee `Self::t` documents.
+        let raw: &'a str = &self.t[start..end];
         let Some(e) = self.emit.as_mut() else { return };
         let value = match kind {
             JsonKind::Object => alloc::format!("object {} member(s)", e.members),
@@ -547,15 +604,7 @@ impl<'a> Scanner<'a> {
             // A string, a number or a bool IS its source text, so the row shows
             // it verbatim -- escapes included, because what the publisher wrote
             // is what a reader comparing against the capture will see.
-            _ => match core::str::from_utf8(raw) {
-                Ok(text) => alloc::format!("{} {text}", json_kind_word(kind)),
-                // RFC 8259 requires UTF-8 and this scanner does not enforce it
-                // inside a string (see `walk_json`), so the row says what it
-                // has rather than lossily inventing characters.
-                Err(_) => {
-                    alloc::format!("{} {} byte(s), not UTF-8", json_kind_word(kind), raw.len())
-                }
-            },
+            _ => alloc::format!("{} {raw}", json_kind_word(kind)),
         };
         let path = e.path.clone();
         e.fields[slot] = formats::PayloadField {
@@ -577,16 +626,47 @@ impl<'a> Scanner<'a> {
     /// Extend the path by one object key, whose string began at `key_at` and
     /// which the cursor has just walked past. `None` when not emitting.
     fn push_key(&mut self, key_at: usize) -> Option<usize> {
-        let b: &'a [u8] = self.b;
-        // `string()` has consumed both quotes, so the key's own bytes are the
-        // range between them.
-        let raw = &b[key_at + 1..self.i - 1];
+        // `string()` has consumed both quotes, so the key's own text is the
+        // range between them -- and both ends are a `"`, which is ASCII, so
+        // slicing `t` here is on character boundaries by construction.
+        //
+        // R311y910 — the key arrives as `&str` rather than as bytes this method
+        // has to decode. It used to fall back to a placeholder name for a key
+        // that was not UTF-8, which was the honest answer while such a key
+        // could get here; item 432 made it unreachable by refusing the document
+        // in `scan`, and a fallback nothing can reach is worse than no fallback
+        // -- it reads as a case that happens.
+        let key: &'a str = &self.t[key_at + 1..self.i - 1];
         let e = self.emit.as_mut()?;
         let mark = e.path.len();
         e.path.push(JSON_PATH_SEP);
-        match core::str::from_utf8(raw) {
-            Ok(text) => e.path.push_str(text),
-            Err(_) => e.path.push_str(JSON_UNNAMEABLE_KEY),
+        // R311y910 (open-debt item 431) — a `.` INSIDE a key is escaped, so a
+        // path names exactly one value.
+        //
+        // R311y909 shipped the ambiguity and registered it: `{"a.b":1}` and
+        // `{"a":{"b":1}}` both produced `$.a.b`, so a `--payload-name`
+        // declaration keyed on that path could rename a field the operator
+        // never meant. The rows were still distinguishable by their spans, which
+        // is why it was a caveat rather than a wrong answer -- but a DECLARATION
+        // cannot read a span.
+        //
+        // The segment is the key's SOURCE text, which is the rule `Self::fill`
+        // already follows for a string VALUE: what the publisher wrote is what
+        // a reader comparing this against the capture bytes will see. So a JSON
+        // escape inside a key arrives here as its two source characters and the
+        // backslash rule below doubles it. Unpretty, and reversible.
+        //
+        // Escaping rather than a second syntax (`$.["a.b"]`) is the choice, and
+        // the reason is that `formats::FormatMap::field_name` matches a path by
+        // STRING EQUALITY. So an operator who writes the escape gets an exact
+        // match with no parser to teach, and this crate keeps one path syntax
+        // shared with the protobuf walk's `2.1` -- which was the whole point of
+        // the separator being `.` in the first place.
+        for c in key.chars() {
+            if c == JSON_PATH_SEP || c == JSON_PATH_ESCAPE {
+                e.path.push(JSON_PATH_ESCAPE);
+            }
+            e.path.push(c);
         }
         Some(mark)
     }
@@ -2954,6 +3034,76 @@ mod tests {
             let (at, _) = e.unwrap_err();
             assert!(at <= bad.len(), "{why}: offset out of range");
         }
+    }
+
+    /// R311y910 (open-debt item 432) — A DECLARED JSON PAYLOAD THAT IS NOT
+    /// UTF-8 IS `NotAsDeclared`, NOT `Json`.
+    ///
+    /// # Why this is a defect and not a strictness
+    ///
+    /// RFC 8259 §8.1 makes UTF-8 part of what a JSON text IS, and this module's
+    /// TEXT arm has always enforced it — `Verdict::Text` is a `from_utf8` and
+    /// `Mismatch::NotUtf8` is the answer when it fails. The JSON arm did not,
+    /// because the only place a non-ASCII byte can survive the grammar is
+    /// inside a string and `Scanner::string` admitted anything from 0x20 up.
+    /// So one module answered the same question two ways depending on which
+    /// name the publisher used.
+    ///
+    /// # What the wrong answer was load-bearing FOR
+    ///
+    /// `Verdict::Json` means "it parsed", and `payload_decode::judge_claim`
+    /// reads exactly that to decide whether a publisher's label survives being
+    /// weighed against its bytes. A label that survives VETOES the operator's
+    /// `--payload-format` rule and the data stays hidden. So this was not a
+    /// cosmetic verdict: a body that is not JSON could protect a false
+    /// `application/json` claim and cost the reader the topic.
+    ///
+    /// The control below is what stops the fix over-reaching: a MULTI-BYTE key
+    /// that is valid UTF-8 must still be `Json`, which an ASCII-only check
+    /// would have broken and which no existing fixture covered.
+    #[test]
+    fn a_declared_json_body_that_is_not_utf8_is_a_finding_and_not_a_parse() {
+        let bad = [b'{', b'"', 0xFF, b'"', b':', b'1', b'}'];
+        let declared = Encoding::Known {
+            id: 5,
+            name: "application/json",
+            schema: None,
+        };
+        match inspect(declared, &bad) {
+            Verdict::NotAsDeclared {
+                declared: name,
+                reason: Mismatch::NotJson { at, reason },
+            } => {
+                assert_eq!(name, "application/json");
+                assert_eq!(at, 2, "byte 2 is the 0xFF");
+                assert!(reason.contains("UTF-8"), "{reason}");
+            }
+            other => panic!("a body that is not UTF-8 is not a JSON text: {other:?}"),
+        }
+        // THE CONTROL, and it is the half a blanket ASCII check would break:
+        // a multi-byte key is valid UTF-8 and therefore valid JSON.
+        let good = "{\"온도\":21}".as_bytes();
+        assert!(
+            matches!(inspect(declared, good), Verdict::Json(_)),
+            "a multi-byte key is a JSON text"
+        );
+        // And the two arms of this module now agree: the same bytes declared as
+        // TEXT have always been `NotAsDeclared`, and JSON was the outlier.
+        let as_text = Encoding::Known {
+            id: 2,
+            name: "zenoh/string",
+            schema: None,
+        };
+        assert!(
+            matches!(
+                inspect(as_text, &bad),
+                Verdict::NotAsDeclared {
+                    reason: Mismatch::NotUtf8 { .. },
+                    ..
+                }
+            ),
+            "the text arm was already right, which is what made JSON the outlier"
+        );
     }
 
     /// Nesting deeper than the scanner accepts is REPORTED, not accepted and

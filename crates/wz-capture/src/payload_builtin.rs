@@ -734,22 +734,103 @@ mod tests {
         out
     }
 
-    /// R311y909 — a member key this reader cannot print is SAID, not invented.
+    /// R311y910 (open-debt item 432) — A BODY THAT IS NOT UTF-8 IS NOT A JSON
+    /// TEXT, AND IS REFUSED WITH THE OFFSET RATHER THAN WALKED.
     ///
-    /// RFC 8259 requires a JSON text to be UTF-8 and this crate's scanner does
-    /// not enforce that inside a string, so such a key does reach here. The
-    /// path must not carry a plausible-looking name for it: putting a wrong
-    /// name on a real row is the failure this whole plane exists to avoid.
+    /// # What this replaces, and why it was worse than a missing check
+    ///
+    /// R311y909 shipped this test asserting the opposite: the walk ACCEPTED
+    /// `{"\xFF":1}` and called the member `$.<not-utf8>`. That was the honest
+    /// rendering of what the scanner then did, and the scanner was wrong. RFC
+    /// 8259 §8.1 makes UTF-8 part of what a JSON text is, so `inspect` was
+    /// answering `Verdict::Json` -- "it parsed" -- about bytes that are not
+    /// JSON, and `payload_decode::judge_claim` uses exactly that verdict to
+    /// decide whether a publisher's `application/json` label survives being
+    /// weighed against its own bytes. A surviving label VETOES the operator's
+    /// rule, so the reader could be argued out of decoding a topic by a body
+    /// this reader should have refuted.
+    ///
+    /// The offset is the first invalid byte, which is where the Text arm of
+    /// `inspect` has always pointed for the same failure -- so the two shapes
+    /// this module recognises now answer the same way.
     #[test]
-    fn a_key_that_is_not_utf8_is_named_as_unprintable_rather_than_guessed() {
+    fn a_body_that_is_not_utf8_is_refused_at_the_byte_that_is_not() {
         let body = [b'{', b'"', 0xFF, b'"', b':', b'1', b'}'];
-        let fields = Json.decode(&body).expect("the scanner accepts the bytes");
-        let member = fields
-            .iter()
-            .find(|f| f.path != "$")
-            .expect("the member has a row");
-        assert_eq!(member.path, "$.<not-utf8>");
-        assert_eq!(member.value, "number 1", "and its VALUE is still read");
+        assert_eq!(
+            Json.decode(&body),
+            Err(PayloadFormatError::Malformed {
+                at: 2,
+                why: String::from("not UTF-8, which RFC 8259 requires of a JSON text"),
+            }),
+            "byte 2 is the 0xFF, and a sender put it there"
+        );
+        // The SAME document with the byte replaced by a real character walks,
+        // so the refusal is about the encoding and not about the shape. `0xFF`
+        // is `U+00FF`, which in UTF-8 is two bytes -- so this is the same
+        // CHARACTER the document above tried to carry as one raw byte.
+        let ok = "{\"\u{00FF}\":1}".as_bytes();
+        let fields = Json.decode(ok).expect("the same character, encoded");
+        assert!(
+            fields.iter().any(|f| f.value == "number 1"),
+            "the control: {fields:?}"
+        );
+        // And a NON-ASCII key that IS valid UTF-8 keeps its own name, which is
+        // the case a blanket ASCII check would have broken.
+        let utf8 = "{\"온도\":1}".as_bytes();
+        let fields = Json.decode(utf8).expect("valid UTF-8 is JSON");
+        assert!(
+            fields.iter().any(|f| f.path == "$.온도"),
+            "a multi-byte key is a name, not a failure: {fields:?}"
+        );
+    }
+
+    /// R311y910 (open-debt item 431) — A DOTTED KEY AND A NESTED MEMBER GET
+    /// DIFFERENT PATHS.
+    ///
+    /// # The discriminator, and why the obvious test is not it
+    ///
+    /// Asserting `$.a\.b` for `{"a.b":1}` alone would pass over an emitter that
+    /// escaped EVERYTHING, or one that escaped nothing and happened to be read
+    /// by a lenient assertion. The pair is the test: the two documents must
+    /// produce DIFFERENT paths, and the nested one must be unchanged from what
+    /// R311y909 already emitted — an escape that also fired on the separator
+    /// between segments would have broken every existing path.
+    ///
+    /// The third document is the escape escaping itself, which is the collision
+    /// one level down that an escape scheme usually misses.
+    #[test]
+    fn a_dotted_key_and_a_nested_member_do_not_collide_on_one_path() {
+        let dotted = Json.decode(br#"{"a.b":1}"#).expect("a JSON document");
+        let nested = Json.decode(br#"{"a":{"b":1}}"#).expect("a JSON document");
+
+        let leaf = |fields: &[PayloadField]| -> String {
+            fields
+                .iter()
+                .find(|f| f.value == "number 1")
+                .expect("the leaf is walked")
+                .path
+                .clone()
+        };
+        let (d, n) = (leaf(&dotted), leaf(&nested));
+        assert_ne!(d, n, "the two documents must not share a path");
+        assert_eq!(d, r"$.a\.b", "a `.` in a key is escaped");
+        assert_eq!(
+            n, "$.a.b",
+            "and nesting is UNCHANGED, which is the half an over-eager escape would break"
+        );
+
+        // The escape escapes itself, which is the collision one level down.
+        // A path segment is the key's SOURCE text (the rule string VALUES
+        // already follow), so `{"a\\.b":1}` has the two-character run `\\` in
+        // its key and each of those doubles, then the `.` is escaped: five
+        // backslashes and a dot. Unpretty and REVERSIBLE, which is the property
+        // that matters -- an operator can write this path and get one field.
+        let backslash = Json.decode(br#"{"a\\.b":1}"#).expect("a JSON document");
+        assert_eq!(
+            leaf(&backslash),
+            r"$.a\\\\\.b",
+            "the key's own backslashes double and its dot is still escaped"
+        );
     }
 
     /// R311y701 (PF3) — A NESTED MESSAGE IS WALKED, and its fields carry
