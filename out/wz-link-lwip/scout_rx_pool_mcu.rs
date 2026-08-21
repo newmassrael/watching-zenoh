@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: e812b8b9426089658c190b079d72f4505398532fde65fe2c41c3ec6148939d1b
-// template-hash: d65905bc3c6e24a33dd9b7fd50b629650d9728247901fb700182448b8698a851
+// template-hash: 63129ea5a60cce4407210a3c2e3ff224327767ebf6618c3f4ed41b0a49b7454d
 // generated-at: 0
 // SCE-MAP: scout_rx_pool_mcu.scxml:44 :: _forge_body
 
