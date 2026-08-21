@@ -1041,6 +1041,7 @@ fn zbuf_body_walker(
 /// |---|---|---|
 /// | `qos` priority / express | [`crate::sample::QosLevel`] | `network/mod.rs` `QoSType` |
 /// | `qos` congestion | ⚠ PARTIAL — see below | the same |
+/// | `qos` on Frame / Fragment / TransportOam | priority ONLY | `transport/mod.rs:270` `QoSType<ID>` |
 /// | `target` | ⚠ PARTIAL — [`crate::query_mode::QueryTarget`] | `zenoh-codec` `network/request.rs:59-67` |
 /// | `queryable_info` | [`crate::queryable_info`] | `zenoh-codec` `network/declare.rs:562-578` |
 ///
@@ -1105,11 +1106,24 @@ fn z64_body_walker(
         // `Open`, where it is a UNIT presence marker, and `Join`, where it is
         // the ZBuf per-priority table `walk_join_qos_body` reads. Same name,
         // three encodings, which is why the dispatch is keyed on both.
+        // R311y911 (open-debt item 412) — the TRANSPORT carriers read a
+        // NARROWER qos than the network ones, and it is not a matter of what a
+        // receiver happens to consult: upstream gives them a DIFFERENT TYPE.
+        // `transport::ext::QoSType<ID>` (`transport/mod.rs:270-286`) has one
+        // constructor argument, one accessor `priority()`, and
+        // `P_MASK = 0b0000_0111`. There is no `congestion_control()` and no
+        // `is_express()` on it at all — those belong to
+        // `network::ext::QoSType`, which has all three plus the D/E/F flags.
+        //
+        // So a `Frame/qos` reported as `[priority, congestion, express]` was
+        // naming two fields upstream does not define for that carrier, from
+        // bits its sender never sets (`pipeline.rs:350` is
+        // `QoSType::new(priority)`, one argument) and its receiver never reads
+        // (`unicast/universal/rx.rs:85`, `:135` and `multicast/rx.rs:151`,
+        // `:192` — three receivers, `priority()` in every one).
+        (C::Frame | C::Fragment | C::TransportOam, "qos") => ("qos", read_transport_qos_z64),
         (
-            C::Frame
-            | C::Fragment
-            | C::TransportOam
-            | C::Push
+            C::Push
             | C::Request
             | C::Response
             | C::ResponseFinal
@@ -1164,6 +1178,53 @@ fn read_qos_z64(value: u64, span: Span) -> Option<Vec<Field>> {
         label("congestion", span, congestion),
         flag("express", span, value & E_FLAG != 0),
     ];
+    if value & !READ_MASK != 0 {
+        out.push(bits("undefined_bits", span, value & !READ_MASK));
+    }
+    Some(out)
+}
+
+/// R311y911 (open-debt item 412) — the TRANSPORT `qos` byte: priority in the
+/// low three bits, and NOTHING ELSE DEFINED.
+///
+/// # Why this is a second walker and not a flag on the first
+///
+/// `Frame`, `Fragment` and `TransportOam` carry
+/// `transport::ext::QoSType<ID>`, which is a different type from the network
+/// messages' `network::ext::QoSType` and a strictly narrower one: one
+/// constructor argument, one accessor, `P_MASK = 0b0000_0111`
+/// (`zenoh-protocol/src/transport/mod.rs:270-286`). The congestion and express
+/// bits are not bits this receiver ignores — they are bits that carrier's type
+/// does not have.
+///
+/// [`read_qos_z64`] reported all three for every carrier, so a capture of an
+/// ordinary Frame printed `congestion=Drop, express=false`: two fields upstream
+/// does not define here, with values that came from a sender which never chose
+/// them (`pipeline.rs:350` constructs `QoSType::new(priority)`) and a receiver
+/// which never reads them. A default rendered as a reading is the failure this
+/// module exists to avoid, and it is the same one item 408 closed one carrier
+/// over.
+///
+/// # Why it was invisible in this tree
+///
+/// wz's own frame encoder writes the same zero, so every self-witness agreed.
+/// The round that first fed this walker FOREIGN bytes found it on the first
+/// run — which is the argument for foreign witnesses stated as a measurement
+/// rather than as a preference.
+///
+/// # No `read_as`, deliberately
+///
+/// The narrowed rows of item 408 emit `read_as` because their reading is a
+/// NUMBER a receiver acts on. Here the reading is a NAME — `priority` is a
+/// label — so a `read_as` beside it would be the same three bits a second time.
+/// What the narrowing discards is named the way every other row names it.
+fn read_transport_qos_z64(value: u64, span: Span) -> Option<Vec<Field>> {
+    /// `transport::ext::QoSType::P_MASK` — the three bits, and the whole of
+    /// what this carrier's type defines.
+    const READ_MASK: u64 = 0x07;
+
+    let priority = crate::qos::Priority::from_wire((value & READ_MASK) as u8);
+    let mut out = alloc::vec![label("priority", span, priority.name())];
     if value & !READ_MASK != 0 {
         out.push(bits("undefined_bits", span, value & !READ_MASK));
     }
@@ -6393,6 +6454,95 @@ mod tests {
         );
     }
 
+    /// R311y911 (open-debt item 412) — A TRANSPORT `qos` NAMES PRIORITY AND
+    /// NOTHING ELSE, AND THE NETWORK CARRIERS ARE UNTOUCHED.
+    ///
+    /// # The discriminator is the PAIR, on ONE value
+    ///
+    /// `0x1D` is priority Data with the D and E bits set. On a network carrier
+    /// those are `congestion=Block` and `express=true` and must stay so; on a
+    /// transport carrier `transport::ext::QoSType<ID>` has neither accessor, so
+    /// they are `undefined_bits`. Asserting only the Frame half would pass over
+    /// a change that narrowed EVERY carrier — which would be the same defect
+    /// pointing the other way, since a `Push`'s congestion really is read.
+    ///
+    /// # And the absences are asserted, not inferred from a count
+    ///
+    /// `congestion` and `express` must be ABSENT rather than zero: a reader
+    /// handed `congestion=Drop` on a Frame is being shown a default as a
+    /// reading, which is the whole of what item 412 was.
+    #[test]
+    fn a_transport_qos_reports_only_the_priority_its_carrier_type_defines() {
+        const PACKED: u64 = 0x05 | 0x08 | 0x10;
+
+        // `Frame`: Z for extensions, R for reliable, one qos ext, then a batch
+        // holding one record so the payload arm is real rather than empty.
+        let frame = concat(&[
+            alloc::vec![0x05u8 | 0x20 | 0x80],
+            vle(7),
+            ext_zint(0x1 | crate::ext_header::EXT_FLAG_M, false, PACKED),
+            alloc::vec![0x1Au8],
+            vle(3),
+        ]);
+        let f = dissect_transport_message(&frame, 0).expect("frame did not dissect");
+        assert_eq!(f.name, "Frame");
+        assert_tiles(&f, 0, frame.len());
+        let qos = qos_entry(&f);
+        assert_eq!(
+            qos.find("priority").map(|x| x.value.clone()),
+            Some(FieldValue::Label(Cow::Borrowed("Data"))),
+            "the three bits the carrier's own type defines are read",
+        );
+        assert!(
+            qos.find("congestion").is_none(),
+            "`transport::ext::QoSType` has no congestion accessor, so a \
+             capture must not be shown one: {qos:?}",
+        );
+        assert!(qos.find("express").is_none(), "nor an express one: {qos:?}",);
+        assert_eq!(
+            qos.find("undefined_bits").map(|x| x.value.clone()),
+            Some(FieldValue::Bits(0x18)),
+            "and the bits the narrowing discarded are NAMED rather than \
+             rendered as fields",
+        );
+
+        // `Fragment` shares the type, so it shares the reading.
+        let frag = concat(&[
+            alloc::vec![0x06u8 | 0x20 | 0x80],
+            vle(3),
+            ext_zint(0x1 | crate::ext_header::EXT_FLAG_M, false, PACKED),
+            alloc::vec![0xDEu8, 0xAD],
+        ]);
+        let g = dissect_transport_message(&frag, 0).expect("fragment did not dissect");
+        assert_eq!(g.name, "Fragment");
+        let frag_qos = qos_entry(&g);
+        assert!(
+            frag_qos.find("congestion").is_none() && frag_qos.find("express").is_none(),
+            "Fragment carries the same narrow type: {frag_qos:?}",
+        );
+
+        // THE CONTROL, and it is the half that stops the fix over-reaching: the
+        // SAME value on a network carrier still reads all three, because
+        // `network::ext::QoSType` defines all three and its receiver acts on
+        // them.
+        let push = push_with_qos(PACKED);
+        let push_qos = qos_entry(&push);
+        assert_eq!(
+            push_qos.find("congestion").map(|x| x.value.clone()),
+            Some(FieldValue::Label(Cow::Borrowed("Block"))),
+            "a Push's congestion is a real reading and must be kept",
+        );
+        assert_eq!(
+            push_qos.find("express").map(|x| x.value.clone()),
+            Some(FieldValue::Flag(true)),
+            "and so is its express bit",
+        );
+        assert!(
+            push_qos.find("undefined_bits").is_none(),
+            "the network reading covers this value wholly: {push_qos:?}",
+        );
+    }
+
     /// A `Request` carrying `node_id` then one `target` Z64 ext, and a bare
     /// `Query` body — the codec's default arm, which reads its lone header
     /// byte and nothing more.
@@ -6688,18 +6838,31 @@ mod tests {
         assert!(budget.find("absent_to_receiver").is_none());
     }
 
-    /// The `qos` reading reaches the TRANSPORT carriers too, which the network
+    /// The `qos` dispatch REACHES the transport carriers, which the network
     /// tests above cannot show: `Frame` declares `qos` MANDATORY and writes its
     /// ext chain BEFORE the batch, so a dispatch keyed only on the network
     /// carriers would leave every frame in a capture unread.
+    ///
+    /// ⚠ R311y911 (open-debt item 412) — this test was
+    /// `a_frames_mandatory_qos_is_read_like_a_pushs` and asserted that a
+    /// Frame's `express` flag came back `true`. It was a faithful test of the
+    /// code as it then stood, and the claim in its NAME was the defect: a Frame
+    /// carries `transport::ext::QoSType<ID>`, which has no express accessor and
+    /// no congestion accessor, so a Frame's qos is NOT read like a Push's. What
+    /// the test was really guarding — that the dispatch reaches this carrier at
+    /// all — is kept, and the reading it asserts is now the narrow one. The
+    /// three-field claim lives in
+    /// `a_transport_qos_reports_only_the_priority_its_carrier_type_defines`,
+    /// which holds both carriers against each other on one value.
     #[test]
-    fn a_frames_mandatory_qos_is_read_like_a_pushs() {
+    fn a_frames_mandatory_qos_is_reached_by_the_dispatch() {
         let record = concat(&[
             alloc::vec![0x1Du8],
             wireexpr(1, None),
             msg_put(None, None, &[], b"aa"),
         ]);
-        // RealTime(1) | express(1<<4) == 0x11.
+        // RealTime(1) | bit 4 == 0x11. On a network carrier bit 4 is `express`;
+        // here it is outside `P_MASK` and therefore undefined.
         let frame = concat(&[
             alloc::vec![0x05u8 | 0x20 | 0x80],
             vle(1_000_000),
@@ -6712,10 +6875,12 @@ mod tests {
         assert_eq!(
             qos.find("priority").map(|f| f.value.clone()),
             Some(FieldValue::Label(Cow::Borrowed("RealTime"))),
+            "the dispatch reached this carrier, which is what this test is for",
         );
         assert_eq!(
-            qos.find("express").map(|f| f.value.clone()),
-            Some(FieldValue::Flag(true)),
+            qos.find("undefined_bits").map(|f| f.value.clone()),
+            Some(FieldValue::Bits(0x10)),
+            "and bit 4 is named rather than rendered as an `express` reading",
         );
     }
 
