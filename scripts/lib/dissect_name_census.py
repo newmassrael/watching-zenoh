@@ -318,9 +318,69 @@ def walker_sites(src: str) -> dict[str, list[int]]:
     # their group through `walked("literal", ..)`, which is why the helper is a
     # function and not a tuple -- as a tuple the eight names below it left this
     # census entirely, and the gate said so.
-    claim(r'\b(?:bits|flag|group|leaf|text|label|walked)\(\s*"([a-z0-9_]+)"', src)
+    # Round 2036, open-debt item 327 — DERIVED, because this arm used to be a
+    # hand-written alternation and a hand-written alternation is a list that
+    # shuts its eyes on the next constructor.
+    #
+    # The docstring above already records this lesson for the FIRST arm ("the
+    # first draft matched a fixed method list and missed `c.text(`, so it
+    # matches any method"), and the lesson was applied to one arm only. Two
+    # things the enumeration had quietly accumulated by the time it was
+    # measured: `leaf` NAMED NOTHING -- it occurs in this file's prose and in
+    # no call -- and `text` is a CURSOR METHOD that the `c.<method>(` arm above
+    # already claims, so listing it here hid which arm owned it. A list that
+    # can hold a dead entry for rounds is the shape `debt-47` is about,
+    # arriving inside a gate.
+    #
+    # The class that is really closed: a free function whose FIRST parameter is
+    # the field name. That is what makes a call site name-producing, and it is
+    # readable straight off the source rather than remembered.
+    claim(constructor_pattern(src), src)
     claim(r'name:\s*"([a-z0-9_]+)"', src)
     return names
+
+
+FIELD_CONSTRUCTOR = re.compile(r"\bfn\s+([a-z_0-9]+)\(\s*name:\s*&'static str")
+"""A free function that takes the field NAME as its first argument.
+
+Anchored on the parameter rather than on the return type on purpose: `walked`
+returns a `(&'static str, ZbufBodyWalker)` pair rather than a `Field`, and it is
+every bit as much a name-producing site -- R311y896 measured what happened when
+those eight names left the census by becoming a tuple.
+"""
+
+
+def field_constructors(src: str) -> list[str]:
+    """The name-producing constructors this source defines, read from it.
+
+    ⚠ ANTI-VACUITY IS THE CALLER'S JOB AND `constructor_pattern` DOES IT. A
+    regex that stops matching returns an empty list, and an empty alternation
+    would make this whole arm silently dead -- a population of zero passing as
+    a clean sweep, which is the failure this gate exists to prevent in the code
+    it reads.
+    """
+    return sorted(set(FIELD_CONSTRUCTOR.findall(src)))
+
+
+def constructor_pattern(src: str) -> str:
+    """The claim pattern for [`field_constructors`], or a hard failure.
+
+    Raising rather than returning something harmless: the alternative to a
+    constructor set is not a smaller sweep, it is a sweep that reports success
+    over nothing. The known residue, stated rather than hidden: a constructor
+    that does NOT take the name first is invisible to this derivation, exactly
+    as it was to the list it replaces. What changed is that the ordinary case
+    -- one more constructor in the existing shape -- no longer needs an edit
+    here to be seen.
+    """
+    found = field_constructors(src)
+    if not found:
+        raise SystemExit(
+            "dissect-name-census: no field constructor matches "
+            f"{FIELD_CONSTRUCTOR.pattern!r} -- the derivation is dead and this "
+            "arm would sweep nothing while reporting a clean census"
+        )
+    return r"\b(?:" + "|".join(found) + r')\(\s*"([a-z0-9_]+)"'
 
 
 def walker_names(src: str) -> set[str]:
@@ -497,6 +557,15 @@ def main() -> int:
         f"dissect-name-census: {len(walkers)} walker name(s), {len(codecs)} codec "
         f"field(s), {matched} shared; {len(OWN_VOCABULARY)} own vocabulary, "
         f"{len(AWAITING_WALKER)} awaiting a walker"
+    )
+    # Round 2036 (item 327) — AND WHICH CONSTRUCTORS THIS SWEEP WAS BUILT FROM.
+    # R2012's lesson on item 253, one gate over: a sweep that narrows must
+    # PRINT what it narrowed to, or a reader has no way to tell a complete
+    # census from one whose derivation quietly stopped seeing a shape. The list
+    # is short and the failure it makes visible is silent by nature.
+    print(
+        "  constructors swept (derived from the source, not listed here): "
+        + ", ".join(field_constructors(src))
     )
     if failures:
         for line in failures:
