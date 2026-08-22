@@ -1986,6 +1986,57 @@ fn each_census_flag_builds_only_its_own_plane() {
     }
 }
 
+/// Round 2002 (Round 2001's carry) — `--csv` RENDERS ROWS, through the binary.
+///
+/// Round 2001 shipped the flag with the rows witnessed only by a unit test: the
+/// binary had never emitted one, because the live smoke feeds KeepAlives and a
+/// KeepAlive carries no keyexpr. `exchange_capture` does, so this is where the
+/// end-to-end claim gets made — and because Layer C1bw runs this crate's whole
+/// suite, it is also where `--csv` acquires a lane. It had none.
+///
+/// Asserted on the ROW rather than on the header, which is the difference
+/// between "the flag reached the emit" and "the emit reached the data": Round
+/// 2001's own smoke got a header out of an empty table.
+#[test]
+fn the_csv_rendering_reaches_real_rows_through_the_binary() {
+    let scratch = Scratch::new("csv-rows");
+    let capture = scratch.write("census.pcapng", &exchange_capture());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .args(["--csv", "throughput"])
+        .output()
+        .expect("runs");
+    let csv = String::from_utf8_lossy(&out.stdout).into_owned();
+    let lines: Vec<&str> = csv.lines().filter(|l| !l.is_empty()).collect();
+
+    assert!(
+        lines[0].starts_with("keyexpr,"),
+        "the header must come first: {csv}"
+    );
+    assert!(
+        lines.len() > 1,
+        "the capture carries keyexprs, so the table must have rows: {csv}"
+    );
+    // Every row has the same field count as the header, which is the property
+    // that makes this a table rather than text with commas in it.
+    let columns = lines[0].split(',').count();
+    for line in &lines[1..] {
+        assert_eq!(
+            line.split(',').count(),
+            columns,
+            "row and header must agree on the column count: {line}"
+        );
+    }
+
+    // And the report is REPLACED, not decorated: a CSV stream holds one table,
+    // so a reader piping this into a table tool must not receive prose.
+    assert!(
+        !csv.contains("messages decoded:"),
+        "the report must not be emitted beside the rows: {csv}"
+    );
+}
+
 /// R311y673 (§1.2a) — the JSON carries the planes too, in ONE document.
 ///
 /// The text and JSON renderings are two paths over one fact, and this workspace

@@ -7722,6 +7722,19 @@ layer_c1bz_docs_resolve() {
     # simply started measuring the docs a consumer can actually build. The
     # ratchet is unchanged in kind: it fails in both directions, so the next
     # round that fixes a link must lower its line here.
+    #
+    # Round 1998 (item 470): wz-runtime-tokio 532 -> 524. The eight went with
+    # the raweth_socket and live_capture modules when they moved to
+    # wz-packet-socket -- a count that FELL because code left.
+    #
+    # ⚠ Round 2002 MOVED THAT NOTE OUT OF THE STRING, which is where R1998 put
+    # it. Everything between the quotes is DATA: the reader splits on
+    # whitespace and reads every token as crate:count, so a comment inside it
+    # became two phantom members and the lane failed with
+    # "the budget names 470), which is not a workspace member". The local
+    # pre-push subset could not see it -- it says so itself, "the
+    # stale-budget-line check needs the full lane" -- so this is a shape only
+    # hosted catches. Annotate ABOVE the quote, never inside it.
     budget="
         wz:2
         wz-ap-demo:27
@@ -7732,13 +7745,6 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:4
         wz-routing-graph:6
         wz-runtime-coop:12
-        # Round 1998 (item 470): 532 -> 524. The eight went with the
-        # raweth_socket and live_capture modules when they moved to
-        # wz-packet-socket -- a count that FELL because code left, which the
-        # ratchet requires be written down in the same push rather than left
-        # as slack the next round could spend.
-        # (No backticks in this block: shellcheck reads them as legacy command
-        # substitution even inside a comment, and Layer 0 said so.)
         wz-runtime-tokio:524
         wz-session-core:538
         wz-session-lwip:4
@@ -8489,7 +8495,13 @@ layer_c1bn_passive_dissection_features() {
     grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
         echo "  C1bn FAIL: the raweth_link filter matched no test"; echo "$out"; return 1; }
 
-    out="$(cd crates && cargo test -p wz-runtime-tokio --features transport-link-raweth raweth_socket:: --quiet 2>&1)" \
+    # Round 2002 — the crate MOVED (Round 1998, item 470) and this lane did not.
+    # Its own carry named the hazard: a lane locates tests by crate, so a split
+    # that updates one lane and not the other leaves an armed lane measuring
+    # nothing. R1998 re-pointed C1bs and missed THIS one, and the gate did
+    # exactly what it is for -- a filter that matches no test is a FAIL here,
+    # so the miss surfaced as a red rather than as a green that meant nothing.
+    out="$(cd crates && cargo test -p wz-packet-socket raweth_socket:: --quiet 2>&1)" \
         || { echo "$out"; return 1; }
     grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
         echo "  C1bn FAIL: the raweth_socket filter matched no test"; echo "$out"; return 1; }
