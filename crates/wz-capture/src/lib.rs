@@ -270,6 +270,23 @@ pub struct SkipCensus {
     /// WHICH tunnel, and a reader holding it can say "GRE" rather than "some
     /// packets were skipped". A count alone cannot name what to add.
     pub unwalked_encapsulations: BTreeSet<u8>,
+    /// Round 2013 (item 256) — chains of carriers LONGER THAN THIS READER
+    /// WALKS.
+    ///
+    /// Its own counter and not part of [`Self::unwalked_encapsulation`], on
+    /// exactly [`Self::gre_payload`]'s argument one carrier up: the two send a
+    /// reader to different work. That one says "this build has no parser for
+    /// tunnel N"; this one says "the parser exists and the chain was deeper
+    /// than the bound". Folding them printed `tunnel IP protocol(s) not
+    /// opened: 4` for a five-deep IPIP chain — naming as unsupported the very
+    /// protocol R311y862 added support for.
+    pub encapsulation_too_deep: usize,
+    /// The PROTOCOL NUMBERS behind that count, on
+    /// [`Self::unwalked_encapsulations`]'s reasoning — except that here the
+    /// number does NOT name a thing to build. It names which carrier the walk
+    /// was entering when it ran out of budget, which is what tells a reader
+    /// whether the depth is coming from where they expected.
+    pub encapsulation_too_deep_protos: BTreeSet<u8>,
     /// R311y862 — the protocol numbers counted in [`Self::not_transport`].
     ///
     /// The furniture class rests on a POSITIVE argument — a protocol that
@@ -326,6 +343,7 @@ impl SkipCensus {
             + self.ipv6_extension_chain
             + self.ipv6_fragment
             + self.unwalked_encapsulation
+            + self.encapsulation_too_deep
             + self.gre_payload
     }
 
@@ -415,6 +433,10 @@ impl SkipCensus {
             SkipReason::Encapsulation(proto) => {
                 self.unwalked_encapsulation += 1;
                 self.unwalked_encapsulations.insert(proto);
+            }
+            SkipReason::EncapsulationTooDeep(proto) => {
+                self.encapsulation_too_deep += 1;
+                self.encapsulation_too_deep_protos.insert(proto);
             }
             SkipReason::GrePayload(ethertype) => {
                 self.gre_payload += 1;
@@ -3272,9 +3294,15 @@ impl Dissection {
                 Ok(Transport::IpFragment(inner)) => {
                     carriers += 1;
                     if carriers > link::MAX_ENCAPSULATION_DEPTH {
+                        // Round 2013 (item 256) — the reassembly door's copy of
+                        // the same bound, and it gets the same correction. A
+                        // door that kept saying `Encapsulation` would have left
+                        // the misattribution reachable through fragmentation,
+                        // which is R311y863's two-doors lesson on this very
+                        // pair of functions.
                         self.note_skip(
                             done.packet_index,
-                            SkipReason::Encapsulation(done.key.proto),
+                            SkipReason::EncapsulationTooDeep(done.key.proto),
                         );
                         return;
                     }
@@ -5996,6 +6024,11 @@ mod datagram_tests {
             ("ipv6_extension_chain", |c| c.ipv6_extension_chain = 1),
             ("ipv6_fragment", |c| c.ipv6_fragment = 1),
             ("unwalked_encapsulation", |c| c.unwalked_encapsulation = 1),
+            // Round 2013 (item 256) — BYTES ABSENT, like the counter it split
+            // from. A chain the walk stopped short of holds a session it did
+            // not read, and the reason it stopped does not change what is
+            // missing; only what the reader should do about it.
+            ("encapsulation_too_deep", |c| c.encapsulation_too_deep = 1),
             ("gre_payload", |c| c.gre_payload = 1),
         ];
 
@@ -6023,6 +6056,12 @@ mod datagram_tests {
             ipv6_fragment: _,
             unwalked_encapsulation: _,
             unwalked_encapsulations: _,
+            encapsulation_too_deep: _,
+            // A SET beside its count, like the three above it, and it is not a
+            // class member of its own: a set of protocol numbers costs the
+            // reader nothing on its own, the count beside it is what the
+            // classification is about.
+            encapsulation_too_deep_protos: _,
             not_transport_protos: _,
             gre_payload: _,
             gre_payloads: _,

@@ -499,10 +499,35 @@ pub enum SkipReason {
     /// An encapsulation terminates nothing: whatever is inside it could be a
     /// zenoh session, and filing it as furniture is how a capture of one IPIP
     /// packet carrying a complete session reported itself complete with zero
-    /// flows read. The v4 sibling of [`Self::Ipv6ExtensionChain`], and like it
-    /// this covers both causes — a protocol this build has no parser for (GRE,
-    /// ESP, L2TP), and a chain longer than `MAX_ENCAPSULATION_DEPTH`.
+    /// flows read. The v4 sibling of [`Self::Ipv6ExtensionChain`].
+    ///
+    /// Round 2013 (item 256) — this now means ONE thing: a protocol this build
+    /// has no parser for (ESP, AH, L2TP, MPLS-in-IP). The doc used to end "and
+    /// a chain longer than `MAX_ENCAPSULATION_DEPTH`", and that second cause
+    /// has moved to [`Self::EncapsulationTooDeep`]. See there for why.
     Encapsulation(u8),
+    /// Round 2013 (item 256) — a chain of carriers LONGER THAN THIS READER
+    /// WALKS, carrying the protocol of the carrier it stopped at.
+    ///
+    /// # Why this is not `Encapsulation`
+    ///
+    /// It was, and the page said `tunnel IP protocol(s) not opened: 4` for a
+    /// five-deep IPIP chain. Protocol 4 IS opened by this build — R311y862
+    /// opened it — so that line told a reader to write a parser that already
+    /// exists. It is the exact false sentence R311y863 measured and item 251
+    /// removed, arriving by a second route: two different facts sharing one
+    /// variant and one number, which is the shape [`Self::GrePayload`] was
+    /// split out to avoid one carrier earlier.
+    ///
+    /// The two send a reader to DIFFERENT WORK, which is the test this crate
+    /// applies to every skip reason. `Encapsulation` says "build a parser".
+    /// This says "the parser exists and the chain was deeper than the bound" —
+    /// and the remedy is to raise the bound, or to accept it, both of which are
+    /// decisions rather than code. A reader cannot make either while the page
+    /// is naming a protocol as unsupported.
+    ///
+    /// Bytes absent, not furniture, exactly as for the variant it left.
+    EncapsulationTooDeep(u8),
     /// R311y864 — a GRE header this reader PARSED whose payload ethertype it
     /// does not walk, carrying that ethertype.
     ///
@@ -1138,7 +1163,9 @@ fn walk_ip_chain<'a>(
         if d.proto == IP_PROTO_IPV4_IN_IP || d.proto == IP_PROTO_IPV6_IN_IP {
             depth += 1;
             if depth > MAX_ENCAPSULATION_DEPTH {
-                return Err(SkipReason::Encapsulation(d.proto));
+                // Round 2013 (item 256) — NOT `Encapsulation`. This build
+                // opens protocol 4 and 41; what stopped here is the bound.
+                return Err(SkipReason::EncapsulationTooDeep(d.proto));
             }
             // Item 252 — recorded BEFORE the cursor moves, which is the only
             // instant this header's addresses exist. The line under it used to
@@ -1154,7 +1181,10 @@ fn walk_ip_chain<'a>(
         if d.proto == IP_PROTO_GRE {
             depth += 1;
             if depth > MAX_ENCAPSULATION_DEPTH {
-                return Err(SkipReason::Encapsulation(IP_PROTO_GRE));
+                // Round 2013 (item 256) — and GRE is the sharper case of the
+                // two: R311y864 built the parser this line used to send a
+                // reader away to write.
+                return Err(SkipReason::EncapsulationTooDeep(IP_PROTO_GRE));
             }
             // Item 260 — the ethertype step, INCLUDING the TEB arm that
             // re-enters at the link layer. `depth` is not incremented a second

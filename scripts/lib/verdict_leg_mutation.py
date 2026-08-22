@@ -308,6 +308,14 @@ PREDICATES = [
             # after the field landed, which is the first time that check has
             # fired on a round that was not the one that wrote it.
             "gre_payload",
+            # Round 2013 (item 256) -- a chain longer than the walk goes, split
+            # out of `unwalked_encapsulation` so the page stops naming an
+            # OPENED protocol as unsupported. An eighth way to be short, and it
+            # is here for the same reason `gre_payload` is: the check demanded
+            # it on the first run after the field landed. Item 256 predicted
+            # this line ("a census field grows and so does a recipe") before
+            # either was written.
+            "encapsulation_too_deep",
         )
     ],
     # R311y861 -- `Dissection::unfinished_fragment_chains`, three ENDS summed.

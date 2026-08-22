@@ -2723,7 +2723,9 @@ fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
          \"not_ip\":{},\"not_transport\":{},\"ipv4_fragment\":{},\
          \"ip_fragment_pending\":{},\"vsock_non_payload\":{},\
          \"ipv6_extension_chain\":{},\"ipv6_fragment\":{},\
-         \"unwalked_encapsulation\":{},\"gre_payload\":{},\"link_types\":[",
+         \"unwalked_encapsulation\":{},\"encapsulation_too_deep\":{},\
+         \"encapsulation_depth_bound\":{},\
+         \"gre_payload\":{},\"link_types\":[",
         sk.total(),
         sk.bytes_absent(),
         sk.not_this_protocol(),
@@ -2738,6 +2740,12 @@ fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
         sk.ipv6_extension_chain,
         sk.ipv6_fragment,
         sk.unwalked_encapsulation,
+        sk.encapsulation_too_deep,
+        // Round 2013 (item 256) — THE BOUND ITSELF, beside the count of what it
+        // stopped. A consumer told "3 chains were too deep" cannot act: too
+        // deep for what? The remedy here is a decision about this number, so
+        // the number is in the document rather than in this reader's source.
+        crate::link::MAX_ENCAPSULATION_DEPTH,
         sk.gre_payload
     ));
     for (i, dlt) in sk.unsupported_link_types.iter().enumerate() {
@@ -2753,6 +2761,17 @@ fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
     // a number nobody expected.
     s.push_str("],\"encapsulations\":[");
     for (i, p) in sk.unwalked_encapsulations.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!("{p}"));
+    }
+    // Round 2013 (item 256) — kept SEPARATE from `encapsulations` above, which
+    // is the whole of the item: one list names tunnels to build and the other
+    // names where a bound bit, and a consumer merging them would print `4` as
+    // unsupported for a build that opens it.
+    s.push_str("],\"too_deep_protos\":[");
+    for (i, p) in sk.encapsulation_too_deep_protos.iter().enumerate() {
         if i > 0 {
             s.push(',');
         }
@@ -2971,7 +2990,8 @@ fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
         "    bytes this dissection does not hold ({}): {} truncated, \
          {} IPv4 fragment, {} IPv6 fragment, \
          {} IPv6 extension chain, {} link type not read, \
-         {} tunnel not opened, {} GRE payload not walked\n",
+         {} tunnel not opened, {} chain deeper than walked, \
+         {} GRE payload not walked\n",
         sk.bytes_absent(),
         sk.truncated,
         sk.ipv4_fragment,
@@ -2979,8 +2999,28 @@ fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
         sk.ipv6_extension_chain,
         sk.unsupported_link_type,
         sk.unwalked_encapsulation,
+        sk.encapsulation_too_deep,
         sk.gre_payload
     ));
+    // Round 2013 (item 256) — its own line, and it says what to DO. The two
+    // above name a thing to build; this one names a bound that held, and the
+    // reader's move is to raise it or to accept it. Naming the protocol here
+    // would repeat the sentence this split removed, so the protocol is given
+    // as WHERE THE WALK WAS, not as what is missing.
+    if !sk.encapsulation_too_deep_protos.is_empty() {
+        let mut protos = String::new();
+        for (i, p) in sk.encapsulation_too_deep_protos.iter().enumerate() {
+            if i > 0 {
+                protos.push_str(", ");
+            }
+            protos.push_str(&format!("{p}"));
+        }
+        s.push_str(&format!(
+            "      chain(s) deeper than this reader walks (bound {} carrier(s)); \
+             stopped entering IP protocol(s): {protos}\n",
+            crate::link::MAX_ENCAPSULATION_DEPTH
+        ));
+    }
     if !sk.gre_payloads.is_empty() {
         let mut types = String::new();
         for (i, e) in sk.gre_payloads.iter().enumerate() {
@@ -6481,6 +6521,230 @@ mod tests {
         out
     }
 
+    /// A chain of `carriers` IPIP headers around a zenoh session.
+    ///
+    /// Each carrier gets its OWN address pair so a walk that stops early is
+    /// visible as which carrier it stopped at, not only as a count.
+    fn ipip_chain(carriers: u8) -> alloc::vec::Vec<u8> {
+        let mut body = ipv4_packet(17, [192, 168, 0, 1], [192, 168, 0, 2], &zenoh_udp(4));
+        for i in 0..carriers {
+            body = ipv4_packet(4, [10, 0, i, 1], [10, 0, i, 2], &body);
+        }
+        eth(&body)
+    }
+
+    /// ITEM 256 — A CHAIN DEEPER THAN THE WALK IS NOT AN UNSUPPORTED TUNNEL.
+    ///
+    /// # The defect
+    ///
+    /// `MAX_ENCAPSULATION_DEPTH` raised `SkipReason::Encapsulation(4)`, so the
+    /// page read `tunnel IP protocol(s) not opened: 4` — MEASURED before this
+    /// round, not inferred. Protocol 4 is opened by this build; R311y862 is the
+    /// round that opened it. The line told a reader to write a parser that
+    /// already exists, which is the exact false sentence R311y863 measured and
+    /// item 251 removed, arriving by a second route. Two facts shared one
+    /// variant and one number.
+    ///
+    /// # What the test pins
+    ///
+    /// Not "the wording changed" — that a fix could satisfy by editing a
+    /// string. The two causes must be TOLD APART in the counters, so a
+    /// too-deep chain must leave `unwalked_encapsulation` at ZERO while a
+    /// genuinely unsupported tunnel still moves it. Both are driven, because a
+    /// split that moved everything into the new counter would pass a test that
+    /// only checked the new one.
+    #[test]
+    fn a_chain_deeper_than_the_walk_is_not_reported_as_an_unopened_tunnel() {
+        let mut d = crate::Dissection::new();
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &ipip_chain(crate::link::MAX_ENCAPSULATION_DEPTH as u8 + 1),
+        );
+        d.finish();
+        let sk = d.skip_census();
+        let text = CaptureReport::of(&d).to_text();
+        let json = CaptureReport::of(&d).to_json();
+
+        assert_eq!(
+            sk.encapsulation_too_deep, 1,
+            "the bound is what stopped this chain: {sk:?}"
+        );
+        assert_eq!(
+            sk.unwalked_encapsulation, 0,
+            "and it is NOT a tunnel this build cannot open -- item 256: {sk:?}"
+        );
+        assert!(
+            sk.unwalked_encapsulations.is_empty(),
+            "so protocol 4 must not be in the build-a-parser list: {sk:?}"
+        );
+        assert!(
+            !text.contains("tunnel IP protocol(s) not opened"),
+            "THE FALSE SENTENCE, back by a second route:\n{text}"
+        );
+        assert!(
+            text.contains("chain(s) deeper than this reader walks (bound 4 carrier(s))"),
+            "and the page must say what actually happened:\n{text}"
+        );
+        // The bytes are still ABSENT -- the split is about attribution, not
+        // about pretending a short capture is whole.
+        assert_eq!(sk.bytes_absent(), 1, "{sk:?}");
+        assert!(text.starts_with("capture: INCOMPLETE"), "{text}");
+        assert!(
+            json.contains("\"encapsulation_too_deep\":1")
+                && json.contains("\"encapsulation_depth_bound\":4")
+                && json.contains("\"too_deep_protos\":[4]")
+                && json.contains("\"encapsulations\":[]"),
+            "the document splits them too, and carries the BOUND -- a consumer \
+             told `1 too deep` cannot act without it:\n{json}"
+        );
+
+        // CONTROL 1: one carrier fewer is READ, so the bound is what the leg
+        // above is about and not some other refusal.
+        let mut ok = crate::Dissection::new();
+        ok.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &ipip_chain(crate::link::MAX_ENCAPSULATION_DEPTH as u8),
+        );
+        ok.finish();
+        assert_eq!(
+            ok.datagram_flows().len(),
+            1,
+            "a chain AT the bound is read: {:?}",
+            ok.skip_census()
+        );
+        assert_eq!(ok.datagram_flows()[0].frames.len(), 4);
+
+        // CONTROL 2: a tunnel this build genuinely has no parser for STILL
+        // reports as one. Without this, moving every encapsulation into the new
+        // counter would pass everything above.
+        let mut esp = crate::Dissection::new();
+        esp.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &eth_ipv4_proto(50, &[0u8; 16]),
+        );
+        esp.finish();
+        let e = esp.skip_census();
+        assert_eq!(
+            (e.unwalked_encapsulation, e.encapsulation_too_deep),
+            (1, 0),
+            "ESP has no parser here and must still say so: {e:?}"
+        );
+        assert!(CaptureReport::of(&esp)
+            .to_text()
+            .contains("tunnel IP protocol(s) not opened: 50"));
+    }
+
+    /// Make `body` arrive as the REASSEMBLED PAYLOAD of a datagram nested
+    /// `level` carriers deep, every one of them separately fragmented.
+    ///
+    /// Item 257 — this is the shape nothing in this tree could build. The
+    /// split at each level is delivered by two independent reassemblies one
+    /// level out, so the capture holds `2^(level+1)` packets and the table
+    /// completes one datagram per level, each of which turns out to be a
+    /// fragment of the next. A running identifier keeps the two datagrams at
+    /// the same level from sharing a fragment key.
+    fn emit_nested_fragmented(
+        d: &mut crate::Dissection,
+        level: usize,
+        body: &[u8],
+        index: &mut usize,
+        ident: &mut u16,
+    ) {
+        let cut = (body.len() / 2) / 8 * 8;
+        assert!(
+            cut > 0 && cut < body.len(),
+            "level {level}: {} byte(s) will not split",
+            body.len()
+        );
+        *ident += 1;
+        let id = *ident;
+        for (offset, more, piece) in [(0usize, true, &body[..cut]), (cut, false, &body[cut..])] {
+            let f = ipv4_frag_packet(
+                4,
+                [172, 20, level as u8, 1],
+                [172, 20, level as u8, 2],
+                id,
+                offset,
+                more,
+                piece,
+            );
+            if level == 0 {
+                d.push_packet(crate::link::LINKTYPE_ETHERNET, *index, &eth(&f));
+                *index += 1;
+            } else {
+                emit_nested_fragmented(d, level - 1, &f, index, ident);
+            }
+        }
+    }
+
+    /// ITEM 257 — THE SECOND CARRIER BOUND, WHICH HAD NO WITNESS.
+    ///
+    /// # Two bounds, not one
+    ///
+    /// `walk_ip_chain` bounds the carriers inside ONE datagram; `push_fragment`
+    /// separately bounds how many times a completed datagram turns out to be
+    /// another fragment. R311y863 pinned the first and said of the second only
+    /// that it "is not the same number". Nothing reached it.
+    ///
+    /// # How this round found out, rather than deduced it
+    ///
+    /// Round 2013 changed BOTH bounds to say `EncapsulationTooDeep`, and
+    /// falsified each door separately as item 252's round established. The
+    /// mutation at `walk_ip_chain` killed three tests. The mutation at
+    /// `push_fragment` — putting `Encapsulation` back — SURVIVED THE WHOLE
+    /// SUITE. A surviving mutant is a leg nothing asks about, and this is that
+    /// leg: reaching it needs five separately-fragmented nested carriers, which
+    /// is thirty-two packets and no helper in this file could build.
+    ///
+    /// The count is asserted at the low end too. Without the `>= 5` leg a
+    /// construction that tripped the bound early — one that never actually
+    /// nested — would pass, and the whole point is that this bound is reached
+    /// by a path the other one cannot reach.
+    #[test]
+    fn the_reassembly_doors_own_carrier_bound_is_reached_and_reported() {
+        // A level-5 fragment: what the fifth reassembly hands back, and one
+        // carrier past what `push_fragment` will follow.
+        let deepest = ipv4_frag_packet(
+            17,
+            [192, 168, 0, 1],
+            [192, 168, 0, 2],
+            0xBEEF,
+            0,
+            true,
+            &zenoh_udp(8),
+        );
+
+        let mut d = crate::Dissection::new();
+        let (mut index, mut ident) = (0usize, 0u16);
+        emit_nested_fragmented(&mut d, 4, &deepest, &mut index, &mut ident);
+        d.finish();
+
+        assert!(
+            index >= 32,
+            "the shape needs every level delivered by two reassemblies: {index}"
+        );
+        let sk = d.skip_census();
+        assert_eq!(
+            sk.encapsulation_too_deep, 1,
+            "the reassembly door's OWN bound must bite, and say which bound \
+             it was: {sk:?}"
+        );
+        assert_eq!(
+            sk.unwalked_encapsulation, 0,
+            "item 256 reaches this door too -- protocol 4 is opened here: {sk:?}"
+        );
+        assert!(
+            CaptureReport::of(&d)
+                .to_text()
+                .contains("chain(s) deeper than this reader walks"),
+            "{}",
+            CaptureReport::of(&d).to_text()
+        );
+    }
+
     /// R311y864 — zenoh inside a GRE tunnel is READ, at every optional-field
     /// combination.
     ///
@@ -7194,9 +7458,18 @@ mod tests {
             0,
             "five is past the bound: {sk:?}"
         );
+        // Round 2013 (item 256) — read off `encapsulation_too_deep`, which is
+        // what this leg always meant. It said `unwalked_encapsulation` because
+        // until this round the bound and the missing-parser case shared one
+        // counter; the sentence in the assertion ("a chain this reader did not
+        // walk") was already describing the OTHER one.
         assert_eq!(
-            sk.unwalked_encapsulation, 1,
+            sk.encapsulation_too_deep, 1,
             "and is reported as a chain this reader did not walk: {sk:?}"
+        );
+        assert_eq!(
+            sk.unwalked_encapsulation, 0,
+            "protocol 4 is opened here; the BOUND is what stopped it: {sk:?}"
         );
         assert_eq!(sk.bytes_absent(), 1, "which is bytes absent: {sk:?}");
     }
@@ -7350,12 +7623,22 @@ mod tests {
         );
     }
 
-    /// R311y862 — the nesting bound is a bound, and beyond it the answer is the
-    /// same one GRE gets.
+    /// R311y862 — the nesting bound is a bound, and beyond it the chain is
+    /// REPORTED rather than walked.
     ///
     /// The depth comes out of the packet, so without this a crafted chain
     /// decides how much work the walk does. Reported rather than dropped: the
     /// bytes are as absent as any other unopened tunnel's.
+    ///
+    /// ⚠ ROUND 2013 (ITEM 256) CORRECTED THE COUNTER THIS READS, and the
+    /// correction is the item. The doc said "beyond it the answer is the same
+    /// one GRE gets" and the leg asserted `unwalked_encapsulation == 1` — a
+    /// green assertion that a chain the walk gave up on is a tunnel this build
+    /// cannot open. It is neither the same answer nor the same remedy: GRE's
+    /// number tells a reader to write a parser, and protocol 4's parser was
+    /// written by the round that wrote this test. What the leg was RIGHT about
+    /// is that the bound holds and the bytes are absent, and both survive
+    /// below, read off the counter that means it.
     #[test]
     fn a_tunnel_chain_past_the_bound_is_reported_not_walked() {
         // Six nested IPv4 headers around the datagram; the bound is four.
@@ -7373,8 +7656,12 @@ mod tests {
 
         let sk = d.skip_census();
         assert_eq!(
-            sk.unwalked_encapsulation, 1,
-            "a chain past the bound is an unopened tunnel: {sk:?}"
+            sk.encapsulation_too_deep, 1,
+            "a chain past the bound is a chain past the bound: {sk:?}"
+        );
+        assert_eq!(
+            sk.unwalked_encapsulation, 0,
+            "and NOT an unopened tunnel -- item 256: {sk:?}"
         );
         assert_eq!(sk.bytes_absent(), 1, "and is bytes absent: {sk:?}");
         assert_eq!(
