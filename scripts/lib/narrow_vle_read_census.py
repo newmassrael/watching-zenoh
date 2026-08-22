@@ -178,6 +178,74 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
 }
 
 
+KEPT_WITHOUT_CALLER: dict[str, str] = {
+    "crates/wz-session-core/src/dissect.rs::vle_u16::": (
+        "`Zenoh080Bounded<u16>` is a real upstream shape -- its `u32` sibling "
+        "is what decides `Encoding.id` -- so the refusing reader stays for the "
+        "field that selects it next. `weight` was its last caller and R311y880 "
+        "moved that field to `vle_u16_truncated` because upstream truncates "
+        "there, which emptied the call sites without making the reader wrong."
+    ),
+}
+"""R2040 (open-debt item 344) — readers KEPT ON PURPOSE with nothing calling
+them.
+
+# What this stops, and why the census alone did not
+
+Deleting one of these already reds the census: the `ADJUDICATED` row becomes an
+adjudication outliving its code. Measured this round rather than assumed, by
+deleting `vle_u16` and running it.
+
+⚠ AND THE MESSAGE RATIFIED THE DELETION. It said "delete the row in the commit
+that removed the read", which is right for a FIELD whose read genuinely went
+away and wrong for a primitive somebody kept deliberately: it tells the person
+how to FINISH the removal rather than what they are about to lose. Item 344 is
+about exactly that reader -- "a primitive with no subject is what a later round
+deletes without reading why".
+
+# Both directions, so the claim cannot rot
+
+A key here must be a reader with NO call site outside its own body. The day a
+field selects it, the claim stops being true and this gate says so -- the entry
+is then deleted because it was ANSWERED, not because it was in the way.
+"""
+
+CALLER = re.compile(r"\b(?:self\.cur\.|cursor\.|c\.)?((?:read_)?vle_u\d+)\(")
+"""A call, with the reader's WHOLE name captured.
+
+⚠ The `read_` prefix is part of the identity, not decoration. `vle_u16` is the
+`SpanCursor` method this census adjudicates; `read_vle_u16` is the inner
+cursor's primitive that the method's own body calls. Folding the prefix into an
+optional group made the body's line read as a call to the method it defines --
+found by mutating this file rather than by reading it, because the one place
+that line appears today is inside that method, where the enclosing-function
+guard hid it.
+"""
+
+
+def callers_outside(name: str, sources: list[tuple[str, str]]) -> list[str]:
+    """`<path>:<line>` for every call to `name` that is not inside its own body.
+
+    The reader's own definition calls the cursor primitive underneath it, so a
+    naive count is never zero; the enclosing function is what separates a
+    definition from a use.
+    """
+    out: list[str] = []
+    for rel, src in sources:
+        enclosing = ""
+        for lineno, line in enumerate(src.splitlines(), start=1):
+            m = FN.match(line)
+            if m:
+                enclosing = m.group(1)
+            stripped = line.lstrip()
+            if stripped.startswith("//") or enclosing == name:
+                continue
+            for hit in CALLER.finditer(line):
+                if hit.group(1) == name:
+                    out.append(f"{rel}:{lineno}")
+    return out
+
+
 def tracked_rust() -> list[Path]:
     """Every tracked `.rs` under the censused trees, per git.
 
@@ -351,12 +419,51 @@ def main() -> int:
 
     for key in sorted(ADJUDICATED.keys() - found.keys()):
         failed = True
+        # Round 2040 (item 344) — a reader KEPT ON PURPOSE gets a different
+        # sentence. The one below tells a person how to finish removing a read
+        # that genuinely went away; said over a deliberately-kept primitive it
+        # would ratify the very deletion this entry exists to question.
+        if key in KEPT_WITHOUT_CALLER:
+            print(
+                f"  narrow-vle FAIL: `{key}` is gone, and it was KEPT ON "
+                f"PURPOSE with nothing calling it:\n    {KEPT_WITHOUT_CALLER[key]}\n"
+                f"    If that reasoning no longer holds, say so and remove BOTH "
+                f"this row and its KEPT_WITHOUT_CALLER entry. If it was removed "
+                f"for having no caller, that is the thing the entry is about."
+            )
+            continue
         print(
             f"  narrow-vle FAIL: ADJUDICATED names `{key}`, which no longer "
             f"exists. An adjudication that outlives its code is the shape "
             f"open-debt item 47 is about — delete the row in the commit that "
             f"removed the read."
         )
+
+    # Round 2040 (item 344) — AND THE CLAIM MUST STILL BE TRUE. A reader that
+    # has gained a caller is no longer being kept for a field that has not
+    # arrived; the field arrived. Deleting the entry then is an ANSWER rather
+    # than a tidy-up, and this is what makes the difference legible.
+    sources = [(p.relative_to(ROOT).as_posix(), p.read_text()) for p in paths]
+    for key, why in sorted(KEPT_WITHOUT_CALLER.items()):
+        if key not in ADJUDICATED:
+            failed = True
+            print(
+                f"  narrow-vle FAIL: `{key}` is kept without a caller and is "
+                f"not adjudicated -- a reader nothing calls still has to say "
+                f"what upstream does at its width"
+            )
+        reader = key.rsplit("::", 2)[1]
+        callers = callers_outside(reader, sources)
+        if callers:
+            failed = True
+            print(
+                f"  narrow-vle FAIL: `{reader}` is declared as kept WITHOUT a "
+                f"caller, and it now has {len(callers)}: {', '.join(callers[:3])}. "
+                f"The reason recorded for keeping it was: {why}\n"
+                f"    Delete the KEPT_WITHOUT_CALLER entry -- the field it was "
+                f"waiting for has arrived, which is the entry being answered "
+                f"rather than the entry being wrong."
+            )
 
     if failed:
         return 1
