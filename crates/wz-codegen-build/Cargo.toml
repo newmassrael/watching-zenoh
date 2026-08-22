@@ -26,5 +26,11 @@ description = "Shared build-script helper: invoke vendored sce-codegen + post-pr
 name = "wz_codegen_build"
 path = "src/lib.rs"
 
+[dev-dependencies]
+# tests/provenance.rs builds a real git repository per fixture: the token is
+# defined by what git says about a checkout, so a hand-rolled fake would be a
+# second implementation of the thing under test.
+tempfile = "3"
+
 [lints]
 workspace = true

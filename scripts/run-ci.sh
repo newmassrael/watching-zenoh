@@ -389,6 +389,13 @@ if [[ -z "$repo_root" ]]; then
 fi
 cd "$repo_root" || exit 2
 
+# ─── shared oracle gates ───────────────────────────────────────────
+# Sourced, not invoked: these are function definitions, and the lanes need them
+# in-process so a repair one lane performs is visible to the next. Sourcing is
+# side-effect free by that file's own contract.
+# shellcheck source=scripts/lib/sce-codegen-oracle.sh
+source scripts/lib/sce-codegen-oracle.sh
+
 # ─── Artefact collection (R311y736, N28) ────────────────────────────
 #
 # WHEN `WZ_ARTIFACT_LOG` IS SET, every cargo invocation below also reports the
@@ -930,7 +937,18 @@ layer_0_preflight_lints() {
         # R311y419 count while the tree grew to 33 files, so a pathspec that
         # stopped matching could have dropped fifteen scripts and still cleared
         # the floor. A floor is only a floor against the number it is set to.
-        local -r sc_files_min=33   # 30 *.sh (25 scripts/ + 5 scripts/lib/) + 3 .githooks
+        #
+        # Raised 33 -> 38 on 2026-08-22, and the interesting part is that only
+        # ONE of those five is this commit's: adding
+        # scripts/lib/sce-codegen-oracle.sh made the count 38, and it had
+        # already drifted to 37 without anyone moving the floor. So the gate had
+        # four scripts of slack — a pathspec that stopped matching could have
+        # dropped four and still cleared 33. That is the SAME drift R311y782
+        # measured and wrote the instruction against, recurring within the file
+        # that carries the instruction, which says the instruction is not
+        # enough on its own. Recomputing it is one command, and the recipe is
+        # the loop directly above this line.
+        local -r sc_files_min=38   # 35 *.sh (25 scripts/ + 10 scripts/lib/) + 3 .githooks
         if (( ${#sc_files[@]} < sc_files_min )); then
             echo "  Layer0 FAIL: shellcheck discovery found ${#sc_files[@]} file(s), expected >= ${sc_files_min}" >&2
             return 1
@@ -1096,45 +1114,21 @@ layer_b_verify_codegen() {
         echo "Layer B SKIP (--skip-codegen)"
         return 0
     fi
-    if [[ ! -x vendor/sce/target/release/sce-codegen ]]; then
-        echo "Layer B SKIP (sce-codegen not built; run scripts/build-sce.sh)"
-        return 0
-    fi
-
-    # R114 sce-codegen freshness gate. The vendor pin moves
-    # whenever R<X> bumps vendor/sce; if the local sce-codegen
-    # binary was built against an older pin, verify-codegen.sh
-    # silently uses the stale binary and Layer 2 reports
-    # spurious match/mismatch results. The R112 -> R114 GitHub
-    # Actions failure (msg_del/query/request rust+cpp mismatch
-    # on a green local pre-push) traced to exactly this stale-
-    # binary path: timestamp 2026-05-18 00:00 (pre-R112 build)
-    # against R112 vendor pin checkout. The gate below compares
-    # the vendor/sce HEAD commit time to the binary mtime and
-    # auto-rebuilds if the binary is older — same effect as the
-    # CI's clean-build path, but no manual `bash scripts/build-
-    # sce.sh` needed in the developer loop.
-    local sce_head_epoch
-    sce_head_epoch="$(git -C vendor/sce log -1 --format=%ct HEAD 2>/dev/null || echo 0)"
-    local bin_mtime_epoch
-    bin_mtime_epoch="$(stat -c '%Y' vendor/sce/target/release/sce-codegen 2>/dev/null || echo 0)"
-    if [[ "$sce_head_epoch" -gt 0 && "$bin_mtime_epoch" -gt 0 \
-          && "$bin_mtime_epoch" -lt "$sce_head_epoch" ]]; then
-        echo "Layer B: sce-codegen stale (built $(date -d @"$bin_mtime_epoch" +%F) vs pin $(date -d @"$sce_head_epoch" +%F)); rebuilding"
-        # R311y889 (open-debt item 362) — KEEP WHAT IT SAID, on the same
-        # argument R311y756 made twenty lines down. This discarded both streams
-        # and printed four words, so a failure here carried no evidence and
-        # learning anything meant running the build again by hand.
-        local sce_log="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/b-sce-rebuild.log"
-        mkdir -p "$(dirname "$sce_log")"
-        bash scripts/build-sce.sh >"$sce_log" 2>&1 || {
-            echo "Layer B FAIL: sce-codegen rebuild failed" >&2
-            echo "  ── the rebuild's last 40 line(s) ──" >&2
-            tail -40 "$sce_log" >&2
-            echo "  ── full log: $sce_log ──" >&2
-            return 1
-        }
-    fi
+    # R114's sce-codegen freshness gate, now shared rather than inlined here.
+    # It was added after a green local pre-push went red on hosted CI
+    # (msg_del/query/request rust+cpp mismatch), traced to a binary built
+    # against the pre-R112 pin: verify-codegen.sh had used the stale binary and
+    # Layer 2's match/mismatch verdicts were all about a different SCE. The
+    # rationale is unchanged; two things about it were wrong and are fixed in
+    # scripts/lib/sce-codegen-oracle.sh — it compared MTIMES (which answer when
+    # the binary was built, not what from), and it lived in THIS LANE ONLY, so
+    # Layer B2 and every other consumer ran unguarded.
+    sce_codegen_ensure "Layer B"
+    case $? in
+        0) ;;
+        2) echo "Layer B SKIP (see the reason above)"; return 0 ;;
+        *) echo "Layer B FAIL: sce-codegen oracle" >&2; return 1 ;;
+    esac
 
     declare -A SCE_UPSTREAM=(
         ["crc16_ccitt"]="vendor/sce/tests/forge/resources/algorithm_crc16.scxml"
@@ -1296,13 +1290,24 @@ layer_b2_regen_diff() {
         return 0
     fi
     # The statechart/buffer-pool regen leg shells the vendored sce-codegen
-    # binary (the codec leg uses sce-build in-process). Absent -> SKIP, not
-    # FAIL (mirrors Layer B). In a full run-ci, Layer B builds + freshness-
-    # checks the binary before this lane, so it is present here.
-    if [[ ! -x vendor/sce/target/release/sce-codegen ]]; then
-        echo "Layer B2 SKIP (sce-codegen not built; run scripts/build-sce.sh — needed for the statechart/pool regen)"
-        return 0
-    fi
+    # binary (the codec leg uses sce-build in-process), so this lane's verdict
+    # is only as good as that binary's provenance.
+    #
+    # This used to read `[[ ! -x <bin> ]] && SKIP`, and outsource freshness with
+    # the comment "In a full run-ci, Layer B builds + freshness-checks the
+    # binary before this lane, so it is present here". Both halves were holes.
+    # ABSENT: `bx` prunes vendor/sce/target after every remote run, so on a
+    # build host this lane printed a pass-shaped SKIP. STALE: the delegation
+    # holds for a full sweep and for nothing else — MEASURED 2026-08-22, the
+    # SCE pin bump to 6399fad49c ran `--layer B2` against a build host's older
+    # binary and failed with `unknown filter: filter host_invoker is unknown`,
+    # naming a template and a line number, none of which was the defect.
+    sce_codegen_ensure "Layer B2"
+    case $? in
+        0) ;;
+        2) echo "Layer B2 SKIP (see the reason above)"; return 0 ;;
+        *) echo "Layer B2 FAIL: sce-codegen oracle" >&2; return 1 ;;
+    esac
     # Build the xtask first; a libxml2-absent box fails here -> SKIP, not FAIL
     # (the gate is a maintainer freshness check, not a consumer build step).
     # R311y889 (open-debt item 362) — the SKIP says WHY. This discarded both

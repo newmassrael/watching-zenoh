@@ -951,10 +951,21 @@ jobs:
         # as text, needs only bash + awk, and costs ~0s.
         run: bash scripts/run-ci.sh --layer C0f
 
+      # WZ_SCE_ORACLE_REQUIRE=1 on both lanes: each opens by grading the
+      # provenance of vendor/sce/target/release/sce-codegen, and an oracle that
+      # cannot be established at all degrades to a SKIP so a developer without
+      # the submodule is not blocked. This job checks the submodule out and
+      # builds the binary above, so here that SKIP could only mean the
+      # provisioning broke — the same rule WZ_A3_REQUIRE / WZ_C0_REQUIRE apply,
+      # and the reason both of those exist: a lane that skips still prints green.
       - name: Layer B — verify-codegen.sh per codec
+        env:
+          WZ_SCE_ORACLE_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer B
 
       - name: Layer B2 — regen-diff (committed out/** == regenerated)
+        env:
+          WZ_SCE_ORACLE_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer B2
 
   # ─────────────────────────────────────────────────────────────────

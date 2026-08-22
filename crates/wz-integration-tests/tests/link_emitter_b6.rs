@@ -74,6 +74,25 @@ fn emit_link_c11(scxml_name: &str) -> Option<String> {
         return None;
     }
 
+    // ABSENT may skip; FOREIGN may not. The two are not the same answer, and
+    // the existence test above cannot tell them apart. A binary built from
+    // another vendor/sce revision emits confidently from that revision's
+    // templates, so this test would compare wz's link SCXML against an SCE it
+    // is not pinned to and report the difference as a wz defect — the shape
+    // R311y774 walked into with a stale demo binary and R311y776 had to
+    // retract. Refuse, and name the one command that repairs it: a test cannot
+    // rebuild the toolchain it is testing with.
+    match wz_codegen_build::sce_codegen_provenance(&sce_workspace()) {
+        wz_codegen_build::Provenance::Matches => {}
+        // Unverifiable is the first-clone / tarball case the skip above serves;
+        // it is not evidence of a foreign binary, so it stays a skip.
+        v @ wz_codegen_build::Provenance::Unverifiable => {
+            eprintln!("skip: {}", v.explain());
+            return None;
+        }
+        v => panic!("{}", v.explain()),
+    }
+
     let out_dir = tempfile::tempdir().expect("create tempdir");
     let status = Command::new(&bin)
         // R311y756 — the FOURTH site that spawns sce-codegen and therefore the

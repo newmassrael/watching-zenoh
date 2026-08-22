@@ -50,7 +50,223 @@ pub fn locate_sce_codegen(sce_workspace: &Path) -> PathBuf {
             bin.display()
         );
     }
+    assert_sce_codegen_provenance(sce_workspace);
     bin
+}
+
+/// Path of the provenance stamp `scripts/build-sce.sh` writes beside the
+/// binary. Named here rather than inlined because several callers read it.
+pub fn sce_codegen_stamp(sce_workspace: &Path) -> PathBuf {
+    sce_workspace.join("target/release/.sce-codegen.pin")
+}
+
+/// What the built `sce-codegen` was built from, relative to what this tree
+/// pins. Returned rather than asserted so each caller can apply its own
+/// policy: a build script panics, a test that cannot rebuild refuses, and a
+/// first-clone ergonomics path may skip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Provenance {
+    /// The binary provably came from the pinned `vendor/sce` state.
+    Matches,
+    /// It came from something else — or carries no stamp at all, which is the
+    /// same answer: its origin is not established.
+    Mismatch {
+        /// The token the binary carries, or `None` when it is unstamped.
+        have: Option<String>,
+        /// The token this tree's `vendor/sce` state produces.
+        want: String,
+    },
+    /// git cannot answer here — a checkout with no `.git`, or no git on PATH.
+    /// Not a failure by itself: a verdict that cannot be computed must not be
+    /// invented in either direction.
+    Unverifiable,
+}
+
+impl Provenance {
+    /// The operator-facing account of a non-`Matches` verdict, worded once so
+    /// every caller says the same thing and names the same remedy.
+    pub fn explain(&self) -> String {
+        match self {
+            Self::Matches => "sce-codegen is the pinned build".to_owned(),
+            Self::Unverifiable => {
+                "sce-codegen provenance UNVERIFIABLE (no readable vendor/sce git checkout)"
+                    .to_owned()
+            }
+            Self::Mismatch { have, want } => format!(
+                "sce-codegen was built from a different vendor/sce state.\n\
+                 \x20 built from: {}\n\
+                 \x20 tree pins:  {want}\n\
+                 run `scripts/build-sce.sh` from the wz workspace root.",
+                have.as_deref()
+                    .unwrap_or("<unstamped: predates the provenance gate>")
+            ),
+        }
+    }
+}
+
+/// Grade the built `sce-codegen` against the `vendor/sce` state this tree
+/// carries.
+///
+/// EXISTENCE IS NOT THE QUESTION. The binary is an untracked build product, so
+/// it survives a pin bump, a branch switch and a rebase without changing, and
+/// nothing about a stale one looks stale: it emits confidently from the
+/// templates it was compiled against. MEASURED 2026-08-22 — a build host's
+/// older binary met the templates of pin `6399fad49c` and reported
+/// `unknown filter: filter host_invoker is unknown`, naming a template, a
+/// filter and a line number, none of which was the defect. The sibling class is
+/// R311y774/R311y776, where a feature was tested against a demo binary
+/// predating it and the resulting red was attributed to a defect that did not
+/// exist.
+///
+/// The token is recomputed with git alone so it is byte-identical to the shell
+/// library's — see `scripts/lib/sce-codegen-oracle.sh` for the format and for
+/// why the digest is a `git hash-object` rather than an md5.
+pub fn sce_codegen_provenance(sce_workspace: &Path) -> Provenance {
+    let want = match sce_source_token(sce_workspace) {
+        Some(t) => t,
+        None => return Provenance::Unverifiable,
+    };
+    let have = std::fs::read_to_string(sce_codegen_stamp(sce_workspace))
+        .ok()
+        .and_then(|s| s.lines().next().map(str::to_owned))
+        .filter(|s| !s.is_empty());
+
+    if have.as_deref() == Some(want.as_str()) {
+        Provenance::Matches
+    } else {
+        Provenance::Mismatch { have, want }
+    }
+}
+
+/// Refuse an `sce-codegen` that was built from a different `vendor/sce` state
+/// than the one this tree carries.
+///
+/// EXISTENCE IS NOT THE QUESTION. The binary is an untracked build product, so
+/// it survives a pin bump, a branch switch and a rebase without changing, and
+/// nothing about a stale one looks stale: it emits confidently from the
+/// templates it was compiled against. MEASURED 2026-08-22 — a build host's
+/// older binary met the templates of pin `6399fad49c` and reported
+/// `unknown filter: filter host_invoker is unknown`, naming a template, a
+/// filter and a line number, none of which was the defect. The sibling class is
+/// R311y774/R311y776, where a feature was tested against a demo binary
+/// predating it and the resulting red was attributed to a defect that did not
+/// exist.
+///
+/// This is the REFUSAL half of the gate, deliberately: it does not rebuild. A
+/// build script that builds its own toolchain hides the cost inside an
+/// unrelated `cargo build` and can recurse. The repair half lives in
+/// `sce_codegen_ensure` (scripts/lib/sce-codegen-oracle.sh), which every wz
+/// gate calls before reaching this path; what is left here is the last line of
+/// defence for anything that arrives another way.
+///
+/// UNVERIFIABLE IS NOT A FAILURE by default: a checkout with no `.git` (a
+/// source tarball) or a box with no `git` cannot be graded, so this warns and
+/// proceeds rather than inventing a verdict. Set `WZ_SCE_ORACLE_REQUIRE=1` —
+/// hosted CI does — to make that case a hard failure, where the submodule and
+/// the toolchain are always present and their absence means a broken runner.
+fn assert_sce_codegen_provenance(sce_workspace: &Path) {
+    // Emitted before the verdict, not after: a rebuild of sce-codegen rewrites
+    // the stamp, and this is what makes cargo re-run the build script — and so
+    // re-ask the question — instead of replaying a cached emit from the binary
+    // that has just been replaced.
+    println!(
+        "cargo:rerun-if-changed={}",
+        sce_codegen_stamp(sce_workspace).display()
+    );
+
+    match sce_codegen_provenance(sce_workspace) {
+        Provenance::Matches => {}
+        Provenance::Unverifiable => {
+            let msg = Provenance::Unverifiable.explain();
+            assert!(
+                std::env::var("WZ_SCE_ORACLE_REQUIRE").as_deref() != Ok("1"),
+                "{msg} — WZ_SCE_ORACLE_REQUIRE=1 forbids proceeding"
+            );
+            println!("cargo:warning={msg}");
+        }
+        mismatch => panic!("{}", mismatch.explain()),
+    }
+}
+
+/// The `<rev>-<digest>` token identifying the SCE source state a build of
+/// `sce-codegen` would consume. `None` when git cannot answer.
+///
+/// Byte-for-byte the shell library's construction: `git status --porcelain`
+/// sorted bytewise (what `LC_ALL=C sort` does), then `git diff HEAD` appended
+/// raw, the pair fed to `git hash-object --stdin`. The two streams are both
+/// needed — a status listing cannot see an edit that leaves the path list
+/// unchanged, and a diff cannot see a new untracked template.
+///
+/// `target/` is excluded from both, for the reason spelled out in the shell
+/// library: it holds the binary and the stamp, so counting it would make the
+/// record change the thing it records and no stamp could ever match.
+fn sce_source_token(sce_workspace: &Path) -> Option<String> {
+    if !sce_workspace.join(".git").exists() {
+        return None;
+    }
+
+    let rev_out = git_stdout(sce_workspace, &["rev-parse", "HEAD"])?;
+    let rev = String::from_utf8(rev_out).ok()?.trim().to_owned();
+    if rev.is_empty() {
+        return None;
+    }
+
+    let status = git_stdout(
+        sce_workspace,
+        &["status", "--porcelain", "--", ".", ":(exclude)target"],
+    )?;
+    let mut lines: Vec<&[u8]> = status
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines.sort_unstable();
+
+    let mut input: Vec<u8> = Vec::new();
+    for line in lines {
+        input.extend_from_slice(line);
+        input.push(b'\n');
+    }
+    input.extend_from_slice(&git_stdout(
+        sce_workspace,
+        &["diff", "HEAD", "--", ".", ":(exclude)target"],
+    )?);
+
+    let digest = git_hash_object(sce_workspace, &input)?;
+    Some(format!("{rev}-{digest}"))
+}
+
+/// Run `git <args>` in `dir`, returning stdout on success. `None` on any
+/// failure — a missing git, a non-repository, a non-zero exit — because every
+/// one of them means the same thing here: the question cannot be answered.
+fn git_stdout(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+fn git_hash_object(dir: &Path, input: &[u8]) -> Option<String> {
+    use std::io::Write;
+
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["hash-object", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(input).ok()?;
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let digest = String::from_utf8(out.stdout).ok()?.trim().to_owned();
+    (!digest.is_empty()).then_some(digest)
 }
 
 /// A located `sce-codegen` binary + its SCE workspace root, ready to

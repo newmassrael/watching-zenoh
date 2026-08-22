@@ -71,6 +71,12 @@ wz-packet-fixtures = { path = "../wz-packet-fixtures" }
 # `z_*` exports would collide with the real zenoh-pico symbols this crate links
 # for the layer3 codec-parity tests.
 libloading = "0.8"
+# tests/link_emitter_b6.rs spawns the vendored sce-codegen binary directly, so
+# it needs the same provenance verdict every other consumer of that binary
+# uses. Depending on the helper crate rather than re-deriving the token here is
+# the point: a second implementation of "which SCE was this built from" is a
+# second thing that can drift from build-sce.sh's stamp.
+wz-codegen-build = { path = "../wz-codegen-build" }
 # R311nx — `codec-serial` pinned so tests/layer3_serial_framing.rs can
 # build the wz serial framing primitives (`wz_codecs::{cobs_encode,
 # cobs_decode, crc32, serial_envelope}`) for the byte-parity compare

@@ -2504,6 +2504,9 @@ dependencies = [
 [[package]]
 name = "wz-codegen-build"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "wz-e2e-declare-observer"
@@ -2597,6 +2600,7 @@ dependencies = [
  "wz-capi-pico",
  "wz-capture",
  "wz-codecs",
+ "wz-codegen-build",
  "wz-packet-fixtures",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",

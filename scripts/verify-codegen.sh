@@ -119,6 +119,25 @@ if [[ ! -x "$SCE_CODEGEN" ]]; then
     exit 2
 fi
 
+# REFUSE a binary from another revision — do not rebuild one here. This script
+# is called once per codec (21 times from Layer B), so repairing would be the
+# caller's job done 21 times; Layer B calls `sce_codegen_ensure` before the
+# loop. But it is also a script a developer runs by hand, and every verdict it
+# prints is a claim about the pinned SCE. A foreign binary makes those verdicts
+# claims about a different one — measured at R114 as spurious rust+cpp
+# mismatches on msg_del/query/request. See scripts/lib/sce-codegen-oracle.sh.
+# shellcheck source=scripts/lib/sce-codegen-oracle.sh
+source "$ROOT/scripts/lib/sce-codegen-oracle.sh"
+_vc_want="$(sce_codegen_source_token "$ROOT/vendor/sce" || true)"
+_vc_have="$(sce_codegen_stamped_token "$ROOT/$WZ_SCE_CODEGEN_STAMP" || true)"
+if [[ -n "$_vc_want" && "$_vc_have" != "$_vc_want" ]]; then
+    echo "verify-codegen: sce-codegen is not the pinned build." >&2
+    echo "  built from: ${_vc_have:-<unstamped, predates the provenance gate>}" >&2
+    echo "  tree pins:  $_vc_want" >&2
+    echo "  run: bash scripts/build-sce.sh" >&2
+    exit 2
+fi
+
 BACKENDS=("rust" "cpp" "kotlin" "go" "c11" "python")
 
 # sce-codegen Go backend wants an import-path prefix; supply a stable

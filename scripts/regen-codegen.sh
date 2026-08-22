@@ -20,11 +20,16 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
 # The statechart/buffer-pool regen leg shells the vendored sce-codegen binary
-# (the codec leg uses sce-build in-process). Ensure it is built.
-if [[ ! -x vendor/sce/target/release/sce-codegen ]]; then
-    echo "regen-codegen: building sce-codegen (needed for the statechart/pool regen)"
-    bash scripts/build-sce.sh
-fi
+# (the codec leg uses sce-build in-process). Ensure it is built AT THE PIN THIS
+# TREE CARRIES — an existence test was not enough: a binary left over from an
+# older vendor/sce rev regenerates out/** from that rev's templates, and the
+# result is committed. See scripts/lib/sce-codegen-oracle.sh.
+# shellcheck source=scripts/lib/sce-codegen-oracle.sh
+source scripts/lib/sce-codegen-oracle.sh
+sce_codegen_ensure "regen-codegen" || {
+    echo "regen-codegen: refusing to regenerate — the sce-codegen oracle is not at the pinned revision" >&2
+    exit 1
+}
 
 echo "regen-codegen: regenerating out/** via xtask (codegen SSOT)"
 cargo run --manifest-path xtask/Cargo.toml --quiet -- regen

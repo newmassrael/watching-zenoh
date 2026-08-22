@@ -17,6 +17,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCE_DIR="$ROOT/vendor/sce"
 BIN="$SCE_DIR/target/release/sce-codegen"
+STAMP="$SCE_DIR/target/release/.sce-codegen.pin"
+
+# The provenance stamp this script writes is the ONLY record of which SCE
+# revision the emitted binary came from — the binary itself carries no such
+# marker, and its mtime answers a different question. Every consumer reads it
+# through the same library. See scripts/lib/sce-codegen-oracle.sh for why
+# existence and mtime were both the wrong question.
+# shellcheck source=scripts/lib/sce-codegen-oracle.sh
+source "$ROOT/scripts/lib/sce-codegen-oracle.sh"
 
 if [[ ! -e "$SCE_DIR/.git" ]]; then
     echo "build-sce: vendor/sce not initialized." >&2
@@ -44,6 +53,12 @@ if [[ ! -x "$BIN" ]]; then
     exit 1
 fi
 
+# AFTER the build, never before: a stamp written up front would assert
+# freshness for a binary that a failed cargo run left at its previous
+# revision — the exact lie this record exists to prevent.
+sce_codegen_write_stamp "$SCE_DIR" "$STAMP"
+
 echo "build-sce: done"
 echo "  binary: $BIN"
+echo "  pin: $(sce_codegen_stamped_token "$STAMP" || echo '<unstamped: no git in vendor/sce>')"
 echo "  version: $("$BIN" 2>&1 | head -1 || true)"
