@@ -15,7 +15,8 @@
 //!
 //! The danger a third rendering brings is a third opinion about WHAT A ROW IS,
 //! which is open-debt item 253's family. It is avoided the only way it can be:
-//! this module reads [`ThroughputTable`] and [`KeyexprRow`], the same types
+//! this module reads [`crate::agg::ThroughputTable`] and
+//! [`crate::agg::KeyexprRow`], the same types
 //! `census_json` reads, and derives its columns from the same accessors. A row
 //! here is a row there by construction, and the test that pins it compares the
 //! two renderings of one table rather than comparing either to a transcript.
