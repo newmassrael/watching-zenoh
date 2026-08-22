@@ -2,8 +2,17 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
+# R1994 (debt-sce-codegen-provenance)
+#
 # The sce-codegen ORACLE gate — shared by every shell consumer of
 # `vendor/sce/target/release/sce-codegen`.
+#
+# It ANSWERS FOR that item without closing it: the sce-codegen instance is
+# closed and gated here, and the item stays open for the untracked oracles that
+# still carry no provenance record at all (`target/zenohd`,
+# `target/zenoh-pico-cli`, the capture fixtures) and for
+# `binary_freshness_lint.py`, which grades the sibling class by mtime — the same
+# wrong question one layer over.
 #
 # ## What it grades
 #
