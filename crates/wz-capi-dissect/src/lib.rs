@@ -1249,10 +1249,18 @@ mod tests {
     /// `no_rules_never_reaches_a_document_so_the_header_need_not_name_it` —
     /// remove that fold and the pair reds, which is what a bare skip here would
     /// have cost.
+    /// Round 2024 (item 281) — the state no DOCUMENT carries, held once for
+    /// both copies of the vocabulary.
+    ///
+    /// Hoisted out of the header test when the rustdoc gained its own leg: two
+    /// copies of an exclusion is the same defect those two legs exist to
+    /// refuse, one file down. Its justification is
+    /// `no_rules_never_reaches_a_document_so_the_header_need_not_name_it`.
+    const NEVER_EMITTED: &str = "no_rules";
+
     #[test]
     fn the_header_names_every_payload_decode_state() {
         const HEADER: &str = include_str!("../include/wz_dissect.h");
-        const NEVER_EMITTED: &str = "no_rules";
         let emitted: Vec<&str> = wz_capture::payload_decode::PayloadDecoding::STATES
             .iter()
             .copied()
@@ -1269,6 +1277,93 @@ mod tests {
                 "wz_dissect.h never names the `{state}` state, which this \
                  library emits -- a C consumer branching on the header's list \
                  would fall through on traffic that produces it"
+            );
+        }
+    }
+
+    /// ITEM 281 — AND SO DOES THIS CRATE'S OWN RUSTDOC, which is the THIRD
+    /// copy of that vocabulary and the one nothing measured.
+    ///
+    /// # What the sibling above deliberately did not cover
+    ///
+    /// R311y873 gated the HEADER and said why: the header is what a linking
+    /// product reads and the only one of the two that ships. That reasoning is
+    /// still right and it left a hole the same round's carry named — the prose
+    /// in this file lists the states too, and it was one of the TWO lists that
+    /// said "one of five" for the whole round a sixth was added. Gating one of
+    /// two copies that went stale TOGETHER leaves the asymmetry that let them.
+    ///
+    /// # Why `include_str!` on this crate's own source
+    ///
+    /// The same argument the header leg makes: the bytes asserted about are the
+    /// bytes compiled into this build, not a file a test happened to open at a
+    /// path. A rustdoc comment is source, so the instrument is the same one.
+    ///
+    /// # ⚠ THE LIST, NOT THE FILE — the first draft of this gate was useless
+    ///
+    /// It asked whether `` `encoding_mismatch` `` appeared anywhere in
+    /// `lib.rs`. Deleting that word from the prose list SURVIVED: the same
+    /// backticked word occurs in the R311y873 paragraph below the list, in the
+    /// header test's own doc, and in this test's assertion strings. A sweep
+    /// over a whole file answers "is this word written somewhere", and the
+    /// question is "does the LIST name it".
+    ///
+    /// So the paragraph is cut out first, by the sentence that introduces it,
+    /// and the anchor's presence is asserted — an anchor that stops matching
+    /// would otherwise make this gate pass over an empty string, which is this
+    /// workspace's population-of-zero green wearing a documentation gate's
+    /// clothes.
+    ///
+    /// # The exclusion is shared, not re-derived
+    ///
+    /// `no_rules` is excluded here for the reason the header leg excludes it —
+    /// no document carries it — and that reason is held by
+    /// `no_rules_never_reaches_a_document_so_the_header_need_not_name_it`. Two
+    /// copies of the exclusion would be this item's own defect, one file down,
+    /// so the constant is read from the sibling rather than written twice.
+    #[test]
+    fn this_crates_rustdoc_names_every_payload_decode_state() {
+        const SOURCE: &str = include_str!("lib.rs");
+        // The sentence that OPENS the vocabulary list, in the
+        // `wz_dissect_declarations_declare` doc — where a reader of this crate
+        // learns the words. Matched without the backticked `state` in the
+        // middle so this literal cannot itself become a second copy of the
+        // thing being checked.
+        const OPENS: &str = "is one of";
+        const CLOSES: &str = "The last three are ANSWERS";
+        let from = SOURCE
+            .find(OPENS)
+            .expect("the vocabulary list's opening sentence must be findable");
+        let to = SOURCE[from..]
+            .find(CLOSES)
+            .expect("and its closing sentence, or this gate has no list to read");
+        let list = &SOURCE[from..from + to];
+        assert!(
+            list.len() > 40,
+            "the slice between the anchors is {} byte(s) and cannot be a list \
+             of six words: {list:?}",
+            list.len()
+        );
+
+        let emitted: Vec<&str> = wz_capture::payload_decode::PayloadDecoding::STATES
+            .iter()
+            .copied()
+            .filter(|s| *s != NEVER_EMITTED)
+            .collect();
+        assert!(
+            emitted.len() + 1 == wz_capture::payload_decode::PayloadDecoding::STATES.len(),
+            "the exclusion must name a state that EXISTS, or this gate is \
+             quietly running over the whole set minus nothing"
+        );
+        for state in emitted {
+            // Backticked, which is how the prose writes a wire word.
+            let quoted = format!("`{state}`");
+            assert!(
+                list.contains(&quoted),
+                "this crate's rustdoc list never names the {quoted} state, \
+                 which the library emits. The header gate beside this one would \
+                 still pass: these are the two lists R311y873's carry says went \
+                 stale together.\n---- the list ----\n{list}"
             );
         }
     }
