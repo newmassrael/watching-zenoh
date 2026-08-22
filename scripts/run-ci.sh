@@ -7732,7 +7732,12 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:4
         wz-routing-graph:6
         wz-runtime-coop:12
-        wz-runtime-tokio:532
+        # Round 1998 (item 470): 532 -> 524. The eight went with
+        # `raweth_socket` and `live_capture` when they moved to
+        # `wz-packet-socket` -- a count that FELL because code left, which the
+        # ratchet requires be written down in the same commit rather than left
+        # as slack the next round could spend.
+        wz-runtime-tokio:524
         wz-session-core:538
         wz-session-lwip:4
         wz-switchboard-codegen:8
