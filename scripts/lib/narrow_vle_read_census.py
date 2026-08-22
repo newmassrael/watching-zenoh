@@ -90,10 +90,51 @@ ROOT = Path(__file__).resolve().parents[2]
 # not a field, and wz does not choose there.
 TREES = ("crates", "out")
 
+# R2039 (open-debt item 343) — the widths are DERIVED, not spelled.
+#
 # `read_vle_u16(` / `.vle_u32(` / ... — every reader that can answer
-# `VleWidthOverflow`. `read_vle_u64` is absent on purpose: nothing is narrower
-# than the wire's own maximum.
-CALL = re.compile(r"\b(?:self\.cur\.|cursor\.|c\.)?(read_vle_u(?:8|16|32)|vle_u(?:8|16|32))\(")
+# `VleWidthOverflow`. The list used to be written by hand as `8|16|32`, which
+# is item 327's shape arriving in a second census: a reader at a width nobody
+# thought of is invisible, and this gate reports OK over it. It had already
+# rotted in the way a hand-written list does — `vle_u8` names no reader in this
+# tree and never has, so one third of the alternation could not match anything.
+#
+# `u64` is excluded by the rule rather than by an exemption: nothing is
+# narrower than the wire's own maximum, so a read into it cannot overflow.
+WIDTH_DECL = re.compile(r"\bfn\s+(?:read_)?vle_u(\d+)\s*\(")
+"""A cursor reader's DECLARATION, which is where a width enters this tree.
+
+Anchored on `(` immediately after the digits on purpose: `vle_u16_truncated` is
+a reader that TRUNCATES, and a truncating read has no upstream question to
+adjudicate. Sweeping it in would put a row in this census that nothing can
+answer.
+"""
+
+
+def narrow_widths(src: str) -> list[str]:
+    """Every width `src` declares a narrow reader for, widest last."""
+    found = sorted({w for w in WIDTH_DECL.findall(src) if int(w) < 64}, key=int)
+    return [str(w) for w in found]
+
+
+def call_pattern(widths: list[str]) -> re.Pattern[str]:
+    """The read pattern for `widths`, or a hard failure.
+
+    Raising rather than returning something harmless: an empty alternation
+    would match nothing and this census would report a clean sweep over a tree
+    it never looked at. That is the failure item 343 is about, and it must not
+    be reachable through the repair for it.
+    """
+    if not widths:
+        raise SystemExit(
+            "narrow-vle: no narrow VLE reader is declared anywhere in the "
+            "censused trees -- the derivation is dead and this census would "
+            "report OK without having looked"
+        )
+    alt = "|".join(widths)
+    return re.compile(
+        rf"\b(?:self\.cur\.|cursor\.|c\.)?(read_vle_u(?:{alt})|vle_u(?:{alt}))\("
+    )
 ARG = re.compile(r"\(\s*\"([^\"]+)\"")
 FN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+|async\s+|unsafe\s+)*fn\s+([A-Za-z0-9_]+)")
 
@@ -154,31 +195,135 @@ def tracked_rust() -> list[Path]:
     return [ROOT / line for line in proc.stdout.splitlines() if line]
 
 
-def census(paths: list[Path]) -> dict[str, str]:
-    """site key -> `<path>:<line>`, for every narrow VLE read found."""
+def census_text(rel: str, src: str, widths: list[str]) -> dict[str, str]:
+    """site key -> `<path>:<line>`, over ONE source's text.
+
+    Split out of [`census`] at R2039 so `--selftest` can drive the detector
+    against a fixture. A gate whose recogniser can only be exercised by the
+    tree it guards has no way to show it still recognises anything once that
+    tree stops producing findings — which is open-debt item 343 exactly.
+    """
+    call_re = call_pattern(widths)
     found: dict[str, str] = {}
-    for path in paths:
-        rel = path.relative_to(ROOT).as_posix()
-        enclosing = ""
-        for lineno, line in enumerate(path.read_text().splitlines(), start=1):
-            m = FN.match(line)
-            if m:
-                enclosing = m.group(1)
-            # A doc comment naming the reader is prose about it, not a read.
-            stripped = line.lstrip()
-            if stripped.startswith("//"):
-                continue
-            call = CALL.search(line)
-            if not call:
-                continue
-            arg = ARG.search(line, call.end() - 1)
-            field = arg.group(1) if arg else ""
-            key = f"{rel}::{enclosing}::{field}"
-            found.setdefault(key, f"{rel}:{lineno}")
+    enclosing = ""
+    for lineno, line in enumerate(src.splitlines(), start=1):
+        m = FN.match(line)
+        if m:
+            enclosing = m.group(1)
+        # A doc comment naming the reader is prose about it, not a read.
+        stripped = line.lstrip()
+        if stripped.startswith("//"):
+            continue
+        call = call_re.search(line)
+        if not call:
+            continue
+        arg = ARG.search(line, call.end() - 1)
+        field = arg.group(1) if arg else ""
+        found.setdefault(f"{rel}::{enclosing}::{field}", f"{rel}:{lineno}")
     return found
 
 
+def census(paths: list[Path]) -> dict[str, str]:
+    """site key -> `<path>:<line>`, for every narrow VLE read found."""
+    sources = [(p.relative_to(ROOT).as_posix(), p.read_text()) for p in paths]
+    # THE WIDTHS COME FROM THE SAME TREES THE READS DO, so a reader added in
+    # one of them is visible in all of them on the same commit.
+    widths: set[str] = set()
+    for _, src in sources:
+        widths.update(narrow_widths(src))
+    found: dict[str, str] = {}
+    for rel, src in sources:
+        found.update(census_text(rel, src, sorted(widths, key=int)))
+    return found
+
+
+def selftest() -> int:
+    """R2039 (debt-narrow-vle-selftest) — prove the DETECTOR still detects.
+
+    # Why a census with nothing to report needs this
+
+    Open-debt item 343: R311y880 paid off the last `MISMATCH`, so this gate now
+    reports `0 carried as MISMATCH` — and a census that has stopped looking
+    reports the same thing. The live population cannot tell the two apart,
+    because the whole point of the repair was to empty it.
+
+    A total blackout does fail already: with `found` empty, every `ADJUDICATED`
+    row becomes an "adjudication that outlives its code" failure. What has no
+    witness is PARTIAL blindness — a narrow read in a shape the pattern cannot
+    see — and that is the one a new reader actually produces.
+
+    So the detector is exercised against fixtures rather than against the tree,
+    the way `verdict_leg_mutation.py --selftest` is for the same reason one gate
+    over. Each case names what would be true if it were removed.
+    """
+    # The readers this tree declares, as `dissect.rs` declares them. Supplied
+    # to every case because the real census pools widths across the censused
+    # TREES rather than reading them out of the file it is scanning -- a
+    # fixture that carried only its own call would derive an empty width set
+    # and prove nothing.
+    DECLS = (
+        "    pub fn vle_u64(&mut self, name: &'static str) {}\n"
+        "    pub fn vle_u16(&mut self, name: &'static str) {}\n"
+        "    pub fn vle_u16_truncated(&mut self, name: &'static str) {}\n"
+        "    pub fn vle_u32(&mut self, name: &'static str) {}\n"
+    )
+    cases: list[tuple[str, str, set[str]]] = [
+        (
+            "an ordinary narrow read is SEEN",
+            'fn walk_encoding(c: &mut C) {\n    c.vle_u32("packed_id")?;\n}\n',
+            {"fx.rs::walk_encoding::packed_id"},
+        ),
+        (
+            "the `read_` spelling is seen too",
+            'fn walk_x(c: &mut C) {\n    self.cur.read_vle_u16("id")?;\n}\n',
+            {"fx.rs::walk_x::id"},
+        ),
+        (
+            "a TRUNCATING reader is NOT a narrow read -- it cannot answer "
+            "`VleWidthOverflow`, so claiming it would put a row in this census "
+            "that has no upstream question to adjudicate",
+            'fn walk_y(c: &mut C) {\n    c.vle_u16_truncated("weight")?;\n}\n',
+            set(),
+        ),
+        (
+            "prose about a reader is not a read",
+            'fn walk_z(c: &mut C) {\n    // c.vle_u32("nope")\n}\n',
+            set(),
+        ),
+        (
+            "A WIDTH THIS TREE GAINS LATER IS SEEN. The pattern used to spell "
+            "its widths by hand, so a reader at any other width was invisible "
+            "and this gate stayed green over it -- item 327's shape, one census "
+            "across",
+            'fn vle_u24(&mut self, name: &str) {}\n'
+            'fn walk_w(c: &mut C) {\n    c.vle_u24("hop")?;\n}\n',
+            # BOTH keys, and the second one is not an accident: a reader's own
+            # DECLARATION is a row in this census by design -- `ADJUDICATED`
+            # carries `vle_u16` and `vle_u32` as "the PRIMITIVE, not a field"
+            # precisely so a reader cannot enter the tree without someone
+            # naming what upstream does at that width.
+            {"fx.rs::vle_u24::", "fx.rs::walk_w::hop"},
+        ),
+    ]
+    failed = False
+    for name, src, want in cases:
+        # ⚠ The widths are pooled over DECLS + the case, exactly as `census`
+        # pools them over the trees; the keys come from the case alone, so a
+        # declaration cannot masquerade as a read.
+        widths = narrow_widths(DECLS + src)
+        got = set(census_text("fx.rs", src, widths))
+        if got != want:
+            failed = True
+            print(f"  narrow-vle SELFTEST FAIL: {name}\n    want {sorted(want)}\n    got  {sorted(got)}")
+    if failed:
+        return 1
+    print(f"  narrow-vle selftest: {len(cases)} detector case(s) hold")
+    return 0
+
+
 def main() -> int:
+    if "--selftest" in sys.argv[1:]:
+        return selftest()
     try:
         paths = tracked_rust()
     except RuntimeError as e:

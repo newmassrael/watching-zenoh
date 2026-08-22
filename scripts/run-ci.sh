@@ -1994,6 +1994,16 @@ PY
     # Same shape as the two above — a SET pinned by name, failing in BOTH
     # directions, with a reason on every row. Enforcement MEASURED both ways
     # this round (an unadjudicated new read, and a row outliving its code).
+    # Round 2039, open-debt item 343 — THE SELFTEST FIRST, for the reason
+    # C0mut runs `verdict_leg_mutation.py --selftest` before its own sweep.
+    # R311y880 paid off the last MISMATCH, so the census below now reports
+    # `0 carried as MISMATCH` — which is exactly what a census that has stopped
+    # looking reports. A total blackout does fail (every ADJUDICATED row becomes
+    # an adjudication outliving its code), but PARTIAL blindness — a narrow read
+    # in a shape the pattern cannot see — was silent, and a new reader is what
+    # produces it. Measured: with the widths spelled by hand again, the
+    # selftest's new-width case finds NOTHING and the live census still says OK.
+    python3 scripts/lib/narrow_vle_read_census.py --selftest || return 1
     python3 scripts/lib/narrow_vle_read_census.py || return 1
     # R311y881 — the APT PACKAGE census: what every ci.yml job downloads, and
     # why. The same SET-pinned, both-directions shape as the censuses above,
