@@ -855,6 +855,72 @@ enum Claim {
     Refuted(String),
 }
 
+#[cfg(test)]
+impl Claim {
+    /// Round 2027 (item 293) — WHAT THIS ARM DOES TO THE ROW, as one word.
+    ///
+    /// # The gate this is half of
+    ///
+    /// `Claim` had three arms and nothing outside `decode_payload`'s match
+    /// holding them. The compiler holds EXHAUSTIVENESS — a fourth arm without
+    /// a match arm does not build — and item 293 is about what it cannot hold:
+    /// an author who points a new arm at an EXISTING outcome. Two claims then
+    /// do one thing and nothing says so. That is item 283's finding, which
+    /// `PayloadDecoding::state` already carries a walk for, arriving one enum
+    /// over.
+    ///
+    /// ⚠ `cfg(test)`, UNLIKE `Misbound`'s walk, and the difference is worth
+    /// stating rather than copying. R311y926 took that one out of `cfg(test)`
+    /// because `Misbound::names` walks it in a SHIPPING build — a real
+    /// consumer existed. `Claim` is internal and nothing shipping asks it what
+    /// its arms are, so the same move here would mean inventing a caller to
+    /// justify a gate. The first draft did it anyway and `cargo doc` refused
+    /// the crate with `associated items are never used`.
+    ///
+    /// What is lost by the gate being test-only is stated plainly: an arm
+    /// added with no entry here fails `cargo test`, not `cargo build`. The
+    /// EXHAUSTIVENESS half still fails the build, because `decode_payload`'s
+    /// match is not test-only — so what escapes a shipping build is only the
+    /// distinctness question, which is the one this test asks.
+    ///
+    /// The words are what the arm CAUSES, not what it is called — `applies`,
+    /// `withholds`, `overrides` — because that is the property two arms must
+    /// not share. Naming them after the variants would make the distinctness
+    /// test compare the variant set with itself.
+    fn outcome(&self) -> &'static str {
+        match self {
+            Self::Agrees => "applies",
+            Self::Vetoes(..) => "withholds",
+            Self::Refuted(_) => "overrides",
+        }
+    }
+
+    /// The next arm, so a test visits every one without writing the list down.
+    ///
+    /// `None` from the last is the end of the walk, not an absence. The
+    /// payloads are the cheapest values that construct: this chain is about
+    /// which arms EXIST, and an arm's contents are the business of the tests
+    /// that drive real traffic through it.
+    fn next(&self) -> Option<Self> {
+        Some(match self {
+            Self::Agrees => Self::Vetoes(String::new(), false),
+            Self::Vetoes(..) => Self::Refuted(String::new()),
+            Self::Refuted(_) => return None,
+        })
+    }
+
+    /// Every arm, walked rather than listed.
+    fn all() -> alloc::vec::Vec<Self> {
+        let mut out = alloc::vec::Vec::new();
+        let mut cur = Some(Self::Agrees);
+        while let Some(v) = cur {
+            cur = v.next();
+            out.push(v);
+        }
+        out
+    }
+}
+
 /// R311y873 — the publisher's claim, weighed against `format`'s rule and, since
 /// R311y874, against the bytes the claim is about.
 ///
@@ -1366,6 +1432,105 @@ mod tests {
                 .contains(&ENCODING_ID_TO_STR[ENC_ZENOH_BYTES as usize]),
             "`zenoh/bytes` must not be a claimed encoding"
         );
+    }
+
+    /// ITEM 293 — EVERY `Claim` ARM DOES ITS OWN THING, AND REAL TRAFFIC
+    /// REACHES EACH ONE.
+    ///
+    /// # What the compiler already holds, and what it cannot
+    ///
+    /// Exhaustiveness: a fourth arm without a match arm in `decode_payload`
+    /// does not build. What no compiler can hold is an author pointing a new
+    /// arm at an EXISTING outcome — two claims then do one thing and nothing
+    /// says so. That is item 283's finding, which `PayloadDecoding::state`
+    /// carries a walk for, arriving one enum over.
+    ///
+    /// # Two halves, and the second is the one that would have been skipped
+    ///
+    /// The walk asserts the outcomes are DISTINCT. On its own that is a claim
+    /// about a `match` in this file agreeing with another `match` in this file,
+    /// which is worth little. So the second half drives REAL TRAFFIC through
+    /// `decode_payload` — one fixture per arm — and asserts the row that comes
+    /// back is the one the arm's word names. An arm whose word says
+    /// `withholds` and whose traffic decodes fails here.
+    #[test]
+    fn every_claim_arm_has_its_own_outcome_and_traffic_that_reaches_it() {
+        let all = Claim::all();
+        assert!(
+            !all.is_empty(),
+            "the walk visited no arm at all, so nothing below was measured"
+        );
+        let mut words: Vec<&str> = all.iter().map(Claim::outcome).collect();
+        let visited = words.len();
+        words.sort_unstable();
+        words.dedup();
+        assert_eq!(
+            words.len(),
+            visited,
+            "two arms share an outcome word, so one of them does something \
+             nothing distinguishes: {:?}",
+            all.iter().map(Claim::outcome).collect::<Vec<_>>()
+        );
+
+        // THE OTHER HALF. Each arm, reached by traffic, judged by what the row
+        // turns out to be — so the words above are about behaviour rather than
+        // about a second `match` beside the first.
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+        let json: &[u8] = br#"{"a":1}"#;
+        let protobuf: &[u8] = &[0x08, 0x2a];
+
+        let mut json_rule = FormatMap::new();
+        json_rule
+            .declare("demo/**=json")
+            .expect("a keyexpr pattern");
+        let mut pb_rule = FormatMap::new();
+        pb_rule
+            .declare("demo/**=protobuf")
+            .expect("a keyexpr pattern");
+
+        // `applies` — the label and the rule agree.
+        let run = Declarations::new(&json_rule);
+        let applies = decode_payload(&put_declaring(ENC_JSON, json), &run, at);
+        // `withholds` — a label the bytes bear out, against a rule that is not
+        // for it.
+        let run2 = Declarations::new(&pb_rule);
+        let withholds = decode_payload(&put_declaring(ENC_JSON, json), &run2, at);
+        // `overrides` — a label the bytes REFUTE, so the rule wins and the row
+        // says whose label was overridden.
+        let run3 = Declarations::new(&pb_rule);
+        let overrides = decode_payload(&put_declaring(ENC_JSON, protobuf), &run3, at);
+
+        let word = |d: &PayloadDecoding| match d {
+            PayloadDecoding::Decoded {
+                despite_encoding: None,
+                ..
+            } => "applies",
+            PayloadDecoding::Decoded {
+                despite_encoding: Some(_),
+                ..
+            } => "overrides",
+            PayloadDecoding::EncodingMismatch { .. } => "withholds",
+            other => panic!("no claim arm produces this row: {other:?}"),
+        };
+        assert_eq!(
+            (word(&applies), word(&withholds), word(&overrides)),
+            ("applies", "withholds", "overrides"),
+            "each arm's word must be what its traffic actually does:\n  \
+             {applies:?}\n  {withholds:?}\n  {overrides:?}"
+        );
+        // And every word the walk holds was reached by one of those three. A
+        // fourth arm added with a fourth word fails here until traffic for it
+        // exists — which is the point: an unreachable answer is not an answer.
+        let reached = [word(&applies), word(&withholds), word(&overrides)];
+        for arm in &all {
+            assert!(
+                reached.contains(&arm.outcome()),
+                "no traffic in this test reaches the `{}` arm, so the walk \
+                 holds a word nothing produces",
+                arm.outcome()
+            );
+        }
     }
 
     /// ITEM 289 — THE SECOND SCAN IS COUNTED, AND ONLY WHERE IT HAPPENS.
