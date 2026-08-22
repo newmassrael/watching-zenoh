@@ -530,6 +530,7 @@ mod tests {
             checksums: crate::link::Checksums {
                 ip: None,
                 transport: None,
+                tunnel: None,
             },
             tunnel: link::Tunnel::none(),
         }

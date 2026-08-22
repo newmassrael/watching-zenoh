@@ -386,13 +386,35 @@ pub struct Checksums {
     /// (RFC 768) rather than getting it wrong. Over IPv6 zero is illegal and
     /// reports `Some(false)`.
     pub transport: Option<bool>,
+    /// Round 2014 (item 261) — the CARRIER's own checksum, folded across every
+    /// GRE header in the chain that carried one.
+    ///
+    /// `None` is the ordinary answer and means no carrier in this packet's
+    /// chain declared a checksum: GRE's is optional (RFC 2784 §2.5, the `C`
+    /// bit), and an untunnelled packet has no carrier at all. `Some` means at
+    /// least one was present, and `false` that one of them did not verify.
+    ///
+    /// # Why this field exists
+    ///
+    /// `strip_gre` read the `C` bit only to SIZE the header and stepped over
+    /// the two bytes it announced. Every other integrity verdict this crate
+    /// reaches is reported — that is what this struct is for — so the carrier's
+    /// was the one judgement that was neither made nor reported as absent. A
+    /// GRE header with a corrupt checksum and one with a correct checksum
+    /// produced byte-identical pages, which is the state item 261 named and
+    /// this round measured before changing anything.
+    ///
+    /// Folded across the chain rather than read off the outermost carrier, for
+    /// the reason the walk folds `ip` the same way: reporting only the outer
+    /// would let a tunnel whose inner header is corrupt read as verified.
+    pub tunnel: Option<bool>,
 }
 
 impl Checksums {
     /// `true` when a checksum was present and did not verify — the only state
     /// that is evidence of corruption rather than of absence.
     pub fn any_invalid(&self) -> bool {
-        self.ip == Some(false) || self.transport == Some(false)
+        self.ip == Some(false) || self.transport == Some(false) || self.tunnel == Some(false)
     }
 }
 
@@ -922,8 +944,9 @@ pub fn decapsulate(
         LinkBody::RawEth(d) => return Ok(Transport::RawEth(d)),
         LinkBody::Ip { bytes, is_v6 } => (bytes, is_v6),
     };
-    let walked = walk_ip_chain(ip_bytes, is_v6, 0, None, Tunnel::none(), packet_index)?;
+    let walked = walk_ip_chain(ip_bytes, is_v6, 0, None, None, Tunnel::none(), packet_index)?;
     let ip_checksum = walked.ip_checksum;
+    let tunnel_checksum = walked.tunnel_checksum;
     let tunnel = walked.tunnel;
     let ip = match walked.end {
         // A GRETAP tunnel whose inner frame was a pico raweth one. The walk
@@ -934,6 +957,12 @@ pub fn decapsulate(
         // an unstamped arm here would be the one that mattered most.
         ChainEnd::RawEth(mut d) => {
             d.tunnel = tunnel;
+            // Round 2014 (item 261) — and its carriers' verdict with it. A
+            // GRETAP frame is the arm where the ONLY checksum that exists is
+            // the carrier's, so an arm that stamped the chain and not the
+            // verdict would report where a corrupt tunnel came from while
+            // staying silent that it was corrupt.
+            d.checksums.tunnel = tunnel_checksum;
             return Ok(Transport::RawEth(d));
         }
         ChainEnd::Ip(ip) => ip,
@@ -955,6 +984,7 @@ pub fn decapsulate(
             checksums: Checksums {
                 ip: ip_checksum,
                 transport: None,
+                tunnel: tunnel_checksum,
             },
             tunnel,
         }));
@@ -965,6 +995,7 @@ pub fn decapsulate(
     let checksums = Checksums {
         ip: ip_checksum,
         transport: transport_checksum(&ip.src, &ip.dst, ip.proto, ip.payload),
+        tunnel: tunnel_checksum,
     };
     transport_from_ip(
         ip.src,
@@ -1006,7 +1037,7 @@ pub fn decapsulate(
 /// the header parses and only its payload is unwalkable, the ethertype IS
 /// known, and reporting 47 there would tell a reader to add GRE support that
 /// is already present.
-fn strip_gre(bytes: &[u8]) -> Result<(&[u8], u16), SkipReason> {
+fn strip_gre(bytes: &[u8]) -> Result<(&[u8], u16, Option<bool>), SkipReason> {
     if bytes.len() < 4 {
         return Err(SkipReason::Truncated);
     }
@@ -1036,7 +1067,20 @@ fn strip_gre(bytes: &[u8]) -> Result<(&[u8], u16), SkipReason> {
     if bytes.len() < len {
         return Err(SkipReason::Truncated);
     }
-    Ok((&bytes[len..], protocol_type))
+    // Round 2014 (item 261) — VERIFIED, not merely stepped over.
+    //
+    // RFC 2784 §2.5: the field holds the one's-complement checksum of the GRE
+    // header AND the payload packet, so the sum over the whole thing WITH the
+    // field in place must be zero — the same property `ipv4_header_ok` uses,
+    // over a different span. `bytes` is exactly that span: `strip_gre` is
+    // handed the carrier's whole body.
+    //
+    // Reported, never acted on. A corrupt carrier still gets walked, for the
+    // reason [`Checksums`] gives about every other verdict here: a dissector
+    // that refuses what it can read leaves the reader with less than one that
+    // reads it and says so.
+    let checksum = checksum_present.then(|| ones_complement(bytes, 0) == 0);
+    Ok((&bytes[len..], protocol_type, checksum))
 }
 
 /// Consume ONE GRE carrier: the header, and whatever its ethertype names.
@@ -1045,9 +1089,17 @@ fn strip_gre(bytes: &[u8]) -> Result<(&[u8], u16), SkipReason> {
 /// onto the walk, and R311y863's finding was that a step written at one of
 /// them makes the same carrier readable at one packet and unreadable at two.
 /// Every ethertype this reader opens is opened here, once.
-fn step_gre(payload: &[u8], packet_index: usize) -> Result<LinkBody<'_>, SkipReason> {
-    let (body, protocol_type) = strip_gre(payload)?;
-    match protocol_type {
+///
+/// Round 2014 (item 261) — returns the carrier's own checksum verdict beside
+/// the body. It rides out of the SAME function the header is parsed in, for
+/// item 260's reason: a verdict computed at one of the walk's two doors would
+/// be a carrier that verifies on a whole packet and not on a fragmented one.
+fn step_gre(
+    payload: &[u8],
+    packet_index: usize,
+) -> Result<(LinkBody<'_>, Option<bool>), SkipReason> {
+    let (body, protocol_type, checksum) = strip_gre(payload)?;
+    let body = match protocol_type {
         ETHERTYPE_IPV4 => Ok(LinkBody::Ip {
             bytes: body,
             is_v6: false,
@@ -1065,6 +1117,22 @@ fn step_gre(payload: &[u8], packet_index: usize) -> Result<LinkBody<'_>, SkipRea
         // than as protocol 47, which would send a reader to build GRE support
         // that is already here.
         other => Err(SkipReason::GrePayload(other)),
+    }?;
+    Ok((body, checksum))
+}
+
+/// Fold one carrier's checksum verdict into the chain's.
+///
+/// Round 2014 (item 261) — the same three-state fold [`walk_ip_chain`] applies
+/// to `ip`, written once because it is applied at both of the walk's doors and
+/// two copies is how they come to disagree: `Some(false)` if any carrier that
+/// HAD a checksum failed, `Some(true)` if at least one had one and all passed,
+/// `None` if none did.
+fn fold_checksum(sofar: Option<bool>, this: Option<bool>) -> Option<bool> {
+    match (sofar, this) {
+        (a, None) => a,
+        (None, b) => b,
+        (Some(a), Some(b)) => Some(a && b),
     }
 }
 
@@ -1091,6 +1159,9 @@ struct Walked<'a> {
     end: ChainEnd<'a>,
     /// Folded across every v4 header in the chain — see [`walk_ip_chain`].
     ip_checksum: Option<bool>,
+    /// Round 2014 (item 261) — folded across every GRE carrier that declared
+    /// one. The third such fold, and the reason `Walked` is a struct.
+    tunnel_checksum: Option<bool>,
     /// The carriers stepped through, outermost first.
     tunnel: Tunnel,
 }
@@ -1130,12 +1201,14 @@ fn walk_ip_chain<'a>(
     is_v6: bool,
     start_depth: usize,
     start_checksum: Option<bool>,
+    start_tunnel_checksum: Option<bool>,
     start_tunnel: Tunnel,
     packet_index: usize,
 ) -> Result<Walked<'a>, SkipReason> {
     let mut cursor: &'a [u8] = bytes;
     let mut v6 = is_v6;
     let mut ip_checksum = start_checksum;
+    let mut tunnel_checksum = start_tunnel_checksum;
     let mut depth = start_depth;
     let mut tunnel = start_tunnel;
     loop {
@@ -1157,6 +1230,7 @@ fn walk_ip_chain<'a>(
             return Ok(Walked {
                 end: ChainEnd::Ip(d),
                 ip_checksum,
+                tunnel_checksum,
                 tunnel,
             });
         }
@@ -1194,7 +1268,9 @@ fn walk_ip_chain<'a>(
             // is a carrier and not a header is open-debt item 262, which this
             // step joins rather than settles.
             tunnel.push(d.src, d.dst, d.proto);
-            match step_gre(d.payload, packet_index)? {
+            let (body, carrier_checksum) = step_gre(d.payload, packet_index)?;
+            tunnel_checksum = fold_checksum(tunnel_checksum, carrier_checksum);
+            match body {
                 LinkBody::Ip { bytes, is_v6 } => {
                     v6 = is_v6;
                     cursor = bytes;
@@ -1203,6 +1279,7 @@ fn walk_ip_chain<'a>(
                     return Ok(Walked {
                         end: ChainEnd::RawEth(dg),
                         ip_checksum,
+                        tunnel_checksum,
                         tunnel,
                     })
                 }
@@ -1212,6 +1289,7 @@ fn walk_ip_chain<'a>(
         return Ok(Walked {
             end: ChainEnd::Ip(d),
             ip_checksum,
+            tunnel_checksum,
             tunnel,
         });
     }
@@ -1276,14 +1354,22 @@ pub fn transport_from_ip(
                 // takes for protocol 47 has to happen before re-entering it.
                 // Item 260 — through `step_gre`, so this door opens exactly the
                 // ethertypes the other one does, GRETAP included.
-                match step_gre(payload, packet_index)? {
+                // Round 2014 (item 261) — the reassembled carrier's OWN
+                // checksum is folded in here, at the door that consumed it.
+                // A GRE carrier that arrived in pieces is exactly as checksummed
+                // as one that arrived whole, and this is the only place that
+                // knows it.
+                let (body, carrier_checksum) = step_gre(payload, packet_index)?;
+                let seeded = fold_checksum(checksums.tunnel, carrier_checksum);
+                match body {
                     LinkBody::Ip { bytes, is_v6 } => {
-                        walk_ip_chain(bytes, is_v6, 1, checksums.ip, tunnel, packet_index)?
+                        walk_ip_chain(bytes, is_v6, 1, checksums.ip, seeded, tunnel, packet_index)?
                     }
                     // A reassembled GRETAP carrier whose inner frame was a pico
                     // raweth one: the walk is over before it starts.
                     LinkBody::RawEth(mut dg) => {
                         dg.tunnel = tunnel;
+                        dg.checksums.tunnel = seeded;
                         return Ok(Transport::RawEth(dg));
                     }
                 }
@@ -1293,16 +1379,19 @@ pub fn transport_from_ip(
                     proto == IP_PROTO_IPV6_IN_IP,
                     1,
                     checksums.ip,
+                    checksums.tunnel,
                     tunnel,
                     packet_index,
                 )?
             };
             let ip_checksum = walked.ip_checksum;
+            let tunnel_checksum = walked.tunnel_checksum;
             let tunnel = walked.tunnel;
             let ip = match walked.end {
                 ChainEnd::Ip(ip) => ip,
                 ChainEnd::RawEth(mut dg) => {
                     dg.tunnel = tunnel;
+                    dg.checksums.tunnel = tunnel_checksum;
                     return Ok(Transport::RawEth(dg));
                 }
             };
@@ -1322,6 +1411,7 @@ pub fn transport_from_ip(
                     checksums: Checksums {
                         ip: ip_checksum,
                         transport: None,
+                        tunnel: tunnel_checksum,
                     },
                     tunnel,
                 }));
@@ -1334,6 +1424,11 @@ pub fn transport_from_ip(
             let inner = Checksums {
                 ip: ip_checksum,
                 transport: transport_checksum(&ip.src, &ip.dst, ip.proto, ip.payload),
+                // Round 2014 (item 261) — CARRIED FORWARD, unlike `transport`
+                // above. The transport verdict is recomputed because it is
+                // about the inner header; the carrier verdict is about the
+                // headers already consumed, which no deeper call can revisit.
+                tunnel: tunnel_checksum,
             };
             // Recursion of depth exactly ONE: `walk_ip_chain` returns either a
             // fragment (handled above), a raweth datagram (returned above), or
@@ -1534,6 +1629,11 @@ fn strip_raweth(bytes: &[u8], packet_index: usize) -> Option<Datagram> {
         checksums: Checksums {
             ip: None,
             transport: None,
+            // Round 2014 (item 261) — `None` here even for a raweth frame
+            // inside GRETAP, and for the same reason `tunnel` below is empty:
+            // the carriers are consumed by the walk ABOVE this strip, which
+            // stamps both onto the datagram when it returns.
+            tunnel: None,
         },
         // Item 252 — [`Tunnel::none`] because this strip runs at the LINK
         // layer, which is above every carrier: a raweth frame inside GRETAP

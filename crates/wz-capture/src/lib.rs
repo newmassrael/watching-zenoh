@@ -2706,6 +2706,19 @@ pub struct DissectionHealth {
     /// Packets whose transport checksum was absent — a UDP-over-IPv4 zero
     /// (the sender declining, RFC 768) or a layer that has none.
     pub transport_checksum_absent: usize,
+    /// Round 2014 (item 261) — GRE carrier checksums that verified.
+    pub tunnel_checksum_valid: usize,
+    /// Carrier checksums that were present and did NOT verify.
+    ///
+    /// The one state here that is evidence of a corrupt TUNNEL, as distinct
+    /// from a corrupt packet inside a sound one. A reader chasing a lossy
+    /// overlay wants to know which of the two they have, and before this round
+    /// the page could not say: `strip_gre` read the `C` bit only to size the
+    /// header and stepped over the two bytes it announced.
+    pub tunnel_checksum_invalid: usize,
+    /// Packets whose carriers declared no checksum — an untunnelled packet, or
+    /// a GRE header with the `C` bit clear, which is legal and common.
+    pub tunnel_checksum_absent: usize,
     /// Packets that yielded no stream bytes, INCLUDING any whose record was
     /// discarded to stay inside [`DissectionLimits::skipped_packets`]. So this
     /// is `skipped().len() + drops().skipped`, and it is the honest total where
@@ -2723,7 +2736,13 @@ impl DissectionHealth {
     /// reordering are normal on a real network and an `any_*` that included
     /// them would be true for almost every capture.
     pub fn any_checksum_invalid(&self) -> bool {
-        self.ip_checksum_invalid > 0 || self.transport_checksum_invalid > 0
+        self.ip_checksum_invalid > 0
+            || self.transport_checksum_invalid > 0
+            // Round 2014 (item 261) — the carrier's, which is the whole of
+            // that item: a corrupt tunnel header is corruption this capture
+            // holds, and leaving it out here would report the verdict on the
+            // page while the one-line answer still said the capture was sound.
+            || self.tunnel_checksum_invalid > 0
     }
 }
 
@@ -2935,7 +2954,11 @@ pub struct Dissection {
     /// R311y605 (F5) — checksum verdicts, tallied as packets arrive. They must
     /// be counted here and not derived later: a `Checksums` rides on the
     /// `Segment` / `Datagram`, which is consumed by the assembler and gone.
-    checksums: [usize; 6],
+    /// Round 2014 (item 261) — NINE, not six: the carrier's own verdict is the
+    /// third triple, on the same valid / invalid / absent shape as the two
+    /// above it. Widened rather than given a separate pair of counters so that
+    /// `tally_checksums` stays one function and cannot fall out of step.
+    checksums: [usize; 9],
     /// R311y713 (§B1) — everything the flows that have LEFT are still owed.
     ///
     /// One value where R311y605 / R311y610 / R311y650 / R311y656 / R311y666
@@ -3067,7 +3090,7 @@ impl Default for Dissection {
             serial_session: new_session(DissectionLimits::default().reassembly_window_ms),
             limits: DissectionLimits::default(),
             drops: DissectionDrops::default(),
-            checksums: [0; 6],
+            checksums: [0; 9],
             carry: exit::ExitCarry::default(),
             fragments: frag::FragmentTable::default(),
             #[cfg(feature = "reassembly")]
@@ -3211,6 +3234,9 @@ impl Dissection {
             transport_checksum_valid: self.checksums[3],
             transport_checksum_invalid: self.checksums[4],
             transport_checksum_absent: self.checksums[5],
+            tunnel_checksum_valid: self.checksums[6],
+            tunnel_checksum_invalid: self.checksums[7],
+            tunnel_checksum_absent: self.checksums[8],
             packets_skipped: self.skipped.len() + self.drops.skipped,
             // R311y746 (debt-carry-N11) — `self.drops()` and NOT the raw field.
             // `drops()` composes `flows` from the retirement count (R311y713
@@ -3245,6 +3271,11 @@ impl Dissection {
         loop {
             let packet_index = piece.packet_index;
             let ip_checksum = piece.checksums.ip;
+            // Round 2014 (item 261) — read off the PIECE, beside the IP verdict
+            // that has been read off it since R311y606. Both are facts about
+            // the headers the reassembler consumed, and neither can be
+            // recovered once the table holds only the body.
+            let tunnel_checksum = piece.checksums.tunnel;
             let Some(done) = self.fragments.push(piece, ts_millis) else {
                 self.note_skip(packet_index, SkipReason::IpFragmentPending);
                 return;
@@ -3264,6 +3295,10 @@ impl Dissection {
                     done.key.proto,
                     &done.payload,
                 ),
+                // Round 2014 (item 261) — the chain the PIECES arrived through
+                // has already been judged; `transport_from_ip` folds whatever
+                // the reassembled carrier's own header adds on top of it.
+                tunnel: tunnel_checksum,
             };
             match link::transport_from_ip(
                 done.key.src,
@@ -3479,6 +3514,16 @@ impl Dissection {
             Some(true) => 3,
             Some(false) => 4,
             None => 5,
+        }] += 1;
+        // Round 2014 (item 261) — the CARRIER's verdict, tallied in the same
+        // breath as the two above it. `absent` is the answer for every
+        // untunnelled packet, which is nearly all of them, and that is the
+        // point: an absent verdict is now a REPORTED absence rather than a
+        // judgement nobody made.
+        self.checksums[match c.tunnel {
+            Some(true) => 6,
+            Some(false) => 7,
+            None => 8,
         }] += 1;
     }
 
@@ -4710,6 +4755,10 @@ impl Dissection {
             checksums: link::Checksums {
                 ip: None,
                 transport: None,
+                // Round 2014 (item 261) — `None` for the same reason the
+                // `tunnel` below is empty: there is no carrier here to have
+                // checksummed anything.
+                tunnel: None,
             },
             // Item 252 — a vsock record CANNOT be tunnelled, and this is the
             // one place that is a statement rather than a default. The

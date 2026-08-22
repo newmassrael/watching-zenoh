@@ -856,8 +856,14 @@ impl<'a> CaptureReport<'a> {
         s.push(',');
         carriers_json(d, s);
         s.push_str(&format!(
-            ",\"ip_checksum_invalid\":{},\"transport_checksum_invalid\":{}",
-            health.ip_checksum_invalid, health.transport_checksum_invalid
+            ",\"ip_checksum_invalid\":{},\"transport_checksum_invalid\":{}\
+             ,\"tunnel_checksum_invalid\":{}",
+            health.ip_checksum_invalid,
+            health.transport_checksum_invalid,
+            // Round 2014 (item 261) — this summary carries the INVALID counts
+            // only, which is the shape it has always had: absence is not news
+            // and corruption is. A corrupt carrier is corruption.
+            health.tunnel_checksum_invalid
         ));
         // R311y648 (§1.2a) — STRUCTURAL, like `skips` below: present with zeroes
         // on a plaintext capture, so a consumer never has to test for the key to
@@ -3207,7 +3213,9 @@ pub fn health_json(d: &crate::Dissection) -> String {
          \"streams\":{{\"retransmits\":{},\"out_of_order\":{},\"partial_overlaps\":{},\
          \"ip_checksum_valid\":{},\"ip_checksum_invalid\":{},\"ip_checksum_absent\":{},\
          \"transport_checksum_valid\":{},\"transport_checksum_invalid\":{},\
-         \"transport_checksum_absent\":{}}},\
+         \"transport_checksum_absent\":{},\
+         \"tunnel_checksum_valid\":{},\"tunnel_checksum_invalid\":{},\
+         \"tunnel_checksum_absent\":{}}},\
          \"framing\":{{\"gaps_forced\":{},\"gap_bytes_missing\":{},\
          \"desyncs\":{},\"recoveries\":{},\"resync_skipped_bytes\":{},\
          \"reserved_headers\":{},\
@@ -3243,6 +3251,12 @@ pub fn health_json(d: &crate::Dissection) -> String {
         h.transport_checksum_valid,
         h.transport_checksum_invalid,
         h.transport_checksum_absent,
+        // Round 2014 (item 261) — the machine half of the third triple, in the
+        // order `health_text` prints it. Both renderings read the same
+        // accessors in the same order; neither is free to omit one.
+        h.tunnel_checksum_valid,
+        h.tunnel_checksum_invalid,
+        h.tunnel_checksum_absent,
         fr.gaps_forced,
         fr.gap_bytes_missing,
         fr.desyncs,
@@ -3310,13 +3324,20 @@ pub fn health_text(d: &crate::Dissection) -> String {
     ));
     s.push_str(&format!(
         "  checksums: ip {} valid / {} invalid / {} absent, \
-         transport {} valid / {} invalid / {} absent\n",
+         transport {} valid / {} invalid / {} absent, \
+         tunnel {} valid / {} invalid / {} absent\n",
         h.ip_checksum_valid,
         h.ip_checksum_invalid,
         h.ip_checksum_absent,
         h.transport_checksum_valid,
         h.transport_checksum_invalid,
-        h.transport_checksum_absent
+        h.transport_checksum_absent,
+        // Round 2014 (item 261) — the third triple, on the SAME line as the
+        // two it joins. A separate line would have let a reader scanning for
+        // "checksums" find the old answer and stop.
+        h.tunnel_checksum_valid,
+        h.tunnel_checksum_invalid,
+        h.tunnel_checksum_absent
     ));
     s.push_str(&format!(
         "  framing: {} gap(s) forced, {} byte(s) missing, {} desync(s), \
@@ -6742,6 +6763,179 @@ mod tests {
                 .contains("chain(s) deeper than this reader walks"),
             "{}",
             CaptureReport::of(&d).to_text()
+        );
+    }
+
+    /// A GRE carrier with the `C` bit set and a checksum that is either
+    /// CORRECT or deliberately wrong.
+    ///
+    /// The correct one is computed the way the sender would: zero the field,
+    /// sum the header and payload, complement. Building it from the same
+    /// primitive the reader verifies with would prove nothing, so it is built
+    /// from the RFC's definition and the reader is asked whether it agrees.
+    fn gre_with_checksum(inner: &[u8], correct: bool) -> alloc::vec::Vec<u8> {
+        let zeroed = gre(0x8000, 0x0800, &[0u8; 4], inner);
+        let mut sum: u32 = 0;
+        let mut i = 0;
+        while i + 1 < zeroed.len() {
+            sum += u32::from(u16::from_be_bytes([zeroed[i], zeroed[i + 1]]));
+            i += 2;
+        }
+        if i < zeroed.len() {
+            sum += u32::from(u16::from_be_bytes([zeroed[i], 0]));
+        }
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        let field = if correct { !(sum as u16) } else { 0xDEAD };
+        let mut opt = alloc::vec::Vec::new();
+        opt.extend_from_slice(&field.to_be_bytes());
+        opt.extend_from_slice(&0u16.to_be_bytes());
+        gre(0x8000, 0x0800, &opt, inner)
+    }
+
+    /// ITEM 261 — THE CARRIER'S OWN CHECKSUM IS JUDGED, AND SAID.
+    ///
+    /// # The defect
+    ///
+    /// `strip_gre` read the `C` bit only to SIZE the header and stepped over
+    /// the two bytes it announced. Every other integrity verdict this crate
+    /// reaches is reported — that is what `Checksums` is for — so the
+    /// carrier's was the only judgement neither made nor reported as absent.
+    ///
+    /// MEASURED before changing anything, with a throwaway probe: a GRE header
+    /// carrying checksum `0xDEAD` and one carrying `0x0000` produced
+    /// `identical page: true` and identical health. Corruption present, page
+    /// silent.
+    ///
+    /// # Why all three states are driven
+    ///
+    /// `Some(false)` alone would pass for a reader that answered "invalid" to
+    /// everything, and this crate's own rule is that an absent verdict and a
+    /// failed one are different answers. So: a correct checksum verifies, a
+    /// corrupt one does not, and a carrier with the `C` bit CLEAR reports
+    /// absent rather than either.
+    #[test]
+    fn a_gre_carriers_checksum_is_verified_and_reported() {
+        let inner = ipv4_packet(17, [192, 168, 0, 1], [192, 168, 0, 2], &zenoh_udp(4));
+        let read = |body: &[u8]| {
+            let mut d = crate::Dissection::new();
+            d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &eth_ipv4_proto(47, body));
+            d.finish();
+            let h = d.health();
+            (
+                (
+                    h.tunnel_checksum_valid,
+                    h.tunnel_checksum_invalid,
+                    h.tunnel_checksum_absent,
+                ),
+                // `health_text`, not `CaptureReport::to_text` — the checksum
+                // triples live on the health document, which is where the
+                // other two already are. Asserting on the capture page instead
+                // was this test's first draft and it failed for the right
+                // reason: that page carries no checksum line at all, so a fix
+                // that reported the verdict THERE would have put the carrier's
+                // answer somewhere its two siblings are not.
+                health_text(&d),
+                health_json(&d),
+            )
+        };
+
+        let good = read(&gre_with_checksum(&inner, true));
+        let bad = read(&gre_with_checksum(&inner, false));
+        let none = read(&gre(0, 0x0800, &[], &inner));
+
+        assert_eq!(good.0, (1, 0, 0), "a correct carrier checksum verifies");
+        assert_eq!(bad.0, (0, 1, 0), "and a corrupt one does NOT -- item 261");
+        assert_eq!(
+            none.0,
+            (0, 0, 1),
+            "and a carrier that declared none is ABSENT, which is a third \
+             answer and not a failure"
+        );
+
+        // The documents must DIFFER, which is the probe's finding inverted.
+        assert_ne!(
+            good.1, bad.1,
+            "a corrupt tunnel and a sound one read alike -- this IS item 261"
+        );
+        assert_ne!(good.2, bad.2, "and the same in the machine rendering");
+        assert!(
+            bad.1.contains("tunnel 0 valid / 1 invalid / 0 absent"),
+            "and the page says which of the three layers was corrupt:\n{}",
+            bad.1
+        );
+        assert!(good.1.contains("tunnel 1 valid / 0 invalid / 0 absent"));
+        assert!(bad.2.contains("\"tunnel_checksum_invalid\":1"), "{}", bad.2);
+
+        // The one-line answer moves too. A verdict on the page that leaves
+        // `any_checksum_invalid` false would let a summary contradict the
+        // detail below it -- and the summary is what most readers read.
+        let mut corrupt = crate::Dissection::new();
+        corrupt.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &eth_ipv4_proto(47, &gre_with_checksum(&inner, false)),
+        );
+        corrupt.finish();
+        assert!(corrupt.health().any_checksum_invalid());
+
+        // CONTROL: the corrupt carrier is still WALKED. Reported, never acted
+        // on -- a dissector that refused what it can read would leave the
+        // reader with less than one that reads it and says so.
+        assert_eq!(
+            corrupt.datagram_flows().len(),
+            1,
+            "a bad checksum is not a skip: {:?}",
+            corrupt.skip_census()
+        );
+        assert_eq!(corrupt.datagram_flows()[0].frames.len(), 4);
+    }
+
+    /// ITEM 261, THE SECOND DOOR — a FRAGMENTED carrier's checksum is judged
+    /// too.
+    ///
+    /// # Why this exists, stated as what happened rather than as a principle
+    ///
+    /// Round 2013 established that a fix touching two sites must mutate each
+    /// alone, and that a survivor is a finding. Removing the fold at
+    /// `transport_from_ip`'s GRE arm SURVIVED the whole suite: the leg above
+    /// drives a carrier that arrived whole, and a carrier that arrived in
+    /// pieces reaches `step_gre` from the other door entirely.
+    ///
+    /// That door is not an exotic path. A GRE carrier adds header bytes to a
+    /// packet already at the MTU, so a fragmented tunnel is the ORDINARY
+    /// shape — which makes an unjudged checksum there the commoner half of
+    /// item 261, not the rarer one.
+    #[test]
+    fn a_fragmented_gre_carriers_checksum_is_judged_at_the_other_door() {
+        let inner = ipv4_packet(17, [192, 168, 0, 1], [192, 168, 0, 2], &zenoh_udp(4));
+        let read = |correct: bool| {
+            let mut d = crate::Dissection::new();
+            push_fragmented_carrier(&mut d, 47, 0x6161, 0, &gre_with_checksum(&inner, correct));
+            d.finish();
+            let h = d.health();
+            (
+                h.tunnel_checksum_valid,
+                h.tunnel_checksum_invalid,
+                d.datagram_flows().len(),
+            )
+        };
+
+        // The reassembled datagram is the packet the verdict is reported
+        // against, so exactly one carrier verdict lands even though two
+        // captured packets went in.
+        assert_eq!(
+            read(true),
+            (1, 0, 1),
+            "a fragmented carrier with a correct checksum verifies, and still \
+             yields its session"
+        );
+        assert_eq!(
+            read(false),
+            (0, 1, 1),
+            "and a corrupt one is REPORTED rather than silently walked -- the \
+             door a whole-packet leg cannot reach"
         );
     }
 
