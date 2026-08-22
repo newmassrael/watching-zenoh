@@ -192,8 +192,36 @@ fn is_encapsulation(proto: u8) -> bool {
             | 97   // ETHERIP
             | 115  // L2TP
             | 137  // MPLS-in-IP
-            | 143 // Ethernet (RFC 8986)
+            | 143  // Ethernet (RFC 8986)
+            // Round 2010 (open-debt item 250) — THREE THIS LIST HAD MISSED,
+            // found by asking its own question of IANA's assignments rather
+            // than by meeting one in a capture. Each carries a body that could
+            // be a session, so filing it as furniture is the exact defect
+            // R311y862 measured on protocol 4.
+            | 55   // MOBILE -- RFC 2004 minimal encapsulation: the body is an
+                   // IP datagram behind a short forwarding header
+            | 98   // ENCAP -- RFC 1241, an encapsulation by its own name
+            | 108 // IPComp -- RFC 3173: the body is a COMPRESSED IP datagram.
+                  // This build cannot decompress it, which is what makes it a
+                  // tunnel not opened rather than a protocol that terminates
     )
+}
+
+/// Round 2010 (item 250) — the encapsulation set, as a SET a test can read.
+///
+/// [`is_encapsulation`] is a `matches!`, which a caller can ask about one
+/// number and cannot enumerate. The gate that keeps this list from shrinking
+/// silently needs the whole set, and deriving it by sweeping 0..=255 through
+/// the predicate is what makes the two agree by construction rather than by a
+/// second list somebody keeps in step.
+///
+/// ⚠ WHAT THIS DOES NOT CLOSE, and item 250 says it plainly: nothing here is
+/// checked against IANA's assignments. A number IANA calls an encapsulation
+/// and this list omits is still furniture by omission, and the only honest
+/// gate for that is a table this tree does not have.
+#[cfg(test)]
+fn encapsulation_set() -> Vec<u8> {
+    (0u8..=u8::MAX).filter(|p| is_encapsulation(*p)).collect()
 }
 
 /// One end of a flow: address bytes plus a port.
@@ -2358,6 +2386,93 @@ mod tests {
                  as TCP, UDP, or raweth"
             );
         }
+    }
+
+    /// Round 2010 (open-debt item 250) — THE ENCAPSULATION SET, PINNED, AND
+    /// every protocol number classified rather than defaulted.
+    ///
+    /// Item 250 is that this list is ten numbers somebody typed, so an
+    /// encapsulation it omits is FURNITURE BY OMISSION -- filed as "could not
+    /// have carried a session" for no reason but absence. That is the defect
+    /// R311y862 measured on protocol 4, one item away.
+    ///
+    /// ⚠ THIS DOES NOT CLOSE 250 AND DOES NOT CLAIM TO. The honest gate is a
+    /// comparison against IANA's assignments, and this tree has no such table;
+    /// asking the question by hand is what THIS round did, and hand
+    /// enumeration is the thing Round 2009 caught itself getting wrong. What
+    /// the leg below buys is narrower and real: the set cannot SHRINK
+    /// silently, and every number is now sorted into a named class by a sweep
+    /// rather than falling into a default.
+    #[test]
+    fn every_ip_protocol_number_lands_in_a_named_class() {
+        // The set, DERIVED from the predicate rather than transcribed beside
+        // it -- so a number removed from `is_encapsulation` reds here even
+        // though nobody edited this list.
+        assert_eq!(
+            encapsulation_set(),
+            vec![4, 41, 47, 50, 51, 55, 94, 97, 98, 108, 115, 137, 143],
+            "the encapsulation set. A number MISSING here is one this build \
+             stopped treating as a tunnel, which sends it straight to the \
+             furniture class; a number ADDED is one somebody classified and \
+             this list has not been told about"
+        );
+
+        // THE THREE THIS ROUND ADDED REACH THE ARM, driven rather than
+        // asserted from the predicate: a number in the list and not in the
+        // dispatch would be a classification nothing acts on.
+        for (name, proto) in [("MOBILE", 55u8), ("ENCAP", 98), ("IPComp", 108)] {
+            assert_eq!(
+                decapsulate(LINKTYPE_ETHERNET, 0, &eth_ipv4_carrier(proto, &[0u8; 8])),
+                Err(SkipReason::Encapsulation(proto)),
+                "{name} ({proto}) must be a tunnel not opened, NOT furniture -- \
+                 its body could be a session"
+            );
+        }
+        // CONTROL: a protocol that genuinely terminates at the host still
+        // reaches the furniture arm, so the widening did not swallow the class.
+        assert_eq!(
+            decapsulate(LINKTYPE_ETHERNET, 0, &eth_ipv4_carrier(1, &[0u8; 8])),
+            Err(SkipReason::NotTransport(1)),
+            "ICMP terminates at the host and carries no session"
+        );
+
+        // And the partition is TOTAL: every one of the 256 numbers is a
+        // transport this build reads, an encapsulation it names, or furniture
+        // -- with no fourth outcome and no number in two classes at once.
+        let mut transports = 0usize;
+        let mut encapsulations = 0usize;
+        let mut furniture = 0usize;
+        for proto in 0u8..=u8::MAX {
+            let is_transport = proto == IP_PROTO_TCP || proto == IP_PROTO_UDP;
+            let is_encap = is_encapsulation(proto);
+            assert!(
+                !(is_transport && is_encap),
+                "protocol {proto} is in two classes at once"
+            );
+            if is_transport {
+                transports += 1;
+            } else if is_encap {
+                encapsulations += 1;
+            } else {
+                furniture += 1;
+            }
+        }
+        assert_eq!(transports, 2, "TCP and UDP, and nothing else is read");
+        assert_eq!(encapsulations, 13);
+        assert_eq!(
+            transports + encapsulations + furniture,
+            256,
+            "every number must be classified"
+        );
+        // ⚠ THE NUMBER THIS ITEM IS ABOUT. 241 protocols are furniture, and
+        // the claim attached to each is "could not have carried a session".
+        // For ICMP and IGMP that is argued; for the rest it is inherited from
+        // absence, and no gate in this tree distinguishes the two.
+        assert_eq!(
+            furniture, 241,
+            "the furniture class is this large, and 250 is that its size is \
+             what nobody has justified"
+        );
     }
 
     /// Round 2009 (item 248) — the OTHER furniture class that rested on a
