@@ -446,11 +446,17 @@ OPTIONS:
                       label those bytes BEAR OUT stops the rule and nothing
                       is decoded; a label they REFUTE is overridden, said
                       on its own line, and the fields are good. A publisher
-                      that declared nothing is decoded. Either finding is
-                      also TOTALLED per topic under the listing, so a rule
-                      that is wrong for a whole topic reads as one line
-                      and not as one per message.
-                      Needs --fields. Formats: json, protobuf.
+                      that declared nothing is decoded. A rule that IS
+                      applied and whose decoder then refuses the bytes is a
+                      finding of its own: neither side was caught out by the
+                      other, so what to go look at is the wire. Every
+                      finding is also TOTALLED per topic under the listing,
+                      so a rule that is wrong for a whole topic reads as one
+                      line and not as one per message.
+                      Needs --fields.
+                      PAYLOAD FORMATS: cbor, json, protobuf
+                      PAYLOAD MISBOUND: rule, publisher
+                      PAYLOAD REFUSED UNDER: corroborated, unclaimed, refuted
     --payload-name <keyexpr>:<path>=<name>
                       name one decoded field path, e.g.
                       `demo/**:1=temperature`. Repeatable; the first matching
@@ -5463,6 +5469,87 @@ mod tests {
                 rendered.contains(entry),
                 "the help claims {entry} and the dispatch does not read it"
             );
+        }
+    }
+
+    /// Round 2033 (item 303) — THE HELP'S PAYLOAD VOCABULARIES, pinned in both
+    /// directions against the walks that ship them.
+    ///
+    /// # What was actually wrong, measured rather than inherited
+    ///
+    /// The item says the encoding prose exists in three places and only the
+    /// header is asserted. That was true when it was filed; item 281 has since
+    /// gated the rustdoc, so the help was the last one — and it had gone wrong
+    /// in TWO independent ways while nothing read it.
+    ///
+    /// `Formats: json, protobuf` omitted `cbor`, which this build ships and
+    /// the command line accepts. A person reading `--help` was told a format
+    /// they could use did not exist, and the word `cbor` appeared nowhere in
+    /// the whole document.
+    ///
+    /// `Either finding is also TOTALLED per topic` counted TWO, and Round 2031
+    /// made it three. That is the exact staleness the item describes — a
+    /// sentence that was true, was edited to stay true once, and had nothing
+    /// holding it the next time the code moved.
+    ///
+    /// # Why lists rather than the prose
+    ///
+    /// A gate over prose would have to pick sentences, and a sentence is the
+    /// part of a help page an author is entitled to rewrite. The lists are the
+    /// part that is a CONTRACT: the formats the parser accepts, and the words
+    /// a `--json` run puts in `wrong` and `under`. Those have shipping walks,
+    /// so they are pinned to them and the sentences stay free.
+    ///
+    /// # Both directions, and off the LIST rather than the document
+    ///
+    /// Item 281's lesson, from the round that measured it: a first draft that
+    /// asked whether the WHOLE document contains a word passes on the word
+    /// appearing in unrelated prose. Each block is sliced out by its own
+    /// heading and the slice is asserted to have been found, so an anchor that
+    /// stops matching fails here rather than silently widening the search.
+    #[test]
+    fn the_usage_names_every_payload_format_and_finding_word_and_no_other() {
+        let block = |heading: &str| {
+            let after = USAGE
+                .split(heading)
+                .nth(1)
+                .unwrap_or_else(|| panic!("the help must carry `{heading}`"));
+            let line = after.lines().next().expect("a line follows the heading");
+            assert!(
+                !line.trim().is_empty(),
+                "`{heading}` must be followed by its list on the same line"
+            );
+            line.split(',')
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+                .collect::<Vec<_>>()
+        };
+        // Each pair is (heading, the SHIPPING population it must equal).
+        let formats: Vec<&str> = wz_capture::payload::formats::BUILTIN_NAMES.to_vec();
+        let misbound = wz_capture::payload_decode::Misbound::names();
+        let refused = wz_capture::payload_decode::RefusedUnder::names();
+        for (heading, shipped) in [
+            ("PAYLOAD FORMATS: ", &formats),
+            ("PAYLOAD MISBOUND: ", &misbound),
+            ("PAYLOAD REFUSED UNDER: ", &refused),
+        ] {
+            let listed = block(heading);
+            // ANTI-VACUITY: an empty population makes both directions true.
+            assert!(!shipped.is_empty(), "a gate over nothing is green");
+            for word in shipped.iter() {
+                assert!(
+                    listed.contains(word),
+                    "this build ships `{word}` and `{heading}` does not say so: \
+                     {listed:?}"
+                );
+            }
+            for word in &listed {
+                assert!(
+                    shipped.contains(word),
+                    "`{heading}` claims `{word}` and this build does not ship \
+                     it: {shipped:?}"
+                );
+            }
         }
     }
 
