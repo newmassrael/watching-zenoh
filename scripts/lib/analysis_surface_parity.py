@@ -204,6 +204,22 @@ ONLY_CLI = {
         "--serial",
         "DELIBERATE, on the same argument as the QUIC declaration above.",
     ),
+    "reading from a live tap": (
+        "--interface",
+        "DELIBERATE and it is the ABI's own design, not an omission. Every "
+        "wz_dissect_* entry point takes capture BYTES the CALLER holds, which "
+        "is what makes a C consumer able to feed a tap it opened itself -- "
+        "`DissectionLimits::for_live_tap` exists there for exactly that. "
+        "Widening the ABI to open sockets would move a privilege across an FFI "
+        "boundary to buy a caller something it can already do. Round 1999 "
+        "(item 470).",
+    ),
+    "bounding a live read": (
+        "--for",
+        "Rides the row above; a bound is meaningless without a tap to bound, "
+        "and the parser refuses it alone for that reason. A C consumer driving "
+        "its own tap owns its own stop rule.",
+    ),
 }
 
 # Reachable ONLY from the C ABI.

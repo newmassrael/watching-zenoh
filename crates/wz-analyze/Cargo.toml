@@ -32,6 +32,12 @@ path = "src/main.rs"
 # owning it and the C ABI having none.
 wz-capture = { path = "../wz-capture", features = ["dissect"] }
 wz-tls-record = { path = "../wz-tls-record" }
+# Round 1999 (item 470) — the live AF_PACKET tap, reachable from argv at last.
+# The dependency is payable because Round 1998 moved the tap out of
+# `wz-runtime-tokio`, whose MANDATORY `tokio` is what kept a passive reader from
+# ever naming it. `tap` is default-off there; this crate is the composition root
+# that turns it on, exactly as it does for `dissect`.
+wz-packet-socket = { path = "../wz-packet-socket", features = ["tap"] }
 # R311y667 — for `PassiveFrame`, which is the type `wz-capture` hands the
 # decoded messages back in. Naming one in a listing means naming its type.
 #

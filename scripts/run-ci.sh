@@ -7935,6 +7935,33 @@ layer_c1bs_live_capture() {
     # says nothing -- the exact trap this lane exists to avoid.
     grep -qE '^test result: ok\. 2 passed' <<<"$out" || {
         echo "  C1bs FAIL: the privileged tap tests did not both run"; echo "$out"; return 1; }
+    # Round 1999 (item 470) — the COMMAND LINE's live arm, which is the reason
+    # the tap stopped being a capability with no caller. Driven here rather than
+    # in C1bw because this is the lane that already holds the privilege, and a
+    # path that exists and never runs is what this lane exists to refuse.
+    #
+    # Judged on what it DECODED, not on its exit status: a live read of a quiet
+    # interface exits non-zero for the honest reason (an incomplete capture), so
+    # a status check would pass on a tap that read nothing at all.
+    (cd crates && cargo build -p wz-analyze --quiet) || return 1
+    local feeder live
+    (
+        sleep 0.4
+        for _ in $(seq 1 200); do
+            printf '\x14' >/dev/udp/127.0.0.1/7447 2>/dev/null || true
+        done
+    ) &
+    feeder=$!
+    live="$("${runner[@]}" ./crates/target/debug/wz-analyze \
+        --interface lo --for 2 2>&1)"
+    wait "$feeder" 2>/dev/null || true
+    grep -qE 'live tap on lo: read [1-9][0-9]* packet\(s\) in .*stopped by --for' <<<"$live" || {
+        echo "  C1bs FAIL: the live command line read nothing, or stopped for a"
+        echo "             reason it did not name"; echo "$live"; return 1; }
+    grep -qE 'messages decoded: [1-9][0-9]*' <<<"$live" || {
+        echo "  C1bs FAIL: the live read decoded no zenoh message"; echo "$live"; return 1; }
+    grep -oE 'live tap on lo: .*' <<<"$live" || true
+
     # Surface the measurement in the lane log; a number nobody sees is a number
     # nobody checks.
     # NOT anchored: with `--test-threads=1 --nocapture` libtest prints the test

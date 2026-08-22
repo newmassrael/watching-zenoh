@@ -2408,6 +2408,7 @@ dependencies = [
  "wz-capture",
  "wz-codecs",
  "wz-packet-fixtures",
+ "wz-packet-socket",
  "wz-session-core",
  "wz-tls-record",
 ]

@@ -38,8 +38,23 @@ pub enum Format {
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
-    /// The capture file to read.
+    /// The capture file to read. Empty when [`Self::interface`] names a live
+    /// tap instead — the two are alternatives and the parser refuses both.
     pub capture: String,
+    /// Round 1999 (item 470) — read from a live `AF_PACKET` tap on this
+    /// interface instead of from a file.
+    ///
+    /// The capability was in the tree since R311y594 and no argv could reach
+    /// it; the crate split of Round 1998 is what made the dependency payable.
+    pub interface: Option<String>,
+    /// Round 1999 — how long a live read runs, in milliseconds.
+    ///
+    /// REQUIRED with [`Self::interface`] and that is the point: a tap has no
+    /// end, so a live read that stopped on its own would produce a report which
+    /// looks complete because the TOOL stopped rather than because the traffic
+    /// did. The bound is stated by the operator and NAMED in the report, on the
+    /// same argument `--bounded` already makes for the dissection caps.
+    pub live_ms: Option<u64>,
     /// NSS key logs to read alongside it, for the ordinary case where the
     /// keys were written by `SSLKEYLOGFILE` into a SEPARATE file from the
     /// capture. Keys embedded in the capture's own Decryption Secrets Blocks
@@ -249,6 +264,23 @@ pub enum UsageError {
     /// covers the case where the declaration was never consulted at all, so
     /// there was nothing for that note to be computed from.
     PayloadWithoutFields(&'static str),
+    /// Round 1999 (item 470) — `--interface` was given together with a capture
+    /// file. They are two sources for one report and picking one silently would
+    /// make the other's presence meaningless.
+    CaptureAndInterface,
+    /// Round 1999 — `--interface` without `--for`.
+    ///
+    /// A live tap has no end. Choosing a default here would put a number in the
+    /// report that the operator never chose and cannot see, and the whole
+    /// reason the bound is reported is that a short read and a quiet network
+    /// look identical.
+    InterfaceWithoutBound,
+    /// Round 1999 — a flag that cannot work on a live read was given with one.
+    ///
+    /// REFUSED on exactly [`Self::SelectWithoutPlane`]'s rule. QUIC recovery
+    /// re-reads the CAPTURE's own bytes (`quic_pass`), which a tap does not
+    /// keep, so `--quic` on a live read would be a flag that changes nothing.
+    LiveCannotDo(&'static str),
 }
 
 impl core::fmt::Display for UsageError {
@@ -270,6 +302,21 @@ impl core::fmt::Display for UsageError {
                 "{flag} is rendered by the field listing and it was not asked \
                  for; add --fields"
             ),
+            Self::CaptureAndInterface => write!(
+                f,
+                "a capture file and --interface are two sources for one report; \
+                 give one"
+            ),
+            Self::InterfaceWithoutBound => write!(
+                f,
+                "--interface needs --for <seconds>: a tap has no end, and a read \
+                 that stopped on its own would report as though the traffic had"
+            ),
+            Self::LiveCannotDo(flag) => write!(
+                f,
+                "{flag} needs the capture's own bytes, which a live read does \
+                 not keep; it would change nothing here"
+            ),
         }
     }
 }
@@ -280,8 +327,28 @@ wz-analyze -- read a zenoh capture and report what is in it
 
 USAGE:
     wz-analyze <capture.pcapng|capture.pcap> [OPTIONS]
+    wz-analyze --interface <name> --for <seconds> [OPTIONS]
 
 OPTIONS:
+    --interface <name>
+                      read from a live AF_PACKET tap on this interface instead
+                      of from a file. Needs CAP_NET_RAW; without it this says
+                      so rather than reporting an empty capture. The kernel's
+                      own drop count is reported beside what was read -- a
+                      packet the kernel discarded because this reader was slow
+                      leaves a hole indistinguishable from one the network
+                      made, and a live read that could not see its own drops
+                      would blame the network for this machine.
+                      Refused together with a capture file, and with --quic /
+                      --quic-cid-len: QUIC recovery re-reads the capture's own
+                      bytes, which a tap does not keep, so those flags would
+                      change nothing here.
+    --for <seconds>   how long a live read runs. REQUIRED with --interface and
+                      meaningless without it. A tap has no end, so a read that
+                      stopped on its own would produce a report that looks
+                      complete because the TOOL stopped rather than because the
+                      traffic did -- the report NAMES this bound for the same
+                      reason --bounded names the caps it bit.
     --keylog <file>   an NSS key log (SSLKEYLOGFILE) to decrypt TLS flows with.
                       Repeatable, and every one given is used -- a two-sided
                       capture usually has one log per endpoint. Keys carried
@@ -462,6 +529,8 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut per_field = false;
     let mut bounded = false;
     let mut health = false;
+    let mut interface: Option<String> = None;
+    let mut live_ms: Option<u64> = None;
     let mut at = 0usize;
     while at < args.len() {
         let arg = &args[at];
@@ -600,6 +669,29 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
                         .ok_or(UsageError::MissingValue("--keylog"))?,
                 );
             }
+            "--interface" => {
+                at += 1;
+                interface = Some(
+                    args.get(at)
+                        .cloned()
+                        .ok_or(UsageError::MissingValue("--interface"))?,
+                );
+            }
+            // Seconds on the command line, milliseconds in `Options`: the
+            // operator thinks in seconds and the pump loop thinks in the unit
+            // its clock already speaks. A fractional value is accepted because
+            // a two-second smoke read is a real thing to want.
+            "--for" => {
+                at += 1;
+                let raw = args.get(at).ok_or(UsageError::MissingValue("--for"))?;
+                let secs: f64 = raw
+                    .parse()
+                    .map_err(|_| UsageError::BadValue("--for", raw.clone()))?;
+                if !(secs.is_finite() && secs > 0.0) {
+                    return Err(UsageError::BadValue("--for", raw.clone()));
+                }
+                live_ms = Some((secs * 1000.0) as u64);
+            }
             // A lone `-` is a filename by convention in no shell this tool
             // supports, and everything else beginning with `-` is a flag this
             // one does not know.
@@ -625,8 +717,35 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
             return Err(UsageError::PayloadWithoutFields("--payload-name"));
         }
     }
+    // Round 1999 (item 470) — the live source's three refusals, in the order
+    // that makes each message the useful one. Source first (which of the two
+    // did you mean), then the bound (a tap has no end), then the flags a live
+    // read cannot honour.
+    if interface.is_some() {
+        if capture.is_some() {
+            return Err(UsageError::CaptureAndInterface);
+        }
+        if live_ms.is_none() {
+            return Err(UsageError::InterfaceWithoutBound);
+        }
+        if !quic_ports.is_empty() {
+            return Err(UsageError::LiveCannotDo("--quic"));
+        }
+        if quic_cid_len.is_some() {
+            return Err(UsageError::LiveCannotDo("--quic-cid-len"));
+        }
+    } else if live_ms.is_some() {
+        // `--for` alone bounds nothing: a file ends by itself.
+        return Err(UsageError::LiveCannotDo("--for"));
+    }
     Ok(Options {
-        capture: capture.ok_or(UsageError::NoCapture)?,
+        capture: match (capture, &interface) {
+            (Some(path), _) => path,
+            (None, Some(_)) => String::new(),
+            (None, None) => return Err(UsageError::NoCapture),
+        },
+        interface,
+        live_ms,
         keylogs,
         format,
         per_flow,
@@ -836,6 +955,44 @@ pub struct Request<'a> {
 
 /// Read a capture and report on it, as [`Request`] describes.
 pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), CaptureError> {
+    // Round 1999 (item 470) — the ONE place a dissection was ever built from
+    // bytes, lifted out so a caller that built one another way can reach the
+    // report. `analyze_dissection` is the rest of this function, unchanged.
+    let dissection = if request.bounded {
+        Dissection::from_capture_declaring_bounded(
+            request.capture,
+            request.quic_ports,
+            request.serial_linktypes,
+            wz_capture::DissectionLimits::for_live_tap(),
+        )?
+    } else {
+        Dissection::from_capture_declaring(
+            request.capture,
+            request.quic_ports,
+            request.serial_linktypes,
+        )?
+    };
+    analyze_dissection(dissection, request)
+}
+
+/// Report on a dissection the CALLER built, as [`Request`] describes.
+///
+/// Round 1999 (item 470) — a live tap is why this exists. A tap has no capture
+/// file behind it, so the analyser cannot be the one to dissect: opening the
+/// socket needs a privilege and reading it needs a stop rule, and both are the
+/// caller's to decide.
+///
+/// ⚠ [`Request::capture`] IS STILL READ on this path, and by exactly one thing:
+/// [`quic_pass`] re-reads the capture's own bytes to find QUIC packets, because
+/// a QUIC flow is recovered from the packet record rather than from the
+/// dissection. A caller with no capture bytes passes an empty slice and gets no
+/// QUIC decryption — which is why `wz-analyze` REFUSES `--quic` together with a
+/// live read rather than accepting a flag that would quietly do nothing.
+pub fn analyze_dissection(
+    dissection: Dissection,
+    request: &Request<'_>,
+) -> Result<(String, Outcome), CaptureError> {
+    let mut dissection = dissection;
     let &Request {
         capture,
         keylog,
@@ -920,16 +1077,13 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
     // caller could not ask until this round. `dropped_by_limits` was zero on
     // every surface because no surface built a bounded dissection; zeros that
     // are structural read exactly like zeros that were measured.
-    let mut dissection = if bounded {
-        Dissection::from_capture_declaring_bounded(
-            capture,
-            quic_ports,
-            serial_linktypes,
-            wz_capture::DissectionLimits::for_live_tap(),
-        )?
-    } else {
-        Dissection::from_capture_declaring(capture, quic_ports, serial_linktypes)?
-    };
+    // Round 1999 (item 470) — the construction moved to `analyze_request`, the
+    // only caller that has bytes to build from, and these three were read by
+    // nothing else here. Named rather than dropped from the pattern so the
+    // destructure keeps mirroring `Request` field for field: a pattern that
+    // silently stops covering a struct is how a new option becomes one nothing
+    // reads.
+    let _ = (bounded, quic_ports, serial_linktypes);
 
     // The capture's own keys first, then the external log folded in.
     let (mut opener, foreign) = CaptureOpener::from_secrets_blocks(dissection.decryption_secrets());
@@ -4565,12 +4719,74 @@ mod tests {
         vec![DeclarationKind::FormatRule, DeclarationKind::FieldName]
     }
 
+    /// Round 1999 (item 470) — a live read is a complete command line, and
+    /// EVERY way of writing an incomplete one is refused by name.
+    ///
+    /// The table is the test. Each refusal below exists because the alternative
+    /// is a flag that quietly changes nothing, which is the shape this parser
+    /// already turns into an error twice (`SelectWithoutPlane`,
+    /// `PayloadWithoutFields`). Driving the accepted form as well is what keeps
+    /// this from being a test that a parser rejecting EVERYTHING would pass.
+    #[test]
+    fn a_live_read_is_accepted_and_every_incomplete_form_is_refused_by_name() {
+        let ok = parse(&args(&["--interface", "eth0", "--for", "2.5"])).expect("a live read");
+        assert_eq!(ok.interface.as_deref(), Some("eth0"));
+        assert_eq!(ok.live_ms, Some(2_500), "seconds in, milliseconds out");
+        assert_eq!(ok.capture, "", "a live read names no file");
+
+        for (why, argv, expected) in [
+            (
+                "two sources for one report",
+                vec!["cap.pcapng", "--interface", "eth0", "--for", "1"],
+                UsageError::CaptureAndInterface,
+            ),
+            (
+                "a tap has no end",
+                vec!["--interface", "eth0"],
+                UsageError::InterfaceWithoutBound,
+            ),
+            (
+                "--for bounds nothing when a file already ends",
+                vec!["cap.pcapng", "--for", "1"],
+                UsageError::LiveCannotDo("--for"),
+            ),
+            (
+                "QUIC recovery re-reads bytes a tap does not keep",
+                vec!["--interface", "eth0", "--for", "1", "--quic", "7447"],
+                UsageError::LiveCannotDo("--quic"),
+            ),
+            (
+                "and the flag that only means anything beside it",
+                vec!["--interface", "eth0", "--for", "1", "--quic-cid-len", "8"],
+                UsageError::LiveCannotDo("--quic-cid-len"),
+            ),
+            (
+                "a bound that is not a number",
+                vec!["--interface", "eth0", "--for", "soon"],
+                UsageError::BadValue("--for", "soon".into()),
+            ),
+            (
+                "and a bound that is a number but not a duration",
+                vec!["--interface", "eth0", "--for", "0"],
+                UsageError::BadValue("--for", "0".into()),
+            ),
+        ] {
+            assert_eq!(
+                parse(&args(&argv)),
+                Err(expected),
+                "{why}: {argv:?} must be refused"
+            );
+        }
+    }
+
     #[test]
     fn a_capture_path_alone_is_a_complete_command_line() {
         assert_eq!(
             parse(&args(&["cap.pcapng"])),
             Ok(Options {
                 capture: "cap.pcapng".into(),
+                interface: None,
+                live_ms: None,
                 keylogs: Vec::new(),
                 format: Format::Text,
                 per_flow: false,
@@ -4602,6 +4818,8 @@ mod tests {
             ])),
             Ok(Options {
                 capture: "cap.pcapng".into(),
+                interface: None,
+                live_ms: None,
                 keylogs: args(&["keys.txt"]),
                 format: Format::Json,
                 // `--messages` implies `--flows`: the messages are printed
