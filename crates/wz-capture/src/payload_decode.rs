@@ -58,6 +58,23 @@ pub struct Declarations<'a> {
     /// R311y875 — the rules that bound the WRONG thing, tallied by the triple
     /// that identifies one misbinding. See [`Self::misbindings`].
     misbound: RefCell<alloc::collections::BTreeMap<MisbindingKey, usize>>,
+    /// Round 2026 (item 289) — WHAT THE SECOND SCAN COST: how many payloads
+    /// [`crate::payload::inspect`] re-walked, and how many bytes it walked.
+    ///
+    /// R311y874 made the veto rest on the bytes rather than on the label, which
+    /// is right and is not free: every sample whose declared encoding
+    /// contradicts its rule is read a SECOND time. That is precisely the
+    /// traffic a reader may have a lot of — one wrong rule on a busy topic is
+    /// every sample on it — and until this round nothing said how much work it
+    /// was.
+    ///
+    /// A COUNT and not a cap. The scan is bounded by the payload's own length,
+    /// which the message bounds and the capture's limits bound above that, so
+    /// the second pass is a constant factor on work already being done rather
+    /// than an open-ended cost. Inventing a ceiling here would bound something
+    /// that is already bounded and would make the veto's honesty depend on a
+    /// number nobody chose.
+    rescans: RefCell<(usize, usize)>,
 }
 
 /// R311y875 — what one misbinding IS, as a key: the topic, the rule's decoder,
@@ -74,7 +91,26 @@ impl<'a> Declarations<'a> {
             map,
             used: RefCell::new(BTreeSet::new()),
             misbound: RefCell::new(alloc::collections::BTreeMap::new()),
+            rescans: RefCell::new((0, 0)),
         }
+    }
+
+    /// Round 2026 (item 289) — how many payloads the claim check re-walked, and
+    /// over how many bytes.
+    ///
+    /// Read it beside [`Self::misbindings`]: a capture with one wrong rule on a
+    /// busy topic pays this on every sample of that topic, and the two numbers
+    /// together are what says whether a slow run is the mapping's fault.
+    pub fn rescans(&self) -> (usize, usize) {
+        *self.rescans.borrow()
+    }
+
+    /// Record one second scan. Called by [`judge_claim`] at the one place that
+    /// performs one.
+    fn note_rescan(&self, bytes: usize) {
+        let mut at = self.rescans.borrow_mut();
+        at.0 += 1;
+        at.1 += bytes;
     }
 
     /// Whether any rule was installed — the map's own question, forwarded so a
@@ -848,7 +884,16 @@ enum Claim {
 /// or unknown declaration comes back [`crate::payload::Verdict::Opaque`], so
 /// nothing contradicts it and the veto stands. That is the honest limit of what
 /// bytes can say about a label, not a gap in the check.
-fn judge_claim(format: &dyn PayloadFormat, node: &Field, bytes: &[u8]) -> Claim {
+fn judge_claim(
+    format: &dyn PayloadFormat,
+    node: &Field,
+    bytes: &[u8],
+    // Round 2026 (item 289) — the run, so the SECOND SCAN below is counted at
+    // the one place that performs one. Threaded in rather than returned,
+    // because a caller that had to remember to tally is a caller that
+    // eventually does not.
+    run: &Declarations<'_>,
+) -> Claim {
     let Some(accepted) = format.encodings() else {
         return Claim::Agrees;
     };
@@ -864,6 +909,10 @@ fn judge_claim(format: &dyn PayloadFormat, node: &Field, bytes: &[u8]) -> Claim 
     if id == 0 || accepted.contains(&name) {
         return Claim::Agrees;
     }
+    // Round 2026 (item 289) — THE SECOND SCAN, counted at the line that starts
+    // it. Everything above this returns without re-reading the payload; from
+    // here the bytes are walked again.
+    run.note_rescan(bytes.len());
     match crate::payload::inspect(declared, bytes) {
         crate::payload::Verdict::NotAsDeclared { .. } => Claim::Refuted(String::from(name)),
         // Round 2025 (item 285) — `Opaque` is SILENCE, not corroboration. The
@@ -913,7 +962,7 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
     // per message until this round and reached no plane at all, so a capture
     // where a mapping is wrong for every sample on a topic said so once per row
     // — in the listing a reader bounds precisely because it is that long.
-    let despite_encoding = match judge_claim(format, node, bytes) {
+    let despite_encoding = match judge_claim(format, node, bytes, map) {
         Claim::Vetoes(declared, checked) => {
             map.record_misbinding(&keyexpr, format.name(), &declared, Misbound::Rule);
             return PayloadDecoding::EncodingMismatch {
@@ -1316,6 +1365,86 @@ mod tests {
                 .expect("json names its encodings")
                 .contains(&ENCODING_ID_TO_STR[ENC_ZENOH_BYTES as usize]),
             "`zenoh/bytes` must not be a claimed encoding"
+        );
+    }
+
+    /// ITEM 289 — THE SECOND SCAN IS COUNTED, AND ONLY WHERE IT HAPPENS.
+    ///
+    /// # The item
+    ///
+    /// R311y874 made the veto rest on the bytes rather than on the label. That
+    /// is right and it is not free: every sample whose declared encoding
+    /// contradicts its rule has its payload walked a SECOND time. One wrong
+    /// rule on a busy topic is every sample on that topic — the traffic a
+    /// reader is likeliest to have a lot of — and nothing measured it.
+    ///
+    /// # What is asserted, and why not a ceiling
+    ///
+    /// The count and the byte total, and that both are ZERO on the paths that
+    /// do not rescan. A cap is deliberately not added: the scan is bounded by
+    /// the payload's own length, which the message bounds and the capture's
+    /// limits bound above that, so this is a constant factor on work already
+    /// being done. A ceiling here would bound something already bounded and
+    /// make the veto's honesty depend on a number nobody chose.
+    ///
+    /// # The three no-rescan paths are the discriminator
+    ///
+    /// A sample the rule AGREES with, one whose publisher declared nothing, and
+    /// one under a format that names no encodings. Each returns before the
+    /// inspect call. Without them a counter that simply incremented per sample
+    /// would pass the first leg and measure nothing.
+    #[test]
+    fn the_second_scan_is_counted_and_only_the_contradicting_samples_pay_it() {
+        let mut map = FormatMap::new();
+        map.declare("demo/**=protobuf").expect("a keyexpr pattern");
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+        let body: &[u8] = br#"{"a":1}"#;
+
+        // ONE contradicting sample: declared JSON, rule says protobuf.
+        let run = Declarations::new(&map);
+        assert_eq!(
+            run.rescans(),
+            (0, 0),
+            "nothing walked before the first call"
+        );
+        let _ = decode_payload(&put_declaring(ENC_JSON, body), &run, at);
+        assert_eq!(
+            run.rescans(),
+            (1, body.len()),
+            "one contradicting sample is one second scan, over its own bytes"
+        );
+        // And it ACCUMULATES, which is the whole point on a busy topic.
+        let _ = decode_payload(&put_declaring(ENC_JSON, body), &run, at);
+        assert_eq!(run.rescans(), (2, body.len() * 2));
+
+        // PATH 1 — the publisher declared nothing. Id 0 returns `Agrees`
+        // before the inspect call.
+        let silent = Declarations::new(&map);
+        let _ = decode_payload(&put_declaring(ENC_ZENOH_BYTES, body), &silent, at);
+        assert_eq!(
+            silent.rescans(),
+            (0, 0),
+            "silence is not disagreement, so nothing is re-walked"
+        );
+
+        // PATH 2 — the rule and the label agree.
+        let mut agreeing = FormatMap::new();
+        agreeing.declare("demo/**=json").expect("a keyexpr pattern");
+        let agreed = Declarations::new(&agreeing);
+        let _ = decode_payload(&put_declaring(ENC_JSON, body), &agreed, at);
+        assert_eq!(agreed.rescans(), (0, 0), "an agreeing label costs nothing");
+
+        // PATH 3 — a format that names no encodings opts out entirely.
+        let acme = Proprietary;
+        let mut opted = FormatMap::new();
+        opted.insert("demo/**", &acme).expect("a keyexpr pattern");
+        let out = Declarations::new(&opted);
+        let _ = decode_payload(&put_declaring(ENC_JSON, body), &out, at);
+        assert_eq!(
+            out.rescans(),
+            (0, 0),
+            "the opt-out returns before the claim is weighed at all"
         );
     }
 
