@@ -57,7 +57,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use crate::link::{Endpoint, FragmentInfo, IpFragment};
+use crate::link::{self, Endpoint, FragmentInfo, IpFragment};
 
 /// The identity of a datagram being reassembled.
 ///
@@ -100,6 +100,24 @@ pub struct Reassembled {
     /// the result and not only in the totals, so a consumer can mark the ONE
     /// datagram rather than the whole capture.
     pub overlapped: bool,
+    /// Item 252 — the carriers the FIRST piece arrived inside.
+    ///
+    /// The first and not the completing one, because the chain is opened by
+    /// the first piece and a table entry is the chain. Reading it off the
+    /// completing piece would have needed no state here and would have named
+    /// whichever packet happened to arrive last, which is a property of the
+    /// capture's ordering rather than of the datagram.
+    ///
+    /// ⚠ "The first piece's" is exact and NOT a residue, which is worth
+    /// stating because it reads like one. A fragmented CARRIER is fragmented
+    /// at the carrier's own header, so that header's addresses are the ones
+    /// [`FragmentKey`] holds: two pieces arriving through different carriers
+    /// are two DIFFERENT keys and never join into one datagram. There is no
+    /// "one entry, two carriers" case to be silent about — the field is the
+    /// chain's carrier because the carrier is part of what makes it a chain.
+    /// `a_second_carrier_does_not_complete_another_carriers_datagram` drives
+    /// it rather than leaving the argument on this comment.
+    pub tunnel: link::Tunnel,
 }
 
 /// What reassembly has cost and what it has seen.
@@ -176,6 +194,9 @@ struct Pending {
     opened_at: Option<u64>,
     /// Monotonic insertion order, for the eviction choice when no clock exists.
     seq: u64,
+    /// Item 252 — the carriers the FIRST piece arrived inside. Written once,
+    /// when the entry is opened; see [`Reassembled::tunnel`].
+    tunnel: link::Tunnel,
 }
 
 impl Pending {
@@ -331,6 +352,7 @@ impl FragmentTable {
             info,
             payload,
             packet_index,
+            tunnel,
             ..
         } = piece;
         let key = FragmentKey {
@@ -355,6 +377,7 @@ impl FragmentTable {
                     overlapped: false,
                     opened_at: now_millis,
                     seq,
+                    tunnel,
                 },
             );
         }
@@ -409,6 +432,7 @@ impl FragmentTable {
             packet_index,
             pieces: done.pieces,
             overlapped: done.overlapped,
+            tunnel: done.tunnel,
         })
     }
 
@@ -507,6 +531,7 @@ mod tests {
                 ip: None,
                 transport: None,
             },
+            tunnel: link::Tunnel::none(),
         }
     }
 

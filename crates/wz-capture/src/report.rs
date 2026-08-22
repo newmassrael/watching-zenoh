@@ -847,6 +847,14 @@ impl<'a> CaptureReport<'a> {
         // R311y665 (§1.2a) — see `decoded_messages`. STRUCTURAL, so a consumer
         // never has to test for the field.
         s.push_str(&format!(",\"messages_decoded\":{}", decoded_messages(d)));
+        // Item 252 — the carriers, in the SAME order [`Self::to_text`] walks
+        // them (stream flows then datagram flows). STRUCTURAL: an empty array
+        // on an untunnelled capture, so a consumer never has to test for the
+        // key to learn that nothing was tunnelled. The text half prints
+        // nothing in that case for the opposite reason — a person reads a
+        // report top to bottom and a machine indexes it.
+        s.push(',');
+        carriers_json(d, s);
         s.push_str(&format!(
             ",\"ip_checksum_invalid\":{},\"transport_checksum_invalid\":{}",
             health.ip_checksum_invalid, health.transport_checksum_invalid
@@ -1382,6 +1390,13 @@ impl<'a> CaptureReport<'a> {
         // holding three decoded messages. That is R311y648's silence in the one
         // place it had not been closed: the summary of what WAS read.
         s.push_str(&format!("  messages decoded: {}\n", decoded_messages(d)));
+        // Item 252 — WHERE THE TUNNELLED FLOWS CAME FROM.
+        //
+        // Printed only when the capture holds one, which is the rule the rest
+        // of this report follows: a line saying "tunnels: 0" on every ordinary
+        // capture buys nothing and costs a line on all of them. The absence is
+        // not silence — a capture with no carriers has nothing to disambiguate.
+        carriers_text(d, &mut s);
         // R311y714 (§1.1f) — the capture's NODES, when the caller built the
         // plane. Printed as an inventory rather than a drawing: the shipped
         // artifact draws it, and what this reader owes is the evidence behind
@@ -2779,6 +2794,177 @@ fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
 /// it called the other eight furniture. That is true of three of them. Reading
 /// it as true of `truncated` or of either fragment counter is how a reader
 /// concludes a short capture was whole.
+/// Item 252 — the carriers the capture's flows arrived inside.
+///
+/// ## The defect this closes
+///
+/// The walk consumed every carrier header and discarded its addresses the
+/// instant the payload was in hand, so a session inside a tunnel rendered
+/// byte-for-byte as a session on the wire. Two deployments tunnelled from
+/// DIFFERENT sites were one page, and so were a tunnelled pair and a pair on
+/// the same segment — the reader could not tell three distinct topologies
+/// apart, and nothing in the report admitted that.
+///
+/// ## What is printed and what is not
+///
+/// One line per flow that arrived through at least one carrier, naming the
+/// chain outermost first. Flows that arrived direct are not listed: they are
+/// the ordinary case and the count above already holds them.
+///
+/// `also direct` is printed when the SAME flow was also seen untunnelled,
+/// which is what a capture taken at a tunnel egress looks like. Without it a
+/// reader would take the carrier as the flow's whole story.
+fn carriers_text(d: &crate::Dissection, s: &mut String) {
+    let mut lines: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    for f in d.flows() {
+        push_carrier_line("stream", &f.flow, f.carriers(), &mut lines);
+    }
+    for f in d.datagram_flows() {
+        push_carrier_line("datagram", &f.flow, f.carriers(), &mut lines);
+    }
+    if lines.is_empty() {
+        return;
+    }
+    s.push_str(&format!(
+        "  tunnels: {} flow(s) arrived inside a carrier\n",
+        lines.len()
+    ));
+    for line in lines {
+        s.push_str(&line);
+    }
+}
+
+/// Item 252 — the machine half of [`carriers_text`], same walk order.
+fn carriers_json(d: &crate::Dissection, s: &mut String) {
+    s.push_str("\"tunnels\":[");
+    let mut first = true;
+    for f in d.flows() {
+        push_carrier_object("stream", &f.flow, f.carriers(), s, &mut first);
+    }
+    for f in d.datagram_flows() {
+        push_carrier_object("datagram", &f.flow, f.carriers(), s, &mut first);
+    }
+    s.push(']');
+}
+
+/// One flow's carrier object, or nothing when it arrived direct.
+fn push_carrier_object(
+    kind: &str,
+    flow: &crate::link::FlowKey,
+    carriers: &crate::link::Carriers,
+    s: &mut String,
+    first: &mut bool,
+) {
+    use core::fmt::Write as _;
+    if carriers.is_empty() {
+        return;
+    }
+    if !*first {
+        s.push(',');
+    }
+    *first = false;
+    let _ = write!(s, "{{\"kind\":\"{kind}\",\"flow\":");
+    crate::census_json::push_flow(flow, s);
+    s.push_str(",\"chains\":[");
+    for (i, t) in carriers.tunnels().iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push('[');
+        for (j, hop) in t.hops().iter().enumerate() {
+            if j > 0 {
+                s.push(',');
+            }
+            let _ = write!(
+                s,
+                "{{\"src\":\"{}\",\"dst\":\"{}\",\"proto\":{}}}",
+                addr_text(&hop.src),
+                addr_text(&hop.dst),
+                hop.proto
+            );
+        }
+        s.push(']');
+    }
+    let _ = write!(
+        s,
+        "],\"also_direct\":{},\"more_than_kept\":{}}}",
+        carriers.saw_untunnelled(),
+        carriers.overflowed()
+    );
+}
+
+/// One flow's carrier line, or nothing when it arrived direct.
+fn push_carrier_line(
+    kind: &str,
+    flow: &crate::link::FlowKey,
+    carriers: &crate::link::Carriers,
+    out: &mut alloc::vec::Vec<String>,
+) {
+    use core::fmt::Write as _;
+    if carriers.is_empty() {
+        return;
+    }
+    let mut chains = String::new();
+    for (i, t) in carriers.tunnels().iter().enumerate() {
+        if i > 0 {
+            chains.push_str("; ");
+        }
+        for (j, hop) in t.hops().iter().enumerate() {
+            if j > 0 {
+                chains.push_str(" > ");
+            }
+            let _ = write!(
+                chains,
+                "{}->{} proto {}",
+                addr_text(&hop.src),
+                addr_text(&hop.dst),
+                hop.proto
+            );
+        }
+    }
+    if carriers.overflowed() {
+        chains.push_str("; ... (more than this reader keeps)");
+    }
+    let also = if carriers.saw_untunnelled() {
+        ", also direct"
+    } else {
+        ""
+    };
+    out.push(format!(
+        "    {kind} {}:{} <-> {}:{} via {chains}{also}\n",
+        addr_text(&flow.low),
+        flow.low.port,
+        addr_text(&flow.high),
+        flow.high.port,
+    ));
+}
+
+/// One endpoint's ADDRESS, without its port.
+///
+/// A carrier header has no port — [`crate::link::TunnelHop`] carries zero
+/// there and says so — and printing `10.0.0.1:0` beside a real `:7447` is how
+/// a reader concludes a tunnel terminates on port zero.
+fn addr_text(e: &crate::link::Endpoint) -> String {
+    use core::fmt::Write as _;
+    let a = e.addr();
+    let mut s = String::new();
+    if e.is_ipv4() {
+        let _ = write!(s, "{}.{}.{}.{}", a[0], a[1], a[2], a[3]);
+    } else {
+        for (i, c) in a.chunks(2).enumerate() {
+            if i > 0 {
+                s.push(':');
+            }
+            let _ = write!(
+                s,
+                "{:x}",
+                u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)])
+            );
+        }
+    }
+    s
+}
+
 fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
     s.push_str(&format!("  reader skipped: {} packet(s)\n", sk.total()));
     s.push_str(&format!(
@@ -6344,6 +6530,233 @@ mod tests {
             );
             assert!(sk.is_empty(), "GRE with {name}: nothing skipped: {sk:?}");
         }
+    }
+
+    /// ITEM 252 — TWO SESSIONS TUNNELLED FROM DIFFERENT SITES ARE NOT ONE PAGE.
+    ///
+    /// # The defect
+    ///
+    /// The walk consumed each carrier header and discarded its addresses at
+    /// `cursor = d.payload`, which is the only instant they exist. Everything
+    /// downstream is keyed by the INNER header — correctly, or one tunnel's
+    /// every session would collapse into one flow — so the carrier reached no
+    /// row, no counter and no line. Three topologies rendered identically:
+    /// a session tunnelled from site A, the same session tunnelled from site
+    /// B, and the same session on the wire.
+    ///
+    /// # Why this is asserted on the RENDERING and not on the walk
+    ///
+    /// A `Tunnel` on a `Datagram` that no renderer reads is the shape this
+    /// workspace has paid for repeatedly: the capability is compiled in and
+    /// the consumer cannot reach it. The item's own words are "indistinguishable
+    /// ON THE PAGE", so the page is what is measured — both pages, because a
+    /// fact reaching one rendering and not the other is the two-surface defect
+    /// `analysis_surface_parity` exists for.
+    ///
+    /// # The three legs
+    ///
+    /// `!=` between the two sites is the item. `!=` between a site and the
+    /// direct capture is the half that a naive fix passes accidentally — print
+    /// the word "tunnel" and the first assertion holds while the second still
+    /// fails, because both sites say the same word. And the CONTENT assertion
+    /// is what stops a fix that distinguishes them by something incidental:
+    /// the addresses have to be on the page, spelled.
+    #[test]
+    fn two_sessions_tunnelled_from_different_sites_are_told_apart() {
+        // Byte-identical in every leg. Whatever differs between the pages
+        // below cannot have come from the session.
+        let inner = ipv4_packet(17, [192, 168, 0, 1], [192, 168, 0, 2], &zenoh_udp(4));
+        let page = |packet: &[u8]| {
+            let mut d = crate::Dissection::new();
+            d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, packet);
+            d.finish();
+            let r = CaptureReport::of(&d);
+            (r.to_text(), r.to_json(), d.datagram_flows()[0].flow)
+        };
+
+        let site_a = page(&eth(&ipv4_packet(
+            47,
+            [203, 0, 113, 7],
+            [198, 51, 100, 4],
+            &gre(0, 0x0800, &[], &inner),
+        )));
+        let site_b = page(&eth(&ipv4_packet(
+            47,
+            [203, 0, 113, 9],
+            [198, 51, 100, 4],
+            &gre(0, 0x0800, &[], &inner),
+        )));
+        let direct = page(&eth(&inner));
+
+        assert_ne!(
+            site_a.0, site_b.0,
+            "two sites, one page -- this IS item 252:\n{}",
+            site_a.0
+        );
+        assert_ne!(site_a.1, site_b.1, "and the same in the machine rendering");
+        assert_ne!(
+            site_a.0, direct.0,
+            "a tunnelled session and a direct one must not read alike either"
+        );
+        assert_ne!(site_a.1, direct.1);
+
+        // NAMED, not merely different. A fix that distinguished the two by a
+        // hash or a count would pass everything above.
+        assert!(
+            site_a.0.contains("203.0.113.7->198.51.100.4 proto 47"),
+            "the carrier must be SPELLED on the page:\n{}",
+            site_a.0
+        );
+        assert!(
+            site_b.0.contains("203.0.113.9->198.51.100.4 proto 47"),
+            "{}",
+            site_b.0
+        );
+        assert!(
+            site_a
+                .1
+                .contains("\"src\":\"203.0.113.7\",\"dst\":\"198.51.100.4\",\"proto\":47"),
+            "{}",
+            site_a.1
+        );
+
+        // The direct capture says NOTHING about tunnels in the text and an
+        // EMPTY array in the document -- the two renderings' stated split, and
+        // an assertion because "prints nothing" is otherwise indistinguishable
+        // from "the walk lost it again".
+        assert!(!direct.0.contains("tunnels:"), "{}", direct.0);
+        assert!(direct.1.contains("\"tunnels\":[]"), "{}", direct.1);
+
+        // THE CONTROL, and the thing the fix must not have broken: all three
+        // are still keyed by the INNER header. A carrier that reached the flow
+        // key would split one session into two and be a worse defect than the
+        // one being closed.
+        assert_eq!(site_a.2, site_b.2, "the flow key is the inner header's");
+        assert_eq!(site_a.2, direct.2);
+        assert_eq!(
+            (site_a.2.low.addr(), site_a.2.high.addr()),
+            (&[192, 168, 0, 1][..], &[192, 168, 0, 2][..])
+        );
+    }
+
+    /// Item 252 — a fragmented tunnel keeps its carrier.
+    ///
+    /// The path this is on is the one a naive fix leaves behind: the walk that
+    /// records the carrier runs at `decapsulate`, and a fragmented carrier
+    /// never reaches it whole. The outer header is consumed by the reassembler
+    /// before `transport_from_ip` is called, so a chain rebuilt inside that
+    /// function starts one hop short and the tunnel disappears -- on precisely
+    /// the shape that is COMMONEST, since a carrier adds bytes to a packet
+    /// already at the path MTU.
+    ///
+    /// R311y863 measured the same door being missed one field earlier; this is
+    /// its lesson applied before the fact rather than after.
+    #[test]
+    fn a_fragmented_tunnel_still_names_its_carrier() {
+        let inner = ipv4_packet(17, [192, 168, 0, 1], [192, 168, 0, 2], &zenoh_udp(4));
+        let carrier_body = gre(0, 0x0800, &[], &inner);
+        let cut = 16;
+        assert_eq!(cut % 8, 0, "an IP fragment offset is in 8-byte units");
+
+        let mut d = crate::Dissection::new();
+        for (i, (offset, more)) in [(0, true), (cut, false)].into_iter().enumerate() {
+            let piece = if more {
+                &carrier_body[..cut]
+            } else {
+                &carrier_body[cut..]
+            };
+            d.push_packet(
+                crate::link::LINKTYPE_ETHERNET,
+                i,
+                &eth(&ipv4_frag_packet(
+                    47,
+                    [203, 0, 113, 7],
+                    [198, 51, 100, 4],
+                    77,
+                    offset,
+                    more,
+                    piece,
+                )),
+            );
+        }
+        d.finish();
+
+        let text = CaptureReport::of(&d).to_text();
+        assert_eq!(
+            d.datagram_flows().len(),
+            1,
+            "the reassembled tunnel must still be read: {:?}",
+            d.skip_census()
+        );
+        assert!(
+            text.contains("203.0.113.7->198.51.100.4 proto 47"),
+            "a fragmented carrier is still a carrier:\n{text}"
+        );
+    }
+
+    /// Item 252 — TWO CARRIERS DO NOT FEED ONE DATAGRAM, tested rather than
+    /// argued.
+    ///
+    /// This round's first draft wrote on [`crate::frag::Reassembled::tunnel`]
+    /// that recording only the first piece's carrier left a residue: a later
+    /// piece arriving through a different carrier would be folded into the
+    /// same entry and go unreported. That was reasoning, and it was WRONG. A
+    /// fragmented carrier is fragmented at the CARRIER's own header, so the
+    /// carrier's addresses are exactly what the fragment key holds — two
+    /// carriers are two keys, and neither datagram completes.
+    ///
+    /// Kept as a test because the correction is only as durable as something
+    /// that fails when it stops being true. The pieces below are a valid
+    /// split of one datagram in every respect except the carrier's source.
+    #[test]
+    fn a_second_carrier_does_not_complete_another_carriers_datagram() {
+        let inner = ipv4_packet(17, [192, 168, 0, 1], [192, 168, 0, 2], &zenoh_udp(4));
+        let carrier_body = gre(0, 0x0800, &[], &inner);
+        let cut = 16;
+
+        let mut d = crate::Dissection::new();
+        for (i, (src, offset, more)) in [
+            ([203, 0, 113, 7], 0, true),
+            // Same identifier, same destination, same protocol, and the piece
+            // that would complete the datagram -- differing only in where the
+            // tunnel starts.
+            ([203, 0, 113, 9], cut, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let piece = if more {
+                &carrier_body[..cut]
+            } else {
+                &carrier_body[cut..]
+            };
+            d.push_packet(
+                crate::link::LINKTYPE_ETHERNET,
+                i,
+                &eth(&ipv4_frag_packet(
+                    47,
+                    src,
+                    [198, 51, 100, 4],
+                    77,
+                    offset,
+                    more,
+                    piece,
+                )),
+            );
+        }
+        d.finish();
+
+        assert_eq!(
+            d.datagram_flows().len(),
+            0,
+            "two carriers must not assemble into one session"
+        );
+        assert_eq!(
+            d.open_fragment_chains(),
+            2,
+            "and they are TWO chains, not one -- which is why the first \
+             piece's carrier is the chain's carrier, with nothing left over"
+        );
     }
 
     /// R311y864 — a GRE payload this reader does not walk is named BY ITS

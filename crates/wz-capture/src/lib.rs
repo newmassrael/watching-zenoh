@@ -548,6 +548,8 @@ pub struct DatagramDissection {
     /// Their fields come from the sink instead, taken while the recovered
     /// plaintext was alive — the same route [`Self::quic_streams`] uses.
     pub quic_datagrams: messages::MessageList,
+    /// Item 252 — the distinct ways this flow's packets ARRIVED.
+    carriers: link::Carriers,
 }
 
 /// R311y918 (open-debt item 270's prerequisite) — WHAT A LIST'S
@@ -690,7 +692,14 @@ impl DatagramDissection {
             last_seen_ms: None,
             quic_streams: Vec::new(),
             quic_datagrams: messages::MessageList::new(),
+            carriers: link::Carriers::default(),
         }
+    }
+
+    /// Item 252 — the distinct carrier chains this flow was seen arriving
+    /// inside, and whether it was also seen arriving direct.
+    pub fn carriers(&self) -> &link::Carriers {
+        &self.carriers
     }
 
     /// R311y718 — transport messages decoded on this flow, over BOTH of the
@@ -1253,6 +1262,8 @@ pub struct FlowDissection {
     chain_loss: ChainLoss,
     /// R311y713 (§B4) — the CAPTURE INSTANT of the last packet on this flow.
     last_seen_ms: Option<u64>,
+    /// Item 252 — the distinct ways this flow's packets ARRIVED.
+    carriers: link::Carriers,
 }
 
 /// R311y612 (§4.1) — post-hole bytes held per direction while deciding whether
@@ -1298,7 +1309,14 @@ impl FlowDissection {
             residue: ByteResidue::default(),
             chain_loss: ChainLoss::default(),
             last_seen_ms: None,
+            carriers: link::Carriers::default(),
         }
+    }
+
+    /// Item 252 — the distinct carrier chains this flow was seen arriving
+    /// inside, and whether it was also seen arriving direct.
+    pub fn carriers(&self) -> &link::Carriers {
+        &self.carriers
     }
 
     /// R311y612 — every ws resynchronisation this flow reported, in order.
@@ -2286,6 +2304,11 @@ mod message_list_census {
             residue: _,
             chain_loss: _,
             last_seen_ms: _,
+            // Item 252 — how this flow's packets ARRIVED, which is not a list
+            // of frames and never becomes one: a carrier is a property of the
+            // wire, so no message plane reads it. `report::carriers_text` and
+            // `carriers_json` are its two consumers.
+            carriers: _,
         } = FlowDissection::new(FlowKey::serial_line(), None, None);
     }
 
@@ -2309,6 +2332,10 @@ mod message_list_census {
             residue: _,
             chain_loss: _,
             last_seen_ms: _,
+            // Item 252 — see the stream-flow twin above. Same field, same two
+            // consumers, and it is on BOTH flow families because a tunnelled
+            // UDP session is the shape a cloud overlay actually carries.
+            carriers: _,
         } = DatagramDissection::new(FlowKey::serial_line(), None);
     }
 
@@ -3223,6 +3250,13 @@ impl Dissection {
                 &done.payload,
                 done.packet_index,
                 checksums,
+                // Item 252 — the chain the pieces arrived inside. Handed BACK
+                // to the walk rather than rebuilt, because the header that
+                // named this carrier was consumed before the table had a whole
+                // datagram: a fragmented tunnel is the ordinary shape (a
+                // carrier adds bytes to a packet already at the MTU), so this
+                // is the path on which a dropped carrier would be commonest.
+                done.tunnel.clone(),
             ) {
                 // R311y608 — `Udp` unconditionally, and it is not a shortcut:
                 // a raweth frame is recognised BEFORE the IP walk and never has
@@ -4463,6 +4497,11 @@ impl Dissection {
         // still stamps its frames.
         self.advance_clock(idx, ts_millis, FlowKind::Stream);
         let flow = &mut self.flows[idx];
+        // Item 252 — recorded for every segment, a pure ACK included: a
+        // keepalive that arrived through a different carrier is exactly as much
+        // evidence of a second path as one carrying bytes, and gating on
+        // payload would make the answer depend on what the peer had to say.
+        flow.carriers.observe(&segment.tunnel);
         let direction = if segment.from_low {
             Direction::A
         } else {
@@ -4644,6 +4683,12 @@ impl Dissection {
                 ip: None,
                 transport: None,
             },
+            // Item 252 — a vsock record CANNOT be tunnelled, and this is the
+            // one place that is a statement rather than a default. The
+            // `LINKTYPE_VSOCK` arm of `decapsulate` returns before the IP walk
+            // exists, so there is no carrier for one to have arrived inside;
+            // if that ever stops being true this line is where it shows.
+            tunnel: link::Tunnel::none(),
         };
         let before = flow.assembler(direction).len();
         match direction {
@@ -4708,6 +4753,11 @@ impl Dissection {
         let flow = &mut self.datagram_flows[idx];
         flow.last_activity = d.packet_index;
         flow.last_seen_ms = ts_millis.or(flow.last_seen_ms);
+        // Item 252 — recorded for EVERY datagram, including one that turns out
+        // to be QUIC or scouting. How a packet arrived is a fact about the
+        // wire, and gating it on what the payload decoded to would report the
+        // carrier only for the flows already easiest to read.
+        flow.carriers.observe(&d.tunnel);
         // R311y709 — THE recovery point for a datagram flow. Before the QUIC
         // branch on purpose: a datagram counted as QUIC was recovered exactly as
         // much as one that is decoded, and the branch that follows is precisely

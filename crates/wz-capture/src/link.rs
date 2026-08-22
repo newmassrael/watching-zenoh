@@ -420,6 +420,10 @@ pub struct Segment {
     pub packet_index: usize,
     /// What this packet's checksums said. Reported, never acted on.
     pub checksums: Checksums,
+    /// Item 252 — the carriers this segment arrived inside, outermost first.
+    /// Empty when it arrived on the wire it was addressed on. Reported, never
+    /// acted on: the flow is keyed by the INNER header and stays so.
+    pub tunnel: Tunnel,
 }
 
 /// Why a captured packet yielded no TCP segment.
@@ -548,6 +552,9 @@ pub struct Datagram {
     pub packet_index: usize,
     /// What this packet's checksums said. Reported, never acted on.
     pub checksums: Checksums,
+    /// Item 252 — the carriers this datagram arrived inside, outermost first.
+    /// Empty when it arrived on the wire it was addressed on.
+    pub tunnel: Tunnel,
 }
 
 impl Datagram {
@@ -676,6 +683,148 @@ pub struct IpFragment {
     /// reporting `Some(false)` for a piece would call every fragmented capture
     /// corrupt.
     pub checksums: Checksums,
+    /// Item 252 — the carriers this PIECE arrived inside, outermost first.
+    ///
+    /// Held on the piece rather than only on the reassembled datagram because
+    /// reassembly happens one layer up and the carrier is knowable only here.
+    /// A tunnel ingress that fragments is the ordinary shape, so a fragmented
+    /// capture is exactly where dropping this would be least noticed.
+    pub tunnel: Tunnel,
+}
+
+/// ONE carrier header the walk stepped through on its way to a session.
+///
+/// Item 252 — before this, every header the walk consumed was discarded the
+/// instant its payload was in hand (`cursor = d.payload; continue;`), so a
+/// session inside a tunnel and a session on the wire produced byte-identical
+/// output. Two deployments tunnelled from different SITES were one page.
+///
+/// The addresses carry `port` zero for the same reason [`IpFragment::src`]
+/// does: a carrier header has no transport under it that this walk has read,
+/// so there is no port to know. Renderers print the address alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TunnelHop {
+    /// Carrier source address, port zero.
+    pub src: Endpoint,
+    /// Carrier destination address, port zero.
+    pub dst: Endpoint,
+    /// The IP protocol number that made this header a carrier rather than a
+    /// terminator: 4 (IPv4-in-IP), 41 (IPv6-in-IP) or 47 (GRE).
+    ///
+    /// Spelled rather than linked because the constants behind these are
+    /// private to the walk, and a consumer reading this field has the number
+    /// and not the name.
+    pub proto: u8,
+}
+
+/// The carriers a packet arrived inside, OUTERMOST FIRST.
+///
+/// Empty for a packet that arrived on the wire it was addressed on, which is
+/// the overwhelming majority, so the empty case costs no allocation.
+///
+/// Bounded by the walk's own encapsulation-depth limit, which refuses a longer
+/// chain before it can be recorded, so this can never grow past it.
+///
+/// A CHAIN and not a single hop because the outermost pair alone would answer
+/// "which site" for a one-hop tunnel and lie about a two-hop one — an overlay
+/// inside a VPN has two sites, and reporting only the outer names the VPN
+/// concentrator every tenant shares.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Tunnel {
+    hops: Vec<TunnelHop>,
+}
+
+impl Tunnel {
+    /// A packet that arrived on the wire it was addressed on.
+    pub fn none() -> Self {
+        Self { hops: Vec::new() }
+    }
+
+    /// The carriers, outermost first.
+    pub fn hops(&self) -> &[TunnelHop] {
+        &self.hops
+    }
+
+    /// `true` when this packet was NOT tunnelled.
+    pub fn is_empty(&self) -> bool {
+        self.hops.is_empty()
+    }
+
+    /// How many carriers the walk stepped through.
+    pub fn depth(&self) -> usize {
+        self.hops.len()
+    }
+
+    /// Record one carrier. Called by the walk as it descends, so the order is
+    /// outermost first by construction rather than by a later sort.
+    fn push(&mut self, src: Endpoint, dst: Endpoint, proto: u8) {
+        self.hops.push(TunnelHop { src, dst, proto });
+    }
+}
+
+/// How many DISTINCT carrier chains one flow will remember.
+///
+/// A cap and not a `Vec` left to grow, for the reason every other population
+/// in this reader is capped: the input is a file somebody else wrote. Eight is
+/// chosen to be past any real deployment — a flow reaching a peer through more
+/// than a couple of tunnels at once is already the anomaly the count reports —
+/// while keeping the per-flow cost bounded by a constant.
+pub const MAX_CARRIERS_PER_FLOW: usize = 8;
+
+/// The distinct ways one flow was observed ARRIVING.
+///
+/// Item 252. Kept per flow rather than per packet because that is the question
+/// a reader has: two sessions on the page differ by where they came from, and
+/// a per-packet field answers it only for whoever walks every packet.
+///
+/// Both halves are recorded, and the second is why this is not a bare list: a
+/// capture taken at a tunnel EGRESS sees the same flow arrive tunnelled and
+/// then direct, and a reader told only "tunnelled" would conclude the capture
+/// point was outside the tunnel for all of it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Carriers {
+    seen: Vec<Tunnel>,
+    untunnelled: bool,
+    overflowed: bool,
+}
+
+impl Carriers {
+    /// Record how ONE packet arrived.
+    pub fn observe(&mut self, tunnel: &Tunnel) {
+        if tunnel.is_empty() {
+            self.untunnelled = true;
+            return;
+        }
+        if self.seen.iter().any(|t| t == tunnel) {
+            return;
+        }
+        if self.seen.len() >= MAX_CARRIERS_PER_FLOW {
+            self.overflowed = true;
+            return;
+        }
+        self.seen.push(tunnel.clone());
+    }
+
+    /// The distinct carrier chains, in the order first seen.
+    pub fn tunnels(&self) -> &[Tunnel] {
+        &self.seen
+    }
+
+    /// `true` when at least one packet on this flow arrived NOT tunnelled.
+    pub fn saw_untunnelled(&self) -> bool {
+        self.untunnelled
+    }
+
+    /// `true` when this flow arrived through more distinct chains than
+    /// [`MAX_CARRIERS_PER_FLOW`], so the list above is a floor.
+    pub fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
+    /// `true` when no packet on this flow arrived through any carrier.
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
 }
 
 /// What an IP header resolved to, before the transport layer is read.
@@ -748,12 +897,20 @@ pub fn decapsulate(
         LinkBody::RawEth(d) => return Ok(Transport::RawEth(d)),
         LinkBody::Ip { bytes, is_v6 } => (bytes, is_v6),
     };
-    let (end, ip_checksum) = walk_ip_chain(ip_bytes, is_v6, 0, None, packet_index)?;
-    let ip = match end {
+    let walked = walk_ip_chain(ip_bytes, is_v6, 0, None, Tunnel::none(), packet_index)?;
+    let ip_checksum = walked.ip_checksum;
+    let tunnel = walked.tunnel;
+    let ip = match walked.end {
         // A GRETAP tunnel whose inner frame was a pico raweth one. The walk
         // reached the link layer and the link layer answered, so there is no
         // IP header here to strip a transport off — the datagram IS the answer.
-        ChainEnd::RawEth(d) => return Ok(Transport::RawEth(d)),
+        // Item 252 — and it is stamped like every other arm: a raweth frame
+        // inside GRETAP is the MOST tunnelled thing this reader produces, so
+        // an unstamped arm here would be the one that mattered most.
+        ChainEnd::RawEth(mut d) => {
+            d.tunnel = tunnel;
+            return Ok(Transport::RawEth(d));
+        }
         ChainEnd::Ip(ip) => ip,
     };
     // R311y606 — a fragment leaves here before the transport strip, because
@@ -774,6 +931,7 @@ pub fn decapsulate(
                 ip: ip_checksum,
                 transport: None,
             },
+            tunnel,
         }));
     }
     // R311y597 — computed here, where both the addresses (for the pseudo
@@ -790,6 +948,7 @@ pub fn decapsulate(
         ip.payload,
         packet_index,
         checksums,
+        tunnel,
     )
 }
 
@@ -895,6 +1054,22 @@ enum ChainEnd<'a> {
     RawEth(Datagram),
 }
 
+/// Everything one chain walk OBSERVED, not merely where it ended.
+///
+/// Item 252 — the walk had been returning a pair, and adding the carrier chain
+/// to it would have made a triple whose members are told apart by position.
+/// The three are not the same kind of fact: one is where the walk stopped, and
+/// two are things it saw on the way and would otherwise discard. A struct is
+/// what lets the next such observation be added without every caller's
+/// destructuring changing shape.
+struct Walked<'a> {
+    end: ChainEnd<'a>,
+    /// Folded across every v4 header in the chain — see [`walk_ip_chain`].
+    ip_checksum: Option<bool>,
+    /// The carriers stepped through, outermost first.
+    tunnel: Tunnel,
+}
+
 /// Walk an IP-in-IP chain down to the header whose body is NOT another packet.
 ///
 /// R311y862 wrote this loop inside [`decapsulate`]; R311y863 lifted it out
@@ -920,17 +1095,24 @@ enum ChainEnd<'a> {
 ///
 /// `packet_index` is carried only so a GRETAP frame can be handed to the link
 /// layer, which stamps it onto the datagram it produces. Item 260.
+///
+/// `start_tunnel` is the third such caller-carried fold, and the reassembly
+/// door is why it exists: the piece's OUTER header was consumed before the
+/// reassembler had a whole datagram, so the carrier it named is knowable only
+/// to that caller. Item 252.
 fn walk_ip_chain<'a>(
     bytes: &'a [u8],
     is_v6: bool,
     start_depth: usize,
     start_checksum: Option<bool>,
+    start_tunnel: Tunnel,
     packet_index: usize,
-) -> Result<(ChainEnd<'a>, Option<bool>), SkipReason> {
+) -> Result<Walked<'a>, SkipReason> {
     let mut cursor: &'a [u8] = bytes;
     let mut v6 = is_v6;
     let mut ip_checksum = start_checksum;
     let mut depth = start_depth;
+    let mut tunnel = start_tunnel;
     loop {
         let d = if v6 {
             strip_ipv6(cursor)?
@@ -947,13 +1129,21 @@ fn walk_ip_chain<'a>(
         // layer down. The piece is reported, and the datagram the reassembler
         // rebuilds out of it re-enters this walk through `transport_from_ip`.
         if d.fragment.is_some() {
-            return Ok((ChainEnd::Ip(d), ip_checksum));
+            return Ok(Walked {
+                end: ChainEnd::Ip(d),
+                ip_checksum,
+                tunnel,
+            });
         }
         if d.proto == IP_PROTO_IPV4_IN_IP || d.proto == IP_PROTO_IPV6_IN_IP {
             depth += 1;
             if depth > MAX_ENCAPSULATION_DEPTH {
                 return Err(SkipReason::Encapsulation(d.proto));
             }
+            // Item 252 — recorded BEFORE the cursor moves, which is the only
+            // instant this header's addresses exist. The line under it used to
+            // be the whole step.
+            tunnel.push(d.src, d.dst, d.proto);
             v6 = d.proto == IP_PROTO_IPV6_IN_IP;
             cursor = d.payload;
             continue;
@@ -973,16 +1163,27 @@ fn walk_ip_chain<'a>(
             // cost a link header as well as a GRE one. That the bound's unit
             // is a carrier and not a header is open-debt item 262, which this
             // step joins rather than settles.
+            tunnel.push(d.src, d.dst, d.proto);
             match step_gre(d.payload, packet_index)? {
                 LinkBody::Ip { bytes, is_v6 } => {
                     v6 = is_v6;
                     cursor = bytes;
                 }
-                LinkBody::RawEth(dg) => return Ok((ChainEnd::RawEth(dg), ip_checksum)),
+                LinkBody::RawEth(dg) => {
+                    return Ok(Walked {
+                        end: ChainEnd::RawEth(dg),
+                        ip_checksum,
+                        tunnel,
+                    })
+                }
             }
             continue;
         }
-        return Ok((ChainEnd::Ip(d), ip_checksum));
+        return Ok(Walked {
+            end: ChainEnd::Ip(d),
+            ip_checksum,
+            tunnel,
+        });
     }
 }
 
@@ -992,6 +1193,12 @@ fn walk_ip_chain<'a>(
 /// as one that arrived whole. The alternative was re-synthesising an IP header
 /// around the reassembled bytes just to feed it back through the front door,
 /// and a synthesised header is a second place for the fields to be wrong.
+///
+/// `tunnel` is what the CALLER already walked through, and it is a parameter
+/// rather than a fresh [`Tunnel::none`] for the reason item 252 exists: the
+/// reassembly door reaches this function having consumed the outer header
+/// itself, so a chain rebuilt here would start one carrier short and a
+/// fragmented tunnel would report as an untunnelled one.
 pub fn transport_from_ip(
     src: Endpoint,
     dst: Endpoint,
@@ -999,10 +1206,15 @@ pub fn transport_from_ip(
     payload: &[u8],
     packet_index: usize,
     checksums: Checksums,
+    tunnel: Tunnel,
 ) -> Result<Transport, SkipReason> {
     match proto {
-        IP_PROTO_TCP => strip_tcp(src, dst, payload, packet_index, checksums).map(Transport::Tcp),
-        IP_PROTO_UDP => strip_udp(src, dst, payload, packet_index, checksums).map(Transport::Udp),
+        IP_PROTO_TCP => {
+            strip_tcp(src, dst, payload, packet_index, checksums, tunnel).map(Transport::Tcp)
+        }
+        IP_PROTO_UDP => {
+            strip_udp(src, dst, payload, packet_index, checksums, tunnel).map(Transport::Udp)
+        }
         // R311y863 — a REASSEMBLED datagram whose body is another packet is
         // WALKED here, not refused.
         //
@@ -1022,18 +1234,28 @@ pub fn transport_from_ip(
         // as a fragmented IPIP one and R311y863 would otherwise have left the
         // new walk reachable through only one of the two doors again.
         IP_PROTO_IPV4_IN_IP | IP_PROTO_IPV6_IN_IP | IP_PROTO_GRE => {
-            let (end, ip_checksum) = if proto == IP_PROTO_GRE {
+            // Item 252 — THIS header is a carrier, and its addresses are the
+            // arguments. `start_depth` is 1 for exactly the same reason, so the
+            // hop and the count are recorded at the same place; recording the
+            // count here and the addresses inside the walk is how the two would
+            // come to disagree.
+            let mut tunnel = tunnel;
+            tunnel.push(src, dst, proto);
+            let walked = if proto == IP_PROTO_GRE {
                 // The reassembled body IS the GRE header, so the step the walk
                 // takes for protocol 47 has to happen before re-entering it.
                 // Item 260 — through `step_gre`, so this door opens exactly the
                 // ethertypes the other one does, GRETAP included.
                 match step_gre(payload, packet_index)? {
                     LinkBody::Ip { bytes, is_v6 } => {
-                        walk_ip_chain(bytes, is_v6, 1, checksums.ip, packet_index)?
+                        walk_ip_chain(bytes, is_v6, 1, checksums.ip, tunnel, packet_index)?
                     }
                     // A reassembled GRETAP carrier whose inner frame was a pico
                     // raweth one: the walk is over before it starts.
-                    LinkBody::RawEth(dg) => return Ok(Transport::RawEth(dg)),
+                    LinkBody::RawEth(mut dg) => {
+                        dg.tunnel = tunnel;
+                        return Ok(Transport::RawEth(dg));
+                    }
                 }
             } else {
                 walk_ip_chain(
@@ -1041,12 +1263,18 @@ pub fn transport_from_ip(
                     proto == IP_PROTO_IPV6_IN_IP,
                     1,
                     checksums.ip,
+                    tunnel,
                     packet_index,
                 )?
             };
-            let ip = match end {
+            let ip_checksum = walked.ip_checksum;
+            let tunnel = walked.tunnel;
+            let ip = match walked.end {
                 ChainEnd::Ip(ip) => ip,
-                ChainEnd::RawEth(dg) => return Ok(Transport::RawEth(dg)),
+                ChainEnd::RawEth(mut dg) => {
+                    dg.tunnel = tunnel;
+                    return Ok(Transport::RawEth(dg));
+                }
             };
             if let Some(info) = ip.fragment {
                 // A FRAGMENT INSIDE A REASSEMBLED CARRIER, which is a real
@@ -1065,6 +1293,7 @@ pub fn transport_from_ip(
                         ip: ip_checksum,
                         transport: None,
                     },
+                    tunnel,
                 }));
             }
             // The transport checksum is recomputed from the INNERMOST header,
@@ -1080,7 +1309,15 @@ pub fn transport_from_ip(
             // fragment (handled above), a raweth datagram (returned above), or
             // a header whose proto is none of 4, 41 and 47, so this call cannot
             // reach this arm again.
-            transport_from_ip(ip.src, ip.dst, ip.proto, ip.payload, packet_index, inner)
+            transport_from_ip(
+                ip.src,
+                ip.dst,
+                ip.proto,
+                ip.payload,
+                packet_index,
+                inner,
+                tunnel,
+            )
         }
         // R311y862 — an encapsulation is NOT furniture, and this arm is what
         // stops it being filed as such. What lands here is a tunnel this build
@@ -1128,6 +1365,7 @@ fn strip_udp(
     bytes: &[u8],
     packet_index: usize,
     checksums: Checksums,
+    tunnel: Tunnel,
 ) -> Result<Datagram, SkipReason> {
     if bytes.len() < 8 {
         return Err(SkipReason::Truncated);
@@ -1153,6 +1391,7 @@ fn strip_udp(
         payload: bytes[8..8 + body_len].to_vec(),
         packet_index,
         checksums,
+        tunnel,
     })
 }
 
@@ -1266,6 +1505,13 @@ fn strip_raweth(bytes: &[u8], packet_index: usize) -> Option<Datagram> {
             ip: None,
             transport: None,
         },
+        // Item 252 — [`Tunnel::none`] because this strip runs at the LINK
+        // layer, which is above every carrier: a raweth frame inside GRETAP
+        // reaches here through `step_gre`, and the walk that consumed those
+        // carriers stamps them onto this datagram when it returns. Building
+        // the chain here would need the frame to know what carried it, which
+        // is exactly what a link header cannot say.
+        tunnel: Tunnel::none(),
     })
 }
 
@@ -1642,6 +1888,7 @@ fn strip_tcp(
     bytes: &[u8],
     packet_index: usize,
     checksums: Checksums,
+    tunnel: Tunnel,
 ) -> Result<Segment, SkipReason> {
     if bytes.len() < 20 {
         return Err(SkipReason::Truncated);
@@ -1667,6 +1914,7 @@ fn strip_tcp(
         payload: bytes[data_off..].to_vec(),
         packet_index,
         checksums,
+        tunnel,
     })
 }
 
@@ -2632,6 +2880,16 @@ mod tests {
     /// defect regenerated one carrier down, so the two are asserted EQUAL
     /// rather than each asserted separately: a leg that only checked the
     /// tunnelled frame would pass against a second, diverging door.
+    ///
+    /// ⚠ ITEM 252 SPLIT THAT EQUALITY, AND THE SPLIT IS THE POINT. This leg
+    /// asserted the two whole `Transport` values were the same, which was the
+    /// right claim about the PARSE and the wrong one about the packet: the
+    /// tunnelled frame really did arrive somewhere else, and a reading in which
+    /// that is invisible is exactly the defect item 252 names. So the equality
+    /// is now taken over everything the link layer produced — flow, direction,
+    /// payload, packet index, checksums — and the carrier is asserted to be the
+    /// ONE thing that differs. A test that had kept the whole-value equality
+    /// would have been a green assertion that the defect must stay.
     #[test]
     fn a_pico_raweth_frame_reads_the_same_inside_a_gretap_tunnel_as_outside() {
         use wz_session_core::raweth_link::DEFAULT_ETHTYPE;
@@ -2642,14 +2900,42 @@ mod tests {
 
         let outside = decapsulate(LINKTYPE_ETHERNET, 7, &bare);
         let inside = decapsulate(LINKTYPE_ETHERNET, 7, &tunnelled);
+        let (Ok(Transport::RawEth(out)), Ok(Transport::RawEth(inn))) = (&outside, &inside) else {
+            panic!("both must be raweth datagrams: {outside:?} / {inside:?}");
+        };
+        // Everything the LINK layer decided, which is what "one door" means.
         assert_eq!(
-            inside, outside,
+            (
+                out.flow,
+                out.from_low,
+                &out.payload,
+                out.packet_index,
+                out.checksums
+            ),
+            (
+                inn.flow,
+                inn.from_low,
+                &inn.payload,
+                inn.packet_index,
+                inn.checksums
+            ),
             "the tunnel must not become a second door onto the link layer"
         );
-        match inside {
-            Ok(Transport::RawEth(d)) => assert_eq!(d.payload, b"zenoh-batch"),
-            other => panic!("expected a raweth datagram, got {other:?}"),
-        }
+        assert_eq!(inn.payload, b"zenoh-batch");
+        // And the ONE difference, asserted from both sides so neither "the
+        // tunnel vanished" nor "the bare frame grew one" can pass.
+        assert!(
+            out.tunnel.is_empty(),
+            "a frame on the wire arrived through no carrier"
+        );
+        assert_eq!(
+            inn.tunnel.hops().len(),
+            1,
+            "and the tunnelled one through exactly the GRE carrier"
+        );
+        assert_eq!(inn.tunnel.hops()[0].proto, IP_PROTO_GRE);
+        assert_eq!(inn.tunnel.hops()[0].src.addr(), &[10, 0, 0, 1]);
+        assert_eq!(inn.tunnel.hops()[0].dst.addr(), &[10, 0, 0, 2]);
     }
 
     /// CONTROL. An ethertype this reader genuinely does not walk is still
