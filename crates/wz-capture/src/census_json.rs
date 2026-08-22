@@ -94,8 +94,13 @@ pub fn census_json(d: &crate::Dissection) -> String {
 pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) -> String {
     let mut out = String::from("{\"keyexprs\":");
     out.push_str(&keyexprs_json(&crate::agg::aggregate_where(d, filter)));
+    // Round 2016 (item 268) — built ONCE and lent to both planes that read it.
+    // The interest plane names the zid that declared each row, and a second
+    // census built for that would be a second answer to "who is in this
+    // capture".
+    let nodes = crate::node::nodes(d);
     out.push_str(",\"nodes\":");
-    out.push_str(&nodes_json(&crate::node::nodes(d)));
+    out.push_str(&nodes_json(&nodes));
     out.push_str(",\"exchanges\":");
     #[cfg(feature = "network-codecs")]
     out.push_str(&exchanges_json(&crate::exchange::exchanges_where(
@@ -119,6 +124,7 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
     out.push_str(&interests_json(
         &crate::interest::interests(d),
         &crate::agg::aggregate_where(d, filter),
+        &nodes,
     ));
     #[cfg(not(feature = "network-codecs"))]
     out.push_str("null");
@@ -147,7 +153,15 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
 /// second aggregation here would be a second answer to "what traffic was
 /// there", and the two could differ by a selector.
 #[cfg(feature = "network-codecs")]
-pub fn interests_json(c: &crate::interest::InterestCensus, t: &ThroughputTable) -> String {
+pub fn interests_json(
+    c: &crate::interest::InterestCensus,
+    t: &ThroughputTable,
+    // Round 2016 (item 268) — the node plane, so a declaration can name WHO
+    // made it. A parameter and not a second census built here: this document
+    // already renders `nodes` from one the caller composed, and building a
+    // second would let the two disagree about how many nodes the capture held.
+    nodes: &NodeCensus,
+) -> String {
     let coverage = c.coverage(t);
     let mut out = String::from("{\"declarations\":[");
     for (i, d) in c.interests().iter().enumerate() {
@@ -156,11 +170,24 @@ pub fn interests_json(c: &crate::interest::InterestCensus, t: &ThroughputTable) 
         }
         let _ = write!(
             out,
-            "{{\"kind\":\"{}\",\"declarer\":\"{}\",\"id\":{},\"keyexpr\":",
+            "{{\"kind\":\"{}\",\"declarer\":\"{}\",\"declarer_zid\":",
             d.kind.name(),
             dir_name(d.declarer),
-            d.id
         );
+        // Item 268 — NULL for a flow whose handshake this capture missed, on
+        // this document's rule that an empty string is a value. See
+        // `NodeCensus::zid_on` for why a guess is worse than a null here.
+        match nodes.zid_on(&d.flow, d.declarer) {
+            Some(zid) => {
+                out.push('"');
+                for b in zid {
+                    let _ = write!(out, "{b:02x}");
+                }
+                out.push('"');
+            }
+            None => out.push_str("null"),
+        }
+        let _ = write!(out, ",\"id\":{},\"keyexpr\":", d.id);
         match &d.keyexpr {
             Some(k) => escape_into(k, &mut out),
             // Not an empty string: a declaration this reader could not name is
@@ -1279,6 +1306,12 @@ mod fed_tests {
             "declared",
             "declared_at",
             "declarer",
+            // Round 2016 (item 268) — the zid that made a declaration, joined
+            // from the node plane. ADDED and not renamed, so it falls on the
+            // side of `wz_dissect.h`'s line a linking consumer may ignore: a
+            // reader that does not know the key reads the document exactly as
+            // before, and one that does gets "who" beside "what".
+            "declarer_zid",
             "dels",
             "descriptors",
             "dropped_by_limits",
@@ -1760,13 +1793,22 @@ mod fed_tests {
         let interests = plane(&json, ",\"interests\":");
         assert!(
             interests.contains(
-                "\"kind\":\"subscriber\",\"declarer\":\"a\",\"id\":1,\"keyexpr\":\"demo/**\""
+                "\"kind\":\"subscriber\",\"declarer\":\"a\",\
+                 \"declarer_zid\":\"a1a1a1a1\",\"id\":1,\"keyexpr\":\"demo/**\""
             ),
             "A's subscriber is missing: {interests}"
         );
+        // Round 2016 (item 268) — and the two declarations name DIFFERENT
+        // zids, which is the half a join reading one end would fail. This
+        // fixture had both ends' handshakes all along; nothing was asking.
+        assert!(
+            interests.contains("\"declarer\":\"b\",\"declarer_zid\":\"b2b2b2b2\""),
+            "B's queryable must name B: {interests}"
+        );
         assert!(
             interests.contains(
-                "\"kind\":\"queryable\",\"declarer\":\"b\",\"id\":2,\"keyexpr\":\"demo/q\""
+                "\"kind\":\"queryable\",\"declarer\":\"b\",\
+                 \"declarer_zid\":\"b2b2b2b2\",\"id\":2,\"keyexpr\":\"demo/q\""
             ),
             "B's queryable is missing, so the plane read one direction only: \
              {interests}"

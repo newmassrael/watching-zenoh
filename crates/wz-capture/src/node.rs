@@ -187,6 +187,35 @@ impl NodeCensus {
         self.unattributed_bytes
     }
 
+    /// Round 2016 (item 268) — WHO IS ON THIS SIDE OF THIS FLOW.
+    ///
+    /// The one lookup that lets the interest plane and this one meet. A
+    /// declaration knows the flow it went past on and the DIRECTION that made
+    /// it ([`crate::interest::DeclaredInterest::declarer`]); this answers which
+    /// zid that direction belongs to, and "zid a1a1a1a1 subscribes to
+    /// `robot/**`" falls out of the two.
+    ///
+    /// # `None` is a real answer and the commoner one
+    ///
+    /// It comes back only for a flow with a LINK — both ends named themselves,
+    /// which needs the handshake to be in the capture. A tap started
+    /// mid-session has no Init to read, so it has nodes it cannot place and
+    /// directions it cannot own. Answering with a guess there — the flow's
+    /// address, say, or the only zid seen nearby — would be this plane's own
+    /// stated failure: `unattributed_bytes` exists because a share computed
+    /// over an invented denominator reads as a measurement.
+    ///
+    /// R311y869 saw this join was one lookup away and did not make it, on the
+    /// ground that the honest arm needs a fixture of its own. It has one now.
+    pub fn zid_on(&self, flow: &FlowKey, dir: Direction) -> Option<&[u8]> {
+        let link = self.links.iter().find(|l| &l.flow == flow)?;
+        let at = match dir {
+            Direction::A => link.a,
+            Direction::B => link.b,
+        };
+        self.nodes.get(at).map(|n| n.zid.as_slice())
+    }
+
     /// Unit bytes credited to a named node.
     pub fn attributed_bytes(&self) -> u64 {
         self.nodes.iter().map(|n| n.wire_bytes).sum()

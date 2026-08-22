@@ -1289,7 +1289,14 @@ pub fn analyze_dissection(
     // taking NO selector: `Filter`'s terms are record-level, and a node is
     // named by a handshake that has no keyexpr, kind or payload for them to
     // read. Same reason the QUIC pass below states, one plane over.
-    let node_census = census.nodes.then(|| wz_capture::node::nodes(&dissection));
+    // Round 2016 (item 268) — built when the node PLANE was asked for, or when
+    // the INTEREST plane was, because "who declared this" is part of the
+    // interest plane's answer and the join needs a census to make it. Exactly
+    // the argument `interest_traffic` below makes about the throughput table:
+    // built for the join, and attached as a plane only if the reader asked for
+    // the plane.
+    let node_census =
+        (census.nodes || census.interests).then(|| wz_capture::node::nodes(&dissection));
     // R311y869 (§1.1f) — the interest plane and the table its coverage is a
     // join against, built HERE rather than inside the report so the coverage is
     // computed exactly once and against the table the rest of this report
@@ -1333,11 +1340,15 @@ pub fn analyze_dissection(
     if let Some(table) = &payloads {
         report = report.with_payloads(table);
     }
-    if let Some(table) = &node_census {
-        report = report.with_nodes(table);
+    // Item 268 — the PLANE only when the reader asked for it, even though the
+    // census above may have been built for the join alone.
+    if census.nodes {
+        if let Some(table) = &node_census {
+            report = report.with_nodes(table);
+        }
     }
     if let (Some(c), Some(cov)) = (&interest_census, &interest_coverage) {
-        report = report.with_interests(c, cov);
+        report = report.with_interests(c, cov, node_census.as_ref());
     }
     let report = report;
     // R311y716 ([REDACTED-REQ]) — the verdict AND its reasons, from ONE call. A
@@ -6060,7 +6071,8 @@ mod tests {
         let json = run(Format::Json);
         assert!(
             json.contains(
-                "\"kind\":\"subscriber\",\"declarer\":\"a\",\"id\":1,\
+                "\"kind\":\"subscriber\",\"declarer\":\"a\",\"declarer_zid\":null,\
+                           \"id\":1,\
                            \"keyexpr\":\"demo/**\",\"open\":true,\"covers\":1"
             ),
             "the export carries the same row: {json}"

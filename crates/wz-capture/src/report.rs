@@ -109,6 +109,11 @@ pub struct CaptureReport<'a> {
         &'a crate::interest::InterestCensus,
         &'a crate::interest::Coverage,
     )>,
+    /// Round 2016 (item 268) — the node census the interest plane is JOINED
+    /// against, which is a different thing from [`Self::nodes`], the node
+    /// PLANE. See [`Self::with_interests`].
+    #[cfg(feature = "network-codecs")]
+    interest_zids: Option<&'a crate::node::NodeCensus>,
     dissection: &'a crate::Dissection,
     throughput: Option<&'a ThroughputTable>,
     #[cfg(feature = "network-codecs")]
@@ -171,6 +176,32 @@ fn hex_zid(zid: &[u8]) -> String {
         out.push_str(&alloc::format!("{b:02x}"));
     }
     out
+}
+
+/// Round 2016 (item 268) — "`<zid>` " for a declaration whose declarer the node
+/// plane can name, and the empty string otherwise.
+///
+/// # Three states, and the third is why this is a function
+///
+/// The node plane may be ABSENT from the report (nobody attached it), PRESENT
+/// but unable to place this flow (no handshake in the capture, so no link), or
+/// able. The first two produce the same line, and they must: a reader is owed
+/// the declaration either way, and a placeholder like `<unknown> subscriber
+/// robot/**` would put a word where a name goes on the majority of real
+/// captures. What tells the two apart is the node plane's own header, which
+/// reports how many nodes and links this capture held.
+///
+/// R311y869 declined this join because the honest arm needs its own fixture.
+/// `an_interest_names_the_zid_that_declared_it` drives all three.
+#[cfg(feature = "network-codecs")]
+fn declarer_prefix(
+    nodes: Option<&crate::node::NodeCensus>,
+    i: &crate::interest::DeclaredInterest,
+) -> String {
+    match nodes.and_then(|n| n.zid_on(&i.flow, i.declarer)) {
+        Some(zid) => alloc::format!("{} ", hex_zid(zid)),
+        None => String::new(),
+    }
 }
 
 /// R311y725 (N4) — the cipher suite a capture's encrypted flows negotiated, as
@@ -357,6 +388,8 @@ impl<'a> CaptureReport<'a> {
             nodes: None,
             #[cfg(feature = "network-codecs")]
             interests: None,
+            #[cfg(feature = "network-codecs")]
+            interest_zids: None,
             quic: None,
         }
     }
@@ -404,13 +437,24 @@ impl<'a> CaptureReport<'a> {
     ///
     /// Both halves at once, on the rule the field states: the coverage must be
     /// the one computed from the table this report's other planes describe.
+    /// Round 2016 (item 268) — `nodes` is the JOIN, not the plane.
+    ///
+    /// It is a third argument here rather than read off [`Self::with_nodes`]
+    /// for the reason `interest_traffic` exists one caller up: a reader asking
+    /// "who subscribes to what" needs the node census whether or not they
+    /// asked for the node PLANE, and rendering the plane because the join
+    /// needed it would put a section on the page nobody requested. `None` is
+    /// legitimate and means the declarations are reported without a declarer,
+    /// which is also what a capture with no handshake produces.
     #[cfg(feature = "network-codecs")]
     pub fn with_interests(
         mut self,
         census: &'a crate::interest::InterestCensus,
         coverage: &'a crate::interest::Coverage,
+        nodes: Option<&'a crate::node::NodeCensus>,
     ) -> Self {
         self.interests = Some((census, coverage));
+        self.interest_zids = nodes;
         self
     }
 
@@ -1218,12 +1262,25 @@ impl<'a> CaptureReport<'a> {
                     s.push(',');
                 }
                 s.push_str(&alloc::format!(
-                    "{{\"kind\":\"{}\",\"declarer\":\"{}\",\"id\":{},\"keyexpr\":{},\
+                    "{{\"kind\":\"{}\",\"declarer\":\"{}\",\"declarer_zid\":{},\
+                     \"id\":{},\"keyexpr\":{},\
                      \"open\":{},\"covers\":{},\"solicited_by\":{}}}",
                     interest.kind.name(),
                     match interest.declarer {
                         wz_session_core::passive::Direction::A => "a",
                         wz_session_core::passive::Direction::B => "b",
+                    },
+                    // Round 2016 (item 268) — the join, as a value a consumer
+                    // can key on. NULL and not "" for the two cases that
+                    // cannot answer (no node plane attached, or a flow whose
+                    // handshake this capture missed), on this document's
+                    // standing rule: an empty string is a zid.
+                    match self
+                        .interest_zids
+                        .and_then(|n| n.zid_on(&interest.flow, interest.declarer))
+                    {
+                        Some(zid) => alloc::format!("\"{}\"", hex_zid(zid)),
+                        None => "null".into(),
                     },
                     interest.id,
                     match &interest.keyexpr {
@@ -1472,7 +1529,12 @@ impl<'a> CaptureReport<'a> {
             for m in &coverage.matched {
                 let i = &census.interests()[m.interest];
                 s.push_str(&format!(
-                    "    {} {} covers {} key(s), {} message(s), {} byte(s){}\n",
+                    "    {}{} {} covers {} key(s), {} message(s), {} byte(s){}\n",
+                    // Round 2016 (item 268) — WHO declared it, when the node
+                    // plane is attached and can say. Leading, because "who
+                    // subscribes to what" is the sentence a reader came for
+                    // and the keyexpr alone answers only half of it.
+                    declarer_prefix(self.interest_zids, i),
                     i.kind.name(),
                     i.keyexpr.as_deref().unwrap_or("<unresolved>"),
                     m.keys.len(),
@@ -1487,7 +1549,12 @@ impl<'a> CaptureReport<'a> {
             for at in &coverage.silent {
                 let i = &census.interests()[*at];
                 s.push_str(&format!(
-                    "    FINDING: {} {} matched NO traffic in this capture\n",
+                    "    FINDING: {}{} {} matched NO traffic in this capture\n",
+                    // Item 268 — and it matters MOST here. "somebody wants
+                    // robot/** and nobody publishes it" is a report; "zid
+                    // a1a1a1a1 wants robot/** and nobody publishes it" is
+                    // something an operator can go and look at.
+                    declarer_prefix(self.interest_zids, i),
                     i.kind.name(),
                     i.keyexpr.as_deref().unwrap_or("<unresolved>"),
                 ));
@@ -5190,7 +5257,9 @@ mod tests {
         assert_eq!(table.rows().len(), 1, "and one keyexpr carried traffic");
         let coverage = census.coverage(&table);
 
-        let page = CaptureReport::of(&d).with_interests(&census, &coverage);
+        // Item 268 — `None`: this leg is about the plane's own findings, and
+        // attaching a node census would put a zid in every expected line.
+        let page = CaptureReport::of(&d).with_interests(&census, &coverage, None);
 
         let text = page.to_text();
         assert!(
@@ -5364,7 +5433,7 @@ mod tests {
         let table = crate::agg::aggregate(&d);
         let coverage = census.coverage(&table);
 
-        let page = CaptureReport::of(&d).with_interests(&census, &coverage);
+        let page = CaptureReport::of(&d).with_interests(&census, &coverage, None);
         let text = page.to_text();
         assert!(
             text.contains(
@@ -7076,6 +7145,135 @@ mod tests {
         );
     }
 
+    /// ITEM 268 — A DECLARATION NAMES THE ZID THAT MADE IT.
+    ///
+    /// # The item
+    ///
+    /// A declaration knows the flow it went past on and the DIRECTION that
+    /// made it; the node plane knows which zid owns each direction of a flow
+    /// it has a link for. "zid a1a1a1a1 subscribes to `robot/**`" was one
+    /// lookup away and R311y869 did not make it — on the stated ground that
+    /// the attribution is sound only where a link exists, and the honest arm
+    /// for everything else needs a fixture of its own.
+    ///
+    /// # All three arms, because the third is the one that was owed a fixture
+    ///
+    /// A flow WITH a handshake names its declarer. A flow WITHOUT one does not
+    /// — a tap started mid-session has no Init to read — and the declaration
+    /// must still be reported, unprefixed, rather than dropped or labelled
+    /// with a placeholder. And a report with no node plane attached behaves
+    /// like the second, because the two are the same to a reader: what tells
+    /// them apart is the node plane's own header.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn an_interest_names_the_zid_that_declared_it() {
+        use crate::datagram_tests::{tcp_packet, tcp_packet_reverse};
+        use crate::node::tests::framed_init;
+
+        let declare = {
+            let wire =
+                wz_session_core::declare_build::build_declare_subscriber(7, 0, Some("robot/**"))
+                    .expect("the production builder")
+                    .try_as_borrowed()
+                    .expect("re-borrow")
+                    .encode_to_vec();
+            // One length-prefixed transport frame carrying it, which is what a
+            // declaration looks like on a stream link.
+            let mut unit = alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAME
+                    | wz_session_core::wire_const::FLAG_T_FRAME_R,
+                0x00,
+            ];
+            unit.extend_from_slice(&wire);
+            let mut out = (unit.len() as u16).to_le_bytes().to_vec();
+            out.extend_from_slice(&unit);
+            out
+        };
+
+        // ARM 1 -- the handshake is in the capture, so A has a name.
+        let mut named = crate::Dissection::new();
+        let mut seq = 1000u32;
+        named.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &tcp_packet(seq, &framed_init(&[0xA1; 4])),
+        );
+        seq += framed_init(&[0xA1; 4]).len() as u32;
+        named.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            1,
+            &tcp_packet_reverse(2000, &framed_init(&[0xB2; 4])),
+        );
+        named.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            2,
+            &tcp_packet(seq, &declare),
+        );
+        named.finish();
+
+        // ARM 2 -- the same declaration on a flow whose handshake went past
+        // before the tap started.
+        let mut anonymous = crate::Dissection::new();
+        anonymous.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &tcp_packet(1000, &declare),
+        );
+        anonymous.finish();
+
+        let page = |d: &crate::Dissection, with_nodes: bool| {
+            let census = crate::interest::interests(d);
+            let table = crate::agg::aggregate(d);
+            let coverage = census.coverage(&table);
+            let nodes = crate::node::nodes(d);
+            assert_eq!(
+                census.interests().len(),
+                1,
+                "the declaration must be READ before anything is asked about \
+                 naming it: {:?}",
+                d.skip_census()
+            );
+            let r = CaptureReport::of(d).with_interests(
+                &census,
+                &coverage,
+                with_nodes.then_some(&nodes),
+            );
+            (r.to_text(), r.to_json())
+        };
+
+        let (text, json) = page(&named, true);
+        assert!(
+            text.contains("a1a1a1a1 subscriber robot/**"),
+            "the declarer must be NAMED on the page -- this IS item 268:\n{text}"
+        );
+        assert!(
+            json.contains("\"declarer_zid\":\"a1a1a1a1\""),
+            "and in the machine rendering:\n{json}"
+        );
+        // The OTHER end's zid must not be the answer. `declarer` is a
+        // direction, and reading the wrong one is the failure that would look
+        // like a working join on a fixture with one node.
+        assert!(!text.contains("b2b2b2b2 subscriber"), "{text}");
+
+        // ARM 2 -- reported, unprefixed, and NOT dropped.
+        let (anon_text, anon_json) = page(&anonymous, true);
+        assert!(
+            anon_text.contains("subscriber robot/**"),
+            "a declaration whose declarer cannot be named is still a \
+             declaration:\n{anon_text}"
+        );
+        assert!(
+            anon_json.contains("\"declarer_zid\":null"),
+            "NULL, not an empty string -- an empty string is a zid:\n{anon_json}"
+        );
+
+        // ARM 3 -- no node plane attached reads like arm 2.
+        let (bare_text, bare_json) = page(&named, false);
+        assert!(bare_text.contains("subscriber robot/**"), "{bare_text}");
+        assert!(!bare_text.contains("a1a1a1a1 subscriber"), "{bare_text}");
+        assert!(bare_json.contains("\"declarer_zid\":null"), "{bare_json}");
+    }
+
     /// R311y864 — zenoh inside a GRE tunnel is READ, at every optional-field
     /// combination.
     ///
@@ -8169,7 +8367,7 @@ mod tests {
         let coverage = census.coverage(&table);
 
         let json = CaptureReport::of(&d)
-            .with_interests(&census, &coverage)
+            .with_interests(&census, &coverage, None)
             .to_json();
         crate::payload::json_wellformed(json.as_bytes()).unwrap_or_else(|(at, why)| {
             panic!("the report is not JSON at byte {at}: {why}\n{json}")

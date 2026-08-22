@@ -2349,7 +2349,12 @@ mod tests {
         // own test proves.
         assert!(
             census.contains(
-                "\"kind\":\"subscriber\",\"declarer\":\"a\",\"id\":1,\
+                // Round 2016 (item 268) — the declaration names the ZID that
+                // made it, and it does so through THIS door too. The join is
+                // made inside `census_json_where`, so a linking consumer gets
+                // "who subscribes to what" without asking for anything new.
+                "\"kind\":\"subscriber\",\"declarer\":\"a\",\
+                             \"declarer_zid\":\"a1a1a1a1\",\"id\":1,\
                              \"keyexpr\":\"demo/**\""
             ),
             "the declaration the capture carried must cross: {census}"
