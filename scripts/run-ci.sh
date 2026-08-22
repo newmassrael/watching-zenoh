@@ -1690,6 +1690,23 @@ PY
     # cfgs; the invariant does not depend on features, so it is checked by
     # reading the declarations. Enforcement MEASURED by restoring the collision.
     python3 scripts/lib/duplicate_module_lint.py || return 1
+    # Round 2038, open-debt item 334 — the CENSUS-ARM lint. `DroppedFrameCensus`
+    # counts every `InboundFrame` variant, and the two halves are gated in
+    # different files: the variant in `inbound.rs`, the arm in
+    # `passive_messages.rs`, with the module's own `#[cfg(all(..))]` supplying
+    # four of the features so those arms are correctly bare. Nothing joined the
+    # three, so `Oam` — ungated on both sides today because the variant needs
+    # no body codec — would gain a gate on one side alone the day one is added,
+    # and break only in the profiles that turn it off. The same argument
+    # `duplicate_module_lint` above makes applies: catching it by BUILDING
+    # needs the one combination that turns the variant's feature off while the
+    # module gate still holds, which is a coincidence rather than a gate.
+    # Enforcement MEASURED three ways, each alone: gating the `Oam` VARIANT
+    # (the future the item feared, named exactly), gating the `Oam` ARM on a
+    # feature its variant does not need, and severing the module-gate term —
+    # which turns four correct bare arms into false positives, so that term is
+    # doing the work rather than sitting there.
+    python3 scripts/lib/census_arm_gate_lint.py || return 1
     # R311y616 (§7.13) — the LITERAL-WIRE-FLAG lint, scoped to wz-capture.
     # R311y615 named `wire_const::FLAG_N_N` for the network `N` bit and shipped
     # it with ONE consumer while four fixtures beside it kept writing `0x20`;
