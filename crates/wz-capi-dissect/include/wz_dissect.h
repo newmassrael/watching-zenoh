@@ -83,7 +83,16 @@ int wz_dissect_pcap_summary(const unsigned char *bytes, size_t len, char **out);
  *
  * A NAMED PRESET and not a limits struct: this ABI hands back a
  * self-describing document instead of a struct tree precisely so that the
- * next axis wz bounds is a preset edit rather than an ABI break. */
+ * next axis wz bounds is a preset edit rather than an ABI break.
+ *
+ * Round 2042 -- and the group carries a `caps` object naming the CEILING each
+ * loss was measured against: frames_per_flow, stream_bytes_per_direction,
+ * skipped_packets, max_flows_per_table, max_scout_askers. `null` on an axis
+ * with no ceiling, never a number and never omitted, so an unbounded run and
+ * a bounded one no longer render identically. Before this a `0` said nothing
+ * about whether a cap existed to bite, which is the whole distinction this
+ * bounded door was added to make. Reading a loss beside its ceiling is also
+ * how you tell which cap is NEAREST without waiting for one to bite. */
 int wz_dissect_pcap_summary_bounded(const unsigned char *bytes, size_t len,
                                     char **out);
 

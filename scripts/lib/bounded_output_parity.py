@@ -196,6 +196,37 @@ def _fn_body(src: str, name: str) -> str | None:
     return _strip_comments(rest[: nxt.start()] if nxt else rest)
 
 
+STR_CONST = re.compile(
+    r"\bconst\s+([A-Z][A-Z0-9_]*)\s*:\s*&(?:'static\s+)?str\s*=\s*(.*?);", re.S
+)
+"""A module-level `&str` constant and its whole definition."""
+
+
+def _with_constants(src: str, body: str) -> str:
+    """`body` with every `&str` constant it NAMES replaced by that constant's
+    own text.
+
+    R2042 (open-debt item 359) — one indirection, and only one.
+
+    This gate reads a test's body for the quoted group key. A module that spells
+    the same expected object in eight assertions and then extracts it to a
+    constant has not stopped asserting on the key; the gate simply cannot see
+    through a name, and would push an author back towards eight copies of one
+    string — which is the drift `OVER_TAP_CAP` beside them was extracted to
+    prevent.
+
+    Substituted rather than "accept any constant reference": the key still has
+    to be THERE, in the text the assertion compares against. Renaming the key
+    inside the constant reds this gate exactly as renaming it inline did.
+    """
+    consts = {name: text for name, text in STR_CONST.findall(src)}
+    out = body
+    for name, text in consts.items():
+        if re.search(rf"\b{re.escape(name)}\b", out):
+            out += "\n" + text
+    return out
+
+
 def main() -> int:
     capi = CAPI.read_text()
     cli = CLI.read_text()
@@ -241,7 +272,13 @@ def main() -> int:
     for door, (path, test, _note) in sorted(DOORS.items()):
         if door not in found:
             continue  # already reported as stale above
-        body = _fn_body(path.read_text(), test)
+        src = path.read_text()
+        body = _fn_body(src, test)
+        if body is not None:
+            # R2042 (item 359) — resolve any `&str` constant the body names,
+            # so extracting one expected object out of eight copies does not
+            # read as the test giving up its claim. See `_with_constants`.
+            body = _with_constants(src, body)
         if body is None:
             findings.append(
                 f"`{door}`'s row names test `{test}`, which is not in "

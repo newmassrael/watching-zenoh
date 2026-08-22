@@ -3292,10 +3292,39 @@ fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
 /// bite" — and behind the bounded doors the numbers are a measurement.
 pub fn dropped_by_limits_json(d: &crate::Dissection) -> String {
     let drops = d.health().drops;
+    let l = d.limits();
+    // Round 2042 (open-debt item 359) — AND THE CEILINGS THOSE LOSSES WERE
+    // MEASURED AGAINST. Without them an unbounded run and a live-tap run
+    // rendered the same five zeros, which is the exact distinction `--bounded`
+    // was added to make: its own help says "no cap exists to bite" is not the
+    // same fact as "nothing was dropped", and until this round the document
+    // could not tell a reader which one they were looking at.
+    //
+    // `null` for an axis with no ceiling, never a number and never omitted: a
+    // consumer that had to test for the key would read its absence as "no
+    // ceiling", and a huge number would read as one that could bite.
+    //
+    // `Dissection::limits()` could answer all along and had only test callers
+    // — the same shape Round 2041 found one accessor over.
+    let cap = |v: Option<usize>| match v {
+        Some(n) => alloc::format!("{n}"),
+        None => String::from("null"),
+    };
     format!(
         "{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\"flows\":{},\
-         \"scout_askers\":{}}}",
-        drops.frames, drops.stream_bytes, drops.skipped, drops.flows, drops.scout_askers
+         \"scout_askers\":{},\"caps\":{{\"frames_per_flow\":{},\
+         \"stream_bytes_per_direction\":{},\"skipped_packets\":{},\
+         \"max_flows_per_table\":{},\"max_scout_askers\":{}}}}}",
+        drops.frames,
+        drops.stream_bytes,
+        drops.skipped,
+        drops.flows,
+        drops.scout_askers,
+        cap(l.frames_per_flow),
+        cap(l.stream_bytes_per_direction),
+        cap(l.skipped_packets),
+        cap(l.max_flows_per_table),
+        cap(l.max_scout_askers)
     )
 }
 
@@ -3306,10 +3335,29 @@ pub fn dropped_by_limits_json(d: &crate::Dissection) -> String {
 /// One trailing newline, so a caller appends it wherever the line belongs.
 pub fn dropped_by_limits_text(d: &crate::Dissection) -> String {
     let drops = d.health().drops;
+    let l = d.limits();
+    // Round 2042 (item 359) — each loss beside the ceiling it was measured
+    // against, so `0` is legible. See [`dropped_by_limits_json`] for why.
+    // `none` rather than a number where there is no ceiling: an unbounded axis
+    // is a different fact from a large one, and item 359 is about not being
+    // able to tell.
+    let cap = |v: Option<usize>| match v {
+        Some(n) => alloc::format!("{n}"),
+        None => String::from("none"),
+    };
     format!(
-        "  dissection caps: {} frame(s), {} stream byte(s), {} skipped, \
-         {} flow(s), {} scout asker(s)\n",
-        drops.frames, drops.stream_bytes, drops.skipped, drops.flows, drops.scout_askers
+        "  dissection caps: {} frame(s) of {}, {} stream byte(s) of {}, \
+         {} skipped of {}, {} flow(s) of {}, {} scout asker(s) of {}\n",
+        drops.frames,
+        cap(l.frames_per_flow),
+        drops.stream_bytes,
+        cap(l.stream_bytes_per_direction),
+        drops.skipped,
+        cap(l.skipped_packets),
+        drops.flows,
+        cap(l.max_flows_per_table),
+        drops.scout_askers,
+        cap(l.max_scout_askers)
     )
 }
 
@@ -6083,6 +6131,80 @@ mod tests {
     }
 
     /// Ethernet + IPv4 carrying an arbitrary protocol number.
+    /// Round 2042 (item 359) — A LOSS IS PRINTED BESIDE THE CEILING IT WAS
+    /// MEASURED AGAINST, so `0` says which of two things it means.
+    ///
+    /// # The harm, measured before anything changed
+    ///
+    /// A probe rendered one capture twice — unbounded, and under the live-tap
+    /// preset — and asserted the two documents were IDENTICAL. They were, on
+    /// both surfaces. `--bounded`'s own help says the whole point of the flag
+    /// is that "no cap exists to bite" is not the same fact as "nothing was
+    /// dropped", and the rendering could not tell them apart either.
+    ///
+    /// `Dissection::limits()` could answer all along and had only test callers
+    /// — the same shape Round 2041 found in `any_checksum_invalid` one
+    /// accessor over, two rounds running.
+    ///
+    /// # What item 359 asked for, and what it gets
+    ///
+    /// It asked to see which cap bites first, and reasoned that needed a
+    /// tighter preset. Re-measured: the Rust tests already build
+    /// `DissectionLimits` directly, so that half was about the COMMAND LINE
+    /// alone. And the question is answerable without inventing numbers nobody
+    /// chose — a reader who can see every ceiling beside every loss can tell
+    /// which one is closest, and can tell an unbounded run from a bounded one
+    /// at a glance.
+    #[test]
+    fn every_loss_is_printed_beside_the_cap_it_was_measured_against() {
+        let read = |limits: crate::DissectionLimits| {
+            let mut d = crate::Dissection::with_limits(limits);
+            let ip = ipv4_packet(17, [10, 0, 0, 1], [10, 0, 0, 2], &zenoh_udp(4));
+            d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &eth(&ip));
+            d.finish();
+            (dropped_by_limits_text(&d), dropped_by_limits_json(&d))
+        };
+        let unbounded = read(crate::DissectionLimits::default());
+        let bounded = read(crate::DissectionLimits::for_live_tap());
+        // ANTI-VACUITY: neither capture lost anything, which is the ordinary
+        // case and the one `--bounded` exists to make legible.
+        assert!(unbounded.0.contains("0 frame(s)"), "{}", unbounded.0);
+        assert!(bounded.0.contains("0 frame(s)"), "{}", bounded.0);
+        // AND NOW THE TWO DOCUMENTS DIFFER, which is the probe's finding
+        // inverted: the losses are the same and the ceilings are not.
+        assert_ne!(
+            unbounded.0, bounded.0,
+            "an unbounded run and a live-tap run must not read alike"
+        );
+        assert_ne!(unbounded.1, bounded.1, "nor in the machine rendering");
+        // AN UNBOUNDED AXIS IS `none`, NOT A LARGE NUMBER. The two are
+        // different facts and telling them apart is what item 359 is about.
+        assert!(
+            unbounded.0.contains("0 frame(s) of none") && unbounded.0.contains("0 flow(s) of none"),
+            "{}",
+            unbounded.0
+        );
+        assert!(
+            unbounded.1.contains("\"frames_per_flow\":null"),
+            "and `null` rather than an omitted key, so its absence can never \
+             be read as `no ceiling`: {}",
+            unbounded.1
+        );
+        // AND THE BOUNDED RUN NAMES THE PRESET'S OWN NUMBERS, so a reader can
+        // see which ceiling is nearest without one having to bite.
+        assert!(
+            bounded.0.contains("0 frame(s) of 10000") && bounded.0.contains("0 flow(s) of 1024"),
+            "{}",
+            bounded.0
+        );
+        assert!(
+            bounded.1.contains("\"frames_per_flow\":10000")
+                && bounded.1.contains("\"max_flows_per_table\":1024"),
+            "{}",
+            bounded.1
+        );
+    }
+
     /// Round 2041 (item 356) — AN AXIS WITH NO CORROBORATION IS SAID, on both
     /// surfaces, without touching the completeness verdict.
     ///

@@ -1294,6 +1294,14 @@ mod fed_tests {
             "by_kind",
             "bytes",
             "cancelled_at",
+            // Round 2042 (open-debt item 359) — the CEILINGS in force, beside
+            // the losses they were measured against. Five keys under one
+            // `caps` object, so a reader of `dropped_by_limits` can tell an
+            // unbounded run from a bounded one: before this the two rendered
+            // identically, which is the distinction `--bounded` exists for.
+            // Every one is an ADDED key, which this document's contract
+            // permits where a rename or a removal would break a consumer.
+            "caps",
             "children",
             "closed_at",
             "completed",
@@ -1325,6 +1333,7 @@ mod fed_tests {
             "flow",
             "flows",
             "frames",
+            "frames_per_flow",
             "gaps",
             "halted_batches",
             "hello",
@@ -1345,7 +1354,9 @@ mod fed_tests {
             "locators",
             "low",
             "matched",
+            "max_flows_per_table",
             "max_ms",
+            "max_scout_askers",
             "mean_ms",
             "messages",
             "min_ms",
@@ -1380,9 +1391,11 @@ mod fed_tests {
             "share_bp",
             "silent",
             "skipped",
+            "skipped_packets",
             "solicited_by",
             "source_ahead_of_observer",
             "stream_bytes",
+            "stream_bytes_per_direction",
             "subscriber",
             "subscribers",
             "subtrees",

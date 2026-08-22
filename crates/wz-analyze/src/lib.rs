@@ -5267,13 +5267,22 @@ mod tests {
             wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &frames);
 
         let bounded = health_run_bounded(&pcapng, false, Format::Json, true);
+        // Round 2042 (item 359) — THE SHAPE PIN NOW CARRIES THE CEILINGS, and
+        // extending it rather than trimming it is the point: this fixture
+        // builds 1025 flows to make ONE cap bite, and until this round the
+        // document said `flows: 1` without saying `of 1024`. A reader could
+        // not tell which ceiling was nearest, which is what item 359 asked
+        // for; here the answer is in the same object.
         assert!(
             bounded.contains(
                 "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
-                 \"flows\":1,\"scout_askers\":0}"
+                 \"flows\":1,\"scout_askers\":0,\"caps\":{\"frames_per_flow\":10000,\
+                 \"stream_bytes_per_direction\":4194304,\"skipped_packets\":10000,\
+                 \"max_flows_per_table\":1024,\"max_scout_askers\":1024}}"
             ),
-            "a reader who asked for a ceiling must be told it bit, without \
-             having to also ask for the loss document: {bounded}"
+            "a reader who asked for a ceiling must be told it bit AND what it \
+             bit against, without having to also ask for the loss document: \
+             {bounded}"
         );
 
         let unbounded = health_run_bounded(&pcapng, false, Format::Json, false);

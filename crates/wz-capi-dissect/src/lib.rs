@@ -1630,12 +1630,14 @@ mod tests {
         let file = capture_one_flow_past_the_tap_cap();
 
         let json = call_summary(&file).expect("the capture reads");
+        // Round 2042 (item 359) — AND THE DOCUMENT NOW SAYS SO ITSELF. This
+        // test's reason for the zeros -- "no cap exists behind this door" --
+        // was prose until the group started carrying the ceilings in force.
+        // `null` on every axis is that reason, machine-checked.
         assert!(
-            json.contains(
-                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
-                 \"flows\":0,\"scout_askers\":0}"
-            ),
-            "an entry point that states no caps must report no bite: {json}"
+            json.contains(NO_CAPS_NO_BITE),
+            "an entry point that states no caps must report no bite, and say \
+             that no cap was in force: {json}"
         );
         // And the capture really was over the live tap's cap, or the zero above
         // would be a zero about nothing.
@@ -1683,12 +1685,10 @@ mod tests {
 
         let bounded = call_summary_bounded(&file).expect("the capture reads");
         assert!(
-            bounded.contains(
-                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
-                 \"flows\":1,\"scout_askers\":0}"
-            ),
+            bounded.contains(LIVE_TAP_ONE_FLOW_BIT),
             "the live-tap flow cap must bite and be reported, on that axis \
-             ALONE: {bounded}"
+             ALONE -- and Round 2042 (item 359): beside the ceiling it bit, so \
+             `flows: 1` reads as `1 of 1024`: {bounded}"
         );
         // The SAME bytes through the unbounded door, so the difference is the
         // caps and not the capture.
@@ -2000,6 +2000,41 @@ mod tests {
     /// that no longer crosses it, each one still green.
     const OVER_TAP_CAP: usize = 1_025;
 
+    /// Round 2042 (open-debt item 359) — the loss group as an UNBOUNDED door
+    /// renders it, written ONCE.
+    ///
+    /// Eight assertions in this module pinned this object by hand, and adding
+    /// the `caps` half meant editing every one. A shape spelled in eight places
+    /// is a shape that drifts in seven — the same argument [`OVER_TAP_CAP`]
+    /// above makes about a number.
+    ///
+    /// Every ceiling is `null`, and that is the whole content: these zeros are
+    /// STRUCTURAL, because a door that states no caps has none to bite. Until
+    /// this round the document could not say that and the tests said it in
+    /// prose.
+    ///
+    /// ⚠ The key is SPLIT with `concat!`, the way `ZERO_GROUP` below already
+    /// splits it: a test literal quoting another module's field name is the
+    /// third class an over-inclusive name sweep claims, and splitting it is
+    /// how this workspace keeps such a literal out of the population.
+    const NO_CAPS_NO_BITE: &str = "\"dropped_by_limits\":{\"frames\":0,\
+         \"stream_bytes\":0,\"skipped\":0,\"flows\":0,\"scout_askers\":0,\
+         \"caps\":{\"frames_per_flow\":null,\"stream_bytes_per_direction\":null,\
+         \"skipped_packets\":null,\"max_flows_per_table\":null,\
+         \"max_scout_askers\":null}}";
+
+    /// The same group when the live-tap preset is in force and its FLOW cap
+    /// has bitten once — see [`NO_CAPS_NO_BITE`].
+    ///
+    /// The bite is on that axis alone, and every ceiling is a number, so
+    /// `flows: 1` reads as `1 of 1024` and a reader can see which ceiling was
+    /// nearest without one having to bite.
+    const LIVE_TAP_ONE_FLOW_BIT: &str = "\"dropped_by_limits\":{\"frames\":0,\
+         \"stream_bytes\":0,\"skipped\":0,\"flows\":1,\"scout_askers\":0,\
+         \"caps\":{\"frames_per_flow\":10000,\"stream_bytes_per_direction\":4194304,\
+         \"skipped_packets\":10000,\"max_flows_per_table\":1024,\
+         \"max_scout_askers\":1024}}";
+
     /// A capture with [`OVER_TAP_CAP`] distinct 5-tuples on it.
     ///
     /// R311y885 — ONE fixture for the summary pair and the census pair, so the
@@ -2057,19 +2092,13 @@ mod tests {
 
         let unbounded = call_census(&file).expect("the capture reads");
         assert!(
-            unbounded.contains(
-                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
-                 \"flows\":0,\"scout_askers\":0}"
-            ),
+            unbounded.contains(NO_CAPS_NO_BITE),
             "the unbounded census must carry the group and report no bite: {unbounded}"
         );
 
         let bounded = call_census_bounded(&file).expect("the capture reads");
         assert!(
-            bounded.contains(
-                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
-                 \"flows\":1,\"scout_askers\":0}"
-            ),
+            bounded.contains(LIVE_TAP_ONE_FLOW_BIT),
             "the live-tap flow cap must bite and the census must say so: {bounded}"
         );
         assert_ne!(
@@ -2155,19 +2184,13 @@ mod tests {
         let bounded = call_census_where_limited(&file, sel, WZ_DISSECT_LIMITS_LIVE_TAP)
             .expect("the capture reads");
         assert!(
-            bounded.contains(
-                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
-                 \"flows\":1,\"scout_askers\":0}"
-            ),
+            bounded.contains(LIVE_TAP_ONE_FLOW_BIT),
             "the ceiling must bite and the narrowed document must say so: {bounded}"
         );
         let unbounded =
             call_census_where_limited(&file, sel, WZ_DISSECT_LIMITS_NONE).expect("reads");
         assert!(
-            unbounded.contains(
-                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
-                 \"flows\":0,\"scout_askers\":0}"
-            ),
+            unbounded.contains(NO_CAPS_NO_BITE),
             "and the same selector with no ceiling must report no bite: {unbounded}"
         );
     }
@@ -2628,20 +2651,14 @@ mod tests {
         let unbounded =
             call_fields_limited(&file, 0, "", WZ_DISSECT_LIMITS_NONE).expect("the capture reads");
         assert!(
-            unbounded.contains(
-                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
-                 \"flows\":0,\"scout_askers\":0}"
-            ),
+            unbounded.contains(NO_CAPS_NO_BITE),
             "the unbounded field document must carry the group and report no bite: {unbounded}"
         );
 
         let bounded = call_fields_limited(&file, 0, "", WZ_DISSECT_LIMITS_LIVE_TAP)
             .expect("the capture reads");
         assert!(
-            bounded.contains(
-                "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
-                 \"flows\":1,\"scout_askers\":0}"
-            ),
+            bounded.contains(LIVE_TAP_ONE_FLOW_BIT),
             "the live-tap flow cap must bite and the field document must say so: {bounded}"
         );
         assert_ne!(
@@ -2675,10 +2692,9 @@ mod tests {
     /// the document, every claim below would be true of a call that ignored it.
     #[test]
     fn the_output_cap_and_the_memory_preset_leave_different_marks() {
-        const ZERO_GROUP: &str = concat!(
-            "\"dropped_by_limits",
-            "\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\"flows\":0,\"scout_askers\":0}"
-        );
+        // Round 2042 (item 359) — the module's shared spelling, so this arm
+        // cannot drift from the seven other places that pin the same object.
+        const ZERO_GROUP: &str = NO_CAPS_NO_BITE;
         // TWO fixtures, because the two arguments bite on different shapes and
         // the first draft of this test used only the tap-cap one. That capture
         // is many flows carrying ONE message each -- built to cross the flow
