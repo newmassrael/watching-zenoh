@@ -385,6 +385,20 @@ fn run_alert(
         // pre-push hook tests the crates the push CHANGES, and the round that
         // widened the struct changed `wz-analyze`, not this crate.
         health: false,
+        // Round 2001 (item 473) — the CSV rendering, and NOT asked for here for
+        // the reason `health` above gives: this path reads a VERDICT out of
+        // `outcome` and throws the rendered string away, so a rendering choice
+        // changes nothing it uses.
+        //
+        // ⚠⚠ AND IT HAPPENED AGAIN. R2001 widened the struct, changed
+        // `wz-analyze`, and this initializer was not updated -- so `wz-replay`
+        // did not compile from that push until Round 2002 read the hosted
+        // `Layer C1 — cargo test --workspace` failure. The paragraph above
+        // describes that exact sequence and was written in this file, which is
+        // the point worth keeping: A COMMENT IS NOT A GATE. What would catch it
+        // is the pre-push hook building the crates that DEPEND on a changed
+        // one, not only the ones changed -- open-debt item 176's family.
+        csv: None,
     };
     let outcome = match wz_analyze::analyze_request(&request) {
         Ok((_rendered, outcome)) => outcome,
