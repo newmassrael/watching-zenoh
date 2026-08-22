@@ -490,6 +490,33 @@ pub enum PayloadDecoding {
         format: String,
         /// What the publisher said this payload is.
         declared: String,
+        /// Round 2025 (item 285) — WAS THE LABEL THIS VETO RESTS ON ACTUALLY
+        /// CHECKED?
+        ///
+        /// `true` when [`crate::payload::inspect`] looked at the bytes and
+        /// they bear the declaration out, so the publisher is corroborated and
+        /// the operator's rule is the thing that is wrong. `false` when
+        /// `inspect` could not say — a `Shape::Binary` or unknown declaration
+        /// comes back [`crate::payload::Verdict::Opaque`], nothing contradicts
+        /// it, and the veto stands on a claim NOBODY MEASURED.
+        ///
+        /// # Why this is a field and not a second state word
+        ///
+        /// A `state` string is what a C consumer branches on, and a new word
+        /// makes every existing branch fall through on traffic it used to
+        /// handle. This ABI's contract permits ADDED KEYS, which is the same
+        /// reasoning R311y919 gave for putting `offset_space` beside
+        /// `first_packet` rather than renaming it.
+        ///
+        /// # The deployment this is about
+        ///
+        /// `application/cdr` — what every ROS 2 publisher declares. It is
+        /// binary, so no shape check can refute it, and under a protobuf rule
+        /// its traffic is hidden on the authority of a label this reader never
+        /// weighed. That the answer is still to withhold the decode is a
+        /// defensible default; that a reader could not tell it from a MEASURED
+        /// veto was not.
+        checked: bool,
     },
     /// The format was applied and refused.
     Refused {
@@ -588,6 +615,7 @@ impl PayloadDecoding {
                 keyexpr: String::new(),
                 format: String::new(),
                 declared: String::new(),
+                checked: false,
             },
             Self::EncodingMismatch { .. } => Self::Refused {
                 keyexpr: String::new(),
@@ -774,9 +802,18 @@ enum Claim {
     /// Nothing stands in the rule's way: the format named no encodings, the
     /// publisher named none, or the two agree.
     Agrees,
-    /// The declaration contradicts the rule AND its own bytes bear it out, so
-    /// the rule is the thing that is wrong. Carries the declared name.
-    Vetoes(String),
+    /// The declaration contradicts the rule and the rule loses. Carries the
+    /// declared name and whether anything CHECKED that name.
+    ///
+    /// Round 2025 (item 285) — the `bool` is the correction. This variant's
+    /// doc used to read "AND its own bytes bear it out, so the rule is the
+    /// thing that is wrong", and that was true of only one of the two ways to
+    /// get here. `inspect` corroborating a text or JSON label is a measurement;
+    /// `inspect` returning `Opaque` on a binary one is silence, and the veto
+    /// then rests on exactly the unchecked claim R311y874 removed from the
+    /// OTHER direction. Both still veto — that is a defensible default — and
+    /// they are no longer the same answer on the page.
+    Vetoes(String, bool),
     /// The declaration contradicts the rule and ITS OWN BYTES REFUTE IT, so the
     /// rule wins and the reader is told whose label was overridden.
     Refuted(String),
@@ -829,7 +866,17 @@ fn judge_claim(format: &dyn PayloadFormat, node: &Field, bytes: &[u8]) -> Claim 
     }
     match crate::payload::inspect(declared, bytes) {
         crate::payload::Verdict::NotAsDeclared { .. } => Claim::Refuted(String::from(name)),
-        _ => Claim::Vetoes(String::from(name)),
+        // Round 2025 (item 285) — `Opaque` is SILENCE, not corroboration. The
+        // bytes were looked at and the shape had nothing to say about them, so
+        // the veto that follows is a default rather than a finding. Told apart
+        // here because this is the only place that knows.
+        crate::payload::Verdict::Opaque { .. } => Claim::Vetoes(String::from(name), false),
+        // `NotOnTheWire` joins it: the payload slot holds an SHM descriptor, so
+        // there are no data bytes to weigh the label against at all. Reading
+        // that as corroboration would be the confident wrong answer that
+        // variant's own doc is written against.
+        crate::payload::Verdict::NotOnTheWire { .. } => Claim::Vetoes(String::from(name), false),
+        _ => Claim::Vetoes(String::from(name), true),
     }
 }
 
@@ -867,12 +914,13 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
     // where a mapping is wrong for every sample on a topic said so once per row
     // — in the listing a reader bounds precisely because it is that long.
     let despite_encoding = match judge_claim(format, node, bytes) {
-        Claim::Vetoes(declared) => {
+        Claim::Vetoes(declared, checked) => {
             map.record_misbinding(&keyexpr, format.name(), &declared, Misbound::Rule);
             return PayloadDecoding::EncodingMismatch {
                 keyexpr,
                 format: String::from(format.name()),
                 declared,
+                checked,
             };
         }
         Claim::Refuted(declared) => {
@@ -961,6 +1009,7 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
             keyexpr,
             format,
             declared,
+            checked,
         } => {
             open(out);
             out.push_str(",\"keyexpr\":");
@@ -969,6 +1018,13 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
             escape_into(format, out);
             out.push_str(",\"declared\":");
             escape_into(declared, out);
+            // Round 2025 (item 285) — an ADDED key, which this ABI's contract
+            // permits where a renamed or removed one would break a linking
+            // consumer. `false` is the answer for every binary declaration,
+            // `application/cdr` above all, and it says the veto rests on a
+            // label nothing weighed.
+            out.push_str(",\"declaration_checked\":");
+            out.push_str(if *checked { "true" } else { "false" });
             out.push('}');
         }
         PayloadDecoding::Refused {
@@ -1131,6 +1187,10 @@ mod tests {
                 keyexpr: String::from("demo/a"),
                 format: String::from("protobuf"),
                 declared: String::from("application/json"),
+                // Round 2025 (item 285) — CHECKED. The bytes are JSON and the
+                // label says JSON, so `inspect` corroborated the publisher and
+                // this veto is a measurement.
+                checked: true,
             },
             "a publisher that said application/json is not decoded by a \
              protobuf rule, and the report names the rule"
@@ -1208,6 +1268,12 @@ mod tests {
                 keyexpr: String::from("demo/a"),
                 format: String::from("json"),
                 declared: String::from("application/protobuf"),
+                // Round 2025 (item 285) — UNCHECKED, and this leg is where the
+                // item is visible without looking for it: protobuf is binary,
+                // `inspect` answers `Opaque`, and the veto that follows rests
+                // on a label nothing weighed. The verdict is unchanged; what it
+                // now says about itself is not.
+                checked: false,
             },
             "the rule is what is wrong, so the verdict names the rule"
         );
@@ -1250,6 +1316,100 @@ mod tests {
                 .expect("json names its encodings")
                 .contains(&ENCODING_ID_TO_STR[ENC_ZENOH_BYTES as usize]),
             "`zenoh/bytes` must not be a claimed encoding"
+        );
+    }
+
+    /// ITEM 285 — A BINARY LABEL VETOES A RULE ON A CLAIM NOBODY CHECKED, AND
+    /// THE PAGE NOW SAYS SO.
+    ///
+    /// # The defect
+    ///
+    /// R311y874 stopped the veto resting on an unchecked claim — for the
+    /// declarations `payload::inspect` can judge. Its own carry named the
+    /// residue: `inspect` refutes only what a shape says something about, so
+    /// text and JSON. A `Shape::Binary` or unknown declaration comes back
+    /// `Verdict::Opaque`, nothing contradicts it, and the veto stands with
+    /// nothing behind it.
+    ///
+    /// `application/cdr` is inside that set, and it is what EVERY ROS 2
+    /// publisher declares. Under a protobuf rule its traffic was withheld on
+    /// the authority of a label this reader never weighed — and the verdict was
+    /// indistinguishable from one where the label had been corroborated.
+    ///
+    /// # What changed, and what deliberately did not
+    ///
+    /// Not the outcome: withholding the decode is still a defensible default,
+    /// and reversing it would be this crate believing the OPERATOR's claim
+    /// instead of the publisher's, which is the same credulity facing the other
+    /// way. What changed is that the verdict now carries whether anything
+    /// measured the label.
+    ///
+    /// # The pairing is the test
+    ///
+    /// Both legs are the SAME shape — a declaration the rule refuses, bytes the
+    /// rule would decode — and differ only in whether the declaration is
+    /// checkable. A single leg would show a `false` that could equally be a
+    /// field nothing ever sets.
+    #[test]
+    fn a_binary_label_vetoes_unchecked_and_a_text_one_does_not() {
+        // Derived from the shipped table rather than transcribed, on the rule
+        // `the_encoding_ids_this_file_names_are_the_ones_upstream_holds`
+        // already applies to its neighbours.
+        const ENC_CDR: u16 = 7;
+        assert_eq!(
+            wz_codecs::encoding_ids::ENCODING_ID_TO_STR[ENC_CDR as usize],
+            "application/cdr",
+            "the id this leg is about must still be the one ROS 2 declares"
+        );
+
+        let mut map = FormatMap::new();
+        map.declare("demo/**=protobuf").expect("a keyexpr pattern");
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+        let run = Declarations::new(&map);
+        // Valid protobuf, so the RULE would have decoded these bytes happily.
+        // What stops it either way is the label.
+        let bytes: &[u8] = &[0x08, 0x2a];
+
+        match decode_payload(&put_declaring(ENC_CDR, bytes), &run, at) {
+            PayloadDecoding::EncodingMismatch {
+                ref declared,
+                checked,
+                ..
+            } => {
+                assert_eq!(declared, "application/cdr");
+                assert!(
+                    !checked,
+                    "`application/cdr` is binary: `inspect` returns Opaque, so \
+                     nothing weighed this label and the veto is a default -- \
+                     THIS IS ITEM 285"
+                );
+            }
+            other => panic!("the label still vetoes; only its warrant changed: {other:?}"),
+        }
+
+        // THE PAIR. A JSON label over JSON bytes vetoes too, and there the
+        // publisher WAS corroborated.
+        match decode_payload(&put_declaring(ENC_JSON, br#"{"a":1}"#), &run, at) {
+            PayloadDecoding::EncodingMismatch { checked, .. } => assert!(
+                checked,
+                "a text-shaped label over bytes that bear it out IS measured, \
+                 so `false` above is a decision and not an unset field"
+            ),
+            other => panic!("{other:?}"),
+        }
+
+        // AND IT REACHES THE DOCUMENT, because a fact only a Rust caller can
+        // read is not what this plane ships.
+        let mut out = String::new();
+        push_decoding(
+            &decode_payload(&put_declaring(ENC_CDR, bytes), &run, at),
+            &mut out,
+        );
+        assert!(
+            out.contains("\"declaration_checked\":false"),
+            "the C consumer hiding ROS 2 traffic behind a protobuf rule must be \
+             able to see the veto was never measured: {out}"
         );
     }
 
@@ -1471,6 +1631,12 @@ mod tests {
                 keyexpr: String::from("demo/a"),
                 format: String::from("protobuf"),
                 declared: String::from("application/json"),
+                // Round 2025 (item 285) — CHECKED, and this leg's own sentence
+                // says why: "a publisher whose bytes MATCH ITS OWN LABEL is
+                // believed". That match is the measurement, and until this
+                // round the verdict could not distinguish it from a veto where
+                // nothing matched anything.
+                checked: true,
             },
             "a publisher whose bytes match its own label is believed"
         );
@@ -1711,6 +1877,7 @@ mod tests {
                 keyexpr: String::from("demo/\"quoted\""),
                 format: String::from("protobuf"),
                 declared: String::from("application/json"),
+                checked: true,
             },
         ];
         for state in &states {

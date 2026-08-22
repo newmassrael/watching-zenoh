@@ -4240,9 +4240,23 @@ fn payload_block(
             keyexpr,
             format: name,
             declared,
+            checked,
         } => format!(
             "    payload `{keyexpr}`: NOT DECODED -- the publisher declared \
-             {declared} and the --payload-format rule says {name}\n"
+             {declared} and the --payload-format rule says {name}{}\n",
+            // Round 2025 (item 285) — WHETHER ANYTHING WEIGHED THAT LABEL. A
+            // binary declaration cannot be judged from bytes, so the refusal
+            // is this reader's policy rather than a finding, and an operator
+            // whose ROS 2 `application/cdr` traffic is being withheld is owed
+            // that distinction on the line that withholds it. Said only in the
+            // unchecked case: the ordinary one needs no qualification and a
+            // clause on every row would bury this one.
+            if *checked {
+                ""
+            } else {
+                " (nothing checked that label: it is binary, so this refusal \
+                 is a default rather than a finding)"
+            }
         ),
         PayloadDecoding::Decoded {
             keyexpr,

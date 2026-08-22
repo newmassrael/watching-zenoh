@@ -272,6 +272,18 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * exactly what their publisher said and the MAPPING is wrong. Folding the
  * two would send an operator to a wire with nothing to answer for.
  *
+ * Round 2025 (item 285) -- `encoding_mismatch` additionally carries
+ * `declaration_checked`, a boolean, and it is the difference between a
+ * finding and a default. `true` means the bytes were inspected and they bear
+ * the publisher's label out, so the mapping really is the thing that is
+ * wrong. `false` means the label is BINARY or unknown -- `application/cdr`,
+ * which is what every ROS 2 publisher declares -- so nothing could weigh it
+ * and the veto is this reader's policy rather than a measurement. The
+ * outcome is the same either way and the warrant is not: an operator whose
+ * CDR traffic is being withheld under a protobuf rule can now see that
+ * nothing checked the label it is being withheld on. An ADDED key, so a
+ * consumer that does not read it is unaffected.
+ *
  * R311y874 -- a `decoded` block additionally carries `despite_encoding`: the
  * name the publisher declared when the rule was applied OVER that
  * declaration, and `null` on an ordinary decode. It is non-null exactly

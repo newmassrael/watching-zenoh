@@ -3387,8 +3387,13 @@ mod tests {
             .expect("the capture reads");
         assert!(
             vetoed.contains(
+                // Round 2025 (item 285) — `declaration_checked: true`, and the
+                // sentence below already says why: the bytes BEAR THE LABEL
+                // OUT. That corroboration is exactly what the new key
+                // distinguishes from a binary label nothing could weigh.
                 "\"payload_decode\":{\"state\":\"encoding_mismatch\",\"keyexpr\":\"demo/sensor\",\
-                 \"format\":\"protobuf\",\"declared\":\"application/json\"}"
+                 \"format\":\"protobuf\",\"declared\":\"application/json\",\
+                 \"declaration_checked\":true}"
             ),
             "a publisher whose bytes match its own label is believed, and the \
              rule is named as the thing to fix: {vetoed}"
