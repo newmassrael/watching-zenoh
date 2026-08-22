@@ -2276,6 +2276,126 @@ mod tests {
         }
     }
 
+    /// Round 2009 (open-debt item 248) — WHAT ELSE REACHES THE FURNITURE ARM.
+    ///
+    /// `not_ip` is one of three classes this crate calls furniture, and the
+    /// furniture claim is a POSITIVE argument: nothing counted there could have
+    /// carried a zenoh session, so a capture is not short for holding it. Two
+    /// of the three had that argument checked; this one rested on a paragraph
+    /// about "ARP and its neighbours" and nobody had ever asked what the
+    /// neighbours ARE.
+    ///
+    /// So the whole 16-bit space is swept and the answer is exact rather than
+    /// representative. The escaping set is DERIVED — every ethertype is driven
+    /// through `decapsulate` and the ones that do not land on `NotIp` are
+    /// collected — so an ethertype this build learns to walk shows up here
+    /// without anyone remembering to add it.
+    ///
+    /// ⚠ THE BODY IS ZEROS AND THAT IS PART OF THE CLAIM. A VLAN or QinQ tag
+    /// escapes only if what follows it is walkable, and here it is `0x0000`,
+    /// which is furniture — so the tags are correctly absent from the set below
+    /// and their walk is witnessed by `vlan_and_qinq_tags_are_walked` instead.
+    /// What this leg settles is the OTHER 65 000-odd values, which no test had
+    /// ever touched.
+    #[test]
+    fn every_ethertype_this_build_does_not_walk_is_furniture() {
+        use wz_session_core::raweth_link::DEFAULT_ETHTYPE;
+
+        let mut escaped: Vec<u16> = Vec::new();
+        for ethertype in 0u16..=u16::MAX {
+            let mut frame = vec![0u8; 12];
+            frame.extend_from_slice(&ethertype.to_be_bytes());
+            frame.extend_from_slice(&[0u8; 46]);
+            if decapsulate(LINKTYPE_ETHERNET, 0, &frame) != Err(SkipReason::NotIp) {
+                escaped.push(ethertype);
+            }
+        }
+
+        // The answer, and it is a SET rather than a count: a build that walked
+        // a different ethertype would have the same number here.
+        //
+        // ⚠ THE SWEEP FOUND ONE THIS TEST'S AUTHOR DID NOT. The expected list
+        // was written as three and came back four: raweth's ethertype escapes
+        // in BOTH byte orders, because pico `memcpy`s its header and the value
+        // lands in the SENDER's order — `strip_raweth` accepts either, and its
+        // module doc says why. Enumerating by hand would have missed it, which
+        // is the whole reason item 248 asked for the space to be counted
+        // instead of argued about.
+        assert_eq!(
+            escaped,
+            vec![
+                ETHERTYPE_IPV4,
+                DEFAULT_ETHTYPE,
+                ETHERTYPE_IPV6,
+                DEFAULT_ETHTYPE.swap_bytes(),
+            ],
+            "exactly four ethertypes leave the furniture arm on a zero body: \
+             IPv4, IPv6, and zenoh-pico's raweth in either byte order. \
+             Anything else here is a link this build started walking and \
+             nobody classified; anything MISSING is a link it stopped walking"
+        );
+
+        // THE ARGUMENT, made checkable. The furniture claim is that nothing in
+        // the complement could carry zenoh, and the complement is enormous --
+        // so the check is that the ethertypes a real segment actually carries
+        // are IN it, by name, rather than that the complement is empty.
+        for (name, ethertype) in [
+            ("ARP", 0x0806u16),
+            ("RARP", 0x8035),
+            ("LLDP", 0x88CC),
+            ("EAPOL", 0x888E),
+            ("PPPoE discovery", 0x8863),
+            ("PPPoE session", 0x8864),
+            ("MPLS unicast", 0x8847),
+            ("PTP", 0x88F7),
+            ("Wake-on-LAN", 0x0842),
+            ("an 802.3 LENGTH field, not a type at all", 0x0040),
+        ] {
+            assert!(
+                !escaped.contains(&ethertype),
+                "{name} ({ethertype:#06x}) must be furniture: no zenoh link \
+                 speaks it, and every link this workspace does speak arrives \
+                 as TCP, UDP, or raweth"
+            );
+        }
+    }
+
+    /// Round 2009 (item 248) — the OTHER furniture class that rested on a
+    /// sentence: every vsock op except one is counted as carrying nothing.
+    ///
+    /// The argument is upstream's, quoted in this file beside
+    /// `AF_VSOCK_OP_PAYLOAD`: "If af_vsockmon_hdr->op is AF_VSOCK_OP_PAYLOAD
+    /// then the payload follows the transport header. Other ops do not have a
+    /// payload." THIS TREE CANNOT CHECK THAT CLAIM — it is about a kernel, and
+    /// no kernel is present here. Saying so is part of the closure rather than
+    /// a hole in it.
+    ///
+    /// What IS checkable is the half this crate owns: that the class is reached
+    /// by every op except the one named, and by exactly that set. Swept over
+    /// the whole 16-bit op space for the same reason the ethertype leg above is
+    /// — an enumeration by hand is what item 248 says was never done, and doing
+    /// it by hand missed a member one screen up.
+    #[test]
+    fn every_vsock_op_but_one_is_furniture() {
+        let mut carried: Vec<u16> = Vec::new();
+        for op in 0u16..=u16::MAX {
+            let mut rec = vec![0u8; 32];
+            rec[24..26].copy_from_slice(&op.to_le_bytes());
+            rec.extend_from_slice(&[0u8; 16]);
+            if decapsulate(LINKTYPE_VSOCK, 0, &rec) != Err(SkipReason::VsockNonPayload(op)) {
+                carried.push(op);
+            }
+        }
+        assert_eq!(
+            carried,
+            vec![AF_VSOCK_OP_PAYLOAD],
+            "exactly one vsock op leaves the furniture arm, and it is the one \
+             the kernel header says carries data. A second here is an op this \
+             build started reading; none at all means the arm swallowed \
+             everything"
+        );
+    }
+
     // ---- item 260: GRETAP -- a GRE tunnel whose payload is a whole frame ---
     //
     // R311y864 opened GRE and stopped at the ethertype, naming `0x6558`
