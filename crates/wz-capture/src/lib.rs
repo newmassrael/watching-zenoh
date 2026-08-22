@@ -3293,6 +3293,26 @@ impl Dissection {
         s.expired + s.evicted + self.open_fragment_chains()
     }
 
+    /// Round 2007 (open-debt item 244) — the BYTES those chains were holding.
+    ///
+    /// [`Self::unfinished_fragment_chains`] is a count, and a count cannot be
+    /// acted on: three abandoned ARP-sized datagrams and three abandoned 64 KiB
+    /// ones are the same number and a rounding error against a real hole. This
+    /// is the size of what is missing.
+    ///
+    /// Summed from the same three sources, in the same order, so the two
+    /// numbers are about the same set: bytes lost to the deadline, bytes lost
+    /// to the concurrency cap, and bytes still held by chains open right now.
+    ///
+    /// ⚠ A FLOOR, and deliberately. It counts the bytes this reader RECEIVED
+    /// and could not use; the pieces that never arrived are not in it and
+    /// cannot be, because their length was never on the wire this capture saw.
+    /// A reader must not read it as "the datagram was this big".
+    pub fn unfinished_fragment_bytes(&self) -> usize {
+        let s = self.fragments.stats();
+        s.expired_bytes + s.evicted_bytes + self.fragments.pending_bytes()
+    }
+
     /// R311y861 — chains still half-assembled, right now.
     ///
     /// Reported beside the two counters it is summed with rather than folded

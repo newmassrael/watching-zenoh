@@ -115,8 +115,25 @@ pub struct FragmentStats {
     pub completed: usize,
     /// Datagrams abandoned because their deadline passed.
     pub expired: usize,
+    /// Round 2007 (open-debt item 244) — bytes those datagrams were holding
+    /// when they were abandoned.
+    ///
+    /// A COUNT OF CHAINS CANNOT BE ACTED ON. An operator told `3 unfinished`
+    /// cannot tell three ARP-sized datagrams from three 64 KiB ones, and the
+    /// two are a rounding error and a real hole in the capture. The pieces are
+    /// in the table WITH their lengths right up to the moment they are dropped,
+    /// so the number is free here and unrecoverable one line later.
+    ///
+    /// The bytes actually PLACED, not the buffer's length: a chain whose first
+    /// piece landed at a high offset has a buffer sized to that offset and
+    /// holds none of the bytes in between. Summing the written runs is what
+    /// makes this a statement about evidence rather than about allocation.
+    pub expired_bytes: usize,
     /// Datagrams evicted to stay inside the concurrency cap.
     pub evicted: usize,
+    /// Round 2007 (item 244) — bytes those datagrams were holding when they
+    /// were evicted. See [`Self::expired_bytes`].
+    pub evicted_bytes: usize,
     /// Pieces refused as malformed: past the 65 535-byte ceiling, or a last
     /// piece that contradicts a length already established.
     pub malformed: usize,
@@ -162,6 +179,16 @@ struct Pending {
 }
 
 impl Pending {
+    /// Round 2007 (item 244) — bytes this chain is actually holding.
+    ///
+    /// Read off `runs` rather than off `bytes.len()`, because the buffer is
+    /// grown to the highest offset SEEN and a chain that received only a late
+    /// piece has a large buffer holding almost nothing. The runs are what was
+    /// written, so their sum is the evidence this chain would take with it.
+    fn held_bytes(&self) -> usize {
+        self.runs.iter().map(|(start, end)| end - start).sum()
+    }
+
     fn place(&mut self, offset: usize, payload: &[u8]) -> bool {
         let end = offset + payload.len();
         if end > MAX_DATAGRAM {
@@ -282,6 +309,15 @@ impl FragmentTable {
         self.pending.len()
     }
 
+    /// Round 2007 (item 244) — bytes those half-assembled datagrams hold.
+    ///
+    /// A STATE and not an event, like [`Self::pending`] beside it: this can
+    /// still go down, by the rest of a datagram arriving. It is summed with the
+    /// two counters rather than folded into them for that reason.
+    pub fn pending_bytes(&self) -> usize {
+        self.pending.values().map(Pending::held_bytes).sum()
+    }
+
     /// Place one piece; `Some` when it completed a datagram.
     ///
     /// `now_millis` is the capture's clock, not the wall clock — the same one
@@ -385,10 +421,20 @@ impl FragmentTable {
             return 0;
         };
         let before = self.pending.len();
-        self.pending
-            .retain(|_, p| p.opened_at.is_none_or(|t| now.saturating_sub(t) <= window));
+        // Round 2007 (item 244) — the bytes are summed HERE, inside the
+        // predicate, because after `retain` the entries are gone and the
+        // question cannot be asked again.
+        let mut lost = 0usize;
+        self.pending.retain(|_, p| {
+            let keep = p.opened_at.is_none_or(|t| now.saturating_sub(t) <= window);
+            if !keep {
+                lost += p.held_bytes();
+            }
+            keep
+        });
         let dropped = before - self.pending.len();
         self.stats.expired += dropped;
+        self.stats.expired_bytes += lost;
         dropped
     }
 
@@ -418,7 +464,12 @@ impl FragmentTable {
             else {
                 return;
             };
-            self.pending.remove(&victim);
+            // Round 2007 (item 244) — the removed entry is the last moment its
+            // length exists, so the byte count is taken from what `remove`
+            // hands back rather than looked up afterwards.
+            if let Some(p) = self.pending.remove(&victim) {
+                self.stats.evicted_bytes += p.held_bytes();
+            }
             self.stats.evicted += 1;
         }
     }
@@ -550,6 +601,72 @@ mod tests {
         assert_eq!(done.payload, b"AAAAAAAABBBB");
         assert!(done.overlapped);
         assert_eq!(t.stats().overlapping, 1);
+    }
+
+    /// Round 2007 (open-debt item 244) — an abandoned chain reports its SIZE,
+    /// and two abandonments of different sizes report differently.
+    ///
+    /// THE DEFECT THIS CLOSES is that `3 unfinished` is a number an operator
+    /// cannot act on: three ARP-sized datagrams and three 64 KiB ones read
+    /// identically, and one of those is a rounding error while the other is a
+    /// real hole in the capture.
+    ///
+    /// Driven at BOTH discard sites, because they are different code: the
+    /// deadline drops entries inside a `retain` predicate, and the cap removes
+    /// a chosen victim. A byte count taken at one and not the other would be
+    /// silently half a number.
+    ///
+    /// The two sizes differ by construction and are asserted against each
+    /// other, not against a transcript: a counter that summed CHAINS would give
+    /// the same answer for both and pass an assertion that only checked
+    /// "greater than zero".
+    #[test]
+    fn an_abandoned_chain_reports_the_bytes_it_was_holding() {
+        // THE DEADLINE. Two chains opened at t=0, neither completed, expired at
+        // t=10_000 with a 5_000 window. One holds 8 bytes and one holds 40.
+        let mut t = FragmentTable::bounded(None, Some(5_000));
+        assert_eq!(t.push(piece(1, 0, true, b"AAAAAAAA", 1), Some(0)), None);
+        assert_eq!(t.push(piece(2, 0, true, &[b'B'; 40], 2), Some(0)), None);
+        assert_eq!(t.pending_bytes(), 48, "both chains are held and measurable");
+        // A third piece drives the clock forward, which is what expires them.
+        let _ = t.push(piece(3, 0, true, b"C", 3), Some(10_000));
+        let s = t.stats();
+        assert_eq!(s.expired, 2, "both chains must have been abandoned");
+        assert_eq!(
+            s.expired_bytes, 48,
+            "and the bytes they were holding must survive the drop"
+        );
+
+        // THE CAP, which is the other discard site and a different code path.
+        let mut c = FragmentTable::bounded(Some(1), None);
+        assert_eq!(c.push(piece(1, 0, true, &[b'A'; 100], 1), None), None);
+        assert_eq!(c.push(piece(2, 0, true, b"BB", 2), None), None);
+        let s = c.stats();
+        assert_eq!(s.evicted, 1, "the cap must have evicted the older chain");
+        assert_eq!(
+            s.evicted_bytes, 100,
+            "and it must report the size of what it threw away"
+        );
+        assert_eq!(c.pending_bytes(), 2, "the survivor's bytes are still held");
+    }
+
+    /// Round 2007 (item 244) — the bytes are what was WRITTEN, not what was
+    /// allocated.
+    ///
+    /// A chain whose only piece landed at a high offset has a buffer grown to
+    /// that offset and holds none of the bytes before it. Reporting the
+    /// buffer's length would tell an operator a 60 KiB hole exists where two
+    /// bytes were received, which is worse than reporting nothing.
+    #[test]
+    fn a_chain_reports_the_bytes_it_received_not_the_buffer_it_grew() {
+        let mut t = FragmentTable::new();
+        // One piece at offset 60_000, two bytes long. `bytes` is 60_002 long.
+        assert_eq!(t.push(piece(9, 60_000, true, b"ZZ", 1), None), None);
+        assert_eq!(
+            t.pending_bytes(),
+            2,
+            "the run list is the evidence, the buffer is an allocation"
+        );
     }
 
     /// An overlap with the SAME bytes is a plain retransmission and is not an

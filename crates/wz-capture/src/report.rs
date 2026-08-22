@@ -2930,7 +2930,7 @@ pub fn health_json(d: &crate::Dissection) -> String {
          \"capture_reported_drops\":{reported},\
          \"dropped_by_limits\":{dropped},\
          \"fragments\":{{\"pieces\":{},\"completed\":{},\"expired\":{},\"evicted\":{},\
-         \"open\":{},\"unfinished\":{},\
+         \"open\":{},\"unfinished\":{},\"unfinished_bytes\":{},\
          \"malformed\":{},\"overlapping\":{}}},\
          \"streams\":{{\"retransmits\":{},\"out_of_order\":{},\"partial_overlaps\":{},\
          \"ip_checksum_valid\":{},\"ip_checksum_invalid\":{},\"ip_checksum_absent\":{},\
@@ -2954,6 +2954,12 @@ pub fn health_json(d: &crate::Dissection) -> String {
         // nowhere, and the sum was a number only the verdict knew.
         d.open_fragment_chains(),
         d.unfinished_fragment_chains(),
+        // Round 2007 (open-debt item 244) — the SIZE of what is missing, beside
+        // the count of it. Three abandoned chains is a number an operator
+        // cannot act on: ARP-sized and 64 KiB read identically. A FLOOR, for
+        // the reason `unfinished_fragment_bytes` states -- the pieces that
+        // never arrived were never measurable here.
+        d.unfinished_fragment_bytes(),
         f.malformed,
         f.overlapping,
         h.retransmits,
@@ -3011,13 +3017,18 @@ pub fn health_text(d: &crate::Dissection) -> String {
     s.push_str(&dropped_by_limits_text(d));
     s.push_str(&format!(
         "  fragments: {} piece(s), {} completed, {} expired, {} evicted, \
-         {} still open, {} unfinished, {} malformed, {} overlapping\n",
+         {} still open, {} unfinished holding {} byte(s), {} malformed, \
+         {} overlapping\n",
         f.pieces,
         f.completed,
         f.expired,
         f.evicted,
         d.open_fragment_chains(),
         d.unfinished_fragment_chains(),
+        // Round 2007 (item 244) — on the same line as the count, because the
+        // two answer one question and a reader who saw only the count has been
+        // told the wrong half of it.
+        d.unfinished_fragment_bytes(),
         f.malformed,
         f.overlapping
     ));
