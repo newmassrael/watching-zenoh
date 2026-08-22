@@ -2344,6 +2344,49 @@ mod tests {
         }
     }
 
+    /// Item 474 — the tunnelled frame carries VLAN tags, which for GRETAP is
+    /// the ORDINARY shape and not the exotic one: an overlay segment is what a
+    /// tag is FOR, so a tunnel whose inner frame is untagged is the special
+    /// case this file was otherwise the only witness of.
+    ///
+    /// It already works, because the inner frame goes through the same
+    /// `strip_link` the capture's own frames do — and that is precisely why it
+    /// needs a leg rather than why it does not. What item 260 bought is that
+    /// there is ONE link-layer door; a door nobody drives a tagged frame
+    /// through is a door whose tag walk can be deleted without a red, and the
+    /// tunnel is where nobody would look.
+    ///
+    /// Both tag shapes, for the reason `vlan_and_qinq_tags_are_walked` drives
+    /// both: a walk that consumed exactly one tag would pass the single-tag leg
+    /// and land inside the QinQ frame's header.
+    #[test]
+    fn a_gretap_frames_vlan_tags_are_walked_inside_the_tunnel() {
+        let plain = eth_ipv4_udp([192, 168, 0, 1], 7447, [192, 168, 0, 2], 40000, b"tagged");
+        for tags in [vec![ETHERTYPE_VLAN], vec![ETHERTYPE_QINQ, ETHERTYPE_VLAN]] {
+            let mut inner: Vec<u8> = plain[..12].to_vec();
+            for t in &tags {
+                inner.extend_from_slice(&t.to_be_bytes());
+                inner.extend_from_slice(&[0x00, 0x64]); // VID 100
+            }
+            inner.extend_from_slice(&plain[12..]);
+
+            let pkt = eth_ipv4_carrier(IP_PROTO_GRE, &gre_no_options(ETHERTYPE_TEB, &inner));
+            match decapsulate(LINKTYPE_ETHERNET, 0, &pkt) {
+                Ok(Transport::Udp(d)) => {
+                    assert_eq!(d.payload, b"tagged", "{tags:?} inside the tunnel");
+                    let mut ends = vec![d.flow.low.addr().to_vec(), d.flow.high.addr().to_vec()];
+                    ends.sort();
+                    assert_eq!(
+                        ends,
+                        vec![vec![192, 168, 0, 1], vec![192, 168, 0, 2]],
+                        "{tags:?}: keyed by the inner header, not the carrier's"
+                    );
+                }
+                other => panic!("{tags:?}: GRETAP must be read, got {other:?}"),
+            }
+        }
+    }
+
     /// THE TRAP, and the reason R311y864 named the ethertype rather than
     /// half-opening it.
     ///
