@@ -191,9 +191,15 @@ impl NodeCensus {
     ///
     /// The one lookup that lets the interest plane and this one meet. A
     /// declaration knows the flow it went past on and the DIRECTION that made
-    /// it ([`crate::interest::DeclaredInterest::declarer`]); this answers which
-    /// zid that direction belongs to, and "zid a1a1a1a1 subscribes to
+    /// it (`DeclaredInterest::declarer`, in the interest plane); this answers
+    /// which zid that direction belongs to, and "zid a1a1a1a1 subscribes to
     /// `robot/**`" falls out of the two.
+    ///
+    /// ⚠ That name is NOT a doc link, and deliberately. The interest plane is
+    /// behind `network-codecs`; a link to it resolves in an all-features build
+    /// of this crate and is unresolved in every lean one, which is a red no
+    /// per-crate doc run can show. Round 2016 shipped it as a link and Round
+    /// 2017's push found it on `wz-runtime-tokio`.
     ///
     /// # `None` is a real answer and the commoner one
     ///

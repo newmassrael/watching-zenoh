@@ -178,6 +178,51 @@ fn hex_zid(zid: &[u8]) -> String {
     out
 }
 
+/// Round 2017 (item 269) — ONE FLOW, as this document renders a flow.
+///
+/// # The convention this settles
+///
+/// Until now the text rendering named a flow in exactly one place — item 252's
+/// tunnel lines — and every plane that prints PER-FLOW rows printed them flat.
+/// Item 269 measured what that costs: two sessions each declaring id 1 produce
+///
+/// ```text
+///     FINDING: subscriber robot/** matched NO traffic in this capture
+///     FINDING: subscriber robot/** matched NO traffic in this capture
+/// ```
+///
+/// — two byte-identical lines for two different deployments, which a reader
+/// takes for a duplicate. The `flow` field that tells them apart was in the
+/// JSON all along.
+///
+/// So: **a per-flow row names its flow, always.** Not "when it would otherwise
+/// be ambiguous" — a format that changes shape with the data cannot be grepped,
+/// cannot be diffed between two captures, and cannot be tested for absence. The
+/// cost is line length on single-flow captures, which is the cheaper mistake.
+///
+/// A SUFFIX rather than a prefix, because the line's subject is what the plane
+/// is about — the keyexpr, the declaration — and the flow is where it happened.
+/// It also keeps every existing `contains(..)` assertion about a row's content
+/// true, which is how a convention arrives without rewriting the tests that
+/// describe the rows.
+///
+/// ⚠ GATED, like [`declarer_prefix`] beside it. Its only callers are in the
+/// interest plane, which is behind `network-codecs`; ungated it is dead code in
+/// every build without that feature, and a DEPENDENT crate compiling
+/// `wz-capture` lean is where that shows. Round 2017 shipped it ungated, a
+/// per-crate `--all-features` doc run said nothing (the feature is on, so the
+/// function is used), and `pre-push` caught it on `wz-runtime-tokio`.
+#[cfg(feature = "network-codecs")]
+fn flow_text(flow: &crate::link::FlowKey) -> String {
+    alloc::format!(
+        "  [{}:{} <-> {}:{}]",
+        addr_text(&flow.low),
+        flow.low.port,
+        addr_text(&flow.high),
+        flow.high.port
+    )
+}
+
 /// Round 2016 (item 268) — "`<zid>` " for a declaration whose declarer the node
 /// plane can name, and the empty string otherwise.
 ///
@@ -1529,7 +1574,7 @@ impl<'a> CaptureReport<'a> {
             for m in &coverage.matched {
                 let i = &census.interests()[m.interest];
                 s.push_str(&format!(
-                    "    {}{} {} covers {} key(s), {} message(s), {} byte(s){}\n",
+                    "    {}{} {} covers {} key(s), {} message(s), {} byte(s){}{}\n",
                     // Round 2016 (item 268) — WHO declared it, when the node
                     // plane is attached and can say. Leading, because "who
                     // subscribes to what" is the sentence a reader came for
@@ -1541,6 +1586,10 @@ impl<'a> CaptureReport<'a> {
                     m.totals.messages(),
                     m.totals.payload_bytes,
                     if i.is_open() { "" } else { "  [withdrawn]" },
+                    // Round 2017 (item 269) — WHERE. A declaration id lives in
+                    // one session's entity space, so two sessions' id 1 are
+                    // unrelated and this is what says so.
+                    flow_text(&i.flow),
                 ));
             }
             // THE FINDING, and it leads with the word a reader acts on. A
@@ -1549,7 +1598,7 @@ impl<'a> CaptureReport<'a> {
             for at in &coverage.silent {
                 let i = &census.interests()[*at];
                 s.push_str(&format!(
-                    "    FINDING: {}{} {} matched NO traffic in this capture\n",
+                    "    FINDING: {}{} {} matched NO traffic in this capture{}\n",
                     // Item 268 — and it matters MOST here. "somebody wants
                     // robot/** and nobody publishes it" is a report; "zid
                     // a1a1a1a1 wants robot/** and nobody publishes it" is
@@ -1557,6 +1606,11 @@ impl<'a> CaptureReport<'a> {
                     declarer_prefix(self.interest_zids, i),
                     i.kind.name(),
                     i.keyexpr.as_deref().unwrap_or("<unresolved>"),
+                    // Item 269 — and this is the line the convention was
+                    // measured on: two sessions with the same silent
+                    // declaration rendered identically, so an operator saw one
+                    // problem where there were two.
+                    flow_text(&i.flow),
                 ));
             }
             // The mirror finding, and it is stated as a FLOOR whenever any
@@ -7272,6 +7326,108 @@ mod tests {
         assert!(bare_text.contains("subscriber robot/**"), "{bare_text}");
         assert!(!bare_text.contains("a1a1a1a1 subscriber"), "{bare_text}");
         assert!(bare_json.contains("\"declarer_zid\":null"), "{bare_json}");
+    }
+
+    /// One `T_MID_FRAME` carrying a subscriber declaration, for a datagram
+    /// link.
+    #[cfg(feature = "network-codecs")]
+    fn framed_declare(id: u64, key: &str) -> alloc::vec::Vec<u8> {
+        let wire = wz_session_core::declare_build::build_declare_subscriber(id, 0, Some(key))
+            .expect("the production builder")
+            .try_as_borrowed()
+            .expect("re-borrow")
+            .encode_to_vec();
+        let mut unit = alloc::vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
+        unit.extend_from_slice(&wire);
+        unit
+    }
+
+    /// ITEM 269 — TWO SESSIONS' ROWS ARE NOT ONE ROW.
+    ///
+    /// # The defect, measured
+    ///
+    /// A declaration id lives in ONE session's entity space, so two sessions'
+    /// id 1 are unrelated. The text rendering printed neither the id nor the
+    /// flow, so a capture holding two deployments with the same silent
+    /// subscriber rendered:
+    ///
+    /// ```text
+    ///     FINDING: subscriber robot/** matched NO traffic in this capture
+    ///     FINDING: subscriber robot/** matched NO traffic in this capture
+    /// ```
+    ///
+    /// An operator reading that sees one problem printed twice. There are two,
+    /// at different sites, and the `flow` field that says so was in the JSON.
+    ///
+    /// # Why this is a GATE and not an assertion about one line
+    ///
+    /// R311y871 measured this and declined it, because the text rendering
+    /// named a flow NOWHERE and fixing one line would settle a document-wide
+    /// convention by accident. So the assertion is over the WHOLE page: in a
+    /// capture whose two flows carry identical per-flow content, no rendered
+    /// line may repeat. A future plane that prints per-flow rows flat fails
+    /// here, which is what makes this a convention rather than a patch.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn no_line_of_the_page_stands_for_two_different_flows() {
+        let mut d = crate::Dissection::new();
+        // TWO deployments, identical in everything a flat rendering prints:
+        // same declaration id, same keyexpr, same silence.
+        for (i, (src, sport, dst)) in [
+            ([10, 0, 0, 1], 50000u16, [10, 0, 0, 2]),
+            ([10, 0, 0, 3], 50001, [10, 0, 0, 4]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            d.push_packet(
+                crate::link::LINKTYPE_ETHERNET,
+                i,
+                &crate::datagram_tests::udp_packet(
+                    src,
+                    sport,
+                    dst,
+                    7447,
+                    &framed_declare(1, "robot/**"),
+                ),
+            );
+        }
+        d.finish();
+
+        // THE POPULATION, before anything is asked of the page: two flows and
+        // two declarations. A capture that produced one of either would satisfy
+        // "no line repeats" by having nothing to repeat.
+        let census = crate::interest::interests(&d);
+        assert_eq!(d.datagram_flows().len(), 2, "two flows");
+        assert_eq!(census.interests().len(), 2, "and two declarations");
+
+        let table = crate::agg::aggregate(&d);
+        let coverage = census.coverage(&table);
+        let text = CaptureReport::of(&d)
+            .with_interests(&census, &coverage, None)
+            .to_text();
+
+        let mut seen: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+        let mut repeated: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            if seen.contains(&line) {
+                repeated.push(line);
+            }
+            seen.push(line);
+        }
+        assert!(
+            repeated.is_empty(),
+            "these line(s) stand for two different flows and cannot be told \
+             apart -- item 269: {repeated:?}\n---- page ----\n{text}"
+        );
+
+        // NAMED, not merely different. A fix that appended a counter would
+        // satisfy the sweep above and tell a reader nothing.
+        assert!(
+            text.contains("[10.0.0.1:50000 <-> 10.0.0.2:7447]")
+                && text.contains("[10.0.0.3:50001 <-> 10.0.0.4:7447]"),
+            "each row must name the flow it belongs to:\n{text}"
+        );
     }
 
     /// R311y864 — zenoh inside a GRE tunnel is READ, at every optional-field

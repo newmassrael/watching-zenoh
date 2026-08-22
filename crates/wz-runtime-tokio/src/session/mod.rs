@@ -1384,7 +1384,14 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// settles with both peers' zids known
     /// (`SessionInitParams.zid` is the local zid passed into
     /// outbound `InitSyn`; the peer's zid lands in
-    /// [`crate::session_glue::SessionLinkActions::inbound_peer_zid`]).
+    /// [`crate::session_glue::SessionLinkActions`]'s `inbound_peer_zid`
+    /// field).
+    //
+    // Round 2017 — the field is NAMED and not linked. `SessionLinkActions` is
+    // a type ALIAS, and rustdoc cannot resolve an associated item through one,
+    // so the old link had never resolved for anyone who clicked it. Found by
+    // `pre-push`'s C1bz on a count of 525 against a budget of 524 that has
+    // been stale since at least Round 2015 -- see this round's carry.
     /// The local zid is therefore already authoritative at
     /// [`Session::new`] time, so R236 wires the install
     /// automatically from `actions.params.zid` — the application
