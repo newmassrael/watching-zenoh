@@ -374,6 +374,21 @@ pub struct DeclaredInterest {
     /// two are told apart nowhere else, and a reader handed a small integer
     /// cannot guess.
     pub anchors: crate::AnchorSpace,
+    /// Round 2019 (item 270) — the space TOKEN, composed exactly as
+    /// [`crate::agg`] composes a row's.
+    ///
+    /// [`Self::anchors`] says a byte offset from a packet index, which is what
+    /// a READER needs. This says whether two such numbers count from the same
+    /// origin, which is what a COMPARISON needs — and item 270's comparison is
+    /// between this declaration's window and a traffic row's span. Two byte
+    /// offsets in different directions of different flows are both
+    /// `StreamBytes` and are not on one line.
+    ///
+    /// Both walks enumerate `Dissection::message_lists()` in the same order,
+    /// which is why the two tokens are comparable at all; that shared order is
+    /// the whole of the coupling and it is stated here so a round that changes
+    /// either walk knows what it is breaking.
+    pub(crate) space: usize,
     /// The `Interest` id this declaration answers, when the envelope carried
     /// one.
     ///
@@ -401,7 +416,96 @@ pub struct InterestMatch {
     /// views does not have to hold two orderings in mind.
     pub keys: Vec<String>,
     /// Everything those keys carried, summed.
+    ///
+    /// ⚠ Round 2019 (item 270) — over ALL of [`Self::keys`], including any in
+    /// [`Self::outside_window`]. It is what the PATTERN covers, not what the
+    /// declaration was open for, and the three lists below are what a reader
+    /// narrows it with. Left whole rather than filtered because a filtered
+    /// total would silently change what every existing consumer reads.
     pub totals: KeyexprCounts,
+    /// Round 2019 (item 270) — keys whose traffic lies ENTIRELY outside the
+    /// window this declaration was open.
+    ///
+    /// THE FINDING this item is about: a subscriber declared and withdrawn
+    /// inside the capture was credited with everything its pattern matched,
+    /// including traffic that went past after it was gone. A key here is one
+    /// the declaration cannot have been receiving.
+    pub outside_window: Vec<String>,
+    /// Keys whose span only PARTIALLY overlaps the window.
+    ///
+    /// The row's totals are then a CEILING for what this declaration covered:
+    /// the row folds records from inside and outside the window and the fold
+    /// keeps no per-record anchor to split them by. Reported rather than
+    /// resolved, because resolving it means re-walking the capture per
+    /// declaration and this plane is a join over two folds.
+    pub partial_window: Vec<String>,
+    /// Keys the window question could not be ASKED of.
+    ///
+    /// Two causes and both are honest: the row's anchors are in a different
+    /// space from this declaration's (a byte offset in another direction is not
+    /// on the same line), or the row is not `anchors_exact` and its span
+    /// therefore does not cover all of its own records. Held apart from
+    /// [`Self::outside_window`] on this crate's standing rule — "cannot tell"
+    /// must never read as "did not happen".
+    pub window_undecidable: Vec<String>,
+}
+
+/// Round 2019 (item 270) — how one traffic row's span sits against the window
+/// one declaration was open for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowOverlap {
+    /// Every record in the row is inside the window.
+    Whole,
+    /// The row spans the window's edge, so its totals include records from
+    /// both sides and this fold cannot split them.
+    Partial,
+    /// The row's whole span is outside the window.
+    Outside,
+    /// The two are not on one line, so the question does not have an answer.
+    Undecidable,
+}
+
+/// Round 2019 (item 270) — the comparison R311y869 said the material was there
+/// for and R311y918 showed it was not.
+///
+/// # What has to be true before the numbers mean anything
+///
+/// Two things, and BOTH are refusals rather than defaults:
+///
+/// 1. The row and the declaration must be in the same coordinate space. A byte
+///    offset within one direction of one flow and a byte offset within another
+///    are both `StreamBytes` and share no origin — comparing them produces a
+///    confident verdict about nothing. The `space` token is what settles it.
+/// 2. The row must be `anchors_exact`. When it is not, the row folded records
+///    from more than one space and its `[first, last]` pair does not cover all
+///    of them, so "the row's span" is not a span this can test.
+///
+/// # The window
+///
+/// `[declared_at, withdrawn_at]`, and an OPEN declaration's window runs to the
+/// end of the capture — `withdrawn_at: None` means the capture never saw it
+/// closed, so nothing after `declared_at` is outside it.
+///
+/// ⚠ A declaration is not retroactive: traffic BEFORE `declared_at` is outside
+/// the window just as much as traffic after a withdrawal. That direction is
+/// the commoner one in a real capture, because a tap started mid-session sees
+/// a `DeclareSubscriber` re-sent after traffic it was already receiving —
+/// which is why this returns `Outside` rather than something that reads as an
+/// error.
+fn window_overlap(interest: &DeclaredInterest, row: &crate::agg::KeyexprRow) -> WindowOverlap {
+    if row.space != interest.space || !row.anchors_exact {
+        return WindowOverlap::Undecidable;
+    }
+    let (from, to) = (row.first_anchor, row.last_anchor);
+    let open = interest.declared_at;
+    let close = interest.withdrawn_at.unwrap_or(usize::MAX);
+    if to < open || from > close {
+        return WindowOverlap::Outside;
+    }
+    if from >= open && to <= close {
+        return WindowOverlap::Whole;
+    }
+    WindowOverlap::Partial
 }
 
 /// The join between what was DECLARED and what was CARRIED.
@@ -458,6 +562,10 @@ pub struct InterestCensus {
     /// already `#[allow(clippy::too_many_arguments)]`, and this is a property of
     /// the WALK rather than of any one declaration.
     anchors: crate::AnchorSpace,
+    /// Round 2019 (item 270) — which message list is being walked, set once per
+    /// [`Self::observe_flow`]. Half of the space token; see
+    /// [`Self::space_of`].
+    list: usize,
     interests: Vec<DeclaredInterest>,
     requests: Vec<InterestRequest>,
     orphan_withdrawals: usize,
@@ -595,8 +703,14 @@ impl InterestCensus {
         flow: &FlowKey,
         frames: &[PassiveFrame],
         anchors: crate::AnchorSpace,
+        // Round 2019 (item 270) — the list's index in
+        // `Dissection::message_lists()`, which is what `crate::agg` already
+        // takes for the same reason: it is half the space token, and without it
+        // two directions of two different flows are one number.
+        list: usize,
     ) {
         self.anchors = anchors;
+        self.list = list;
         let mut spaces = KeyexprSpaces::new();
         // The OPEN declaration per `(declarer, kind, id)`, as an index into
         // `self.interests`. Keyed on the kind as well as the id because zenoh
@@ -914,8 +1028,27 @@ impl InterestCensus {
             withdrawn_at: None,
             solicited_by,
             anchors: self.anchors,
+            // Round 2019 (item 270) — the DECLARER's direction, because that is
+            // the direction the frame carrying this declaration travelled in,
+            // and the offset above is an offset within it.
+            space: self.space_of(declarer),
         });
         self.interests.len() - 1
+    }
+
+    /// Round 2019 (item 270) — the space token for one direction of the list
+    /// being walked, composed exactly as [`crate::agg`] composes a row's.
+    ///
+    /// Written as its own function so the two compositions are one sentence
+    /// apart rather than one file apart. If they ever disagree the comparison
+    /// silently becomes "always undecidable", which is the quiet failure this
+    /// whole item is about; `a_declarations_space_token_matches_the_rows` is
+    /// the leg that would notice.
+    fn space_of(&self, dir: Direction) -> usize {
+        match self.anchors {
+            crate::AnchorSpace::PacketIndex => 0,
+            crate::AnchorSpace::StreamBytes => 1 + self.list * 2 + dir_index(dir),
+        }
     }
 
     fn withdraw(
@@ -967,6 +1100,9 @@ impl InterestCensus {
             let chunks: Vec<&str> = pattern.split('/').collect();
             let mut keys = Vec::new();
             let mut totals = KeyexprCounts::default();
+            let mut outside_window = Vec::new();
+            let mut partial_window = Vec::new();
+            let mut window_undecidable = Vec::new();
             for (i, row) in rows.iter().enumerate() {
                 if !wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, &row.keyexpr) {
                     continue;
@@ -974,6 +1110,17 @@ impl InterestCensus {
                 claimed[i] = true;
                 keys.push(row.keyexpr.clone());
                 totals.add(&row.totals());
+                // Round 2019 (item 270) — WAS THIS DECLARATION OPEN WHEN THAT
+                // TRAFFIC WENT PAST? The pattern match above answers "could it
+                // have covered this key"; without this the two questions were
+                // one, and a declaration withdrawn mid-capture was credited
+                // with everything after it.
+                match window_overlap(interest, row) {
+                    WindowOverlap::Whole => {}
+                    WindowOverlap::Partial => partial_window.push(row.keyexpr.clone()),
+                    WindowOverlap::Outside => outside_window.push(row.keyexpr.clone()),
+                    WindowOverlap::Undecidable => window_undecidable.push(row.keyexpr.clone()),
+                }
             }
             if keys.is_empty() {
                 out.silent.push(at);
@@ -982,6 +1129,9 @@ impl InterestCensus {
                     interest: at,
                     keys,
                     totals,
+                    outside_window,
+                    partial_window,
+                    window_undecidable,
                 });
             }
         }
@@ -1054,8 +1204,12 @@ fn pattern_is_decidable(pattern: &str) -> bool {
 /// nothing.
 pub fn interests(dissection: &crate::Dissection) -> InterestCensus {
     let mut census = InterestCensus::new();
-    for (flow, anchors, frames) in dissection.message_lists() {
-        census.observe_flow(&flow, frames, anchors);
+    // Round 2019 (item 270) — `.enumerate()`, exactly as `agg::aggregate_where`
+    // does. The two walks must agree on the list index or their space tokens
+    // are not comparable, and they agree by walking the same enumeration of the
+    // same iterator.
+    for (list, (flow, anchors, frames)) in dissection.message_lists().enumerate() {
+        census.observe_flow(&flow, frames, anchors, list);
     }
     census
 }
@@ -1231,6 +1385,179 @@ mod tests {
         );
         assert_eq!(cov.unclaimed, alloc::vec!["robot/1/pose"]);
         assert!(cov.unclaimed_exact);
+    }
+
+    /// ITEM 270 — A WITHDRAWN DECLARATION IS NOT CREDITED WITH WHAT CAME
+    /// AFTER IT.
+    ///
+    /// # The defect
+    ///
+    /// `coverage` joined a declaration to a traffic row by PATTERN alone. A
+    /// subscriber declared and withdrawn inside the capture therefore covered
+    /// everything its pattern matched, including traffic that went past when
+    /// it was gone — the plane answered "could this have covered that key"
+    /// while the page read as "this was receiving that".
+    ///
+    /// R311y869 said the material was on the rows already. R311y918 showed
+    /// that was true and not enough: two anchors exist, and whether they can
+    /// be COMPARED is a different question, answered only once both sides
+    /// carry the space they count in. Round 2019 is the comparison.
+    ///
+    /// # The three arms, because "cannot tell" is not "did not happen"
+    ///
+    /// Traffic after the withdrawal is OUTSIDE. Traffic while the declaration
+    /// was open is WHOLE and says nothing. And the leg below drives the pair
+    /// together in one capture, so a fix that reported everything as outside
+    /// would fail as loudly as one that reported nothing.
+    #[test]
+    fn traffic_after_a_withdrawal_is_not_covered_by_the_withdrawn_declaration() {
+        let d = wire(&[
+            // 0: opened, and it stays open for the whole capture.
+            (true, declare_sub(1, "demo/open")),
+            // 1: opened, 2: withdrawn.
+            (true, declare_sub(2, "demo/gone")),
+            (true, undeclare_sub(2)),
+            // 3: traffic on the key the WITHDRAWN one matches, after it went.
+            (false, push(sender_space(0, Some("demo/gone")), &[0u8; 4])),
+            // 4: traffic on the key the OPEN one matches.
+            (false, push(sender_space(0, Some("demo/open")), &[0u8; 4])),
+        ]);
+
+        let census = interests(&d);
+        let table = crate::agg::aggregate(&d);
+        // THE POPULATION FIRST. Two declarations and two keyexpr rows; a
+        // capture short of either would make every claim below vacuous.
+        assert_eq!(census.interests().len(), 2, "two declarations");
+        assert_eq!(table.rows().len(), 2, "and two keys carried traffic");
+        let cov = census.coverage(&table);
+        assert_eq!(cov.matched.len(), 2, "both patterns match a row: {cov:?}");
+
+        let by_key = |k: &str| {
+            cov.matched
+                .iter()
+                .find(|m| census.interests()[m.interest].keyexpr.as_deref() == Some(k))
+                .unwrap_or_else(|| panic!("no match for {k}: {cov:?}"))
+        };
+
+        let gone = by_key("demo/gone");
+        assert_eq!(
+            gone.outside_window,
+            alloc::vec![String::from("demo/gone")],
+            "the traffic went past after the withdrawal, so this declaration \
+             cannot have been receiving it -- THIS IS ITEM 270: {gone:?}"
+        );
+        assert!(gone.partial_window.is_empty(), "{gone:?}");
+        assert!(
+            gone.window_undecidable.is_empty(),
+            "a UDP capture anchors every record by packet index, so the \
+             question IS askable here: {gone:?}"
+        );
+
+        // THE CONTROL, in the same capture: an open declaration's traffic is
+        // inside its window and says nothing.
+        let open = by_key("demo/open");
+        assert!(
+            open.outside_window.is_empty()
+                && open.partial_window.is_empty()
+                && open.window_undecidable.is_empty(),
+            "a declaration still open at the end of the capture has no traffic \
+             outside its window: {open:?}"
+        );
+
+        // AND `totals` IS UNCHANGED, deliberately. It is what the pattern
+        // covers; narrowing it silently would move a number every existing
+        // consumer reads.
+        assert_eq!(gone.totals.messages(), 1, "{gone:?}");
+    }
+
+    /// ITEM 270, THE HALF THAT REFUSES — TWO BYTE OFFSETS IN DIFFERENT
+    /// DIRECTIONS ARE NOT ON ONE LINE.
+    ///
+    /// # Why this leg exists, stated as what happened
+    ///
+    /// The window comparison landed with the packet-index witness above
+    /// passing, and removing the SPACE check from `window_overlap` survived
+    /// the whole suite. A surviving mutant is a leg nothing asks about, and
+    /// this is that leg: a UDP capture anchors every record by packet index,
+    /// so every space token is 0 and the check can never be wrong there.
+    ///
+    /// On a STREAM link the anchor is a byte offset within ONE DIRECTION, and
+    /// the two directions count from different origins. R311y918 measured what
+    /// ignoring that produces — a row reporting the span `[419, 0]`, an
+    /// interval that cannot exist.
+    ///
+    /// # ⚠ And the answer this gives is mostly UNDECIDABLE, which is the point
+    ///
+    /// A subscriber declares in one direction and the traffic it subscribes to
+    /// arrives in the other. On a stream link those are two spaces, so the
+    /// window question genuinely cannot be asked of the ordinary case. Saying
+    /// so is the deliverable; a comparison that answered anyway would be
+    /// confident about nothing, which is the defect item 270 exists to end
+    /// rather than to relocate.
+    #[test]
+    fn a_window_and_a_row_in_different_stream_directions_are_not_compared() {
+        use crate::datagram_tests::{tcp_packet, tcp_packet_reverse};
+
+        // One length-prefixed transport frame carrying `record`.
+        let framed = |record: &[u8]| {
+            let mut unit = alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAME
+                    | wz_session_core::wire_const::FLAG_T_FRAME_R,
+                0x00,
+            ];
+            unit.extend_from_slice(record);
+            let mut out = (unit.len() as u16).to_le_bytes().to_vec();
+            out.extend_from_slice(&unit);
+            out
+        };
+
+        let mut d = Dissection::new();
+        // A declares, in A's byte space.
+        let decl = framed(&declare_sub(5, "demo/**"));
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1000, &decl));
+        // A publishes too, so ONE row is in A's space and decidable.
+        let mine = framed(&push(sender_space(0, Some("demo/mine")), &[0u8; 4]));
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &tcp_packet(1000 + decl.len() as u32, &mine),
+        );
+        // B publishes: same flow, OTHER direction, other origin.
+        let theirs = framed(&push(sender_space(0, Some("demo/theirs")), &[0u8; 4]));
+        d.push_packet(LINKTYPE_ETHERNET, 2, &tcp_packet_reverse(2000, &theirs));
+        d.finish();
+
+        let census = interests(&d);
+        let table = crate::agg::aggregate(&d);
+        assert_eq!(census.interests().len(), 1, "one declaration");
+        assert_eq!(
+            table.rows().len(),
+            2,
+            "and TWO rows, one per direction -- without both this leg cannot \
+             tell a refusal from an empty table: {:?}",
+            table.rows()
+        );
+
+        let cov = census.coverage(&table);
+        let m = cov.matched.first().expect("the pattern matches both rows");
+        assert_eq!(m.keys.len(), 2, "{m:?}");
+        assert_eq!(
+            m.window_undecidable,
+            alloc::vec![String::from("demo/theirs")],
+            "the OTHER direction's row is anchored in another space and the \
+             window cannot be judged against it: {m:?}"
+        );
+        assert!(
+            m.outside_window.is_empty(),
+            "and it is NOT reported as outside the window -- `cannot tell` \
+             must never read as `did not happen`: {m:?}"
+        );
+        // The CONTROL, in the same capture: the declarer's own direction is
+        // one space and IS judged.
+        assert!(
+            !m.window_undecidable.contains(&String::from("demo/mine")),
+            "the declarer's own direction shares its space: {m:?}"
+        );
     }
 
     /// R311y869 — a withdrawal CLOSES an interest and does not erase it, and

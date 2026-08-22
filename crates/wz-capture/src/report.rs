@@ -178,6 +178,49 @@ fn hex_zid(zid: &[u8]) -> String {
     out
 }
 
+/// Round 2019 (item 270) — what a match's keys say about the WINDOW, or
+/// nothing at all.
+///
+/// # Why it leads with FINDING for one of the three
+///
+/// `outside_window` is a claim the reader must act on: the declaration's
+/// pattern matches that key and the traffic went past when the declaration was
+/// not open, so crediting it was wrong. The other two are qualifications on a
+/// number — a ceiling, and a question that could not be asked — and they are
+/// reported without the word.
+///
+/// Empty when there is nothing to say, which is the common case: a declaration
+/// open for the whole capture has no traffic outside its window.
+#[cfg(feature = "network-codecs")]
+fn window_text(m: &crate::interest::InterestMatch) -> String {
+    let mut s = String::new();
+    if !m.outside_window.is_empty() {
+        s.push_str(&format!(
+            "      FINDING: {} key(s) carried their traffic OUTSIDE this \
+             declaration's window: {}\n",
+            m.outside_window.len(),
+            m.outside_window.join(", ")
+        ));
+    }
+    if !m.partial_window.is_empty() {
+        s.push_str(&format!(
+            "      {} key(s) span the window's edge, so the byte and message \
+             counts above are a CEILING: {}\n",
+            m.partial_window.len(),
+            m.partial_window.join(", ")
+        ));
+    }
+    if !m.window_undecidable.is_empty() {
+        s.push_str(&format!(
+            "      {} key(s) are anchored in another coordinate space, so the \
+             window could not be judged for them: {}\n",
+            m.window_undecidable.len(),
+            m.window_undecidable.join(", ")
+        ));
+    }
+    s
+}
+
 /// Round 2017 (item 269) — ONE FLOW, as this document renders a flow.
 ///
 /// # The convention this settles
@@ -1591,6 +1634,13 @@ impl<'a> CaptureReport<'a> {
                     // unrelated and this is what says so.
                     flow_text(&i.flow),
                 ));
+                // Round 2019 (item 270) — WHEN. The line above says what the
+                // PATTERN covers; this says how much of it went past while the
+                // declaration was actually open. Printed only when there is
+                // something to say — on an open declaration over a whole
+                // capture there is not, and a line of zeroes on every row would
+                // bury the one that matters.
+                s.push_str(&window_text(m));
             }
             // THE FINDING, and it leads with the word a reader acts on. A
             // declaration nobody published under is a deployment that believes

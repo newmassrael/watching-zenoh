@@ -428,11 +428,20 @@ pub struct KeyexprRow {
     /// is the same word, from [`crate::AnchorSpace::name`].
     pub anchors: crate::AnchorSpace,
     /// The space token [`Self::first_anchor`] is in, as composed by
-    /// [`ThroughputTable::observe_flow_where`]. Private: it is an internal
-    /// identity with no meaning outside this fold, and a consumer that needed
-    /// to compare two rows' spaces would be asking a question this crate has
-    /// not answered yet.
-    space: usize,
+    /// [`ThroughputTable::observe_flow_where`].
+    ///
+    /// Round 2019 (item 270) — `pub(crate)`, and the doc that stood here is
+    /// what changed. It read "a consumer that needed to compare two rows'
+    /// spaces would be asking a question this crate has not answered yet", and
+    /// item 270 is exactly that question: a declaration's `declared_at` and a
+    /// row's `first_anchor` can only be compared if they count the same thing,
+    /// and this token is what says whether they do.
+    ///
+    /// Still not `pub`. It is an internal identity — a small integer with no
+    /// meaning outside this crate's walk — and what a DOCUMENT gets is
+    /// [`Self::anchors`], the kind, plus the verdicts the interest plane
+    /// derives from comparing tokens.
+    pub(crate) space: usize,
 }
 
 impl KeyexprRow {
