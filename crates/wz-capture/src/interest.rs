@@ -1570,6 +1570,72 @@ mod tests {
         );
     }
 
+    /// ITEM 272 — AN INTEREST ID REUSED AFTER A FINAL.
+    ///
+    /// # The reading this pins
+    ///
+    /// The live map holds the latest request per `(asker, id)`; a `Final`
+    /// removes it and stamps the closure, and a later `Interest` on the same id
+    /// takes the slot. The earlier request stays in the list with its own
+    /// ending. That is the intended reading — upstream FREES the id at Final,
+    /// so a long capture reuses one — and R311y870 filed it because nothing
+    /// drove it.
+    ///
+    /// # Why the last assertion is the one that matters
+    ///
+    /// Two rows with the same id is easy to get right by accident. What is not
+    /// is which of them a later ANSWER belongs to: a declaration citing id 7
+    /// after the reuse answers the SECOND question, and crediting the first
+    /// would report a cancelled interest as having been served.
+    #[test]
+    fn an_interest_id_reused_after_a_final_opens_a_second_question() {
+        let d = wire(&[
+            // 0: asked. 1: cancelled. 2: asked AGAIN on the same id.
+            (true, interest_subs(7, true, false, "demo/**")),
+            (true, interest_final(7)),
+            (true, interest_subs(7, true, false, "demo/**")),
+            // 3: the answer, citing id 7 — which now means the SECOND one.
+            (false, declare_sub_solicited(1, "demo/temp", 7)),
+        ]);
+
+        let census = interests(&d);
+        // THE POPULATION. Two requests and one declaration; a capture that
+        // folded the reuse into one row would fail here rather than further
+        // down, and the failure would name the right thing.
+        assert_eq!(
+            census.requests().len(),
+            2,
+            "a reused id is TWO questions, not one: {:?}",
+            census.requests()
+        );
+        assert_eq!(census.interests().len(), 1);
+
+        let (first, second) = (&census.requests()[0], &census.requests()[1]);
+        assert_eq!((first.id, second.id), (7, 7), "the same id, twice");
+        assert!(
+            first.cancelled_at.is_some(),
+            "the FIRST was ended by the Final and keeps its own ending: {first:?}"
+        );
+        assert!(
+            second.cancelled_at.is_none(),
+            "and the SECOND is still open at the end of the capture: {second:?}"
+        );
+        assert!(second.asked_at > first.asked_at, "{first:?} / {second:?}");
+        // A Final that closed a question this capture SAW is not an orphan.
+        assert_eq!(census.orphan_answers(), 0);
+
+        // THE ASSERTION THE ITEM IS ABOUT: the answer belongs to the live
+        // question, not the cancelled one.
+        assert_eq!(
+            (first.answers, second.answers),
+            (0, 1),
+            "a declaration citing id 7 after the reuse answers the SECOND \
+             question; crediting the first would report a cancelled interest \
+             as served: {first:?} / {second:?}"
+        );
+        assert_eq!(census.interests()[0].solicited_by, Some(7));
+    }
+
     /// R311y869 — a withdrawal CLOSES an interest and does not erase it, and
     /// the anchor it closed at is kept.
     ///
@@ -1724,6 +1790,27 @@ mod tests {
         .try_as_borrowed()
         .expect("re-borrow")
         .encode_to_vec()
+    }
+
+    /// Round 2022 (item 272) — a `DeclareSubscriber` that CITES an interest id.
+    ///
+    /// `build_declare_subscriber` writes the unsolicited shape — `interest_id:
+    /// None`, no I flag — because that is what this workspace emits. A
+    /// declaration ANSWERING a question is what a router sends, so the flag and
+    /// the field are set here rather than by widening a production builder for
+    /// a shape production does not write.
+    ///
+    /// `0x20` is the envelope's I bit, read back by the generated decoder at
+    /// `out/wz-codecs/declare.rs:128`. Named from the decoder rather than from
+    /// the spec, so this fixture and the parser it drives cannot disagree about
+    /// which bit it is.
+    fn declare_sub_solicited(id: u64, keyexpr: &str, interest_id: u64) -> Vec<u8> {
+        let mut declare = declare_build::build_declare_subscriber(id, 0, Some(keyexpr))
+            .expect("the production builder must build a subscriber");
+        declare.header |= 0x20;
+        declare.interest_id = Some(interest_id);
+        let borrowed = declare.try_as_borrowed().expect("and it must re-borrow");
+        borrowed.encode_to_vec()
     }
 
     fn interest_final(id: u64) -> Vec<u8> {
